@@ -388,3 +388,215 @@ pub fn create_schema() -> Schema<QueryRoot, MutationRoot, EmptySubscription> {
 pub fn create_context(server: Arc<TrustformerServer>) -> GraphQLContext {
     GraphQLContext { server }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_health_info(status: &str) -> HealthInfo {
+        HealthInfo {
+            status: status.to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            version: "1.0.0".to_string(),
+            uptime_seconds: 42.0,
+        }
+    }
+
+    #[test]
+    fn test_health_info_fields() {
+        let info = make_health_info("healthy");
+        assert_eq!(info.status, "healthy");
+        assert_eq!(info.version, "1.0.0");
+        assert!((info.uptime_seconds - 42.0).abs() < 1e-9);
+        assert!(!info.timestamp.is_empty());
+    }
+
+    #[test]
+    fn test_health_info_degraded_status() {
+        let info = make_health_info("degraded");
+        assert_eq!(info.status, "degraded");
+    }
+
+    #[test]
+    fn test_health_info_unhealthy_status() {
+        let info = make_health_info("unhealthy");
+        assert_eq!(info.status, "unhealthy");
+    }
+
+    #[test]
+    fn test_inference_result_fields() {
+        let result = InferenceResult {
+            request_id: "req-123".to_string(),
+            text: "hello world".to_string(),
+            tokens: vec!["hello".to_string(), "world".to_string()],
+            processing_time_ms: 55.5,
+        };
+        assert_eq!(result.request_id, "req-123");
+        assert_eq!(result.text, "hello world");
+        assert_eq!(result.tokens.len(), 2);
+        assert!((result.processing_time_ms - 55.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_inference_result_empty_tokens() {
+        let result = InferenceResult {
+            request_id: "r".to_string(),
+            text: "".to_string(),
+            tokens: vec![],
+            processing_time_ms: 0.0,
+        };
+        assert!(result.tokens.is_empty());
+    }
+
+    #[test]
+    fn test_batch_inference_result_fields() {
+        let batch_result = BatchInferenceResult {
+            batch_id: "batch-7".to_string(),
+            responses: vec![
+                InferenceResult {
+                    request_id: "r1".to_string(),
+                    text: "a".to_string(),
+                    tokens: vec![],
+                    processing_time_ms: 10.0,
+                },
+                InferenceResult {
+                    request_id: "r2".to_string(),
+                    text: "b".to_string(),
+                    tokens: vec![],
+                    processing_time_ms: 15.0,
+                },
+            ],
+            total_processing_time_ms: 25.0,
+        };
+        assert_eq!(batch_result.batch_id, "batch-7");
+        assert_eq!(batch_result.responses.len(), 2);
+        assert!((batch_result.total_processing_time_ms - 25.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_model_info_fields() {
+        let info = ModelInfo {
+            name: "llama-3".to_string(),
+            version: "1.0.0".to_string(),
+            status: "active".to_string(),
+            loaded_at: "2026-01-01T00:00:00Z".to_string(),
+            memory_usage: 1024.0,
+        };
+        assert_eq!(info.name, "llama-3");
+        assert_eq!(info.version, "1.0.0");
+        assert_eq!(info.status, "active");
+        assert!((info.memory_usage - 1024.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_stats_info_fields() {
+        let stats = StatsInfo {
+            batching_stats: "{}".to_string(),
+            caching_stats: "{}".to_string(),
+            streaming_stats: "{}".to_string(),
+            ha_stats: "{}".to_string(),
+        };
+        assert_eq!(stats.batching_stats, "{}");
+        assert_eq!(stats.caching_stats, "{}");
+    }
+
+    #[test]
+    fn test_service_health_info_fields() {
+        let service_health = ServiceHealthInfo {
+            batching: "healthy".to_string(),
+            caching: "healthy".to_string(),
+            streaming: "degraded".to_string(),
+            failover: "healthy".to_string(),
+        };
+        assert_eq!(service_health.batching, "healthy");
+        assert_eq!(service_health.streaming, "degraded");
+    }
+
+    #[test]
+    fn test_detailed_health_info_has_system_health() {
+        use crate::server::SystemHealthInfo;
+        let detailed = DetailedHealthInfo {
+            status: "healthy".to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            version: "1.0.0".to_string(),
+            uptime_seconds: 100.0,
+            system_health: SystemHealthInfo {
+                cpu_usage: 0.0,
+                memory_usage: 0.0,
+                disk_usage: 0.0,
+                active_connections: 0,
+            },
+            services: ServiceHealthInfo {
+                batching: "healthy".to_string(),
+                caching: "healthy".to_string(),
+                streaming: "healthy".to_string(),
+                failover: "healthy".to_string(),
+            },
+        };
+        assert_eq!(detailed.status, "healthy");
+        assert!((detailed.uptime_seconds - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_create_schema_succeeds() {
+        // Schema creation should not panic
+        let _schema = create_schema();
+    }
+
+    #[test]
+    fn test_inference_result_error_token() {
+        let result = InferenceResult {
+            request_id: "err-req".to_string(),
+            text: "Error: something went wrong".to_string(),
+            tokens: vec!["<error>".to_string()],
+            processing_time_ms: 5.0,
+        };
+        assert!(result.text.starts_with("Error:"));
+        assert_eq!(result.tokens[0], "<error>");
+    }
+
+    #[test]
+    fn test_inference_result_zero_processing_time() {
+        let result = InferenceResult {
+            request_id: "fast".to_string(),
+            text: "fast response".to_string(),
+            tokens: vec!["fast".to_string(), "response".to_string()],
+            processing_time_ms: 0.0,
+        };
+        assert!((result.processing_time_ms - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_model_info_loaded_at_field() {
+        let info = ModelInfo {
+            name: "gpt".to_string(),
+            version: "2.0".to_string(),
+            status: "active".to_string(),
+            loaded_at: "2026-03-24T12:00:00Z".to_string(),
+            memory_usage: 2048.5,
+        };
+        assert!(info.loaded_at.contains("2026"));
+    }
+
+    #[test]
+    fn test_batch_inference_result_empty_responses() {
+        let batch_result = BatchInferenceResult {
+            batch_id: "empty-batch".to_string(),
+            responses: vec![],
+            total_processing_time_ms: 0.0,
+        };
+        assert!(batch_result.responses.is_empty());
+        assert_eq!(batch_result.batch_id, "empty-batch");
+    }
+
+    #[test]
+    fn test_health_info_uptime_zero() {
+        let info = HealthInfo {
+            status: "healthy".to_string(),
+            timestamp: "now".to_string(),
+            version: "0.1.1".to_string(),
+            uptime_seconds: 0.0,
+        };
+        assert!((info.uptime_seconds - 0.0).abs() < 1e-9);
+    }
+}

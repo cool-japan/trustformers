@@ -1082,4 +1082,217 @@ mod tests {
         assert_eq!(pipeline.config.pitch, 1.2);
         assert_eq!(pipeline.config.volume, 0.8);
     }
+
+    // ── Additional tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_default_config_sample_rate() {
+        let cfg = TextToSpeechConfig::default();
+        assert_eq!(cfg.sample_rate, 22050);
+    }
+
+    #[test]
+    fn test_default_config_prosody_disabled() {
+        let cfg = TextToSpeechConfig::default();
+        assert!(!cfg.prosody_control);
+        assert!(!cfg.emotion_control);
+        assert!(cfg.target_emotion.is_none());
+    }
+
+    #[test]
+    fn test_default_config_max_duration_positive() {
+        let cfg = TextToSpeechConfig::default();
+        if let Some(d) = cfg.max_duration {
+            assert!(d > 0.0, "max_duration must be positive when set");
+        }
+    }
+
+    #[test]
+    fn test_audio_format_variants_constructable() {
+        let formats = [
+            AudioFormat::Wav,
+            AudioFormat::Mp3,
+            AudioFormat::Flac,
+            AudioFormat::Ogg,
+            AudioFormat::Raw,
+        ];
+        assert_eq!(formats.len(), 5);
+    }
+
+    #[test]
+    fn test_prosody_type_variants_constructable() {
+        let types = [
+            ProsodyType::Emphasis,
+            ProsodyType::Pause,
+            ProsodyType::Speed,
+            ProsodyType::Pitch,
+            ProsodyType::Volume,
+        ];
+        assert_eq!(types.len(), 5);
+    }
+
+    #[test]
+    fn test_prosody_marker_fields() {
+        let marker = ProsodyMarker {
+            start: 0,
+            end: 5,
+            prosody_type: ProsodyType::Emphasis,
+            intensity: 0.8,
+        };
+        assert_eq!(marker.start, 0);
+        assert_eq!(marker.end, 5);
+        assert!(marker.intensity >= 0.0 && marker.intensity <= 1.0);
+    }
+
+    #[test]
+    fn test_tts_input_with_all_fields() {
+        let input = TextToSpeechInput {
+            text: "Hello world".to_string(),
+            voice: Some("male-neutral".to_string()),
+            speaking_rate: Some(1.2),
+            pitch: Some(0.9),
+            volume: Some(0.7),
+            emotion: Some("happy".to_string()),
+            prosody_markers: Some(vec![ProsodyMarker {
+                start: 0,
+                end: 5,
+                prosody_type: ProsodyType::Emphasis,
+                intensity: 0.5,
+            }]),
+        };
+        assert_eq!(input.text, "Hello world");
+        assert!(input.voice.is_some());
+        assert!(input.speaking_rate.is_some());
+        assert!(input.prosody_markers.is_some());
+    }
+
+    #[test]
+    fn test_phoneme_converter_known_words() {
+        let converter = PhonemeConverter::new();
+        let hello_phonemes =
+            converter.text_to_phonemes("hello").expect("phoneme conversion should succeed");
+        // "hello" is in the dict → should return 4 phonemes
+        assert_eq!(hello_phonemes.len(), 4, "hello → h ə ˈl oʊ (4 phonemes)");
+    }
+
+    #[test]
+    fn test_phoneme_converter_unknown_word_fallback() {
+        let converter = PhonemeConverter::new();
+        let phonemes = converter
+            .text_to_phonemes("zzz")
+            .expect("phoneme conversion should succeed for unknown word");
+        // Fallback: each character becomes a phoneme
+        assert_eq!(phonemes.len(), 3, "unknown word → 1 phoneme per character");
+    }
+
+    #[test]
+    fn test_expand_abbreviations_dr() {
+        let model = MockModel::new();
+        let tokenizer = MockTokenizer::new();
+        let pipeline = TextToSpeechPipeline::new(model, tokenizer).expect("pipeline creation ok");
+        let result = pipeline.expand_abbreviations("Dr. Smith");
+        assert!(result.contains("Doctor"), "Dr. should expand to Doctor");
+    }
+
+    #[test]
+    fn test_expand_abbreviations_ai() {
+        let model = MockModel::new();
+        let tokenizer = MockTokenizer::new();
+        let pipeline = TextToSpeechPipeline::new(model, tokenizer).expect("pipeline creation ok");
+        let result = pipeline.expand_abbreviations("AI systems");
+        assert!(
+            result.contains("Artificial Intelligence"),
+            "AI should expand to Artificial Intelligence"
+        );
+    }
+
+    #[test]
+    fn test_normalize_numbers_single_digit() {
+        let model = MockModel::new();
+        let tokenizer = MockTokenizer::new();
+        let pipeline = TextToSpeechPipeline::new(model, tokenizer).expect("pipeline creation ok");
+        let result = pipeline.normalize_numbers(" 5 steps");
+        assert!(result.contains("five"), "5 should become 'five'");
+    }
+
+    #[test]
+    fn test_normalize_punctuation_period() {
+        let model = MockModel::new();
+        let tokenizer = MockTokenizer::new();
+        let pipeline = TextToSpeechPipeline::new(model, tokenizer).expect("pipeline creation ok");
+        let result = pipeline.normalize_punctuation("End.");
+        assert!(
+            result.contains("period"),
+            "period should be expanded to 'period'"
+        );
+    }
+
+    #[test]
+    fn test_normalize_punctuation_question_mark() {
+        let model = MockModel::new();
+        let tokenizer = MockTokenizer::new();
+        let pipeline = TextToSpeechPipeline::new(model, tokenizer).expect("pipeline creation ok");
+        let result = pipeline.normalize_punctuation("Really?");
+        assert!(result.contains("question"), "? should expand to 'question'");
+    }
+
+    #[test]
+    fn test_prosody_analyzer_avg_pitch_non_negative() {
+        let analyzer = ProsodyAnalyzer::new();
+        // LCG-generated samples
+        let mut s = 42u64;
+        let samples: Vec<f32> = (0..100)
+            .map(|_| {
+                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (s % 1000) as f32 / 1000.0
+            })
+            .collect();
+        let prosody = analyzer.analyze("test text", &samples, 22050).expect("prosody ok");
+        assert!(prosody.avg_pitch >= 0.0, "avg_pitch must be non-negative");
+    }
+
+    #[test]
+    fn test_prosody_analyzer_speaking_rate_positive() {
+        let analyzer = ProsodyAnalyzer::new();
+        let samples = vec![0.3_f32; 200];
+        let prosody = analyzer.analyze("test", &samples, 22050).expect("prosody should succeed");
+        assert!(
+            prosody.speaking_rate > 0.0,
+            "speaking_rate must be positive"
+        );
+    }
+
+    #[test]
+    fn test_phoneme_timings_ordering() {
+        let model = MockModel::new();
+        let tokenizer = MockTokenizer::new();
+        let pipeline = TextToSpeechPipeline::new(model, tokenizer).expect("pipeline ok");
+        let phonemes = vec!["h".to_string(), "e".to_string(), "l".to_string()];
+        let timings =
+            pipeline.generate_phoneme_timings(&phonemes, 1.5).expect("phoneme timings ok");
+        assert_eq!(timings.len(), 3, "one timing per phoneme");
+        // Verify start times are non-decreasing
+        for w in timings.windows(2) {
+            assert!(
+                w[1].start_time >= w[0].start_time,
+                "phoneme start times should be non-decreasing"
+            );
+        }
+    }
+
+    #[test]
+    fn test_phoneme_timings_confidence_range() {
+        let model = MockModel::new();
+        let tokenizer = MockTokenizer::new();
+        let pipeline = TextToSpeechPipeline::new(model, tokenizer).expect("pipeline ok");
+        let phonemes = vec!["a".to_string(), "b".to_string()];
+        let timings =
+            pipeline.generate_phoneme_timings(&phonemes, 1.0).expect("phoneme timings ok");
+        for t in &timings {
+            assert!(
+                t.confidence >= 0.0 && t.confidence <= 1.0,
+                "confidence must be in [0, 1]"
+            );
+        }
+    }
 }

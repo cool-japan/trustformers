@@ -2,7 +2,7 @@
 
 WebAssembly bindings for the TrustformeRS transformer library, enabling transformer models to run directly in web browsers and Node.js environments with full WebGPU hardware acceleration.
 
-**Version:** 0.1.0 | **Status:** Stable | **Tests:** 128 | **SLoC:** 55,504 | **Last Updated:** 2026-03-21
+**Version:** 0.1.1 | **Status:** Stable | **Tests:** 128 | **SLoC:** 55,504 | **Last Updated:** 2026-04-25
 
 ## Features
 
@@ -47,7 +47,7 @@ async function run() {
     await init();
 
     const tf = new TrustformersWasm();
-    console.log('Version:', tf.version);  // "0.1.0"
+    console.log('Version:', tf.version);  // "0.1.1"
 
     // Create and manipulate tensors
     const tensor = WasmTensor.new([1, 2, 3, 4], [2, 2]);
@@ -91,7 +91,7 @@ Main entry point for the library.
 
 ```javascript
 const tf = new TrustformersWasm();
-console.log(tf.version);     // "0.1.0"
+console.log(tf.version);     // "0.1.1"
 console.log(tf.initialized); // true
 ```
 

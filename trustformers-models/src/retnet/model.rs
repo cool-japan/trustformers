@@ -1458,3 +1458,199 @@ impl RetNetForSequenceClassification {
         Ok(last_tokens)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trustformers_core::traits::Config;
+
+    fn small_retnet_config() -> RetNetConfig {
+        RetNetConfig {
+            vocab_size: 100,
+            hidden_size: 32,
+            num_hidden_layers: 2,
+            num_heads: 4,
+            intermediate_size: 64,
+            hidden_act: "swish".to_string(),
+            hidden_dropout_prob: 0.0,
+            attention_dropout_prob: 0.0,
+            max_position_embeddings: 64,
+            initializer_range: 0.02,
+            layer_norm_eps: 1e-6,
+            pad_token_id: 0,
+            bos_token_id: 1,
+            eos_token_id: 2,
+            use_bias: false,
+            use_glu: true,
+            use_norm_bias: false,
+            deepnorm: false,
+            dropout_module: "dropout".to_string(),
+            activation_dropout: 0.0,
+            attention_dropout: 0.0,
+            retention_heads: 4,
+            value_factor: 2.0,
+            gate_fn: "swish".to_string(),
+            tensor_parallel_degree: 1,
+            sequence_parallel: false,
+            fuse_norm: false,
+            no_output_layer: false,
+            layernorm_embedding: false,
+            chunking: false,
+            chunk_size: 64,
+        }
+    }
+
+    #[test]
+    fn test_retnet_config_default() {
+        let config = RetNetConfig::default();
+        assert_eq!(config.vocab_size, 32000);
+        assert_eq!(config.hidden_size, 2048);
+        assert_eq!(config.num_hidden_layers, 24);
+        assert_eq!(config.num_heads, 16);
+    }
+
+    #[test]
+    fn test_retnet_config_validate() {
+        let config = small_retnet_config();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_rotary_position_embedding_creation() {
+        let result = RotaryPositionEmbedding::new(32, 64, 10000.0);
+        assert!(result.is_ok());
+        let rope = result.expect("rope creation should succeed");
+        assert_eq!(rope.dim, 32);
+        assert!(matches!(rope.device(), Device::CPU));
+    }
+
+    #[test]
+    fn test_rotary_position_embedding_with_device() {
+        let result = RotaryPositionEmbedding::new_with_device(16, 32, 10000.0, Device::CPU);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_rotary_position_embedding_inv_freq_shape() {
+        let rope =
+            RotaryPositionEmbedding::new(8, 32, 10000.0).expect("rope creation should succeed");
+        // inv_freq should have shape [dim/2] = [4]
+        assert_eq!(rope.inv_freq.shape(), vec![4]);
+    }
+
+    #[test]
+    fn test_rotary_position_embedding_device_cpu() {
+        let rope =
+            RotaryPositionEmbedding::new(16, 64, 10000.0).expect("rope creation should succeed");
+        assert!(matches!(rope.device(), Device::CPU));
+    }
+
+    #[test]
+    fn test_retnet_model_creation() {
+        let config = small_retnet_config();
+        let result = RetNetModel::new(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_retnet_model_device() {
+        let config = small_retnet_config();
+        let model = RetNetModel::new(config).expect("model creation should succeed");
+        assert!(matches!(model.device(), Device::CPU));
+    }
+
+    #[test]
+    fn test_retnet_model_config() {
+        let config = small_retnet_config();
+        let model = RetNetModel::new(config.clone()).expect("model creation should succeed");
+        let model_config = model.get_config();
+        assert_eq!(model_config.vocab_size, config.vocab_size);
+        assert_eq!(model_config.hidden_size, config.hidden_size);
+    }
+
+    #[test]
+    fn test_retnet_model_num_parameters() {
+        let config = small_retnet_config();
+        let model = RetNetModel::new(config).expect("model creation should succeed");
+        let params = model.num_parameters();
+        assert!(params > 0);
+    }
+
+    #[test]
+    fn test_retnet_model_parameter_count_positive() {
+        let config = small_retnet_config();
+        let model = RetNetModel::new(config).expect("model creation should succeed");
+        // Model should have non-trivial number of parameters
+        assert!(model.num_parameters() > 100);
+    }
+
+    #[test]
+    fn test_retnet_lm_head_creation() {
+        let config = small_retnet_config();
+        let result = RetNetForLanguageModeling::new(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_retnet_lm_head_parameter_count_positive() {
+        let config = small_retnet_config();
+        let model = RetNetForLanguageModeling::new(config).expect("model creation should succeed");
+        assert!(model.num_parameters() > 0);
+    }
+
+    #[test]
+    fn test_retnet_lm_head_num_parameters() {
+        let config = small_retnet_config();
+        let model = RetNetForLanguageModeling::new(config).expect("model creation should succeed");
+        let params = model.num_parameters();
+        assert!(params > 0);
+    }
+
+    #[test]
+    fn test_retnet_sequence_classification_creation() {
+        let config = small_retnet_config();
+        let result = RetNetForSequenceClassification::new(config, 5);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_retnet_sequence_classification_num_labels() {
+        let config = small_retnet_config();
+        let model =
+            RetNetForSequenceClassification::new(config, 3).expect("model creation should succeed");
+        assert_eq!(model.num_labels, 3);
+    }
+
+    #[test]
+    fn test_retnet_with_device() {
+        let config = small_retnet_config();
+        let result = RetNetModel::new_with_device(config, Device::CPU);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_retnet_lm_head_with_device() {
+        let config = small_retnet_config();
+        let result = RetNetForLanguageModeling::new_with_device(config, Device::CPU);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_retnet_classification_with_device() {
+        let config = small_retnet_config();
+        let result = RetNetForSequenceClassification::new_with_device(config, 2, Device::CPU);
+        assert!(result.is_ok());
+        let model = result.expect("model should be created");
+        assert!(matches!(model.device(), Device::CPU));
+    }
+
+    #[test]
+    fn test_retnet_model_config_matches() {
+        let config = small_retnet_config();
+        let model = RetNetModel::new(config.clone()).expect("model creation should succeed");
+        let mc = model.get_config();
+        assert_eq!(mc.hidden_size, config.hidden_size);
+        assert_eq!(mc.num_heads, config.num_heads);
+        assert_eq!(mc.num_hidden_layers, config.num_hidden_layers);
+    }
+}

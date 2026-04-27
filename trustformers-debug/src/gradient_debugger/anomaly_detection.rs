@@ -56,7 +56,7 @@ impl GradientAnomalyDetector {
         sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let median_idx = sorted_values.len() / 2;
-        let median = if sorted_values.len() % 2 == 0 {
+        let median = if sorted_values.len().is_multiple_of(2) {
             (sorted_values[median_idx - 1] + sorted_values[median_idx]) / 2.0
         } else {
             sorted_values[median_idx]

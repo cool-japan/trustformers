@@ -7,3 +7,6 @@ pub mod model;
 
 pub use config::PerformerConfig;
 pub use model::{PerformerForMaskedLM, PerformerForSequenceClassification, PerformerModel};
+
+#[cfg(test)]
+mod tests;

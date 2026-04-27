@@ -1349,3 +1349,315 @@ pub enum StorageType {
     /// Tape storage
     Tape { device: String },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- DisasterRecoveryConfig default ---
+
+    #[test]
+    fn test_default_config_enabled() {
+        let config = DisasterRecoveryConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.rto_seconds, 300);
+        assert_eq!(config.rpo_seconds, 60);
+    }
+
+    #[test]
+    fn test_default_config_has_dr_site() {
+        let config = DisasterRecoveryConfig::default();
+        assert!(!config.dr_sites.is_empty());
+        let dr_site = &config.dr_sites[0];
+        assert_eq!(dr_site.site_id, "dr-site-1");
+    }
+
+    #[test]
+    fn test_default_primary_site_id() {
+        let config = DisasterRecoveryConfig::default();
+        assert!(!config.primary_site.site_id.is_empty());
+    }
+
+    // --- DisasterRecoveryManager creation ---
+
+    #[tokio::test]
+    async fn test_manager_creation_default_config() {
+        let config = DisasterRecoveryConfig::default();
+        let result = DisasterRecoveryManager::new(config);
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_manager_initial_active_site() {
+        let config = DisasterRecoveryConfig::default();
+        let primary_id = config.primary_site.site_id.clone();
+        if let Ok(manager) = DisasterRecoveryManager::new(config) {
+            let status = manager.get_status().await;
+            assert_eq!(status.active_site_id, primary_id);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_manager_no_failover_in_progress_initially() {
+        let config = DisasterRecoveryConfig::default();
+        if let Ok(manager) = DisasterRecoveryManager::new(config) {
+            let status = manager.get_status().await;
+            assert!(!status.failover_in_progress);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_manager_rto_rpo_in_status() {
+        let config = DisasterRecoveryConfig::default();
+        let rto = config.rto_seconds;
+        let rpo = config.rpo_seconds;
+        if let Ok(manager) = DisasterRecoveryManager::new(config) {
+            let status = manager.get_status().await;
+            assert_eq!(status.rto_seconds, rto);
+            assert_eq!(status.rpo_seconds, rpo);
+        }
+    }
+
+    // --- record_event ---
+
+    #[tokio::test]
+    async fn test_record_event_test_started() {
+        let config = DisasterRecoveryConfig::default();
+        if let Ok(manager) = DisasterRecoveryManager::new(config) {
+            let result = manager.record_event(DREventType::TestStarted, "Test event", None).await;
+            assert!(result.is_ok());
+            let events = manager.get_recent_events(Some(5)).await;
+            assert!(!events.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_record_event_failover_triggered_severity() {
+        let config = DisasterRecoveryConfig::default();
+        if let Ok(manager) = DisasterRecoveryManager::new(config) {
+            let result = manager
+                .record_event(
+                    DREventType::FailoverTriggered,
+                    "Failover!",
+                    Some("site1".to_string()),
+                )
+                .await;
+            assert!(result.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_record_multiple_events() {
+        let config = DisasterRecoveryConfig::default();
+        if let Ok(manager) = DisasterRecoveryManager::new(config) {
+            for _ in 0..5 {
+                let _ = manager.record_event(DREventType::BackupCompleted, "backup", None).await;
+            }
+            let events = manager.get_recent_events(None).await;
+            assert_eq!(events.len(), 5);
+        }
+    }
+
+    // --- get_recent_events ---
+
+    #[tokio::test]
+    async fn test_get_recent_events_limit() {
+        let config = DisasterRecoveryConfig::default();
+        if let Ok(manager) = DisasterRecoveryManager::new(config) {
+            for _ in 0..10 {
+                let _ = manager.record_event(DREventType::TestCompleted, "test", None).await;
+            }
+            let events = manager.get_recent_events(Some(3)).await;
+            assert_eq!(events.len(), 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_recent_events_no_limit() {
+        let config = DisasterRecoveryConfig::default();
+        if let Ok(manager) = DisasterRecoveryManager::new(config) {
+            for i in 0..7 {
+                let _ = manager
+                    .record_event(DREventType::SiteUnavailable, &format!("event {}", i), None)
+                    .await;
+            }
+            let events = manager.get_recent_events(None).await;
+            assert_eq!(events.len(), 7);
+        }
+    }
+
+    // --- trigger_failover (note: these may trigger gradual failover which involves sleep) ---
+
+    #[tokio::test]
+    async fn test_trigger_failover_no_gradual() {
+        let mut config = DisasterRecoveryConfig::default();
+        // Disable gradual failover to avoid long waits
+        config.failover.traffic_splitting.gradual_failover = false;
+        if let Ok(manager) = DisasterRecoveryManager::new(config) {
+            let result = manager
+                .trigger_failover(Some("dr-site-1".to_string()), "test reason".to_string())
+                .await;
+            assert!(result.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_trigger_failover_increments_stats() {
+        let mut config = DisasterRecoveryConfig::default();
+        config.failover.traffic_splitting.gradual_failover = false;
+        if let Ok(manager) = DisasterRecoveryManager::new(config) {
+            let _ = manager.trigger_failover(None, "auto".to_string()).await;
+            let stats = manager.get_stats().await;
+            assert!(stats.total_failovers.load(std::sync::atomic::Ordering::Relaxed) >= 1);
+        }
+    }
+
+    // --- get_stats ---
+
+    #[tokio::test]
+    async fn test_stats_initial_zero() {
+        let config = DisasterRecoveryConfig::default();
+        if let Ok(manager) = DisasterRecoveryManager::new(config) {
+            let stats = manager.get_stats().await;
+            assert_eq!(
+                stats.total_failovers.load(std::sync::atomic::Ordering::Relaxed),
+                0
+            );
+            assert_eq!(
+                stats.total_backups.load(std::sync::atomic::Ordering::Relaxed),
+                0
+            );
+        }
+    }
+
+    // --- type variant tests ---
+
+    #[test]
+    fn test_site_status_variants() {
+        let statuses = [
+            SiteStatus::Active,
+            SiteStatus::Standby,
+            SiteStatus::Unhealthy,
+            SiteStatus::Maintenance,
+            SiteStatus::Activating,
+            SiteStatus::Deactivating,
+            SiteStatus::Unknown,
+        ];
+        for s in &statuses {
+            assert!(format!("{:?}", s).len() > 0);
+        }
+    }
+
+    #[test]
+    fn test_failover_strategy_variants() {
+        let strats = [
+            FailoverStrategy::HighestPriority,
+            FailoverStrategy::RoundRobin,
+            FailoverStrategy::CapacityBased,
+            FailoverStrategy::Geographic {
+                preferred_regions: vec!["us-east-1".to_string()],
+            },
+            FailoverStrategy::Custom {
+                strategy_name: "custom".to_string(),
+            },
+        ];
+        for s in &strats {
+            assert!(format!("{:?}", s).len() > 0);
+        }
+    }
+
+    #[test]
+    fn test_replication_mode_variants() {
+        let modes = [
+            ReplicationMode::Synchronous,
+            ReplicationMode::Asynchronous,
+            ReplicationMode::SemiSynchronous,
+        ];
+        for m in &modes {
+            assert!(format!("{:?}", m).len() > 0);
+        }
+    }
+
+    #[test]
+    fn test_backup_type_variants() {
+        let types = [
+            BackupType::Full,
+            BackupType::Incremental,
+            BackupType::Differential,
+        ];
+        for t in &types {
+            assert!(format!("{:?}", t).len() > 0);
+        }
+    }
+
+    #[test]
+    fn test_notification_severity_variants() {
+        let severities = [
+            NotificationSeverity::Low,
+            NotificationSeverity::Medium,
+            NotificationSeverity::High,
+            NotificationSeverity::Critical,
+        ];
+        for s in &severities {
+            assert!(format!("{:?}", s).len() > 0);
+        }
+    }
+
+    // --- DRError ---
+
+    #[test]
+    fn test_dr_error_display() {
+        let err = DRError::ConfigurationError {
+            message: "bad config".to_string(),
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("bad config"));
+    }
+
+    #[test]
+    fn test_dr_error_site_not_found() {
+        let err = DRError::SiteNotFound {
+            site_id: "missing-site".to_string(),
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("missing-site"));
+    }
+
+    // --- HealthCheckConfig ---
+
+    #[test]
+    fn test_health_check_config_fields() {
+        let hc = HealthCheckConfig {
+            enabled: true,
+            interval_seconds: 30,
+            timeout_seconds: 10,
+            failure_threshold: 3,
+            success_threshold: 2,
+        };
+        assert!(hc.enabled);
+        assert_eq!(hc.failure_threshold, 3);
+        assert_eq!(hc.success_threshold, 2);
+    }
+
+    // --- TrafficStage ---
+
+    #[test]
+    fn test_traffic_stage_percentages() {
+        let stages = vec![
+            TrafficStage {
+                percentage: 10,
+                duration_seconds: 60,
+            },
+            TrafficStage {
+                percentage: 50,
+                duration_seconds: 120,
+            },
+            TrafficStage {
+                percentage: 100,
+                duration_seconds: 0,
+            },
+        ];
+        assert_eq!(stages[0].percentage, 10);
+        assert_eq!(stages[2].percentage, 100);
+    }
+}

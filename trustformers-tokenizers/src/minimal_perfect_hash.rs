@@ -270,7 +270,7 @@ impl MinimalPerfectHash {
             return 2;
         }
 
-        let mut candidate = if n % 2 == 0 { n + 1 } else { n };
+        let mut candidate = if n.is_multiple_of(2) { n + 1 } else { n };
 
         while !Self::is_prime(candidate) {
             candidate += 2;
@@ -287,13 +287,13 @@ impl MinimalPerfectHash {
         if n <= 3 {
             return true;
         }
-        if n % 2 == 0 || n % 3 == 0 {
+        if n.is_multiple_of(2) || n.is_multiple_of(3) {
             return false;
         }
 
         let mut i = 5;
         while i * i <= n {
-            if n % i == 0 || n % (i + 2) == 0 {
+            if n.is_multiple_of(i) || n.is_multiple_of(i + 2) {
                 return false;
             }
             i += 6;

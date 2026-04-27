@@ -2,6 +2,7 @@ pub mod cross_task;
 pub mod in_context;
 pub mod meta_learning;
 pub mod prompt_tuning;
+pub mod prototypical;
 pub mod task_adaptation;
 
 pub use cross_task::{CrossTaskGeneralizer, GeneralizationConfig, TaskEmbedding};
@@ -10,6 +11,10 @@ pub use meta_learning::{
     MAMLConfig, MAMLTrainer, MetaLearningAlgorithm, ReptileConfig, ReptileTrainer, TaskBatch,
 };
 pub use prompt_tuning::{PromptConfig, PromptTuner, SoftPrompt};
+pub use prototypical::{
+    FewShotError, IclEpisodeBuilder, IclTemplate, MatchingNetworks, PrototypicalConfig,
+    PrototypicalNetworks,
+};
 pub use task_adaptation::{AdaptationConfig, TaskAdapter, TaskDescriptor};
 
 use anyhow::Result;
@@ -228,5 +233,205 @@ mod tests {
 
         assert!(manager.get_support_set("task1").is_some());
         assert!(manager.get_query_set("task1").is_some());
+    }
+
+    #[test]
+    fn test_few_shot_config_default() {
+        let cfg = FewShotConfig::default();
+        assert_eq!(cfg.k_shot, 5);
+        assert!(cfg.in_context.is_some());
+        assert!(cfg.prompt_tuning.is_none());
+        assert!(cfg.meta_learning.is_none());
+        assert!(!cfg.enable_cross_task);
+    }
+
+    #[test]
+    fn test_support_set_is_not_complete_initially() {
+        let ss = SupportSet::new("t".to_string(), 3);
+        // num_classes is None → is_complete returns false
+        assert!(!ss.is_complete());
+    }
+
+    #[test]
+    fn test_support_set_incomplete_before_full() {
+        let mut ss = SupportSet::new("t".to_string(), 3);
+        ss.num_classes = Some(2); // need 6 examples
+        for i in 0..5 {
+            ss.add_example(FewShotExample {
+                input: vec![i as f32],
+                output: vec![0.0],
+                task_id: None,
+                metadata: None,
+            })
+            .expect("add should succeed for first 5 examples");
+        }
+        assert!(
+            !ss.is_complete(),
+            "should not be complete with only 5 of 6 examples"
+        );
+    }
+
+    #[test]
+    fn test_support_set_add_over_capacity_errors() {
+        let mut ss = SupportSet::new("t".to_string(), 2);
+        ss.num_classes = Some(1); // capacity = k_shot * num_classes = 2
+
+        for i in 0..2 {
+            ss.add_example(FewShotExample {
+                input: vec![i as f32],
+                output: vec![0.0],
+                task_id: None,
+                metadata: None,
+            })
+            .expect("first 2 adds should succeed");
+        }
+
+        // Third add should fail (exceeds k_shot * num_classes = 2)
+        let result = ss.add_example(FewShotExample {
+            input: vec![99.0],
+            output: vec![0.0],
+            task_id: None,
+            metadata: None,
+        });
+        assert!(result.is_err(), "adding beyond capacity should return Err");
+    }
+
+    #[test]
+    fn test_few_shot_manager_get_missing_support_set() {
+        let manager = FewShotLearningManager::new(FewShotConfig::default());
+        assert!(
+            manager.get_support_set("nonexistent").is_none(),
+            "missing support set should return None"
+        );
+    }
+
+    #[test]
+    fn test_few_shot_manager_get_missing_query_set() {
+        let manager = FewShotLearningManager::new(FewShotConfig::default());
+        assert!(
+            manager.get_query_set("nonexistent").is_none(),
+            "missing query set should return None"
+        );
+    }
+
+    #[test]
+    fn test_few_shot_manager_add_support_missing_task_errors() {
+        let mut manager = FewShotLearningManager::new(FewShotConfig::default());
+        let result = manager.add_support_example(
+            "ghost",
+            FewShotExample {
+                input: vec![1.0],
+                output: vec![0.0],
+                task_id: None,
+                metadata: None,
+            },
+        );
+        assert!(
+            result.is_err(),
+            "adding to missing support set should return Err"
+        );
+    }
+
+    #[test]
+    fn test_few_shot_manager_add_query_missing_task_errors() {
+        let mut manager = FewShotLearningManager::new(FewShotConfig::default());
+        let result = manager.add_query_example(
+            "phantom",
+            FewShotExample {
+                input: vec![2.0],
+                output: vec![1.0],
+                task_id: None,
+                metadata: None,
+            },
+        );
+        assert!(
+            result.is_err(),
+            "adding to missing query set should return Err"
+        );
+    }
+
+    #[test]
+    fn test_few_shot_manager_multiple_tasks() {
+        let config = FewShotConfig {
+            k_shot: 3,
+            ..FewShotConfig::default()
+        };
+        let mut manager = FewShotLearningManager::new(config);
+
+        manager
+            .create_support_set("task_a".to_string(), 2)
+            .expect("create task_a support");
+        manager
+            .create_support_set("task_b".to_string(), 4)
+            .expect("create task_b support");
+
+        assert!(manager.get_support_set("task_a").is_some());
+        assert!(manager.get_support_set("task_b").is_some());
+        assert!(manager.get_support_set("task_c").is_none());
+    }
+
+    #[test]
+    fn test_few_shot_example_metadata() {
+        let ex = FewShotExample {
+            input: vec![0.1, 0.2],
+            output: vec![1.0],
+            task_id: Some("task_meta".to_string()),
+            metadata: Some(serde_json::json!({"source": "wikipedia"})),
+        };
+        assert!(ex.metadata.is_some());
+        assert_eq!(
+            ex.task_id.as_deref().expect("task_id must be set"),
+            "task_meta"
+        );
+    }
+
+    #[test]
+    fn test_query_set_add_multiple_examples() {
+        let config = FewShotConfig::default();
+        let mut manager = FewShotLearningManager::new(config);
+        manager.create_query_set("q1".to_string()).expect("create query set");
+
+        for i in 0..5 {
+            manager
+                .add_query_example(
+                    "q1",
+                    FewShotExample {
+                        input: vec![i as f32],
+                        output: vec![(i % 2) as f32],
+                        task_id: None,
+                        metadata: None,
+                    },
+                )
+                .expect("add query example should succeed");
+        }
+
+        let qs = manager.get_query_set("q1").expect("query set must exist");
+        assert_eq!(qs.examples.len(), 5);
+    }
+
+    #[test]
+    fn test_few_shot_method_variant_in_context() {
+        let cfg = FewShotConfig {
+            method: FewShotMethod::InContext,
+            ..FewShotConfig::default()
+        };
+        assert!(matches!(cfg.method, FewShotMethod::InContext));
+    }
+
+    #[test]
+    fn test_few_shot_method_variant_prompt_tuning() {
+        let cfg = FewShotConfig {
+            method: FewShotMethod::PromptTuning,
+            ..FewShotConfig::default()
+        };
+        assert!(matches!(cfg.method, FewShotMethod::PromptTuning));
+    }
+
+    #[test]
+    fn test_support_set_k_shot_and_task_id() {
+        let ss = SupportSet::new("classification".to_string(), 10);
+        assert_eq!(ss.k_shot, 10);
+        assert_eq!(ss.task_id, "classification");
+        assert!(ss.examples.is_empty());
     }
 }

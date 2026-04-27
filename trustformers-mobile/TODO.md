@@ -17,11 +17,11 @@ The `trustformers-mobile` crate provides mobile deployment infrastructure for iO
 
 ## Current Status
 
-**Version:** 0.1.0 | **Date:** 2026-03-21 | **Status:** Alpha
+**Version:** 0.1.0 | **Date:** 2026-03-22 | **Status:** Alpha
 
 ### Implementation Status
 🔵 **ALPHA** - Core infrastructure implemented; API may change
-✅ **1 RUST INTEGRATION TEST** - Passing
+✅ **143 RUST INTEGRATION TESTS** - All passing (10 test files added 2026-03-22)
 ✅ **ZERO COMPILATION ERRORS** - Clean compilation across all platforms
 ✅ **IOS IMPLEMENTED** - Swift framework, Core ML, Metal
 ✅ **ANDROID IMPLEMENTED** - Kotlin, NNAPI, Vulkan
@@ -550,22 +550,34 @@ if battery_mgr.should_run_inference()? {
 ## Future Enhancements
 
 ### High Priority
-- Enhanced quantization methods (INT4, GGUF)
-- Better thermal management algorithms
-- Improved model compression techniques
-- WebNN integration for future platforms
+- ✅ **INT4/GGUF quantization** — nibble-packed INT4 per-group quantization + pure-Rust GGUF reader (`quantization/int4.rs`, `quantization/gguf_mobile.rs`)
+- ✅ **Predictive thermal management** — linear regression thermal predictor with proactive throttle prevention (`thermal/predictive.rs`)
+- ✅ **WebNN integration (IR + export)** — W3C WebNN IR, graph builder, JSON/compact-JSON export, structural validation (`webnn/mod.rs`)
+- [ ] Improved model compression techniques
+  - **Refinement needed:** target compression ratio? Which techniques: GPTQ, AWQ, SqueezeLLM?
 
 ### Performance
-- Further memory optimizations
-- Improved battery efficiency
-- Better cache strategies
-- Hardware-specific optimizations
+- [ ] Further memory optimizations
+  - **Refinement needed:** target peak memory reduction %, which platform?
+- [ ] Improved battery efficiency
+  - **Refinement needed:** target battery % per inference, which benchmark device?
+- [ ] Better cache strategies
+  - **Refinement needed:** LRU vs ARC vs model-aware eviction? Target cache miss rate?
+- [ ] Hardware optimization: iOS ANE (Apple Neural Engine) via CoreML integration
+- [ ] Hardware optimization: Android NPU via NNAPI/QNN
+- [ ] Hardware optimization: Android Hexagon DSP acceleration
+- [ ] Hardware optimization: Qualcomm AI Engine Direct (QAI-Hub integration)
 
 ### Features
-- More AR/VR integrations
-- Enhanced privacy features
-- Additional cross-platform frameworks
-- Real-time collaboration
+- [ ] More AR/VR integrations
+  - **Refinement needed:** VisionOS? ARCore extensions? Specific spatial AI use case?
+- [ ] Enhanced privacy features
+  - **Refinement needed:** what delta beyond existing DP/MPC/HE? Specific threat model?
+- [ ] Cross-platform: .NET MAUI bindings for C# mobile apps
+- [ ] Cross-platform: Capacitor.js plugin for Ionic/Angular apps
+- [ ] Cross-platform: Kotlin Multiplatform Mobile (KMM) module
+- [ ] Real-time collaboration
+  - **Refinement needed:** protocol (WebRTC? CRDT? operational transform?), transport, use-case definition.
 
 ---
 

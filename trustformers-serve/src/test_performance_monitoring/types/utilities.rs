@@ -840,3 +840,230 @@ pub struct GoodnessOfFit {
     pub distribution: String,
     pub sample_size: usize,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- CleanupSchedule tests ---
+
+    #[test]
+    fn test_cleanup_schedule_default() {
+        let schedule = CleanupSchedule::default();
+        assert_eq!(schedule.interval, Duration::from_secs(24 * 3600));
+        assert!(schedule.auto_cleanup);
+    }
+
+    // --- EvaluationContext tests ---
+
+    #[test]
+    fn test_evaluation_context_default() {
+        let ctx = EvaluationContext::default();
+        assert!(ctx.variables.is_empty());
+        assert!(ctx.timestamp.is_none());
+    }
+
+    #[test]
+    fn test_evaluation_context_new() {
+        let ctx = EvaluationContext::new();
+        assert!(ctx.variables.is_empty());
+    }
+
+    // --- EnhancedLatencyProcessor tests ---
+
+    #[test]
+    fn test_enhanced_latency_processor_default() {
+        let proc = EnhancedLatencyProcessor::default();
+        assert!(proc.processing_times.is_empty());
+        assert_eq!(proc.avg_latency, Duration::from_secs(0));
+        assert_eq!(proc.max_latency, Duration::from_secs(0));
+    }
+
+    #[test]
+    fn test_enhanced_latency_processor_new() {
+        let proc = EnhancedLatencyProcessor::new();
+        assert!(proc.processing_times.is_empty());
+    }
+
+    // --- EnhancedResourceUtilizationProcessor tests ---
+
+    #[test]
+    fn test_resource_utilization_processor_default() {
+        let proc = EnhancedResourceUtilizationProcessor::default();
+        assert!((proc.cpu_utilization - 0.0).abs() < 1e-9);
+        assert!((proc.memory_utilization - 0.0).abs() < 1e-9);
+        assert!((proc.gpu_utilization - 0.0).abs() < 1e-9);
+        assert!((proc.network_utilization - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_resource_utilization_processor_new() {
+        let proc = EnhancedResourceUtilizationProcessor::new();
+        assert!((proc.cpu_utilization - 0.0).abs() < 1e-9);
+    }
+
+    // --- ConditionContext tests ---
+
+    #[test]
+    fn test_condition_context_default() {
+        let ctx = ConditionContext::default();
+        assert!(ctx.variables.is_empty());
+    }
+
+    // --- CachedSharingCapability tests ---
+
+    #[test]
+    fn test_cached_sharing_capability_is_valid_recent() {
+        let cap = CachedSharingCapability {
+            can_share: true,
+            sharing_mode: "shared".to_string(),
+            cache_timestamp: Utc::now(),
+            result: "ok".to_string(),
+            cached_at: Utc::now(),
+            confidence: 0.95,
+        };
+        assert!(cap.is_valid());
+    }
+
+    #[test]
+    fn test_cached_sharing_capability_is_valid_expired() {
+        let cap = CachedSharingCapability {
+            can_share: true,
+            sharing_mode: "shared".to_string(),
+            cache_timestamp: Utc::now() - chrono::Duration::seconds(600),
+            result: "ok".to_string(),
+            cached_at: Utc::now() - chrono::Duration::seconds(600),
+            confidence: 0.95,
+        };
+        assert!(!cap.is_valid());
+    }
+
+    // --- Default enum tests ---
+
+    #[test]
+    fn test_comparison_operator_default() {
+        let op = ComparisonOperator::default();
+        assert!(matches!(op, ComparisonOperator::Equal));
+    }
+
+    #[test]
+    fn test_group_type_default() {
+        let gt = GroupType::default();
+        assert!(matches!(gt, GroupType::BySource));
+    }
+
+    #[test]
+    fn test_group_status_default() {
+        let gs = GroupStatus::default();
+        assert!(matches!(gs, GroupStatus::Active));
+    }
+
+    #[test]
+    fn test_suppression_level_default() {
+        let sl = SuppressionLevel::default();
+        assert!(matches!(sl, SuppressionLevel::Low));
+    }
+
+    #[test]
+    fn test_recovery_condition_type_default() {
+        let rct = RecoveryConditionType::default();
+        assert!(matches!(rct, RecoveryConditionType::MetricReturnsToNormal));
+    }
+
+    #[test]
+    fn test_trend_default() {
+        let t = Trend::default();
+        assert!(matches!(t, Trend::Unknown));
+    }
+
+    #[test]
+    fn test_sensitivity_level_default() {
+        let sl = SensitivityLevel::default();
+        assert!(matches!(sl, SensitivityLevel::Medium));
+    }
+
+    #[test]
+    fn test_analysis_depth_default() {
+        let ad = AnalysisDepth::default();
+        assert!(matches!(ad, AnalysisDepth::Normal));
+    }
+
+    #[test]
+    fn test_optimization_strategy_default() {
+        let os_val = OptimizationStrategy::default();
+        assert!(matches!(os_val, OptimizationStrategy::Balanced));
+    }
+
+    #[test]
+    fn test_comparison_method_default() {
+        let cm = ComparisonMethod::default();
+        assert!(matches!(cm, ComparisonMethod::Relative));
+    }
+
+    #[test]
+    fn test_baseline_type_default() {
+        let bt = BaselineType::default();
+        assert!(matches!(bt, BaselineType::Rolling));
+    }
+
+    // --- OrderingConstraint tests ---
+
+    #[test]
+    fn test_ordering_constraint_default() {
+        let oc = OrderingConstraint::default();
+        assert!(oc.before_test.is_empty());
+        assert!(oc.after_test.is_empty());
+        assert_eq!(oc.constraint_type, "temporal");
+        assert!(oc.reason.is_empty());
+    }
+
+    // --- Derive Default tests ---
+
+    #[test]
+    fn test_thread_utilization_default() {
+        let tu = ThreadUtilization::default();
+        assert_eq!(tu.thread_count, 0);
+        assert!((tu.utilization_percent - 0.0).abs() < 1e-9);
+        assert_eq!(tu.blocked_threads, 0);
+    }
+
+    #[test]
+    fn test_latency_characteristics_default() {
+        let lc = LatencyCharacteristics::default();
+        assert!((lc.p50_ms - 0.0).abs() < 1e-9);
+        assert!((lc.p95_ms - 0.0).abs() < 1e-9);
+        assert!((lc.p99_ms - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_data_source_default() {
+        let ds = DataSource::default();
+        assert!(ds.source_type.is_empty());
+        assert!(ds.query.is_empty());
+        assert!(ds.parameters.is_empty());
+    }
+
+    #[test]
+    fn test_severity_distribution_default() {
+        let sd = SeverityDistribution::default();
+        assert_eq!(sd.critical, 0);
+        assert_eq!(sd.high, 0);
+        assert_eq!(sd.medium, 0);
+        assert_eq!(sd.low, 0);
+    }
+
+    #[test]
+    fn test_false_positive_assessment_default() {
+        let fpa = FalsePositiveAssessment::default();
+        assert!((fpa.false_positive_rate - 0.0).abs() < 1e-9);
+        assert!((fpa.confidence - 0.0).abs() < 1e-9);
+        assert!(fpa.evidence.is_empty());
+    }
+
+    #[test]
+    fn test_statistical_significance_default() {
+        let ss = StatisticalSignificance::default();
+        assert!((ss.p_value - 0.0).abs() < 1e-9);
+        assert!(!ss.is_significant);
+    }
+}

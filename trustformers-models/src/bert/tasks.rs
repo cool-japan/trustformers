@@ -328,3 +328,229 @@ impl Model for BertForQuestionAnswering {
         self.bert.num_parameters() + self.qa_outputs.parameter_count()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trustformers_core::traits::{Model, TokenizedInput};
+
+    /// Tiny BertConfig for fast tests (no pooler issue workaround: we test
+    /// tasks that directly use the last_hidden_state).
+    fn tiny_config() -> BertConfig {
+        BertConfig {
+            vocab_size: 256,
+            hidden_size: 32,
+            num_hidden_layers: 1,
+            num_attention_heads: 4,
+            intermediate_size: 128,
+            hidden_act: "gelu".to_string(),
+            hidden_dropout_prob: 0.0,
+            attention_probs_dropout_prob: 0.0,
+            max_position_embeddings: 16,
+            type_vocab_size: 2,
+            initializer_range: 0.02,
+            layer_norm_eps: 1e-12,
+            pad_token_id: 0,
+            position_embedding_type: Some("absolute".to_string()),
+            use_cache: Some(false),
+            classifier_dropout: None,
+        }
+    }
+
+    fn make_input(seq_len: usize) -> TokenizedInput {
+        let input_ids: Vec<u32> = (0..seq_len as u32).collect();
+        let attention_mask: Vec<u8> = vec![1u8; seq_len];
+        TokenizedInput::new(input_ids, attention_mask)
+    }
+
+    // --- BertForTokenClassification ---
+
+    #[test]
+    fn test_token_classification_new() {
+        let cfg = tiny_config();
+        let model = BertForTokenClassification::new(cfg, 5)
+            .expect("BertForTokenClassification::new must succeed");
+        assert_eq!(model.device(), Device::CPU);
+    }
+
+    #[test]
+    fn test_token_classification_output_shape() {
+        let cfg = tiny_config();
+        let num_labels = 5usize;
+        let seq_len = 6usize;
+        let model = BertForTokenClassification::new(cfg, num_labels)
+            .expect("BertForTokenClassification::new must succeed");
+        let output = model
+            .forward(make_input(seq_len))
+            .expect("BertForTokenClassification forward must succeed");
+        let shape = output.logits.shape();
+        // last_hidden_state is [1, seq_len, hidden_size]; classifier produces [1, seq_len, num_labels]
+        // but since last_hidden_state feeds directly as 3D, the shape should end with num_labels
+        assert_eq!(
+            *shape.last().expect("shape must not be empty"),
+            num_labels,
+            "final logits dim must equal num_labels"
+        );
+    }
+
+    #[test]
+    fn test_token_classification_hidden_states_present() {
+        let cfg = tiny_config();
+        let model = BertForTokenClassification::new(cfg, 3)
+            .expect("BertForTokenClassification::new must succeed");
+        let output = model.forward(make_input(4)).expect("forward must succeed");
+        assert!(
+            output.hidden_states.is_some(),
+            "hidden_states must be returned"
+        );
+    }
+
+    #[test]
+    fn test_token_classification_num_parameters_positive() {
+        let cfg = tiny_config();
+        let model = BertForTokenClassification::new(cfg, 4)
+            .expect("BertForTokenClassification::new must succeed");
+        assert!(model.num_parameters() > 0);
+    }
+
+    #[test]
+    fn test_token_classification_get_config() {
+        let cfg = tiny_config();
+        let model = BertForTokenClassification::new(cfg.clone(), 2)
+            .expect("BertForTokenClassification::new must succeed");
+        let c = model.get_config();
+        assert_eq!(c.vocab_size, cfg.vocab_size);
+    }
+
+    // --- BertForMaskedLM ---
+
+    #[test]
+    fn test_masked_lm_new() {
+        let cfg = tiny_config();
+        let model = BertForMaskedLM::new(cfg).expect("BertForMaskedLM::new must succeed");
+        assert_eq!(model.device(), Device::CPU);
+    }
+
+    #[test]
+    fn test_masked_lm_output_last_dim_is_vocab_size() {
+        let cfg = tiny_config();
+        let vocab_size = cfg.vocab_size;
+        let model = BertForMaskedLM::new(cfg).expect("BertForMaskedLM::new must succeed");
+        let output = model.forward(make_input(4)).expect("BertForMaskedLM forward must succeed");
+        let shape = output.logits.shape();
+        assert_eq!(
+            *shape.last().expect("shape must not be empty"),
+            vocab_size,
+            "BertForMaskedLM final logits dim must equal vocab_size"
+        );
+    }
+
+    #[test]
+    fn test_masked_lm_output_seq_len_preserved() {
+        let cfg = tiny_config();
+        let seq_len = 5usize;
+        let model = BertForMaskedLM::new(cfg).expect("BertForMaskedLM::new must succeed");
+        let output = model
+            .forward(make_input(seq_len))
+            .expect("BertForMaskedLM forward must succeed");
+        let shape = output.logits.shape();
+        // shape is [1, seq_len, vocab_size] or [seq_len, vocab_size]
+        // sequence dimension must contain seq_len
+        assert!(
+            shape.contains(&seq_len),
+            "seq_len must appear in BertForMaskedLM logits shape, got {:?}",
+            shape
+        );
+    }
+
+    #[test]
+    fn test_masked_lm_num_parameters_positive() {
+        let cfg = tiny_config();
+        let model = BertForMaskedLM::new(cfg).expect("BertForMaskedLM::new must succeed");
+        assert!(model.num_parameters() > 0);
+    }
+
+    #[test]
+    fn test_masked_lm_hidden_states_present() {
+        let cfg = tiny_config();
+        let model = BertForMaskedLM::new(cfg).expect("BertForMaskedLM::new must succeed");
+        let output = model.forward(make_input(3)).expect("forward must succeed");
+        assert!(
+            output.hidden_states.is_some(),
+            "hidden_states must be returned"
+        );
+    }
+
+    // --- BertForQuestionAnswering ---
+
+    #[test]
+    fn test_qa_new() {
+        let cfg = tiny_config();
+        let model =
+            BertForQuestionAnswering::new(cfg).expect("BertForQuestionAnswering::new must succeed");
+        assert_eq!(model.device(), Device::CPU);
+    }
+
+    #[test]
+    fn test_qa_start_logits_shape() {
+        let cfg = tiny_config();
+        let seq_len = 6usize;
+        let model =
+            BertForQuestionAnswering::new(cfg).expect("BertForQuestionAnswering::new must succeed");
+        let output = model
+            .forward(make_input(seq_len))
+            .expect("BertForQuestionAnswering forward must succeed");
+        // start_logits shape must contain seq_len
+        let shape = output.start_logits.shape();
+        assert!(
+            shape.contains(&seq_len),
+            "start_logits must cover seq_len positions, got shape {:?}",
+            shape
+        );
+    }
+
+    #[test]
+    fn test_qa_end_logits_shape_matches_start() {
+        let cfg = tiny_config();
+        let seq_len = 6usize;
+        let model =
+            BertForQuestionAnswering::new(cfg).expect("BertForQuestionAnswering::new must succeed");
+        let output = model
+            .forward(make_input(seq_len))
+            .expect("BertForQuestionAnswering forward must succeed");
+        assert_eq!(
+            output.start_logits.shape(),
+            output.end_logits.shape(),
+            "start_logits and end_logits must have the same shape"
+        );
+    }
+
+    #[test]
+    fn test_qa_num_parameters_positive() {
+        let cfg = tiny_config();
+        let model =
+            BertForQuestionAnswering::new(cfg).expect("BertForQuestionAnswering::new must succeed");
+        assert!(model.num_parameters() > 0);
+    }
+
+    #[test]
+    fn test_qa_hidden_states_present() {
+        let cfg = tiny_config();
+        let model =
+            BertForQuestionAnswering::new(cfg).expect("BertForQuestionAnswering::new must succeed");
+        let output = model.forward(make_input(4)).expect("forward must succeed");
+        assert!(
+            output.hidden_states.is_some(),
+            "hidden_states must be returned"
+        );
+    }
+
+    #[test]
+    fn test_qa_get_config() {
+        let cfg = tiny_config();
+        let model = BertForQuestionAnswering::new(cfg.clone())
+            .expect("BertForQuestionAnswering::new must succeed");
+        let c = model.get_config();
+        assert_eq!(c.hidden_size, cfg.hidden_size);
+    }
+}

@@ -819,4 +819,313 @@ mod tests {
         assert_eq!(allocator.target_compression, 4.0);
         assert_eq!(allocator.available_bits, vec![4, 6, 8, 16]);
     }
+
+    #[test]
+    fn test_config_default_values() {
+        let config = MixedBitQuantizationConfig::default();
+        assert!((config.target_compression_ratio - 4.0).abs() < f32::EPSILON);
+        assert!((config.max_accuracy_drop - 0.02).abs() < f32::EPSILON);
+        assert_eq!(config.available_bit_widths, vec![4, 6, 8, 16]);
+        assert_eq!(
+            config.allocation_strategy,
+            BitAllocationStrategy::SensitivityBased
+        );
+        assert!(config.gradient_free_optimization);
+        assert!(config.progressive_quantization.is_none());
+        assert!(config.layer_constraints.is_empty());
+        assert!(config.hardware_constraints.is_none());
+    }
+
+    #[test]
+    fn test_config_chaining() {
+        let config = MixedBitQuantizationConfig::default()
+            .with_target_compression(16.0)
+            .with_max_accuracy_drop(0.05)
+            .with_bit_widths(vec![2, 4, 8, 16]);
+        assert!((config.target_compression_ratio - 16.0).abs() < f32::EPSILON);
+        assert!((config.max_accuracy_drop - 0.05).abs() < f32::EPSILON);
+        assert_eq!(config.available_bit_widths, vec![2, 4, 8, 16]);
+    }
+
+    #[test]
+    fn test_bit_allocation_strategy_variants() {
+        let strats = vec![
+            BitAllocationStrategy::SensitivityBased,
+            BitAllocationStrategy::ReinforcementLearning,
+            BitAllocationStrategy::EvolutionaryAlgorithm,
+            BitAllocationStrategy::GreedySearch,
+            BitAllocationStrategy::MixedIntegerProgramming,
+            BitAllocationStrategy::NeuralArchitectureSearch,
+            BitAllocationStrategy::ParetoOptimal,
+        ];
+        for strat in &strats {
+            let _ = format!("{:?}", strat);
+        }
+    }
+
+    #[test]
+    fn test_bit_allocation_strategy_custom() {
+        let mut custom_map = HashMap::new();
+        custom_map.insert("layer1".to_string(), 4u8);
+        custom_map.insert("layer2".to_string(), 8u8);
+        let strat = BitAllocationStrategy::Custom(custom_map.clone());
+        match strat {
+            BitAllocationStrategy::Custom(m) => {
+                assert_eq!(m.len(), 2);
+                assert_eq!(m["layer1"], 4);
+            },
+            _ => panic!("Expected Custom variant"),
+        }
+    }
+
+    #[test]
+    fn test_calibration_config_default() {
+        let config = CalibrationConfig::default();
+        assert_eq!(config.num_samples, 1000);
+        assert!((config.percentile - 99.99).abs() < 0.1);
+        assert!(config.entropy_calibration);
+    }
+
+    #[test]
+    fn test_sensitivity_analysis_method_eq() {
+        assert_eq!(
+            SensitivityAnalysisMethod::HessianBased,
+            SensitivityAnalysisMethod::HessianBased
+        );
+        assert_ne!(
+            SensitivityAnalysisMethod::HessianBased,
+            SensitivityAnalysisMethod::GradientBased
+        );
+    }
+
+    #[test]
+    fn test_quantization_params_creation() {
+        let params = QuantizationParams {
+            scale: 0.01,
+            zero_point: 128,
+            range: (-1.0, 1.0),
+            symmetric: true,
+            per_channel: None,
+        };
+        assert!((params.scale - 0.01).abs() < f32::EPSILON);
+        assert_eq!(params.zero_point, 128);
+        assert!(params.symmetric);
+        assert!(params.per_channel.is_none());
+    }
+
+    #[test]
+    fn test_quantization_params_per_channel() {
+        let channel_params = vec![
+            ChannelQuantizationParams {
+                scale: 0.01,
+                zero_point: 0,
+                range: (-1.0, 1.0),
+            },
+            ChannelQuantizationParams {
+                scale: 0.02,
+                zero_point: 0,
+                range: (-2.0, 2.0),
+            },
+        ];
+        let params = QuantizationParams {
+            scale: 0.015,
+            zero_point: 0,
+            range: (-2.0, 2.0),
+            symmetric: true,
+            per_channel: Some(channel_params),
+        };
+        assert!(params.per_channel.is_some());
+        assert_eq!(
+            params.per_channel.as_ref().expect("channel params").len(),
+            2
+        );
+    }
+
+    #[test]
+    fn test_quantized_layer_info_creation() {
+        let info = QuantizedLayerInfo {
+            layer_name: "encoder.layer.0.attention".to_string(),
+            bit_width: 8,
+            quantization_params: QuantizationParams {
+                scale: 0.01,
+                zero_point: 0,
+                range: (-1.0, 1.0),
+                symmetric: true,
+                per_channel: None,
+            },
+            sensitivity_score: 0.8,
+            compression_ratio: 4.0,
+            accuracy_impact: 0.01,
+        };
+        assert_eq!(info.bit_width, 8);
+        assert!((info.sensitivity_score - 0.8).abs() < f32::EPSILON);
+        assert!((info.compression_ratio - 4.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_quantization_quality_metrics() {
+        let metrics = QuantizationQualityMetrics {
+            snr: 45.0,
+            psnr: 48.0,
+            ssim: 0.95,
+            cosine_similarity: 0.98,
+            l2_error: 0.001,
+            kl_divergence: 0.05,
+            per_layer_scores: HashMap::new(),
+        };
+        assert!(metrics.snr > 0.0);
+        assert!(metrics.ssim >= 0.0 && metrics.ssim <= 1.0);
+        assert!(metrics.cosine_similarity >= 0.0 && metrics.cosine_similarity <= 1.0);
+    }
+
+    #[test]
+    fn test_layer_constraints() {
+        let constraints = LayerQuantizationConstraints {
+            min_bits: Some(4),
+            max_bits: Some(16),
+            fixed_bits: None,
+            priority: 0.9,
+            can_skip: false,
+        };
+        assert_eq!(constraints.min_bits, Some(4));
+        assert_eq!(constraints.max_bits, Some(16));
+        assert!(constraints.fixed_bits.is_none());
+        assert!(!constraints.can_skip);
+    }
+
+    #[test]
+    fn test_layer_constraints_fixed_bits() {
+        let constraints = LayerQuantizationConstraints {
+            min_bits: None,
+            max_bits: None,
+            fixed_bits: Some(8),
+            priority: 1.0,
+            can_skip: false,
+        };
+        assert_eq!(constraints.fixed_bits, Some(8));
+    }
+
+    #[test]
+    fn test_mixed_bit_quantizer_creation() {
+        let config = MixedBitQuantizationConfig::default();
+        let _quantizer = MixedBitQuantizer::new(config);
+    }
+
+    #[test]
+    fn test_quantizer_with_custom_config() {
+        let config = MixedBitQuantizationConfig::default()
+            .with_target_compression(8.0)
+            .with_max_accuracy_drop(0.05)
+            .with_bit_widths(vec![2, 4, 8]);
+        let _quantizer = MixedBitQuantizer::new(config);
+    }
+
+    #[test]
+    fn test_quantization_format_variants() {
+        let formats = vec![
+            QuantizationFormat::SignedInt { bits: 8 },
+            QuantizationFormat::UnsignedInt { bits: 8 },
+            QuantizationFormat::FloatingPoint { bits: 16 },
+            QuantizationFormat::BlockWise {
+                block_size: 32,
+                bits: 4,
+            },
+            QuantizationFormat::Custom {
+                name: "my_format".to_string(),
+                bits: 6,
+            },
+        ];
+        for fmt in &formats {
+            let dbg = format!("{:?}", fmt);
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_progressive_quantization_config() {
+        let config = ProgressiveQuantizationConfig {
+            num_stages: 3,
+            bit_schedule: BitReductionSchedule::Linear,
+            epochs_per_stage: 5,
+            learning_rate_schedule: vec![0.001, 0.0005, 0.0001],
+        };
+        assert_eq!(config.num_stages, 3);
+        assert_eq!(config.epochs_per_stage, 5);
+        assert_eq!(config.learning_rate_schedule.len(), 3);
+    }
+
+    #[test]
+    fn test_bit_reduction_schedule_variants() {
+        let _linear = BitReductionSchedule::Linear;
+        let _exp = BitReductionSchedule::Exponential { decay_rate: 0.9 };
+        let _step = BitReductionSchedule::StepWise {
+            steps: vec![(10, 0.5), (20, 0.25)],
+        };
+        let _custom = BitReductionSchedule::Custom(vec![1.0, 0.8, 0.6, 0.4]);
+    }
+
+    #[test]
+    fn test_sensitivity_analysis_results() {
+        let mut sensitivities = HashMap::new();
+        sensitivities.insert("layer0".to_string(), 0.3f32);
+        sensitivities.insert("layer1".to_string(), 0.8f32);
+        let mut bits = HashMap::new();
+        bits.insert("layer0".to_string(), 4u8);
+        bits.insert("layer1".to_string(), 8u8);
+        let results = SensitivityAnalysisResults {
+            layer_sensitivities: sensitivities,
+            recommended_bits: bits,
+            analysis_method: SensitivityAnalysisMethod::ActivationBased,
+            confidence_scores: HashMap::new(),
+        };
+        assert_eq!(results.layer_sensitivities.len(), 2);
+        assert_eq!(results.recommended_bits["layer0"], 4);
+        assert_eq!(results.recommended_bits["layer1"], 8);
+    }
+
+    #[test]
+    fn test_quantization_timing_info() {
+        let timing = QuantizationTimingInfo {
+            total_time_ms: 1000.0,
+            sensitivity_analysis_ms: 300.0,
+            bit_allocation_ms: 100.0,
+            calibration_ms: 400.0,
+            conversion_ms: 200.0,
+        };
+        let sum = timing.sensitivity_analysis_ms
+            + timing.bit_allocation_ms
+            + timing.calibration_ms
+            + timing.conversion_ms;
+        assert!(sum <= timing.total_time_ms);
+    }
+
+    #[test]
+    fn test_channel_quantization_params() {
+        let params = ChannelQuantizationParams {
+            scale: 0.05,
+            zero_point: 10,
+            range: (-5.0, 5.0),
+        };
+        assert!((params.scale - 0.05).abs() < f32::EPSILON);
+        assert_eq!(params.zero_point, 10);
+        assert!((params.range.0 - (-5.0)).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_outlier_rejection_strategy_variants() {
+        let _none = OutlierRejectionStrategy::None;
+        let _pct = OutlierRejectionStrategy::Percentile { threshold: 99.0 };
+        let _iqr = OutlierRejectionStrategy::IQR { multiplier: 1.5 };
+        let _std = OutlierRejectionStrategy::StandardDeviation { num_stds: 3.0 };
+        let _custom = OutlierRejectionStrategy::Custom;
+    }
+
+    #[test]
+    fn test_calibration_method_variants() {
+        let _minmax = CalibrationMethod::MinMax;
+        let _entropy = CalibrationMethod::Entropy;
+        let _pct = CalibrationMethod::Percentile;
+        let _mse = CalibrationMethod::MSE;
+        let _adaptive = CalibrationMethod::Adaptive;
+    }
 }

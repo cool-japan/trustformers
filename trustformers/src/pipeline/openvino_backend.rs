@@ -182,10 +182,10 @@ impl OpenVINOModel {
         }
     }
 
-    pub fn new_stub() -> Self {
-        // Create a stub model that doesn't create any nested structures
+    /// Create a mock model with a wrapper but no further nesting (no circular reference).
+    pub fn new_with_wrapper() -> Self {
         OpenVINOModel {
-            model: Some(Arc::new(OpenVINOModelWrapper::new_stub())),
+            model: Some(Arc::new(OpenVINOModelWrapper::new_base())),
             config: OpenVINOBackendConfig::default(),
             input_names: vec!["input_ids".to_string()],
             output_names: vec!["logits".to_string()],
@@ -193,10 +193,10 @@ impl OpenVINOModel {
         }
     }
 
-    pub fn new_final_stub() -> Self {
-        // Create a final stub model that doesn't create any wrappers
+    /// Create the simplest possible model without any nested wrappers.
+    pub fn new_empty_model() -> Self {
         OpenVINOModel {
-            model: Some(Arc::new(OpenVINOModelWrapper::new_final_stub())),
+            model: None,
             config: OpenVINOBackendConfig::default(),
             input_names: vec!["input_ids".to_string()],
             output_names: vec!["logits".to_string()],
@@ -251,45 +251,13 @@ impl OpenVINOModel {
 
 impl Default for OpenVINOModel {
     fn default() -> Self {
-        use std::sync::Arc;
-        let config = OpenVINOBackendConfig::default();
-        let input_names = vec!["input_ids".to_string()];
-        let output_names = vec!["logits".to_string()];
-        let runtime = Arc::new(OpenVINORuntime);
-
-        // Create a minimal wrapper without circular reference
-        let wrapper = OpenVINOModelWrapper {
-            model: Some(Arc::new(OpenVINOModel {
-                model: Some(Arc::new(OpenVINOModelWrapper {
-                    model: Some(Arc::new(OpenVINOModel {
-                        model: Some(Arc::new(OpenVINOModelWrapper::default())),
-                        config: config.clone(),
-                        input_names: input_names.clone(),
-                        output_names: output_names.clone(),
-                        runtime: runtime.clone(),
-                    })),
-                    config: config.clone(),
-                    input_names: input_names.clone(),
-                    output_names: output_names.clone(),
-                    runtime: runtime.clone(),
-                })),
-                config: config.clone(),
-                input_names: input_names.clone(),
-                output_names: output_names.clone(),
-                runtime: runtime.clone(),
-            })),
-            config: config.clone(),
-            input_names: input_names.clone(),
-            output_names: output_names.clone(),
-            runtime: runtime.clone(),
-        };
-
+        // Simple default: no nested wrapper to avoid deeply nested structures
         OpenVINOModel {
-            model: Some(Arc::new(wrapper)),
-            config,
-            input_names,
-            output_names,
-            runtime,
+            model: None,
+            config: OpenVINOBackendConfig::default(),
+            input_names: vec!["input_ids".to_string()],
+            output_names: vec!["logits".to_string()],
+            runtime: Arc::new(OpenVINORuntime),
         }
     }
 }
@@ -598,46 +566,14 @@ impl Default for OpenVINOModelWrapper {
 }
 
 impl OpenVINOModelWrapper {
+    /// Create a wrapper with no inner model (simplest form, no nesting).
     pub fn new_empty() -> Self {
-        use std::sync::Arc;
-        let config = OpenVINOBackendConfig::default();
-        let input_names = vec!["input_ids".to_string()];
-        let output_names = vec!["logits".to_string()];
-        let runtime = Arc::new(OpenVINORuntime);
-
-        // Create a minimal model without circular reference
-        let model = OpenVINOModel {
-            model: Some(Arc::new(OpenVINOModelWrapper {
-                model: Some(Arc::new(OpenVINOModel {
-                    model: Some(Arc::new(OpenVINOModelWrapper {
-                        model: Some(Arc::new(OpenVINOModel::new_minimal())),
-                        config: config.clone(),
-                        input_names: input_names.clone(),
-                        output_names: output_names.clone(),
-                        runtime: runtime.clone(),
-                    })),
-                    config: config.clone(),
-                    input_names: input_names.clone(),
-                    output_names: output_names.clone(),
-                    runtime: runtime.clone(),
-                })),
-                config: config.clone(),
-                input_names: input_names.clone(),
-                output_names: output_names.clone(),
-                runtime: runtime.clone(),
-            })),
-            config: config.clone(),
-            input_names: input_names.clone(),
-            output_names: output_names.clone(),
-            runtime: runtime.clone(),
-        };
-
         OpenVINOModelWrapper {
-            model: Some(Arc::new(model)),
-            config,
-            input_names,
-            output_names,
-            runtime,
+            model: None,
+            config: OpenVINOBackendConfig::default(),
+            input_names: vec!["input_ids".to_string()],
+            output_names: vec!["logits".to_string()],
+            runtime: Arc::new(OpenVINORuntime),
         }
     }
 
@@ -658,37 +594,25 @@ impl OpenVINOModelWrapper {
         }
     }
 
-    pub fn new_stub() -> Self {
-        use std::sync::Arc;
-        let config = OpenVINOBackendConfig::default();
-        let input_names = vec!["input_ids".to_string()];
-        let output_names = vec!["logits".to_string()];
-        let runtime = Arc::new(OpenVINORuntime);
-
-        // Create a stub that doesn't create any nested structures
+    /// Create a wrapper that holds an empty model (no further nesting).
+    pub fn new_with_empty_model() -> Self {
         OpenVINOModelWrapper {
-            model: Some(Arc::new(OpenVINOModel::new_final_stub())),
-            config,
-            input_names,
-            output_names,
-            runtime,
+            model: Some(Arc::new(OpenVINOModel::new_empty_model())),
+            config: OpenVINOBackendConfig::default(),
+            input_names: vec!["input_ids".to_string()],
+            output_names: vec!["logits".to_string()],
+            runtime: Arc::new(OpenVINORuntime),
         }
     }
 
-    pub fn new_final_stub() -> Self {
-        use std::sync::Arc;
-        let config = OpenVINOBackendConfig::default();
-        let input_names = vec!["input_ids".to_string()];
-        let output_names = vec!["logits".to_string()];
-        let runtime = Arc::new(OpenVINORuntime);
-
-        // Create the final stub that doesn't create any more nested structures
+    /// Create a wrapper holding only an inner model without further wrapper nesting.
+    pub fn new_terminal() -> Self {
         OpenVINOModelWrapper {
-            model: Some(Arc::new(OpenVINOModel::new_absolute_final())),
-            config,
-            input_names,
-            output_names,
-            runtime,
+            model: Some(Arc::new(OpenVINOModel::new_empty_model())),
+            config: OpenVINOBackendConfig::default(),
+            input_names: vec!["input_ids".to_string()],
+            output_names: vec!["logits".to_string()],
+            runtime: Arc::new(OpenVINORuntime),
         }
     }
 

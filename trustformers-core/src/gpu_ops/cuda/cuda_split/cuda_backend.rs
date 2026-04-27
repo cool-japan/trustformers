@@ -211,7 +211,7 @@ extern "C" __global__ void matmul_kernel(
 
         // Launch kernel using builder pattern
         let cfg = LaunchConfig {
-            grid_dim: ((n as u32 + 15) / 16, (m as u32 + 15) / 16, 1),
+            grid_dim: ((n as u32).div_ceil(16), (m as u32).div_ceil(16), 1),
             block_dim: (16, 16, 1),
             shared_mem_bytes: 0,
         };
@@ -325,7 +325,7 @@ extern "C" __global__ void matmul_kernel(
 
         // Launch kernel
         let cfg = LaunchConfig {
-            grid_dim: ((n as u32 + 15) / 16, (m as u32 + 15) / 16, 1),
+            grid_dim: ((n as u32).div_ceil(16), (m as u32).div_ceil(16), 1),
             block_dim: (16, 16, 1),
             shared_mem_bytes: 0,
         };
@@ -439,7 +439,7 @@ extern "C" __global__ void gelu_kernel(
 
         // Launch kernel
         let cfg = LaunchConfig {
-            grid_dim: ((size as u32 + 255) / 256, 1, 1),
+            grid_dim: ((size as u32).div_ceil(256), 1, 1),
             block_dim: (256, 1, 1),
             shared_mem_bytes: 0,
         };
@@ -538,7 +538,7 @@ extern "C" __global__ void gelu_kernel(
 
         // Launch kernel
         let cfg = LaunchConfig {
-            grid_dim: ((size as u32 + 255) / 256, 1, 1),
+            grid_dim: ((size as u32).div_ceil(256), 1, 1),
             block_dim: (256, 1, 1),
             shared_mem_bytes: 0,
         };
@@ -636,7 +636,7 @@ extern "C" __global__ void add_bias_kernel(
 
         // Launch kernel
         let cfg = LaunchConfig {
-            grid_dim: ((n as u32 + 15) / 16, (m as u32 + 15) / 16, 1),
+            grid_dim: ((n as u32).div_ceil(16), (m as u32).div_ceil(16), 1),
             block_dim: (16, 16, 1),
             shared_mem_bytes: 0,
         };
@@ -795,7 +795,7 @@ extern "C" __global__ void layernorm_kernel(
 
         // Launch kernel
         let cfg = LaunchConfig {
-            grid_dim: ((seq_len as u32 + 63) / 64, 1, 1),
+            grid_dim: ((seq_len as u32).div_ceil(64), 1, 1),
             block_dim: (64, 1, 1),
             shared_mem_bytes: 0,
         };
@@ -922,7 +922,7 @@ extern "C" __global__ void layernorm_kernel(
 
         // Launch kernel
         let cfg = LaunchConfig {
-            grid_dim: ((seq_len as u32 + 63) / 64, 1, 1),
+            grid_dim: ((seq_len as u32).div_ceil(64), 1, 1),
             block_dim: (64, 1, 1),
             shared_mem_bytes: 0,
         };
@@ -1034,7 +1034,7 @@ extern "C" __global__ void matmul_kernel(
 
         // Launch kernel
         let cfg = LaunchConfig {
-            grid_dim: ((n as u32 + 15) / 16, (m as u32 + 15) / 16, 1),
+            grid_dim: ((n as u32).div_ceil(16), (m as u32).div_ceil(16), 1),
             block_dim: (16, 16, 1),
             shared_mem_bytes: 0,
         };
@@ -1182,9 +1182,9 @@ extern "C" __global__ void rope_kernel(
         // Launch kernel with 3D grid
         let cfg = LaunchConfig {
             grid_dim: (
-                ((rotary_ndims / 2) as u32 + 7) / 8,
-                (num_heads as u32 + 3) / 4,
-                (seq_len as u32 + 3) / 4,
+                ((rotary_ndims / 2) as u32).div_ceil(8),
+                (num_heads as u32).div_ceil(4),
+                (seq_len as u32).div_ceil(4),
             ),
             block_dim: (8, 4, 4),
             shared_mem_bytes: 0,
@@ -1328,7 +1328,7 @@ extern "C" __global__ void softmax_causal_kernel(
 
         // Launch kernel (one thread per row)
         let cfg = LaunchConfig {
-            grid_dim: ((seq_len as u32 + 63) / 64, 1, 1),
+            grid_dim: ((seq_len as u32).div_ceil(64), 1, 1),
             block_dim: (64, 1, 1),
             shared_mem_bytes: 0,
         };

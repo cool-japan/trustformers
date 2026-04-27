@@ -256,6 +256,11 @@ impl std::fmt::Display for DataType {
 pub type HardwareResult<T> = Result<T, TrustformersError>;
 
 #[cfg(test)]
+mod backends_tests;
+#[cfg(test)]
+mod devices_tests;
+
+#[cfg(test)]
 mod tests {
     use super::asic::*;
     use super::traits::DeviceStatus as TraitsDeviceStatus;

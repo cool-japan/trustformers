@@ -444,3 +444,225 @@ impl BertModel {
         &self.config
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trustformers_core::traits::{Model, TokenizedInput};
+
+    // --- LCG for reproducible sequences ---
+    fn lcg_next(state: &mut u64) -> u64 {
+        *state = state.wrapping_mul(6364136223846793005u64).wrapping_add(1442695040888963407u64);
+        *state
+    }
+
+    fn lcg_token(state: &mut u64, vocab: u32) -> u32 {
+        (lcg_next(state) >> 33) as u32 % vocab
+    }
+
+    /// Build a tiny BertConfig suitable for fast unit tests.
+    fn tiny_config() -> BertConfig {
+        BertConfig {
+            vocab_size: 256,
+            hidden_size: 32,
+            num_hidden_layers: 1,
+            num_attention_heads: 4,
+            intermediate_size: 128,
+            hidden_act: "gelu".to_string(),
+            hidden_dropout_prob: 0.0,
+            attention_probs_dropout_prob: 0.0,
+            max_position_embeddings: 16,
+            type_vocab_size: 2,
+            initializer_range: 0.02,
+            layer_norm_eps: 1e-12,
+            pad_token_id: 0,
+            position_embedding_type: Some("absolute".to_string()),
+            use_cache: Some(false),
+            classifier_dropout: None,
+        }
+    }
+
+    // --- Construction ---
+
+    #[test]
+    fn test_bert_model_new_cpu() {
+        let cfg = tiny_config();
+        let model = BertModel::new(cfg).expect("BertModel::new must succeed");
+        assert_eq!(model.device(), Device::CPU);
+    }
+
+    #[test]
+    fn test_bert_model_new_with_device_cpu() {
+        let cfg = tiny_config();
+        let model = BertModel::new_with_device(cfg, Device::CPU)
+            .expect("BertModel::new_with_device must succeed");
+        assert_eq!(model.device(), Device::CPU);
+    }
+
+    // --- num_parameters ---
+
+    #[test]
+    fn test_bert_model_num_parameters_positive() {
+        let cfg = tiny_config();
+        let model = BertModel::new(cfg).expect("BertModel::new must succeed");
+        assert!(
+            model.num_parameters() > 0,
+            "num_parameters must be positive"
+        );
+    }
+
+    #[test]
+    fn test_bert_model_larger_config_has_more_params() {
+        let small = tiny_config();
+        let big = BertConfig {
+            vocab_size: 256,
+            hidden_size: 64,
+            num_hidden_layers: 2,
+            num_attention_heads: 8,
+            intermediate_size: 256,
+            ..tiny_config()
+        };
+        let m_small = BertModel::new(small).expect("small model must succeed");
+        let m_big = BertModel::new(big).expect("big model must succeed");
+        assert!(
+            m_big.num_parameters() > m_small.num_parameters(),
+            "Larger config must have more parameters"
+        );
+    }
+
+    // --- forward_with_embeddings ---
+
+    #[test]
+    fn test_bert_forward_last_hidden_state_shape() {
+        let cfg = tiny_config();
+        let model = BertModel::new(cfg.clone()).expect("BertModel::new must succeed");
+        let seq_len = 5usize;
+        let mut state: u64 = 42;
+        let input_ids: Vec<u32> =
+            (0..seq_len).map(|_| lcg_token(&mut state, cfg.vocab_size as u32)).collect();
+        let output = model
+            .forward_with_embeddings(input_ids, None, None)
+            .expect("forward_with_embeddings must succeed");
+        let shape = output.last_hidden_state.shape();
+        // Expected: [batch=1, seq_len, hidden_size]
+        assert_eq!(shape[0], 1, "batch dimension must be 1");
+        assert_eq!(shape[1], seq_len, "second dim must equal seq_len");
+        assert_eq!(
+            shape[2], cfg.hidden_size,
+            "third dim must equal hidden_size"
+        );
+    }
+
+    #[test]
+    fn test_bert_forward_with_attention_mask() {
+        let cfg = tiny_config();
+        let model = BertModel::new(cfg.clone()).expect("BertModel::new must succeed");
+        let seq_len = 4usize;
+        let input_ids: Vec<u32> = (0..seq_len as u32).collect();
+        let attention_mask: Vec<u8> = vec![1, 1, 1, 0];
+        let output = model
+            .forward_with_embeddings(input_ids, Some(attention_mask), None)
+            .expect("forward with attention mask must succeed");
+        let shape = output.last_hidden_state.shape();
+        assert_eq!(shape[1], seq_len);
+        assert_eq!(shape[2], cfg.hidden_size);
+    }
+
+    #[test]
+    fn test_bert_forward_with_token_type_ids() {
+        let cfg = tiny_config();
+        let model = BertModel::new(cfg.clone()).expect("BertModel::new must succeed");
+        let seq_len = 6usize;
+        let input_ids: Vec<u32> = (0..seq_len as u32).collect();
+        let token_type_ids: Vec<u32> = vec![0, 0, 0, 1, 1, 1];
+        let output = model
+            .forward_with_embeddings(input_ids, None, Some(token_type_ids))
+            .expect("forward with token_type_ids must succeed");
+        let shape = output.last_hidden_state.shape();
+        assert_eq!(shape[1], seq_len);
+        assert_eq!(shape[2], cfg.hidden_size);
+    }
+
+    // --- Model trait ---
+
+    #[test]
+    fn test_bert_model_trait_forward() {
+        let cfg = tiny_config();
+        let model = BertModel::new(cfg.clone()).expect("BertModel::new must succeed");
+        let seq_len = 4usize;
+        let input_ids: Vec<u32> = (0..seq_len as u32).collect();
+        let attention_mask: Vec<u8> = vec![1u8; seq_len];
+        let input = TokenizedInput::new(input_ids, attention_mask);
+        let output = model.forward(input).expect("Model::forward must succeed");
+        let shape = output.last_hidden_state.shape();
+        assert_eq!(shape[1], seq_len);
+        assert_eq!(shape[2], cfg.hidden_size);
+    }
+
+    #[test]
+    fn test_bert_model_get_config() {
+        let cfg = tiny_config();
+        let model = BertModel::new(cfg.clone()).expect("BertModel::new must succeed");
+        let returned = model.get_config();
+        assert_eq!(returned.vocab_size, cfg.vocab_size);
+        assert_eq!(returned.hidden_size, cfg.hidden_size);
+    }
+
+    // --- Bidirectional attention property: all tokens attend to each other ---
+    // Note: with zero-initialized weights, LayerNorm may normalize outputs to similar values.
+    // We verify the model produces consistent shapes for different inputs (structural test).
+
+    #[test]
+    fn test_bert_forward_outputs_are_finite() {
+        let cfg = tiny_config();
+        let model = BertModel::new(cfg.clone()).expect("BertModel::new must succeed");
+        let input_ids: Vec<u32> = vec![1, 2, 3, 4];
+        let output = model
+            .forward_with_embeddings(input_ids, None, None)
+            .expect("forward must succeed");
+        if let trustformers_core::tensor::Tensor::F32(arr) = &output.last_hidden_state {
+            for &v in arr.iter() {
+                assert!(v.is_finite(), "BERT output must be finite, got {}", v);
+            }
+        }
+    }
+
+    #[test]
+    fn test_bert_forward_same_input_produces_same_output() {
+        let cfg = tiny_config();
+        let model = BertModel::new(cfg.clone()).expect("BertModel::new must succeed");
+        // The model must be deterministic: same input -> same output
+        let out1 = model
+            .forward_with_embeddings(vec![1, 2, 3, 4], None, None)
+            .expect("first forward must succeed");
+        let out2 = model
+            .forward_with_embeddings(vec![1, 2, 3, 4], None, None)
+            .expect("second forward must succeed");
+        if let (
+            trustformers_core::tensor::Tensor::F32(a),
+            trustformers_core::tensor::Tensor::F32(b),
+        ) = (&out1.last_hidden_state, &out2.last_hidden_state)
+        {
+            let all_equal = a.iter().zip(b.iter()).all(|(x, y)| (x - y).abs() < 1e-6);
+            assert!(
+                all_equal,
+                "BERT model must be deterministic: same input must produce same output"
+            );
+        }
+    }
+
+    // --- Single-token input ---
+
+    #[test]
+    fn test_bert_single_token_forward() {
+        let cfg = tiny_config();
+        let model = BertModel::new(cfg.clone()).expect("BertModel::new must succeed");
+        let input_ids: Vec<u32> = vec![5];
+        let output = model
+            .forward_with_embeddings(input_ids, None, None)
+            .expect("single-token forward must succeed");
+        let shape = output.last_hidden_state.shape();
+        assert_eq!(shape[1], 1, "single token input: seq_len must be 1");
+        assert_eq!(shape[2], cfg.hidden_size);
+    }
+}

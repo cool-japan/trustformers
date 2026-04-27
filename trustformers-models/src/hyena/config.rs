@@ -83,7 +83,7 @@ impl Config for HyenaConfig {
             ));
         }
 
-        if self.conv_kernel_size % 2 == 0 {
+        if self.conv_kernel_size.is_multiple_of(2) {
             return Err(invalid_config(
                 "config_field",
                 "conv_kernel_size should be odd for symmetric padding".to_string(),

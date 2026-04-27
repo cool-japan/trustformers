@@ -62,7 +62,7 @@ impl Default for FalconConfig {
 
 impl Config for FalconConfig {
     fn validate(&self) -> trustformers_core::errors::Result<()> {
-        if self.hidden_size % self.num_attention_heads != 0 {
+        if !self.hidden_size.is_multiple_of(self.num_attention_heads) {
             return Err(trustformers_core::errors::TrustformersError::config_error(
                 "hidden_size must be divisible by num_attention_heads",
                 "FalconConfig::validate",
@@ -70,7 +70,7 @@ impl Config for FalconConfig {
         }
 
         if let Some(num_kv_heads) = self.num_kv_heads {
-            if self.num_attention_heads % num_kv_heads != 0 {
+            if !self.num_attention_heads.is_multiple_of(num_kv_heads) {
                 return Err(trustformers_core::errors::TrustformersError::config_error(
                     "num_attention_heads must be divisible by num_kv_heads",
                     "FalconConfig::validate",
@@ -338,5 +338,187 @@ mod tests {
             "Expected ~40B params, got {}",
             params_40b
         );
+    }
+
+    // ---- Default config ----
+
+    #[test]
+    fn test_default_config_hidden_size() {
+        let config = FalconConfig::default();
+        // Default mirrors 7B: hidden_size=4544
+        assert_eq!(config.hidden_size, 4544);
+    }
+
+    #[test]
+    fn test_default_config_num_attention_heads() {
+        let config = FalconConfig::default();
+        assert_eq!(config.num_attention_heads, 71);
+    }
+
+    #[test]
+    fn test_default_config_num_hidden_layers() {
+        let config = FalconConfig::default();
+        assert_eq!(config.num_hidden_layers, 32);
+    }
+
+    #[test]
+    fn test_default_config_parallel_attn_true() {
+        let config = FalconConfig::default();
+        assert!(
+            config.parallel_attn,
+            "Default config must have parallel_attn=true"
+        );
+    }
+
+    #[test]
+    fn test_default_config_multi_query_true() {
+        let config = FalconConfig::default();
+        assert!(
+            config.multi_query,
+            "Default config must have multi_query=true"
+        );
+    }
+
+    // ---- ALiBi vs rotary PE selection ----
+
+    #[test]
+    fn test_falcon_7b_uses_alibi_not_rotary() {
+        let config = FalconConfig::falcon_7b();
+        assert!(config.alibi, "Falcon-7B must use ALiBi positional encoding");
+    }
+
+    #[test]
+    fn test_falcon_180b_no_alibi() {
+        let config = FalconConfig::falcon_180b();
+        assert!(!config.alibi, "Falcon-180B must not use ALiBi");
+    }
+
+    // ---- new_decoder_architecture for 40B+ ----
+
+    #[test]
+    fn test_falcon_40b_old_decoder_architecture() {
+        // Falcon-40B still uses old architecture
+        let config = FalconConfig::falcon_40b();
+        assert!(!config.new_decoder_architecture);
+    }
+
+    #[test]
+    fn test_falcon_180b_new_decoder_architecture() {
+        let config = FalconConfig::falcon_180b();
+        assert!(config.new_decoder_architecture);
+    }
+
+    // ---- Instruct/chat model detection ----
+
+    #[test]
+    fn test_falcon_7b_instruct_is_instruct() {
+        let config = FalconConfig::falcon_7b_instruct();
+        assert!(config.is_instruct_model());
+    }
+
+    #[test]
+    fn test_falcon_40b_instruct_is_instruct() {
+        let config = FalconConfig::falcon_40b_instruct();
+        assert!(config.is_instruct_model());
+    }
+
+    #[test]
+    fn test_falcon_7b_base_not_instruct() {
+        let config = FalconConfig::falcon_7b();
+        assert!(!config.is_instruct_model());
+    }
+
+    // ---- Validation checks ----
+
+    #[test]
+    fn test_validation_fails_zero_vocab_size() {
+        let config = FalconConfig {
+            vocab_size: 0,
+            ..FalconConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validation_fails_kv_heads_not_divisor() {
+        let config = FalconConfig {
+            num_attention_heads: 8,
+            num_kv_heads: Some(3), // 8 % 3 != 0
+            hidden_size: 8 * 64,   // ensure head_dim divisibility
+            ..FalconConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_all_preset_configs_validate() {
+        for config in [
+            FalconConfig::falcon_7b(),
+            FalconConfig::falcon_40b(),
+            FalconConfig::falcon_180b(),
+        ] {
+            assert!(
+                config.validate().is_ok(),
+                "Config {:?} failed validation",
+                config.model_type
+            );
+        }
+    }
+
+    // ---- from_pretrained short names ----
+
+    #[test]
+    fn test_from_pretrained_short_name_7b() {
+        let config = FalconConfig::from_pretrained_name("falcon-7b");
+        assert!(config.is_some());
+        assert_eq!(config.expect("falcon-7b config").num_kv_heads(), 1);
+    }
+
+    #[test]
+    fn test_from_pretrained_short_name_40b() {
+        let config = FalconConfig::from_pretrained_name("falcon-40b");
+        assert!(config.is_some());
+    }
+
+    #[test]
+    fn test_from_pretrained_unknown_returns_none() {
+        let config = FalconConfig::from_pretrained_name("completely-unknown");
+        assert!(config.is_none());
+    }
+
+    // ---- num_query_groups relationship ----
+
+    #[test]
+    fn test_num_query_groups_7b() {
+        let config = FalconConfig::falcon_7b();
+        // 71 query heads / 1 kv head = 71 groups
+        assert_eq!(config.num_query_groups(), 71);
+    }
+
+    #[test]
+    fn test_num_query_groups_180b() {
+        let config = FalconConfig::falcon_180b();
+        // 232 / 8 = 29 groups
+        assert_eq!(config.num_query_groups(), 29);
+    }
+
+    // ---- Serialization round-trip ----
+
+    #[test]
+    fn test_config_serialization_roundtrip() {
+        let config = FalconConfig::falcon_7b();
+        let json = serde_json::to_string(&config).expect("serialize FalconConfig");
+        let restored: FalconConfig = serde_json::from_str(&json).expect("deserialize FalconConfig");
+        assert_eq!(config.hidden_size, restored.hidden_size);
+        assert_eq!(config.num_attention_heads, restored.num_attention_heads);
+        assert_eq!(config.alibi, restored.alibi);
+    }
+
+    #[test]
+    fn test_config_clone_equality() {
+        let config = FalconConfig::falcon_40b();
+        let cloned = config.clone();
+        assert_eq!(config.hidden_size, cloned.hidden_size);
+        assert_eq!(config.num_kv_heads, cloned.num_kv_heads);
     }
 }

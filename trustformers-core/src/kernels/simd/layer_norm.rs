@@ -42,8 +42,9 @@ impl SIMDLayerNorm {
         bias: Option<&Tensor>,
     ) -> Result<Tensor> {
         let simd_width = self.cpu_features.best_simd_width();
-        let can_use_simd =
-            simd_width > 1 && self.hidden_size % simd_width == 0 && self.hidden_size >= 256;
+        let can_use_simd = simd_width > 1
+            && self.hidden_size.is_multiple_of(simd_width)
+            && self.hidden_size >= 256;
 
         if can_use_simd {
             match self.cpu_features.best_instruction_set() {
@@ -94,7 +95,7 @@ impl SIMDLayerNorm {
                 }
 
                 // Horizontal sum of SIMD register
-                let sum_array = std::mem::transmute::<_, [f32; 8]>(sum);
+                let sum_array = std::mem::transmute::<std::arch::x86_64::__m256, [f32; 8]>(sum);
                 let mean = (sum_array.iter().sum::<f32>() + scalar_sum) / hidden_size as f32;
 
                 // Compute variance using SIMD
@@ -118,7 +119,7 @@ impl SIMDLayerNorm {
                 }
 
                 // Horizontal sum and compute standard deviation
-                let var_array = std::mem::transmute::<_, [f32; 8]>(var_sum);
+                let var_array = std::mem::transmute::<std::arch::x86_64::__m256, [f32; 8]>(var_sum);
                 let variance =
                     (var_array.iter().sum::<f32>() + scalar_var_sum) / hidden_size as f32;
                 let std_dev = (variance + self.eps).sqrt();
@@ -684,5 +685,227 @@ impl SIMDLayerNorm {
         }
 
         Ok(Tensor::from_vec(output_data, &input_shape)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tensor::Tensor;
+
+    // LCG helper
+    fn lcg_next(s: &mut u64) -> f32 {
+        *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (*s % 1000) as f32 / 1000.0
+    }
+
+    fn ones_tensor(n: usize) -> Tensor {
+        Tensor::from_vec(vec![1.0f32; n], &[n]).unwrap_or_else(|_| panic!("tensor failed"))
+    }
+
+    // ── 1. SIMDLayerNorm constructs without panicking ─────────────────────────
+
+    #[test]
+    fn test_construction() {
+        let _ = SIMDLayerNorm::new(64, 1e-5);
+    }
+
+    // ── 2. forward on constant input with ones weight/zero bias → near-zero ──
+
+    #[test]
+    fn test_constant_input_near_zero_output() {
+        let hidden = 4;
+        let norm = SIMDLayerNorm::new(hidden, 1e-5);
+        let input = Tensor::from_vec(vec![3.0f32; hidden], &[hidden])
+            .unwrap_or_else(|_| panic!("tensor failed"));
+        let weight = ones_tensor(hidden);
+        let output =
+            norm.forward(&input, &weight, None).unwrap_or_else(|_| panic!("forward failed"));
+        let data = output.data().unwrap_or_else(|_| panic!("data failed"));
+        // All inputs equal → mean = input, variance = 0 → normalized = 0
+        for &v in data.iter() {
+            assert!(
+                v.abs() < 1e-4,
+                "constant input must produce ~0 output, got {v}"
+            );
+        }
+    }
+
+    // ── 3. output shape matches input shape ───────────────────────────────────
+
+    #[test]
+    fn test_output_shape_matches_input() {
+        let hidden = 8;
+        let norm = SIMDLayerNorm::new(hidden, 1e-5);
+        let input = ones_tensor(hidden);
+        let weight = ones_tensor(hidden);
+        let output =
+            norm.forward(&input, &weight, None).unwrap_or_else(|_| panic!("forward failed"));
+        assert_eq!(output.shape(), &[hidden], "output shape must match input");
+    }
+
+    // ── 4. output is finite for LCG inputs ───────────────────────────────────
+
+    #[test]
+    fn test_output_is_finite_lcg() {
+        let hidden = 8;
+        let norm = SIMDLayerNorm::new(hidden, 1e-5);
+        let mut s = 42u64;
+        let data: Vec<f32> = (0..hidden).map(|_| lcg_next(&mut s) * 4.0 - 2.0).collect();
+        let input = Tensor::from_vec(data, &[hidden]).unwrap_or_else(|_| panic!("tensor failed"));
+        let weight = ones_tensor(hidden);
+        let output =
+            norm.forward(&input, &weight, None).unwrap_or_else(|_| panic!("forward failed"));
+        let out_data = output.data().unwrap_or_else(|_| panic!("data failed"));
+        for &v in out_data.iter() {
+            assert!(v.is_finite(), "output {v} must be finite");
+        }
+    }
+
+    // ── 5. normalized output has near-zero mean ───────────────────────────────
+
+    #[test]
+    fn test_normalized_near_zero_mean() {
+        let hidden = 8;
+        let norm = SIMDLayerNorm::new(hidden, 1e-5);
+        let mut s = 123u64;
+        let data: Vec<f32> = (0..hidden).map(|_| lcg_next(&mut s) * 6.0 - 3.0).collect();
+        let input = Tensor::from_vec(data, &[hidden]).unwrap_or_else(|_| panic!("tensor failed"));
+        let weight = ones_tensor(hidden);
+        let output =
+            norm.forward(&input, &weight, None).unwrap_or_else(|_| panic!("forward failed"));
+        let out_data = output.data().unwrap_or_else(|_| panic!("data failed"));
+        let mean: f32 = out_data.iter().sum::<f32>() / hidden as f32;
+        assert!(
+            mean.abs() < 1e-4,
+            "normalized mean must be near zero, got {mean}"
+        );
+    }
+
+    // ── 6. normalized output has near-unit variance ───────────────────────────
+
+    #[test]
+    fn test_normalized_near_unit_variance() {
+        let hidden = 8;
+        let norm = SIMDLayerNorm::new(hidden, 1e-5);
+        let mut s = 777u64;
+        let data: Vec<f32> = (0..hidden).map(|_| lcg_next(&mut s) * 4.0 - 2.0).collect();
+        let input = Tensor::from_vec(data, &[hidden]).unwrap_or_else(|_| panic!("tensor failed"));
+        let weight = ones_tensor(hidden);
+        let output =
+            norm.forward(&input, &weight, None).unwrap_or_else(|_| panic!("forward failed"));
+        let out_data = output.data().unwrap_or_else(|_| panic!("data failed"));
+        let mean: f32 = out_data.iter().sum::<f32>() / hidden as f32;
+        let var: f32 = out_data.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / hidden as f32;
+        assert!(
+            (var - 1.0).abs() < 0.1,
+            "normalized variance must be near 1.0, got {var}"
+        );
+    }
+
+    // ── 7. bias is added correctly ────────────────────────────────────────────
+
+    #[test]
+    fn test_bias_is_added() {
+        let hidden = 4;
+        let norm = SIMDLayerNorm::new(hidden, 1e-5);
+        let mut s = 42u64;
+        let data: Vec<f32> = (0..hidden).map(|_| lcg_next(&mut s) * 2.0).collect();
+        let input = Tensor::from_vec(data, &[hidden]).unwrap_or_else(|_| panic!("tensor failed"));
+        let weight = ones_tensor(hidden);
+        let bias = Tensor::from_vec(vec![1.0f32; hidden], &[hidden])
+            .unwrap_or_else(|_| panic!("bias tensor failed"));
+
+        let out_no_bias = norm
+            .forward(&input, &weight, None)
+            .unwrap_or_else(|_| panic!("no-bias forward failed"));
+        let out_with_bias = norm
+            .forward(&input, &weight, Some(&bias))
+            .unwrap_or_else(|_| panic!("with-bias forward failed"));
+
+        let d_no = out_no_bias.data().unwrap_or_else(|_| panic!("data failed"));
+        let d_with = out_with_bias.data().unwrap_or_else(|_| panic!("data failed"));
+
+        // Each element in with-bias should be no-bias + 1.0
+        for (&nb, &wb) in d_no.iter().zip(d_with.iter()) {
+            assert!(
+                (wb - nb - 1.0).abs() < 1e-5,
+                "bias mismatch: {wb} vs {nb}+1.0"
+            );
+        }
+    }
+
+    // ── 8. weight scaling is applied ─────────────────────────────────────────
+
+    #[test]
+    fn test_weight_scaling_applied() {
+        let hidden = 4;
+        let norm = SIMDLayerNorm::new(hidden, 1e-5);
+        let mut s = 55u64;
+        let data: Vec<f32> = (0..hidden).map(|_| lcg_next(&mut s) * 2.0).collect();
+        let input = Tensor::from_vec(data, &[hidden]).unwrap_or_else(|_| panic!("tensor failed"));
+
+        let weight1 = ones_tensor(hidden);
+        let weight2 = Tensor::from_vec(vec![2.0f32; hidden], &[hidden])
+            .unwrap_or_else(|_| panic!("weight tensor failed"));
+
+        let out1 = norm
+            .forward(&input, &weight1, None)
+            .unwrap_or_else(|_| panic!("forward 1 failed"));
+        let out2 = norm
+            .forward(&input, &weight2, None)
+            .unwrap_or_else(|_| panic!("forward 2 failed"));
+
+        let d1 = out1.data().unwrap_or_else(|_| panic!("data failed"));
+        let d2 = out2.data().unwrap_or_else(|_| panic!("data failed"));
+
+        for (&v1, &v2) in d1.iter().zip(d2.iter()) {
+            assert!(
+                (v2 - 2.0 * v1).abs() < 1e-5,
+                "weight=2 must double output: {v2} vs 2*{v1}"
+            );
+        }
+    }
+
+    // ── 9. deterministic output ───────────────────────────────────────────────
+
+    #[test]
+    fn test_deterministic() {
+        let hidden = 4;
+        let norm = SIMDLayerNorm::new(hidden, 1e-5);
+        let data = vec![1.0f32, 2.0, 3.0, 4.0];
+        let input = Tensor::from_vec(data, &[hidden]).unwrap_or_else(|_| panic!("tensor failed"));
+        let weight = ones_tensor(hidden);
+        let r1 = norm.forward(&input, &weight, None).unwrap_or_else(|_| panic!("forward failed"));
+        let r2 = norm.forward(&input, &weight, None).unwrap_or_else(|_| panic!("forward failed"));
+        let d1 = r1.data().unwrap_or_else(|_| panic!("data failed"));
+        let d2 = r2.data().unwrap_or_else(|_| panic!("data failed"));
+        assert_eq!(d1, d2, "layer norm must be deterministic");
+    }
+
+    // ── 10. different eps values give different results ────────────────────────
+
+    #[test]
+    fn test_different_eps_values() {
+        let hidden = 4;
+        let norm1 = SIMDLayerNorm::new(hidden, 1e-5);
+        let norm2 = SIMDLayerNorm::new(hidden, 1.0); // large eps
+        let data = vec![1.0f32, 1.0, 1.0, 2.0]; // near-constant → variance ≈ 0
+        let input = Tensor::from_vec(data, &[hidden]).unwrap_or_else(|_| panic!("tensor failed"));
+        let weight = ones_tensor(hidden);
+        let r1 = norm1
+            .forward(&input, &weight, None)
+            .unwrap_or_else(|_| panic!("forward1 failed"));
+        let r2 = norm2
+            .forward(&input, &weight, None)
+            .unwrap_or_else(|_| panic!("forward2 failed"));
+        let d1 = r1.data().unwrap_or_else(|_| panic!("data1 failed"));
+        let d2 = r2.data().unwrap_or_else(|_| panic!("data2 failed"));
+        // With large eps the magnitude is smaller; at least one pair should differ
+        let max_diff = d1.iter().zip(d2.iter()).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(
+            max_diff > 1e-6,
+            "different eps must produce different outputs"
+        );
     }
 }

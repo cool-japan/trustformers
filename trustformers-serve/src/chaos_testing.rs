@@ -1130,4 +1130,447 @@ mod tests {
             tags: HashMap::new(),
         }
     }
+
+    fn make_experiment(
+        name: &str,
+        exp_type: ChaosExperimentType,
+        intensity: f64,
+    ) -> ChaosExperiment {
+        ChaosExperiment {
+            id: Uuid::new_v4(),
+            name: name.to_string(),
+            description: format!("Test: {}", name),
+            experiment_type: exp_type,
+            config: ExperimentConfig {
+                duration_seconds: 60,
+                intensity,
+                scope: ExperimentScope::SingleInstance,
+                parameters: HashMap::new(),
+                pre_conditions: vec![],
+                success_criteria: vec![],
+            },
+            safety_config: SafetyConfig {
+                max_duration_seconds: 300,
+                rollback_timeout_seconds: 30,
+                health_check_interval_seconds: 5,
+                failure_threshold: 0.1,
+                enable_automatic_rollback: true,
+                safety_checks: vec![],
+                emergency_contacts: vec![],
+            },
+            status: ExperimentStatus::Created,
+            created_at: Utc::now(),
+            started_at: None,
+            ended_at: None,
+            results: None,
+            tags: HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_multiple_experiments() {
+        let framework = ChaosTestingFramework::new();
+        for i in 0..5 {
+            let exp = make_experiment(
+                &format!("exp_{}", i),
+                ChaosExperimentType::CpuExhaustion,
+                0.3,
+            );
+            framework.create_experiment(exp).await.expect("create ok");
+        }
+        let list = framework.list_experiments().await;
+        assert_eq!(list.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_get_nonexistent_experiment() {
+        let framework = ChaosTestingFramework::new();
+        // get_experiment with a random UUID should fail or return empty
+        let random_id = Uuid::new_v4();
+        let experiments = framework.list_experiments().await;
+        let found = experiments.iter().any(|e| e.id == random_id);
+        assert!(!found);
+    }
+
+    #[tokio::test]
+    async fn test_zero_intensity() {
+        let framework = ChaosTestingFramework::new();
+        let exp = make_experiment("zero", ChaosExperimentType::MemoryExhaustion, 0.0);
+        let result = framework.create_experiment(exp).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_max_intensity() {
+        let framework = ChaosTestingFramework::new();
+        let exp = make_experiment("max", ChaosExperimentType::DiskFailure, 1.0);
+        let result = framework.create_experiment(exp).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_negative_intensity_rejected() {
+        let framework = ChaosTestingFramework::new();
+        let exp = make_experiment("neg", ChaosExperimentType::ServiceKill, -0.1);
+        let result = framework.create_experiment(exp).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_over_intensity_rejected() {
+        let framework = ChaosTestingFramework::new();
+        let exp = make_experiment("over", ChaosExperimentType::ServiceCrash, 1.1);
+        let result = framework.create_experiment(exp).await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_experiment_type_debug() {
+        let types = vec![
+            ChaosExperimentType::NetworkLatency,
+            ChaosExperimentType::NetworkPacketLoss,
+            ChaosExperimentType::NetworkPartition,
+            ChaosExperimentType::CpuExhaustion,
+            ChaosExperimentType::MemoryExhaustion,
+            ChaosExperimentType::ServiceKill,
+            ChaosExperimentType::DatabaseFailure,
+            ChaosExperimentType::ModelLoadFailure,
+            ChaosExperimentType::Custom("test".to_string()),
+        ];
+        for t in types {
+            assert!(!format!("{:?}", t).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_experiment_scope_debug() {
+        let scopes = vec![
+            ExperimentScope::SingleInstance,
+            ExperimentScope::MultipleInstances(3),
+            ExperimentScope::Percentage(50.0),
+            ExperimentScope::AllInstances,
+            ExperimentScope::SpecificTargets(vec!["a".to_string()]),
+        ];
+        for s in scopes {
+            assert!(!format!("{:?}", s).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_experiment_status_debug() {
+        let statuses = vec![
+            ExperimentStatus::Created,
+            ExperimentStatus::Validating,
+            ExperimentStatus::Running,
+            ExperimentStatus::Completed,
+            ExperimentStatus::Failed,
+            ExperimentStatus::Aborted,
+            ExperimentStatus::RollingBack,
+            ExperimentStatus::RolledBack,
+        ];
+        assert_eq!(statuses.len(), 8);
+    }
+
+    #[test]
+    fn test_severity_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(Severity::Low);
+        set.insert(Severity::Medium);
+        set.insert(Severity::High);
+        set.insert(Severity::Critical);
+        assert_eq!(set.len(), 4);
+    }
+
+    #[test]
+    fn test_business_impact_debug() {
+        let impacts = vec![
+            BusinessImpact::None,
+            BusinessImpact::Low,
+            BusinessImpact::Medium,
+            BusinessImpact::High,
+            BusinessImpact::Critical,
+        ];
+        for i in impacts {
+            assert!(!format!("{:?}", i).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_observation_category_debug() {
+        let cats = vec![
+            ObservationCategory::Performance,
+            ObservationCategory::Availability,
+            ObservationCategory::ErrorRate,
+            ObservationCategory::Recovery,
+            ObservationCategory::UserExperience,
+            ObservationCategory::SystemBehavior,
+        ];
+        for c in cats {
+            assert!(!format!("{:?}", c).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_event_type_debug() {
+        let events = vec![
+            EventType::ExperimentStarted,
+            EventType::FailureInjected,
+            EventType::SystemResponse,
+            EventType::MetricChanged,
+            EventType::SafetyTriggered,
+            EventType::RecoveryStarted,
+            EventType::ExperimentEnded,
+            EventType::Error,
+        ];
+        assert_eq!(events.len(), 8);
+    }
+
+    #[test]
+    fn test_condition_type_debug() {
+        let types = vec![
+            ConditionType::HealthCheck,
+            ConditionType::MetricThreshold,
+            ConditionType::ServiceAvailability,
+            ConditionType::ResourceUtilization,
+            ConditionType::ErrorRate,
+        ];
+        for t in types {
+            assert!(!format!("{:?}", t).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_comparison_operator_debug() {
+        let ops = vec![
+            ComparisonOperator::LessThan,
+            ComparisonOperator::LessThanOrEqual,
+            ComparisonOperator::GreaterThan,
+            ComparisonOperator::GreaterThanOrEqual,
+            ComparisonOperator::Equal,
+            ComparisonOperator::NotEqual,
+        ];
+        assert_eq!(ops.len(), 6);
+    }
+
+    #[test]
+    fn test_safety_check_type_debug() {
+        let types = vec![
+            SafetyCheckType::ErrorRate,
+            SafetyCheckType::ResponseTime,
+            SafetyCheckType::Availability,
+            SafetyCheckType::ResourceUsage,
+            SafetyCheckType::ServiceHealth,
+        ];
+        for t in types {
+            assert!(!format!("{:?}", t).is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_experiment_with_tags() {
+        let framework = ChaosTestingFramework::new();
+        let mut exp = create_test_experiment();
+        exp.tags.insert("team".to_string(), "platform".to_string());
+        exp.tags.insert("priority".to_string(), "high".to_string());
+        let id = framework.create_experiment(exp).await.expect("create ok");
+        let retrieved = framework.get_experiment(id).await.expect("get ok");
+        assert_eq!(retrieved.tags.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_experiment_with_preconditions() {
+        let framework = ChaosTestingFramework::new();
+        let mut exp = create_test_experiment();
+        exp.config.pre_conditions.push(PreCondition {
+            name: "health_ok".to_string(),
+            condition_type: ConditionType::HealthCheck,
+            value: serde_json::json!(true),
+            required: true,
+        });
+        let result = framework.create_experiment(exp).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_experiment_with_success_criteria() {
+        let framework = ChaosTestingFramework::new();
+        let mut exp = create_test_experiment();
+        exp.config.success_criteria.push(SuccessCriterion {
+            name: "error_rate".to_string(),
+            metric: "error_rate".to_string(),
+            threshold: 0.05,
+            comparison: ComparisonOperator::LessThan,
+            measurement_window_seconds: 60,
+        });
+        let result = framework.create_experiment(exp).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_experiment_with_safety_checks() {
+        let framework = ChaosTestingFramework::new();
+        let mut exp = create_test_experiment();
+        exp.safety_config.safety_checks.push(SafetyCheck {
+            name: "error_rate_check".to_string(),
+            check_type: SafetyCheckType::ErrorRate,
+            threshold: 0.1,
+            enabled: true,
+        });
+        let result = framework.create_experiment(exp).await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_framework_default() {
+        let framework = ChaosTestingFramework::default();
+        // default() should be equivalent to new()
+        let debug_str = format!("{:?}", framework.experiments);
+        assert!(!debug_str.is_empty());
+    }
+
+    #[test]
+    fn test_framework_clone() {
+        let framework = ChaosTestingFramework::new();
+        let cloned = framework.clone();
+        // Cloned framework should share same Arc pointers
+        assert!(Arc::ptr_eq(&framework.experiments, &cloned.experiments));
+    }
+
+    #[test]
+    fn test_experiment_serialization() {
+        let exp = create_test_experiment();
+        let json = serde_json::to_string(&exp);
+        assert!(json.is_ok());
+    }
+
+    #[test]
+    fn test_experiment_deserialization() {
+        let exp = create_test_experiment();
+        let json = serde_json::to_string(&exp).expect("serialize ok");
+        let deser: std::result::Result<ChaosExperiment, _> = serde_json::from_str(&json);
+        assert!(deser.is_ok());
+    }
+
+    #[test]
+    fn test_experiment_config_serialization() {
+        let config = ExperimentConfig {
+            duration_seconds: 120,
+            intensity: 0.75,
+            scope: ExperimentScope::AllInstances,
+            parameters: HashMap::new(),
+            pre_conditions: vec![],
+            success_criteria: vec![],
+        };
+        let json = serde_json::to_string(&config);
+        assert!(json.is_ok());
+    }
+
+    #[test]
+    fn test_safety_config_serialization() {
+        let config = SafetyConfig {
+            max_duration_seconds: 600,
+            rollback_timeout_seconds: 60,
+            health_check_interval_seconds: 10,
+            failure_threshold: 0.2,
+            enable_automatic_rollback: true,
+            safety_checks: vec![],
+            emergency_contacts: vec!["admin@example.com".to_string()],
+        };
+        let json = serde_json::to_string(&config);
+        assert!(json.is_ok());
+    }
+
+    #[test]
+    fn test_impact_analysis_serialization() {
+        let impact = ImpactAnalysis {
+            overall_impact: Severity::High,
+            affected_services: vec!["svc-a".to_string()],
+            recovery_time_seconds: 120,
+            error_increase_percentage: 5.5,
+            latency_increase_percentage: 15.0,
+            availability_reduction_percentage: 2.0,
+            user_impact_estimate: UserImpactEstimate {
+                affected_users: 1000,
+                affected_requests: 5000,
+                business_impact: BusinessImpact::Medium,
+            },
+        };
+        let json = serde_json::to_string(&impact);
+        assert!(json.is_ok());
+    }
+
+    #[test]
+    fn test_experiment_results_serialization() {
+        let results = ExperimentResults {
+            success: true,
+            metrics: HashMap::from([("error_rate".to_string(), 0.02)]),
+            timeline: vec![],
+            observations: vec![],
+            impact_analysis: ImpactAnalysis {
+                overall_impact: Severity::Low,
+                affected_services: vec![],
+                recovery_time_seconds: 0,
+                error_increase_percentage: 0.0,
+                latency_increase_percentage: 0.0,
+                availability_reduction_percentage: 0.0,
+                user_impact_estimate: UserImpactEstimate {
+                    affected_users: 0,
+                    affected_requests: 0,
+                    business_impact: BusinessImpact::None,
+                },
+            },
+            recommendations: vec!["Consider increasing replicas".to_string()],
+            raw_data: serde_json::json!({}),
+        };
+        let json = serde_json::to_string(&results);
+        assert!(json.is_ok());
+    }
+
+    #[test]
+    fn test_timeline_event_serialization() {
+        let event = TimelineEvent {
+            timestamp: Utc::now(),
+            event_type: EventType::ExperimentStarted,
+            description: "Experiment started".to_string(),
+            data: Some(serde_json::json!({"key": "value"})),
+        };
+        let json = serde_json::to_string(&event);
+        assert!(json.is_ok());
+    }
+
+    #[test]
+    fn test_observation_serialization() {
+        let obs = Observation {
+            timestamp: Utc::now(),
+            category: ObservationCategory::Performance,
+            severity: Severity::Medium,
+            description: "Latency increased".to_string(),
+            metrics: HashMap::from([("p99_latency".to_string(), 250.0)]),
+            affected_components: vec!["api-gateway".to_string()],
+        };
+        let json = serde_json::to_string(&obs);
+        assert!(json.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_list_experiments_after_multiple_creates() {
+        let framework = ChaosTestingFramework::new();
+
+        let exp_types = vec![
+            ChaosExperimentType::NetworkLatency,
+            ChaosExperimentType::CpuExhaustion,
+            ChaosExperimentType::ServiceHang,
+            ChaosExperimentType::InferenceTimeout,
+            ChaosExperimentType::ExternalApiFailure,
+        ];
+
+        for (i, et) in exp_types.into_iter().enumerate() {
+            let exp = make_experiment(&format!("test_{}", i), et, 0.5);
+            framework.create_experiment(exp).await.expect("create ok");
+        }
+
+        let list = framework.list_experiments().await;
+        assert_eq!(list.len(), 5);
+    }
 }

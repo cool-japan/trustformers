@@ -22,6 +22,7 @@ mod ggml_advanced;
 mod gguf_k_quants;
 mod learned;
 mod mixed_bit;
+pub mod mx;
 mod qat;
 mod smoothquant;
 
@@ -93,4 +94,10 @@ pub use fp8::{
 // Re-export GGUF K-quant items
 pub use gguf_k_quants::{
     BlockQ2K, BlockQ3K, BlockQ4K, KQuantConfig, KQuantTensor, KQuantType, KQuantizer,
+};
+
+// Re-export MX (Microscaling) quantization items
+pub use mx::{
+    compression_ratio as mx_compression_ratio, compute_mx_error, dequantize_mx, quantize_mx,
+    quantize_mx_with_shape, MxErrorStats, MxFormat, MxQuantConfig, MxQuantized,
 };

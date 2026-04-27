@@ -363,3 +363,274 @@ impl Default for MetricCollection {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scirs2_core::ndarray::{ArrayD, IxDyn};
+    use trustformers_core::Tensor;
+
+    fn make_f32_tensor(data: Vec<f32>, shape: &[usize]) -> Tensor {
+        let arr =
+            ArrayD::from_shape_vec(IxDyn(shape), data).expect("shape mismatch in test helper");
+        Tensor::F32(arr)
+    }
+
+    fn make_i64_tensor(data: Vec<i64>, shape: &[usize]) -> Tensor {
+        let arr =
+            ArrayD::from_shape_vec(IxDyn(shape), data).expect("shape mismatch in test helper");
+        Tensor::I64(arr)
+    }
+
+    // ──────────────────── Accuracy ────────────────────
+
+    #[test]
+    fn test_accuracy_name() {
+        assert_eq!(Accuracy.name(), "accuracy");
+    }
+
+    #[test]
+    fn test_accuracy_higher_is_better() {
+        assert!(Accuracy.higher_is_better());
+    }
+
+    #[test]
+    fn test_accuracy_perfect_logits() {
+        // logits: batch=3, classes=3; argmax selects diagonal
+        let logits = make_f32_tensor(
+            vec![10.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 10.0],
+            &[3, 3],
+        );
+        let targets = make_i64_tensor(vec![0, 1, 2], &[3]);
+        let result = Accuracy.compute(&logits, &targets);
+        assert!(result.is_ok());
+        let acc = result.expect("accuracy compute failed");
+        assert!(
+            (acc - 1.0).abs() < 1e-6,
+            "perfect accuracy expected, got {}",
+            acc
+        );
+    }
+
+    #[test]
+    fn test_accuracy_zero_logits() {
+        // Predictions all wrong
+        let logits = make_f32_tensor(vec![0.0, 10.0, 0.0, 0.0, 10.0, 0.0], &[2, 3]);
+        // argmax = class 1 for both; targets want class 0 and 2
+        let targets = make_i64_tensor(vec![0, 2], &[2]);
+        let result = Accuracy.compute(&logits, &targets);
+        assert!(result.is_ok());
+        let acc = result.expect("accuracy compute failed");
+        assert!(
+            (acc - 0.0).abs() < 1e-6,
+            "zero accuracy expected, got {}",
+            acc
+        );
+    }
+
+    #[test]
+    fn test_accuracy_half_correct_logits() {
+        // Row 0: [10.0, 0.0] → argmax = class 0
+        // Row 1: [10.0, 0.0] → argmax = class 0
+        let logits = make_f32_tensor(vec![10.0, 0.0, 10.0, 0.0], &[2, 2]);
+        // First row correct (target 0), second row wrong (target 1)
+        let targets = make_i64_tensor(vec![0, 1], &[2]);
+        let result = Accuracy.compute(&logits, &targets);
+        assert!(result.is_ok());
+        let acc = result.expect("accuracy compute failed");
+        assert!(
+            (acc - 0.5).abs() < 1e-6,
+            "50% accuracy expected, got {}",
+            acc
+        );
+    }
+
+    #[test]
+    fn test_accuracy_with_i64_predictions() {
+        let pred_classes = make_i64_tensor(vec![0, 1, 2, 1], &[4]);
+        let targets = make_i64_tensor(vec![0, 1, 2, 0], &[4]);
+        let result = Accuracy.compute(&pred_classes, &targets);
+        assert!(result.is_ok());
+        let acc = result.expect("accuracy compute failed");
+        // 3 out of 4 correct
+        assert!((acc - 0.75).abs() < 1e-6, "75% expected, got {}", acc);
+    }
+
+    #[test]
+    fn test_accuracy_invalid_types_returns_err() {
+        let pred = make_f32_tensor(vec![1.0, 0.0], &[2]);
+        let target = make_f32_tensor(vec![0.0, 1.0], &[2]);
+        let result = Accuracy.compute(&pred, &target);
+        assert!(result.is_err(), "F32 targets should return error");
+    }
+
+    // ──────────────────── F1Score ────────────────────
+
+    #[test]
+    fn test_f1_score_name() {
+        assert_eq!(F1Score::new().name(), "f1");
+    }
+
+    #[test]
+    fn test_f1_score_higher_is_better() {
+        assert!(F1Score::new().higher_is_better());
+    }
+
+    #[test]
+    fn test_f1_binary_perfect() {
+        let pred = make_i64_tensor(vec![1, 1, 0, 0], &[4]);
+        let target = make_i64_tensor(vec![1, 1, 0, 0], &[4]);
+        let result = F1Score::new().compute(&pred, &target);
+        assert!(result.is_ok());
+        let f1 = result.expect("f1 compute failed");
+        assert!((f1 - 1.0).abs() < 1e-5, "perfect F1 expected, got {}", f1);
+    }
+
+    #[test]
+    fn test_f1_macro_multiclass() {
+        // 3-class: perfect classification
+        let pred = make_i64_tensor(vec![0, 1, 2, 0, 1, 2], &[6]);
+        let target = make_i64_tensor(vec![0, 1, 2, 0, 1, 2], &[6]);
+        let result = F1Score::macro_averaged().compute(&pred, &target);
+        assert!(result.is_ok());
+        let f1 = result.expect("f1 macro compute failed");
+        assert!(
+            (f1 - 1.0).abs() < 1e-5,
+            "perfect macro F1 expected, got {}",
+            f1
+        );
+    }
+
+    #[test]
+    fn test_f1_micro() {
+        let pred = make_i64_tensor(vec![0, 1, 1, 0], &[4]);
+        let target = make_i64_tensor(vec![0, 1, 0, 1], &[4]);
+        let result = F1Score::micro().compute(&pred, &target);
+        assert!(result.is_ok());
+        let f1 = result.expect("f1 micro compute failed");
+        assert!(
+            (0.0..=1.0).contains(&f1),
+            "micro F1 should be in [0,1], got {}",
+            f1
+        );
+    }
+
+    #[test]
+    fn test_f1_weighted() {
+        let pred = make_i64_tensor(vec![0, 1, 2, 0, 1, 2], &[6]);
+        let target = make_i64_tensor(vec![0, 1, 2, 0, 1, 2], &[6]);
+        let result = F1Score::weighted().compute(&pred, &target);
+        assert!(result.is_ok());
+        let f1 = result.expect("f1 weighted compute failed");
+        assert!(
+            (f1 - 1.0).abs() < 1e-5,
+            "perfect weighted F1 expected, got {}",
+            f1
+        );
+    }
+
+    #[test]
+    fn test_f1_binary_from_logits() {
+        // logits selecting class 0 vs class 1
+        let logits = make_f32_tensor(vec![10.0, 0.0, 0.0, 10.0], &[2, 2]);
+        let target = make_i64_tensor(vec![0, 1], &[2]);
+        let result = F1Score::new().compute(&logits, &target);
+        assert!(result.is_ok());
+        let f1 = result.expect("f1 from logits failed");
+        assert!(
+            (f1 - 1.0).abs() < 1e-5,
+            "perfect F1 from logits, got {}",
+            f1
+        );
+    }
+
+    #[test]
+    fn test_f1_invalid_average_returns_err() {
+        let pred = make_i64_tensor(vec![0, 1], &[2]);
+        let target = make_i64_tensor(vec![0, 1], &[2]);
+        let f1 = F1Score {
+            average: "invalid_avg".to_string(),
+            pos_label: None,
+        };
+        let result = f1.compute(&pred, &target);
+        assert!(
+            result.is_err(),
+            "invalid average method should return error"
+        );
+    }
+
+    // ──────────────────── Perplexity ────────────────────
+
+    #[test]
+    fn test_perplexity_name() {
+        assert_eq!(Perplexity.name(), "perplexity");
+    }
+
+    #[test]
+    fn test_perplexity_lower_is_better() {
+        assert!(!Perplexity.higher_is_better());
+    }
+
+    #[test]
+    fn test_perplexity_equals_exp_cross_entropy() {
+        let logits = make_f32_tensor(vec![2.0, 1.0, 0.1, 0.1, 2.0, 0.1], &[2, 3]);
+        let targets = make_i64_tensor(vec![0, 1], &[2]);
+        let ce_loss = crate::CrossEntropyLoss::new();
+        let ce_val = ce_loss.compute(&logits, &targets).expect("ce failed");
+        let ppl = Perplexity.compute(&logits, &targets).expect("perplexity failed");
+        let expected_ppl = ce_val.exp();
+        assert!(
+            (ppl - expected_ppl).abs() < 1e-4,
+            "perplexity should equal exp(CE), expected {:.4}, got {:.4}",
+            expected_ppl,
+            ppl
+        );
+    }
+
+    #[test]
+    fn test_perplexity_wrong_types_returns_err() {
+        let pred = make_f32_tensor(vec![1.0, 0.0], &[2]);
+        let target = make_f32_tensor(vec![0.0, 1.0], &[2]);
+        let result = Perplexity.compute(&pred, &target);
+        assert!(result.is_err(), "F32 targets should fail for perplexity");
+    }
+
+    // ──────────────────── MetricCollection ────────────────────
+
+    #[test]
+    fn test_metric_collection_empty() {
+        let collection = MetricCollection::new();
+        let logits = make_f32_tensor(vec![1.0, 0.0], &[1, 2]);
+        let targets = make_i64_tensor(vec![0], &[1]);
+        let result = collection.compute_all(&logits, &targets);
+        assert!(result.is_ok());
+        let map = result.expect("empty collection compute failed");
+        assert!(map.is_empty(), "empty collection should return empty map");
+    }
+
+    #[test]
+    fn test_metric_collection_multiple_metrics() {
+        let collection = MetricCollection::new()
+            .add_metric(Box::new(Accuracy))
+            .add_metric(Box::new(F1Score::macro_averaged()));
+        let logits = make_f32_tensor(vec![10.0, 0.0, 0.0, 10.0], &[2, 2]);
+        let targets = make_i64_tensor(vec![0, 1], &[2]);
+        let result = collection.compute_all(&logits, &targets);
+        assert!(result.is_ok());
+        let map = result.expect("multi-metric compute failed");
+        assert!(map.contains_key("accuracy"), "should contain 'accuracy'");
+        assert!(map.contains_key("f1"), "should contain 'f1'");
+    }
+
+    #[test]
+    fn test_metric_collection_add_metric_mut() {
+        let mut collection = MetricCollection::new();
+        collection.add_metric_mut(Box::new(Accuracy));
+        let logits = make_f32_tensor(vec![5.0, 1.0, 1.0, 5.0], &[2, 2]);
+        let targets = make_i64_tensor(vec![0, 1], &[2]);
+        let result = collection.compute_all(&logits, &targets);
+        assert!(result.is_ok());
+        let map = result.expect("add_metric_mut compute failed");
+        assert!(map.contains_key("accuracy"));
+    }
+}

@@ -761,61 +761,23 @@ pub fn create_full_advanced_rag_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::text_generation::TextGenerationPipeline;
     use crate::Result;
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_advanced_rag_pipeline() {
-        let config = AdvancedRAGConfig::default();
-        let mock_generation_pipeline = Arc::new(MockGenerationPipeline);
-
-        let rag_pipeline = create_advanced_rag_pipeline(config, mock_generation_pipeline);
-
-        let input = PipelineInput::Text("What is climate change?".to_string());
-        let result = rag_pipeline.__call__(input);
-
-        assert!(result.is_ok());
-        if let Ok(PipelineOutput::AdvancedRAG(rag_output)) = result {
-            assert!(!rag_output.final_answer.is_empty());
-            assert!(rag_output.confidence_score > 0.0);
-            assert!(!rag_output.reasoning_chain.is_empty());
-        }
+    // Simple LCG for deterministic pseudo-random values
+    struct Lcg {
+        state: u64,
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_multi_hop_reasoning() {
-        let mut config = AdvancedRAGConfig::default();
-        config.max_hops = 2;
-
-        let mock_generation_pipeline = Arc::new(MockGenerationPipeline);
-        let rag_pipeline = create_advanced_rag_pipeline(config, mock_generation_pipeline);
-
-        let input =
-            PipelineInput::Text("How does climate change affect renewable energy?".to_string());
-        let result = rag_pipeline.__call__(input);
-
-        assert!(result.is_ok());
-        if let Ok(PipelineOutput::AdvancedRAG(rag_output)) = result {
-            assert!(rag_output.retrieval_iterations <= 2);
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Self { state: seed }
         }
-    }
 
-    #[tokio::test]
-    async fn test_adaptive_chunking() {
-        let config = AdvancedRAGConfig {
-            adaptive_chunking: true,
-            ..Default::default()
-        };
-
-        let mock_generation_pipeline = Arc::new(MockGenerationPipeline);
-        let rag_pipeline = create_advanced_rag_pipeline(config, mock_generation_pipeline);
-
-        let scientific_content = "Abstract: This paper studies climate change impacts...";
-        let metadata =
-            HashMap::from([("content_type".to_string(), "scientific_paper".to_string())]);
-
-        let chunked = rag_pipeline.adaptive_chunk(scientific_content, &metadata).await;
-        assert!(chunked.is_ok());
+        fn next_f32(&mut self) -> f32 {
+            self.state =
+                self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((self.state >> 33) as f32) / (u32::MAX as f32)
+        }
     }
 
     // Mock generation pipeline for testing
@@ -831,5 +793,481 @@ mod tests {
                     .to_string(),
             ))
         }
+    }
+
+    // Helper: build a test MultiModalDocument with given id and score
+    fn make_doc(id: &str, text: &str, score: f32) -> MultiModalDocument {
+        MultiModalDocument {
+            id: id.to_string(),
+            text_content: text.to_string(),
+            image_content: None,
+            structured_data: None,
+            metadata: HashMap::new(),
+            embedding: vec![0.1, 0.2, 0.3],
+            similarity_score: score,
+        }
+    }
+
+    // ── Config & default field tests ────────────────────────────────────────
+
+    #[test]
+    fn test_config_default_top_k() {
+        let config = AdvancedRAGConfig::default();
+        assert_eq!(config.top_k, 5, "default top_k should be 5");
+    }
+
+    #[test]
+    fn test_config_default_min_similarity() {
+        let config = AdvancedRAGConfig::default();
+        assert!(
+            config.min_similarity > 0.0 && config.min_similarity < 1.0,
+            "min_similarity should be in (0,1)"
+        );
+    }
+
+    #[test]
+    fn test_config_default_max_context_length() {
+        let config = AdvancedRAGConfig::default();
+        assert!(
+            config.max_context_length > 0,
+            "max_context_length must be positive"
+        );
+    }
+
+    #[test]
+    fn test_config_custom_top_k() {
+        let config = AdvancedRAGConfig {
+            top_k: 10,
+            ..Default::default()
+        };
+        assert_eq!(config.top_k, 10);
+    }
+
+    #[test]
+    fn test_config_similarity_threshold_bounds() {
+        let config = AdvancedRAGConfig {
+            min_similarity: 0.75,
+            ..Default::default()
+        };
+        assert!(config.min_similarity >= 0.0 && config.min_similarity <= 1.0);
+    }
+
+    // ── Mock retriever behaviour ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_mock_retriever_respects_top_k() {
+        let retriever = MockAdvancedRetriever::new();
+        let mut config = AdvancedRAGConfig::default();
+        config.top_k = 1;
+        let result = retriever
+            .retrieve_documents("test query", &config, None)
+            .await
+            .expect("retrieve_documents should succeed");
+        assert_eq!(result.documents.len(), 1, "Retriever must respect top_k=1");
+    }
+
+    #[tokio::test]
+    async fn test_mock_retriever_metadata() {
+        let retriever = MockAdvancedRetriever::new();
+        let config = AdvancedRAGConfig::default();
+        let result = retriever
+            .retrieve_documents("energy", &config, None)
+            .await
+            .expect("retrieve_documents should succeed");
+        assert!(result.retrieval_metadata.average_similarity > 0.0);
+        assert!(result.retrieval_metadata.retrieval_time_ms > 0);
+    }
+
+    #[tokio::test]
+    async fn test_mock_retriever_graph_nodes() {
+        let retriever = MockAdvancedRetriever::new();
+        let entities = vec!["Climate".to_string(), "Energy".to_string()];
+        let nodes = retriever
+            .retrieve_graph_nodes(&entities, 2)
+            .await
+            .expect("retrieve_graph_nodes should succeed");
+        assert!(!nodes.is_empty(), "should return at least one node");
+    }
+
+    #[tokio::test]
+    async fn test_empty_entity_extraction_yields_no_crash() {
+        let config = AdvancedRAGConfig::default();
+        let generation_pipeline = Arc::new(MockGenerationPipeline);
+        let pipeline = create_advanced_rag_pipeline(config, generation_pipeline);
+        // all lowercase, short words → no entities extracted
+        let entities = pipeline
+            .extract_entities("what is the sky")
+            .await
+            .expect("extract_entities should succeed");
+        // May be empty; just must not panic
+        let _ = entities;
+    }
+
+    #[tokio::test]
+    async fn test_entity_extraction_uppercase_words() {
+        let config = AdvancedRAGConfig::default();
+        let generation_pipeline = Arc::new(MockGenerationPipeline);
+        let pipeline = create_advanced_rag_pipeline(config, generation_pipeline);
+        let entities = pipeline
+            .extract_entities("Einstein developed Relativity theory")
+            .await
+            .expect("extract_entities should succeed");
+        assert!(
+            !entities.is_empty(),
+            "capitalised words should be detected as entities"
+        );
+    }
+
+    // ── Document chunking tests ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_adaptive_chunking_scientific() {
+        let config = AdvancedRAGConfig {
+            adaptive_chunking: true,
+            ..Default::default()
+        };
+        let generation_pipeline = Arc::new(MockGenerationPipeline);
+        let pipeline = create_advanced_rag_pipeline(config, generation_pipeline);
+        let metadata =
+            HashMap::from([("content_type".to_string(), "scientific_paper".to_string())]);
+        let content = "Abstract: This paper studies climate. Results: Significant warming observed. Conclusion: Action needed.";
+        let chunk = pipeline
+            .adaptive_chunk(content, &metadata)
+            .await
+            .expect("adaptive_chunk should succeed");
+        assert!(!chunk.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_adaptive_chunking_code() {
+        let config = AdvancedRAGConfig {
+            adaptive_chunking: true,
+            ..Default::default()
+        };
+        let generation_pipeline = Arc::new(MockGenerationPipeline);
+        let pipeline = create_advanced_rag_pipeline(config, generation_pipeline);
+        let metadata = HashMap::from([("content_type".to_string(), "code".to_string())]);
+        let content = "fn main() {\n    println!(\"hello\");\n}\nclass Foo {}\ndef bar(): pass";
+        let chunk = pipeline
+            .adaptive_chunk(content, &metadata)
+            .await
+            .expect("adaptive_chunk should succeed");
+        assert!(
+            chunk.contains("fn") || chunk.contains("class") || chunk.contains("def"),
+            "code chunk should contain function/class definitions"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_adaptive_chunking_json() {
+        let config = AdvancedRAGConfig {
+            adaptive_chunking: true,
+            ..Default::default()
+        };
+        let generation_pipeline = Arc::new(MockGenerationPipeline);
+        let pipeline = create_advanced_rag_pipeline(config, generation_pipeline);
+        let metadata = HashMap::from([("content_type".to_string(), "structured".to_string())]);
+        let json_content = r#"{"name": "test", "value": 42, "items": [1, 2, 3]}"#;
+        let chunk = pipeline
+            .adaptive_chunk(json_content, &metadata)
+            .await
+            .expect("adaptive_chunk should succeed for JSON");
+        assert!(!chunk.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_adaptive_chunking_default_truncation() {
+        let config = AdvancedRAGConfig {
+            adaptive_chunking: true,
+            ..Default::default()
+        };
+        let generation_pipeline = Arc::new(MockGenerationPipeline);
+        let pipeline = create_advanced_rag_pipeline(config, generation_pipeline);
+        // 'other' content type → default truncation
+        let mut metadata = HashMap::new();
+        metadata.insert("content_type".to_string(), "other".to_string());
+        let long_text = "x".repeat(2000);
+        let chunk = pipeline
+            .adaptive_chunk(&long_text, &metadata)
+            .await
+            .expect("adaptive_chunk should succeed");
+        assert!(
+            chunk.len() <= 1000 + 5,
+            "default chunking should truncate to ~1000 chars"
+        );
+    }
+
+    // ── Context window assembly ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_build_context_respects_max_length() {
+        let max_len = 50;
+        let config = AdvancedRAGConfig {
+            max_context_length: max_len,
+            adaptive_chunking: false,
+            ..Default::default()
+        };
+        let generation_pipeline = Arc::new(MockGenerationPipeline);
+        let pipeline = create_advanced_rag_pipeline(config, generation_pipeline);
+        // Documents that together exceed max_context_length
+        let docs = vec![
+            make_doc("d1", "A".repeat(40).as_str(), 0.9),
+            make_doc("d2", "B".repeat(40).as_str(), 0.8),
+        ];
+        let ctx = pipeline.build_context(&docs).await.expect("build_context should succeed");
+        assert!(
+            ctx.len() <= max_len + 30,
+            "context should not hugely exceed max_context_length"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_context_empty_docs() {
+        let config = AdvancedRAGConfig::default();
+        let generation_pipeline = Arc::new(MockGenerationPipeline);
+        let pipeline = create_advanced_rag_pipeline(config, generation_pipeline);
+        let ctx = pipeline
+            .build_context(&[])
+            .await
+            .expect("build_context with empty docs should succeed");
+        assert!(
+            ctx.is_empty(),
+            "context from empty docs should be empty string"
+        );
+    }
+
+    // ── Reasoning prompt ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_build_reasoning_prompt_contains_query() {
+        let config = AdvancedRAGConfig::default();
+        let generation_pipeline = Arc::new(MockGenerationPipeline);
+        let pipeline = create_advanced_rag_pipeline(config, generation_pipeline);
+        let prompt = pipeline.build_reasoning_prompt("test query", "some context", 0);
+        assert!(
+            prompt.contains("test query"),
+            "prompt must include the query"
+        );
+    }
+
+    #[test]
+    fn test_build_reasoning_prompt_contains_hop_number() {
+        let config = AdvancedRAGConfig::default();
+        let generation_pipeline = Arc::new(MockGenerationPipeline);
+        let pipeline = create_advanced_rag_pipeline(config, generation_pipeline);
+        let prompt = pipeline.build_reasoning_prompt("query", "ctx", 2);
+        assert!(prompt.contains("3"), "hop 2 → display hop 3");
+    }
+
+    // ── Uncertainty estimation ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_mock_uncertainty_short_text_high_uncertainty() {
+        let estimator = MockUncertaintyEstimator;
+        let short_text = "Yes.";
+        let uncertainty = estimator
+            .estimate_uncertainty(short_text, &[])
+            .await
+            .expect("estimate_uncertainty should succeed");
+        assert!(
+            uncertainty >= 0.3,
+            "short answer should have higher uncertainty"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mock_uncertainty_long_text_low_uncertainty() {
+        let estimator = MockUncertaintyEstimator;
+        let long_text = "a".repeat(200);
+        let uncertainty = estimator
+            .estimate_uncertainty(&long_text, &[])
+            .await
+            .expect("estimate_uncertainty should succeed");
+        assert!(
+            uncertainty < 0.3,
+            "long answer should have lower uncertainty"
+        );
+    }
+
+    // ── Self-reflection ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_mock_self_reflector_long_answer_high_confidence() {
+        let reflector = MockSelfReflector;
+        let long_answer = "a".repeat(200);
+        let result = reflector
+            .reflect_on_answer("query", &long_answer, &[])
+            .await
+            .expect("reflect_on_answer should succeed");
+        assert!(
+            result.answer_confidence >= 0.8,
+            "long answer should yield high confidence"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mock_self_reflector_short_answer_suggests_more_retrieval() {
+        let reflector = MockSelfReflector;
+        let short_answer = "Ok.";
+        let result = reflector
+            .reflect_on_answer("query", short_answer, &[])
+            .await
+            .expect("reflect_on_answer should succeed");
+        assert!(
+            result.should_retrieve_more,
+            "short answer should suggest more retrieval"
+        );
+    }
+
+    // ── RRF scoring simulation ────────────────────────────────────────────────
+
+    #[test]
+    fn test_rrf_score_formula() {
+        // RRF: score = sum(1 / (rank + k))
+        // For k=60, rank 0 → 1/60, rank 1 → 1/61
+        let k = 60.0_f64;
+        let rank0_score = 1.0 / (0.0 + k);
+        let rank1_score = 1.0 / (1.0 + k);
+        assert!(
+            rank0_score > rank1_score,
+            "higher rank (lower index) should score higher in RRF"
+        );
+    }
+
+    #[test]
+    fn test_sparse_dense_fusion_ordering() {
+        // Simulate fusing two ranked lists: sparse ranks [0,1] and dense ranks [1,0]
+        // Doc A: sparse rank 0, dense rank 1 → RRF = 1/60 + 1/61 ≈ 0.03279
+        // Doc B: sparse rank 1, dense rank 0 → RRF = 1/61 + 1/60 ≈ 0.03279 (same for symmetric)
+        // This verifies the arithmetic, not ordering
+        let k = 60.0_f64;
+        let score_a: f64 = 1.0 / (0.0 + k) + 1.0 / (1.0 + k);
+        let score_b: f64 = 1.0 / (1.0 + k) + 1.0 / (0.0 + k);
+        let diff = (score_a - score_b).abs();
+        assert!(
+            diff < 1e-10,
+            "symmetric sparse/dense ranks should yield equal fused scores"
+        );
+    }
+
+    // ── RAG chain end-to-end ─────────────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_advanced_rag_pipeline() {
+        let config = AdvancedRAGConfig::default();
+        let mock_generation_pipeline = Arc::new(MockGenerationPipeline);
+        let rag_pipeline = create_advanced_rag_pipeline(config, mock_generation_pipeline);
+        let input = PipelineInput::Text("What is climate change?".to_string());
+        let result = rag_pipeline.__call__(input);
+        assert!(result.is_ok());
+        if let Ok(PipelineOutput::AdvancedRAG(rag_output)) = result {
+            assert!(!rag_output.final_answer.is_empty());
+            assert!(rag_output.confidence_score > 0.0);
+            assert!(!rag_output.reasoning_chain.is_empty());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_multi_hop_reasoning() {
+        let mut config = AdvancedRAGConfig::default();
+        config.max_hops = 2;
+        let mock_generation_pipeline = Arc::new(MockGenerationPipeline);
+        let rag_pipeline = create_advanced_rag_pipeline(config, mock_generation_pipeline);
+        let input =
+            PipelineInput::Text("How does climate change affect renewable energy?".to_string());
+        let result = rag_pipeline.__call__(input);
+        assert!(result.is_ok());
+        if let Ok(PipelineOutput::AdvancedRAG(rag_output)) = result {
+            assert!(rag_output.retrieval_iterations <= 2);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_full_rag_pipeline_with_reflection() {
+        let config = AdvancedRAGConfig {
+            enable_self_reflection: true,
+            max_hops: 1,
+            ..Default::default()
+        };
+        let generation_pipeline = Arc::new(MockGenerationPipeline);
+        let pipeline = create_full_advanced_rag_pipeline(config, generation_pipeline);
+        let input = PipelineInput::Text("Tell me about renewable energy.".to_string());
+        let result = pipeline.__call__(input);
+        assert!(result.is_ok(), "full pipeline should succeed");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_rag_non_text_input_rejected() {
+        let config = AdvancedRAGConfig::default();
+        let generation_pipeline = Arc::new(MockGenerationPipeline);
+        let pipeline = create_advanced_rag_pipeline(config, generation_pipeline);
+        let input = PipelineInput::Tokens(vec![1, 2, 3]);
+        let result = pipeline.__call__(input);
+        assert!(result.is_err(), "non-text input should be rejected");
+    }
+
+    // ── Citation extraction via document IDs ──────────────────────────────────
+
+    #[test]
+    fn test_reasoning_step_preserves_doc_ids() {
+        let step = ReasoningStep {
+            step_id: 0,
+            query: "test".to_string(),
+            retrieved_docs: vec![make_doc("doc42", "some content", 0.9)],
+            intermediate_answer: "answer".to_string(),
+            confidence: 0.9,
+            reasoning_trace: "trace".to_string(),
+        };
+        assert_eq!(
+            step.retrieved_docs[0].id, "doc42",
+            "document id should be preserved in reasoning step for citation extraction"
+        );
+    }
+
+    #[test]
+    fn test_knowledge_graph_edge_weight() {
+        let edge = KnowledgeGraphEdge {
+            target_id: "e2".to_string(),
+            relation_type: "related_to".to_string(),
+            weight: 0.75,
+        };
+        assert!(edge.weight > 0.0 && edge.weight <= 1.0);
+    }
+
+    // ── Synthesis ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_synthesize_empty_chain_returns_fallback() {
+        let config = AdvancedRAGConfig::default();
+        let generation_pipeline = Arc::new(MockGenerationPipeline);
+        let pipeline = create_advanced_rag_pipeline(config, generation_pipeline);
+        let result = pipeline
+            .synthesize_final_answer(&[])
+            .await
+            .expect("synthesize with empty chain should not error");
+        assert!(
+            !result.is_empty(),
+            "should return non-empty fallback for empty chain"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_synthesize_single_step_chain() {
+        let config = AdvancedRAGConfig::default();
+        let generation_pipeline = Arc::new(MockGenerationPipeline);
+        let pipeline = create_advanced_rag_pipeline(config, generation_pipeline);
+        let steps = vec![ReasoningStep {
+            step_id: 0,
+            query: "q".to_string(),
+            retrieved_docs: vec![],
+            intermediate_answer: "The sky is blue.".to_string(),
+            confidence: 0.9,
+            reasoning_trace: "trace".to_string(),
+        }];
+        let result = pipeline
+            .synthesize_final_answer(&steps)
+            .await
+            .expect("synthesize with single step should succeed");
+        assert!(!result.is_empty());
     }
 }

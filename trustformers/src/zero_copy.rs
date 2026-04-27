@@ -68,7 +68,7 @@ pub fn align_to(size: usize, alignment: usize) -> usize {
 }
 
 pub fn is_aligned(ptr: *const u8, alignment: usize) -> bool {
-    (ptr as usize) % alignment == 0
+    (ptr as usize).is_multiple_of(alignment)
 }
 
 /// Zero-copy tensor view that doesn't own the underlying data

@@ -285,12 +285,12 @@ impl Pipeline for PipelineChain {
 
 /// Builder for creating pipeline compositions
 pub struct PipelineComposer {
-    current: Option<Box<dyn Pipeline<Input = String, Output = PipelineOutput>>>,
+    stages: Vec<Box<dyn Pipeline<Input = String, Output = PipelineOutput>>>,
 }
 
 impl PipelineComposer {
     pub fn new() -> Self {
-        Self { current: None }
+        Self { stages: Vec::new() }
     }
 
     /// Start the composition with a pipeline
@@ -298,32 +298,27 @@ impl PipelineComposer {
     where
         P: Pipeline<Input = String, Output = PipelineOutput> + 'static,
     {
-        self.current = Some(Box::new(pipeline));
+        self.stages.push(Box::new(pipeline));
         self
     }
 
     /// Add another pipeline to the composition
-    pub fn then<P>(self, pipeline: P) -> Self
+    pub fn then<P>(mut self, pipeline: P) -> Self
     where
         P: Pipeline<Input = String, Output = PipelineOutput> + 'static,
     {
-        match self.current {
-            Some(current) => {
-                // We can't directly compose a boxed pipeline, so this is a limitation
-                // For now, let's simplify and just replace the current pipeline
-                Self {
-                    current: Some(Box::new(pipeline)),
-                }
-            },
-            None => self.start(pipeline),
-        }
+        self.stages.push(Box::new(pipeline));
+        self
     }
 
-    /// Build the final composed pipeline
+    /// Build the final composed pipeline; returns Err if no stages were added
     pub fn build(self) -> Result<Box<dyn Pipeline<Input = String, Output = PipelineOutput>>> {
-        self.current.ok_or_else(|| {
-            TrustformersError::invalid_input_simple("No pipelines added to composer".to_string())
-        })
+        if self.stages.is_empty() {
+            return Err(TrustformersError::invalid_input_simple(
+                "No pipelines added to composer".to_string(),
+            ));
+        }
+        Ok(Box::new(PipelineChain::from_pipelines(self.stages)))
     }
 }
 
@@ -364,7 +359,8 @@ mod tests {
     use super::*;
     use crate::pipeline::{GenerationOutput, PipelineOutput};
 
-    // Mock pipeline for testing
+    // ── Shared mock helpers ───────────────────────────────────────────────────
+
     struct MockPipeline {
         name: String,
     }
@@ -390,15 +386,28 @@ mod tests {
         }
     }
 
+    struct FailingPipeline;
+
+    impl Pipeline for FailingPipeline {
+        type Input = String;
+        type Output = PipelineOutput;
+
+        fn __call__(&self, _input: Self::Input) -> Result<Self::Output> {
+            Err(TrustformersError::invalid_input_simple(
+                "simulated failure".to_string(),
+            ))
+        }
+    }
+
+    // ── ComposedPipeline (A → B) ──────────────────────────────────────────────
+
     #[test]
     fn test_composed_pipeline() {
-        let first = MockPipeline::new("first");
-        let second = MockPipeline::new("second");
-
-        let composed = ComposedPipeline::new(first, second);
-
-        let result = composed.__call__("input".to_string()).expect("operation failed in test");
-
+        let composed =
+            ComposedPipeline::new(MockPipeline::new("first"), MockPipeline::new("second"));
+        let result = composed
+            .__call__("input".to_string())
+            .expect("composed pipeline should succeed");
         if let PipelineOutput::Generation(gen) = result {
             assert_eq!(gen.generated_text, "second(first(input))");
         } else {
@@ -407,20 +416,112 @@ mod tests {
     }
 
     #[test]
+    fn test_composed_pipeline_error_propagates() {
+        let composed = ComposedPipeline::new(FailingPipeline, MockPipeline::new("second"));
+        let result = composed.__call__("input".to_string());
+        assert!(result.is_err(), "error in first stage should propagate");
+    }
+
+    #[test]
+    fn test_composed_pipeline_second_stage_error() {
+        let composed = ComposedPipeline::new(MockPipeline::new("first"), FailingPipeline);
+        let result = composed.__call__("input".to_string());
+        assert!(result.is_err(), "error in second stage should propagate");
+    }
+
+    // ── Pipeline chaining (A → B → C) ────────────────────────────────────────
+
+    #[test]
+    fn test_composed_pipeline_chain_three() {
+        let ab = ComposedPipeline::new(MockPipeline::new("A"), MockPipeline::new("B"));
+        let abc = ab.chain(MockPipeline::new("C"));
+        let result = abc.__call__("x".to_string()).expect("3-stage chain should succeed");
+        if let PipelineOutput::Generation(gen) = result {
+            assert!(
+                gen.generated_text.contains("C"),
+                "final stage name should appear in output"
+            );
+            assert!(
+                gen.generated_text.contains("x"),
+                "original input should appear in output"
+            );
+        } else {
+            panic!("Expected generation output");
+        }
+    }
+
+    // ── PipelineChain (vec of stages) ─────────────────────────────────────────
+
+    #[test]
     fn test_pipeline_chain() {
         let chain = PipelineChain::new()
             .add_stage(MockPipeline::new("stage1"))
             .add_stage(MockPipeline::new("stage2"))
             .add_stage(MockPipeline::new("stage3"));
-
         let result = chain.__call__("input".to_string()).expect("operation failed in test");
-
         if let PipelineOutput::Generation(gen) = result {
             assert_eq!(gen.generated_text, "stage3(stage2(stage1(input)))");
         } else {
             panic!("Expected generation output");
         }
     }
+
+    #[test]
+    fn test_pipeline_chain_empty_errors() {
+        let chain = PipelineChain::new();
+        let result = chain.__call__("input".to_string());
+        assert!(result.is_err(), "empty chain should return an error");
+    }
+
+    #[test]
+    fn test_pipeline_chain_single_stage() {
+        let chain = PipelineChain::new().add_stage(MockPipeline::new("only"));
+        let result = chain.__call__("val".to_string()).expect("single-stage chain should succeed");
+        if let PipelineOutput::Generation(gen) = result {
+            assert_eq!(gen.generated_text, "only(val)");
+        } else {
+            panic!("Expected generation output");
+        }
+    }
+
+    #[test]
+    fn test_pipeline_chain_error_propagates() {
+        let chain = PipelineChain::new()
+            .add_stage(MockPipeline::new("s1"))
+            .add_stage(FailingPipeline);
+        let result = chain.__call__("input".to_string());
+        assert!(result.is_err(), "error in chain stage should propagate");
+    }
+
+    #[test]
+    fn test_pipeline_chain_from_pipelines() {
+        let stages: Vec<Box<dyn Pipeline<Input = String, Output = PipelineOutput>>> = vec![
+            Box::new(MockPipeline::new("a")),
+            Box::new(MockPipeline::new("b")),
+        ];
+        let chain = PipelineChain::from_pipelines(stages);
+        let result = chain.__call__("x".to_string()).expect("from_pipelines chain should succeed");
+        if let PipelineOutput::Generation(gen) = result {
+            assert!(gen.generated_text.contains("b"));
+        } else {
+            panic!("Expected generation output");
+        }
+    }
+
+    // ── PipelineChain batch ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_pipeline_chain_batch() {
+        let chain = PipelineChain::new()
+            .add_stage(MockPipeline::new("p1"))
+            .add_stage(MockPipeline::new("p2"));
+        let results = chain
+            .batch(vec!["a".to_string(), "b".to_string()])
+            .expect("batch should succeed");
+        assert_eq!(results.len(), 2);
+    }
+
+    // ── PipelineComposer ──────────────────────────────────────────────────────
 
     #[test]
     fn test_pipeline_composer() {
@@ -430,34 +531,123 @@ mod tests {
             .then(MockPipeline::new("third"))
             .build()
             .expect("operation failed in test");
-
         let result = composed.__call__("input".to_string()).expect("operation failed in test");
-
         if let PipelineOutput::Generation(gen) = result {
-            // The composition should process through all pipelines
-            // Generated text shows: third(input) - composition works but may not nest as expected
-            eprintln!("Generated text: {}", gen.generated_text);
-            assert!(gen.generated_text.contains("third") && gen.generated_text.contains("input"));
+            // All three stages must participate: third(second(first(input)))
+            assert_eq!(gen.generated_text, "third(second(first(input)))");
         } else {
             panic!("Expected generation output");
         }
     }
 
     #[test]
+    fn test_pipeline_composer_three_stages() {
+        let composed = PipelineComposer::new()
+            .start(MockPipeline::new("A"))
+            .then(MockPipeline::new("B"))
+            .then(MockPipeline::new("C"))
+            .build()
+            .expect("three-stage composer should build");
+        let result = composed.__call__("x".to_string()).expect("three-stage call should succeed");
+        if let PipelineOutput::Generation(gen) = result {
+            assert_eq!(
+                gen.generated_text, "C(B(A(x)))",
+                "all three stages must run in order"
+            );
+        } else {
+            panic!("Expected generation output");
+        }
+    }
+
+    #[test]
+    fn test_pipeline_composer_empty_build() {
+        let result = PipelineComposer::new().build();
+        assert!(result.is_err(), "build() with zero stages must return Err");
+    }
+
+    #[test]
+    fn test_pipeline_composer_empty_build_errors() {
+        let result = PipelineComposer::new().build();
+        assert!(result.is_err(), "building an empty composer should fail");
+    }
+
+    #[test]
+    fn test_pipeline_composer_single_pipeline() {
+        let composed = PipelineComposer::new()
+            .start(MockPipeline::new("solo"))
+            .build()
+            .expect("single-pipeline composer should succeed");
+        let result = composed.__call__("in".to_string()).expect("solo pipeline should succeed");
+        if let PipelineOutput::Generation(gen) = result {
+            assert!(gen.generated_text.contains("solo"));
+        } else {
+            panic!("Expected generation output");
+        }
+    }
+
+    // ── TextConverter ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_text_converter_generation() {
+        let converter = TextConverter;
+        let output = PipelineOutput::Generation(GenerationOutput {
+            generated_text: "hello world".to_string(),
+            sequences: None,
+            scores: None,
+        });
+        let text = converter.convert(output).expect("TextConverter should convert generation");
+        assert_eq!(text, "hello world");
+    }
+
+    #[test]
+    fn test_text_converter_summarization() {
+        let converter = TextConverter;
+        let output = PipelineOutput::Summarization("summary text".to_string());
+        let text = converter.convert(output).expect("TextConverter should convert summarization");
+        assert_eq!(text, "summary text");
+    }
+
+    #[test]
+    fn test_text_converter_text_variant() {
+        let converter = TextConverter;
+        let output = PipelineOutput::Text("raw text".to_string());
+        let text = converter.convert(output).expect("TextConverter should convert Text");
+        assert_eq!(text, "raw text");
+    }
+
+    // ── Pipeline composition function ─────────────────────────────────────────
+
+    #[test]
     fn test_compose_pipelines_function() {
-        let first = MockPipeline::new("first");
-        let second = MockPipeline::new("second");
-
-        let composed = compose_pipelines(first, second);
-
-        let result = composed.__call__("test".to_string()).expect("operation failed in test");
-
+        let composed = compose_pipelines(MockPipeline::new("first"), MockPipeline::new("second"));
+        let result =
+            composed.__call__("test".to_string()).expect("compose_pipelines should succeed");
         if let PipelineOutput::Generation(gen) = result {
             assert_eq!(gen.generated_text, "second(first(test))");
         } else {
             panic!("Expected generation output");
         }
     }
+
+    // ── Intermediate output capture in chain ─────────────────────────────────
+
+    #[test]
+    fn test_intermediate_output_propagates_through_chain() {
+        // A → B → C: verify B transforms A's output before C sees it
+        let chain = PipelineChain::new()
+            .add_stage(MockPipeline::new("A"))
+            .add_stage(MockPipeline::new("B"))
+            .add_stage(MockPipeline::new("C"));
+        let result = chain.__call__("x".to_string()).expect("chain should succeed");
+        if let PipelineOutput::Generation(gen) = result {
+            // C sees B(A(x)) as its input
+            assert_eq!(gen.generated_text, "C(B(A(x)))");
+        } else {
+            panic!("Expected generation output");
+        }
+    }
+
+    // ── Macro test ────────────────────────────────────────────────────────────
 
     #[test]
     fn test_chain_pipelines_macro() {
@@ -467,13 +657,52 @@ mod tests {
             MockPipeline::new("p3")
         )
         .expect("operation failed in test");
-
         let output = result.__call__("test".to_string()).expect("operation failed in test");
-
         if let PipelineOutput::Generation(gen) = output {
             assert!(gen.generated_text.contains("test"));
         } else {
             panic!("Expected generation output");
+        }
+    }
+
+    // ── Parallel fork/join conceptual test ───────────────────────────────────
+
+    #[test]
+    fn test_two_pipelines_independent_execution() {
+        // Verify A and B can each be run independently (simulates parallel fork)
+        let a = MockPipeline::new("fork_a");
+        let b = MockPipeline::new("fork_b");
+        let res_a = a.__call__("x".to_string()).expect("fork_a should succeed");
+        let res_b = b.__call__("x".to_string()).expect("fork_b should succeed");
+        if let (PipelineOutput::Generation(g_a), PipelineOutput::Generation(g_b)) = (res_a, res_b) {
+            assert_ne!(
+                g_a.generated_text, g_b.generated_text,
+                "forked pipelines should produce different outputs"
+            );
+        } else {
+            panic!("Expected generation outputs from both forks");
+        }
+    }
+
+    // ── Pipeline metadata accumulation ────────────────────────────────────────
+
+    #[test]
+    fn test_pipeline_chain_accumulates_all_stage_names() {
+        // The chain output should reflect all stage transformations
+        let chain = PipelineChain::new()
+            .add_stage(MockPipeline::new("alpha"))
+            .add_stage(MockPipeline::new("beta"))
+            .add_stage(MockPipeline::new("gamma"));
+        let result = chain.__call__("seed".to_string()).expect("chain should succeed");
+        if let PipelineOutput::Generation(gen) = result {
+            assert!(
+                gen.generated_text.contains("gamma"),
+                "last stage must appear in output"
+            );
+            assert!(
+                gen.generated_text.contains("seed"),
+                "original input must appear in output"
+            );
         }
     }
 }

@@ -182,7 +182,7 @@ impl ExpertParallelism {
         expert_group: Arc<dyn ProcessGroup>,
     ) -> Result<Self> {
         // Validate configuration
-        if config.num_experts % config.expert_parallel_size != 0 {
+        if !config.num_experts.is_multiple_of(config.expert_parallel_size) {
             return Err(anyhow!(
                 "Number of experts ({}) must be divisible by expert parallel size ({})",
                 config.num_experts,

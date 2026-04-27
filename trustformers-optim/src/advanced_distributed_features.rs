@@ -731,7 +731,7 @@ impl SmartCheckpointManager {
     }
 
     pub fn should_checkpoint(&self, step: usize, performance_metrics: &PerformanceMetrics) -> bool {
-        if step % self.config.base_frequency == 0 {
+        if step.is_multiple_of(self.config.base_frequency) {
             return true;
         }
 
@@ -1020,7 +1020,7 @@ impl PerformanceMLOptimizer {
     }
 
     pub fn should_optimize(&self, step: usize) -> bool {
-        step % self.config.optimization_frequency == 0
+        step.is_multiple_of(self.config.optimization_frequency)
             && self.last_optimization.elapsed() > Duration::from_secs(60) // At least 1 minute between optimizations
     }
 

@@ -987,4 +987,171 @@ mod tests {
         let result = ModelManager::new(config);
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn test_model_manager_config_defaults() {
+        let config = ModelManagerConfig::default();
+        assert!(!config.update_server_url.is_empty());
+        assert!(config.api_key.is_none());
+        assert!(config.max_storage_size_mb > 0);
+        assert!(config.enable_auto_updates);
+        assert!(config.enable_differential_updates);
+        assert!(config.require_signature_verification);
+        assert!(config.download_timeout_seconds > 0);
+        assert!(config.max_concurrent_downloads > 0);
+        assert!(config.download_retry_attempts > 0);
+    }
+
+    #[test]
+    fn test_model_manager_config_invalid_empty_url() {
+        let mut config = ModelManagerConfig::default();
+        config.update_server_url = String::new();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_model_manager_config_invalid_storage() {
+        let mut config = ModelManagerConfig::default();
+        config.max_storage_size_mb = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_model_metadata_default_for_id() {
+        let metadata = ModelMetadata::default_for_id("my_model");
+        assert_eq!(metadata.model_id, "my_model");
+        assert_eq!(metadata.version, "0.0.0");
+        assert!(metadata.signature.is_none());
+    }
+
+    #[test]
+    fn test_model_compatibility_creation() {
+        let compat = ModelCompatibility {
+            min_android_api: Some(30),
+            min_ios_version: Some("16.0".to_string()),
+            required_features: vec!["gpu".to_string()],
+            min_memory_mb: 256,
+            supported_architectures: vec!["arm64".to_string(), "x86_64".to_string()],
+        };
+        assert_eq!(compat.min_android_api, Some(30));
+        assert_eq!(compat.supported_architectures.len(), 2);
+    }
+
+    #[test]
+    fn test_download_progress_creation() {
+        let progress = DownloadProgress {
+            model_id: "test_model".to_string(),
+            total_bytes: 1000000,
+            downloaded_bytes: 500000,
+            download_speed_bps: 100000.0,
+            eta_seconds: 5.0,
+            status: DownloadStatus::Downloading,
+        };
+        assert_eq!(progress.downloaded_bytes * 2, progress.total_bytes);
+        assert!(progress.download_speed_bps > 0.0);
+    }
+
+    #[test]
+    fn test_model_metadata_with_all_fields() {
+        let metadata = ModelMetadata {
+            model_id: "bert_tiny".to_string(),
+            version: "1.2.0".to_string(),
+            model_type: "transformer".to_string(),
+            size_bytes: 50_000_000,
+            checksum: "abc123def456".to_string(),
+            signature: Some("sig_data".to_string()),
+            download_url: "https://models.example.com/bert_tiny.bin".to_string(),
+            differential_url: Some("https://models.example.com/bert_tiny.diff".to_string()),
+            description: "Tiny BERT model".to_string(),
+            required_config: MobileConfig::default(),
+            compatibility: ModelCompatibility {
+                min_android_api: None,
+                min_ios_version: None,
+                required_features: vec![],
+                min_memory_mb: 64,
+                supported_architectures: vec![],
+            },
+            release_timestamp: 1700000000,
+            deprecation_timestamp: None,
+            tags: vec!["nlp".to_string(), "bert".to_string()],
+        };
+        assert_eq!(metadata.model_id, "bert_tiny");
+        assert!(metadata.signature.is_some());
+        assert!(metadata.differential_url.is_some());
+        assert!(metadata.deprecation_timestamp.is_none());
+        assert_eq!(metadata.tags.len(), 2);
+    }
+
+    #[test]
+    fn test_model_manager_config_with_api_key() {
+        let mut config = ModelManagerConfig::default();
+        config.api_key = Some("test_key_123".to_string());
+        assert!(config.api_key.is_some());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_model_manager_config_compression_disabled() {
+        let mut config = ModelManagerConfig::default();
+        config.enable_compression = false;
+        assert!(!config.enable_compression);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_model_manager_config_auto_updates_disabled() {
+        let mut config = ModelManagerConfig::default();
+        config.enable_auto_updates = false;
+        assert!(!config.enable_auto_updates);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_model_compatibility_minimal() {
+        let compat = ModelCompatibility {
+            min_android_api: None,
+            min_ios_version: None,
+            required_features: vec![],
+            min_memory_mb: 0,
+            supported_architectures: vec![],
+        };
+        assert!(compat.required_features.is_empty());
+    }
+
+    #[test]
+    fn test_mock_http_client() {
+        let client = MockHttpClient::new();
+        client.set_response("https://example.com/api", "{\"status\": \"ok\"}");
+        let result = client.get_metadata("https://example.com/api");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_mock_http_client_missing_url() {
+        let client = MockHttpClient::new();
+        let result = client.get_metadata("https://nonexistent.com");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_mock_http_client_download() {
+        let client = MockHttpClient::new();
+        let tmp_path = std::env::temp_dir().join("test_download");
+        let result = client.download_file("https://example.com/model", &tmp_path);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_mock_http_client_download_with_progress() {
+        let client = MockHttpClient::new();
+        let tmp_path = std::env::temp_dir().join("test_download_progress");
+        let result = client.download_with_progress(
+            "https://example.com/model",
+            &tmp_path,
+            Box::new(|downloaded, total| {
+                let _ = (downloaded, total);
+            }),
+        );
+        assert!(result.is_ok());
+    }
 }

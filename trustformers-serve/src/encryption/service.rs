@@ -376,3 +376,348 @@ impl EncryptionStats {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    /// Simple LCG for deterministic pseudo-random bytes
+    struct Lcg {
+        state: u64,
+    }
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Lcg { state: seed }
+        }
+        fn next(&mut self) -> u64 {
+            self.state = self
+                .state
+                .wrapping_mul(6364136223846793005u64)
+                .wrapping_add(1442695040888963407u64);
+            self.state
+        }
+        fn next_byte(&mut self) -> u8 {
+            (self.next() & 0xFF) as u8
+        }
+        fn fill_bytes(&mut self, buf: &mut [u8]) {
+            for b in buf.iter_mut() {
+                *b = self.next_byte();
+            }
+        }
+    }
+
+    fn make_service() -> EncryptionService {
+        let config = EncryptionConfig::default();
+        EncryptionService::new(config).expect("service creation should succeed")
+    }
+
+    fn make_service_with_algo(algo: EncryptionAlgorithm) -> EncryptionService {
+        let mut config = EncryptionConfig::default();
+        config.default_algorithm = algo;
+        EncryptionService::new(config).expect("service creation should succeed")
+    }
+
+    #[tokio::test]
+    async fn test_service_creation_succeeds() {
+        let svc = make_service();
+        assert!(svc.config.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_generate_key_returns_active_key() {
+        let svc = make_service();
+        let key = svc.generate_key(None).await.expect("key generation should succeed");
+        assert_eq!(key.status, KeyStatus::Active);
+        assert!(!key.key_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_generate_key_with_specific_algorithm() {
+        let svc = make_service();
+        let key = svc
+            .generate_key(Some(EncryptionAlgorithm::ChaCha20Poly1305))
+            .await
+            .expect("key generation should succeed");
+        assert_eq!(key.algorithm, EncryptionAlgorithm::ChaCha20Poly1305);
+    }
+
+    #[tokio::test]
+    async fn test_key_material_has_correct_length_aes256() {
+        let svc = make_service();
+        let key = svc.generate_key(Some(EncryptionAlgorithm::AES256GCM)).await.expect("key gen");
+        assert_eq!(
+            key.key_material.len(),
+            EncryptionAlgorithm::AES256GCM.key_size()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_key_material_has_correct_length_aes128() {
+        let svc = make_service();
+        let key = svc.generate_key(Some(EncryptionAlgorithm::AES128GCM)).await.expect("key gen");
+        assert_eq!(
+            key.key_material.len(),
+            EncryptionAlgorithm::AES128GCM.key_size()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_encrypt_returns_correct_length() {
+        let svc = make_service();
+        let plaintext = b"Hello, world! This is a test message.";
+        let result = svc.encrypt(plaintext, None).await.expect("encrypt should succeed");
+        assert_eq!(result.ciphertext.len(), plaintext.len());
+    }
+
+    #[tokio::test]
+    async fn test_encrypt_produces_different_output_from_input() {
+        let svc = make_service();
+        let plaintext = b"sensitive data that should be transformed";
+        let result = svc.encrypt(plaintext, None).await.expect("encrypt should succeed");
+        // XOR-based encryption changes at least some bytes
+        let unchanged =
+            plaintext.iter().zip(result.ciphertext.iter()).filter(|(a, b)| a == b).count();
+        assert!(
+            unchanged < plaintext.len(),
+            "encryption should transform data"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_encrypt_with_explicit_key_id() {
+        let svc = make_service();
+        let key = svc.generate_key(None).await.expect("key gen");
+        let plaintext = b"test data for encryption";
+        let result = svc
+            .encrypt(plaintext, Some(&key.key_id))
+            .await
+            .expect("encrypt with explicit key should succeed");
+        assert_eq!(result.key_id, key.key_id);
+    }
+
+    #[tokio::test]
+    async fn test_encrypt_then_decrypt_roundtrip() {
+        let svc = make_service_with_algo(EncryptionAlgorithm::AES256CBC);
+        let plaintext = b"roundtrip test data";
+        let key = svc.generate_key(Some(EncryptionAlgorithm::AES256CBC)).await.expect("key");
+        let encrypted = svc.encrypt(plaintext, Some(&key.key_id)).await.expect("encrypt");
+        let decrypted = svc
+            .decrypt(
+                &encrypted.ciphertext,
+                &encrypted.iv,
+                encrypted.tag.as_deref(),
+                &encrypted.key_id,
+            )
+            .await
+            .expect("decrypt");
+        assert_eq!(decrypted.plaintext, plaintext.to_vec());
+    }
+
+    #[tokio::test]
+    async fn test_decrypt_missing_tag_on_authenticated_algo_fails() {
+        let svc = make_service();
+        let key = svc.generate_key(Some(EncryptionAlgorithm::AES256GCM)).await.expect("key");
+        let plaintext = b"test";
+        let encrypted = svc.encrypt(plaintext, Some(&key.key_id)).await.expect("encrypt");
+        // Pass None as tag to trigger auth failure
+        let result = svc.decrypt(&encrypted.ciphertext, &encrypted.iv, None, &key.key_id).await;
+        assert!(
+            result.is_err(),
+            "decryption without tag for authenticated algorithm must fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_decrypt_with_unknown_key_id_fails() {
+        let svc = make_service();
+        let plaintext = b"test data";
+        let result = svc.decrypt(plaintext, &[0u8; 12], None, "nonexistent-key-id").await;
+        assert!(result.is_err(), "decryption with unknown key id must fail");
+    }
+
+    #[tokio::test]
+    async fn test_stats_track_encryptions() {
+        let svc = make_service();
+        let key = svc.generate_key(Some(EncryptionAlgorithm::AES256CBC)).await.expect("key");
+        for _ in 0..3 {
+            svc.encrypt(b"data", Some(&key.key_id)).await.expect("encrypt");
+        }
+        let stats = svc.get_stats();
+        assert_eq!(stats.total_encryptions.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn test_stats_track_bytes_encrypted() {
+        let svc = make_service();
+        let key = svc.generate_key(Some(EncryptionAlgorithm::AES256CBC)).await.expect("key");
+        let data = b"twelve bytes";
+        svc.encrypt(data, Some(&key.key_id)).await.expect("encrypt");
+        let stats = svc.get_stats();
+        assert_eq!(
+            stats.total_bytes_encrypted.load(Ordering::Relaxed),
+            data.len() as u64
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stats_track_decryptions() {
+        let svc = make_service_with_algo(EncryptionAlgorithm::AES256CBC);
+        let key = svc.generate_key(Some(EncryptionAlgorithm::AES256CBC)).await.expect("key");
+        let encrypted = svc.encrypt(b"hello world", Some(&key.key_id)).await.expect("encrypt");
+        svc.decrypt(
+            &encrypted.ciphertext,
+            &encrypted.iv,
+            encrypted.tag.as_deref(),
+            &encrypted.key_id,
+        )
+        .await
+        .expect("decrypt");
+        let stats = svc.get_stats();
+        assert_eq!(stats.total_decryptions.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn test_stats_initial_values_are_zero() {
+        let svc = make_service();
+        let stats = svc.get_stats();
+        assert_eq!(stats.total_encryptions.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.total_decryptions.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.failed_operations.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn test_encrypt_empty_data() {
+        let svc = make_service_with_algo(EncryptionAlgorithm::AES256CBC);
+        let key = svc.generate_key(Some(EncryptionAlgorithm::AES256CBC)).await.expect("key");
+        let result = svc.encrypt(b"", Some(&key.key_id)).await.expect("encrypt empty");
+        assert_eq!(result.ciphertext.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_key_status_active_on_creation() {
+        let svc = make_service();
+        let key = svc.generate_key(None).await.expect("key gen");
+        assert_eq!(key.status, KeyStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn test_key_has_created_at_timestamp() {
+        let svc = make_service();
+        let before = SystemTime::now();
+        let key = svc.generate_key(None).await.expect("key gen");
+        let after = SystemTime::now();
+        assert!(key.created_at >= before);
+        assert!(key.created_at <= after);
+    }
+
+    #[tokio::test]
+    async fn test_encryption_key_clone() {
+        let svc = make_service();
+        let key = svc.generate_key(None).await.expect("key gen");
+        let cloned = key.clone();
+        assert_eq!(key.key_id, cloned.key_id);
+        assert_eq!(key.key_material, cloned.key_material);
+    }
+
+    #[tokio::test]
+    async fn test_encrypt_with_aes128_algorithm() {
+        let svc = make_service();
+        let key = svc.generate_key(Some(EncryptionAlgorithm::AES128GCM)).await.expect("key");
+        let result = svc.encrypt(b"test data", Some(&key.key_id)).await.expect("encrypt");
+        assert_eq!(result.algorithm, EncryptionAlgorithm::AES128GCM);
+    }
+
+    #[tokio::test]
+    async fn test_authenticated_algorithm_produces_tag() {
+        let svc = make_service();
+        let key = svc.generate_key(Some(EncryptionAlgorithm::AES256GCM)).await.expect("key");
+        let result = svc.encrypt(b"auth test", Some(&key.key_id)).await.expect("encrypt");
+        assert!(
+            result.tag.is_some(),
+            "authenticated algorithm should produce a tag"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_non_authenticated_algorithm_no_tag() {
+        let svc = make_service();
+        let key = svc.generate_key(Some(EncryptionAlgorithm::AES256CBC)).await.expect("key");
+        let result = svc.encrypt(b"no-auth test", Some(&key.key_id)).await.expect("encrypt");
+        assert!(
+            result.tag.is_none(),
+            "non-authenticated algorithm should not produce a tag"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multiple_keys_stored_independently() {
+        let svc = make_service();
+        let key1 = svc.generate_key(Some(EncryptionAlgorithm::AES256GCM)).await.expect("key1");
+        let key2 = svc.generate_key(Some(EncryptionAlgorithm::AES256CBC)).await.expect("key2");
+        assert_ne!(key1.key_id, key2.key_id);
+        assert_ne!(key1.algorithm, key2.algorithm);
+    }
+
+    #[tokio::test]
+    async fn test_stats_key_operations_tracked() {
+        let svc = make_service();
+        svc.generate_key(None).await.expect("key1");
+        svc.generate_key(None).await.expect("key2");
+        let stats = svc.get_stats();
+        assert!(stats.total_key_operations.load(Ordering::Relaxed) >= 2);
+    }
+
+    #[tokio::test]
+    async fn test_large_data_encryption() {
+        let svc = make_service_with_algo(EncryptionAlgorithm::AES256CBC);
+        let key = svc.generate_key(Some(EncryptionAlgorithm::AES256CBC)).await.expect("key");
+        let mut lcg = Lcg::new(99887766);
+        let mut large_data = vec![0u8; 4096];
+        lcg.fill_bytes(&mut large_data);
+        let result = svc.encrypt(&large_data, Some(&key.key_id)).await.expect("encrypt large");
+        assert_eq!(result.ciphertext.len(), large_data.len());
+    }
+
+    #[tokio::test]
+    async fn test_key_id_format_is_uuid_like() {
+        let svc = make_service();
+        let key = svc.generate_key(None).await.expect("key gen");
+        // UUID v4 has 36 chars with hyphens
+        assert_eq!(key.key_id.len(), 36);
+        let parts: Vec<&str> = key.key_id.split('-').collect();
+        assert_eq!(parts.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_data_encryption_key_clone() {
+        let dek = DataEncryptionKey {
+            dek_id: "test-dek-id".to_string(),
+            master_key_id: "master-key-id".to_string(),
+            encrypted_key_material: vec![1, 2, 3, 4],
+            plaintext_key_material: Some(vec![5, 6, 7, 8]),
+            algorithm: EncryptionAlgorithm::AES256GCM,
+            created_at: SystemTime::now(),
+            last_used_at: SystemTime::now(),
+            usage_count: AtomicU64::new(42),
+        };
+        let cloned = dek.clone();
+        assert_eq!(cloned.dek_id, dek.dek_id);
+        assert_eq!(cloned.master_key_id, dek.master_key_id);
+        assert_eq!(cloned.usage_count.load(Ordering::Relaxed), 42);
+    }
+
+    #[test]
+    fn test_key_status_equality() {
+        assert_eq!(KeyStatus::Active, KeyStatus::Active);
+        assert_ne!(KeyStatus::Active, KeyStatus::Deprecated);
+        assert_ne!(KeyStatus::Revoked, KeyStatus::Expired);
+    }
+
+    #[tokio::test]
+    async fn test_encrypt_creates_non_empty_iv() {
+        let svc = make_service();
+        let result = svc.encrypt(b"iv test data", None).await.expect("encrypt");
+        assert!(!result.iv.is_empty(), "IV should not be empty");
+    }
+}

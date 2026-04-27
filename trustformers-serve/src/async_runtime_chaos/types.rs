@@ -1046,3 +1046,274 @@ impl AsyncRuntimeChaosFramework {
         Ok(suite_result)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── LCG ──────────────────────────────────────────────────────────────────
+    struct Lcg {
+        state: u64,
+    }
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Lcg { state: seed }
+        }
+        fn next(&mut self) -> u64 {
+            self.state = self
+                .state
+                .wrapping_mul(6_364_136_223_846_793_005_u64)
+                .wrapping_add(1_442_695_040_888_963_407_u64);
+            self.state
+        }
+        fn next_f32(&mut self) -> f32 {
+            (self.next() >> 11) as f32 / (1_u64 << 53) as f32
+        }
+    }
+
+    // ── AsyncTestSuiteResult ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_async_test_suite_result_new_empty() {
+        let suite = AsyncTestSuiteResult::new();
+        assert!(suite.results.is_empty());
+        assert_eq!(suite.success_rate, 0.0);
+        assert_eq!(suite.total_duration, Duration::ZERO);
+    }
+
+    #[test]
+    fn test_async_test_suite_result_add_result() {
+        let mut suite = AsyncTestSuiteResult::new();
+        let id = Uuid::new_v4();
+        let exp_result = AsyncExperimentResult::new(id, AsyncRuntimeChaosType::TaskCancellation);
+        suite.add_result("task_cancel", exp_result);
+        assert_eq!(suite.results.len(), 1);
+        assert!(suite.results.contains_key("task_cancel"));
+    }
+
+    #[test]
+    fn test_async_test_suite_result_add_multiple_results() {
+        let mut suite = AsyncTestSuiteResult::new();
+        let types = [
+            ("t1", AsyncRuntimeChaosType::TaskCancellation),
+            ("t2", AsyncRuntimeChaosType::RuntimeShutdown),
+            ("t3", AsyncRuntimeChaosType::DeadlockDetection),
+        ];
+        for (name, chaos_type) in types {
+            let id = Uuid::new_v4();
+            suite.add_result(name, AsyncExperimentResult::new(id, chaos_type));
+        }
+        assert_eq!(suite.results.len(), 3);
+    }
+
+    #[test]
+    fn test_async_test_suite_result_overwrite_with_same_key() {
+        let mut suite = AsyncTestSuiteResult::new();
+        let id1 = Uuid::new_v4();
+        let id2 = Uuid::new_v4();
+        suite.add_result(
+            "key",
+            AsyncExperimentResult::new(id1, AsyncRuntimeChaosType::TaskCancellation),
+        );
+        suite.add_result(
+            "key",
+            AsyncExperimentResult::new(id2, AsyncRuntimeChaosType::RuntimeShutdown),
+        );
+        // Map insert replaces, so length stays 1
+        assert_eq!(suite.results.len(), 1);
+    }
+
+    // ── AsyncExperimentResult ────────────────────────────────────────────────
+
+    #[test]
+    fn test_async_experiment_result_new_not_successful() {
+        let id = Uuid::new_v4();
+        let res = AsyncExperimentResult::new(id, AsyncRuntimeChaosType::AsyncMemoryPressure);
+        assert!(!res.success);
+        assert!(res.metrics.is_empty());
+        assert!(res.errors.is_empty());
+        assert_eq!(res.experiment_id, id);
+    }
+
+    #[test]
+    fn test_async_experiment_result_record_metric() {
+        let id = Uuid::new_v4();
+        let mut res = AsyncExperimentResult::new(id, AsyncRuntimeChaosType::AsyncNetworkFailure);
+        res.record_metric("latency_ms", 42.5);
+        assert_eq!(res.metrics.get("latency_ms"), Some(&42.5));
+    }
+
+    #[test]
+    fn test_async_experiment_result_record_error() {
+        let id = Uuid::new_v4();
+        let mut res = AsyncExperimentResult::new(id, AsyncRuntimeChaosType::AsyncPanicRecovery);
+        res.record_error("something went wrong".to_string());
+        assert_eq!(res.errors.len(), 1);
+        assert_eq!(res.errors[0], "something went wrong");
+    }
+
+    #[test]
+    fn test_async_experiment_result_multiple_metrics_lcg() {
+        let mut lcg = Lcg::new(55);
+        let id = Uuid::new_v4();
+        let mut res =
+            AsyncExperimentResult::new(id, AsyncRuntimeChaosType::RaceConditionSimulation);
+        for i in 0..10 {
+            let val = lcg.next_f32() as f64 * 1000.0;
+            res.record_metric(&format!("metric_{}", i), val);
+        }
+        assert_eq!(res.metrics.len(), 10);
+    }
+
+    #[test]
+    fn test_async_experiment_result_multiple_errors() {
+        let id = Uuid::new_v4();
+        let mut res = AsyncExperimentResult::new(id, AsyncRuntimeChaosType::TaskStarvation);
+        res.record_error("err1".to_string());
+        res.record_error("err2".to_string());
+        res.record_error("err3".to_string());
+        assert_eq!(res.errors.len(), 3);
+    }
+
+    // ── CancellationStrategy ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_cancellation_strategy_broadcast_cancel_constructible() {
+        let _s = CancellationStrategy::BroadcastCancel;
+    }
+
+    #[test]
+    fn test_cancellation_strategy_selective_cancel_with_percentage() {
+        let _s = CancellationStrategy::SelectiveCancel(75.0);
+        if let CancellationStrategy::SelectiveCancel(pct) = _s {
+            assert!((pct - 75.0).abs() < f64::EPSILON);
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn test_cancellation_strategy_graceful_shutdown_constructible() {
+        let _s = CancellationStrategy::GracefulShutdown;
+    }
+
+    // ── Config structs ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_runtime_shutdown_config_fields() {
+        let cfg = RuntimeShutdownConfig {
+            worker_threads: 4,
+            concurrent_operations: 8,
+            operation_duration: Duration::from_millis(100),
+            startup_delay: Duration::from_millis(50),
+            graceful_shutdown_timeout: Duration::from_secs(5),
+        };
+        assert_eq!(cfg.worker_threads, 4);
+        assert_eq!(cfg.concurrent_operations, 8);
+    }
+
+    #[test]
+    fn test_panic_recovery_config_fields() {
+        let cfg = PanicRecoveryConfig {
+            total_tasks: 20,
+            panic_task_count: 5,
+            panic_type: PanicType::Immediate,
+        };
+        assert_eq!(cfg.total_tasks, 20);
+        assert_eq!(cfg.panic_task_count, 5);
+    }
+
+    #[test]
+    fn test_task_cancellation_config_fields() {
+        let cfg = TaskCancellationConfig {
+            task_count: 100,
+            task_duration: Duration::from_millis(500),
+            cancellation_delay: Duration::from_millis(100),
+            cancellation_strategy: CancellationStrategy::BroadcastCancel,
+            graceful_timeout: Duration::from_millis(200),
+            completion_timeout: Duration::from_secs(2),
+        };
+        assert_eq!(cfg.task_count, 100);
+    }
+
+    #[test]
+    fn test_deadlock_config_fields() {
+        let cfg = DeadlockConfig {
+            deadlock_delay: Duration::from_millis(10),
+            deadlock_timeout: Duration::from_millis(50),
+            detection_timeout: Duration::from_millis(200),
+        };
+        assert_eq!(cfg.deadlock_delay, Duration::from_millis(10));
+    }
+
+    #[test]
+    fn test_concurrent_access_config_patterns() {
+        let configs = [
+            ConcurrentAccessPattern::ReadHeavy,
+            ConcurrentAccessPattern::WriteHeavy,
+            ConcurrentAccessPattern::Mixed,
+        ];
+        for pattern in configs {
+            let cfg = ConcurrentAccessConfig {
+                concurrent_tasks: 10,
+                operations_per_task: 5,
+                access_pattern: pattern,
+            };
+            assert_eq!(cfg.concurrent_tasks, 10);
+        }
+    }
+
+    #[test]
+    fn test_async_memory_pressure_config_fields() {
+        let cfg = AsyncMemoryPressureConfig {
+            memory_pressure_mb: 128,
+            concurrent_async_tasks: 16,
+            pressure_duration: Duration::from_millis(200),
+        };
+        assert_eq!(cfg.memory_pressure_mb, 128);
+        assert_eq!(cfg.concurrent_async_tasks, 16);
+    }
+
+    // ── AsyncRuntimeChaosType variants ───────────────────────────────────────
+
+    #[test]
+    fn test_async_runtime_chaos_type_serialization() {
+        let variants = [
+            AsyncRuntimeChaosType::TaskCancellation,
+            AsyncRuntimeChaosType::RuntimeShutdown,
+            AsyncRuntimeChaosType::DeadlockDetection,
+            AsyncRuntimeChaosType::AsyncMemoryPressure,
+            AsyncRuntimeChaosType::AsyncNetworkFailure,
+            AsyncRuntimeChaosType::AsyncResourceExhaustion,
+            AsyncRuntimeChaosType::RaceConditionSimulation,
+            AsyncRuntimeChaosType::AsyncPanicRecovery,
+            AsyncRuntimeChaosType::TaskStarvation,
+            AsyncRuntimeChaosType::ChannelCongestion,
+            AsyncRuntimeChaosType::AsyncTimeouts,
+            AsyncRuntimeChaosType::TaskLeakage,
+        ];
+        for variant in &variants {
+            let json =
+                serde_json::to_string(variant).expect("failed to serialize AsyncRuntimeChaosType");
+            assert!(!json.is_empty());
+        }
+    }
+
+    // ── AsyncRuntimeChaosFramework ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_async_runtime_chaos_framework_new_and_start() {
+        let framework = AsyncRuntimeChaosFramework::new();
+        let result = framework.start().await;
+        assert!(result.is_ok(), "framework.start() failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_lcg_produces_diverse_f32() {
+        let mut lcg = Lcg::new(777);
+        let vals: Vec<f32> = (0..20).map(|_| lcg.next_f32()).collect();
+        let first = vals[0];
+        let diff_count = vals.iter().filter(|&&v| (v - first).abs() > 1e-6).count();
+        assert!(diff_count >= 8, "LCG appears stuck");
+    }
+}

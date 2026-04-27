@@ -4,7 +4,7 @@ Comprehensive training infrastructure for transformer models with distributed tr
 
 ## Current State
 
-**Version:** 0.1.0 | **Status:** Stable | **Released:** 2026-03-21
+**Version:** 0.1.1 | **Status:** Stable | **Released:** 2026-04-25
 
 This crate provides **production-ready training capabilities** including distributed training across multiple nodes, mixed precision training, hyperparameter tuning, and quantization-aware training. The design closely follows HuggingFace Transformers' Trainer API for familiarity.
 

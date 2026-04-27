@@ -1196,3 +1196,6 @@ impl Default for LifecycleStats {
         Self::new()
     }
 }
+
+#[path = "stats_tests.rs"]
+mod stats_tests;

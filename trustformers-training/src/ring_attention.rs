@@ -1351,7 +1351,7 @@ impl RingAttentionConfig {
         }
 
         // Performance optimization suggestions
-        if self.chunk_size % 64 != 0 {
+        if !self.chunk_size.is_multiple_of(64) {
             warnings.push(format!(
                 "Chunk size {} is not aligned to 64, consider adjusting for better performance",
                 self.chunk_size

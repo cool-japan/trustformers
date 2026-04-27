@@ -453,4 +453,146 @@ mod tests {
         let prob = preference.expect("operation failed in test");
         assert!((0.0..=1.0).contains(&prob));
     }
+
+    // ── Additional tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_reward_model_config_default() {
+        let cfg = RewardModelConfig::default();
+        assert!(cfg.max_length > 0);
+        assert!(cfg.epochs > 0);
+        assert!(cfg.batch_size > 0);
+    }
+
+    #[test]
+    fn test_reward_prediction_score_in_valid_range() {
+        let config = RewardModelConfig::default();
+        let mut model = RewardModel::new(config).expect("model creation failed");
+        model.initialize_parameters(768).expect("init failed");
+        let pred = model.predict_reward("hello world").expect("prediction failed");
+        // score may be any real but should be finite
+        assert!(pred.score.is_finite());
+    }
+
+    #[test]
+    fn test_reward_prediction_confidence_range() {
+        let config = RewardModelConfig::default();
+        let mut model = RewardModel::new(config).expect("model creation failed");
+        model.initialize_parameters(768).expect("init failed");
+        let pred = model.predict_reward("test").expect("prediction failed");
+        assert!(
+            pred.confidence >= 0.0 && pred.confidence <= 1.0,
+            "confidence should be in [0,1], got {}",
+            pred.confidence
+        );
+    }
+
+    #[test]
+    fn test_reward_model_predict_batch_empty() {
+        let config = RewardModelConfig::default();
+        let mut model = RewardModel::new(config).expect("model creation failed");
+        model.initialize_parameters(64).expect("init failed");
+        let result = model.predict_batch(&[]);
+        assert!(result.is_ok());
+        let preds = result.expect("predict_batch should succeed");
+        assert!(preds.is_empty());
+    }
+
+    #[test]
+    fn test_reward_model_predict_batch_multiple_texts() {
+        let config = RewardModelConfig::default();
+        let mut model = RewardModel::new(config).expect("model creation failed");
+        model.initialize_parameters(64).expect("init failed");
+        let texts: Vec<String> = vec!["text one".into(), "text two".into(), "text three".into()];
+        let preds = model.predict_batch(&texts).expect("predict_batch failed");
+        assert_eq!(preds.len(), 3);
+    }
+
+    #[test]
+    fn test_reward_model_compare_responses_returns_probability() {
+        let config = RewardModelConfig::default();
+        let mut model = RewardModel::new(config).expect("model creation failed");
+        model.initialize_parameters(128).expect("init failed");
+        let p = model
+            .compare_responses("prompt", "response a", "response b")
+            .expect("compare failed");
+        assert!((0.0..=1.0).contains(&p));
+    }
+
+    #[test]
+    fn test_reward_model_statistics_initially_empty() {
+        let config = RewardModelConfig::default();
+        let model = RewardModel::new(config).expect("model creation failed");
+        let stats = model.get_statistics();
+        assert_eq!(stats.training_steps, 0);
+        assert!(stats.losses.is_empty());
+        assert!(stats.accuracies.is_empty());
+    }
+
+    #[test]
+    fn test_reward_training_result_structure() {
+        let result = RewardTrainingResult {
+            loss: 0.5,
+            accuracy: 0.8,
+            avg_chosen_reward: 1.2,
+            avg_rejected_reward: -0.3,
+            reward_margin: 1.5,
+        };
+        assert!(result.reward_margin > 0.0, "chosen should exceed rejected");
+        assert!(
+            (result.reward_margin - (result.avg_chosen_reward - result.avg_rejected_reward)).abs()
+                < 1e-5
+        );
+    }
+
+    #[test]
+    fn test_reward_prediction_component_scores_nonempty() {
+        let config = RewardModelConfig::default();
+        let mut model = RewardModel::new(config).expect("model creation failed");
+        model.initialize_parameters(64).expect("init failed");
+        let pred = model.predict_reward("hello").expect("predict failed");
+        assert!(!pred.component_scores.is_empty());
+    }
+
+    #[test]
+    fn test_reward_model_load_training_data_empty() {
+        let config = RewardModelConfig::default();
+        let mut model = RewardModel::new(config).expect("model creation failed");
+        let result = model.load_training_data(vec![]);
+        assert!(result.is_ok(), "loading empty data should succeed");
+        assert_eq!(model.training_data.len(), 0);
+    }
+
+    #[test]
+    fn test_reward_model_mlp_type_initializes() {
+        let config = RewardModelConfig {
+            model_type: RewardModelType::MLP,
+            ..RewardModelConfig::default()
+        };
+        let mut model = RewardModel::new(config).expect("model creation failed");
+        let result = model.initialize_parameters(128);
+        assert!(result.is_ok(), "MLP init should succeed");
+        assert!(!model.parameters.is_empty());
+    }
+
+    #[test]
+    fn test_reward_model_statistics_after_step_nonempty() {
+        use scirs2_core::ndarray::{Array1, Array2};
+        let config = RewardModelConfig::default();
+        let mut model = RewardModel::new(config).expect("model creation failed");
+        model.initialize_parameters(64).expect("init failed");
+
+        let batch = RewardBatch {
+            prompts: vec!["q".into()],
+            chosen_responses: vec!["good".into()],
+            rejected_responses: vec!["bad".into()],
+            chosen_tokens: Array2::zeros((1, 5)),
+            rejected_tokens: Array2::zeros((1, 5)),
+            labels: Array1::from_vec(vec![1.0]),
+        };
+        let result = model.train_step(&batch);
+        assert!(result.is_ok(), "train_step should succeed");
+        let stats = model.get_statistics();
+        assert_eq!(stats.training_steps, 1);
+    }
 }

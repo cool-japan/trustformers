@@ -12,11 +12,6 @@ use std::fs;
 #[cfg(target_os = "linux")]
 use std::io::Read;
 
-#[cfg(target_os = "windows")]
-use winapi::um::sysinfoapi::GetLogicalProcessorInformation;
-#[cfg(target_os = "windows")]
-use winapi::um::winnt::SYSTEM_LOGICAL_PROCESSOR_INFORMATION;
-
 /// Memory pool configuration
 #[derive(Debug, Clone)]
 pub struct MemoryPoolConfig {
@@ -160,7 +155,7 @@ impl NumaTopology {
                             // Read CPU list for this node
                             let cpulist_path = format!("{}/node{}/cpulist", nodes_dir, node_id);
                             if let Ok(cpulist) = fs::read_to_string(&cpulist_path) {
-                                let cpus = Self::parse_cpu_list(&cpulist.trim())?;
+                                let cpus = Self::parse_cpu_list(cpulist.trim())?;
                                 numa_topology.cpus_per_node.insert(node_id, cpus);
                             }
 

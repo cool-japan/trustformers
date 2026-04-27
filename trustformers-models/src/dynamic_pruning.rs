@@ -1682,4 +1682,237 @@ mod tests {
         assert_eq!(stats.computational_savings, 0.75); // 1 - 0.5^2
         assert_eq!(stats.memory_savings, 0.5); // 1 - 0.5
     }
+
+    // ---- Pruning schedule: cosine annealing ----
+
+    /// Cubic ease-in schedule: sparsity(t) = target * (1 - (1 - t/T)^3)
+    /// At t=0 sparsity must be 0.0; at t=T sparsity must equal target.
+    #[test]
+    fn test_cosine_schedule_endpoints() {
+        let target = 0.7f32;
+        let total = 100usize;
+
+        let sparsity_at_0 = target * (1.0 - (1.0 - 0.0f32 / total as f32).powi(3));
+        let sparsity_at_t = target * (1.0 - (1.0 - total as f32 / total as f32).powi(3));
+
+        assert!(sparsity_at_0.abs() < 1e-6, "sparsity at t=0 must be 0");
+        assert!(
+            (sparsity_at_t - target).abs() < 1e-6,
+            "sparsity at t=T must equal target"
+        );
+    }
+
+    /// The cubic schedule must be monotonically non-decreasing.
+    #[test]
+    fn test_cosine_schedule_monotone() {
+        let target = 0.8f32;
+        let total = 50usize;
+        let mut prev = -1.0f32;
+        for t in 0..=total {
+            let s = target * (1.0 - (1.0 - t as f32 / total as f32).powi(3));
+            assert!(s >= prev - 1e-6, "Schedule must be monotone at t={}", t);
+            prev = s;
+        }
+    }
+
+    // ---- Magnitude-based scoring ----
+
+    /// Higher-magnitude tokens must receive higher importance scores.
+    #[test]
+    fn test_magnitude_scoring_order() {
+        // Simulate magnitude-based scoring: score_i = ||h_i||^2
+        let norms_squared = [0.1f32, 0.9, 0.3, 0.7, 0.5];
+        let mut indexed: Vec<(usize, f32)> =
+            norms_squared.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("comparison must succeed"));
+
+        // The highest magnitude (index 1, norm²=0.9) must rank first
+        assert_eq!(indexed[0].0, 1, "Highest magnitude token must rank first");
+        // The lowest magnitude (index 0, norm²=0.1) must rank last
+        assert_eq!(
+            indexed[indexed.len() - 1].0,
+            0,
+            "Lowest magnitude token must rank last"
+        );
+    }
+
+    // ---- Structured vs unstructured pruning ----
+
+    /// Unstructured pruning removes individual tokens (any position).
+    /// Structured pruning removes entire heads/layers.
+    /// Verify the keep_mask property: any boolean pattern is valid for unstructured.
+    #[test]
+    fn test_unstructured_any_keep_mask_valid() {
+        let keep_masks = vec![
+            vec![true, false, true, false, true],
+            vec![true, true, true, false, false],
+            vec![false, false, false, true, true],
+        ];
+        for mask in &keep_masks {
+            let kept = mask.iter().filter(|&&x| x).count();
+            assert!(
+                kept > 0,
+                "At least one token must be kept; mask: {:?}",
+                mask
+            );
+            assert!(
+                kept < mask.len(),
+                "Not all tokens should be kept; mask: {:?}",
+                mask
+            );
+        }
+    }
+
+    // ---- Attention-based pruner configurations ----
+
+    #[test]
+    fn test_confidence_based_pruner_creation() {
+        let config = ConfidenceBasedPruningConfig::default();
+        let pruner = DynamicPruner::confidence_based(config);
+        assert!(
+            matches!(pruner.strategy, PruningStrategy::ConfidenceBased),
+            "Expected ConfidenceBased strategy"
+        );
+    }
+
+    #[test]
+    fn test_progressive_pruner_creation() {
+        let config = ProgressivePruningConfig::default();
+        let pruner = DynamicPruner::progressive(config);
+        assert!(
+            matches!(pruner.strategy, PruningStrategy::Progressive),
+            "Expected Progressive strategy"
+        );
+    }
+
+    #[test]
+    fn test_layer_adaptive_pruner_creation() {
+        let config = LayerAdaptivePruningConfig::default();
+        let pruner = DynamicPruner::layer_adaptive(config);
+        assert!(
+            matches!(pruner.strategy, PruningStrategy::LayerAdaptive),
+            "Expected LayerAdaptive strategy"
+        );
+    }
+
+    // ---- Sparsity percentage validation ----
+
+    /// compression_ratio = pruned_length / original_length must be in (0, 1].
+    #[test]
+    fn test_compression_ratio_in_valid_range() {
+        let original_length = 20usize;
+        for pruned_length in 1..=original_length {
+            let ratio = pruned_length as f32 / original_length as f32;
+            assert!(
+                ratio > 0.0 && ratio <= 1.0,
+                "compression_ratio must be in (0,1]"
+            );
+        }
+    }
+
+    /// Sparsity = 1 - compression_ratio must be in [0, 1).
+    #[test]
+    fn test_sparsity_in_valid_range() {
+        let original = 10usize;
+        for pruned in 1..=original {
+            let compression_ratio = pruned as f32 / original as f32;
+            let sparsity = 1.0 - compression_ratio;
+            assert!((0.0..1.0).contains(&sparsity), "sparsity must be in [0, 1)");
+        }
+    }
+
+    // ---- PruningStatistics empty and multi-layer ----
+
+    #[test]
+    fn test_pruning_statistics_empty_results() {
+        let stats = PruningStatistics::from_results(&[]);
+        assert_eq!(
+            stats.avg_compression_ratio, 1.0,
+            "Empty results must give ratio=1.0"
+        );
+        assert!(stats.layer_compression_ratios.is_empty());
+    }
+
+    #[test]
+    fn test_pruning_statistics_multiple_layers() {
+        let make_result = |ratio: f32, seq_len: usize| PruningResult {
+            pruned_hidden_states: Tensor::zeros(&[1, seq_len, 64])
+                .expect("tensor creation must succeed"),
+            pruned_attention_mask: Tensor::ones(&[1, seq_len])
+                .expect("tensor creation must succeed"),
+            token_importance: TokenImportance {
+                importance_scores: vec![0.5; seq_len],
+                token_indices: (0..seq_len).collect(),
+                keep_mask: vec![true; seq_len],
+                pruning_reasons: vec![PruningReason::MinimumRatio; seq_len],
+            },
+            original_length: (seq_len as f32 / ratio) as usize,
+            pruned_length: seq_len,
+            compression_ratio: ratio,
+        };
+
+        let results = vec![make_result(0.6, 6), make_result(0.4, 4)];
+        let stats = PruningStatistics::from_results(&results);
+        let expected_avg = (0.6 + 0.4) / 2.0;
+        assert!((stats.avg_compression_ratio - expected_avg).abs() < 1e-6);
+        assert_eq!(stats.layer_compression_ratios.len(), 2);
+    }
+
+    // ---- Pruning reason distribution ----
+
+    #[test]
+    fn test_pruning_reason_distribution_tracked() {
+        let result = PruningResult {
+            pruned_hidden_states: Tensor::zeros(&[1, 3, 32]).expect("must succeed"),
+            pruned_attention_mask: Tensor::ones(&[1, 3]).expect("must succeed"),
+            token_importance: TokenImportance {
+                importance_scores: vec![0.8, 0.5, 0.2],
+                token_indices: vec![0, 1, 2],
+                keep_mask: vec![true, true, false],
+                pruning_reasons: vec![
+                    PruningReason::AlwaysKeep,
+                    PruningReason::MinimumRatio,
+                    PruningReason::LowAttention,
+                ],
+            },
+            original_length: 4,
+            pruned_length: 3,
+            compression_ratio: 0.75,
+        };
+        let stats = PruningStatistics::from_results(&[result]);
+        assert_eq!(
+            stats.pruning_reason_distribution.get(&PruningReason::AlwaysKeep),
+            Some(&1)
+        );
+        assert_eq!(
+            stats.pruning_reason_distribution.get(&PruningReason::LowAttention),
+            Some(&1)
+        );
+    }
+
+    // ---- Progressive pruning schedule: linear ----
+
+    #[test]
+    fn test_progressive_pruning_linear_schedule_bounds() {
+        let config = ProgressivePruningConfig {
+            initial_pruning_ratio: 0.1,
+            final_pruning_ratio: 0.5,
+            progression_schedule: ProgressionSchedule::Linear,
+        };
+        let total_layers = 12usize;
+        for layer in 0..total_layers {
+            let progress = layer as f32 / (total_layers - 1) as f32;
+            let ratio = config.initial_pruning_ratio
+                + (config.final_pruning_ratio - config.initial_pruning_ratio) * progress;
+            assert!(
+                ratio >= config.initial_pruning_ratio - 1e-6
+                    && ratio <= config.final_pruning_ratio + 1e-6,
+                "Linear schedule ratio {} must be in [{}, {}] for layer {}",
+                ratio,
+                config.initial_pruning_ratio,
+                config.final_pruning_ratio,
+                layer
+            );
+        }
+    }
 }

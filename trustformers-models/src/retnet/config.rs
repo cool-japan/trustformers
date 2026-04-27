@@ -83,14 +83,14 @@ impl Default for RetNetConfig {
 
 impl Config for RetNetConfig {
     fn validate(&self) -> trustformers_core::errors::Result<()> {
-        if self.hidden_size % self.num_heads != 0 {
+        if !self.hidden_size.is_multiple_of(self.num_heads) {
             return Err(invalid_config(
                 "config_field",
                 "hidden_size must be divisible by num_heads".to_string(),
             ));
         }
 
-        if self.hidden_size % self.retention_heads != 0 {
+        if !self.hidden_size.is_multiple_of(self.retention_heads) {
             return Err(invalid_config(
                 "config_field",
                 "hidden_size must be divisible by retention_heads".to_string(),

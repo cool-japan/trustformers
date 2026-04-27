@@ -457,4 +457,305 @@ mod tests {
             "ip:192.168.1.1"
         );
     }
+
+    #[test]
+    fn test_key_generation_no_limits() {
+        let config = RateLimitConfig {
+            per_user_limits: false,
+            per_ip_limits: false,
+            ..Default::default()
+        };
+        let service = RateLimitService::new(config).expect("service creation should succeed");
+        assert_eq!(service.generate_key(Some("u"), Some("1.2.3.4")), "global");
+    }
+
+    #[test]
+    fn test_key_generation_user_only() {
+        let config = RateLimitConfig {
+            per_user_limits: true,
+            per_ip_limits: false,
+            ..Default::default()
+        };
+        let service = RateLimitService::new(config).expect("service creation should succeed");
+        assert_eq!(service.generate_key(Some("alice"), None), "user:alice");
+    }
+
+    #[test]
+    fn test_key_generation_ip_only() {
+        let config = RateLimitConfig {
+            per_user_limits: false,
+            per_ip_limits: true,
+            ..Default::default()
+        };
+        let service = RateLimitService::new(config).expect("service creation should succeed");
+        assert_eq!(service.generate_key(None, Some("10.0.0.1")), "ip:10.0.0.1");
+    }
+
+    #[test]
+    fn test_default_config() {
+        let config = RateLimitConfig::default();
+        assert!(matches!(config.algorithm, RateLimitAlgorithm::TokenBucket));
+        assert_eq!(config.max_requests, 100);
+        assert_eq!(config.window_seconds, 60);
+        assert!(config.per_user_limits);
+        assert!(config.per_ip_limits);
+        assert!(!config.global_limit);
+    }
+
+    #[tokio::test]
+    async fn test_fixed_window_rate_limit() {
+        let config = RateLimitConfig {
+            algorithm: RateLimitAlgorithm::FixedWindow,
+            max_requests: 3,
+            window_seconds: 60,
+            max_burst: None,
+            refill_rate: None,
+            per_user_limits: true,
+            per_ip_limits: false,
+            global_limit: false,
+        };
+        let service = RateLimitService::new(config).expect("service creation should succeed");
+
+        for _ in 0..3 {
+            assert!(service.check_rate_limit("user:fw_test").await.is_ok());
+        }
+        assert!(service.check_rate_limit("user:fw_test").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_separate_keys_independent() {
+        let config = RateLimitConfig {
+            algorithm: RateLimitAlgorithm::TokenBucket,
+            max_requests: 2,
+            window_seconds: 60,
+            max_burst: Some(2),
+            refill_rate: Some(0.1),
+            per_user_limits: true,
+            per_ip_limits: false,
+            global_limit: false,
+        };
+        let service = RateLimitService::new(config).expect("service creation should succeed");
+
+        // Exhaust key_a
+        assert!(service.check_rate_limit("key_a").await.is_ok());
+        assert!(service.check_rate_limit("key_a").await.is_ok());
+        assert!(service.check_rate_limit("key_a").await.is_err());
+
+        // key_b should still work
+        assert!(service.check_rate_limit("key_b").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_global_rate_limit() {
+        let config = RateLimitConfig {
+            algorithm: RateLimitAlgorithm::TokenBucket,
+            max_requests: 2,
+            window_seconds: 60,
+            max_burst: Some(2),
+            refill_rate: Some(0.01),
+            per_user_limits: false,
+            per_ip_limits: false,
+            global_limit: true,
+        };
+        let service = RateLimitService::new(config).expect("service creation should succeed");
+
+        assert!(service.check_rate_limit("a").await.is_ok());
+        assert!(service.check_rate_limit("b").await.is_ok());
+        // Global bucket exhausted
+        assert!(service.check_rate_limit("c").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_stats_active_limiters() {
+        let config = RateLimitConfig::default();
+        let service = RateLimitService::new(config).expect("service creation should succeed");
+
+        let stats_before = service.get_stats().await;
+        assert_eq!(stats_before.active_limiters, 0);
+
+        let _ = service.check_rate_limit("user_x").await;
+        let _ = service.check_rate_limit("user_y").await;
+
+        let stats_after = service.get_stats().await;
+        assert_eq!(stats_after.active_limiters, 2);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_expired() {
+        let config = RateLimitConfig {
+            algorithm: RateLimitAlgorithm::FixedWindow,
+            max_requests: 10,
+            window_seconds: 1, // Very short window
+            ..Default::default()
+        };
+        let service = RateLimitService::new(config).expect("service creation should succeed");
+
+        let _ = service.check_rate_limit("cleanup_test").await;
+        let stats = service.get_stats().await;
+        assert_eq!(stats.active_limiters, 1);
+
+        // Cleanup should be callable without error
+        service.cleanup_expired().await;
+    }
+
+    #[test]
+    fn test_token_bucket_creation() {
+        let bucket = TokenBucket::new(10.0, 2.0);
+        assert!((bucket.max_tokens - 10.0).abs() < f64::EPSILON);
+        assert!((bucket.refill_rate - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_token_bucket_consume() {
+        let mut bucket = TokenBucket::new(5.0, 1.0);
+        assert!(bucket.try_consume(1.0));
+        assert!(bucket.try_consume(1.0));
+        assert!(bucket.try_consume(1.0));
+        assert!(bucket.try_consume(1.0));
+        assert!(bucket.try_consume(1.0));
+        // Should be empty now (approximately)
+        assert!(!bucket.try_consume(1.0));
+    }
+
+    #[test]
+    fn test_token_bucket_retry_after_empty() {
+        let mut bucket = TokenBucket::new(1.0, 1.0);
+        assert!(bucket.try_consume(1.0));
+        let retry = bucket.retry_after();
+        // retry should be ~1 second
+        assert!(retry.as_secs_f64() > 0.0);
+    }
+
+    #[test]
+    fn test_sliding_window_entry() {
+        let mut entry = SlidingWindowEntry::new(Duration::from_secs(60), 3);
+        assert!(entry.try_add_request());
+        assert!(entry.try_add_request());
+        assert!(entry.try_add_request());
+        assert!(!entry.try_add_request());
+    }
+
+    #[test]
+    fn test_sliding_window_retry_after() {
+        let entry = SlidingWindowEntry::new(Duration::from_secs(60), 3);
+        let retry = entry.retry_after();
+        assert_eq!(retry, Duration::from_secs(0));
+    }
+
+    #[test]
+    fn test_fixed_window_entry() {
+        let mut entry = FixedWindowEntry::new(Duration::from_secs(60), 2);
+        assert!(entry.try_add_request());
+        assert!(entry.try_add_request());
+        assert!(!entry.try_add_request());
+    }
+
+    #[test]
+    fn test_fixed_window_retry_after() {
+        let entry = FixedWindowEntry::new(Duration::from_secs(60), 2);
+        let retry = entry.retry_after();
+        assert!(retry.as_secs() <= 60);
+    }
+
+    #[test]
+    fn test_rate_limiter_state_token_bucket() {
+        let config = RateLimitConfig {
+            algorithm: RateLimitAlgorithm::TokenBucket,
+            max_burst: Some(5),
+            refill_rate: Some(1.0),
+            ..Default::default()
+        };
+        let state = RateLimiterState::new(&config);
+        assert!(state.is_ok());
+    }
+
+    #[test]
+    fn test_rate_limiter_state_sliding_window() {
+        let config = RateLimitConfig {
+            algorithm: RateLimitAlgorithm::SlidingWindow,
+            ..Default::default()
+        };
+        let state = RateLimiterState::new(&config);
+        assert!(state.is_ok());
+    }
+
+    #[test]
+    fn test_rate_limiter_state_fixed_window() {
+        let config = RateLimitConfig {
+            algorithm: RateLimitAlgorithm::FixedWindow,
+            ..Default::default()
+        };
+        let state = RateLimiterState::new(&config);
+        assert!(state.is_ok());
+    }
+
+    #[test]
+    fn test_rate_limiter_state_consume() {
+        let config = RateLimitConfig {
+            algorithm: RateLimitAlgorithm::TokenBucket,
+            max_burst: Some(2),
+            refill_rate: Some(0.001),
+            ..Default::default()
+        };
+        let mut state = RateLimiterState::new(&config).expect("state creation ok");
+        assert!(state.try_consume());
+        assert!(state.try_consume());
+        assert!(!state.try_consume());
+    }
+
+    #[test]
+    fn test_rate_limiter_state_retry_after() {
+        let config = RateLimitConfig {
+            algorithm: RateLimitAlgorithm::TokenBucket,
+            max_burst: Some(1),
+            refill_rate: Some(1.0),
+            ..Default::default()
+        };
+        let state = RateLimiterState::new(&config).expect("state creation ok");
+        let retry = state.retry_after();
+        assert_eq!(retry, Duration::from_secs(0));
+    }
+
+    #[tokio::test]
+    async fn test_rate_limit_error_display() {
+        let err = RateLimitError::RateLimitExceeded {
+            key: "user:test".to_string(),
+            retry_after_seconds: 30,
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("user:test"));
+        assert!(msg.contains("30"));
+    }
+
+    #[tokio::test]
+    async fn test_global_rate_limit_error_display() {
+        let err = RateLimitError::GlobalRateLimitExceeded {
+            retry_after_seconds: 10,
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("Global"));
+        assert!(msg.contains("10"));
+    }
+
+    #[tokio::test]
+    async fn test_many_keys_lcg() {
+        let config = RateLimitConfig {
+            algorithm: RateLimitAlgorithm::TokenBucket,
+            max_burst: Some(100),
+            refill_rate: Some(10.0),
+            ..Default::default()
+        };
+        let service = RateLimitService::new(config).expect("service creation should succeed");
+
+        // Use LCG for deterministic key generation
+        let mut lcg_state: u64 = 12345;
+        for _ in 0..20 {
+            lcg_state = lcg_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let key = format!("user_{}", lcg_state % 100);
+            let _ = service.check_rate_limit(&key).await;
+        }
+        let stats = service.get_stats().await;
+        assert!(stats.active_limiters > 0);
+        assert!(stats.active_limiters <= 20);
+    }
 }

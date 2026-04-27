@@ -810,6 +810,213 @@ mod tests {
         assert!(allocation.values().sum::<usize>() == 4);
     }
 
+    #[test]
+    fn test_instance_type_creation() {
+        let instance = InstanceType {
+            name: "g5.xlarge".to_string(),
+            gpu_count: 1,
+            gpu_type: "A10G".to_string(),
+            memory_gb: 16,
+            cpu_cores: 4,
+            network_bandwidth: 10.0,
+            cost_per_hour: 1.006,
+            spot_available: true,
+            spot_discount: 0.5,
+            performance_score: 0.6,
+        };
+        assert_eq!(instance.gpu_count, 1);
+        assert!(instance.spot_available);
+        assert!(instance.performance_score > 0.0);
+    }
+
+    #[test]
+    fn test_cost_config_creation() {
+        let config = CostConfig {
+            max_cost_per_hour: 50.0,
+            budget_limit: 500.0,
+            optimization_strategy: CostOptimizationStrategy::MinimizeCost,
+            use_spot_instances: true,
+            spot_price_tolerance: 0.3,
+        };
+        assert!(config.max_cost_per_hour > 0.0);
+        assert!(config.spot_price_tolerance <= 1.0);
+    }
+
+    #[test]
+    fn test_auth_type_variants() {
+        let types = [
+            AuthType::ApiKey,
+            AuthType::ServiceAccount,
+            AuthType::IAMRole,
+            AuthType::OAuth,
+        ];
+        assert_eq!(types.len(), 4);
+    }
+
+    #[test]
+    fn test_cost_optimization_strategy_variants() {
+        let strategies = [
+            CostOptimizationStrategy::MinimizeCost,
+            CostOptimizationStrategy::CostPerformanceBalance,
+        ];
+        assert_eq!(strategies.len(), 2);
+    }
+
+    #[test]
+    fn test_cost_tracker_multiple_entries() {
+        let mut tracker = CostTracker::new();
+        tracker.add_cost_entry("node1".to_string(), 5.0, "aws".to_string());
+        tracker.add_cost_entry("node2".to_string(), 3.0, "gcp".to_string());
+        tracker.add_cost_entry("node1".to_string(), 2.0, "aws".to_string());
+        assert_eq!(tracker.total_cost, 10.0);
+        assert_eq!(tracker.cost_history.len(), 3);
+    }
+
+    #[test]
+    fn test_cost_tracker_empty() {
+        let tracker = CostTracker::new();
+        assert_eq!(tracker.total_cost, 0.0);
+        assert!(tracker.cost_history.is_empty());
+    }
+
+    #[test]
+    fn test_network_topology_creation() {
+        let topology = NetworkTopology {
+            comm_pattern: CommunicationPattern::Hierarchical,
+            bandwidth_requirements: 10.0,
+            latency_tolerance: Duration::from_millis(100),
+            compression: CompressionConfig {
+                enabled: true,
+                algorithm: CompressionAlgorithm::GradientQuantization,
+                level: 6,
+                min_tensor_size: 1024,
+            },
+        };
+        assert_eq!(topology.bandwidth_requirements, 10.0);
+        assert!(topology.compression.enabled);
+    }
+
+    #[test]
+    fn test_fault_tolerance_config_creation() {
+        let config = FaultToleranceConfig {
+            max_failures: 3,
+            checkpoint_frequency: Duration::from_secs(600),
+            recovery_strategy: RecoveryStrategy::Hybrid,
+            health_check_interval: Duration::from_secs(15),
+        };
+        assert_eq!(config.max_failures, 3);
+    }
+
+    #[test]
+    fn test_cloud_scheduler_creation() {
+        let scheduler = CloudScheduler::new();
+        assert!(scheduler.current_allocation.is_empty());
+    }
+
+    #[test]
+    fn test_scheduler_zero_nodes() {
+        let config = create_test_config();
+        let mut scheduler = CloudScheduler::new();
+        let result = scheduler.schedule_resources(0, &config);
+        assert!(result.is_ok());
+        let allocation = result.expect("operation failed in test");
+        assert_eq!(allocation.values().sum::<usize>(), 0);
+    }
+
+    #[test]
+    fn test_scheduler_multiple_nodes() {
+        let config = create_test_config();
+        let mut scheduler = CloudScheduler::new();
+        let allocation =
+            scheduler.schedule_resources(8, &config).expect("operation failed in test");
+        assert_eq!(allocation.values().sum::<usize>(), 8);
+    }
+
+    #[test]
+    fn test_cloud_provider_creation() {
+        let provider = CloudProvider {
+            name: "azure".to_string(),
+            regions: vec!["eastus".to_string(), "westus".to_string()],
+            instance_types: vec![],
+            auth_config: AuthConfig {
+                auth_type: AuthType::OAuth,
+                config_data: HashMap::new(),
+            },
+            inter_region_bandwidth: 15.0,
+            inter_region_latency: Duration::from_millis(40),
+        };
+        assert_eq!(provider.name, "azure");
+        assert_eq!(provider.regions.len(), 2);
+    }
+
+    #[test]
+    fn test_compression_config_creation() {
+        let config = CompressionConfig {
+            enabled: false,
+            algorithm: CompressionAlgorithm::GradientQuantization,
+            level: 3,
+            min_tensor_size: 2048,
+        };
+        assert!(!config.enabled);
+        assert_eq!(config.min_tensor_size, 2048);
+    }
+
+    #[test]
+    fn test_multicloud_config_providers_count() {
+        let config = create_test_config();
+        assert!(config.providers.len() >= 2);
+    }
+
+    #[test]
+    fn test_instance_type_spot_pricing() {
+        let instance = InstanceType {
+            name: "p3.16xlarge".to_string(),
+            gpu_count: 8,
+            gpu_type: "V100".to_string(),
+            memory_gb: 488,
+            cpu_cores: 64,
+            network_bandwidth: 25.0,
+            cost_per_hour: 24.48,
+            spot_available: true,
+            spot_discount: 0.7,
+            performance_score: 1.0,
+        };
+        let spot_price = instance.cost_per_hour * (1.0 - instance.spot_discount);
+        assert!(spot_price < instance.cost_per_hour);
+    }
+
+    #[test]
+    fn test_instance_type_no_spot() {
+        let instance = InstanceType {
+            name: "dedicated".to_string(),
+            gpu_count: 4,
+            gpu_type: "H100".to_string(),
+            memory_gb: 256,
+            cpu_cores: 32,
+            network_bandwidth: 100.0,
+            cost_per_hour: 50.0,
+            spot_available: false,
+            spot_discount: 0.0,
+            performance_score: 1.0,
+        };
+        assert!(!instance.spot_available);
+    }
+
+    #[test]
+    fn test_auth_config_with_data() {
+        let mut config_data = HashMap::new();
+        config_data.insert("region".to_string(), "us-east-1".to_string());
+        config_data.insert(
+            "role_arn".to_string(),
+            "arn:aws:iam::role/training".to_string(),
+        );
+        let auth = AuthConfig {
+            auth_type: AuthType::IAMRole,
+            config_data,
+        };
+        assert_eq!(auth.config_data.len(), 2);
+    }
+
     fn create_test_config() -> MultiCloudConfig {
         MultiCloudConfig {
             providers: vec![

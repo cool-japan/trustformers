@@ -683,3 +683,257 @@ pub enum HSMType {
     CloudHSM { endpoint: String },
     Network { url: String },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- EncryptionAlgorithm tests ---
+
+    #[test]
+    fn test_aes256gcm_key_size() {
+        assert_eq!(EncryptionAlgorithm::AES256GCM.key_size(), 32);
+    }
+
+    #[test]
+    fn test_aes256cbc_key_size() {
+        assert_eq!(EncryptionAlgorithm::AES256CBC.key_size(), 32);
+    }
+
+    #[test]
+    fn test_aes128gcm_key_size() {
+        assert_eq!(EncryptionAlgorithm::AES128GCM.key_size(), 16);
+    }
+
+    #[test]
+    fn test_chacha20_key_size() {
+        assert_eq!(EncryptionAlgorithm::ChaCha20Poly1305.key_size(), 32);
+    }
+
+    #[test]
+    fn test_xchacha20_key_size() {
+        assert_eq!(EncryptionAlgorithm::XChaCha20Poly1305.key_size(), 32);
+    }
+
+    #[test]
+    fn test_salsa20_key_size() {
+        assert_eq!(EncryptionAlgorithm::Salsa20.key_size(), 32);
+    }
+
+    #[test]
+    fn test_aes256gcm_nonce_size() {
+        assert_eq!(EncryptionAlgorithm::AES256GCM.nonce_size(), 12);
+    }
+
+    #[test]
+    fn test_aes128gcm_nonce_size() {
+        assert_eq!(EncryptionAlgorithm::AES128GCM.nonce_size(), 12);
+    }
+
+    #[test]
+    fn test_aes256cbc_nonce_size() {
+        assert_eq!(EncryptionAlgorithm::AES256CBC.nonce_size(), 16);
+    }
+
+    #[test]
+    fn test_chacha20_nonce_size() {
+        assert_eq!(EncryptionAlgorithm::ChaCha20Poly1305.nonce_size(), 12);
+    }
+
+    #[test]
+    fn test_xchacha20_nonce_size() {
+        assert_eq!(EncryptionAlgorithm::XChaCha20Poly1305.nonce_size(), 24);
+    }
+
+    #[test]
+    fn test_salsa20_nonce_size() {
+        assert_eq!(EncryptionAlgorithm::Salsa20.nonce_size(), 8);
+    }
+
+    #[test]
+    fn test_aes256gcm_is_authenticated() {
+        assert!(EncryptionAlgorithm::AES256GCM.is_authenticated());
+    }
+
+    #[test]
+    fn test_aes128gcm_is_authenticated() {
+        assert!(EncryptionAlgorithm::AES128GCM.is_authenticated());
+    }
+
+    #[test]
+    fn test_chacha20_is_authenticated() {
+        assert!(EncryptionAlgorithm::ChaCha20Poly1305.is_authenticated());
+    }
+
+    #[test]
+    fn test_xchacha20_is_authenticated() {
+        assert!(EncryptionAlgorithm::XChaCha20Poly1305.is_authenticated());
+    }
+
+    #[test]
+    fn test_aes256cbc_is_not_authenticated() {
+        assert!(!EncryptionAlgorithm::AES256CBC.is_authenticated());
+    }
+
+    #[test]
+    fn test_salsa20_is_not_authenticated() {
+        assert!(!EncryptionAlgorithm::Salsa20.is_authenticated());
+    }
+
+    // --- Default config tests ---
+
+    #[test]
+    fn test_encryption_config_default() {
+        let config = EncryptionConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.default_algorithm, EncryptionAlgorithm::AES256GCM);
+    }
+
+    #[test]
+    fn test_key_management_config_default() {
+        let config = KeyManagementConfig::default();
+        assert!(matches!(config.kms_type, KeyManagementSystem::Internal));
+        assert!(config.hsm.is_none());
+    }
+
+    #[test]
+    fn test_database_encryption_config_default() {
+        let config = DatabaseEncryptionConfig::default();
+        assert!(config.enabled);
+        assert!(matches!(config.scope, DatabaseEncryptionScope::ColumnLevel));
+    }
+
+    #[test]
+    fn test_column_encryption_config_default() {
+        let config = ColumnEncryptionConfig::default();
+        assert!(config.enabled);
+        assert!(config.auto_encrypt_sensitive);
+        assert!(!config.encryption_patterns.is_empty());
+        assert!(config.exclusion_patterns.is_empty());
+    }
+
+    #[test]
+    fn test_table_encryption_config_default() {
+        let config = TableEncryptionConfig::default();
+        assert!(config.encrypted_tables.is_empty());
+        assert!(config.table_algorithm.is_none());
+        assert!(config.key_per_table);
+    }
+
+    #[test]
+    fn test_sensitive_data_detection_default() {
+        let config = SensitiveDataDetection::default();
+        assert!(config.enabled);
+        assert_eq!(config.patterns.len(), 5);
+        assert!((config.confidence_threshold - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_filesystem_encryption_config_default() {
+        let config = FilesystemEncryptionConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.default_algorithm, EncryptionAlgorithm::AES256GCM);
+    }
+
+    #[test]
+    fn test_memory_encryption_config_default() {
+        let config = MemoryEncryptionConfig::default();
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn test_memory_wiping_config_default() {
+        let config = MemoryWipingConfig::default();
+        assert!(config.enabled);
+        assert!(matches!(config.wiping_method, WipingMethod::ZeroFill));
+    }
+
+    #[test]
+    fn test_key_rotation_config_default() {
+        let config = KeyRotationConfig::default();
+        assert!(config.enabled);
+        assert!(matches!(config.rotation_schedule, RotationSchedule::Daily));
+    }
+
+    #[test]
+    fn test_compliance_config_default() {
+        let config = ComplianceConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.standards.len(), 1);
+    }
+
+    #[test]
+    fn test_performance_config_default() {
+        let config = PerformanceConfig::default();
+        assert!(config.enabled);
+    }
+
+    #[test]
+    fn test_hardware_acceleration_default() {
+        let accel = HardwareAcceleration::default();
+        assert!(accel.enabled);
+        assert!(accel.use_aes_ni);
+    }
+
+    #[test]
+    fn test_master_key_config_default() {
+        let config = MasterKeyConfig::default();
+        assert_eq!(config.key_size, 256);
+        assert!(matches!(
+            config.generation_method,
+            KeyGenerationMethod::SecureRandom
+        ));
+        assert!(config.escrow.is_none());
+    }
+
+    #[test]
+    fn test_key_backup_config_default() {
+        let config = KeyBackupConfig::default();
+        assert!(config.enabled);
+        assert!(config.backup_encryption);
+        assert_eq!(config.storage_locations.len(), 1);
+    }
+
+    #[test]
+    fn test_dek_config_default() {
+        let config = DEKConfig::default();
+        assert!(matches!(
+            config.generation_method,
+            DEKGenerationMethod::OnDemand
+        ));
+    }
+
+    #[test]
+    fn test_dek_caching_config_default() {
+        let config = DEKCachingConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.cache_size, 1000);
+        assert!(matches!(config.eviction_policy, EvictionPolicy::LRU));
+    }
+
+    #[test]
+    fn test_dek_lifecycle_config_default() {
+        let config = DEKLifecycleConfig::default();
+        assert!(config.auto_rotation);
+        assert_eq!(config.max_usage_count, Some(1_000_000));
+        assert_eq!(config.rotation_triggers.len(), 2);
+    }
+
+    #[test]
+    fn test_key_derivation_config_default() {
+        let config = KeyDerivationConfig::default();
+        assert!(matches!(config.kdf, KeyDerivationFunction::PBKDF2SHA256));
+        assert_eq!(config.iterations, 100_000);
+    }
+
+    #[test]
+    fn test_salt_config_default() {
+        let config = SaltConfig::default();
+        assert_eq!(config.size, 32);
+        assert!(matches!(
+            config.generation_method,
+            SaltGenerationMethod::SecureRandom
+        ));
+        assert!(matches!(config.storage, SaltStorage::WithData));
+    }
+}

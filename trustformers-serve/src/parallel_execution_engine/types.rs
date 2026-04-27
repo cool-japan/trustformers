@@ -1511,3 +1511,339 @@ pub struct QueueManagementConfig {
     /// Queue compaction interval
     pub compaction_interval: Duration,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0
+        }
+        fn next_f64(&mut self) -> f64 {
+            (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+        }
+        fn next_f32(&mut self) -> f32 {
+            self.next_f64() as f32
+        }
+        fn next_usize(&mut self, bound: usize) -> usize {
+            (self.next_u64() as usize) % bound.max(1)
+        }
+    }
+
+    // ---- Enum variant tests ----
+    #[test]
+    fn test_execution_constraint_type_variants() {
+        let types = [
+            ExecutionConstraintType::Before,
+            ExecutionConstraintType::After,
+            ExecutionConstraintType::CannotExecuteWith,
+            ExecutionConstraintType::RequiresResource,
+            ExecutionConstraintType::Custom("test".to_string()),
+        ];
+        assert_eq!(types.len(), 5);
+    }
+
+    #[test]
+    fn test_pool_item_state_variants() {
+        let states = [
+            PoolItemState::Available,
+            PoolItemState::Allocated,
+            PoolItemState::Maintenance,
+            PoolItemState::Failed,
+        ];
+        assert_eq!(states.len(), 4);
+    }
+
+    #[test]
+    fn test_alert_level_variants() {
+        let levels = [
+            AlertLevel::Info,
+            AlertLevel::Warning,
+            AlertLevel::Error,
+            AlertLevel::Critical,
+        ];
+        assert_eq!(levels.len(), 4);
+    }
+
+    #[test]
+    fn test_execution_session_state_variants() {
+        let states = [
+            ExecutionSessionState::Initializing,
+            ExecutionSessionState::Running,
+            ExecutionSessionState::Paused,
+            ExecutionSessionState::Completing,
+            ExecutionSessionState::Completed,
+            ExecutionSessionState::Failed("error".to_string()),
+        ];
+        assert_eq!(states.len(), 6);
+    }
+
+    #[test]
+    fn test_dependency_node_type_variants() {
+        let types = [
+            DependencyNodeType::Test,
+            DependencyNodeType::Setup,
+            DependencyNodeType::Teardown,
+            DependencyNodeType::ResourceInit,
+            DependencyNodeType::Custom("custom".to_string()),
+        ];
+        assert_eq!(types.len(), 5);
+    }
+
+    #[test]
+    fn test_scheduling_event_type_variants() {
+        let types = [
+            SchedulingEventType::Queued,
+            SchedulingEventType::Scheduled,
+            SchedulingEventType::Started,
+            SchedulingEventType::Completed,
+            SchedulingEventType::Failed,
+            SchedulingEventType::Cancelled,
+            SchedulingEventType::Rescheduled,
+            SchedulingEventType::PriorityAdjusted,
+        ];
+        assert_eq!(types.len(), 8);
+    }
+
+    #[test]
+    fn test_cleanup_policy_variants() {
+        let policies = [
+            CleanupPolicy::Immediate,
+            CleanupPolicy::Delayed(Duration::from_secs(60)),
+            CleanupPolicy::Manual,
+            CleanupPolicy::Custom("rotate".to_string()),
+        ];
+        assert_eq!(policies.len(), 4);
+    }
+
+    #[test]
+    fn test_pool_growth_strategy_variants() {
+        let strategies = [
+            PoolGrowthStrategy::Fixed,
+            PoolGrowthStrategy::OnDemand,
+            PoolGrowthStrategy::Preemptive,
+            PoolGrowthStrategy::Custom("adaptive".to_string()),
+        ];
+        assert_eq!(strategies.len(), 4);
+    }
+
+    #[test]
+    fn test_scheduling_constraint_type_variants() {
+        let types = [
+            SchedulingConstraintType::TimeWindow,
+            SchedulingConstraintType::ResourceAvailability,
+            SchedulingConstraintType::Dependency,
+            SchedulingConstraintType::Priority,
+            SchedulingConstraintType::Custom("custom_constraint".to_string()),
+        ];
+        assert_eq!(types.len(), 5);
+    }
+
+    #[test]
+    fn test_resolution_status_variants() {
+        let statuses = [
+            ResolutionStatus::Success,
+            ResolutionStatus::Failed("timeout".to_string()),
+            ResolutionStatus::Partial,
+        ];
+        assert_eq!(statuses.len(), 3);
+    }
+
+    // ---- Default impl tests ----
+    #[test]
+    fn test_dependency_metrics_default() {
+        let m = DependencyMetrics::default();
+        assert_eq!(m.total_analyzed, 0);
+        assert!((m.cache_hit_rate - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_queue_statistics_default() {
+        let s = QueueStatistics::default();
+        assert_eq!(s.total_enqueued, 0);
+        assert_eq!(s.total_dequeued, 0);
+        assert_eq!(s.current_size, 0);
+    }
+
+    #[test]
+    fn test_dependency_graph_default() {
+        let g = DependencyGraph::default();
+        let formatted = format!("{:?}", g);
+        assert!(formatted.contains("DependencyGraph"));
+    }
+
+    #[test]
+    fn test_dependency_graph_statistics_default() {
+        let s = DependencyGraphStatistics::default();
+        assert_eq!(s.node_count, 0);
+        assert_eq!(s.edge_count, 0);
+        assert!(s.circular_dependencies.is_empty());
+    }
+
+    #[test]
+    fn test_scheduler_metrics_default() {
+        let m = SchedulerMetrics::default();
+        assert_eq!(m.decisions_made, 0);
+        assert!((m.scheduling_accuracy - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_resource_pool_stats_default() {
+        let s = ResourcePoolStats::default();
+        assert_eq!(s.total_allocations, 0);
+        assert_eq!(s.current_allocations, 0);
+        assert_eq!(s.peak_allocations, 0);
+    }
+
+    // ---- Constructor tests ----
+    #[test]
+    fn test_priority_queue_new() {
+        let q: PriorityQueue<String> = PriorityQueue::new();
+        let formatted = format!("{:?}", q);
+        assert!(formatted.contains("PriorityQueue"));
+    }
+
+    // ---- Struct construction tests ----
+    #[test]
+    fn test_rebalancing_config_construction() {
+        let c = RebalancingConfig {
+            enabled: true,
+            interval: Duration::from_secs(30),
+            imbalance_threshold: 0.2,
+            aggressiveness: 0.5,
+            work_stealing: WorkStealingConfig {
+                enabled: true,
+                steal_threshold: 0.7,
+                max_steals_per_interval: 10,
+                steal_timeout: Duration::from_millis(100),
+            },
+        };
+        assert!(c.enabled);
+        assert!(c.work_stealing.enabled);
+    }
+
+    #[test]
+    fn test_resource_pool_config_construction() {
+        let c = ResourcePoolConfig {
+            min_size: 5,
+            max_size: 50,
+            growth_strategy: PoolGrowthStrategy::OnDemand,
+            cleanup_interval: Duration::from_secs(60),
+            item_timeout: Duration::from_secs(300),
+        };
+        assert!(c.max_size > c.min_size);
+    }
+
+    #[test]
+    fn test_adaptive_scheduling_params_construction() {
+        let p = AdaptiveSchedulingParams {
+            learning_rate: 0.01,
+            adaptation_interval: Duration::from_secs(10),
+            history_window: 100,
+            min_confidence: 0.5,
+            max_adaptation_rate: 0.1,
+        };
+        assert!((p.learning_rate - 0.01).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_priority_weights_construction() {
+        let w = PriorityWeights {
+            category_weight: 1.0,
+            duration_weight: 0.8,
+            resource_weight: 0.6,
+            dependency_weight: 1.2,
+            performance_weight: 0.5,
+            failure_rate_weight: 1.5,
+        };
+        assert!(w.failure_rate_weight > w.category_weight);
+    }
+
+    #[test]
+    fn test_resource_requirement_construction() {
+        let r = ResourceRequirement {
+            resource_type: "gpu_device".to_string(),
+            min_amount: 1.0,
+            cpu_cores: 4.0,
+            memory_mb: 8192,
+            gpu_devices: vec![0],
+            network_ports: 2,
+            temp_directories: 1,
+            database_connections: 0,
+            custom_resources: HashMap::new(),
+        };
+        assert_eq!(r.resource_type, "gpu_device");
+        assert_eq!(r.gpu_devices.len(), 1);
+    }
+
+    #[test]
+    fn test_execution_constraint_construction() {
+        let c = ExecutionConstraint {
+            constraint_type: ExecutionConstraintType::RequiresResource,
+            value: "gpu_0".to_string(),
+            priority: 1.0,
+        };
+        assert!((c.priority - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_available_resources_default() {
+        let r = AvailableResources::default();
+        assert!((r.cpu_cores - 0.0).abs() < f32::EPSILON);
+        assert_eq!(r.memory_mb, 0);
+        assert!(r.gpu_devices.is_empty());
+    }
+
+    #[test]
+    fn test_worker_scaling_config_construction() {
+        let c = WorkerScalingConfig {
+            enabled: true,
+            scale_up_threshold: 0.8,
+            scale_down_threshold: 0.3,
+            cooldown_period: Duration::from_secs(60),
+            scaling_factor: 2.0,
+        };
+        assert!(c.scale_up_threshold > c.scale_down_threshold);
+    }
+
+    // ---- LCG-driven tests ----
+    #[test]
+    fn test_lcg_generates_priority_values() {
+        let mut rng = Lcg::new(42);
+        for _ in 0..50 {
+            let priority = rng.next_f32();
+            assert!((0.0..1.0).contains(&priority));
+        }
+    }
+
+    #[test]
+    fn test_lcg_generates_queue_sizes() {
+        let mut rng = Lcg::new(999);
+        for _ in 0..30 {
+            let size = rng.next_usize(1000);
+            assert!(size < 1000);
+        }
+    }
+
+    #[test]
+    fn test_lcg_selects_alert_levels() {
+        let mut rng = Lcg::new(1234);
+        let levels = [
+            AlertLevel::Info,
+            AlertLevel::Warning,
+            AlertLevel::Error,
+            AlertLevel::Critical,
+        ];
+        for _ in 0..20 {
+            let idx = rng.next_usize(levels.len());
+            let formatted = format!("{:?}", levels[idx]);
+            assert!(!formatted.is_empty());
+        }
+    }
+}

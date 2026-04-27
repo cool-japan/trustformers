@@ -381,13 +381,12 @@ impl OfflineModelPackManager {
         output_path: &Path,
         config: &PackCreationConfig,
     ) -> Result<u64> {
-        // Real tar archive implementation
+        use oxiarc_archive::tar::TarWriter;
         use oxiarc_deflate::streaming::GzipStreamEncoder;
-        use tar::Builder;
 
         let file = File::create(output_path)?;
         let encoder = GzipStreamEncoder::new(file, 6);
-        let mut tar_builder = Builder::new(encoder);
+        let mut tar_writer = TarWriter::new(encoder);
 
         // Create pack metadata
         let metadata = serde_json::json!({
@@ -404,15 +403,9 @@ impl OfflineModelPackManager {
 
         // Add metadata file to archive
         let metadata_content = serde_json::to_string_pretty(&metadata)?;
-        let mut metadata_header = tar::Header::new_gnu();
-        metadata_header.set_size(metadata_content.len() as u64);
-        metadata_header.set_mode(0o644);
-        metadata_header.set_cksum();
-        tar_builder.append_data(
-            &mut metadata_header,
-            "pack_metadata.json",
-            std::io::Cursor::new(metadata_content),
-        )?;
+        tar_writer
+            .add_file_with_mode("pack_metadata.json", metadata_content.as_bytes(), 0o644)
+            .map_err(|e| TrustformersError::invalid_input_simple(e.to_string()))?;
 
         // Add each model to the archive
         let mut total_size = 0u64;
@@ -427,25 +420,25 @@ impl OfflineModelPackManager {
             });
 
             let config_content = serde_json::to_string_pretty(&model_config)?;
-            let mut config_header = tar::Header::new_gnu();
-            config_header.set_size(config_content.len() as u64);
-            config_header.set_mode(0o644);
-            config_header.set_cksum();
-
             let model_path = format!("models/{}/config.json", model_id);
             let content_len = config_content.len() as u64;
-            tar_builder.append_data(
-                &mut config_header,
-                &model_path,
-                std::io::Cursor::new(config_content),
-            )?;
+
+            tar_writer
+                .add_file_with_mode(&model_path, config_content.as_bytes(), 0o644)
+                .map_err(|e| TrustformersError::invalid_input_simple(e.to_string()))?;
 
             total_size += content_len;
         }
 
-        // Finalize the archive and flush the gzip encoder
-        let encoder = tar_builder.into_inner()?;
-        encoder.finish()?;
+        // Consume tar_writer, writing the trailing zero blocks and returning the encoder
+        let encoder = tar_writer
+            .into_inner()
+            .map_err(|e| TrustformersError::invalid_input_simple(e.to_string()))?;
+
+        // Flush and finalise the gzip stream
+        encoder
+            .finish()
+            .map_err(|e| TrustformersError::invalid_input_simple(e.to_string()))?;
 
         // Calculate final archive size
         let final_size = output_path.metadata()?.len();
@@ -520,18 +513,53 @@ impl OfflineModelPackManager {
     }
 
     async fn extract_pack(&self, pack_path: &Path, extract_path: &Path) -> Result<()> {
-        // Real tar extraction implementation
+        use oxiarc_archive::tar::TarStreamReader;
         use oxiarc_deflate::streaming::GzipStreamDecoder;
-        use tar::Archive;
+        use std::io::Read as _;
+
+        // TAR typeflag constants
+        const TAR_REGULAR_FILE: u8 = b'0';
+        const TAR_REGULAR_FILE_ALT: u8 = 0;
+        const TAR_DIRECTORY: u8 = b'5';
 
         std::fs::create_dir_all(extract_path)?;
 
         let file = File::open(pack_path)?;
         let decoder = GzipStreamDecoder::new(file);
-        let mut archive = Archive::new(decoder);
+        let mut stream = TarStreamReader::new(decoder);
 
-        // Extract all files from the archive
-        archive.unpack(extract_path)?;
+        // Extract all entries from the archive manually
+        while let Some(mut entry) = stream
+            .next_entry()
+            .map_err(|e| TrustformersError::invalid_input_simple(e.to_string()))?
+        {
+            let entry_name = entry.header.name.clone();
+            let typeflag = entry.header.typeflag;
+
+            // Strip leading "./" or "/" from entry names for safety
+            let sanitized = entry_name.trim_start_matches("./").trim_start_matches('/');
+            let dest = extract_path.join(sanitized);
+
+            match typeflag {
+                TAR_DIRECTORY => {
+                    std::fs::create_dir_all(&dest)?;
+                },
+                TAR_REGULAR_FILE | TAR_REGULAR_FILE_ALT => {
+                    // Ensure parent directories exist
+                    if let Some(parent) = dest.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    let mut out_file = File::create(&dest)?;
+                    let mut buf = Vec::new();
+                    entry
+                        .read_to_end(&mut buf)
+                        .map_err(|e| TrustformersError::invalid_input_simple(e.to_string()))?;
+                    std::io::Write::write_all(&mut out_file, &buf)?;
+                },
+                // Skip symlinks (b'2'), hardlinks (b'1'), and unknown types for security
+                _ => {},
+            }
+        }
 
         // Read the pack metadata that was extracted
         let metadata_path = extract_path.join("pack_metadata.json");
@@ -877,5 +905,337 @@ impl OfflineModelPackManager {
 
         // Use the existing create_pack implementation but with enhanced model info
         self.create_pack(name, description, model_ids, config).await
+    }
+}
+
+// ================================================================================================
+// TESTS
+// ================================================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+
+    fn temp_dir_path() -> std::path::PathBuf {
+        let mut path = env::temp_dir();
+        // Use a deterministic but unique subdirectory using LCG-based pseudo-unique suffix
+        // LCG: seed = PID * 6364136223846793005 + 1442695040888963407
+        let pid = std::process::id() as u64;
+        let suffix = pid.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        path.push(format!("trustformers_test_{}", suffix));
+        path
+    }
+
+    // --- ModelPackMetadata tests ---
+
+    #[test]
+    fn test_model_pack_metadata_fields() {
+        let metadata = ModelPackMetadata {
+            pack_id: "test-pack-id".to_string(),
+            name: "Test Pack".to_string(),
+            description: "A test model pack".to_string(),
+            version: "1.0.0".to_string(),
+            created_at: SystemTime::now(),
+            created_by: "trustformers".to_string(),
+            total_size: 1024 * 1024,
+            models: vec![],
+            dependencies: vec![],
+            target_platforms: vec!["linux".to_string()],
+            checksum: "abc123".to_string(),
+            compression_ratio: 0.75,
+        };
+        assert_eq!(metadata.pack_id, "test-pack-id");
+        assert_eq!(metadata.name, "Test Pack");
+        assert!(!metadata.version.is_empty(), "version should not be empty");
+        assert!(
+            metadata.compression_ratio > 0.0,
+            "compression_ratio should be positive"
+        );
+    }
+
+    #[test]
+    fn test_model_pack_metadata_compression_ratio_bounded() {
+        // Compression ratio should be (0.0, 1.0] for compressed, or > 1.0 for expansion
+        let metadata = ModelPackMetadata {
+            pack_id: "id1".to_string(),
+            name: "Pack".to_string(),
+            description: "desc".to_string(),
+            version: "1.0.0".to_string(),
+            created_at: SystemTime::now(),
+            created_by: "test".to_string(),
+            total_size: 512,
+            models: vec![],
+            dependencies: vec![],
+            target_platforms: vec![],
+            checksum: "abc".to_string(),
+            compression_ratio: 0.65,
+        };
+        assert!(
+            metadata.compression_ratio > 0.0,
+            "compression_ratio should be positive"
+        );
+    }
+
+    // --- PackedModelInfo tests ---
+
+    #[test]
+    fn test_packed_model_info_construction() {
+        let info = PackedModelInfo {
+            model_id: "bert-base-uncased".to_string(),
+            name: "BERT Base Uncased".to_string(),
+            version: "latest".to_string(),
+            original_size: 1024 * 1024 * 440,
+            compressed_size: 1024 * 1024 * 320,
+            model_type: ModelType::TextClassification,
+            framework: "transformers".to_string(),
+            precision: PrecisionType::FP32,
+            metadata: HashMap::new(),
+        };
+        assert_eq!(info.model_id, "bert-base-uncased");
+        assert!(
+            info.compressed_size <= info.original_size,
+            "compressed_size should not exceed original_size after compression"
+        );
+    }
+
+    #[test]
+    fn test_packed_model_info_model_type_variants() {
+        let types = [
+            ModelType::TextGeneration,
+            ModelType::TextClassification,
+            ModelType::ImageClassification,
+            ModelType::SpeechRecognition,
+            ModelType::Translation,
+            ModelType::Summarization,
+            ModelType::QuestionAnswering,
+            ModelType::Multimodal,
+        ];
+        // Verify all variants are constructible
+        assert_eq!(types.len(), 8, "should have 8 ModelType variants");
+    }
+
+    // --- PackCreationConfig tests ---
+
+    #[test]
+    fn test_pack_creation_config_default() {
+        let config = PackCreationConfig::default();
+        assert!(
+            config.compression_level <= 9,
+            "compression_level should be in [0,9]"
+        );
+        assert!(
+            !config.target_platforms.is_empty(),
+            "target_platforms should not be empty by default"
+        );
+        assert!(
+            config.max_pack_size.is_some(),
+            "default max_pack_size should be set"
+        );
+        let max_size = config.max_pack_size.expect("max_pack_size should be set");
+        assert!(max_size > 0, "max_pack_size should be positive");
+    }
+
+    #[test]
+    fn test_pack_creation_config_compression_level_range() {
+        for level in 0u8..=9 {
+            let config = PackCreationConfig {
+                compression_level: level,
+                ..PackCreationConfig::default()
+            };
+            assert!(
+                config.compression_level <= 9,
+                "compression_level {} should be valid (0-9)",
+                config.compression_level
+            );
+        }
+    }
+
+    // --- OfflineModelPackManager construction tests ---
+
+    #[test]
+    fn test_offline_pack_manager_new_creates_directory() {
+        let path = temp_dir_path();
+        let _manager = OfflineModelPackManager::new(&path)
+            .expect("OfflineModelPackManager::new should succeed");
+        assert!(path.exists(), "base directory should be created");
+        std::fs::remove_dir_all(&path).ok();
+    }
+
+    #[test]
+    fn test_offline_pack_manager_list_packs_initially_empty() {
+        let path = temp_dir_path();
+        let manager = OfflineModelPackManager::new(&path)
+            .expect("OfflineModelPackManager::new should succeed");
+        let packs = manager.list_packs();
+        // Initially empty (or from any previously saved registry)
+        let _ = packs.len(); // Just verify no panic
+        std::fs::remove_dir_all(&path).ok();
+    }
+
+    #[test]
+    fn test_offline_pack_manager_get_pack_info_missing_returns_none() {
+        let path = temp_dir_path();
+        let manager = OfflineModelPackManager::new(&path)
+            .expect("OfflineModelPackManager::new should succeed");
+        let info = manager.get_pack_info("non-existent-pack-id");
+        assert!(
+            info.is_none(),
+            "get_pack_info on missing pack should return None"
+        );
+        std::fs::remove_dir_all(&path).ok();
+    }
+
+    // --- Async pack creation tests ---
+
+    #[tokio::test]
+    async fn test_create_pack_returns_pack_id() {
+        let path = temp_dir_path();
+        let mut manager = OfflineModelPackManager::new(&path)
+            .expect("OfflineModelPackManager::new should succeed");
+        let config = PackCreationConfig::default();
+        let pack_id = manager
+            .create_pack(
+                "Test Pack".to_string(),
+                "A test pack for unit testing".to_string(),
+                vec!["gpt2".to_string()],
+                config,
+            )
+            .await
+            .expect("create_pack should succeed");
+        assert!(
+            !pack_id.is_empty(),
+            "create_pack should return non-empty pack_id"
+        );
+        std::fs::remove_dir_all(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn test_create_pack_registers_in_list() {
+        let path = temp_dir_path();
+        let mut manager = OfflineModelPackManager::new(&path)
+            .expect("OfflineModelPackManager::new should succeed");
+        let config = PackCreationConfig::default();
+        let pack_id = manager
+            .create_pack(
+                "Listed Pack".to_string(),
+                "Pack that should appear in listing".to_string(),
+                vec!["bert-base-uncased".to_string()],
+                config,
+            )
+            .await
+            .expect("create_pack should succeed");
+        let packs = manager.list_packs();
+        let found = packs.iter().any(|p| p.pack_id == pack_id);
+        assert!(found, "newly created pack should appear in list_packs()");
+        std::fs::remove_dir_all(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn test_create_pack_metadata_has_model_info() {
+        let path = temp_dir_path();
+        let mut manager = OfflineModelPackManager::new(&path)
+            .expect("OfflineModelPackManager::new should succeed");
+        let config = PackCreationConfig::default();
+        let pack_id = manager
+            .create_pack(
+                "Metadata Test Pack".to_string(),
+                "Testing metadata fields".to_string(),
+                vec!["gpt2".to_string(), "bert-base-uncased".to_string()],
+                config,
+            )
+            .await
+            .expect("create_pack should succeed");
+        let info = manager
+            .get_pack_info(&pack_id)
+            .expect("pack should be retrievable after creation");
+        assert_eq!(info.name, "Metadata Test Pack");
+        assert!(
+            !info.checksum.is_empty(),
+            "pack should have a non-empty integrity checksum"
+        );
+        assert!(info.total_size > 0, "pack should have positive total_size");
+        assert!(
+            !info.models.is_empty(),
+            "pack should contain model information"
+        );
+        std::fs::remove_dir_all(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn test_create_pack_pack_id_is_unique() {
+        let path = temp_dir_path();
+        let mut manager = OfflineModelPackManager::new(&path)
+            .expect("OfflineModelPackManager::new should succeed");
+        let config = PackCreationConfig::default();
+        let id1 = manager
+            .create_pack(
+                "Pack A".to_string(),
+                "First pack".to_string(),
+                vec!["gpt2".to_string()],
+                config.clone(),
+            )
+            .await
+            .expect("first create_pack should succeed");
+        let id2 = manager
+            .create_pack(
+                "Pack B".to_string(),
+                "Second pack".to_string(),
+                vec!["bert-base-uncased".to_string()],
+                config,
+            )
+            .await
+            .expect("second create_pack should succeed");
+        assert_ne!(id1, id2, "each created pack should have a unique pack_id");
+        std::fs::remove_dir_all(&path).ok();
+    }
+
+    // --- PrecisionType tests ---
+
+    #[test]
+    fn test_precision_type_variants_serializable() {
+        let types = [
+            PrecisionType::FP32,
+            PrecisionType::FP16,
+            PrecisionType::INT8,
+            PrecisionType::INT4,
+            PrecisionType::Mixed,
+        ];
+        for precision in &types {
+            let serialized =
+                serde_json::to_string(precision).expect("PrecisionType should be serializable");
+            assert!(
+                !serialized.is_empty(),
+                "serialized precision should not be empty"
+            );
+        }
+    }
+
+    // --- ModelInfo tests ---
+
+    #[test]
+    fn test_model_info_construction() {
+        let info = ModelInfo {
+            model_id: "test/model".to_string(),
+            library_name: Some("transformers".to_string()),
+            pipeline_tag: Some("text-generation".to_string()),
+            tags: vec!["nlp".to_string()],
+            config: HashMap::new(),
+            downloads: Some(5000),
+            likes: Some(200),
+            created_at: None,
+            updated_at: None,
+            author: Some("test-author".to_string()),
+            description: Some("A test model".to_string()),
+            license: Some("apache-2.0".to_string()),
+            task: Some("text-generation".to_string()),
+            language: vec!["en".to_string()],
+            dataset: vec![],
+            model_type: None,
+            architecture: None,
+        };
+        assert_eq!(info.model_id, "test/model");
+        assert_eq!(info.pipeline_tag.as_deref(), Some("text-generation"));
+        assert_eq!(info.downloads, Some(5000));
     }
 }

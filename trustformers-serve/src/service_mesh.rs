@@ -749,4 +749,318 @@ mod tests {
         let state = manager.state.read().await;
         assert_eq!(state.traffic_rules.len(), 1);
     }
+
+    #[test]
+    fn test_default_config() {
+        let config = ServiceMeshConfig::default();
+        assert!(matches!(config.mesh_type, ServiceMeshType::Istio));
+        assert_eq!(config.service_name, "trustformers-serve");
+        assert_eq!(config.namespace, "default");
+        assert_eq!(config.port, 8080);
+        assert!(config.security.mtls_enabled);
+    }
+
+    #[tokio::test]
+    async fn test_unhealthy_status() {
+        let manager = ServiceMeshManager::new(ServiceMeshConfig::default());
+        let result = manager.update_health_status(HealthStatus::Unhealthy).await;
+        assert!(result.is_ok());
+        let state = manager.state.read().await;
+        assert!(matches!(state.health_status, HealthStatus::Unhealthy));
+    }
+
+    #[tokio::test]
+    async fn test_degraded_status() {
+        let manager = ServiceMeshManager::new(ServiceMeshConfig::default());
+        let result = manager.update_health_status(HealthStatus::Warning).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_record_many_requests() {
+        let manager = ServiceMeshManager::new(ServiceMeshConfig::default());
+
+        let mut lcg: u64 = 42;
+        for _ in 0..20 {
+            lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let success = !lcg.is_multiple_of(3); // ~66% success rate
+            let latency_ms = lcg % 500;
+            manager.record_request(success, Duration::from_millis(latency_ms)).await;
+        }
+
+        let metrics = manager.get_metrics().await;
+        assert_eq!(metrics.total_requests, 20);
+        assert!(metrics.successful_requests > 0);
+        assert!(metrics.failed_requests > 0);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_traffic_rules() {
+        let manager = ServiceMeshManager::new(ServiceMeshConfig::default());
+
+        let rules = vec![
+            TrafficRule {
+                id: "route-1".to_string(),
+                rule_type: TrafficRuleType::Routing,
+                conditions: vec![],
+                actions: vec![],
+                priority: 1,
+            },
+            TrafficRule {
+                id: "rate-limit-1".to_string(),
+                rule_type: TrafficRuleType::RateLimit,
+                conditions: vec![],
+                actions: vec![],
+                priority: 2,
+            },
+        ];
+
+        let result = manager.configure_traffic_rules(rules).await;
+        assert!(result.is_ok());
+
+        let state = manager.state.read().await;
+        assert_eq!(state.traffic_rules.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_metrics_initial_state() {
+        let manager = ServiceMeshManager::new(ServiceMeshConfig::default());
+        let metrics = manager.get_metrics().await;
+        assert_eq!(metrics.total_requests, 0);
+        assert_eq!(metrics.successful_requests, 0);
+        assert_eq!(metrics.failed_requests, 0);
+    }
+
+    #[test]
+    fn test_service_mesh_type_debug() {
+        let types = vec![
+            ServiceMeshType::Istio,
+            ServiceMeshType::Linkerd,
+            ServiceMeshType::ConsulConnect,
+            ServiceMeshType::AppMesh,
+            ServiceMeshType::Envoy,
+            ServiceMeshType::Custom {
+                name: "custom".to_string(),
+            },
+        ];
+        for t in types {
+            assert!(!format!("{:?}", t).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_load_balancing_strategy_debug() {
+        let strategies = vec![
+            LoadBalancingStrategy::RoundRobin,
+            LoadBalancingStrategy::LeastConnections,
+            LoadBalancingStrategy::WeightedRoundRobin,
+            LoadBalancingStrategy::IPHash,
+            LoadBalancingStrategy::Random,
+            LoadBalancingStrategy::LeastResponseTime,
+            LoadBalancingStrategy::Custom {
+                algorithm: "test".to_string(),
+            },
+        ];
+        for s in strategies {
+            assert!(!format!("{:?}", s).is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_register_and_metrics() {
+        let manager = ServiceMeshManager::new(ServiceMeshConfig::default());
+        manager.register_service().await.expect("register ok");
+
+        // After registration, do some requests
+        manager.record_request(true, Duration::from_millis(50)).await;
+        manager.record_request(true, Duration::from_millis(100)).await;
+
+        let metrics = manager.get_metrics().await;
+        assert_eq!(metrics.total_requests, 2);
+        assert_eq!(metrics.successful_requests, 2);
+    }
+
+    #[tokio::test]
+    async fn test_empty_traffic_rules() {
+        let manager = ServiceMeshManager::new(ServiceMeshConfig::default());
+        let result = manager.configure_traffic_rules(vec![]).await;
+        assert!(result.is_ok());
+
+        let state = manager.state.read().await;
+        assert!(state.traffic_rules.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_health_check_config() {
+        let config = ServiceMeshConfig::default();
+        assert_eq!(config.health_check.path, "/health");
+        assert_eq!(config.health_check.failure_threshold, 3);
+        assert!(config.health_check.success_threshold > 0);
+    }
+
+    #[tokio::test]
+    async fn test_traffic_rule_types() {
+        let types = vec![
+            TrafficRuleType::Routing,
+            TrafficRuleType::RateLimit,
+            TrafficRuleType::CircuitBreaker,
+            TrafficRuleType::Retry,
+            TrafficRuleType::Timeout,
+        ];
+        for t in types {
+            assert!(!format!("{:?}", t).is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_manager_clone_shares_state() {
+        let manager = ServiceMeshManager::new(ServiceMeshConfig::default());
+        let cloned = manager.clone();
+
+        manager.record_request(true, Duration::from_millis(10)).await;
+
+        let metrics = cloned.get_metrics().await;
+        assert_eq!(metrics.total_requests, 1);
+    }
+
+    #[tokio::test]
+    async fn test_all_success_requests() {
+        let manager = ServiceMeshManager::new(ServiceMeshConfig::default());
+        for _ in 0..10 {
+            manager.record_request(true, Duration::from_millis(50)).await;
+        }
+        let metrics = manager.get_metrics().await;
+        assert_eq!(metrics.total_requests, 10);
+        assert_eq!(metrics.successful_requests, 10);
+        assert_eq!(metrics.failed_requests, 0);
+    }
+
+    #[tokio::test]
+    async fn test_all_failure_requests() {
+        let manager = ServiceMeshManager::new(ServiceMeshConfig::default());
+        for _ in 0..10 {
+            manager.record_request(false, Duration::from_millis(200)).await;
+        }
+        let metrics = manager.get_metrics().await;
+        assert_eq!(metrics.total_requests, 10);
+        assert_eq!(metrics.successful_requests, 0);
+        assert_eq!(metrics.failed_requests, 10);
+    }
+
+    #[test]
+    fn test_traffic_rule_priority() {
+        let rule_a = TrafficRule {
+            id: "a".to_string(),
+            rule_type: TrafficRuleType::Routing,
+            conditions: vec![],
+            actions: vec![],
+            priority: 1,
+        };
+        let rule_b = TrafficRule {
+            id: "b".to_string(),
+            rule_type: TrafficRuleType::RateLimit,
+            conditions: vec![],
+            actions: vec![],
+            priority: 10,
+        };
+        assert!(rule_a.priority < rule_b.priority);
+    }
+
+    #[tokio::test]
+    async fn test_register_twice() {
+        let manager = ServiceMeshManager::new(ServiceMeshConfig::default());
+        manager.register_service().await.expect("first register ok");
+        manager.register_service().await.expect("second register ok");
+        let state = manager.state.read().await;
+        assert!(state.registered);
+    }
+
+    #[tokio::test]
+    async fn test_health_transitions() {
+        let manager = ServiceMeshManager::new(ServiceMeshConfig::default());
+        manager.update_health_status(HealthStatus::Healthy).await.expect("ok");
+        manager.update_health_status(HealthStatus::Warning).await.expect("ok");
+        manager.update_health_status(HealthStatus::Unhealthy).await.expect("ok");
+        manager.update_health_status(HealthStatus::Unknown).await.expect("ok");
+        manager.update_health_status(HealthStatus::Healthy).await.expect("ok");
+    }
+
+    #[test]
+    fn test_health_status_debug() {
+        let statuses = vec![
+            HealthStatus::Healthy,
+            HealthStatus::Unhealthy,
+            HealthStatus::Warning,
+            HealthStatus::Unknown,
+        ];
+        for s in statuses {
+            assert!(!format!("{:?}", s).is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_overwrite_traffic_rules() {
+        let manager = ServiceMeshManager::new(ServiceMeshConfig::default());
+
+        let rules1 = vec![TrafficRule {
+            id: "r1".to_string(),
+            rule_type: TrafficRuleType::Routing,
+            conditions: vec![],
+            actions: vec![],
+            priority: 1,
+        }];
+        manager.configure_traffic_rules(rules1).await.expect("ok");
+
+        let rules2 = vec![
+            TrafficRule {
+                id: "r2".to_string(),
+                rule_type: TrafficRuleType::Timeout,
+                conditions: vec![],
+                actions: vec![],
+                priority: 1,
+            },
+            TrafficRule {
+                id: "r3".to_string(),
+                rule_type: TrafficRuleType::CircuitBreaker,
+                conditions: vec![],
+                actions: vec![],
+                priority: 2,
+            },
+        ];
+        manager.configure_traffic_rules(rules2).await.expect("ok");
+
+        let state = manager.state.read().await;
+        assert_eq!(state.traffic_rules.len(), 2);
+    }
+
+    #[test]
+    fn test_config_serialization() {
+        let config = ServiceMeshConfig::default();
+        let json = serde_json::to_string(&config);
+        assert!(json.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_metric_recording() {
+        let manager = ServiceMeshManager::new(ServiceMeshConfig::default());
+        let m1 = manager.clone();
+        let m2 = manager.clone();
+
+        let h1 = tokio::spawn(async move {
+            for _ in 0..10 {
+                m1.record_request(true, Duration::from_millis(10)).await;
+            }
+        });
+        let h2 = tokio::spawn(async move {
+            for _ in 0..10 {
+                m2.record_request(false, Duration::from_millis(10)).await;
+            }
+        });
+
+        h1.await.expect("join ok");
+        h2.await.expect("join ok");
+
+        let metrics = manager.get_metrics().await;
+        assert_eq!(metrics.total_requests, 20);
+    }
 }

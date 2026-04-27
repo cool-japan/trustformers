@@ -204,12 +204,12 @@ impl SimdTensorOps {
         // Process 4 elements at a time using SIMD
         for i in 0..chunks {
             let idx = i * 4;
-            let a_vec = v128_load(&a[idx..idx + 4] as *const [f32] as *const v128);
-            let b_vec = v128_load(&b[idx..idx + 4] as *const [f32] as *const v128);
+            let a_vec = unsafe { v128_load(&a[idx..idx + 4] as *const [f32] as *const v128) };
+            let b_vec = unsafe { v128_load(&b[idx..idx + 4] as *const [f32] as *const v128) };
             let sum = f32x4_add(a_vec, b_vec);
 
             let mut temp = [0.0f32; 4];
-            v128_store(&mut temp as *mut [f32] as *mut v128, sum);
+            unsafe { v128_store(&mut temp as *mut [f32] as *mut v128, sum) };
             result.extend_from_slice(&temp);
         }
 
@@ -232,12 +232,12 @@ impl SimdTensorOps {
 
         for i in 0..chunks {
             let idx = i * 4;
-            let a_vec = v128_load(&a[idx..idx + 4] as *const [f32] as *const v128);
-            let b_vec = v128_load(&b[idx..idx + 4] as *const [f32] as *const v128);
+            let a_vec = unsafe { v128_load(&a[idx..idx + 4] as *const [f32] as *const v128) };
+            let b_vec = unsafe { v128_load(&b[idx..idx + 4] as *const [f32] as *const v128) };
             let prod = f32x4_mul(a_vec, b_vec);
 
             let mut temp = [0.0f32; 4];
-            v128_store(&mut temp as *mut [f32] as *mut v128, prod);
+            unsafe { v128_store(&mut temp as *mut [f32] as *mut v128, prod) };
             result.extend_from_slice(&temp);
         }
 
@@ -260,11 +260,11 @@ impl SimdTensorOps {
 
         for i in 0..chunks {
             let idx = i * 4;
-            let data_vec = v128_load(&data[idx..idx + 4] as *const [f32] as *const v128);
+            let data_vec = unsafe { v128_load(&data[idx..idx + 4] as *const [f32] as *const v128) };
             let relu_vec = f32x4_max(data_vec, zero_vec);
 
             let mut temp = [0.0f32; 4];
-            v128_store(&mut temp as *mut [f32] as *mut v128, relu_vec);
+            unsafe { v128_store(&mut temp as *mut [f32] as *mut v128, relu_vec) };
             result.extend_from_slice(&temp);
         }
 
@@ -310,8 +310,8 @@ impl SimdTensorOps {
         for i in 0..chunks {
             let idx = i * 4;
             if idx + 4 <= a.len() && idx + 4 <= b.len() {
-                let a_vec = v128_load(&a[idx..idx + 4] as *const [f32] as *const v128);
-                let b_vec = v128_load(&b[idx..idx + 4] as *const [f32] as *const v128);
+                let a_vec = unsafe { v128_load(&a[idx..idx + 4] as *const [f32] as *const v128) };
+                let b_vec = unsafe { v128_load(&b[idx..idx + 4] as *const [f32] as *const v128) };
                 let prod = f32x4_mul(a_vec, b_vec);
                 simd_sum = f32x4_add(simd_sum, prod);
             }
@@ -319,7 +319,7 @@ impl SimdTensorOps {
 
         // Extract components and sum
         let mut temp = [0.0f32; 4];
-        v128_store(&mut temp as *mut [f32] as *mut v128, simd_sum);
+        unsafe { v128_store(&mut temp as *mut [f32] as *mut v128, simd_sum) };
         sum += temp[0] + temp[1] + temp[2] + temp[3];
 
         // Handle remaining elements

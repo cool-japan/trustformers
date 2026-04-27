@@ -1158,4 +1158,190 @@ mod tests {
             NNAPIOperationType::Relu
         );
     }
+
+    #[test]
+    fn test_default_converter_config() {
+        let config = NNAPIConverterConfig::default();
+        assert!(config.target_api_level >= 29);
+        assert!(!config.target_devices.is_empty());
+        assert!(matches!(
+            config.fallback_strategy,
+            FallbackStrategy::CPUFallback
+        ));
+    }
+
+    #[test]
+    fn test_nnapi_target_device_variants() {
+        let devices = vec![
+            NNAPITargetDevice::CPU,
+            NNAPITargetDevice::GPU,
+            NNAPITargetDevice::HexagonDSP,
+            NNAPITargetDevice::EdgeTPU,
+            NNAPITargetDevice::MediaTekAPU,
+            NNAPITargetDevice::SamsungNPU,
+            NNAPITargetDevice::HiSiliconNPU,
+            NNAPITargetDevice::GenericAccelerator,
+        ];
+        assert_eq!(devices.len(), 8);
+    }
+
+    #[test]
+    fn test_nnapi_format_variants() {
+        let formats = vec![
+            NNAPIFormat::Binary,
+            NNAPIFormat::FlatBuffer,
+            NNAPIFormat::TFLite,
+        ];
+        assert_eq!(formats.len(), 3);
+    }
+
+    #[test]
+    fn test_fallback_strategy_variants() {
+        let strategies = vec![
+            FallbackStrategy::Fail,
+            FallbackStrategy::CPUFallback,
+            FallbackStrategy::Partition,
+        ];
+        assert_eq!(strategies.len(), 3);
+    }
+
+    #[test]
+    fn test_quantization_scheme_variants() {
+        let schemes = vec![
+            NNAPIQuantizationScheme::Dynamic,
+            NNAPIQuantizationScheme::FullInteger,
+            NNAPIQuantizationScheme::IntegerWithFloat,
+            NNAPIQuantizationScheme::Float16,
+        ];
+        assert_eq!(schemes.len(), 4);
+    }
+
+    #[test]
+    fn test_calibration_method_variants() {
+        let methods = vec![CalibrationMethod::MinMax];
+        assert_eq!(methods.len(), 1);
+    }
+
+    #[test]
+    fn test_quantization_config_per_channel() {
+        let config = NNAPIQuantizationConfig {
+            scheme: NNAPIQuantizationScheme::FullInteger,
+            calibration: CalibrationConfig {
+                num_samples: 500,
+                method: CalibrationMethod::MinMax,
+                dataset_path: None,
+            },
+            per_channel: false,
+            symmetric: true,
+            quantize_io: false,
+        };
+        assert!(!config.per_channel);
+        assert!(config.symmetric);
+        assert!(!config.quantize_io);
+    }
+
+    #[test]
+    fn test_calibration_config_with_path() {
+        let config = CalibrationConfig {
+            num_samples: 2000,
+            method: CalibrationMethod::MinMax,
+            dataset_path: Some(PathBuf::from("/tmp/calibration_data")),
+        };
+        assert!(config.dataset_path.is_some());
+        assert_eq!(config.num_samples, 2000);
+    }
+
+    #[test]
+    fn test_operation_mapping_matmul() {
+        let config = NNAPIConverterConfig::default();
+        let converter = NNAPIModelConverter::new(config);
+        let result = converter.map_operation_type("MatMul");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_operation_mapping_unknown() {
+        let config = NNAPIConverterConfig::default();
+        let converter = NNAPIModelConverter::new(config);
+        let result = converter.map_operation_type("UnknownOp123");
+        // Unknown operations may map to a fallback or error
+        let _ = result; // Just verify it doesn't panic
+    }
+
+    #[test]
+    fn test_operation_mapping_batch_norm() {
+        let config = NNAPIConverterConfig::default();
+        let converter = NNAPIModelConverter::new(config);
+        let result = converter.map_operation_type("BatchNorm");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_converter_supported_ops_not_empty() {
+        let config = NNAPIConverterConfig::default();
+        let converter = NNAPIModelConverter::new(config);
+        assert!(!converter.operation_validator.supported_ops.is_empty());
+    }
+
+    #[test]
+    fn test_operation_mapping_pooling() {
+        let config = NNAPIConverterConfig::default();
+        let converter = NNAPIModelConverter::new(config);
+        let result = converter.map_operation_type("MaxPool2d");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_operation_mapping_softmax() {
+        let config = NNAPIConverterConfig::default();
+        let converter = NNAPIModelConverter::new(config);
+        let result = converter.map_operation_type("Softmax");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_operation_mapping_add() {
+        let config = NNAPIConverterConfig::default();
+        let converter = NNAPIModelConverter::new(config);
+        let result = converter.map_operation_type("Add");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_converter_with_quantization() {
+        let mut config = NNAPIConverterConfig::default();
+        config.quantization = Some(NNAPIQuantizationConfig {
+            scheme: NNAPIQuantizationScheme::FullInteger,
+            calibration: CalibrationConfig {
+                num_samples: 100,
+                method: CalibrationMethod::MinMax,
+                dataset_path: None,
+            },
+            per_channel: true,
+            symmetric: true,
+            quantize_io: true,
+        });
+        let converter = NNAPIModelConverter::new(config);
+        assert!(!converter.operation_validator.supported_ops.is_empty());
+    }
+
+    #[test]
+    fn test_converter_with_partitioning() {
+        let mut config = NNAPIConverterConfig::default();
+        config.enable_partitioning = true;
+        let converter = NNAPIModelConverter::new(config);
+        assert!(!converter.operation_validator.supported_ops.is_empty());
+    }
+
+    #[test]
+    fn test_nnapi_target_device_equality() {
+        assert_eq!(NNAPITargetDevice::CPU, NNAPITargetDevice::CPU);
+        assert_ne!(NNAPITargetDevice::CPU, NNAPITargetDevice::GPU);
+    }
+
+    #[test]
+    fn test_nnapi_format_equality() {
+        assert_eq!(NNAPIFormat::Binary, NNAPIFormat::Binary);
+        assert_ne!(NNAPIFormat::Binary, NNAPIFormat::TFLite);
+    }
 }

@@ -768,3 +768,181 @@ impl LazyTensor {
         &self.metadata
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::weight_loading::config::{WeightDataType, WeightFormat, WeightLoadingConfig};
+
+    // ── WeightFormat tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_weight_format_equality() {
+        let f1 = WeightFormat::SafeTensors;
+        let f2 = WeightFormat::SafeTensors;
+        assert_eq!(f1, f2);
+    }
+
+    #[test]
+    fn test_weight_format_custom() {
+        let f = WeightFormat::Custom("msgpack".to_string());
+        if let WeightFormat::Custom(name) = &f {
+            assert_eq!(name, "msgpack");
+        } else {
+            panic!("Expected Custom variant");
+        }
+    }
+
+    #[test]
+    fn test_weight_format_hf_bin_ne_safetensors() {
+        assert_ne!(WeightFormat::HuggingFaceBin, WeightFormat::SafeTensors);
+    }
+
+    // ── WeightLoadingConfig tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_weight_loading_config_default() {
+        let cfg = WeightLoadingConfig::default();
+        assert!(!cfg.lazy_loading);
+        assert!(!cfg.memory_mapped);
+        assert!(!cfg.streaming);
+        assert_eq!(cfg.device, "cpu");
+        assert!(cfg.verify_checksums);
+    }
+
+    #[test]
+    fn test_weight_loading_config_lazy_loading_flag() {
+        let cfg = WeightLoadingConfig {
+            lazy_loading: true,
+            ..WeightLoadingConfig::default()
+        };
+        assert!(cfg.lazy_loading);
+    }
+
+    #[test]
+    fn test_weight_loading_config_with_format() {
+        let cfg = WeightLoadingConfig {
+            format: Some(WeightFormat::SafeTensors),
+            ..WeightLoadingConfig::default()
+        };
+        if let Some(WeightFormat::SafeTensors) = &cfg.format {
+            // expected
+        } else {
+            panic!("Expected SafeTensors format");
+        }
+    }
+
+    // ── TensorMetadata tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_tensor_metadata_construction() {
+        let meta = TensorMetadata {
+            shape: vec![128, 256],
+            dtype: WeightDataType::Float32,
+            size_bytes: 128 * 256 * 4,
+            offset: 0,
+        };
+        assert_eq!(meta.shape, vec![128, 256]);
+        assert_eq!(meta.size_bytes, 131072);
+    }
+
+    #[test]
+    fn test_tensor_metadata_clone() {
+        let meta = TensorMetadata {
+            shape: vec![32, 64],
+            dtype: WeightDataType::Float16,
+            size_bytes: 32 * 64 * 2,
+            offset: 1024,
+        };
+        let cloned = meta.clone();
+        assert_eq!(cloned.shape, meta.shape);
+        assert_eq!(cloned.offset, meta.offset);
+    }
+
+    // ── TensorInfo tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_tensor_info_clone() {
+        let info = TensorInfo {
+            dtype: "F32".to_string(),
+            shape: vec![64, 128],
+            data_offsets: [0, 32768],
+        };
+        let cloned = info.clone();
+        assert_eq!(cloned.dtype, "F32");
+        assert_eq!(cloned.shape, vec![64, 128]);
+        assert_eq!(cloned.data_offsets, [0, 32768]);
+    }
+
+    // ── HuggingFaceLoader directory tests ─────────────────────────────────────
+
+    #[test]
+    fn test_huggingface_loader_nonexistent_dir() {
+        let cfg = WeightLoadingConfig::default();
+        let result = HuggingFaceLoader::new("/nonexistent/model/dir", cfg);
+        assert!(
+            result.is_err(),
+            "Expected error for nonexistent model directory"
+        );
+    }
+
+    #[test]
+    fn test_huggingface_loader_empty_dir() {
+        let dir = std::env::temp_dir().join("trustformers_hf_test_empty_dir");
+        let _ = std::fs::create_dir_all(&dir);
+        let cfg = WeightLoadingConfig::default();
+        let result = HuggingFaceLoader::new(&dir, cfg);
+        // Should fail since no weight files are present
+        assert!(
+            result.is_err(),
+            "Expected error for directory with no weight files"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── SafeTensors format tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_safetensors_header_empty() {
+        // Deserializing a minimal empty JSON object
+        let json = r#"{"__metadata__": {}}"#;
+        let result: std::result::Result<SafeTensorsHeader, _> = serde_json::from_str(json);
+        assert!(
+            result.is_ok(),
+            "Empty SafeTensors header parse failed: {:?}",
+            result.err()
+        );
+        let header = result.expect("expected Ok");
+        assert!(header.tensors.is_empty());
+    }
+
+    #[test]
+    fn test_safetensors_header_with_tensor() {
+        let json = r#"{
+            "__metadata__": {"format": "pt"},
+            "model.weight": {"dtype": "F32", "shape": [64, 128], "data_offsets": [0, 32768]}
+        }"#;
+        let result: std::result::Result<SafeTensorsHeader, _> = serde_json::from_str(json);
+        assert!(
+            result.is_ok(),
+            "SafeTensors header parse failed: {:?}",
+            result.err()
+        );
+        let header = result.expect("expected Ok");
+        assert!(header.tensors.contains_key("model.weight"));
+        assert!(header.metadata.is_some());
+    }
+
+    #[test]
+    fn test_safetensors_header_multiple_tensors() {
+        let json = r#"{
+            "layer.0.weight": {"dtype": "F16", "shape": [256, 512], "data_offsets": [0, 262144]},
+            "layer.0.bias": {"dtype": "F32", "shape": [256], "data_offsets": [262144, 263168]}
+        }"#;
+        let result: std::result::Result<SafeTensorsHeader, _> = serde_json::from_str(json);
+        assert!(result.is_ok());
+        let header = result.expect("expected Ok");
+        assert_eq!(header.tensors.len(), 2);
+        assert!(header.metadata.is_none());
+    }
+}

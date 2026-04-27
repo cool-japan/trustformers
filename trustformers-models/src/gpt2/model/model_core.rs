@@ -1212,3 +1212,197 @@ pub struct Gpt2LMOutput {
     pub logits: Tensor,
     pub past_key_values: Option<KVCache>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trustformers_core::traits::Config;
+
+    fn small_gpt2_config() -> Gpt2Config {
+        Gpt2Config {
+            vocab_size: 100,
+            n_positions: 64,
+            n_embd: 32,
+            n_layer: 2,
+            n_head: 4,
+            n_inner: None,
+            activation_function: "gelu".to_string(),
+            resid_pdrop: 0.0,
+            embd_pdrop: 0.0,
+            attn_pdrop: 0.0,
+            layer_norm_epsilon: 1e-5,
+            initializer_range: 0.02,
+            bos_token_id: 50256,
+            eos_token_id: 50256,
+            model_type: "gpt2".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_gpt2_config_default() {
+        let config = Gpt2Config::default();
+        assert_eq!(config.vocab_size, 50257);
+        assert_eq!(config.n_positions, 1024);
+        assert_eq!(config.n_embd, 768);
+        assert_eq!(config.n_layer, 12);
+        assert_eq!(config.n_head, 12);
+    }
+
+    #[test]
+    fn test_gpt2_config_validate() {
+        let config = small_gpt2_config();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_gpt2_model_creation() {
+        let config = small_gpt2_config();
+        let result = Gpt2Model::new(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_gpt2_model_with_device() {
+        let config = small_gpt2_config();
+        let result = Gpt2Model::new_with_device(config, Device::CPU);
+        assert!(result.is_ok());
+        let model = result.expect("model creation should succeed");
+        assert!(matches!(model.device(), Device::CPU));
+    }
+
+    #[test]
+    fn test_gpt2_model_config() {
+        let config = small_gpt2_config();
+        let model = Gpt2Model::new(config.clone()).expect("model creation should succeed");
+        let model_config = model.get_config();
+        assert_eq!(model_config.vocab_size, config.vocab_size);
+        assert_eq!(model_config.n_embd, config.n_embd);
+    }
+
+    #[test]
+    fn test_gpt2_model_num_parameters() {
+        let config = small_gpt2_config();
+        let model = Gpt2Model::new(config).expect("model creation should succeed");
+        assert!(model.num_parameters() > 0);
+    }
+
+    #[test]
+    fn test_gpt2_lm_head_creation() {
+        let config = small_gpt2_config();
+        let result = Gpt2LMHeadModel::new(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_gpt2_lm_head_num_parameters() {
+        let config = small_gpt2_config();
+        let model = Gpt2LMHeadModel::new(config).expect("model creation should succeed");
+        assert!(model.num_parameters() > 0);
+    }
+
+    #[test]
+    fn test_layer_cache_new() {
+        let cache = LayerCache::new();
+        assert!(cache.key.is_none());
+        assert!(cache.value.is_none());
+    }
+
+    #[test]
+    fn test_layer_cache_default() {
+        let cache = LayerCache::default();
+        assert!(cache.key.is_none());
+        assert!(cache.value.is_none());
+    }
+
+    #[test]
+    fn test_kv_cache_new() {
+        let cache = KVCache::new(4);
+        assert_eq!(cache.layers.len(), 4);
+        for layer in &cache.layers {
+            assert!(layer.key.is_none());
+            assert!(layer.value.is_none());
+        }
+    }
+
+    #[test]
+    fn test_kv_cache_zero_layers() {
+        let cache = KVCache::new(0);
+        assert!(cache.layers.is_empty());
+    }
+
+    #[test]
+    fn test_transpose_tensor_2d() {
+        let arr = ArrayD::from_shape_vec(IxDyn(&[2, 3]), vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0])
+            .expect("array creation should succeed");
+        let tensor = Tensor::F32(arr);
+        let result = transpose_tensor(tensor);
+        assert!(result.is_ok());
+        let transposed = result.expect("transpose should succeed");
+        assert_eq!(transposed.shape(), vec![3, 2]);
+    }
+
+    #[test]
+    fn test_transpose_tensor_non_2d_fails() {
+        let arr = ArrayD::from_shape_vec(IxDyn(&[2, 3, 4]), vec![0.0f32; 24])
+            .expect("array creation should succeed");
+        let tensor = Tensor::F32(arr);
+        let result = transpose_tensor(tensor);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_gpt2_model_to_device() {
+        let config = small_gpt2_config();
+        let model = Gpt2Model::new(config).expect("model creation should succeed");
+        let model_cpu = model.to_device(Device::CPU);
+        assert!(matches!(model_cpu.device(), Device::CPU));
+    }
+
+    #[test]
+    fn test_gpt2_config_n_inner_override() {
+        let mut config = small_gpt2_config();
+        config.n_inner = Some(128);
+        let result = Gpt2Model::new(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_gpt2_config_activation_functions() {
+        for activation in &["gelu", "relu", "silu"] {
+            let mut config = small_gpt2_config();
+            config.activation_function = activation.to_string();
+            let result = Gpt2Model::new(config);
+            assert!(result.is_ok(), "Failed with activation: {}", activation);
+        }
+    }
+
+    #[test]
+    fn test_gpt2_lm_head_with_device() {
+        let config = small_gpt2_config();
+        let result = Gpt2LMHeadModel::new_with_device(config, Device::CPU);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_kv_cache_clone() {
+        let cache = KVCache::new(3);
+        let cloned = cache.clone();
+        assert_eq!(cloned.layers.len(), 3);
+    }
+
+    #[test]
+    fn test_layer_cache_clone() {
+        let cache = LayerCache::new();
+        let cloned = cache.clone();
+        assert!(cloned.key.is_none());
+    }
+
+    #[test]
+    fn test_gpt2_model_forward() {
+        let config = small_gpt2_config();
+        let model = Gpt2Model::new(config).expect("model creation should succeed");
+        let input = TokenizedInput::new(vec![1, 2, 3], vec![1, 1, 1]);
+        let result = model.forward(input);
+        assert!(result.is_ok());
+    }
+}

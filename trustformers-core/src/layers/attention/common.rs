@@ -35,7 +35,7 @@ impl AttentionConfig {
         dropout_prob: f32,
         bias: bool,
     ) -> Result<Self> {
-        if hidden_size % num_heads != 0 {
+        if !hidden_size.is_multiple_of(num_heads) {
             return Err(TrustformersError::config_error(
                 &format!(
                     "hidden_size {} must be divisible by num_heads {}",

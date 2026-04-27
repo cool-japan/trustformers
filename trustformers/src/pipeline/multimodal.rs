@@ -852,3 +852,308 @@ where
 {
     MultiModalPipeline::new(model, tokenizer)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- MultiModalConfig tests ----
+
+    #[test]
+    fn test_config_default_values() {
+        let cfg = MultiModalConfig::default();
+        assert_eq!(cfg.max_text_length, 512);
+        assert_eq!(cfg.max_image_size, (224, 224));
+        assert!((cfg.max_audio_duration - 30.0).abs() < 1e-6);
+        assert!(cfg.normalize_inputs);
+        assert!(cfg.cross_modal_attention);
+        assert!((cfg.temperature - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_config_clone() {
+        let cfg = MultiModalConfig {
+            max_text_length: 256,
+            ..MultiModalConfig::default()
+        };
+        assert_eq!(cfg.clone().max_text_length, 256);
+    }
+
+    // ---- AttentionConfig tests ----
+
+    #[test]
+    fn test_attention_config_default() {
+        let acfg = AttentionConfig::default();
+        assert_eq!(acfg.num_heads, 8);
+        assert_eq!(acfg.head_dim, 64);
+        assert!((acfg.dropout - 0.1).abs() < 1e-6);
+        assert!(acfg.use_relative_position);
+        assert_eq!(acfg.max_relative_position, 128);
+    }
+
+    // ---- MultiModalInput tests ----
+
+    #[test]
+    fn test_input_text_only() {
+        let input = MultiModalInput {
+            text: Some("Hello world".to_string()),
+            image: None,
+            audio: None,
+            video: None,
+            metadata: HashMap::new(),
+            modality_weights: None,
+        };
+        assert!(input.text.is_some());
+        assert!(input.image.is_none());
+    }
+
+    #[test]
+    fn test_input_image_plus_text() {
+        let input = MultiModalInput {
+            text: Some("Describe this image".to_string()),
+            image: Some(vec![0u8; 100]),
+            audio: None,
+            video: None,
+            metadata: HashMap::new(),
+            modality_weights: None,
+        };
+        assert!(input.text.is_some());
+        assert!(input.image.is_some());
+    }
+
+    #[test]
+    fn test_input_multimodality_flags() {
+        let input = MultiModalInput {
+            text: Some("text".to_string()),
+            image: Some(vec![1, 2, 3]),
+            audio: Some(vec![4, 5, 6]),
+            video: None,
+            metadata: HashMap::new(),
+            modality_weights: None,
+        };
+        let mut modalities = Vec::new();
+        if input.text.is_some() {
+            modalities.push("text");
+        }
+        if input.image.is_some() {
+            modalities.push("image");
+        }
+        if input.audio.is_some() {
+            modalities.push("audio");
+        }
+        if input.video.is_some() {
+            modalities.push("video");
+        }
+        assert_eq!(modalities.len(), 3);
+    }
+
+    // ---- TextProcessor tests ----
+
+    #[test]
+    fn test_text_processor_produces_features() {
+        let processor = TextProcessor::new();
+        let cfg = MultiModalConfig::default();
+        let features =
+            processor.process("Hello world test", &cfg).expect("text processing succeeded");
+        // 3 tokens → 3 feature vectors
+        assert_eq!(features.len(), 3);
+        assert_eq!(features[0].len(), 768); // embedding dim
+    }
+
+    #[test]
+    fn test_text_processor_respects_max_length() {
+        let processor = TextProcessor::new();
+        let cfg = MultiModalConfig {
+            max_text_length: 2,
+            ..MultiModalConfig::default()
+        };
+        let text = "one two three four five";
+        let features = processor.process(text, &cfg).expect("text processing succeeded");
+        assert!(features.len() <= 2);
+    }
+
+    #[test]
+    fn test_text_processor_empty_text() {
+        let processor = TextProcessor::new();
+        let cfg = MultiModalConfig::default();
+        let features = processor.process("", &cfg).expect("empty text processing succeeded");
+        assert!(features.is_empty());
+    }
+
+    // ---- ImageProcessor tests ----
+
+    #[test]
+    fn test_image_processor_produces_patch_features() {
+        let processor = ImageProcessor::new();
+        let cfg = MultiModalConfig::default();
+        let dummy_image = vec![0u8; 224 * 224 * 3];
+        let features = processor.process(&dummy_image, &cfg).expect("image processing succeeded");
+        // 224/16 * 224/16 = 14 * 14 = 196 patches
+        assert_eq!(features.len(), 196);
+        assert_eq!(features[0].len(), 768);
+    }
+
+    #[test]
+    fn test_image_processor_feature_dimensionality() {
+        let processor = ImageProcessor::new();
+        let cfg = MultiModalConfig {
+            max_image_size: (32, 32),
+            ..MultiModalConfig::default()
+        };
+        let dummy = vec![0u8; 32 * 32 * 3];
+        let features = processor.process(&dummy, &cfg).expect("ok");
+        // 32/16 * 32/16 = 4 patches
+        assert_eq!(features.len(), 4);
+    }
+
+    // ---- AudioProcessor tests ----
+
+    #[test]
+    fn test_audio_processor_produces_frames() {
+        let processor = AudioProcessor::new();
+        let cfg = MultiModalConfig {
+            max_audio_duration: 1.0,
+            ..MultiModalConfig::default()
+        };
+        let dummy_audio = vec![0u8; 16000];
+        let features = processor.process(&dummy_audio, &cfg).expect("audio processing succeeded");
+        assert!(!features.is_empty());
+        assert_eq!(features[0].len(), 128); // spectral dims
+    }
+
+    // ---- FusionLayer tests ----
+
+    #[test]
+    fn test_fusion_concatenation_non_empty() {
+        let fusion = FusionLayer::new();
+        let cfg = MultiModalConfig {
+            fusion_strategy: FusionStrategy::Concatenation,
+            ..MultiModalConfig::default()
+        };
+        let features = ModalityFeatures {
+            text_features: Some(vec![vec![0.1; 768]; 3]),
+            image_features: None,
+            audio_features: None,
+            video_features: None,
+            feature_dims: HashMap::new(),
+            attention_masks: HashMap::new(),
+        };
+        let fused = fusion.fuse(&features, &cfg).expect("fusion succeeded");
+        assert!(!fused.is_empty());
+    }
+
+    #[test]
+    fn test_fusion_addition_with_two_modalities() {
+        let fusion = FusionLayer::new();
+        let cfg = MultiModalConfig {
+            fusion_strategy: FusionStrategy::Addition,
+            ..MultiModalConfig::default()
+        };
+        let features = ModalityFeatures {
+            text_features: Some(vec![vec![1.0; 768]]),
+            image_features: Some(vec![vec![2.0; 768]]),
+            audio_features: None,
+            video_features: None,
+            feature_dims: HashMap::new(),
+            attention_masks: HashMap::new(),
+        };
+        let fused = fusion.fuse(&features, &cfg).expect("fusion succeeded");
+        assert_eq!(fused.len(), 1);
+        // Average of 1.0 and 2.0 should be 1.5
+        assert!(
+            (fused[0][0] - 1.5).abs() < 1e-4,
+            "expected 1.5, got {}",
+            fused[0][0]
+        );
+    }
+
+    #[test]
+    fn test_fusion_weighted_average() {
+        let fusion = FusionLayer::new();
+        let cfg = MultiModalConfig {
+            fusion_strategy: FusionStrategy::WeightedAverage,
+            ..MultiModalConfig::default()
+        };
+        let features = ModalityFeatures {
+            text_features: Some(vec![vec![1.0; 768]]),
+            image_features: Some(vec![vec![1.0; 768]]),
+            audio_features: None,
+            video_features: None,
+            feature_dims: HashMap::new(),
+            attention_masks: HashMap::new(),
+        };
+        let fused = fusion.fuse(&features, &cfg).expect("fusion succeeded");
+        assert!(!fused.is_empty());
+    }
+
+    // ---- Cross-attention weights tests ----
+
+    #[test]
+    fn test_attention_weights_normalised() {
+        // compute_attention_weights normalises to sum 1 per query
+        let query = vec![vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0]];
+        let key = vec![
+            vec![1.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 1.0],
+        ];
+
+        // Reproduce the logic inline
+        let mut attention_weights = Vec::new();
+        for q in &query {
+            let mut q_weights = Vec::new();
+            for k in &key {
+                let dot: f32 = q.iter().zip(k.iter()).map(|(a, b)| a * b).sum();
+                let score = (dot / (q.len() as f32).sqrt()).exp();
+                q_weights.push(score);
+            }
+            let sum: f32 = q_weights.iter().sum();
+            if sum > 0.0 {
+                q_weights.iter_mut().for_each(|w| *w /= sum);
+            }
+            attention_weights.push(q_weights);
+        }
+
+        for row in &attention_weights {
+            let sum: f32 = row.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-5, "row sum = {}", sum);
+        }
+    }
+
+    #[test]
+    fn test_cross_modal_similarity_range() {
+        // cosine similarity must be in [-1, 1]
+        let a = [1.0_f32, 0.0, 0.0];
+        let b = [0.0_f32, 1.0, 0.0];
+        let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+        let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let sim = if na > 0.0 && nb > 0.0 { dot / (na * nb) } else { 0.0 };
+        assert!((-1.0..=1.0).contains(&sim), "sim = {}", sim);
+    }
+
+    // ---- Output format tests ----
+
+    #[test]
+    fn test_classification_result_score_in_range() {
+        let result = ClassificationResult {
+            label: "positive".to_string(),
+            score: 0.85,
+            modality_contributions: HashMap::new(),
+        };
+        assert!(result.score >= 0.0 && result.score <= 1.0);
+    }
+
+    #[test]
+    fn test_processing_metadata_modalities_list() {
+        let meta = ProcessingMetadata {
+            processing_time_ms: 42,
+            modalities_used: vec!["text".to_string(), "image".to_string()],
+            fusion_strategy_used: "Concatenation".to_string(),
+            model_confidence: 0.85,
+            feature_extraction_time_ms: HashMap::new(),
+        };
+        assert_eq!(meta.modalities_used.len(), 2);
+        assert!(meta.modalities_used.contains(&"text".to_string()));
+    }
+}

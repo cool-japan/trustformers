@@ -1172,4 +1172,167 @@ mod tests {
         assert!(report.current_stability_score >= 0.0);
         assert!(report.confidence_level >= 0.0);
     }
+
+    // ── Additional tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_config_default_prediction_horizon_positive() {
+        let cfg = AdvancedStabilityConfig::default();
+        assert!(cfg.prediction_horizon > 0);
+    }
+
+    #[test]
+    fn test_config_default_pattern_window_positive() {
+        let cfg = AdvancedStabilityConfig::default();
+        assert!(cfg.pattern_window_size > 0);
+    }
+
+    #[test]
+    fn test_config_default_confidence_threshold_range() {
+        let cfg = AdvancedStabilityConfig::default();
+        assert!(cfg.prediction_confidence_threshold >= 0.0);
+        assert!(cfg.prediction_confidence_threshold <= 1.0);
+    }
+
+    #[test]
+    fn test_config_default_stability_threshold_range() {
+        let cfg = AdvancedStabilityConfig::default();
+        assert!(cfg.stability_threshold >= 0.0);
+        assert!(cfg.stability_threshold <= 1.0);
+    }
+
+    #[test]
+    fn test_config_predictive_detection_enabled_default() {
+        let cfg = AdvancedStabilityConfig::default();
+        assert!(
+            cfg.predictive_detection,
+            "predictive_detection should be true by default"
+        );
+    }
+
+    #[test]
+    fn test_config_adaptive_recovery_default_true() {
+        let cfg = AdvancedStabilityConfig::default();
+        assert!(cfg.adaptive_recovery);
+    }
+
+    #[test]
+    fn test_trend_direction_increasing() {
+        let cfg = AdvancedStabilityConfig::default();
+        let monitor = AdvancedStabilityMonitor::new(cfg);
+        let values: VecDeque<f32> = vec![0.6, 0.7, 0.8, 0.9, 1.0].into();
+        let trend = monitor.compute_trend(&values);
+        assert!(matches!(trend, TrendDirection::Increasing));
+    }
+
+    #[test]
+    fn test_trend_direction_stable() {
+        let cfg = AdvancedStabilityConfig::default();
+        let monitor = AdvancedStabilityMonitor::new(cfg);
+        let values: VecDeque<f32> = vec![0.5, 0.5, 0.5, 0.5, 0.5].into();
+        let trend = monitor.compute_trend(&values);
+        assert!(matches!(trend, TrendDirection::Stable));
+    }
+
+    #[test]
+    fn test_risk_level_variants_exist() {
+        let _ = RiskLevel::Low;
+        let _ = RiskLevel::Medium;
+        let _ = RiskLevel::High;
+        let _ = RiskLevel::Critical;
+    }
+
+    #[test]
+    fn test_predicted_anomaly_type_variants() {
+        let _ = PredictedAnomalyType::GradientExplosion;
+        let _ = PredictedAnomalyType::GradientVanishing;
+        let _ = PredictedAnomalyType::TrainingStagnation;
+        let _ = PredictedAnomalyType::ConvergenceFailure;
+    }
+
+    #[test]
+    fn test_analyze_step_with_gradient_norms() {
+        let cfg = AdvancedStabilityConfig::default();
+        let mut monitor = AdvancedStabilityMonitor::new(cfg);
+        let gradients: HashMap<String, Tensor> = HashMap::new();
+        let result = monitor.analyze_step(1, 0.8, 0.4, 0.001, &gradients);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_analyze_multiple_steps_accumulates_history() {
+        let cfg = AdvancedStabilityConfig::default();
+        let mut monitor = AdvancedStabilityMonitor::new(cfg);
+        let gradients: HashMap<String, Tensor> = HashMap::new();
+        let mut s = 42u64;
+        for step in 0..5usize {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let loss = (s % 1000) as f32 / 1000.0 + 0.1;
+            let _ = monitor.analyze_step(step, loss, 0.5, 0.001, &gradients);
+        }
+        assert!(
+            !monitor.loss_history.is_empty(),
+            "loss history should be populated"
+        );
+    }
+
+    #[test]
+    fn test_stability_report_score_non_negative() {
+        let cfg = AdvancedStabilityConfig::default();
+        let mut monitor = AdvancedStabilityMonitor::new(cfg);
+        let gradients: HashMap<String, Tensor> = HashMap::new();
+        for step in 0..3 {
+            let _ = monitor.analyze_step(step, 1.0 - step as f32 * 0.1, 0.5, 0.001, &gradients);
+        }
+        let report = monitor.get_stability_report();
+        assert!(report.current_stability_score >= 0.0);
+        assert!(report.current_stability_score <= 1.0 + f32::EPSILON);
+    }
+
+    #[test]
+    fn test_stability_report_confidence_bounded() {
+        let cfg = AdvancedStabilityConfig::default();
+        let monitor = AdvancedStabilityMonitor::new(cfg);
+        let report = monitor.get_stability_report();
+        assert!(report.confidence_level >= 0.0 && report.confidence_level <= 1.0);
+    }
+
+    #[test]
+    fn test_stability_score_struct_bounds() {
+        let score = StabilityScore {
+            overall_score: 0.75,
+            gradient_stability: 0.8,
+            loss_stability: 0.7,
+            convergence_stability: 0.75,
+            numerical_stability: 0.8,
+            recommendations: vec![],
+        };
+        assert!(score.overall_score >= 0.0 && score.overall_score <= 1.0);
+        assert!(score.gradient_stability >= 0.0);
+    }
+
+    #[test]
+    fn test_training_dynamics_struct_creation() {
+        let td = TrainingDynamics {
+            loss_trend: TrendDirection::Decreasing,
+            gradient_trend: TrendDirection::Stable,
+            lr_effectiveness: 0.8,
+            convergence_velocity: 0.5,
+            oscillation_frequency: 0.1,
+            phase_trajectory: vec![(1.0, 0.5), (0.9, 0.4)],
+        };
+        assert!(!td.phase_trajectory.is_empty());
+        assert!(matches!(td.loss_trend, TrendDirection::Decreasing));
+    }
+
+    #[test]
+    fn test_analyze_step_extreme_loss_nan_handled() {
+        let cfg = AdvancedStabilityConfig::default();
+        let mut monitor = AdvancedStabilityMonitor::new(cfg);
+        let gradients = HashMap::new();
+        // NaN loss should return an error or handle gracefully
+        let result = monitor.analyze_step(0, f32::NAN, 0.5, 0.001, &gradients);
+        // Either error or ok — just should not panic
+        let _ = result;
+    }
 }

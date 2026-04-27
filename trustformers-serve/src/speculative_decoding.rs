@@ -888,4 +888,317 @@ mod tests {
             deserialized.average_acceptance_rate
         );
     }
+
+    #[tokio::test]
+    async fn test_decoder_initial_speculation_length() {
+        let config = SpeculativeDecodingConfig {
+            max_speculation_length: 10,
+            min_speculation_length: 2,
+            ..Default::default()
+        };
+        let decoder = SpeculativeDecoder::new(config);
+        let stats = decoder.get_stats().await;
+        // initial length should be midpoint: (10 + 2) / 2 = 6
+        assert_eq!(stats.current_speculation_length, 6);
+    }
+
+    #[tokio::test]
+    async fn test_stats_reset() {
+        let config = SpeculativeDecodingConfig {
+            adaptive_speculation: false,
+            ..Default::default()
+        };
+        let decoder = SpeculativeDecoder::new(config);
+        let draft_model = MockDraftModel::new(vec![1, 2, 3, 4]);
+        let target_model = MockTargetModel::new(1.0);
+
+        decoder
+            .generate(&[100], 4, &draft_model, &target_model)
+            .await
+            .expect("generation should succeed");
+
+        let stats_before = decoder.get_stats().await;
+        assert!(stats_before.total_sequences > 0);
+
+        decoder.reset_stats().await;
+
+        let stats_after = decoder.get_stats().await;
+        assert_eq!(stats_after.total_sequences, 0);
+        assert_eq!(stats_after.total_draft_tokens, 0);
+        assert_eq!(stats_after.total_accepted_tokens, 0);
+    }
+
+    #[tokio::test]
+    async fn test_verification_result_structure() {
+        let result = VerificationResult {
+            accepted_count: 3,
+            rejected_position: Some(3),
+            target_logits: vec![0.1, 0.2, 0.3],
+            accepted_tokens: vec![10, 20, 30],
+            correction_token: Some(99),
+        };
+        assert_eq!(result.accepted_count, 3);
+        assert_eq!(result.accepted_tokens.len(), 3);
+        assert!(result.correction_token.is_some());
+        if let Some(pos) = result.rejected_position {
+            assert_eq!(pos, 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_draft_token_fields() {
+        let token = DraftToken {
+            token_id: 42,
+            logit: 3.5,
+            probability: 0.9,
+            timestamp: Instant::now(),
+        };
+        assert_eq!(token.token_id, 42);
+        assert!((token.logit - 3.5).abs() < 1e-6);
+        assert!((token.probability - 0.9).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn test_model_info_structure() {
+        let draft_model = MockDraftModel::new(vec![1]);
+        let info = draft_model.model_info();
+        assert_eq!(info.name, "MockDraft");
+        assert_eq!(info.vocab_size, 32000);
+        assert_eq!(info.context_length, 2048);
+    }
+
+    #[tokio::test]
+    async fn test_manager_remove_decoder() {
+        let config = SpeculativeDecodingConfig::default();
+        let manager = SpeculativeDecodingManager::new(config);
+
+        let _ = manager.get_decoder("session_x").await;
+        let all_stats = manager.get_all_stats().await;
+        assert_eq!(all_stats.len(), 1);
+
+        let removed = manager.remove_decoder("session_x").await;
+        assert!(removed.is_some());
+
+        let all_stats_after = manager.get_all_stats().await;
+        assert_eq!(all_stats_after.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_manager_remove_nonexistent_decoder() {
+        let config = SpeculativeDecodingConfig::default();
+        let manager = SpeculativeDecodingManager::new(config);
+
+        let removed = manager.remove_decoder("nonexistent_session").await;
+        assert!(removed.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_stats_empty() {
+        let config = SpeculativeDecodingConfig::default();
+        let manager = SpeculativeDecodingManager::new(config);
+
+        let agg = manager.get_aggregate_stats().await;
+        assert_eq!(agg.total_sequences, 0);
+        assert_eq!(agg.total_draft_tokens, 0);
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_stats_multiple_sessions() {
+        let config = SpeculativeDecodingConfig {
+            adaptive_speculation: false,
+            ..Default::default()
+        };
+        let manager = SpeculativeDecodingManager::new(config);
+
+        let draft_model = MockDraftModel::new(vec![1, 2, 3, 4]);
+        let target_model = MockTargetModel::new(1.0);
+
+        let decoder1 = manager.get_decoder("s1").await;
+        let decoder2 = manager.get_decoder("s2").await;
+
+        decoder1
+            .generate(&[1], 2, &draft_model, &target_model)
+            .await
+            .expect("generation should succeed");
+        decoder2
+            .generate(&[2], 2, &draft_model, &target_model)
+            .await
+            .expect("generation should succeed");
+
+        let agg = manager.get_aggregate_stats().await;
+        assert_eq!(agg.total_sequences, 2);
+    }
+
+    #[tokio::test]
+    async fn test_config_default_values() {
+        let config = SpeculativeDecodingConfig::default();
+        assert_eq!(config.max_speculation_length, 8);
+        assert_eq!(config.min_speculation_length, 2);
+        assert!((config.target_acceptance_rate - 0.7).abs() < 1e-6);
+        assert_eq!(config.acceptance_rate_window, 100);
+        assert!((config.temperature - 1.0).abs() < 1e-6);
+        assert!(config.adaptive_speculation);
+        assert_eq!(config.draft_timeout_ms, 50);
+        assert_eq!(config.target_timeout_ms, 200);
+        assert!(config.parallel_execution);
+        assert!(config.enable_verification_cache);
+        assert_eq!(config.verification_cache_size, 10000);
+    }
+
+    #[tokio::test]
+    async fn test_stats_default_values() {
+        let stats = SpeculativeStats::default();
+        assert_eq!(stats.total_sequences, 0);
+        assert_eq!(stats.total_draft_tokens, 0);
+        assert_eq!(stats.total_accepted_tokens, 0);
+        assert_eq!(stats.total_rejected_tokens, 0);
+        assert!((stats.average_acceptance_rate - 0.0).abs() < 1e-6);
+        assert_eq!(stats.current_speculation_length, 4);
+        assert_eq!(stats.cache_hits, 0);
+        assert_eq!(stats.cache_misses, 0);
+        assert_eq!(stats.adaptive_adjustments, 0);
+    }
+
+    #[tokio::test]
+    async fn test_context_hash_consistency() {
+        let config = SpeculativeDecodingConfig::default();
+        let decoder = SpeculativeDecoder::new(config);
+        let context = vec![1u32, 2, 3, 4, 5];
+        let hash1 = decoder.compute_context_hash(&context);
+        let hash2 = decoder.compute_context_hash(&context);
+        assert_eq!(hash1, hash2);
+    }
+
+    #[tokio::test]
+    async fn test_context_hash_different_contexts() {
+        let config = SpeculativeDecodingConfig::default();
+        let decoder = SpeculativeDecoder::new(config);
+        let context_a = vec![1u32, 2, 3];
+        let context_b = vec![4u32, 5, 6];
+        let hash_a = decoder.compute_context_hash(&context_a);
+        let hash_b = decoder.compute_context_hash(&context_b);
+        assert_ne!(hash_a, hash_b);
+    }
+
+    #[tokio::test]
+    async fn test_cache_stats_update() {
+        let config = SpeculativeDecodingConfig {
+            enable_verification_cache: false,
+            adaptive_speculation: false,
+            ..Default::default()
+        };
+        let decoder = SpeculativeDecoder::new(config);
+
+        // Manually trigger cache stats via the public update method
+        decoder.update_cache_stats(true).await;
+        decoder.update_cache_stats(true).await;
+        decoder.update_cache_stats(false).await;
+
+        let stats = decoder.get_stats().await;
+        assert_eq!(stats.cache_hits, 2);
+        assert_eq!(stats.cache_misses, 1);
+    }
+
+    #[tokio::test]
+    async fn test_generate_with_zero_context() {
+        let config = SpeculativeDecodingConfig {
+            adaptive_speculation: false,
+            ..Default::default()
+        };
+        let decoder = SpeculativeDecoder::new(config);
+        let draft_model = MockDraftModel::new(vec![1, 2]);
+        let target_model = MockTargetModel::new(1.0);
+
+        let generated = decoder.generate(&[], 2, &draft_model, &target_model).await;
+        assert!(generated.is_ok());
+        let tokens = generated.expect("generation should succeed");
+        assert_eq!(tokens.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_generate_max_new_tokens_zero() {
+        let config = SpeculativeDecodingConfig::default();
+        let decoder = SpeculativeDecoder::new(config);
+        let draft_model = MockDraftModel::new(vec![1, 2, 3]);
+        let target_model = MockTargetModel::new(1.0);
+
+        let generated = decoder.generate(&[100], 0, &draft_model, &target_model).await;
+        assert!(generated.is_ok());
+        let tokens = generated.expect("generation should succeed");
+        assert_eq!(tokens.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_partial_acceptance() {
+        let config = SpeculativeDecodingConfig {
+            max_speculation_length: 4,
+            min_speculation_length: 2,
+            adaptive_speculation: false,
+            ..Default::default()
+        };
+        let decoder = SpeculativeDecoder::new(config);
+        let draft_model = MockDraftModel::new(vec![10, 20, 30, 40]);
+        let target_model = MockTargetModel::new(0.5); // 50% acceptance
+
+        let generated = decoder.generate(&[1, 2], 4, &draft_model, &target_model).await;
+        assert!(generated.is_ok());
+        let tokens = generated.expect("generation should succeed");
+        assert!(tokens.len() <= 4);
+        assert!(!tokens.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_stats_incremented_across_sequences() {
+        let config = SpeculativeDecodingConfig {
+            adaptive_speculation: false,
+            ..Default::default()
+        };
+        let decoder = SpeculativeDecoder::new(config);
+        let draft_model = MockDraftModel::new(vec![1, 2]);
+        let target_model = MockTargetModel::new(1.0);
+
+        for _ in 0..3 {
+            decoder
+                .generate(&[100], 2, &draft_model, &target_model)
+                .await
+                .expect("generation should succeed");
+        }
+
+        let stats = decoder.get_stats().await;
+        assert_eq!(stats.total_sequences, 3);
+        assert!(stats.total_draft_tokens > 0);
+    }
+
+    #[tokio::test]
+    async fn test_manager_session_isolation() {
+        let config = SpeculativeDecodingConfig {
+            adaptive_speculation: false,
+            ..Default::default()
+        };
+        let manager = SpeculativeDecodingManager::new(config);
+
+        let draft_model = MockDraftModel::new(vec![1, 2, 3]);
+        let target_model = MockTargetModel::new(1.0);
+
+        let decoder_a = manager.get_decoder("alpha").await;
+        decoder_a
+            .generate(&[1], 3, &draft_model, &target_model)
+            .await
+            .expect("generation should succeed");
+
+        let decoder_b = manager.get_decoder("beta").await;
+        let stats_b = decoder_b.get_stats().await;
+
+        // beta session should have no sequences run
+        assert_eq!(stats_b.total_sequences, 0);
+    }
+
+    #[tokio::test]
+    async fn test_model_info_target() {
+        let target_model = MockTargetModel::new(0.5);
+        let info = target_model.model_info();
+        assert_eq!(info.name, "MockTarget");
+        assert_eq!(info.parameters, 70_000_000_000);
+        assert_eq!(info.context_length, 4096);
+    }
 }

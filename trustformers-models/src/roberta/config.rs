@@ -67,7 +67,7 @@ impl RobertaConfig {
 
 impl Config for RobertaConfig {
     fn validate(&self) -> Result<()> {
-        if self.hidden_size % self.num_attention_heads != 0 {
+        if !self.hidden_size.is_multiple_of(self.num_attention_heads) {
             return Err(trustformers_core::errors::invalid_config(
                 "hidden_size",
                 format!(

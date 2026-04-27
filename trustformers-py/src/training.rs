@@ -12,7 +12,7 @@ use trustformers_training::{
 };
 
 /// Python wrapper for TrainingArguments
-#[pyclass(name = "TrainingArguments")]
+#[pyclass(name = "TrainingArguments", from_py_object)]
 #[derive(Clone)]
 pub struct PyTrainingArguments {
     inner: TrainingArguments,
@@ -317,7 +317,7 @@ impl PyTrainer {
 }
 
 /// Loss function types
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Copy)]
 pub enum PyLossFunction {
     CrossEntropy,

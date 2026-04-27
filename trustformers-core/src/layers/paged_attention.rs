@@ -123,7 +123,7 @@ impl PagedAttention {
         page_size: usize,
         max_pages: usize,
     ) -> Result<Self> {
-        if hidden_size % num_heads != 0 {
+        if !hidden_size.is_multiple_of(num_heads) {
             return Err(TrustformersError::invalid_config(format!(
                 "hidden_size {} must be divisible by num_heads {}",
                 hidden_size, num_heads

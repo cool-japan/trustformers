@@ -119,7 +119,7 @@ impl StatisticalAnalyzer {
         sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let n = data.len() as f64;
         let mean = data.iter().sum::<f64>() / n;
-        let median = if sorted_data.len() % 2 == 0 {
+        let median = if sorted_data.len().is_multiple_of(2) {
             (sorted_data[sorted_data.len() / 2 - 1] + sorted_data[sorted_data.len() / 2]) / 2.0
         } else {
             sorted_data[sorted_data.len() / 2]
@@ -179,7 +179,7 @@ impl StatisticalAnalyzer {
         let mean = data.iter().copied().sum::<f64>() / data.len() as f64;
         let mut sorted = data.to_vec();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median = if sorted.len() % 2 == 0 {
+        let median = if sorted.len().is_multiple_of(2) {
             let mid = sorted.len() / 2;
             (sorted[mid - 1] + sorted[mid]) / 2.0
         } else {

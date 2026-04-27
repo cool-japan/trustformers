@@ -2,7 +2,7 @@
 
 Comprehensive transformer model implementations for various NLP and vision tasks.
 
-**Version:** 0.1.0 (Alpha) | **Date:** 2026-03-21 | **Tests:** 759 passing | **SLoC:** 113,086 | **Public API items:** 1,220
+**Version:** 0.1.1 (Alpha) | **Date:** 2026-04-25 | **Tests:** 759 passing | **SLoC:** 113,086 | **Public API items:** 1,220
 
 ## Current State
 
@@ -157,7 +157,7 @@ trustformers-models/
 
 ## Testing
 
-- 759 passing tests, 0 failing (as of 2026-03-21)
+- 759 passing tests, 0 failing (as of 2026-04-25)
 - Comprehensive unit tests for each model
 - Numerical parity tests against reference implementations
 - Integration tests with real tokenizers
@@ -170,7 +170,7 @@ trustformers-models/
 
 ```toml
 [dependencies]
-trustformers-models = { version = "0.1.0", features = ["bert", "llama", "mistral", "clip"] }
+trustformers-models = { version = "0.1.1", features = ["bert", "llama", "mistral", "clip"] }
 ```
 
 Available flags: `bert`, `roberta`, `albert`, `distilbert`, `electra`, `deberta`, `gpt2`, `gpt_neo`, `gpt_j`, `gpt_neox`, `llama`, `mistral`, `gemma`, `qwen`, `phi3`, `falcon`, `stablelm`, `t5`, `vit`, `clip`, `blip2`, `llava`, `dalle`, `flamingo`, `cogvlm`, `mamba`, `rwkv`, `s4`, `hyena`, `linformer`, `performer`, `retnet`, `fnet`

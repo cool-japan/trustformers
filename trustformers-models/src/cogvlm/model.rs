@@ -1142,14 +1142,16 @@ impl TemporalLayer {
 
     pub fn new_with_device(config: CogVideoConfig, device: Device) -> Result<Self> {
         // Ensure num_heads divides evenly into temporal_hidden_size
-        let num_heads = if config.temporal_hidden_size % config.base_config.num_attention_heads == 0
+        let num_heads = if config
+            .temporal_hidden_size
+            .is_multiple_of(config.base_config.num_attention_heads)
         {
             config.base_config.num_attention_heads
         } else {
             // Find a suitable number of heads that divides evenly
             let mut suitable_heads = 8; // Default fallback
             for heads in [16, 32, 8, 4, 2, 1].iter() {
-                if config.temporal_hidden_size % heads == 0 {
+                if config.temporal_hidden_size.is_multiple_of(*heads) {
                     suitable_heads = *heads;
                     break;
                 }

@@ -1014,7 +1014,7 @@ impl MixedBitQATTrainer {
         // Handle progressive quantization
         if let MixedBitStrategy::Progressive { .. } = &self.config.mixed_bit_strategy {
             // Bit widths will be automatically updated via get_layer_bits
-            if self.current_step % 1000 == 0 {
+            if self.current_step.is_multiple_of(1000) {
                 println!(
                     "📈 Progressive quantization step {}: updating bit allocations",
                     self.current_step
@@ -1260,5 +1260,224 @@ mod tests {
         assert_eq!(config.default_bits, 8);
         assert!(config.symmetric);
         assert_eq!(config.start_step, 1000);
+    }
+
+    #[test]
+    fn test_qat_config_defaults_full() {
+        let config = QATConfig::default();
+        assert!(!config.per_channel);
+        assert_eq!(config.observer_momentum, 0.99);
+        assert!(!config.learnable_step_size);
+        assert!(config.layer_configs.is_empty());
+        assert!(!config.quantize_activations);
+        assert_eq!(config.activation_bits, 8);
+        assert!(!config.enable_mixed_bit_optimization);
+        assert!(config.bit_allocation_budget.is_none());
+        assert!(config.freeze_step.is_none());
+    }
+
+    #[test]
+    fn test_mixed_bit_strategy_uniform_default() {
+        let strategy = MixedBitStrategy::default();
+        if let MixedBitStrategy::Uniform { bits } = strategy {
+            assert_eq!(bits, 8);
+        } else {
+            panic!("Expected Uniform strategy");
+        }
+    }
+
+    #[test]
+    fn test_layer_quant_config_default() {
+        let config = LayerQuantConfig::default();
+        assert_eq!(config.bits, 8);
+        assert!(config.symmetric);
+        assert!(!config.per_channel);
+        assert_eq!(config.sensitivity, 0.5);
+        assert!(!config.is_critical);
+    }
+
+    #[test]
+    fn test_get_layer_bits_uniform() {
+        let config = QATConfig::default();
+        let bits = config.get_layer_bits("any_layer", 0);
+        assert_eq!(bits, 8);
+    }
+
+    #[test]
+    fn test_get_layer_bits_manual() {
+        let mut config = QATConfig::default();
+        let mut layer_bits = HashMap::new();
+        layer_bits.insert("conv".to_string(), 4_u8);
+        layer_bits.insert("linear".to_string(), 8_u8);
+        config.mixed_bit_strategy = MixedBitStrategy::Manual { layer_bits };
+        assert_eq!(config.get_layer_bits("conv_layer1", 0), 4);
+        assert_eq!(config.get_layer_bits("linear_layer1", 0), 8);
+        assert_eq!(config.get_layer_bits("unknown", 0), 8); // default
+    }
+
+    #[test]
+    fn test_get_layer_bits_resource_constrained() {
+        let config = QATConfig {
+            mixed_bit_strategy: MixedBitStrategy::ResourceConstrained {
+                total_bit_budget: 1024,
+                critical_layers: vec!["attention".to_string()],
+                critical_bits: 8,
+                default_bits: 4,
+            },
+            ..Default::default()
+        };
+        assert_eq!(config.get_layer_bits("attention_head", 0), 8);
+        assert_eq!(config.get_layer_bits("some_layer", 0), 4);
+    }
+
+    #[test]
+    fn test_get_layer_bits_progressive() {
+        let config = QATConfig {
+            mixed_bit_strategy: MixedBitStrategy::Progressive {
+                initial_bits: 8,
+                final_bits: 4,
+                reduction_schedule: vec![(100, 6), (200, 4)],
+            },
+            ..Default::default()
+        };
+        assert_eq!(config.get_layer_bits("layer", 50), 8);
+        assert_eq!(config.get_layer_bits("layer", 150), 6);
+        assert_eq!(config.get_layer_bits("layer", 250), 4);
+    }
+
+    #[test]
+    fn test_set_layer_config() {
+        let mut config = QATConfig::default();
+        let layer_config = LayerQuantConfig {
+            bits: 4,
+            symmetric: false,
+            per_channel: true,
+            sensitivity: 0.9,
+            is_critical: true,
+        };
+        config.set_layer_config("my_layer".to_string(), layer_config);
+        assert!(config.layer_configs.contains_key("my_layer"));
+        assert_eq!(config.get_layer_bits("my_layer", 0), 4);
+    }
+
+    #[test]
+    fn test_auto_configure_sensitivity() {
+        let mut config = QATConfig::default();
+        let mut sensitivities = HashMap::new();
+        sensitivities.insert("layer1".to_string(), 0.9_f32);
+        sensitivities.insert("layer2".to_string(), 0.3_f32);
+        config.auto_configure_sensitivity(sensitivities);
+        assert_eq!(config.layer_configs["layer1"].bits, 8);
+        assert_eq!(config.layer_configs["layer2"].bits, 4);
+        assert!(config.layer_configs["layer1"].is_critical);
+        assert!(!config.layer_configs["layer2"].is_critical);
+    }
+
+    #[test]
+    fn test_create_common_config_edge() {
+        let config = QATConfig::create_common_config("edge_deployment");
+        assert!(config.quantize_activations);
+        assert!(config.enable_mixed_bit_optimization);
+        assert_eq!(config.activation_bits, 8);
+    }
+
+    #[test]
+    fn test_create_common_config_high_accuracy() {
+        let config = QATConfig::create_common_config("high_accuracy");
+        assert!(!config.quantize_activations);
+        assert!(config.enable_mixed_bit_optimization);
+    }
+
+    #[test]
+    fn test_create_common_config_aggressive() {
+        let config = QATConfig::create_common_config("aggressive_compression");
+        assert!(config.quantize_activations);
+        assert_eq!(config.activation_bits, 4);
+    }
+
+    #[test]
+    fn test_create_common_config_unknown() {
+        let config = QATConfig::create_common_config("unknown_scenario");
+        assert_eq!(config.default_bits, 8); // Falls back to default
+    }
+
+    #[test]
+    fn test_quantization_params_symmetric() {
+        let params = QuantizationParams::new(&[1], true);
+        assert!(params.zero_point.is_none());
+        assert_eq!(params.num_observations, 0);
+    }
+
+    #[test]
+    fn test_quantization_params_asymmetric() {
+        let params = QuantizationParams::new(&[1], false);
+        assert!(params.zero_point.is_some());
+        assert_eq!(params.num_observations, 0);
+    }
+
+    #[test]
+    fn test_estimate_bit_consumption() {
+        let config = QATConfig {
+            mixed_bit_strategy: MixedBitStrategy::Uniform { bits: 4 },
+            ..Default::default()
+        };
+        let mut model_info = HashMap::new();
+        model_info.insert("layer1".to_string(), 1000_u64);
+        model_info.insert("layer2".to_string(), 2000_u64);
+        let total = config.estimate_bit_consumption(&model_info);
+        assert_eq!(total, 12000); // (1000 + 2000) * 4
+    }
+
+    #[test]
+    fn test_optimize_bit_allocation_no_budget() {
+        let mut config = QATConfig::default();
+        let model_info = HashMap::new();
+        let result = config.optimize_bit_allocation(model_info);
+        assert!(result.is_ok()); // No budget set, should be no-op
+    }
+
+    #[test]
+    fn test_optimize_bit_allocation_with_budget() {
+        let mut config = QATConfig {
+            bit_allocation_budget: Some(100_000),
+            ..Default::default()
+        };
+        let mut model_info = HashMap::new();
+        model_info.insert("layer1".to_string(), 5000_u64);
+        model_info.insert("layer2".to_string(), 3000_u64);
+        let result = config.optimize_bit_allocation(model_info);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_mixed_bit_trainer_creation() {
+        let config = QATConfig::default();
+        let trainer = MixedBitQATTrainer::new(config, 0.001, 0.0001);
+        assert_eq!(trainer.quant_lr, 0.001);
+        assert_eq!(trainer.quant_weight_decay, 0.0001);
+    }
+
+    #[test]
+    fn test_mixed_bit_trainer_estimate_savings() {
+        let config = QATConfig::default();
+        let trainer = MixedBitQATTrainer::new(config, 0.001, 0.0);
+        let (size_savings, compute_savings) = trainer.estimate_savings();
+        assert!(size_savings >= 0.0);
+        assert!(compute_savings >= 0.0);
+    }
+
+    #[test]
+    fn test_activation_quantizer_creation() {
+        let quantizer = ActivationQuantizer::new(&[1, 256], 8, true);
+        assert_eq!(quantizer.bits, 8);
+    }
+
+    #[test]
+    fn test_calibration_dataset_creation() {
+        let samples = vec![Tensor::from_vec(vec![1.0, 2.0], &[2]).expect("tensor op failed")];
+        let labels = vec![Tensor::from_vec(vec![0.0], &[1]).expect("tensor op failed")];
+        let dataset = CalibrationDataset::new(samples, labels);
+        assert_eq!(dataset.samples.len(), 1);
+        assert_eq!(dataset.labels.len(), 1);
     }
 }

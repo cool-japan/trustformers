@@ -106,6 +106,7 @@
 pub mod config;
 pub mod generation;
 pub mod model;
+pub mod tasks;
 
 #[cfg(test)]
 mod tests;
@@ -113,3 +114,6 @@ mod tests;
 pub use config::Gpt2Config;
 pub use generation::GenerativeModel;
 pub use model::{Gpt2LMHeadModel, Gpt2Model};
+pub use tasks::{
+    Gpt2ForCausalLM, Gpt2ForSequenceClassification, Gpt2ForTokenClassification, Gpt2TaskError,
+};

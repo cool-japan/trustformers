@@ -984,4 +984,292 @@ mod tests {
         assert_eq!(peer_info.peer_id, deserialized.peer_id);
         assert_eq!(peer_info.reputation, deserialized.reputation);
     }
+
+    #[test]
+    fn test_p2p_config_default() {
+        let config = P2PConfig::default();
+        assert_eq!(config.max_peers, 100);
+        assert_eq!(config.heartbeat_interval, Duration::from_secs(30));
+        assert_eq!(config.peer_timeout, Duration::from_secs(300));
+        assert_eq!(config.chunk_size, 1024 * 1024);
+        assert_eq!(config.max_concurrent_transfers, 5);
+        assert!(config.enable_dht);
+        assert!(config.bootstrap_peers.is_empty());
+        assert!((config.reputation_threshold - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_reputation_tracker_default_score() {
+        let tracker = ReputationTracker::new();
+        assert!((tracker.get_reputation("unknown_peer") - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_reputation_tracker_multiple_events() {
+        let mut tracker = ReputationTracker::new();
+        for _ in 0..5 {
+            let event = ReputationEvent {
+                event_type: ReputationEventType::SuccessfulTransfer,
+                timestamp: SystemTime::now(),
+                score_delta: 0.05,
+            };
+            tracker.update_reputation("peer_a", event);
+        }
+        let rep = tracker.get_reputation("peer_a");
+        assert!(rep > 0.5);
+        assert!(rep <= 1.0);
+    }
+
+    #[test]
+    fn test_reputation_tracker_negative_event() {
+        let mut tracker = ReputationTracker::new();
+        let event = ReputationEvent {
+            event_type: ReputationEventType::InvalidData,
+            timestamp: SystemTime::now(),
+            score_delta: -0.3,
+        };
+        tracker.update_reputation("bad_peer", event);
+        let rep = tracker.get_reputation("bad_peer");
+        assert!(rep < 0.5);
+        assert!(rep >= 0.0);
+    }
+
+    #[test]
+    fn test_reputation_tracker_clamp_to_one() {
+        let mut tracker = ReputationTracker::new();
+        let event = ReputationEvent {
+            event_type: ReputationEventType::SuccessfulTransfer,
+            timestamp: SystemTime::now(),
+            score_delta: 0.6,
+        };
+        tracker.update_reputation("great_peer", event);
+        assert!((tracker.get_reputation("great_peer") - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_reputation_tracker_clamp_to_zero() {
+        let mut tracker = ReputationTracker::new();
+        let event = ReputationEvent {
+            event_type: ReputationEventType::InvalidData,
+            timestamp: SystemTime::now(),
+            score_delta: -1.0,
+        };
+        tracker.update_reputation("terrible_peer", event);
+        assert!((tracker.get_reputation("terrible_peer") - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_reputation_decay() {
+        let mut tracker = ReputationTracker::new();
+        let event = ReputationEvent {
+            event_type: ReputationEventType::SuccessfulTransfer,
+            timestamp: SystemTime::now(),
+            score_delta: 0.3,
+        };
+        tracker.update_reputation("peer_x", event);
+        let before_decay = tracker.get_reputation("peer_x");
+        tracker.decay_reputations();
+        let after_decay = tracker.get_reputation("peer_x");
+        assert!(after_decay < before_decay);
+    }
+
+    #[test]
+    fn test_reputation_decay_multiple_rounds() {
+        let mut tracker = ReputationTracker::new();
+        let event = ReputationEvent {
+            event_type: ReputationEventType::Availability,
+            timestamp: SystemTime::now(),
+            score_delta: 0.4,
+        };
+        tracker.update_reputation("peer_y", event);
+        for _ in 0..10 {
+            tracker.decay_reputations();
+        }
+        let rep = tracker.get_reputation("peer_y");
+        assert!(rep >= 0.0);
+        assert!(rep < 0.9); // Should have decayed significantly
+    }
+
+    #[test]
+    fn test_peer_capabilities_creation() {
+        let caps = PeerCapabilities {
+            can_serve_models: true,
+            can_compute_diffs: false,
+            supported_algorithms: vec!["bsdiff".to_string()],
+            max_model_size: 10_000_000_000,
+            storage_capacity: 100_000_000_000,
+            compute_power: 2.5,
+        };
+        assert!(caps.can_serve_models);
+        assert!(!caps.can_compute_diffs);
+        assert_eq!(caps.supported_algorithms.len(), 1);
+    }
+
+    #[test]
+    fn test_bandwidth_info_creation() {
+        let info = BandwidthInfo {
+            upload_mbps: 50.0,
+            download_mbps: 200.0,
+            latency_ms: 25,
+            measured_at: SystemTime::now(),
+        };
+        assert!(info.download_mbps > info.upload_mbps);
+        assert!(info.latency_ms > 0);
+    }
+
+    #[test]
+    fn test_model_advertisement_creation() {
+        let ad = ModelAdvertisement {
+            model_id: "llama-7b".to_string(),
+            version: "v2".to_string(),
+            size: 7_000_000_000,
+            checksum: "sha256_hash".to_string(),
+            availability: 0.95,
+            last_updated: SystemTime::now(),
+            metadata: {
+                let mut m = HashMap::new();
+                m.insert("task".to_string(), "generation".to_string());
+                m
+            },
+        };
+        assert_eq!(ad.model_id, "llama-7b");
+        assert!(ad.availability > 0.0 && ad.availability <= 1.0);
+    }
+
+    #[test]
+    fn test_chunk_info_creation() {
+        let info = ChunkInfo {
+            total_chunks: 100,
+            chunk_size: 1024 * 1024,
+            total_size: 100 * 1024 * 1024,
+            checksums: vec!["hash".to_string(); 100],
+        };
+        assert_eq!(info.total_chunks, 100);
+        assert_eq!(info.checksums.len(), info.total_chunks as usize);
+    }
+
+    #[test]
+    fn test_transfer_state_creation() {
+        let state = TransferState {
+            model_id: "model_1".to_string(),
+            version: "1.0".to_string(),
+            peer_id: "peer_abc".to_string(),
+            progress: 0.5,
+            start_time: SystemTime::now(),
+            chunks_received: {
+                let mut set = HashSet::new();
+                set.insert(0);
+                set.insert(1);
+                set.insert(2);
+                set
+            },
+            total_chunks: 10,
+        };
+        assert_eq!(state.chunks_received.len(), 3);
+        assert!((state.progress - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_reputation_event_type_variants() {
+        let events = [
+            ReputationEventType::SuccessfulTransfer,
+            ReputationEventType::FailedTransfer,
+            ReputationEventType::InvalidData,
+            ReputationEventType::SlowResponse,
+            ReputationEventType::FastResponse,
+            ReputationEventType::Availability,
+        ];
+        assert_eq!(events.len(), 6);
+    }
+
+    #[test]
+    fn test_p2p_message_peer_discovery() {
+        let msg = P2PMessage::PeerDiscovery;
+        assert!(matches!(msg, P2PMessage::PeerDiscovery));
+    }
+
+    #[test]
+    fn test_p2p_message_heartbeat() {
+        let msg = P2PMessage::Heartbeat {
+            peer_id: "peer_1".to_string(),
+            timestamp: SystemTime::now(),
+        };
+        if let P2PMessage::Heartbeat { peer_id, .. } = &msg {
+            assert_eq!(peer_id, "peer_1");
+        }
+    }
+
+    #[test]
+    fn test_p2p_message_model_request() {
+        let msg = P2PMessage::ModelRequest {
+            model_id: "gpt2".to_string(),
+            version: "1.0".to_string(),
+            requestor_id: "peer_2".to_string(),
+        };
+        if let P2PMessage::ModelRequest { model_id, .. } = &msg {
+            assert_eq!(model_id, "gpt2");
+        }
+    }
+
+    #[test]
+    fn test_p2p_message_model_chunk() {
+        let msg = P2PMessage::ModelChunk {
+            model_id: "model_a".to_string(),
+            version: "1.0".to_string(),
+            chunk_id: 5,
+            data: vec![0u8; 1024],
+            checksum: "chunk_hash".to_string(),
+        };
+        if let P2PMessage::ModelChunk { chunk_id, data, .. } = &msg {
+            assert_eq!(*chunk_id, 5);
+            assert_eq!(data.len(), 1024);
+        }
+    }
+
+    #[test]
+    fn test_peer_info_creation() {
+        let info = PeerInfo {
+            peer_id: "peer_test".to_string(),
+            address: "192.168.1.100:9090".parse().expect("failed to parse"),
+            public_key: "pubkey_123".to_string(),
+            last_seen: SystemTime::now(),
+            reputation: 0.7,
+            capabilities: PeerCapabilities {
+                can_serve_models: true,
+                can_compute_diffs: true,
+                supported_algorithms: vec![],
+                max_model_size: 1024,
+                storage_capacity: 2048,
+                compute_power: 1.0,
+            },
+            bandwidth: BandwidthInfo {
+                upload_mbps: 10.0,
+                download_mbps: 50.0,
+                latency_ms: 30,
+                measured_at: SystemTime::now(),
+            },
+            models: vec![],
+        };
+        assert_eq!(info.peer_id, "peer_test");
+        assert!((info.reputation - 0.7).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn test_peer_id_generation_unique() {
+        let temp_dir1 = TempDir::new().expect("failed to create temp dir");
+        let temp_dir2 = TempDir::new().expect("failed to create temp dir");
+        let config1 = P2PConfig {
+            storage_path: temp_dir1.path().to_path_buf(),
+            listen_address: "127.0.0.1:0".parse().expect("failed to parse"),
+            ..Default::default()
+        };
+        let config2 = P2PConfig {
+            storage_path: temp_dir2.path().to_path_buf(),
+            listen_address: "127.0.0.1:0".parse().expect("failed to parse"),
+            ..Default::default()
+        };
+        let node1 = P2PNode::new(config1).await.expect("async operation failed");
+        let node2 = P2PNode::new(config2).await.expect("async operation failed");
+        assert_ne!(node1.peer_id, node2.peer_id);
+    }
 }

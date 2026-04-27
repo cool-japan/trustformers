@@ -810,7 +810,7 @@ impl IntelUtils {
         let candidates = vec![1024, 512, 256, 128, 64, 32];
 
         for &size in &candidates {
-            if size <= max_workgroup_size && problem_size % size == 0 {
+            if size <= max_workgroup_size && problem_size.is_multiple_of(size) {
                 return size;
             }
         }

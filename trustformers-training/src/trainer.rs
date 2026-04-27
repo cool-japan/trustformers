@@ -449,7 +449,7 @@ impl<M: Model> Trainer<M> {
         )?;
 
         // Log gradient norm if needed
-        if self.state.global_step % self.args.logging_steps == 0 {
+        if self.state.global_step.is_multiple_of(self.args.logging_steps) {
             println!("Gradient norm: {:.4}", grad_norm);
         }
 
@@ -572,7 +572,7 @@ impl<M: Model> Trainer<M> {
                 }
 
                 // Logging
-                if self.state.global_step % self.args.logging_steps == 0 {
+                if self.state.global_step.is_multiple_of(self.args.logging_steps) {
                     let mut logs = HashMap::new();
                     logs.insert("loss".to_string(), loss);
                     logs.insert("learning_rate".to_string(), self.optimizer.get_lr());
@@ -597,7 +597,7 @@ impl<M: Model> Trainer<M> {
 
                 // Evaluation
                 if let Some(eval_data) = eval_dataset {
-                    if self.state.global_step % self.args.eval_steps == 0 {
+                    if self.state.global_step.is_multiple_of(self.args.eval_steps) {
                         let eval_results = self.evaluate(eval_data)?;
 
                         // Update best metric
@@ -632,7 +632,7 @@ impl<M: Model> Trainer<M> {
                 }
 
                 // Checkpointing
-                if self.state.global_step % self.args.save_steps == 0 {
+                if self.state.global_step.is_multiple_of(self.args.save_steps) {
                     let checkpoint_dir =
                         self.args.output_dir.join(format!("checkpoint-{}", self.state.global_step));
                     self.save_checkpoint(&checkpoint_dir)?;
@@ -757,7 +757,7 @@ impl<M: Model> Trainer<M> {
         // by having models implement the ParameterAccess trait
 
         // Log that gradient computation occurred but parameters weren't updated
-        if self.state.global_step % self.args.logging_steps == 0 {
+        if self.state.global_step.is_multiple_of(self.args.logging_steps) {
             println!("Gradients computed but not applied - model needs ParameterAccess trait");
         }
 
@@ -935,5 +935,571 @@ impl CallbackManager {
 impl Default for CallbackManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::training_args::TrainingArguments;
+
+    // ── LCG random helper ────────────────────────────────────────────────────
+    fn lcg_next(seed: &mut u64) -> u64 {
+        *seed = seed.wrapping_mul(6364136223846793005u64).wrapping_add(1442695040888963407u64);
+        *seed
+    }
+
+    fn make_args() -> TrainingArguments {
+        let dir = std::env::temp_dir().join(format!("trainer_test_{}", {
+            let mut s = 99991u64;
+            lcg_next(&mut s)
+        }));
+        std::fs::create_dir_all(&dir).expect("should create test dir");
+        TrainingArguments::new(dir)
+    }
+
+    fn make_state(global_step: usize, epoch: f32) -> TrainingState {
+        TrainingState {
+            epoch,
+            global_step,
+            best_metric: None,
+            best_model_checkpoint: None,
+            log_history: Vec::new(),
+            trial_name: None,
+            trial_params: None,
+        }
+    }
+
+    fn make_metrics(pairs: &[(&str, f32)]) -> HashMap<String, f32> {
+        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+
+    // ── TrainingState ─────────────────────────────────────────────────────────
+
+    // 1. TrainingState initializes to zero step / zero epoch
+    #[test]
+    fn test_training_state_initial_values() {
+        let state = make_state(0, 0.0);
+        assert_eq!(state.global_step, 0);
+        assert!((state.epoch - 0.0).abs() < 1e-6);
+        assert!(state.best_metric.is_none());
+        assert!(state.best_model_checkpoint.is_none());
+        assert!(state.log_history.is_empty());
+    }
+
+    // 2. global_step increment
+    #[test]
+    fn test_training_state_step_increment() {
+        let mut state = make_state(0, 0.0);
+        state.global_step += 1;
+        assert_eq!(state.global_step, 1);
+        state.global_step += 1;
+        assert_eq!(state.global_step, 2);
+    }
+
+    // 3. epoch tracking
+    #[test]
+    fn test_training_state_epoch_tracking() {
+        let mut state = make_state(0, 0.0);
+        for epoch in 0..5usize {
+            state.epoch = epoch as f32;
+            assert!((state.epoch - epoch as f32).abs() < 1e-6);
+        }
+    }
+
+    // 4. best_metric tracking — update when improved
+    #[test]
+    fn test_training_state_best_metric_update() {
+        let mut state = make_state(0, 0.0);
+        state.best_metric = Some(0.8);
+        // Improve
+        let new_metric = 0.9_f32;
+        if state.best_metric.map(|b| new_metric > b).unwrap_or(true) {
+            state.best_metric = Some(new_metric);
+        }
+        assert!((state.best_metric.expect("should have best") - 0.9).abs() < 1e-6);
+    }
+
+    // 5. best_metric does NOT update when not improved
+    #[test]
+    fn test_training_state_best_metric_not_update_when_worse() {
+        let mut state = make_state(0, 0.0);
+        state.best_metric = Some(0.9);
+        let new_metric = 0.7_f32;
+        if state.best_metric.map(|b| new_metric > b).unwrap_or(true) {
+            state.best_metric = Some(new_metric);
+        }
+        assert!((state.best_metric.expect("should still be 0.9") - 0.9).abs() < 1e-6);
+    }
+
+    // 6. log_history grows when LogEntry appended
+    #[test]
+    fn test_training_state_log_history_grows() {
+        let mut state = make_state(0, 0.0);
+        for step in 1..=5usize {
+            state.log_history.push(LogEntry {
+                step,
+                epoch: 0.0,
+                learning_rate: 1e-4,
+                loss: 1.0 / step as f32,
+                eval_metrics: None,
+                train_metrics: None,
+            });
+        }
+        assert_eq!(state.log_history.len(), 5);
+        assert_eq!(state.log_history[0].step, 1);
+        assert_eq!(state.log_history[4].step, 5);
+    }
+
+    // 7. TrainingState serializes and deserializes (serde roundtrip)
+    #[test]
+    fn test_training_state_serde_roundtrip() {
+        let mut state = make_state(42, 1.5);
+        state.best_metric = Some(0.92);
+        state.log_history.push(LogEntry {
+            step: 42,
+            epoch: 1.5,
+            learning_rate: 2e-5,
+            loss: 0.15,
+            eval_metrics: Some(make_metrics(&[("eval_loss", 0.2)])),
+            train_metrics: None,
+        });
+        let json = serde_json::to_string(&state).expect("serialize should work");
+        let restored: TrainingState = serde_json::from_str(&json).expect("deserialize should work");
+        assert_eq!(restored.global_step, 42);
+        assert!((restored.epoch - 1.5).abs() < 1e-4);
+        assert!((restored.best_metric.expect("best metric") - 0.92).abs() < 1e-5);
+        assert_eq!(restored.log_history.len(), 1);
+    }
+
+    // ── EarlyStoppingCallback ─────────────────────────────────────────────────
+
+    // 8. EarlyStoppingCallback does not stop initially
+    #[test]
+    fn test_early_stopping_no_stop_initially() {
+        let cb = EarlyStoppingCallback::new(3, 0.0, "eval_loss".to_string(), false);
+        assert!(!cb.should_stop());
+    }
+
+    // 9. Early stopping: patience counter increments on no improvement
+    #[test]
+    fn test_early_stopping_patience_increments() {
+        let mut cb = EarlyStoppingCallback::new(3, 0.001, "eval_loss".to_string(), false);
+        let args = make_args();
+        let state = make_state(0, 0.0);
+        // First eval: best_score set → no stop
+        cb.on_evaluate(&args, &state, &make_metrics(&[("eval_loss", 0.5)]));
+        assert!(!cb.should_stop(), "should not stop after first eval");
+        // Same loss → no improvement → wait_count = 1
+        cb.on_evaluate(&args, &state, &make_metrics(&[("eval_loss", 0.5)]));
+        assert!(!cb.should_stop(), "patience not exceeded (1 < 3)");
+        // Still no improvement → wait_count = 2
+        cb.on_evaluate(&args, &state, &make_metrics(&[("eval_loss", 0.5)]));
+        assert!(!cb.should_stop(), "patience not exceeded (2 < 3)");
+        // Still no improvement → wait_count = 3 ≥ patience → stop
+        cb.on_evaluate(&args, &state, &make_metrics(&[("eval_loss", 0.5)]));
+        assert!(cb.should_stop(), "should stop after patience exceeded");
+    }
+
+    // 10. Early stopping: improvement resets patience counter
+    #[test]
+    fn test_early_stopping_improvement_resets_counter() {
+        let mut cb = EarlyStoppingCallback::new(2, 0.001, "eval_loss".to_string(), false);
+        let args = make_args();
+        let state = make_state(0, 0.0);
+        cb.on_evaluate(&args, &state, &make_metrics(&[("eval_loss", 0.5)]));
+        cb.on_evaluate(&args, &state, &make_metrics(&[("eval_loss", 0.5)])); // wait_count=1
+                                                                             // Improvement → resets wait_count to 0
+        cb.on_evaluate(&args, &state, &make_metrics(&[("eval_loss", 0.3)]));
+        assert!(!cb.should_stop(), "improvement should reset counter");
+        // One more non-improvement
+        cb.on_evaluate(&args, &state, &make_metrics(&[("eval_loss", 0.3)]));
+        assert!(
+            !cb.should_stop(),
+            "still only 1 non-improvement after reset"
+        );
+    }
+
+    // 11. Early stopping: greater_is_better = true (maximize metric)
+    #[test]
+    fn test_early_stopping_greater_is_better() {
+        let mut cb = EarlyStoppingCallback::new(2, 0.001, "accuracy".to_string(), true);
+        let args = make_args();
+        let state = make_state(0, 0.0);
+        cb.on_evaluate(&args, &state, &make_metrics(&[("accuracy", 0.7)]));
+        // Higher value → improvement
+        cb.on_evaluate(&args, &state, &make_metrics(&[("accuracy", 0.9)]));
+        assert!(
+            !cb.should_stop(),
+            "improvement in greater_is_better mode should not stop"
+        );
+        // Lower value → no improvement
+        cb.on_evaluate(&args, &state, &make_metrics(&[("accuracy", 0.8)]));
+        assert!(!cb.should_stop(), "patience 1 < 2");
+        cb.on_evaluate(&args, &state, &make_metrics(&[("accuracy", 0.8)]));
+        assert!(cb.should_stop(), "patience 2 >= 2, should stop");
+    }
+
+    // 12. Early stopping: unknown metric key is ignored (no panic)
+    #[test]
+    fn test_early_stopping_missing_metric_key() {
+        let mut cb = EarlyStoppingCallback::new(1, 0.0, "missing_metric".to_string(), false);
+        let args = make_args();
+        let state = make_state(0, 0.0);
+        // Metric key not present: should not panic, should not stop
+        cb.on_evaluate(&args, &state, &make_metrics(&[("eval_loss", 0.5)]));
+        assert!(
+            !cb.should_stop(),
+            "missing metric key should not trigger stop"
+        );
+    }
+
+    // ── CallbackManager ───────────────────────────────────────────────────────
+
+    // 13. CallbackManager: new creates empty manager
+    #[test]
+    fn test_callback_manager_new_empty() {
+        let mgr = CallbackManager::new();
+        assert!(!mgr.should_stop(), "empty manager should not stop");
+    }
+
+    // 14. CallbackManager: should_stop with no stopping callbacks
+    #[test]
+    fn test_callback_manager_should_stop_false() {
+        struct NoStopCallback;
+        impl TrainerCallback for NoStopCallback {}
+        let mut mgr = CallbackManager::new();
+        mgr.add_callback(Box::new(NoStopCallback));
+        assert!(!mgr.should_stop());
+    }
+
+    // 15. CallbackManager: should_stop returns true when any callback stops
+    #[test]
+    fn test_callback_manager_should_stop_true() {
+        struct StopCallback;
+        impl TrainerCallback for StopCallback {
+            fn should_stop(&self) -> bool {
+                true
+            }
+        }
+        let mut mgr = CallbackManager::new();
+        mgr.add_callback(Box::new(StopCallback));
+        assert!(mgr.should_stop());
+    }
+
+    // 16. CallbackManager: get_callback by type downcasting
+    #[test]
+    fn test_callback_manager_get_callback_by_type() {
+        let mut mgr = CallbackManager::new();
+        let cb = EarlyStoppingCallback::new(2, 0.0, "loss".to_string(), false);
+        mgr.add_callback(Box::new(cb));
+        let found = mgr.get_callback::<EarlyStoppingCallback>();
+        assert!(found.is_some(), "should find EarlyStoppingCallback by type");
+    }
+
+    // 17. CallbackManager: get_callback returns None for absent type
+    #[test]
+    fn test_callback_manager_get_callback_absent() {
+        let mgr = CallbackManager::new();
+        let found = mgr.get_callback::<EarlyStoppingCallback>();
+        assert!(found.is_none());
+    }
+
+    // 18. CallbackManager: remove_callback removes the callback
+    #[test]
+    fn test_callback_manager_remove_callback() {
+        let mut mgr = CallbackManager::new();
+        mgr.add_callback(Box::new(EarlyStoppingCallback::new(
+            2,
+            0.0,
+            "loss".to_string(),
+            false,
+        )));
+        let removed = mgr.remove_callback::<EarlyStoppingCallback>();
+        assert!(removed.is_some(), "should return the removed callback");
+        // Should be gone now
+        assert!(mgr.get_callback::<EarlyStoppingCallback>().is_none());
+    }
+
+    // 19. CallbackManager: call_on_train_begin doesn't panic
+    #[test]
+    fn test_callback_manager_call_on_train_begin() {
+        let mut mgr = CallbackManager::new();
+        let args = make_args();
+        let state = make_state(0, 0.0);
+        // No callbacks → should not panic
+        mgr.call_on_train_begin(&args, &state);
+    }
+
+    // 20. CallbackManager: call_on_evaluate passes metrics to callbacks
+    #[test]
+    fn test_callback_manager_call_on_evaluate() {
+        let mut mgr = CallbackManager::new();
+        // Add an early stopping callback monitoring accuracy
+        let cb = EarlyStoppingCallback::new(1, 0.0, "accuracy".to_string(), true);
+        mgr.add_callback(Box::new(cb));
+        let args = make_args();
+        let state = make_state(10, 1.0);
+        mgr.call_on_evaluate(&args, &state, &make_metrics(&[("accuracy", 0.9)]));
+        // First call → best_score set; second with same → patience triggered
+        mgr.call_on_evaluate(&args, &state, &make_metrics(&[("accuracy", 0.8)]));
+        // After 2 calls with no improvement from 0.9, should stop (patience=1)
+        assert!(mgr.should_stop(), "should stop after patience exceeded");
+    }
+
+    // 21. TaskType variants are distinct and debuggable
+    #[test]
+    fn test_task_type_variants() {
+        assert_ne!(TaskType::LanguageModeling, TaskType::Classification);
+        assert_ne!(TaskType::Classification, TaskType::Representation);
+        assert_ne!(TaskType::Representation, TaskType::LanguageModeling);
+    }
+
+    // ── Validation trigger simulation (every N steps) ─────────────────────────
+
+    // 22. Validation trigger at every eval_steps
+    #[test]
+    fn test_validation_trigger_every_n_steps() {
+        let args = {
+            let mut a = make_args();
+            a.eval_steps = 10;
+            a
+        };
+        let total_steps = 30;
+        let expected_eval_steps: Vec<usize> =
+            (1..=total_steps).filter(|s| s % args.eval_steps == 0).collect();
+        assert_eq!(expected_eval_steps, vec![10, 20, 30]);
+    }
+
+    // 23. Checkpoint save trigger at every N steps
+    #[test]
+    fn test_checkpoint_save_trigger_every_n_steps() {
+        let args = {
+            let mut a = make_args();
+            a.save_steps = 5;
+            a
+        };
+        let total_steps = 20;
+        let checkpoint_steps: Vec<usize> =
+            (1..=total_steps).filter(|s| s % args.save_steps == 0).collect();
+        assert_eq!(checkpoint_steps, vec![5, 10, 15, 20]);
+    }
+
+    // 24. Gradient accumulation: apply every N micro-steps
+    #[test]
+    fn test_gradient_accumulation_step_count() {
+        let grad_accum_steps = 4;
+        let mut apply_count = 0;
+        let mut accum = 0;
+        for _step in 1..=16usize {
+            accum += 1;
+            if accum >= grad_accum_steps {
+                apply_count += 1;
+                accum = 0;
+            }
+        }
+        // 16 micro-steps / 4 = 4 optimizer steps
+        assert_eq!(apply_count, 4);
+    }
+
+    // 25. Training time estimation: steps_per_second × remaining_steps
+    #[test]
+    fn test_training_time_estimation() {
+        let total_steps = 1000usize;
+        let elapsed_steps = 200usize;
+        let elapsed_secs = 20.0_f32;
+        let remaining_steps = total_steps - elapsed_steps;
+        let steps_per_sec = elapsed_steps as f32 / elapsed_secs;
+        let estimated_remaining = remaining_steps as f32 / steps_per_sec;
+        assert!(
+            (estimated_remaining - 80.0).abs() < 1e-3,
+            "expected 80s remaining, got {estimated_remaining}"
+        );
+    }
+
+    // 26. Resume from checkpoint: state fields are restored
+    #[test]
+    fn test_resume_from_checkpoint_state_restoration() {
+        // Simulate checkpoint state
+        let checkpoint_state = TrainingState {
+            epoch: 2.0,
+            global_step: 500,
+            best_metric: Some(0.85),
+            best_model_checkpoint: Some(PathBuf::from("/tmp/best_ckpt")),
+            log_history: vec![LogEntry {
+                step: 500,
+                epoch: 2.0,
+                learning_rate: 1e-4,
+                loss: 0.3,
+                eval_metrics: None,
+                train_metrics: None,
+            }],
+            trial_name: None,
+            trial_params: None,
+        };
+        // Simulate restore
+        let state = checkpoint_state;
+        assert_eq!(state.global_step, 500);
+        assert!((state.epoch - 2.0).abs() < 1e-5);
+        assert_eq!(state.log_history.len(), 1);
+        assert!((state.best_metric.expect("best metric") - 0.85).abs() < 1e-5);
+    }
+
+    // 27. Warmup: LR stays at 0 before warmup steps, increases linearly
+    #[test]
+    fn test_warmup_lr_schedule() {
+        let max_lr = 1e-4_f32;
+        let warmup_steps = 100usize;
+        let compute_lr = |step: usize| {
+            if step < warmup_steps {
+                // linear warmup: lr = max_lr * step / warmup_steps
+                max_lr * step as f32 / warmup_steps as f32
+            } else {
+                max_lr
+            }
+        };
+        assert!(
+            (compute_lr(0) - 0.0).abs() < 1e-10,
+            "LR at step 0 should be 0"
+        );
+        let mid = compute_lr(50);
+        assert!(
+            (mid - 5e-5).abs() < 1e-8,
+            "LR at step 50 should be 5e-5, got {mid}"
+        );
+        let at_warmup = compute_lr(100);
+        assert!(
+            (at_warmup - max_lr).abs() < 1e-8,
+            "LR at warmup end should equal max_lr"
+        );
+        let after = compute_lr(200);
+        assert!(
+            (after - max_lr).abs() < 1e-8,
+            "LR after warmup should equal max_lr"
+        );
+    }
+
+    // 28. LogEntry stores all fields correctly
+    #[test]
+    fn test_log_entry_fields() {
+        let mut eval_map = HashMap::new();
+        eval_map.insert("eval_loss".to_string(), 0.25_f32);
+        let entry = LogEntry {
+            step: 100,
+            epoch: 1.5,
+            learning_rate: 2e-5,
+            loss: 0.3,
+            eval_metrics: Some(eval_map.clone()),
+            train_metrics: None,
+        };
+        assert_eq!(entry.step, 100);
+        assert!((entry.epoch - 1.5).abs() < 1e-5);
+        assert!((entry.learning_rate - 2e-5).abs() < 1e-10);
+        assert!((entry.loss - 0.3).abs() < 1e-6);
+        assert!(entry.eval_metrics.is_some());
+        assert!(entry.train_metrics.is_none());
+    }
+
+    // 29. Logging trigger: every logging_steps
+    #[test]
+    fn test_logging_trigger_every_n_steps() {
+        let logging_steps = 10usize;
+        let trigger_count = (1usize..=50).filter(|s| s % logging_steps == 0).count();
+        assert_eq!(trigger_count, 5, "should log 5 times in 50 steps");
+    }
+
+    // 30. Epoch tracking matches loop iteration
+    #[test]
+    fn test_epoch_tracking_in_loop() {
+        let num_epochs = 3.0_f32;
+        let mut state = make_state(0, 0.0);
+        for epoch in 0..(num_epochs as usize) {
+            state.epoch = epoch as f32;
+        }
+        // After loop ends, epoch should be 2.0 (0-indexed, last epoch)
+        assert!(
+            (state.epoch - 2.0).abs() < 1e-5,
+            "expected epoch=2.0, got {}",
+            state.epoch
+        );
+    }
+
+    // 31. Early stopping: threshold effect — small improvement below threshold does not reset counter
+    #[test]
+    fn test_early_stopping_threshold_effect() {
+        let mut cb = EarlyStoppingCallback::new(
+            2,
+            0.1, // threshold = 0.1 (improvement must be > 0.1)
+            "eval_loss".to_string(),
+            false, // minimize
+        );
+        let args = make_args();
+        let state = make_state(0, 0.0);
+        // First: sets best = 0.5
+        cb.on_evaluate(&args, &state, &make_metrics(&[("eval_loss", 0.5)]));
+        // "Improvement" of 0.05 < threshold 0.1 → NOT considered improvement
+        cb.on_evaluate(&args, &state, &make_metrics(&[("eval_loss", 0.45)]));
+        assert!(!cb.should_stop(), "patience 1 < 2");
+        cb.on_evaluate(&args, &state, &make_metrics(&[("eval_loss", 0.45)]));
+        assert!(cb.should_stop(), "patience 2 >= 2 should trigger stop");
+    }
+
+    // 32. CallbackManager default() creates empty manager
+    #[test]
+    fn test_callback_manager_default() {
+        let mgr = CallbackManager::default();
+        assert!(!mgr.should_stop());
+    }
+
+    // 33. Multiple callbacks: all receive on_log events
+    #[test]
+    fn test_callback_manager_multiple_callbacks_on_log() {
+        use std::sync::{Arc, Mutex};
+        let counter = Arc::new(Mutex::new(0usize));
+
+        struct CountingCallback {
+            counter: Arc<Mutex<usize>>,
+        }
+        impl TrainerCallback for CountingCallback {
+            fn on_log(
+                &mut self,
+                _args: &TrainingArguments,
+                _state: &TrainingState,
+                _logs: &HashMap<String, f32>,
+            ) {
+                let mut c = self.counter.lock().expect("lock failed");
+                *c += 1;
+            }
+        }
+
+        let mut mgr = CallbackManager::new();
+        for _ in 0..3 {
+            mgr.add_callback(Box::new(CountingCallback {
+                counter: Arc::clone(&counter),
+            }));
+        }
+        let args = make_args();
+        let state = make_state(10, 0.0);
+        let logs = make_metrics(&[("loss", 0.5)]);
+        mgr.call_on_log(&args, &state, &logs);
+        let count = *counter.lock().expect("lock failed");
+        assert_eq!(count, 3, "3 callbacks should each receive on_log");
+    }
+
+    // 34. LogEntry serde roundtrip
+    #[test]
+    fn test_log_entry_serde() {
+        let entry = LogEntry {
+            step: 50,
+            epoch: 0.5,
+            learning_rate: 1e-4,
+            loss: 0.42,
+            eval_metrics: None,
+            train_metrics: None,
+        };
+        let json = serde_json::to_string(&entry).expect("serialize failed");
+        let restored: LogEntry = serde_json::from_str(&json).expect("deserialize failed");
+        assert_eq!(restored.step, 50);
+        assert!((restored.loss - 0.42).abs() < 1e-6);
     }
 }

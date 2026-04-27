@@ -430,3 +430,230 @@ pub struct WarmingStats {
     pub warming_hit_rate: f32,
     pub is_warming_active: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::caching::config::{
+        EvictionPolicy, TierConfig, WarmingConfig, WarmingSchedule, WarmingStrategy,
+    };
+    use crate::caching::embedding_cache::EmbeddingCacheService;
+    use crate::caching::metrics::CacheStatsCollector;
+    use crate::caching::result_cache::ResultCacheService;
+    use std::time::Duration;
+
+    fn make_result_tier() -> TierConfig {
+        TierConfig {
+            max_size_bytes: 10 * 1024 * 1024,
+            max_entries: 1000,
+            default_ttl: Duration::from_secs(3600),
+            eviction_policy: EvictionPolicy::LRU,
+            compression_enabled: false,
+            tier_name: "result".to_string(),
+        }
+    }
+
+    fn make_embedding_tier() -> TierConfig {
+        TierConfig {
+            max_size_bytes: 5 * 1024 * 1024,
+            max_entries: 500,
+            default_ttl: Duration::from_secs(7200),
+            eviction_policy: EvictionPolicy::LFU,
+            compression_enabled: false,
+            tier_name: "embedding".to_string(),
+        }
+    }
+
+    fn make_warmer(config: WarmingConfig) -> CacheWarmer {
+        let metrics = Arc::new(CacheStatsCollector::new());
+        let result_cache = Arc::new(ResultCacheService::new(make_result_tier(), metrics.clone()));
+        let embedding_cache = Arc::new(EmbeddingCacheService::new(make_embedding_tier(), metrics));
+        CacheWarmer::new(config, result_cache, embedding_cache)
+    }
+
+    // --- WarmingPolicy tests ---
+
+    #[test]
+    fn test_warming_policy_construction() {
+        let policy = WarmingPolicy {
+            strategies: vec![WarmingStrategy::PopularQueries],
+            schedule: WarmingSchedule::Startup,
+            max_concurrent: 5,
+            timeout_seconds: 30,
+        };
+        assert_eq!(policy.max_concurrent, 5);
+        assert_eq!(policy.timeout_seconds, 30);
+    }
+
+    // --- PreloadService tests ---
+
+    #[tokio::test]
+    async fn test_preload_service_popular_queries_empty_initially() {
+        let service = PreloadService::new();
+        let queries = service.get_warming_queries(&WarmingStrategy::PopularQueries).await;
+        assert!(queries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_preload_service_update_popular_queries() {
+        let mut service = PreloadService::new();
+        service.update_popular_queries(vec!["q1".to_string(), "q2".to_string()]).await;
+        let queries = service.get_warming_queries(&WarmingStrategy::PopularQueries).await;
+        assert_eq!(queries.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_preload_service_recent_queries() {
+        let mut service = PreloadService::new();
+        service.add_recent_query("recent_q1".to_string()).await;
+        service.add_recent_query("recent_q2".to_string()).await;
+        let queries = service.get_warming_queries(&WarmingStrategy::RecentQueries).await;
+        assert_eq!(queries.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_preload_service_custom_queries() {
+        let service = PreloadService::new();
+        let custom = vec![
+            "custom_1".to_string(),
+            "custom_2".to_string(),
+            "custom_3".to_string(),
+        ];
+        let queries = service
+            .get_warming_queries(&WarmingStrategy::CustomQueries(custom.clone()))
+            .await;
+        assert_eq!(queries.len(), 3);
+        assert_eq!(queries[0], "custom_1");
+    }
+
+    #[tokio::test]
+    async fn test_preload_service_predictive_queries_without_model() {
+        let service = PreloadService::new();
+        let queries = service.get_warming_queries(&WarmingStrategy::PredictiveQueries).await;
+        assert!(queries.is_empty());
+    }
+
+    #[test]
+    fn test_preload_service_analyze_query_frequencies() {
+        let mut service = PreloadService::new();
+        // Manually add to recent_queries for testing
+        service.recent_queries.push("q1".to_string());
+        service.recent_queries.push("q1".to_string());
+        service.recent_queries.push("q2".to_string());
+        let freqs = service.analyze_query_frequencies();
+        assert_eq!(*freqs.get("q1").unwrap_or(&0), 2);
+        assert_eq!(*freqs.get("q2").unwrap_or(&0), 1);
+    }
+
+    #[test]
+    fn test_preload_service_analyze_time_patterns_returns_vec() {
+        let service = PreloadService::new();
+        let patterns = service.analyze_time_patterns();
+        // Just verify it returns without panic and is a Vec
+        let _ = patterns.len();
+    }
+
+    // --- WarmingScheduler tests ---
+
+    #[tokio::test]
+    async fn test_warming_scheduler_startup_should_run_initially() {
+        let mut scheduler = WarmingScheduler::new(WarmingSchedule::Startup);
+        assert!(scheduler.should_run().await);
+    }
+
+    #[tokio::test]
+    async fn test_warming_scheduler_startup_should_not_run_after_first() {
+        let mut scheduler = WarmingScheduler::new(WarmingSchedule::Startup);
+        scheduler.start_warming().await;
+        scheduler.complete_warming().await;
+        // After first run, startup should not repeat
+        assert!(!scheduler.should_run().await);
+    }
+
+    #[tokio::test]
+    async fn test_warming_scheduler_manual_never_runs() {
+        let mut scheduler = WarmingScheduler::new(WarmingSchedule::Manual);
+        assert!(!scheduler.should_run().await);
+    }
+
+    #[tokio::test]
+    async fn test_warming_scheduler_interval_runs_when_ready() {
+        let mut scheduler =
+            WarmingScheduler::new(WarmingSchedule::Interval(Duration::from_millis(1)));
+        // Never been run before, so should_run = true
+        assert!(scheduler.should_run().await);
+    }
+
+    #[tokio::test]
+    async fn test_warming_scheduler_is_running_blocks_rerun() {
+        let mut scheduler = WarmingScheduler::new(WarmingSchedule::Startup);
+        scheduler.start_warming().await;
+        // While running, should_run should return false
+        assert!(!scheduler.should_run().await);
+        scheduler.complete_warming().await;
+    }
+
+    // --- CacheWarmer tests ---
+
+    #[tokio::test]
+    async fn test_cache_warmer_disabled_no_op() {
+        let mut config = WarmingConfig::default();
+        config.enabled = false;
+        let warmer = make_warmer(config);
+        let result = warmer.run_warming_cycle().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_cache_warmer_enabled_runs_without_panic() {
+        let mut config = WarmingConfig::default();
+        config.enabled = true;
+        config.strategies = vec![WarmingStrategy::PopularQueries];
+        config.schedule = WarmingSchedule::Startup;
+        let warmer = make_warmer(config);
+        let result = warmer.run_warming_cycle().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_cache_warmer_update_popular_queries() {
+        let config = WarmingConfig::default();
+        let warmer = make_warmer(config);
+        warmer.update_popular_queries(vec!["q_a".to_string(), "q_b".to_string()]).await;
+        // After update, queries_warmed reflects the strategies in config
+        let _stats = warmer.get_stats().await;
+    }
+
+    #[tokio::test]
+    async fn test_cache_warmer_add_recent_query() {
+        let config = WarmingConfig::default();
+        let warmer = make_warmer(config);
+        warmer.add_recent_query("recent_test".to_string()).await;
+        // Just verify no panic
+        let stats = warmer.get_stats().await;
+        assert!(!stats.is_warming_active);
+    }
+
+    #[tokio::test]
+    async fn test_cache_warmer_stats_initial_state() {
+        let config = WarmingConfig::default();
+        let warmer = make_warmer(config);
+        let stats = warmer.get_stats().await;
+        assert!(!stats.is_warming_active);
+        assert!((stats.warming_hit_rate - 0.0).abs() < 1e-5);
+    }
+
+    #[tokio::test]
+    async fn test_cache_warmer_trigger_warming_with_custom_queries() {
+        let mut config = WarmingConfig::default();
+        config.enabled = true;
+        config.strategies = vec![WarmingStrategy::CustomQueries(vec![
+            "custom_query_1".to_string(),
+            "custom_query_2".to_string(),
+        ])];
+        config.schedule = WarmingSchedule::Startup;
+        let warmer = make_warmer(config);
+        let result = warmer.trigger_warming().await;
+        assert!(result.is_ok());
+    }
+}

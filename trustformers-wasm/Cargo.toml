@@ -19,9 +19,9 @@ workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-wasm-bindgen = { version = "0.2.114", features = ["serde-serialize"] }
-wasm-bindgen-futures = "0.4.64"
-js-sys = "0.3.91"
+wasm-bindgen = { version = "0.2.118", features = ["serde-serialize"] }
+wasm-bindgen-futures = "0.4.68"
+js-sys = "0.3.95"
 serde = { workspace = true, features = ["derive", "alloc"] }
 serde_json = { workspace = true, features = ["alloc"] }
 serde-wasm-bindgen = "0.6.5"
@@ -37,7 +37,7 @@ scirs2-core = { workspace = true, optional = true }
 # We'll implement our own tensor operations for now
 
 # Core web-sys features for essential functionality
-web-sys = { version = "0.3.91", features = [
+web-sys = { version = "0.3.95", features = [
     "console",
     "Navigator",
     "Performance",
@@ -137,7 +137,7 @@ web-sys = { version = "0.3.91", features = [
 ] }
 
 [dev-dependencies]
-wasm-bindgen-test = "0.3.64"
+wasm-bindgen-test = "0.3.68"
 
 [features]
 default = ["console_panic", "dlmalloc-alloc"]

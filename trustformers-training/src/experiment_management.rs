@@ -1033,4 +1033,194 @@ mod tests {
         assert_eq!(filtered_experiments.len(), 1);
         assert_eq!(filtered_experiments[0].id, exp_id1);
     }
+
+    // ── Helper ────────────────────────────────────────────────────────────────
+
+    fn make_test_environment() -> EnvironmentInfo {
+        EnvironmentInfo {
+            python_version: "3.10.0".to_string(),
+            cuda_version: None,
+            pytorch_version: "2.0.0".to_string(),
+            hardware: HardwareInfo {
+                cpu_model: "Test CPU".to_string(),
+                cpu_cores: 4,
+                total_ram_gb: 16.0,
+                gpus: vec![],
+            },
+            packages: HashMap::new(),
+            system: SystemInfo {
+                os: "Linux".to_string(),
+                os_version: "Ubuntu 22.04".to_string(),
+                architecture: "x86_64".to_string(),
+                hostname: "test-host".to_string(),
+            },
+        }
+    }
+
+    // ── Additional tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_experiment_status_variants_eq() {
+        assert_eq!(ExperimentStatus::Running, ExperimentStatus::Running);
+        assert_ne!(ExperimentStatus::Running, ExperimentStatus::Completed);
+        assert_ne!(ExperimentStatus::Failed, ExperimentStatus::Cancelled);
+    }
+
+    #[test]
+    fn test_experiment_manager_new_empty() {
+        let manager = ExperimentManager::new();
+        let all = manager.list_experiments(None);
+        assert!(all.is_empty());
+    }
+
+    #[test]
+    fn test_create_experiment_returns_nonempty_id() {
+        let mut manager = ExperimentManager::new();
+        let id = manager.create_experiment(
+            "Test Exp".to_string(),
+            "desc".to_string(),
+            vec!["tag".to_string()],
+            "user1".to_string(),
+            None,
+            make_test_environment(),
+        );
+        assert!(!id.is_empty());
+    }
+
+    #[test]
+    fn test_create_experiment_initial_status_planning() {
+        let mut manager = ExperimentManager::new();
+        let id = manager.create_experiment(
+            "Planning Test".to_string(),
+            "desc".to_string(),
+            vec![],
+            "user".to_string(),
+            None,
+            make_test_environment(),
+        );
+        let exp = manager.get_experiment(&id).expect("experiment not found");
+        assert_eq!(exp.status, ExperimentStatus::Planning);
+    }
+
+    #[test]
+    fn test_update_experiment_status() {
+        let mut manager = ExperimentManager::new();
+        let id = manager.create_experiment(
+            "Status Update".to_string(),
+            "desc".to_string(),
+            vec![],
+            "user".to_string(),
+            None,
+            make_test_environment(),
+        );
+        manager
+            .update_experiment_status(&id, ExperimentStatus::Running)
+            .expect("update_status failed");
+        let exp = manager.get_experiment(&id).expect("exp not found");
+        assert_eq!(exp.status, ExperimentStatus::Running);
+    }
+
+    #[test]
+    fn test_get_nonexistent_experiment_returns_none() {
+        let manager = ExperimentManager::new();
+        assert!(manager.get_experiment("nonexistent-id").is_none());
+    }
+
+    #[test]
+    fn test_list_experiments_no_filter_returns_all() {
+        let mut manager = ExperimentManager::new();
+        for i in 0..3usize {
+            manager.create_experiment(
+                format!("exp_{}", i),
+                "desc".to_string(),
+                vec![],
+                "user".to_string(),
+                None,
+                make_test_environment(),
+            );
+        }
+        let all = manager.list_experiments(None);
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn test_set_current_experiment() {
+        let mut manager = ExperimentManager::new();
+        let id = manager.create_experiment(
+            "Current Exp".to_string(),
+            "desc".to_string(),
+            vec![],
+            "user".to_string(),
+            None,
+            make_test_environment(),
+        );
+        manager.set_current_experiment(id.clone()).expect("set_current failed");
+        let current = manager.get_current_experiment();
+        assert!(current.is_some());
+        assert_eq!(current.expect("no current exp").id, id);
+    }
+
+    #[test]
+    fn test_set_nonexistent_current_experiment_fails() {
+        let mut manager = ExperimentManager::new();
+        let result = manager.set_current_experiment("does-not-exist".to_string());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_add_experiment_metadata() {
+        let mut manager = ExperimentManager::new();
+        let id = manager.create_experiment(
+            "Meta Exp".to_string(),
+            "desc".to_string(),
+            vec![],
+            "user".to_string(),
+            None,
+            make_test_environment(),
+        );
+        let result = manager.add_experiment_metadata(&id, "key1".to_string(), "value1".to_string());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_experiment_version_starts_at_one() {
+        let mut manager = ExperimentManager::new();
+        let id = manager.create_experiment(
+            "Version Test".to_string(),
+            "desc".to_string(),
+            vec![],
+            "user".to_string(),
+            None,
+            make_test_environment(),
+        );
+        let exp = manager.get_experiment(&id).expect("exp not found");
+        assert_eq!(exp.version, 1);
+    }
+
+    #[test]
+    fn test_create_hyperparameter_config_retrievable() {
+        let mut manager = ExperimentManager::new();
+        let mut params = HashMap::new();
+        params.insert("lr".to_string(), serde_json::json!(1e-4_f64));
+        params.insert("batch_size".to_string(), serde_json::json!(32));
+        let config_id = manager.create_hyperparameter_config(
+            "HP Config".to_string(),
+            params,
+            None,
+            Some("test config".to_string()),
+        );
+        assert!(manager.get_hyperparameter_config(&config_id).is_some());
+    }
+
+    #[test]
+    fn test_hardware_info_cpu_cores_positive() {
+        let hw = HardwareInfo {
+            cpu_model: "TestCPU".to_string(),
+            cpu_cores: 8,
+            total_ram_gb: 32.0,
+            gpus: vec![],
+        };
+        assert!(hw.cpu_cores > 0);
+        assert!(hw.total_ram_gb > 0.0);
+    }
 }

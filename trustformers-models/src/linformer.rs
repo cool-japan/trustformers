@@ -7,3 +7,6 @@ pub mod model;
 
 pub use config::LinformerConfig;
 pub use model::{LinformerForMaskedLM, LinformerForSequenceClassification, LinformerModel};
+
+#[cfg(test)]
+mod tests;

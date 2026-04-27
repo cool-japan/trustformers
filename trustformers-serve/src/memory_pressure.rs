@@ -526,6 +526,201 @@ mod integration_tests {
 
         // All component creation should succeed without panicking
     }
+
+    #[tokio::test]
+    async fn test_handler_get_pressure_level_valid_range() {
+        let config = MemoryPressureConfig::default();
+        let handler = MemoryPressureHandler::new(config);
+
+        let level = handler.get_pressure_level().await;
+        // Should be one of the known variants
+        assert!(matches!(
+            level,
+            MemoryPressureLevel::Normal
+                | MemoryPressureLevel::Low
+                | MemoryPressureLevel::Medium
+                | MemoryPressureLevel::High
+                | MemoryPressureLevel::Critical
+                | MemoryPressureLevel::Emergency
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_handler_memory_stats_fields() {
+        let config = MemoryPressureConfig::default();
+        let handler = MemoryPressureHandler::new(config);
+
+        let stats = handler.get_memory_stats().await;
+        // utilization should be within [0, 1]
+        assert!(stats.utilization >= 0.0);
+        assert!(stats.utilization <= 1.0);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_allocations_tracked() {
+        let config = MemoryPressureConfig::default();
+        let handler = MemoryPressureHandler::new(config);
+
+        let id1 = handler
+            .request_allocation(512 * 1024, "alloc_1".to_string())
+            .await
+            .expect("alloc 1 should succeed");
+        let id2 = handler
+            .request_allocation(256 * 1024, "alloc_2".to_string())
+            .await
+            .expect("alloc 2 should succeed");
+
+        assert!(!id1.is_empty());
+        assert!(!id2.is_empty());
+        assert_ne!(id1, id2);
+
+        handler.release_allocation(&id1).await.expect("release 1 should succeed");
+        handler.release_allocation(&id2).await.expect("release 2 should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_double_release_fails() {
+        let config = MemoryPressureConfig::default();
+        let handler = MemoryPressureHandler::new(config);
+
+        let id = handler
+            .request_allocation(1024, "double_release".to_string())
+            .await
+            .expect("alloc should succeed");
+
+        handler.release_allocation(&id).await.expect("first release should succeed");
+        let second_release = handler.release_allocation(&id).await;
+        assert!(second_release.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_current_thresholds_valid_order() {
+        let config = MemoryPressureConfig::default();
+        let handler = MemoryPressureHandler::new(config);
+
+        let thresholds = handler.get_current_thresholds().await;
+        assert!(thresholds.low < thresholds.medium);
+        assert!(thresholds.medium < thresholds.high);
+        assert!(thresholds.high < thresholds.critical);
+    }
+
+    #[tokio::test]
+    async fn test_thresholds_in_valid_range() {
+        let config = MemoryPressureConfig::default();
+        let handler = MemoryPressureHandler::new(config);
+
+        let thresholds = handler.get_current_thresholds().await;
+        assert!(thresholds.low > 0.0 && thresholds.low < 1.0);
+        assert!(thresholds.medium > 0.0 && thresholds.medium < 1.0);
+        assert!(thresholds.high > 0.0 && thresholds.high < 1.0);
+        assert!(thresholds.critical > 0.0 && thresholds.critical < 1.0);
+    }
+
+    #[tokio::test]
+    async fn test_memory_forecast_horizon_thirty_minutes() {
+        let config = MemoryPressureConfig::default();
+        let handler = MemoryPressureHandler::new(config);
+
+        let forecast = handler.get_memory_forecast(30).await.expect("forecast should succeed");
+
+        assert_eq!(forecast.window_seconds, 30 * 60);
+    }
+
+    #[tokio::test]
+    async fn test_memory_forecast_utilization_range() {
+        let config = MemoryPressureConfig::default();
+        let handler = MemoryPressureHandler::new(config);
+
+        let forecast = handler.get_memory_forecast(10).await.expect("forecast should succeed");
+
+        assert!(forecast.predicted_utilization >= 0.0);
+        assert!(forecast.predicted_utilization <= 1.0);
+    }
+
+    #[tokio::test]
+    async fn test_memory_forecast_confidence_range() {
+        let config = MemoryPressureConfig::default();
+        let handler = MemoryPressureHandler::new(config);
+
+        let forecast = handler.get_memory_forecast(60).await.expect("forecast should succeed");
+
+        assert!(forecast.confidence >= 0.0);
+        assert!(forecast.confidence <= 1.0);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_queue_initially_empty() {
+        let config = MemoryPressureConfig::default();
+        let handler = MemoryPressureHandler::new(config);
+
+        let queue_status = handler.get_cleanup_queue_status().await;
+        assert_eq!(queue_status.pending_actions, 0);
+        assert_eq!(queue_status.estimated_memory_freed, 0);
+    }
+
+    #[tokio::test]
+    async fn test_event_subscription_no_initial_events() {
+        let config = MemoryPressureConfig::default();
+        let handler = MemoryPressureHandler::new(config);
+
+        let mut rx = handler.subscribe_to_events();
+        // Should not receive any events immediately
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_start_and_stop_cycle() {
+        let mut config = MemoryPressureConfig::default();
+        config.monitoring_interval_seconds = 1;
+
+        let handler = MemoryPressureHandler::new(config);
+
+        handler.start().await.expect("start should succeed");
+        handler.stop().await.expect("stop should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_system_info_has_version() {
+        let info = super::get_system_info();
+        assert!(info.contains_key("version"));
+        assert_eq!(
+            info.get("version").map(|s| s.as_str()),
+            Some(super::VERSION)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_system_info_has_gpu_monitoring() {
+        let info = super::get_system_info();
+        assert!(info.contains_key("gpu_monitoring"));
+    }
+
+    #[tokio::test]
+    async fn test_system_info_has_platform() {
+        let info = super::get_system_info();
+        assert!(info.contains_key("platform"));
+    }
+
+    #[test]
+    fn test_version_constant() {
+        assert!(!super::VERSION.is_empty());
+        assert!(super::VERSION.contains('.'));
+    }
+
+    #[test]
+    fn test_build_info_contains_version() {
+        assert!(!super::BUILD_INFO.is_empty());
+        assert!(super::BUILD_INFO.contains("TrustFormeRS"));
+    }
+
+    #[test]
+    fn test_feature_flags_enabled() {
+        const _: () = assert!(super::features::GPU_MONITORING);
+        const _: () = assert!(super::features::PLATFORM_OPTIMIZATIONS);
+        const _: () = assert!(super::features::PREDICTIVE_ANALYTICS);
+        const _: () = assert!(super::features::ADAPTIVE_THRESHOLDS);
+        const _: () = assert!(super::features::ADVANCED_CLEANUP);
+    }
 }
 
 // =============================================================================

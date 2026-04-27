@@ -1519,3 +1519,385 @@ pub struct HealthStatistics {
     /// Last trend analysis timestamp
     pub last_analysis: DateTime<Utc>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn new(seed: u64) -> Self { Self(seed) }
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0
+        }
+        fn next_f64(&mut self) -> f64 { (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64 }
+        fn next_f32(&mut self) -> f32 { self.next_f64() as f32 }
+        fn next_usize(&mut self, bound: usize) -> usize { (self.next_u64() as usize) % bound.max(1) }
+    }
+
+    // ---- EfficiencyMetrics tests ----
+    #[test]
+    fn test_efficiency_metrics_construction() {
+        let m = EfficiencyMetrics {
+            allocation_efficiency: 0.95,
+            utilization_efficiency: 0.88,
+            conflict_resolution_efficiency: 0.92,
+            overall_efficiency: 0.90,
+            fragmentation_level: 0.1,
+            waste_percentage: 5.0,
+        };
+        assert!(m.overall_efficiency > m.utilization_efficiency);
+    }
+
+    #[test]
+    fn test_efficiency_metrics_clone() {
+        let m = EfficiencyMetrics {
+            allocation_efficiency: 0.5,
+            utilization_efficiency: 0.5,
+            conflict_resolution_efficiency: 0.5,
+            overall_efficiency: 0.5,
+            fragmentation_level: 0.1,
+            waste_percentage: 10.0,
+        };
+        let m2 = m.clone();
+        assert!((m.overall_efficiency - m2.overall_efficiency).abs() < f32::EPSILON);
+    }
+
+    // ---- PredictiveIndicators tests ----
+    #[test]
+    fn test_predictive_indicators_construction() {
+        let p = PredictiveIndicators {
+            utilization_trend: TrendDirection::Increasing,
+            time_to_exhaustion: Some(Duration::from_secs(3600)),
+            risk_score: 0.3,
+            anomaly_confidence: 0.1,
+            degradation_risk: 0.2,
+            maintenance_urgency: 0.15,
+        };
+        assert!(p.time_to_exhaustion.is_some());
+    }
+
+    #[test]
+    fn test_predictive_indicators_no_exhaustion() {
+        let p = PredictiveIndicators {
+            utilization_trend: TrendDirection::Stable,
+            time_to_exhaustion: None,
+            risk_score: 0.05,
+            anomaly_confidence: 0.0,
+            degradation_risk: 0.0,
+            maintenance_urgency: 0.0,
+        };
+        assert!(p.time_to_exhaustion.is_none());
+    }
+
+    // ---- HealthStatus tests ----
+    #[test]
+    fn test_health_status_variants() {
+        let statuses = [
+            HealthStatus::Healthy,
+            HealthStatus::Warning,
+            HealthStatus::Degraded,
+            HealthStatus::Critical,
+            HealthStatus::Unknown,
+        ];
+        assert_eq!(statuses.len(), 5);
+    }
+
+    #[test]
+    fn test_health_status_equality() {
+        assert_eq!(HealthStatus::Healthy, HealthStatus::Healthy);
+        assert_ne!(HealthStatus::Healthy, HealthStatus::Critical);
+    }
+
+    // ---- AlertStatus tests ----
+    #[test]
+    fn test_alert_status_variants() {
+        let statuses = [
+            AlertStatus::Active,
+            AlertStatus::Acknowledged,
+            AlertStatus::Resolved,
+            AlertStatus::Suppressed,
+        ];
+        assert_eq!(statuses.len(), 4);
+    }
+
+    // ---- AlertSeverity tests ----
+    #[test]
+    fn test_alert_severity_variants() {
+        let sevs = [
+            AlertSeverity::Low,
+            AlertSeverity::Medium,
+            AlertSeverity::High,
+            AlertSeverity::Critical,
+        ];
+        assert_eq!(sevs.len(), 4);
+    }
+
+    // ---- EventSeverity tests ----
+    #[test]
+    fn test_event_severity_variants() {
+        let sevs = [
+            EventSeverity::Info,
+            EventSeverity::Warning,
+            EventSeverity::Error,
+            EventSeverity::Critical,
+        ];
+        assert_eq!(sevs.len(), 4);
+    }
+
+    // ---- TrendDirection tests ----
+    #[test]
+    fn test_trend_direction_variants() {
+        let dirs = [
+            TrendDirection::Increasing,
+            TrendDirection::Decreasing,
+            TrendDirection::Stable,
+            TrendDirection::Unknown,
+        ];
+        assert_eq!(dirs.len(), 4);
+    }
+
+    // ---- HealthEventType tests ----
+    #[test]
+    fn test_health_event_type_all_variants() {
+        let types = [
+            HealthEventType::StatusChange,
+            HealthEventType::AlertTriggered,
+            HealthEventType::AlertResolved,
+            HealthEventType::ThresholdCrossed,
+            HealthEventType::PerformanceDegradation,
+            HealthEventType::PerformanceImprovement,
+            HealthEventType::ResourceExhaustion,
+            HealthEventType::SystemRecovery,
+            HealthEventType::ConfigurationChange,
+            HealthEventType::AnomalyDetected,
+        ];
+        assert_eq!(types.len(), 10);
+    }
+
+    // ---- AlertType tests ----
+    #[test]
+    fn test_alert_type_variants() {
+        let types = [
+            AlertType::HighUtilization,
+            AlertType::SlowPerformance,
+            AlertType::HighConflictRate,
+            AlertType::LowHealthScore,
+            AlertType::HighErrorRate,
+            AlertType::ResourceFragmentation,
+            AlertType::SystemDegradation,
+            AlertType::CapacityWarning,
+            AlertType::AnomalousBehavior,
+        ];
+        assert_eq!(types.len(), 9);
+    }
+
+    #[test]
+    fn test_alert_type_custom() {
+        let custom = AlertType::Custom("my_alert".to_string());
+        let formatted = format!("{:?}", custom);
+        assert!(formatted.contains("my_alert"));
+    }
+
+    // ---- PortHealthThresholds construction ----
+    #[test]
+    fn test_port_health_thresholds_construction() {
+        let t = PortHealthThresholds {
+            utilization_warning: 75.0,
+            utilization_critical: 95.0,
+            conflicts_per_minute_warning: 5.0,
+            conflicts_per_minute_critical: 20.0,
+            allocation_time_warning_ms: 100.0,
+            allocation_time_critical_ms: 500.0,
+            health_score_warning: 60.0,
+            health_score_critical: 30.0,
+            error_rate_warning: 5.0,
+            error_rate_critical: 20.0,
+            fragmentation_warning: 0.3,
+            fragmentation_critical: 0.6,
+        };
+        assert!(t.utilization_critical > t.utilization_warning);
+    }
+
+    // ---- PortHealthConfig construction ----
+    #[test]
+    fn test_port_health_config_construction() {
+        let c = PortHealthConfig {
+            enabled: true,
+            check_interval: Duration::from_secs(30),
+            history_size: 1000,
+            enable_alerts: true,
+            enable_trend_analysis: true,
+            enable_predictive_indicators: true,
+            check_timeout: Duration::from_secs(5),
+            alert_throttle_duration: Duration::from_secs(60),
+            enable_detailed_logging: false,
+        };
+        assert!(c.enabled);
+        assert!(c.enable_alerts);
+    }
+
+    // ---- PerformanceBaseline construction ----
+    #[test]
+    fn test_performance_baseline_construction() {
+        let b = PerformanceBaseline {
+            baseline_allocation_time_ms: 10.0,
+            baseline_utilization: 50.0,
+            baseline_conflict_rate: 1.5,
+            baseline_efficiency: EfficiencyMetrics {
+                allocation_efficiency: 0.9,
+                utilization_efficiency: 0.85,
+                conflict_resolution_efficiency: 0.95,
+                overall_efficiency: 0.9,
+                fragmentation_level: 0.05,
+                waste_percentage: 3.0,
+            },
+            established_at: Utc::now(),
+            is_valid: true,
+            sample_count: 100,
+        };
+        assert!(b.is_valid);
+        assert_eq!(b.sample_count, 100);
+    }
+
+    // ---- PortHealthStatus construction ----
+    #[test]
+    fn test_port_health_status_construction() {
+        let s = PortHealthStatus {
+            overall_status: HealthStatus::Healthy,
+            last_check: Utc::now(),
+            available_ports: 1000,
+            allocated_ports: 500,
+            reserved_ports: 50,
+            utilization_percent: 50.0,
+            recent_conflicts: 0,
+            avg_allocation_time_ms: 5.0,
+            active_alerts: Vec::new(),
+            health_score: 95.0,
+            uptime_seconds: 86400,
+            last_event: None,
+            efficiency_metrics: EfficiencyMetrics {
+                allocation_efficiency: 0.95,
+                utilization_efficiency: 0.9,
+                conflict_resolution_efficiency: 1.0,
+                overall_efficiency: 0.95,
+                fragmentation_level: 0.02,
+                waste_percentage: 1.0,
+            },
+            predictive_indicators: PredictiveIndicators {
+                utilization_trend: TrendDirection::Stable,
+                time_to_exhaustion: None,
+                risk_score: 0.05,
+                anomaly_confidence: 0.0,
+                degradation_risk: 0.01,
+                maintenance_urgency: 0.0,
+            },
+        };
+        assert_eq!(s.overall_status, HealthStatus::Healthy);
+        assert_eq!(s.available_ports, 1000);
+    }
+
+    // ---- PortHealthAlert construction ----
+    #[test]
+    fn test_port_health_alert_construction() {
+        let alert = PortHealthAlert {
+            id: "alert_1".to_string(),
+            alert_type: AlertType::HighUtilization,
+            severity: AlertSeverity::High,
+            title: "High utilization detected".to_string(),
+            description: "Port utilization exceeded 90%".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            status: AlertStatus::Active,
+            source: "utilization_monitor".to_string(),
+            current_value: 92.5,
+            threshold_value: 90.0,
+            recommended_actions: vec!["Scale up".to_string()],
+            metadata: HashMap::new(),
+        };
+        assert_eq!(alert.id, "alert_1");
+        assert!(alert.current_value > alert.threshold_value);
+    }
+
+    // ---- HealthStatistics construction ----
+    #[test]
+    fn test_health_statistics_construction() {
+        let s = HealthStatistics {
+            total_events: 100,
+            critical_events: 5,
+            warning_events: 20,
+            active_alerts: 3,
+            trend_data_points: 50,
+            last_analysis: Utc::now(),
+        };
+        assert!(s.critical_events < s.warning_events);
+        assert!(s.warning_events < s.total_events);
+    }
+
+    // ---- PortHealthEvent construction ----
+    #[test]
+    fn test_port_health_event_construction() {
+        let event = PortHealthEvent {
+            timestamp: Utc::now(),
+            status: HealthStatus::Warning,
+            event_type: HealthEventType::ThresholdCrossed,
+            metrics: HashMap::new(),
+            alerts: vec!["utilization_high".to_string()],
+            details: HashMap::new(),
+            severity: EventSeverity::Warning,
+            duration: Some(Duration::from_secs(10)),
+            component: "port_allocator".to_string(),
+        };
+        assert_eq!(event.alerts.len(), 1);
+        assert!(event.duration.is_some());
+    }
+
+    // ---- HealthTrendAnalysis construction ----
+    #[test]
+    fn test_health_trend_analysis_construction() {
+        let trend = HealthTrendAnalysis {
+            utilization_history: VecDeque::new(),
+            performance_history: VecDeque::new(),
+            conflict_history: VecDeque::new(),
+            health_score_history: VecDeque::new(),
+            window_size: 100,
+            last_analysis: Utc::now(),
+        };
+        assert_eq!(trend.window_size, 100);
+        assert!(trend.utilization_history.is_empty());
+    }
+
+    // ---- LCG-driven tests ----
+    #[test]
+    fn test_lcg_generates_utilization_values() {
+        let mut rng = Lcg::new(42);
+        for _ in 0..50 {
+            let util = rng.next_f32() * 100.0;
+            assert!(util >= 0.0 && util < 100.0);
+        }
+    }
+
+    #[test]
+    fn test_lcg_generates_health_scores() {
+        let mut rng = Lcg::new(999);
+        for _ in 0..50 {
+            let score = rng.next_f32() * 100.0;
+            assert!(score >= 0.0 && score < 100.0);
+        }
+    }
+
+    #[test]
+    fn test_lcg_selects_health_statuses() {
+        let mut rng = Lcg::new(1234);
+        let statuses = [
+            HealthStatus::Healthy, HealthStatus::Warning,
+            HealthStatus::Degraded, HealthStatus::Critical,
+        ];
+        for _ in 0..30 {
+            let idx = rng.next_usize(statuses.len());
+            let formatted = format!("{:?}", statuses[idx]);
+            assert!(!formatted.is_empty());
+        }
+    }
+}

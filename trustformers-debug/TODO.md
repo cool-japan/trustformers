@@ -1,6 +1,6 @@
 # trustformers-debug TODO List
 
-**Version:** 0.1.0 | **Status:** Alpha | **Tests:** 216 | **SLoC:** 61,841 | **Updated:** 2026-03-21
+**Version:** 0.1.0 | **Status:** Alpha | **Tests:** 323 | **SLoC:** 61,841+ | **Updated:** 2026-03-22
 
 ## Overview
 
@@ -487,21 +487,24 @@ console.run(&model, input)?;
 ## Future Enhancements
 
 ### High Priority
-- Enhanced profiling for distributed training across multiple ranks
-- Better visualization for very large models (>100B params)
-- Real-time debugging dashboard with WebSocket streaming
-- More export formats (Perfetto, Tracy)
+- [ ] Enhanced profiling for distributed training across multiple ranks
+- [ ] Better visualization for very large models (>100B params)
+  - **Refinement needed:** What sampling strategy? Hierarchical view? LOD approach?
+- [x] **DONE** Real-time debugging dashboard with WebSocket/SSE streaming (`dashboard_ws` module)
+- [x] **DONE** More export formats: Perfetto (`export::perfetto`) and Tracy (`export::tracy`)
 
 ### Performance
-- Faster graph generation for large architectures
-- Reduced overhead for profiling hooks (lock-free ring buffer)
-- Better memory efficiency for long training runs
+- [ ] Faster graph generation for large architectures
+- [x] **DONE** Reduced overhead for profiling hooks: lock-free SPSC ring buffer (`ring_buffer::LockFreeRingBuffer`)
+- [ ] Better memory efficiency for long training runs
+  - **Refinement needed:** Target metric? (e.g., peak RSS reduction %? allocation count reduction?)
 
 ### Features
-- More interactive visualizations (animated gradient flow)
-- Integration with MLflow experiment tracking
-- Custom visualization plugins
-- Automated performance tuning recommendations
+- [x] **DONE** More interactive visualizations (animated gradient flow): `visualization::gradient_animation::GradientFlowAnimator` — frame-by-frame gradient recording, JSON/CSV/ASCII-heatmap export, health classification, summary report
+- [x] **DONE** Integration with MLflow experiment tracking: `tracking::mlflow::MlflowClient` / `MlflowExperiment` — local file-based MLflow backend writing the canonical `mlruns/` layout; supports experiments, runs, metrics, params, tags, artifacts
+- [x] **DONE** Automated performance regression detection: `regression::detector::RegressionDetector` — baseline save/load (JSON), statistical significance (z-score), severity-graded alerts (Minor/Moderate/Severe/Critical), human-readable reports, actionable recommendations
+- [x] Custom visualization plugins (implemented 2026-04-24 via `visualization_plugins` real rendering)
+- [x] Automated performance tuning recommendations (implemented 2026-04-24 via `performance_tuning`)
 
 ---
 
@@ -534,7 +537,7 @@ cargo run --example interactive_debug
 
 ---
 
-**Last Updated:** 2026-03-21 - 0.1.0 Alpha Release
+**Last Updated:** 2026-03-22 - Workstream C enhancements
 **Status:** Alpha - core features implemented, API may change
-**Tests:** 216 (100% pass rate)
-**Tools:** Profiling, flame graphs, visualization (Plotters/Ratatui/TensorBoard), analysis, AI code analysis, VS Code integration
+**Tests:** 323 (100% pass rate)
+**Tools:** Profiling, flame graphs, visualization (Plotters/Ratatui/TensorBoard), analysis, AI code analysis, VS Code integration, Perfetto/Tracy export, lock-free ring buffer, SSE streaming dashboard

@@ -565,3 +565,279 @@ impl DistributedStats {
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::weight_loading::config::{
+        CacheEvictionPolicy, CacheStrategy, ConsistencyLevel, DistributedCacheConfig,
+        DistributedConfig, FaultToleranceConfig, LoadBalancingStrategy, NetworkConfig, NodeConfig,
+        WeightLoadingConfig,
+    };
+    use std::time::Duration;
+
+    fn make_node(id: &str) -> NodeConfig {
+        NodeConfig {
+            id: id.to_string(),
+            address: "127.0.0.1".to_string(),
+            port: 9000,
+            weight_capacity: 1024 * 1024 * 1024,
+            bandwidth: 1000.0,
+            priority: 128,
+            storage_paths: vec![std::path::PathBuf::from("/tmp")],
+        }
+    }
+
+    fn make_distributed_config(nodes: Vec<NodeConfig>) -> DistributedConfig {
+        DistributedConfig {
+            nodes,
+            load_balancer: LoadBalancingStrategy::RoundRobin,
+            fault_tolerance: FaultToleranceConfig {
+                max_retries: 3,
+                retry_delay: Duration::from_millis(10),
+                timeout: Duration::from_secs(5),
+                enable_failover: true,
+                health_check_interval: Duration::from_secs(60),
+                backup_nodes: vec![],
+            },
+            network: NetworkConfig {
+                max_concurrent_connections: 4,
+                connection_timeout: Duration::from_secs(5),
+                read_timeout: Duration::from_secs(10),
+                chunk_size: 4096,
+                enable_keepalive: false,
+                compression_threshold: 1024 * 1024,
+            },
+            distributed_cache: DistributedCacheConfig {
+                cache_strategy: CacheStrategy::ReadThrough,
+                replication_factor: 1,
+                eviction_policy: CacheEvictionPolicy::LRU,
+                consistency_level: ConsistencyLevel::Eventual,
+            },
+            compression: false,
+        }
+    }
+
+    // ── DistributedStats tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_stats_default_zero() {
+        let stats = DistributedStats::new();
+        assert_eq!(stats.cache_hits, 0, "initial cache_hits must be 0");
+        assert_eq!(stats.cache_misses, 0, "initial cache_misses must be 0");
+        assert_eq!(
+            stats.successful_loads, 0,
+            "initial successful_loads must be 0"
+        );
+        assert_eq!(stats.failed_loads, 0, "initial failed_loads must be 0");
+    }
+
+    #[test]
+    fn test_cache_hit_rate_zero_when_no_requests() {
+        let stats = DistributedStats::new();
+        let rate = stats.cache_hit_rate();
+        assert!(
+            (rate - 0.0).abs() < 1e-10,
+            "cache_hit_rate must be 0 when no requests"
+        );
+    }
+
+    #[test]
+    fn test_cache_hit_rate_all_hits() {
+        let mut stats = DistributedStats::new();
+        stats.cache_hits = 10;
+        stats.cache_misses = 0;
+        let rate = stats.cache_hit_rate();
+        assert!(
+            (rate - 1.0).abs() < 1e-10,
+            "cache_hit_rate must be 1.0 with all hits"
+        );
+    }
+
+    #[test]
+    fn test_cache_hit_rate_half() {
+        let mut stats = DistributedStats::new();
+        stats.cache_hits = 5;
+        stats.cache_misses = 5;
+        let rate = stats.cache_hit_rate();
+        assert!(
+            (rate - 0.5).abs() < 1e-10,
+            "cache_hit_rate must be 0.5 with equal hits/misses"
+        );
+    }
+
+    #[test]
+    fn test_success_rate_zero_when_no_loads() {
+        let stats = DistributedStats::new();
+        assert!(
+            (stats.success_rate() - 0.0).abs() < 1e-10,
+            "success_rate must be 0 when no loads"
+        );
+    }
+
+    #[test]
+    fn test_success_rate_all_success() {
+        let mut stats = DistributedStats::new();
+        stats.successful_loads = 7;
+        stats.failed_loads = 0;
+        assert!(
+            (stats.success_rate() - 1.0).abs() < 1e-10,
+            "success_rate must be 1.0 when all loads succeed"
+        );
+    }
+
+    #[test]
+    fn test_success_rate_partial_failure() {
+        let mut stats = DistributedStats::new();
+        stats.successful_loads = 3;
+        stats.failed_loads = 1;
+        let expected = 3.0 / 4.0;
+        let delta = (stats.success_rate() - expected).abs();
+        assert!(
+            delta < 1e-10,
+            "success_rate must be 0.75 for 3 successes and 1 failure"
+        );
+    }
+
+    #[test]
+    fn test_average_load_time_zero_when_no_loads() {
+        let stats = DistributedStats::new();
+        assert_eq!(
+            stats.average_load_time(),
+            Duration::ZERO,
+            "average_load_time must be ZERO when no loads completed"
+        );
+    }
+
+    #[test]
+    fn test_average_load_time_single_load() {
+        let mut stats = DistributedStats::new();
+        let elapsed = Duration::from_millis(100);
+        stats.successful_loads = 1;
+        stats.total_load_time = elapsed;
+        assert_eq!(
+            stats.average_load_time(),
+            elapsed,
+            "average_load_time must equal total for single load"
+        );
+    }
+
+    #[test]
+    fn test_average_load_time_multiple_loads() {
+        let mut stats = DistributedStats::new();
+        stats.successful_loads = 4;
+        stats.total_load_time = Duration::from_millis(400);
+        assert_eq!(
+            stats.average_load_time(),
+            Duration::from_millis(100),
+            "average_load_time must be 100ms for 4 loads totalling 400ms"
+        );
+    }
+
+    // ── DistributedWeightLoader construction tests ────────────────────────────
+
+    #[test]
+    fn test_loader_construct_single_node() {
+        let nodes = vec![make_node("node-0")];
+        let dist_config = make_distributed_config(nodes);
+        let weight_config = WeightLoadingConfig::default();
+        let loader = DistributedWeightLoader::new(weight_config, dist_config);
+        assert!(
+            loader.is_ok(),
+            "DistributedWeightLoader must construct with single node"
+        );
+    }
+
+    #[test]
+    fn test_loader_construct_multiple_nodes() {
+        let nodes = vec![
+            make_node("node-0"),
+            make_node("node-1"),
+            make_node("node-2"),
+        ];
+        let dist_config = make_distributed_config(nodes);
+        let weight_config = WeightLoadingConfig::default();
+        let loader = DistributedWeightLoader::new(weight_config, dist_config);
+        assert!(
+            loader.is_ok(),
+            "DistributedWeightLoader must construct with multiple nodes"
+        );
+    }
+
+    #[test]
+    fn test_loader_stats_initial_zero() {
+        let nodes = vec![make_node("node-0")];
+        let dist_config = make_distributed_config(nodes);
+        let loader = DistributedWeightLoader::new(WeightLoadingConfig::default(), dist_config)
+            .expect("loader must construct");
+        let stats = loader.get_stats();
+        assert_eq!(stats.cache_hits, 0);
+        assert_eq!(stats.successful_loads, 0);
+        assert_eq!(stats.failed_loads, 0);
+    }
+
+    // ── Load balancer (via DistributedWeightLoader) tests ────────────────────
+
+    #[test]
+    fn test_load_balancer_round_robin_construct() {
+        let nodes = vec![make_node("a"), make_node("b")];
+        let dist_config = make_distributed_config(nodes);
+        let loader = DistributedWeightLoader::new(WeightLoadingConfig::default(), dist_config);
+        assert!(loader.is_ok(), "round-robin load balancer must construct");
+    }
+
+    #[test]
+    fn test_load_balancer_least_loaded_construct() {
+        let nodes = vec![make_node("a"), make_node("b")];
+        let mut dist_config = make_distributed_config(nodes);
+        dist_config.load_balancer = LoadBalancingStrategy::LeastLoaded;
+        let loader = DistributedWeightLoader::new(WeightLoadingConfig::default(), dist_config);
+        assert!(loader.is_ok(), "least-loaded load balancer must construct");
+    }
+
+    #[test]
+    fn test_load_balancer_consistent_hashing_construct() {
+        let nodes = vec![make_node("a"), make_node("b")];
+        let mut dist_config = make_distributed_config(nodes);
+        dist_config.load_balancer = LoadBalancingStrategy::ConsistentHashing;
+        let loader = DistributedWeightLoader::new(WeightLoadingConfig::default(), dist_config);
+        assert!(
+            loader.is_ok(),
+            "consistent hashing load balancer must construct"
+        );
+    }
+
+    // ── Cache strategy tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_cache_none_strategy() {
+        let nodes = vec![make_node("node-0")];
+        let mut dist_config = make_distributed_config(nodes);
+        dist_config.distributed_cache.cache_strategy = CacheStrategy::None;
+        let loader = DistributedWeightLoader::new(WeightLoadingConfig::default(), dist_config)
+            .expect("loader must construct");
+        // Verify the should_cache returns false for CacheStrategy::None
+        // (tested indirectly via construction; actual caching is in async path)
+        let stats = loader.get_stats();
+        assert_eq!(
+            stats.cache_hits, 0,
+            "fresh loader must have zero cache hits"
+        );
+    }
+
+    #[test]
+    fn test_cache_read_through_strategy_construct() {
+        let nodes = vec![make_node("node-0")];
+        let mut dist_config = make_distributed_config(nodes);
+        dist_config.distributed_cache.cache_strategy = CacheStrategy::ReadThrough;
+        let loader = DistributedWeightLoader::new(WeightLoadingConfig::default(), dist_config);
+        assert!(
+            loader.is_ok(),
+            "ReadThrough cache strategy must be constructible"
+        );
+    }
+}

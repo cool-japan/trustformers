@@ -4,10 +4,13 @@ use chrono::Utc;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::sleep;
+#[cfg(feature = "kafka")]
 use trustformers_serve::message_queue::{
-    CompressionAlgorithm, EventHandler, Message, MessageBatch, MessageQueueBackend,
-    MessageQueueConfig, MessageQueueEvent, MessageQueueManager, PerformanceConfig, RetryPolicy,
-    SecurityConfig, SerializationFormat,
+    CompressionAlgorithm, PerformanceConfig, RetryPolicy, SecurityConfig, SerializationFormat,
+};
+use trustformers_serve::message_queue::{
+    EventHandler, Message, MessageBatch, MessageQueueBackend, MessageQueueConfig,
+    MessageQueueEvent, MessageQueueManager,
 };
 use uuid::Uuid;
 
@@ -25,8 +28,11 @@ async fn main() -> Result<()> {
     run_inmemory_example().await?;
 
     // Example 2: Kafka Queue (requires Kafka server)
-    println!("\n📡 Example 2: Kafka Message Queue");
-    run_kafka_example().await?;
+    #[cfg(feature = "kafka")]
+    {
+        println!("\n📡 Example 2: Kafka Message Queue");
+        run_kafka_example().await?;
+    }
 
     // Example 3: Redis Streams (requires Redis server)
     println!("\n🔴 Example 3: Redis Streams Message Queue");
@@ -112,6 +118,7 @@ async fn run_inmemory_example() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "kafka")]
 async fn run_kafka_example() -> Result<()> {
     let config = MessageQueueConfig {
         backend: MessageQueueBackend::Kafka,

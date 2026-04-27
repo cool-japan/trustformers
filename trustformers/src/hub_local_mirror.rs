@@ -1001,4 +1001,282 @@ mod tests {
         assert_eq!(config.parallel_downloads, 4);
         assert!(config.auto_cleanup);
     }
+
+    #[test]
+    fn test_mirror_config_default_values() {
+        let config = MirrorConfig::default();
+        assert_eq!(config.storage_path, PathBuf::from("./hub_mirror"));
+        assert_eq!(config.remote_hub_url, "https://hub.trustformers.ai");
+        assert_eq!(config.sync_interval, Duration::from_secs(3600));
+        assert!(config.compression_enabled);
+        assert!((config.cleanup_threshold - 0.8).abs() < f64::EPSILON);
+        assert_eq!(config.retry_attempts, 3);
+        assert_eq!(config.retry_delay, Duration::from_secs(5));
+        assert!(config.bandwidth_limit_mbps.is_none());
+        assert!(config.priority_models.is_empty());
+    }
+
+    #[test]
+    fn test_mirror_stats_default() {
+        let stats = MirrorStats::default();
+        assert_eq!(stats.total_models, 0);
+        assert!((stats.total_size_gb - 0.0).abs() < f64::EPSILON);
+        assert_eq!(stats.cache_hits, 0);
+        assert_eq!(stats.cache_misses, 0);
+        assert_eq!(stats.downloads_completed, 0);
+        assert_eq!(stats.downloads_failed, 0);
+        assert!(stats.last_sync.is_none());
+    }
+
+    #[test]
+    fn test_download_status_equality() {
+        assert_eq!(DownloadStatus::Queued, DownloadStatus::Queued);
+        assert_eq!(DownloadStatus::Downloading, DownloadStatus::Downloading);
+        assert_eq!(DownloadStatus::Completed, DownloadStatus::Completed);
+        assert_ne!(DownloadStatus::Queued, DownloadStatus::Completed);
+    }
+
+    #[test]
+    fn test_download_status_failed_variant() {
+        let status = DownloadStatus::Failed("timeout".to_string());
+        assert_ne!(status, DownloadStatus::Completed);
+        if let DownloadStatus::Failed(msg) = &status {
+            assert_eq!(msg, "timeout");
+        }
+    }
+
+    #[test]
+    fn test_download_progress_creation() {
+        let progress = DownloadProgress {
+            model_id: "gpt2".to_string(),
+            version: "1.0".to_string(),
+            bytes_downloaded: 100_000,
+            total_bytes: 500_000,
+            progress_percent: 20.0,
+            download_speed_mbps: 50.0,
+            eta_seconds: 8,
+            status: DownloadStatus::Downloading,
+        };
+        assert_eq!(progress.model_id, "gpt2");
+        assert!((progress.progress_percent - 20.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_model_metadata_creation() {
+        let metadata = ModelMetadata {
+            name: "BERT Base".to_string(),
+            description: Some("BERT base uncased model".to_string()),
+            architecture: "transformer".to_string(),
+            task: "text-classification".to_string(),
+            language: Some("en".to_string()),
+            license: Some("Apache-2.0".to_string()),
+            tags: vec!["nlp".to_string(), "transformer".to_string()],
+            performance_metrics: {
+                let mut m = HashMap::new();
+                m.insert("accuracy".to_string(), 0.9);
+                m
+            },
+            size_mb: 438.0,
+            dependencies: vec![],
+        };
+        assert_eq!(metadata.name, "BERT Base");
+        assert!(metadata.description.is_some());
+        assert_eq!(metadata.tags.len(), 2);
+        assert!((metadata.size_mb - 438.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_cached_model_creation() {
+        let cached = CachedModel {
+            model_id: "test_model".to_string(),
+            version: "1.0".to_string(),
+            local_path: PathBuf::from("/tmp/test_model"),
+            remote_url: "https://example.com/model".to_string(),
+            cached_at: SystemTime::now(),
+            last_accessed: SystemTime::now(),
+            access_count: 5,
+            file_size: 1_000_000,
+            checksum: "sha256_hash".to_string(),
+            metadata: ModelMetadata {
+                name: "Test".to_string(),
+                description: None,
+                architecture: "test".to_string(),
+                task: "test".to_string(),
+                language: None,
+                license: None,
+                tags: vec![],
+                performance_metrics: HashMap::new(),
+                size_mb: 1.0,
+                dependencies: vec![],
+            },
+            is_priority: false,
+            download_complete: true,
+        };
+        assert_eq!(cached.access_count, 5);
+        assert!(cached.download_complete);
+    }
+
+    #[test]
+    fn test_mirror_config_custom() {
+        let config = MirrorConfig {
+            storage_path: PathBuf::from("/data/models"),
+            remote_hub_url: "https://custom-hub.example.com".to_string(),
+            sync_interval: Duration::from_secs(7200),
+            max_storage_size_gb: 500.0,
+            compression_enabled: false,
+            auto_cleanup: false,
+            cleanup_threshold: 0.95,
+            parallel_downloads: 8,
+            retry_attempts: 5,
+            retry_delay: Duration::from_secs(10),
+            bandwidth_limit_mbps: Some(100.0),
+            priority_models: vec!["model_a".to_string(), "model_b".to_string()],
+        };
+        assert_eq!(config.parallel_downloads, 8);
+        assert_eq!(config.priority_models.len(), 2);
+        assert!(config.bandwidth_limit_mbps.is_some());
+    }
+
+    #[test]
+    fn test_download_progress_complete() {
+        let progress = DownloadProgress {
+            model_id: "model_x".to_string(),
+            version: "2.0".to_string(),
+            bytes_downloaded: 1000,
+            total_bytes: 1000,
+            progress_percent: 100.0,
+            download_speed_mbps: 25.0,
+            eta_seconds: 0,
+            status: DownloadStatus::Completed,
+        };
+        assert_eq!(progress.bytes_downloaded, progress.total_bytes);
+        assert!((progress.progress_percent - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_download_progress_queued() {
+        let progress = DownloadProgress {
+            model_id: "model_y".to_string(),
+            version: "1.0".to_string(),
+            bytes_downloaded: 0,
+            total_bytes: 500_000_000,
+            progress_percent: 0.0,
+            download_speed_mbps: 0.0,
+            eta_seconds: 0,
+            status: DownloadStatus::Queued,
+        };
+        assert_eq!(progress.bytes_downloaded, 0);
+        assert_eq!(progress.status, DownloadStatus::Queued);
+    }
+
+    #[test]
+    fn test_model_metadata_no_optional_fields() {
+        let metadata = ModelMetadata {
+            name: "Minimal".to_string(),
+            description: None,
+            architecture: "cnn".to_string(),
+            task: "classification".to_string(),
+            language: None,
+            license: None,
+            tags: vec![],
+            performance_metrics: HashMap::new(),
+            size_mb: 10.0,
+            dependencies: vec![],
+        };
+        assert!(metadata.description.is_none());
+        assert!(metadata.language.is_none());
+        assert!(metadata.license.is_none());
+    }
+
+    #[test]
+    fn test_model_metadata_with_dependencies() {
+        let metadata = ModelMetadata {
+            name: "Complex".to_string(),
+            description: None,
+            architecture: "transformer".to_string(),
+            task: "generation".to_string(),
+            language: None,
+            license: None,
+            tags: vec![],
+            performance_metrics: HashMap::new(),
+            size_mb: 100.0,
+            dependencies: vec!["tokenizer-v2".to_string(), "vocab-en".to_string()],
+        };
+        assert_eq!(metadata.dependencies.len(), 2);
+    }
+
+    #[test]
+    fn test_mirror_stats_with_activity() {
+        let stats = MirrorStats {
+            total_models: 25,
+            total_size_gb: 50.5,
+            cache_hits: 1000,
+            cache_misses: 200,
+            downloads_completed: 30,
+            downloads_failed: 2,
+            last_sync: Some(SystemTime::now()),
+            sync_errors: 1,
+            bandwidth_saved_gb: 100.0,
+            average_download_speed_mbps: 50.0,
+        };
+        let hit_rate = stats.cache_hits as f64 / (stats.cache_hits + stats.cache_misses) as f64;
+        assert!(hit_rate > 0.8);
+    }
+
+    #[test]
+    fn test_cached_model_priority_flag() {
+        let cached = CachedModel {
+            model_id: "priority_model".to_string(),
+            version: "1.0".to_string(),
+            local_path: PathBuf::from("/tmp/priority"),
+            remote_url: "https://example.com".to_string(),
+            cached_at: SystemTime::now(),
+            last_accessed: SystemTime::now(),
+            access_count: 0,
+            file_size: 100,
+            checksum: "hash".to_string(),
+            metadata: ModelMetadata {
+                name: "Priority".to_string(),
+                description: None,
+                architecture: "test".to_string(),
+                task: "test".to_string(),
+                language: None,
+                license: None,
+                tags: vec![],
+                performance_metrics: HashMap::new(),
+                size_mb: 0.1,
+                dependencies: vec![],
+            },
+            is_priority: true,
+            download_complete: true,
+        };
+        assert!(cached.is_priority);
+    }
+
+    #[tokio::test]
+    async fn test_mirror_save_load_roundtrip() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let config = MirrorConfig {
+            storage_path: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let mirror = HubMirror::new(config).expect("operation failed in test");
+        mirror.save_cache().await.expect("save failed");
+        mirror.load_cache().await.expect("load failed");
+        let cache = mirror.cache.read().expect("lock should not be poisoned");
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_mirror_initial_stats() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let config = MirrorConfig {
+            storage_path: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let mirror = HubMirror::new(config).expect("operation failed in test");
+        let stats = mirror.stats.lock().expect("lock should not be poisoned");
+        assert_eq!(stats.total_models, 0);
+        assert_eq!(stats.cache_hits, 0);
+    }
 }

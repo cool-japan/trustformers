@@ -2,12 +2,17 @@ pub mod catastrophic_prevention;
 pub mod ewc;
 pub mod memory_replay;
 pub mod progressive_networks;
+pub mod replay_buffer;
 pub mod task_boundary;
 
 pub use catastrophic_prevention::{CatastrophicPreventionStrategy, RegularizationMethod};
 pub use ewc::{EWCConfig, EWCTrainer, FisherInformation};
 pub use memory_replay::{ExperienceBuffer, MemoryReplay, MemoryReplayConfig};
 pub use progressive_networks::{ProgressiveConfig, ProgressiveNetwork, TaskModule};
+pub use replay_buffer::{
+    compute_bwt, compute_fwt, compute_intransigence, LateralAdapter, PnnConfig, ReplayBuffer,
+    ReplaySample, ReplayStrategy,
+};
 pub use task_boundary::{BoundaryDetectionConfig, TaskBoundaryDetector, TaskTransition};
 
 use serde::{Deserialize, Serialize};
@@ -170,5 +175,153 @@ mod tests {
                 assert!(manager.add_task(task).is_err());
             }
         }
+    }
+
+    #[test]
+    fn test_get_current_task_none_initially() {
+        let manager = ContinualLearningManager::new(ContinualLearningConfig::default());
+        assert!(manager.get_current_task().is_none());
+    }
+
+    #[test]
+    fn test_set_current_task_not_found_errors() {
+        let mut manager = ContinualLearningManager::new(ContinualLearningConfig::default());
+        let result = manager.set_current_task("nonexistent".to_string());
+        assert!(
+            result.is_err(),
+            "setting a non-existent task should return Err"
+        );
+    }
+
+    #[test]
+    fn test_task_transitions_recorded() {
+        let config = ContinualLearningConfig::default();
+        let mut manager = ContinualLearningManager::new(config);
+
+        for i in 0..3 {
+            manager
+                .add_task(TaskInfo {
+                    task_id: format!("t{}", i),
+                    name: format!("Task {}", i),
+                    description: None,
+                    data_size: 50,
+                    num_classes: Some(3),
+                    created_at: chrono::Utc::now(),
+                })
+                .expect("add_task should succeed");
+        }
+
+        manager.set_current_task("t0".to_string()).expect("set t0 should succeed");
+        manager.set_current_task("t1".to_string()).expect("set t1 should succeed");
+        manager.set_current_task("t2".to_string()).expect("set t2 should succeed");
+
+        let transitions = manager.get_task_transitions();
+        assert_eq!(transitions.len(), 2, "2 transitions: t0→t1 and t1→t2");
+        assert_eq!(transitions[0].from_task, "t0");
+        assert_eq!(transitions[0].to_task, "t1");
+        assert_eq!(transitions[1].from_task, "t1");
+        assert_eq!(transitions[1].to_task, "t2");
+    }
+
+    #[test]
+    fn test_get_task_count_empty() {
+        let manager = ContinualLearningManager::new(ContinualLearningConfig::default());
+        assert_eq!(manager.get_task_count(), 0);
+    }
+
+    #[test]
+    fn test_config_default_fields() {
+        let cfg = ContinualLearningConfig::default();
+        assert_eq!(cfg.max_tasks, 10);
+        assert!(cfg.online_learning);
+        assert!(cfg.ewc.is_some());
+        assert!(cfg.memory_replay.is_none());
+        assert!(cfg.progressive.is_none());
+    }
+
+    #[test]
+    fn test_config_online_learning_false() {
+        let cfg = ContinualLearningConfig {
+            online_learning: false,
+            ..ContinualLearningConfig::default()
+        };
+        assert!(!cfg.online_learning);
+    }
+
+    #[test]
+    fn test_task_info_fields() {
+        let now = chrono::Utc::now();
+        let task = TaskInfo {
+            task_id: "t42".to_string(),
+            name: "Sentiment Analysis".to_string(),
+            description: Some("Classify sentiment".to_string()),
+            data_size: 50_000,
+            num_classes: Some(3),
+            created_at: now,
+        };
+        assert_eq!(task.task_id, "t42");
+        assert_eq!(task.data_size, 50_000);
+        assert_eq!(task.num_classes, Some(3));
+        assert_eq!(
+            task.description.as_deref().expect("description must be set"),
+            "Classify sentiment"
+        );
+    }
+
+    #[test]
+    fn test_get_task_transitions_empty() {
+        let manager = ContinualLearningManager::new(ContinualLearningConfig::default());
+        assert!(manager.get_task_transitions().is_empty());
+    }
+
+    #[test]
+    fn test_add_multiple_tasks_and_get_count() {
+        let mut manager = ContinualLearningManager::new(ContinualLearningConfig::default());
+        for i in 0..5 {
+            manager
+                .add_task(TaskInfo {
+                    task_id: format!("task_{}", i),
+                    name: format!("T{}", i),
+                    description: None,
+                    data_size: 100 * (i + 1),
+                    num_classes: None,
+                    created_at: chrono::Utc::now(),
+                })
+                .expect("add should succeed for 5 tasks under limit 10");
+        }
+        assert_eq!(manager.get_task_count(), 5);
+    }
+
+    #[test]
+    fn test_current_task_id_updated() {
+        let mut manager = ContinualLearningManager::new(ContinualLearningConfig::default());
+        manager
+            .add_task(TaskInfo {
+                task_id: "alpha".to_string(),
+                name: "Alpha".to_string(),
+                description: None,
+                data_size: 10,
+                num_classes: Some(2),
+                created_at: chrono::Utc::now(),
+            })
+            .expect("add alpha should succeed");
+
+        manager.set_current_task("alpha".to_string()).expect("set alpha should succeed");
+        let current = manager.get_current_task().expect("current task should be Some");
+        assert_eq!(current.task_id, "alpha");
+        assert_eq!(current.name, "Alpha");
+    }
+
+    #[test]
+    fn test_task_info_no_num_classes() {
+        let task = TaskInfo {
+            task_id: "gen".to_string(),
+            name: "Generation".to_string(),
+            description: None,
+            data_size: 1000,
+            num_classes: None,
+            created_at: chrono::Utc::now(),
+        };
+        assert!(task.num_classes.is_none());
     }
 }

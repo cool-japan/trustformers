@@ -288,3 +288,73 @@ impl Default for PerformanceMetrics {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_query_performance_metrics_default() {
+        let m = QueryPerformanceMetrics::default();
+        assert_eq!(m.query_count, 0);
+        assert!((m.cache_hit_rate - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_storage_efficiency_metrics_default() {
+        let m = StorageEfficiencyMetrics::default();
+        assert!((m.compression_ratio - 1.0).abs() < 1e-9);
+        assert_eq!(m.storage_used, 0);
+    }
+
+    #[test]
+    fn test_retention_metrics_default() {
+        let m = RetentionMetrics::default();
+        assert_eq!(m.retention_period, Duration::from_secs(7 * 24 * 3600));
+        assert_eq!(m.purged_records, 0);
+    }
+
+    #[test]
+    fn test_retention_statistics_default() {
+        let m = RetentionStatistics::default();
+        assert_eq!(m.total_size, 0);
+        assert_eq!(m.retained_count, 0);
+        assert_eq!(m.deleted_count, 0);
+    }
+
+    #[test]
+    fn test_compression_statistics_default() {
+        let m = CompressionStatistics::default();
+        assert_eq!(m.total_compressed, 0);
+        assert!((m.compression_ratio - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_performance_targets_default() {
+        let m = PerformanceTargets::default();
+        assert_eq!(m.max_latency, Duration::from_secs(1));
+        assert!((m.max_cpu_usage - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_query_statistics_default() {
+        let m = QueryStatistics::default();
+        assert_eq!(m.rows_scanned, 0);
+        assert!(!m.cache_hit);
+    }
+
+    #[test]
+    fn test_usage_statistics_default() {
+        let m = UsageStatistics::default();
+        assert_eq!(m.total_requests, 0);
+        assert!((m.error_rate - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_performance_metrics_default() {
+        let m = PerformanceMetrics::default();
+        assert!((m.cpu_usage - 0.0).abs() < 1e-9);
+        assert!((m.memory_usage - 0.0).abs() < 1e-9);
+        assert!((m.disk_usage - 0.0).abs() < 1e-9);
+    }
+}

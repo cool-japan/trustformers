@@ -205,7 +205,7 @@ impl AdvancedOptimizationHistoryManager {
         self.perform_comprehensive_analysis().await?;
 
         // Update predictive models periodically
-        if event_id % 10 == 0 {
+        if event_id.is_multiple_of(10) {
             self.update_predictive_models().await?;
         }
 

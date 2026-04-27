@@ -561,13 +561,9 @@ impl PyTensorOptimized {
     ) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let weight_array = weight
-            .map(|w| w.try_readonly().ok()?.as_array().to_owned())
-            .transpose()
-            .ok_or_else(|| PyValueError::new_err("Failed to read weight array"))?;
+            .and_then(|w| w.try_readonly().ok().map(|r| r.as_array().to_owned()));
         let bias_array = bias
-            .map(|b| b.try_readonly().ok()?.as_array().to_owned())
-            .transpose()
-            .ok_or_else(|| PyValueError::new_err("Failed to read bias array"))?;
+            .and_then(|b| b.try_readonly().ok().map(|r| r.as_array().to_owned()));
 
         let result = TensorOptimizer::layer_norm(
             &input_array,
@@ -602,9 +598,7 @@ impl PyTensorOptimized {
         let key_array = key.try_readonly()?.as_array().to_owned();
         let value_array = value.try_readonly()?.as_array().to_owned();
         let mask_array = mask
-            .map(|m| m.try_readonly().ok()?.as_array().to_owned())
-            .transpose()
-            .ok_or_else(|| PyValueError::new_err("Failed to read mask array"))?;
+            .and_then(|m| m.try_readonly().ok().map(|r| r.as_array().to_owned()));
 
         let result = TensorOptimizer::scaled_dot_product_attention(
             &query_array,

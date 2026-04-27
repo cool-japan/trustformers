@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Copyright 2025-2026 COOLJAPAN OU (Team KitaSan)
 
+## [0.1.1] - 2026-04-25
+
+### Added
+- 49+ transformer architectures (22 new architectures: Falcon2, Gemma2, Granite, Hyena, InternLM2, Jamba, Jamba2, Linformer, LLaMA3.2, Mamba2, Nemotron, Performer, Phi4, Qwen2.5, RetNet, S4, SD3, StableLM, StarCoder2, Whisper, xLSTM, Yi)
+- Natural typing simulator for human-like response delivery
+- Ensemble model types and strategies
+- Resource analysis and monitoring structures
+
+### Changed
+- Upgraded SciRS2 dependencies to version 0.4.2
+- Replaced ONNX Runtime with oxionnx (Pure Rust policy compliance)
+- `tar` crate replaced with `oxiarc-archive` (COOLJAPAN policy)
+- `rdkafka` Kafka backend feature-gated (`--features kafka`)
+- 7 oversized files split using splitrs (COOLJAPAN 2000-line policy)
+- Dependency upgrades: oxiarc-deflate/lz4 0.2.7, scirs2-core/linalg 0.4.2, wasm-bindgen 0.2.118, web-sys 0.3.95, lapin 4.5, redis 1.2
+
+### Fixed
+- Version consistency across all workspace crates
+- Example crates missing `publish = false`
+- cargo fmt formatting across 4 files
+- 88 clippy unused-import warnings eliminated
+
 ## [0.1.0] - 2026-03-20
 
 ### Added

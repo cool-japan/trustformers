@@ -294,7 +294,7 @@ impl SimdTokenizer {
 
         // Process remainder
         for &byte in remainder {
-            let converted = if byte >= b'A' && byte <= b'Z' { byte + 32 } else { byte };
+            let converted = if byte.is_ascii_uppercase() { byte + 32 } else { byte };
             result.push(converted);
         }
 

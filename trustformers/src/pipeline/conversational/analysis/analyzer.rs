@@ -354,3 +354,353 @@ impl Default for EnhancedAnalysisConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::super::types::{ConversationRole, ConversationTurn};
+    use super::super::types::EnhancedAnalysisConfig;
+    use super::*;
+
+    /// Create a minimal ConversationTurn for testing without needing a live model.
+    fn make_turn(content: &str, role: ConversationRole) -> ConversationTurn {
+        ConversationTurn {
+            role,
+            content: content.to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            token_count: content.split_whitespace().count(),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Initialization
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_analyzer_default_config() {
+        let cfg = EnhancedAnalysisConfig::default();
+        assert!(
+            cfg.enable_linguistic_analysis,
+            "linguistic analysis should be enabled by default"
+        );
+        assert!(
+            cfg.enable_health_assessment,
+            "health assessment should be enabled by default"
+        );
+        assert_eq!(cfg.batch_size, 10, "default batch size should be 10");
+    }
+
+    #[test]
+    fn test_analyzer_construction() {
+        let cfg = EnhancedAnalysisConfig::default();
+        let _analyzer = ConversationAnalyzer::new(cfg);
+        // Simply verify construction does not panic
+    }
+
+    #[test]
+    fn test_analyzer_custom_config() {
+        let mut cfg = EnhancedAnalysisConfig::default();
+        cfg.enable_linguistic_analysis = false;
+        cfg.batch_size = 32;
+        let _analyzer = ConversationAnalyzer::new(cfg);
+    }
+
+    // -----------------------------------------------------------------------
+    // Turn analysis
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_analyze_turn_returns_result() {
+        let analyzer = ConversationAnalyzer::new(EnhancedAnalysisConfig::default());
+        let turn = make_turn("Hello, how are you today?", ConversationRole::User);
+        let result = analyzer.analyze_turn(&turn).await.expect("analyze_turn must succeed");
+        assert!(
+            result.quality_score >= 0.0 && result.quality_score <= 1.0,
+            "quality score must be in [0, 1]"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_analyze_turn_confidence_in_range() {
+        let analyzer = ConversationAnalyzer::new(EnhancedAnalysisConfig::default());
+        let turn = make_turn(
+            "This is a well-formed sentence for testing purposes.",
+            ConversationRole::User,
+        );
+        let result = analyzer.analyze_turn(&turn).await.expect("analyze_turn must succeed");
+        assert!(
+            result.confidence >= 0.0 && result.confidence <= 1.0,
+            "confidence must be in [0, 1]"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_analyze_turn_sentiment_not_empty() {
+        let analyzer = ConversationAnalyzer::new(EnhancedAnalysisConfig::default());
+        let turn = make_turn(
+            "I feel great about this! Excellent work.",
+            ConversationRole::User,
+        );
+        let result = analyzer.analyze_turn(&turn).await.expect("analyze_turn must succeed");
+        let sentiment = result.sentiment.expect("sentiment must be present");
+        assert!(!sentiment.is_empty(), "sentiment string must not be empty");
+    }
+
+    #[tokio::test]
+    async fn test_analyze_turn_positive_sentiment() {
+        let analyzer = ConversationAnalyzer::new(EnhancedAnalysisConfig::default());
+        let turn = make_turn(
+            "This is great and wonderful, I am very happy!",
+            ConversationRole::User,
+        );
+        let result = analyzer.analyze_turn(&turn).await.expect("analyze_turn must succeed");
+        let sentiment = result.sentiment.expect("sentiment must be present");
+        assert_eq!(
+            sentiment, "positive",
+            "strongly positive text should yield positive sentiment"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_analyze_turn_negative_sentiment() {
+        let analyzer = ConversationAnalyzer::new(EnhancedAnalysisConfig::default());
+        let turn = make_turn(
+            "This is terrible and awful, I feel bad and angry about it.",
+            ConversationRole::User,
+        );
+        let result = analyzer.analyze_turn(&turn).await.expect("analyze_turn must succeed");
+        let sentiment = result.sentiment.expect("sentiment must be present");
+        assert_eq!(
+            sentiment, "negative",
+            "strongly negative text should yield negative sentiment"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_analyze_turn_neutral_sentiment() {
+        let analyzer = ConversationAnalyzer::new(EnhancedAnalysisConfig::default());
+        let turn = make_turn("The sky is blue.", ConversationRole::User);
+        let result = analyzer.analyze_turn(&turn).await.expect("analyze_turn must succeed");
+        let sentiment = result.sentiment.expect("sentiment must be present");
+        assert_eq!(
+            sentiment, "neutral",
+            "neutral text should yield neutral sentiment"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Intent classification
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_analyze_turn_intent_question() {
+        let analyzer = ConversationAnalyzer::new(EnhancedAnalysisConfig::default());
+        let turn = make_turn("What time is it?", ConversationRole::User);
+        let result = analyzer.analyze_turn(&turn).await.expect("analyze_turn must succeed");
+        let intent = result.intent.expect("intent must be present");
+        assert_eq!(
+            intent, "question",
+            "sentence ending in ? must yield question intent"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_analyze_turn_intent_request() {
+        let analyzer = ConversationAnalyzer::new(EnhancedAnalysisConfig::default());
+        // "please" without "thank/thanks" triggers "request" intent
+        let turn = make_turn("Please send me the report.", ConversationRole::User);
+        let result = analyzer.analyze_turn(&turn).await.expect("analyze_turn must succeed");
+        let intent = result.intent.expect("intent must be present");
+        assert_eq!(
+            intent, "request",
+            "message containing 'please' should yield request intent"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_analyze_turn_intent_gratitude() {
+        let analyzer = ConversationAnalyzer::new(EnhancedAnalysisConfig::default());
+        // "thank" without any "please"/"can you"/"help" triggers "gratitude"
+        let turn = make_turn(
+            "Thank you so much, I really appreciate it.",
+            ConversationRole::User,
+        );
+        let result = analyzer.analyze_turn(&turn).await.expect("analyze_turn must succeed");
+        let intent = result.intent.expect("intent must be present");
+        assert_eq!(
+            intent, "gratitude",
+            "message containing 'thank' should yield gratitude intent"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Topic extraction
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_analyze_turn_technology_topic() {
+        let analyzer = ConversationAnalyzer::new(EnhancedAnalysisConfig::default());
+        let turn = make_turn(
+            "The new AI software is running on the computer.",
+            ConversationRole::User,
+        );
+        let result = analyzer.analyze_turn(&turn).await.expect("analyze_turn must succeed");
+        assert!(
+            result.topics.contains(&"technology".to_string()),
+            "message about AI/software/computer should have technology topic"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_analyze_turn_no_topic_for_generic_text() {
+        let analyzer = ConversationAnalyzer::new(EnhancedAnalysisConfig::default());
+        let turn = make_turn("Hello there.", ConversationRole::User);
+        let result = analyzer.analyze_turn(&turn).await.expect("analyze_turn must succeed");
+        // No specific keywords matched; topics may be empty
+        assert!(
+            result.topics.len() < 3,
+            "generic greeting should not produce many topics"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Engagement level
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_analyze_turn_low_engagement_short_message() {
+        let analyzer = ConversationAnalyzer::new(EnhancedAnalysisConfig::default());
+        let turn = make_turn("ok", ConversationRole::User);
+        let result = analyzer.analyze_turn(&turn).await.expect("analyze_turn must succeed");
+        assert_eq!(
+            result.engagement_level,
+            EngagementLevel::Low,
+            "single word with no punctuation should yield low engagement"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_analyze_turn_processing_time_set() {
+        let analyzer = ConversationAnalyzer::new(EnhancedAnalysisConfig::default());
+        let turn = make_turn("Some meaningful text for analysis.", ConversationRole::User);
+        let result = analyzer.analyze_turn(&turn).await.expect("analyze_turn must succeed");
+        // processing_time is a Duration; just ensure it can be read without panic
+        let _ = result.processing_time.as_millis();
+    }
+
+    // -----------------------------------------------------------------------
+    // Conversation health assessment
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_analyze_conversation_empty_state() {
+        let analyzer = ConversationAnalyzer::new(EnhancedAnalysisConfig::default());
+        let state = ConversationState::new("conv-001".to_string());
+        let assessment = analyzer
+            .analyze_conversation(&state)
+            .await
+            .expect("analyze_conversation must succeed");
+        assert!(
+            assessment.overall_score >= 0.0 && assessment.overall_score <= 1.0,
+            "overall_score must be in [0, 1]"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_analyze_conversation_trend_present() {
+        let analyzer = ConversationAnalyzer::new(EnhancedAnalysisConfig::default());
+        let state = ConversationState::new("conv-002".to_string());
+        let assessment = analyzer
+            .analyze_conversation(&state)
+            .await
+            .expect("analyze_conversation must succeed");
+        let trend = assessment.trend.expect("trend must be present for new conversation");
+        assert!(!trend.is_empty(), "trend string must not be empty");
+    }
+
+    #[tokio::test]
+    async fn test_analyze_conversation_component_scores_in_range() {
+        let analyzer = ConversationAnalyzer::new(EnhancedAnalysisConfig::default());
+        let state = ConversationState::new("conv-003".to_string());
+        let assessment = analyzer
+            .analyze_conversation(&state)
+            .await
+            .expect("analyze_conversation must succeed");
+        let scores = &assessment.component_scores;
+        assert!(
+            scores.coherence >= 0.0 && scores.coherence <= 1.0,
+            "coherence in [0,1]"
+        );
+        assert!(
+            scores.engagement >= 0.0 && scores.engagement <= 1.0,
+            "engagement in [0,1]"
+        );
+        assert!(
+            scores.safety >= 0.0 && scores.safety <= 1.0,
+            "safety in [0,1]"
+        );
+        assert!(
+            scores.responsiveness >= 0.0 && scores.responsiveness <= 1.0,
+            "responsiveness in [0,1]"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Performance metrics
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_performance_metrics_increments_on_analysis() {
+        let analyzer = ConversationAnalyzer::new(EnhancedAnalysisConfig::default());
+        let turn = make_turn(
+            "Hello world. Testing performance tracking.",
+            ConversationRole::User,
+        );
+        analyzer.analyze_turn(&turn).await.expect("analyze_turn must succeed");
+        let metrics = analyzer.get_performance_metrics().await;
+        assert_eq!(
+            metrics.turns_analyzed, 1,
+            "turns_analyzed should be 1 after one analysis"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_performance_metrics_multiple_turns() {
+        let analyzer = ConversationAnalyzer::new(EnhancedAnalysisConfig::default());
+        for i in 0..5_usize {
+            let content = format!("Turn number {} with some content to analyze.", i);
+            let turn = make_turn(&content, ConversationRole::User);
+            analyzer.analyze_turn(&turn).await.expect("analyze_turn must succeed");
+        }
+        let metrics = analyzer.get_performance_metrics().await;
+        assert_eq!(
+            metrics.turns_analyzed, 5,
+            "turns_analyzed should be 5 after five analyses"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Caching
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_analyze_turn_cache_hit_same_result() {
+        let analyzer = ConversationAnalyzer::new(EnhancedAnalysisConfig::default());
+        let turn = make_turn(
+            "Cached content for repeated analysis.",
+            ConversationRole::User,
+        );
+        let result_first =
+            analyzer.analyze_turn(&turn).await.expect("first analyze_turn must succeed");
+        let result_second =
+            analyzer.analyze_turn(&turn).await.expect("second analyze_turn must succeed");
+        assert_eq!(
+            result_first.intent, result_second.intent,
+            "cached result must return same intent"
+        );
+        assert!(
+            (result_first.quality_score - result_second.quality_score).abs() < f32::EPSILON,
+            "cached result must return same quality_score"
+        );
+    }
+}

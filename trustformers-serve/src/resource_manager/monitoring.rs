@@ -515,3 +515,271 @@ impl WorkerPool {
         Ok(workers.iter().filter(|w| matches!(w.status, WorkerStatus::Idle)).count())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_system_metrics_default() {
+        let m = SystemMetrics::default();
+        assert_eq!(m.cpu_utilization, 0.0);
+        assert_eq!(m.memory_utilization, 0.0);
+        assert!(m.gpu_utilization.is_none());
+        assert_eq!(m.network_utilization, 0.0);
+        assert_eq!(m.disk_utilization, 0.0);
+        assert_eq!(m.active_processes, 0);
+        assert_eq!(m.load_average, 0.0);
+    }
+
+    #[test]
+    fn test_system_metrics_clone() {
+        let mut m = SystemMetrics::default();
+        m.cpu_utilization = 0.5;
+        m.memory_utilization = 0.7;
+        m.active_processes = 10;
+        let c = m.clone();
+        assert_eq!(c.cpu_utilization, 0.5);
+        assert_eq!(c.memory_utilization, 0.7);
+        assert_eq!(c.active_processes, 10);
+    }
+
+    #[test]
+    fn test_pool_utilization_default() {
+        let p = PoolUtilization::default();
+        assert_eq!(p.port_pool, 0.0);
+        assert_eq!(p.temp_dir_pool, 0.0);
+        assert_eq!(p.gpu_pool, 0.0);
+        assert_eq!(p.database_pool, 0.0);
+        assert_eq!(p.overall_efficiency, 0.0);
+    }
+
+    #[test]
+    fn test_pool_utilization_custom() {
+        let p = PoolUtilization {
+            port_pool: 0.3,
+            temp_dir_pool: 0.5,
+            gpu_pool: 0.8,
+            database_pool: 0.2,
+            overall_efficiency: 0.6,
+        };
+        assert!((p.gpu_pool - 0.8).abs() < 1e-6);
+        assert!((p.overall_efficiency - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_alert_thresholds_default() {
+        let t = AlertThresholds::default();
+        assert!((t.cpu_threshold - 0.8).abs() < 1e-6);
+        assert!((t.memory_threshold - 0.85).abs() < 1e-6);
+        assert!((t.gpu_threshold - 0.9).abs() < 1e-6);
+        assert!((t.disk_threshold - 0.9).abs() < 1e-6);
+        assert_eq!(t.queue_threshold, 100);
+        assert_eq!(t.response_time_threshold, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_alert_thresholds_clone() {
+        let t = AlertThresholds::default();
+        let c = t.clone();
+        assert_eq!(c.queue_threshold, 100);
+    }
+
+    #[test]
+    fn test_worker_pool_default() {
+        let wp = WorkerPool::default();
+        assert_eq!(wp.capacity, 4);
+    }
+
+    #[test]
+    fn test_worker_pool_custom_capacity() {
+        let wp = WorkerPool::new(8);
+        assert_eq!(wp.capacity, 8);
+    }
+
+    #[tokio::test]
+    async fn test_worker_pool_add_worker() {
+        let wp = WorkerPool::new(3);
+        let r = wp.add_worker("w-1".to_string()).await;
+        assert!(r.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_worker_pool_get_available_count_empty() {
+        let wp = WorkerPool::new(4);
+        let count = wp.get_available_count().await.unwrap_or(99);
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_worker_pool_add_then_count() {
+        let wp = WorkerPool::new(4);
+        wp.add_worker("w-1".to_string()).await.unwrap_or(());
+        wp.add_worker("w-2".to_string()).await.unwrap_or(());
+        let count = wp.get_available_count().await.unwrap_or(0);
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_worker_pool_respects_capacity() {
+        let wp = WorkerPool::new(2);
+        wp.add_worker("w-1".to_string()).await.unwrap_or(());
+        wp.add_worker("w-2".to_string()).await.unwrap_or(());
+        wp.add_worker("w-3".to_string()).await.unwrap_or(());
+        let status = wp.get_worker_status().await.unwrap_or_default();
+        assert!(status.len() <= 2);
+    }
+
+    #[test]
+    fn test_health_checker_default() {
+        let hc = HealthChecker::default();
+        let checks = hc.checks.lock();
+        assert!(checks.is_empty());
+    }
+
+    #[test]
+    fn test_alert_system_default() {
+        let _a = AlertSystem::default();
+    }
+
+    #[test]
+    fn test_performance_analyzer_default() {
+        let _pa = PerformanceAnalyzer::default();
+    }
+
+    #[test]
+    fn test_optimization_type_variants() {
+        let variants = [
+            OptimizationType::ScaleUp,
+            OptimizationType::ScaleDown,
+            OptimizationType::RedistributeLoad,
+            OptimizationType::OptimizeScheduling,
+            OptimizationType::TuneConfiguration,
+            OptimizationType::UpdateAlgorithms,
+        ];
+        assert_eq!(variants.len(), 6);
+    }
+
+    #[test]
+    fn test_optimization_recommendation_creation() {
+        let rec = OptimizationRecommendation {
+            recommendation_type: OptimizationType::ScaleUp,
+            expected_impact: 0.8,
+            difficulty: 0.4,
+            priority: 0.9,
+            description: "Add more GPU capacity".to_string(),
+        };
+        assert!((rec.expected_impact - 0.8).abs() < 1e-6);
+        assert!((rec.priority - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_performance_bottleneck_creation() {
+        let pb = PerformanceBottleneck {
+            resource_type: "GPU".to_string(),
+            severity: 0.9,
+            description: "GPU saturated".to_string(),
+            recommendation: "Add more GPUs".to_string(),
+        };
+        assert_eq!(pb.resource_type, "GPU");
+        assert!((pb.severity - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_resource_usage_snapshot_creation() {
+        let snap = ResourceUsageSnapshot {
+            timestamp: chrono::Utc::now(),
+            system_metrics: SystemMetrics::default(),
+            pool_utilization: PoolUtilization::default(),
+            active_tests: 5,
+            queue_length: 10,
+        };
+        assert_eq!(snap.active_tests, 5);
+        assert_eq!(snap.queue_length, 10);
+    }
+
+    #[tokio::test]
+    async fn test_resource_monitor_new() {
+        use crate::test_parallelization::ResourceMonitoringConfig;
+        let config = ResourceMonitoringConfig::default();
+        let monitor = ResourceMonitor::new(config).await;
+        assert!(monitor.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_resource_monitor_get_current_metrics() {
+        use crate::test_parallelization::ResourceMonitoringConfig;
+        let config = ResourceMonitoringConfig::default();
+        let monitor = ResourceMonitor::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        let metrics = monitor.get_current_metrics().await.unwrap_or(SystemMetrics::default());
+        assert_eq!(metrics.cpu_utilization, 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_resource_monitor_update_metrics() {
+        use crate::test_parallelization::ResourceMonitoringConfig;
+        let config = ResourceMonitoringConfig::default();
+        let monitor = ResourceMonitor::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        let mut m = SystemMetrics::default();
+        m.cpu_utilization = 0.3;
+        let r = monitor.update_metrics(m).await;
+        assert!(r.is_ok());
+        let current = monitor.get_current_metrics().await.unwrap_or(SystemMetrics::default());
+        assert!((current.cpu_utilization - 0.3).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn test_resource_monitor_take_snapshot() {
+        use crate::test_parallelization::ResourceMonitoringConfig;
+        let config = ResourceMonitoringConfig::default();
+        let monitor = ResourceMonitor::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        let snapshot = monitor.take_snapshot().await;
+        assert!(snapshot.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_resource_monitor_usage_history_grows() {
+        use crate::test_parallelization::ResourceMonitoringConfig;
+        let config = ResourceMonitoringConfig::default();
+        let monitor = ResourceMonitor::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        monitor.take_snapshot().await.unwrap_or_else(|_| panic!("snap failed"));
+        monitor.take_snapshot().await.unwrap_or_else(|_| panic!("snap failed"));
+        let history = monitor.get_usage_history().await.unwrap_or_default();
+        assert_eq!(history.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_resource_monitor_update_alert_thresholds() {
+        use crate::test_parallelization::ResourceMonitoringConfig;
+        let config = ResourceMonitoringConfig::default();
+        let monitor = ResourceMonitor::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        let mut thresholds = AlertThresholds::default();
+        thresholds.cpu_threshold = 0.6;
+        let r = monitor.update_alert_thresholds(thresholds).await;
+        assert!(r.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_system_statistics_calculate_efficiency() {
+        let stats = SystemStatistics::new();
+        let eff = stats.calculate_efficiency().await;
+        assert!((eff - 0.75).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn test_system_statistics_get_performance_history_empty() {
+        let stats = SystemStatistics::new();
+        let history = stats.get_performance_history().await.unwrap_or_default();
+        assert!(history.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_system_statistics_update_efficiency_metric() {
+        let stats = SystemStatistics::new();
+        let r = stats.update_efficiency_metric("cpu".to_string(), 0.85).await;
+        assert!(r.is_ok());
+        let metrics = stats.get_efficiency_metrics().await.unwrap_or_default();
+        let val = metrics.get("cpu").copied().unwrap_or(0.0);
+        assert!((val - 0.85).abs() < 1e-6);
+    }
+}

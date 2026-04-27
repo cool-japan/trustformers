@@ -768,16 +768,14 @@ impl WasmTensor {
     #[inline]
     fn scale_simd(&mut self, scalar: f32) {
         let chunks = self.data.len() / 4;
-        let scalar_vec = unsafe { f32x4_splat(scalar) };
+        let scalar_vec = f32x4_splat(scalar);
 
         // Process 4 elements at a time with SIMD
         for i in 0..chunks {
             let offset = i * 4;
-            unsafe {
-                let data_vec = v128_load(&self.data[offset] as *const f32 as *const v128);
-                let result = f32x4_mul(data_vec, scalar_vec);
-                v128_store(&mut self.data[offset] as *mut f32 as *mut v128, result);
-            }
+            let data_vec = unsafe { v128_load(&self.data[offset] as *const f32 as *const v128) };
+            let result = f32x4_mul(data_vec, scalar_vec);
+            unsafe { v128_store(&mut self.data[offset] as *mut f32 as *mut v128, result) };
         }
 
         // Handle remaining elements
@@ -790,26 +788,22 @@ impl WasmTensor {
     #[inline]
     fn dot_simd(&self, other: &[f32]) -> f32 {
         let chunks = self.data.len() / 4;
-        let mut sum_vec = unsafe { f32x4_splat(0.0) };
+        let mut sum_vec = f32x4_splat(0.0);
 
         // Process 4 elements at a time with SIMD
         for i in 0..chunks {
             let offset = i * 4;
-            unsafe {
-                let a = v128_load(&self.data[offset] as *const f32 as *const v128);
-                let b = v128_load(&other[offset] as *const f32 as *const v128);
-                let product = f32x4_mul(a, b);
-                sum_vec = f32x4_add(sum_vec, product);
-            }
+            let a = unsafe { v128_load(&self.data[offset] as *const f32 as *const v128) };
+            let b = unsafe { v128_load(&other[offset] as *const f32 as *const v128) };
+            let product = f32x4_mul(a, b);
+            sum_vec = f32x4_add(sum_vec, product);
         }
 
         // Extract sum from SIMD register
-        let mut result = unsafe {
-            f32x4_extract_lane::<0>(sum_vec)
-                + f32x4_extract_lane::<1>(sum_vec)
-                + f32x4_extract_lane::<2>(sum_vec)
-                + f32x4_extract_lane::<3>(sum_vec)
-        };
+        let mut result = f32x4_extract_lane::<0>(sum_vec)
+            + f32x4_extract_lane::<1>(sum_vec)
+            + f32x4_extract_lane::<2>(sum_vec)
+            + f32x4_extract_lane::<3>(sum_vec);
 
         // Handle remaining elements
         for i in (chunks * 4)..self.data.len() {
@@ -898,17 +892,17 @@ impl WasmTensor {
         for i in 0..m {
             for j in (0..n).step_by(4) {
                 let j_end = (j + 4).min(n);
-                let mut acc = unsafe { f32x4_splat(0.0) };
+                let mut acc = f32x4_splat(0.0);
 
                 for k_idx in 0..k {
                     let a_val = self.data[i * k + k_idx];
-                    let a_vec = unsafe { f32x4_splat(a_val) };
+                    let a_vec = f32x4_splat(a_val);
 
                     if j_end - j == 4 {
                         let b_vec = unsafe {
                             v128_load(&other.data[k_idx * n + j] as *const f32 as *const v128)
                         };
-                        acc = unsafe { f32x4_add(acc, f32x4_mul(a_vec, b_vec)) };
+                        acc = f32x4_add(acc, f32x4_mul(a_vec, b_vec));
                     } else {
                         // Handle remaining elements
                         for jj in j..j_end {

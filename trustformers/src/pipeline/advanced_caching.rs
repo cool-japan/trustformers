@@ -117,7 +117,6 @@ pub struct CacheStats {
 pub struct AdvancedLRUCache<T> {
     config: AdvancedCacheConfig,
     entries: Arc<RwLock<HashMap<String, CacheEntry<T>>>>,
-    access_order: Arc<RwLock<Vec<String>>>, // Most recently used at the end
     access_patterns: Arc<RwLock<HashMap<String, AccessPattern>>>,
     stats: Arc<RwLock<CacheStats>>,
     last_cleanup: Arc<RwLock<Instant>>,
@@ -132,7 +131,6 @@ where
         Self {
             config,
             entries: Arc::new(RwLock::new(HashMap::new())),
-            access_order: Arc::new(RwLock::new(Vec::new())),
             access_patterns: Arc::new(RwLock::new(HashMap::new())),
             stats: Arc::new(RwLock::new(CacheStats {
                 total_entries: 0,
@@ -182,15 +180,6 @@ where
         // Insert the entry
         {
             let mut entries = self.entries.write().expect("lock should not be poisoned");
-            let mut access_order = self.access_order.write().expect("lock should not be poisoned");
-
-            // Remove from access order if already exists
-            if let Some(pos) = access_order.iter().position(|k| k == &key) {
-                access_order.remove(pos);
-            }
-
-            // Add to the end (most recent)
-            access_order.push(key.clone());
             entries.insert(key.clone(), entry);
         }
 
@@ -252,16 +241,6 @@ where
                 }
             }
 
-            // Update LRU order
-            {
-                let mut access_order =
-                    self.access_order.write().expect("lock should not be poisoned");
-                if let Some(pos) = access_order.iter().position(|k| k == key) {
-                    access_order.remove(pos);
-                    access_order.push(key.to_string());
-                }
-            }
-
             // Update access pattern
             if self.config.enable_access_pattern_analysis {
                 self.update_access_pattern(key);
@@ -279,12 +258,6 @@ where
         };
 
         if value.is_some() {
-            // Update access order
-            let mut access_order = self.access_order.write().expect("lock should not be poisoned");
-            if let Some(pos) = access_order.iter().position(|k| k == key) {
-                access_order.remove(pos);
-            }
-
             // Update access patterns
             if self.config.enable_access_pattern_analysis {
                 let mut patterns =
@@ -304,10 +277,6 @@ where
         {
             let mut entries = self.entries.write().expect("lock should not be poisoned");
             entries.clear();
-        }
-        {
-            let mut access_order = self.access_order.write().expect("lock should not be poisoned");
-            access_order.clear();
         }
         {
             let mut patterns = self.access_patterns.write().expect("lock should not be poisoned");
@@ -353,32 +322,28 @@ where
 
     /// LRU eviction strategy
     fn lru_eviction(&self, needed_memory: u64) -> Result<()> {
-        let mut freed_memory = 0u64;
         let keys_to_remove = {
-            let access_order = self.access_order.read().expect("lock should not be poisoned");
             let entries = self.entries.read().expect("lock should not be poisoned");
 
+            // Sort entries by last_accessed ascending (oldest first = LRU)
+            let mut lru_order: Vec<(&String, Instant, u64)> =
+                entries.iter().map(|(k, e)| (k, e.last_accessed, e.memory_size)).collect();
+            lru_order.sort_unstable_by_key(|(_, last_accessed, _)| *last_accessed);
+
             let mut to_remove = Vec::new();
-
-            // Remove from least recently used
-            for key in access_order.iter() {
-                if let Some(entry) = entries.get(key) {
-                    to_remove.push(key.clone());
-                    freed_memory += entry.memory_size;
-
-                    if freed_memory >= needed_memory {
-                        break;
-                    }
+            let mut freed_memory = 0u64;
+            for (key, _, memory_size) in lru_order {
+                to_remove.push(key.clone());
+                freed_memory += memory_size;
+                if freed_memory >= needed_memory {
+                    break;
                 }
             }
-
             to_remove
         };
 
-        // Remove the selected entries
         for key in keys_to_remove {
             self.remove(&key);
-
             let mut stats = self.stats.write().expect("lock should not be poisoned");
             stats.eviction_count += 1;
         }
@@ -851,5 +816,239 @@ mod tests {
 
         // Different inputs should produce different keys
         assert_ne!(key1, key3);
+    }
+
+    // ── Additional tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_default_config_values() {
+        let cfg = AdvancedCacheConfig::default();
+        assert_eq!(cfg.max_entries, 10000);
+        assert_eq!(cfg.max_memory_bytes, 1024 * 1024 * 1024);
+        assert_eq!(cfg.ttl_seconds, 3600);
+        assert!(cfg.enable_hit_rate_tracking);
+        assert!(cfg.enable_memory_pressure_monitoring);
+        assert!(cfg.enable_access_pattern_analysis);
+    }
+
+    #[test]
+    fn test_default_config_eviction_thresholds_in_range() {
+        let cfg = AdvancedCacheConfig::default();
+        assert!(cfg.lru_eviction_threshold > 0.0 && cfg.lru_eviction_threshold <= 1.0);
+        assert!(cfg.smart_eviction_threshold > 0.0 && cfg.smart_eviction_threshold <= 1.0);
+    }
+
+    #[test]
+    fn test_default_config_cleanup_interval_positive() {
+        let cfg = AdvancedCacheConfig::default();
+        assert!(cfg.cleanup_interval_seconds > 0);
+    }
+
+    #[test]
+    fn test_cache_priority_ordering() {
+        assert!(CachePriority::Critical > CachePriority::High);
+        assert!(CachePriority::High > CachePriority::Normal);
+        assert!(CachePriority::Normal > CachePriority::Low);
+    }
+
+    #[test]
+    fn test_cache_priority_default_is_normal() {
+        let p = CachePriority::default();
+        assert_eq!(p, CachePriority::Normal);
+    }
+
+    #[test]
+    fn test_insert_and_get_high_priority() {
+        let cfg = AdvancedCacheConfig::default();
+        let cache = AdvancedLRUCache::new(cfg);
+        cache
+            .insert(
+                "important".to_string(),
+                42_u64,
+                200,
+                CachePriority::Critical,
+                HashSet::new(),
+                None,
+            )
+            .expect("insert should succeed");
+        assert_eq!(cache.get("important"), Some(42_u64));
+    }
+
+    #[test]
+    fn test_size_info_after_insertions() {
+        let cfg = AdvancedCacheConfig::default();
+        let cache = AdvancedLRUCache::new(cfg);
+        for i in 0..5_u64 {
+            cache
+                .insert(
+                    format!("key{}", i),
+                    i * 10,
+                    100,
+                    CachePriority::Normal,
+                    HashSet::new(),
+                    None,
+                )
+                .expect("insert ok");
+        }
+        let (count, memory) = cache.size_info();
+        assert_eq!(count, 5, "should have 5 entries");
+        assert_eq!(memory, 500, "total memory should be 5 * 100 = 500");
+    }
+
+    #[test]
+    fn test_size_info_empty_cache() {
+        let cfg = AdvancedCacheConfig::default();
+        let cache = AdvancedLRUCache::<String>::new(cfg);
+        let (count, memory) = cache.size_info();
+        assert_eq!(count, 0);
+        assert_eq!(memory, 0);
+    }
+
+    #[test]
+    fn test_eviction_policy_variants() {
+        let policies = [
+            EvictionPolicy::LRU,
+            EvictionPolicy::LFU,
+            EvictionPolicy::TTL,
+            EvictionPolicy::Smart,
+        ];
+        assert_eq!(policies.len(), 4);
+    }
+
+    #[test]
+    fn test_cache_key_builder_different_models_differ() {
+        let builder = PipelineCacheKeyBuilder::default();
+        let k1 = builder.build_key(&"same_input", "bert-base", 0);
+        let k2 = builder.build_key(&"same_input", "gpt2", 0);
+        assert_ne!(
+            k1, k2,
+            "different model IDs must produce different cache keys"
+        );
+    }
+
+    #[test]
+    fn test_cache_key_builder_different_configs_differ() {
+        let builder = PipelineCacheKeyBuilder::new();
+        let k1 = builder.build_key(&"input", "model", 1111);
+        let k2 = builder.build_key(&"input", "model", 2222);
+        assert_ne!(
+            k1, k2,
+            "different config hashes must produce different cache keys"
+        );
+    }
+
+    #[test]
+    fn test_contextual_key_includes_context() {
+        let builder = PipelineCacheKeyBuilder::new();
+        let k_no_ctx = builder.build_key(&"input", "model", 0);
+        let k_with_ctx = builder.build_contextual_key(
+            &"input",
+            "model",
+            0,
+            &[("lang", "en"), ("task", "classify")],
+        );
+        // Contextual key should differ from plain key
+        assert_ne!(
+            k_no_ctx, k_with_ctx,
+            "key with context must differ from key without context"
+        );
+    }
+
+    #[test]
+    fn test_contextual_key_same_context_is_deterministic() {
+        let builder = PipelineCacheKeyBuilder::new();
+        let ctx = [("k1", "v1"), ("k2", "v2")];
+        let k1 = builder.build_contextual_key(&"inp", "m", 0, &ctx);
+        let k2 = builder.build_contextual_key(&"inp", "m", 0, &ctx);
+        assert_eq!(k1, k2, "same context must produce identical keys");
+    }
+
+    #[test]
+    fn test_remove_nonexistent_key_returns_none() {
+        let cfg = AdvancedCacheConfig::default();
+        let cache = AdvancedLRUCache::<String>::new(cfg);
+        let result = cache.remove("does_not_exist");
+        assert!(
+            result.is_none(),
+            "removing non-existent key should return None"
+        );
+    }
+
+    #[test]
+    fn test_get_by_tag_empty_when_no_matches() {
+        let cfg = AdvancedCacheConfig::default();
+        let cache = AdvancedLRUCache::new(cfg);
+        let mut tags = HashSet::new();
+        tags.insert("model_x".to_string());
+        cache
+            .insert(
+                "k".to_string(),
+                "v".to_string(),
+                10,
+                CachePriority::Low,
+                tags,
+                None,
+            )
+            .expect("insert ok");
+        let keys = cache.get_by_tag("model_y");
+        assert!(
+            keys.is_empty(),
+            "get_by_tag for non-existent tag should return empty"
+        );
+    }
+
+    #[test]
+    fn test_remove_by_tag_returns_count() {
+        let cfg = AdvancedCacheConfig::default();
+        let cache = AdvancedLRUCache::new(cfg);
+        for i in 0..3_u32 {
+            let mut tags = HashSet::new();
+            tags.insert("shared".to_string());
+            cache
+                .insert(format!("k{}", i), i, 50, CachePriority::Normal, tags, None)
+                .expect("insert ok");
+        }
+        let removed = cache.remove_by_tag("shared");
+        assert_eq!(removed, 3, "should remove exactly 3 tagged entries");
+    }
+
+    // ── LCG-based value determinism  ──────────────────────────────────────────
+
+    #[test]
+    fn test_cache_stores_and_retrieves_lcg_values() {
+        let cfg = AdvancedCacheConfig::default();
+        let cache = AdvancedLRUCache::new(cfg);
+
+        // LCG-generated test values
+        let mut s = 42u64;
+        let mut values: Vec<f32> = Vec::new();
+        for _ in 0..5 {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            values.push((s % 1000) as f32 / 1000.0);
+        }
+
+        for (i, &v) in values.iter().enumerate() {
+            cache
+                .insert(
+                    format!("lcg_{}", i),
+                    v,
+                    50,
+                    CachePriority::Normal,
+                    HashSet::new(),
+                    None,
+                )
+                .expect("insert ok");
+        }
+
+        for (i, &v) in values.iter().enumerate() {
+            let retrieved = cache.get(&format!("lcg_{}", i));
+            assert!(retrieved.is_some(), "key lcg_{} should be present", i);
+            let stored = retrieved.expect("value present");
+            assert!(
+                (stored - v).abs() < 1e-6,
+                "retrieved value for lcg_{} must match stored value",
+                i
+            );
+        }
     }
 }

@@ -283,10 +283,10 @@ impl CommandRConfig {
         if self.max_sequence_length == 0 {
             return Err("max_sequence_length must be greater than 0".to_string());
         }
-        if self.hidden_size % self.num_attention_heads != 0 {
+        if !self.hidden_size.is_multiple_of(self.num_attention_heads) {
             return Err("hidden_size must be divisible by num_attention_heads".to_string());
         }
-        if self.num_attention_heads % self.num_key_value_heads != 0 {
+        if !self.num_attention_heads.is_multiple_of(self.num_key_value_heads) {
             return Err("num_attention_heads must be divisible by num_key_value_heads".to_string());
         }
 

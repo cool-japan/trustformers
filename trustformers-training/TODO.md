@@ -571,8 +571,10 @@ trainer.load_checkpoint("checkpoint-1000.pt")?;
 
 ## Known Limitations
 
-- Some very recent training techniques not yet implemented
-- Fault tolerance could be enhanced
+- [ ] Recent training techniques: implement missing techniques
+  - **Refinement needed:** which specific techniques? (e.g. DoRA, GaLore, spectrum-regularized LoRA, AdaLoRA?)
+- [ ] Fault tolerance: checkpoint-on-preemption for SLURM/cloud spot instances
+- [ ] Fault tolerance: worker failure recovery in distributed training without full restart
 
 ---
 
@@ -582,6 +584,8 @@ trainer.load_checkpoint("checkpoint-1000.pt")?;
 - [x] Enhanced fault tolerance (auto-resume on failure)
 - [x] More advanced RLHF techniques (DPO, KTO) — sigmoid DPO/KTO loss, log_softmax in get_batch_logps, preference accuracy metric
 - [x] Additional meta-learning algorithms (MAML, FOMAML, Reptile)
+- [x] **PPO standalone module** (`src/ppo/mod.rs`) — GAE advantage estimation, clipped surrogate objective, entropy bonus, PpoTrainer with history and early-stop
+- [x] **DPO standalone module** (`src/dpo/mod.rs`) — Sigmoid / Hinge / IPO / SigmoidWithShift variants, label smoothing, DpoRewardStats with percentile_margin, DpoTrainer
 
 ### Performance
 - [x] Communication optimization (gradient compression)

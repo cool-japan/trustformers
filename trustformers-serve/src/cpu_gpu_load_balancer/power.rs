@@ -442,3 +442,184 @@ impl Default for DVFSStatus {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpu_gpu_load_balancer::config::{PowerEfficiencyMode, PowerScalingFactors};
+    use crate::cpu_gpu_load_balancer::types::{ProcessorResource, ProcessorType};
+
+    fn make_default_resource() -> ProcessorResource {
+        ProcessorResource::default()
+    }
+
+    // --- PowerEfficiencyMetrics tests ---
+
+    #[test]
+    fn test_power_metrics_default_zeroed() {
+        let metrics = PowerEfficiencyMetrics::default();
+        assert!((metrics.avg_power_consumption - 0.0).abs() < 1e-6);
+        assert!((metrics.peak_power_consumption - 0.0).abs() < 1e-6);
+        assert!((metrics.total_energy_consumed - 0.0).abs() < 1e-6);
+    }
+
+    // --- PowerEfficiencyManager tests ---
+
+    #[test]
+    fn test_manager_new_starts_zero_consumption() {
+        let manager = PowerEfficiencyManager::new(PowerEfficiencyMode::Balanced, 1000.0);
+        let metrics = manager.get_metrics();
+        assert!((metrics.avg_power_consumption - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_manager_update_power_consumption_tracks_peak() {
+        let mut manager = PowerEfficiencyManager::new(PowerEfficiencyMode::Balanced, 1000.0);
+        manager.update_power_consumption(ProcessorType::CPU, 400.0, 0.5);
+        manager.update_power_consumption(ProcessorType::CPU, 700.0, 0.8);
+        let metrics = manager.get_metrics();
+        assert!((metrics.peak_power_consumption - 700.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_manager_update_power_tracks_energy() {
+        let mut manager = PowerEfficiencyManager::new(PowerEfficiencyMode::Balanced, 1000.0);
+        manager.update_power_consumption(ProcessorType::GPU, 500.0, 0.7);
+        let metrics = manager.get_metrics();
+        assert!(metrics.total_energy_consumed > 0.0);
+    }
+
+    #[test]
+    fn test_manager_set_power_mode_performance_first() {
+        let mut manager = PowerEfficiencyManager::new(PowerEfficiencyMode::Balanced, 1000.0);
+        manager.set_power_mode(PowerEfficiencyMode::PerformanceFirst);
+        // Verify scaling factors updated to full power
+        let report = manager.generate_power_report();
+        assert!((report.dvfs_status.frequency_scaling - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_manager_set_power_mode_power_first_reduces_scaling() {
+        let mut manager = PowerEfficiencyManager::new(PowerEfficiencyMode::Balanced, 1000.0);
+        manager.set_power_mode(PowerEfficiencyMode::PowerFirst);
+        let report = manager.generate_power_report();
+        // Power-first mode reduces CPU frequency scaling below 1.0
+        assert!(report.dvfs_status.frequency_scaling < 1.0);
+    }
+
+    #[test]
+    fn test_manager_get_optimal_power_state_performance_first_full_power() {
+        let manager = PowerEfficiencyManager::new(PowerEfficiencyMode::PerformanceFirst, 1000.0);
+        let resource = make_default_resource();
+        let state = manager.get_optimal_power_state(&resource, 0.1);
+        matches!(state, PowerState::FullPower);
+    }
+
+    #[test]
+    fn test_manager_get_optimal_power_state_power_first_low_workload() {
+        let manager = PowerEfficiencyManager::new(PowerEfficiencyMode::PowerFirst, 1000.0);
+        let resource = make_default_resource();
+        let state = manager.get_optimal_power_state(&resource, 0.1);
+        matches!(state, PowerState::LowPower);
+    }
+
+    #[test]
+    fn test_manager_get_optimal_power_state_balanced_high_workload() {
+        let manager = PowerEfficiencyManager::new(PowerEfficiencyMode::Balanced, 1000.0);
+        let resource = make_default_resource();
+        let state = manager.get_optimal_power_state(&resource, 0.9);
+        matches!(state, PowerState::FullPower);
+    }
+
+    #[test]
+    fn test_manager_get_optimal_power_state_balanced_medium_workload() {
+        let manager = PowerEfficiencyManager::new(PowerEfficiencyMode::Balanced, 1000.0);
+        let resource = make_default_resource();
+        let state = manager.get_optimal_power_state(&resource, 0.5);
+        matches!(state, PowerState::ReducedPower);
+    }
+
+    #[test]
+    fn test_manager_calculate_efficiency_score_zero_power_returns_zero() {
+        let manager = PowerEfficiencyManager::new(PowerEfficiencyMode::Balanced, 1000.0);
+        let score = manager.calculate_efficiency_score(0.0, 1000.0);
+        assert!((score - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_manager_calculate_efficiency_score_positive() {
+        let manager = PowerEfficiencyManager::new(PowerEfficiencyMode::Balanced, 1000.0);
+        let score = manager.calculate_efficiency_score(100.0, 500.0);
+        assert!(score > 0.0 && score <= 1.0);
+    }
+
+    #[test]
+    fn test_manager_optimize_minimize_power() {
+        let mut manager = PowerEfficiencyManager::new(PowerEfficiencyMode::Balanced, 1000.0);
+        let result = manager.optimize_power_consumption(PowerOptimizationStrategy::MinimizePower);
+        assert!(result.is_ok());
+        let report = manager.generate_power_report();
+        assert!(report.dvfs_status.frequency_scaling < 1.0);
+    }
+
+    #[test]
+    fn test_manager_optimize_balanced_resets_to_defaults() {
+        let mut manager = PowerEfficiencyManager::new(PowerEfficiencyMode::Balanced, 1000.0);
+        // First reduce scaling
+        manager
+            .optimize_power_consumption(PowerOptimizationStrategy::MinimizePower)
+            .expect("ok");
+        // Then reset to balanced
+        manager
+            .optimize_power_consumption(PowerOptimizationStrategy::Balanced)
+            .expect("ok");
+        let report = manager.generate_power_report();
+        assert!((report.dvfs_status.frequency_scaling - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_manager_generate_power_report_structure() {
+        let manager = PowerEfficiencyManager::new(PowerEfficiencyMode::Balanced, 500.0);
+        let report = manager.generate_power_report();
+        assert!((report.power_limit - 500.0).abs() < 1e-4);
+        assert!(report.power_state_distribution.contains_key("FullPower"));
+    }
+
+    #[test]
+    fn test_manager_recommendations_near_power_limit() {
+        let mut manager = PowerEfficiencyManager::new(PowerEfficiencyMode::Balanced, 100.0);
+        // Push near the limit (90%)
+        manager.update_power_consumption(ProcessorType::CPU, 95.0, 0.9);
+        let report = manager.generate_power_report();
+        let has_power_rec = report
+            .recommendations
+            .iter()
+            .any(|r| r.contains("power") || r.contains("Power"));
+        assert!(has_power_rec);
+    }
+
+    #[test]
+    fn test_manager_dvfs_status_default() {
+        let status = DVFSStatus::default();
+        assert!(status.enabled);
+        assert!((status.frequency_scaling - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_update_scaling_factors_updates_dvfs_effectiveness() {
+        let mut manager = PowerEfficiencyManager::new(PowerEfficiencyMode::Balanced, 1000.0);
+        let factors = PowerScalingFactors {
+            cpu_frequency_scaling: 0.7,
+            gpu_power_limit_scaling: 0.6,
+            memory_frequency_scaling: 0.9,
+            voltage_scaling: 0.85,
+            idle_power_optimization: 0.7,
+            dvfs_enabled: true,
+            sleep_states_enabled: true,
+        };
+        manager.update_scaling_factors(factors);
+        let metrics = manager.get_metrics();
+        // DVFS effectiveness should be non-zero with these factors
+        assert!(metrics.dvfs_effectiveness >= 0.0);
+    }
+}

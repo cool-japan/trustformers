@@ -809,3 +809,252 @@ impl ElectraForSequenceClassification {
         Ok(logits)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::electra::config::ElectraConfig;
+    use scirs2_core::ndarray::Array1;
+    use trustformers_core::traits::Config;
+
+    /// Minimal ELECTRA config for fast tests.
+    fn mini_config() -> ElectraConfig {
+        ElectraConfig {
+            vocab_size: 100,
+            embedding_size: 32,
+            hidden_size: 64,
+            num_hidden_layers: 1,
+            num_attention_heads: 4,
+            intermediate_size: 128,
+            hidden_act: "gelu".to_string(),
+            hidden_dropout_prob: 0.0,
+            attention_probs_dropout_prob: 0.0,
+            max_position_embeddings: 32,
+            type_vocab_size: 2,
+            initializer_range: 0.02,
+            layer_norm_eps: 1e-12,
+            pad_token_id: 0,
+            position_embedding_type: "absolute".to_string(),
+            use_cache: true,
+            classifier_dropout: None,
+            generator_hidden_size: 32,
+            generator_num_hidden_layers: 1,
+            generator_num_attention_heads: 2,
+            generator_intermediate_size: 64,
+            discriminator_hidden_size: 64,
+            discriminator_num_hidden_layers: 1,
+            discriminator_num_attention_heads: 4,
+            discriminator_intermediate_size: 128,
+            tie_word_embeddings: true,
+            model_type: "electra".to_string(),
+        }
+    }
+
+    fn sample_ids(len: usize) -> Array1<u32> {
+        (0..len as u32).collect()
+    }
+
+    // ── ElectraEmbeddings ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_electra_embeddings_new_succeeds() {
+        let cfg = mini_config();
+        ElectraEmbeddings::new(&cfg).expect("ElectraEmbeddings::new should succeed");
+    }
+
+    #[test]
+    fn test_electra_embeddings_forward_shape() {
+        let cfg = mini_config();
+        let emb = ElectraEmbeddings::new(&cfg).expect("ElectraEmbeddings::new failed");
+        let ids: Array1<u32> = sample_ids(5);
+        let out = emb.forward(&ids, None, None).expect("ElectraEmbeddings::forward failed");
+        assert_eq!(out.shape(), &[5, cfg.embedding_size]);
+    }
+
+    // ── ElectraLayer ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_electra_layer_new_succeeds() {
+        let cfg = mini_config();
+        ElectraLayer::new(
+            &cfg,
+            cfg.discriminator_hidden_size,
+            cfg.discriminator_num_attention_heads,
+            cfg.discriminator_intermediate_size,
+        )
+        .expect("ElectraLayer::new should succeed");
+    }
+
+    // ── ElectraEncoder ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_electra_encoder_new_succeeds() {
+        let cfg = mini_config();
+        ElectraEncoder::new(
+            &cfg,
+            cfg.discriminator_hidden_size,
+            cfg.discriminator_num_hidden_layers,
+            cfg.discriminator_num_attention_heads,
+            cfg.discriminator_intermediate_size,
+        )
+        .expect("ElectraEncoder::new should succeed");
+    }
+
+    // ── ElectraGenerator ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_electra_generator_new_succeeds() {
+        let cfg = mini_config();
+        ElectraGenerator::new(&cfg).expect("ElectraGenerator::new should succeed");
+    }
+
+    #[test]
+    fn test_electra_generator_forward_output_shape() {
+        let cfg = mini_config();
+        let gen = ElectraGenerator::new(&cfg).expect("generator creation failed");
+        let ids: Array1<u32> = sample_ids(4);
+        let out = gen.forward(&ids, None, None, None).expect("generator forward failed");
+        // shape: [1 (batch), seq_len, vocab_size]
+        assert_eq!(out.shape(), &[1, 4, cfg.vocab_size]);
+    }
+
+    // ── ElectraDiscriminator ──────────────────────────────────────────────
+
+    #[test]
+    fn test_electra_discriminator_new_succeeds() {
+        let cfg = mini_config();
+        ElectraDiscriminator::new(&cfg).expect("ElectraDiscriminator::new should succeed");
+    }
+
+    #[test]
+    fn test_electra_discriminator_forward_output_shape() {
+        let cfg = mini_config();
+        let disc = ElectraDiscriminator::new(&cfg).expect("discriminator creation failed");
+        let ids: Array1<u32> = sample_ids(4);
+        let out = disc.forward(&ids, None, None, None).expect("discriminator forward failed");
+        // shape: [1 (batch), seq_len, discriminator_hidden_size]
+        assert_eq!(out.shape(), &[1, 4, cfg.discriminator_hidden_size]);
+    }
+
+    // ── ElectraModel (combined generator + discriminator) ─────────────────
+
+    #[test]
+    fn test_electra_model_new_succeeds() {
+        let cfg = mini_config();
+        ElectraModel::new(cfg).expect("ElectraModel::new should succeed");
+    }
+
+    #[test]
+    fn test_electra_model_from_pretrained_small() {
+        let _model = ElectraModel::from_pretrained("electra-small")
+            .expect("from_pretrained electra-small failed");
+    }
+
+    #[test]
+    fn test_electra_model_from_pretrained_base() {
+        let _model = ElectraModel::from_pretrained("electra-base")
+            .expect("from_pretrained electra-base failed");
+    }
+
+    #[test]
+    fn test_electra_model_has_generator_and_discriminator() {
+        let cfg = mini_config();
+        let model = ElectraModel::new(cfg).expect("ElectraModel::new failed");
+        // Accessing both sub-models should not panic
+        let _gen = model.get_generator();
+        let _disc = model.get_discriminator();
+    }
+
+    // ── ElectraForPreTraining ─────────────────────────────────────────────
+
+    #[test]
+    fn test_electra_for_pretraining_new_succeeds() {
+        let cfg = mini_config();
+        ElectraForPreTraining::new(cfg).expect("ElectraForPreTraining::new should succeed");
+    }
+
+    #[test]
+    fn test_electra_for_pretraining_forward_returns_two_outputs() {
+        let cfg = mini_config();
+        let model = ElectraForPreTraining::new(cfg).expect("model creation failed");
+        let ids: Array1<u32> = sample_ids(4);
+        let (gen_logits, disc_logits) = model
+            .forward(&ids, None, None, None)
+            .expect("ElectraForPreTraining::forward failed");
+        // Generator logits: [1, seq, vocab]
+        assert_eq!(gen_logits.shape()[2], mini_config().vocab_size);
+        // Discriminator logits: [1, seq, 1] — binary per-token
+        assert_eq!(
+            disc_logits.shape()[2],
+            1,
+            "discriminator should output 1 logit per token"
+        );
+    }
+
+    #[test]
+    fn test_electra_discriminator_logits_per_token_binary() {
+        let cfg = mini_config();
+        let model = ElectraForPreTraining::new(cfg).expect("model creation failed");
+        let ids: Array1<u32> = sample_ids(6);
+        let (_, disc_logits) = model.forward(&ids, None, None, None).expect("forward failed");
+        // shape [1, 6, 1]
+        assert_eq!(disc_logits.shape(), &[1, 6, 1]);
+    }
+
+    // ── ElectraForSequenceClassification ──────────────────────────────────
+
+    #[test]
+    fn test_electra_seq_class_new_two_labels() {
+        let cfg = mini_config();
+        ElectraForSequenceClassification::new(cfg, 2)
+            .expect("ElectraForSequenceClassification with 2 labels failed");
+    }
+
+    #[test]
+    fn test_electra_seq_class_forward_output_shape() {
+        let cfg = mini_config();
+        let model = ElectraForSequenceClassification::new(cfg, 3).expect("model creation failed");
+        let ids: Array1<u32> = sample_ids(4);
+        let out = model.forward(&ids, None, None, None).expect("forward should succeed");
+        assert_eq!(out.shape(), &[1, 3]);
+    }
+
+    // ── Config property tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_electra_default_tie_word_embeddings_true() {
+        let cfg = ElectraConfig::default();
+        assert!(
+            cfg.tie_word_embeddings,
+            "tie_word_embeddings should default to true"
+        );
+    }
+
+    #[test]
+    fn test_electra_small_embedding_and_hidden_size() {
+        let cfg = ElectraConfig::small();
+        assert_eq!(
+            cfg.embedding_size, 128,
+            "ELECTRA-small embedding_size should be 128"
+        );
+        assert_eq!(
+            cfg.hidden_size, 256,
+            "ELECTRA-small hidden_size should be 256"
+        );
+    }
+
+    #[test]
+    fn test_electra_generator_hidden_smaller_than_discriminator() {
+        let cfg = ElectraConfig::small();
+        assert!(
+            cfg.generator_hidden_size < cfg.discriminator_hidden_size,
+            "generator hidden should be smaller than discriminator"
+        );
+    }
+
+    #[test]
+    fn test_electra_mini_config_validates() {
+        let cfg = mini_config();
+        cfg.validate().expect("mini_config should be valid");
+    }
+}

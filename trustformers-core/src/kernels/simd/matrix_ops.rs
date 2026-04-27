@@ -25,13 +25,17 @@ fn blas_sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize)
     use oxiblas_blas::level3::gemm;
     use oxiblas_matrix::{MatMut, MatRef};
 
-    // Create matrix views from slices (row-major layout)
-    let a_mat = MatRef::new(a.as_ptr(), m, k, k);
-    let b_mat = MatRef::new(b.as_ptr(), k, n, n);
-    let c_mat = MatMut::new(c.as_mut_ptr(), m, n, n);
+    // Bridge row-major → col-major via Cᵀ = Bᵀ·Aᵀ identity:
+    // Row-major A(m×k) reinterpreted as col-major is Aᵀ(k×m), lda=k.
+    // Row-major B(k×n) reinterpreted as col-major is Bᵀ(n×k), lda=n.
+    // Row-major C(m×n) reinterpreted as col-major is Cᵀ(n×m), lda=n.
+    // gemm(Bᵀ, Aᵀ) → Cᵀ = Bᵀ·Aᵀ = (A·B)ᵀ, so C buffer holds A·B. ✓
+    let a_t = MatRef::new(a.as_ptr(), k, m, k);
+    let b_t = MatRef::new(b.as_ptr(), n, k, n);
+    let c_t = MatMut::new(c.as_mut_ptr(), n, m, n);
 
-    // GEMM: C = 1.0 * A * B + 0.0 * C
-    gemm(1.0, a_mat, b_mat, 0.0, c_mat);
+    // GEMM: Cᵀ = 1.0 * Bᵀ * Aᵀ + 0.0 * Cᵀ
+    gemm(1.0, b_t, a_t, 0.0, c_t);
 }
 
 /// Fallback for non-macOS: use scirs2-core SIMD GEMM
@@ -167,7 +171,7 @@ impl SIMDMatrixOps {
         }
 
         let simd_width = self.cpu_features.best_simd_width();
-        let can_use_simd = simd_width > 1 && n % simd_width == 0 && n >= 64;
+        let can_use_simd = simd_width > 1 && n.is_multiple_of(simd_width) && n >= 64;
 
         if can_use_simd {
             match self.cpu_features.best_instruction_set() {
@@ -217,7 +221,7 @@ impl SIMDMatrixOps {
             self.matmul_avx2_inner(&a_data, &b_data, &mut c_data, m, k, n);
         }
 
-        Ok(Tensor::from_vec(c_data, &[m, n])?)
+        Tensor::from_vec(c_data, &[m, n])
     }
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -263,7 +267,7 @@ impl SIMDMatrixOps {
             self.matmul_avx512_inner(&a_data, &b_data, &mut c_data, m, k, n);
         }
 
-        Ok(Tensor::from_vec(c_data, &[m, n])?)
+        Tensor::from_vec(c_data, &[m, n])
     }
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -423,6 +427,13 @@ impl SIMDMatrixOps {
     }
 }
 
+/// Fast polynomial approximation of exp(x) using AVX2 SIMD.
+///
+/// # Safety
+///
+/// Caller must ensure the `avx2` target feature is available on the current CPU.
+/// This function uses raw SIMD intrinsics; calling it without AVX2 support causes
+/// undefined behavior.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 pub unsafe fn simd_exp_approx(x: __m256) -> __m256 {
@@ -441,7 +452,5 @@ pub unsafe fn simd_exp_approx(x: __m256) -> __m256 {
 
     let result = _mm256_add_ps(one, term1);
     let result = _mm256_add_ps(result, term2);
-    let result = _mm256_add_ps(result, term3);
-
-    result
+    _mm256_add_ps(result, term3)
 }

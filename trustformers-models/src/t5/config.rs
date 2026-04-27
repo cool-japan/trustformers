@@ -50,7 +50,7 @@ impl Default for T5Config {
 
 impl Config for T5Config {
     fn validate(&self) -> trustformers_core::errors::Result<()> {
-        if self.d_model % self.num_heads != 0 {
+        if !self.d_model.is_multiple_of(self.num_heads) {
             return Err(
                 trustformers_core::errors::TrustformersError::invalid_config(
                     "d_model must be divisible by num_heads".to_string(),

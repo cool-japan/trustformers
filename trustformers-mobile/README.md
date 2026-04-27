@@ -2,7 +2,7 @@
 
 Mobile deployment infrastructure for running transformer models on iOS and Android devices with hardware acceleration and cross-platform framework support.
 
-**Version:** 0.1.0 | **Status:** Alpha | **Tests:** 1 | **SLoC:** 131,187 | **Last Updated:** 2026-03-21
+**Version:** 0.1.1 | **Status:** Alpha | **Tests:** 1 | **SLoC:** 131,187 | **Last Updated:** 2026-04-25
 
 ## Status
 
@@ -101,14 +101,14 @@ final result = await engine.generate('Once upon a time');
 ### iOS (CocoaPods)
 
 ```ruby
-pod 'TrustformersKit', '~> 0.1.0'
+pod 'TrustformersKit', '~> 0.1.1'
 ```
 
 ### iOS (Swift Package Manager)
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/cool-japan/trustformers-ios", from: "0.1.0")
+    .package(url: "https://github.com/cool-japan/trustformers-ios", from: "0.1.1")
 ]
 ```
 
@@ -116,7 +116,7 @@ dependencies: [
 
 ```gradle
 dependencies {
-    implementation 'com.trustformers:mobile:0.1.0'
+    implementation 'com.trustformers:mobile:0.1.1'
 }
 ```
 
@@ -130,7 +130,7 @@ npm install trustformers-react-native
 
 ```yaml
 dependencies:
-  trustformers_flutter: ^0.1.0
+  trustformers_flutter: ^0.1.1
 ```
 
 ## Architecture
@@ -253,8 +253,8 @@ Licensed under Apache License, Version 2.0 ([LICENSE](LICENSE)).
 
 ---
 
-**Last Updated:** 2026-03-21
-**Version:** 0.1.0
+**Last Updated:** 2026-04-25
+**Version:** 0.1.1
 **Status:** Alpha
 **Test Suite:** 1 Rust integration test
 **SLoC:** 131,187

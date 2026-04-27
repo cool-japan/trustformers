@@ -7,3 +7,6 @@ pub mod model;
 
 pub use config::RetNetConfig;
 pub use model::{RetNetForLanguageModeling, RetNetForSequenceClassification, RetNetModel};
+
+#[cfg(test)]
+mod tests;

@@ -520,4 +520,238 @@ mod tests {
         assert_eq!(intel_config.precision_mode, MetalPrecisionMode::FP32);
         assert!(!intel_config.enable_neural_engine);
     }
+
+    // ── Default configuration ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_default_config_values() {
+        let cfg = MetalBackendConfig::default();
+        assert_eq!(cfg.max_batch_size, 1);
+        assert!(cfg.enable_neural_engine);
+        assert!(cfg.enable_mps);
+        assert!(cfg.enable_fast_math);
+        assert!(cfg.enable_threadgroup_optimization);
+        assert!(!cfg.enable_profiling);
+        assert!(cfg.profile_output_path.is_none());
+        assert!(cfg.metal_library_path.is_none());
+    }
+
+    #[test]
+    fn test_default_config_buffer_allocation_256mb() {
+        let cfg = MetalBackendConfig::default();
+        assert_eq!(cfg.buffer_allocation_size, 256 * 1024 * 1024);
+    }
+
+    // ── Device type variants ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_device_type_variants_are_distinct() {
+        assert_ne!(
+            MetalDeviceType::IntegratedGPU as i32,
+            MetalDeviceType::DiscreteGPU as i32
+        );
+        assert_ne!(
+            MetalDeviceType::NeuralEngine as i32,
+            MetalDeviceType::CPU as i32
+        );
+        assert_ne!(MetalDeviceType::Auto as i32, MetalDeviceType::CPU as i32);
+    }
+
+    // ── Precision mode variants ───────────────────────────────────────────────
+
+    #[test]
+    fn test_precision_mode_variants() {
+        let fp32 = MetalPrecisionMode::FP32;
+        let fp16 = MetalPrecisionMode::FP16;
+        let int8 = MetalPrecisionMode::INT8;
+        let auto = MetalPrecisionMode::Auto;
+        // All four must be constructable and distinguishable
+        assert_ne!(fp32, fp16);
+        assert_ne!(fp16, int8);
+        assert_ne!(int8, auto);
+    }
+
+    // ── Memory strategy variants ──────────────────────────────────────────────
+
+    #[test]
+    fn test_memory_strategy_variants() {
+        let strategies = [
+            MetalMemoryStrategy::Shared,
+            MetalMemoryStrategy::Private,
+            MetalMemoryStrategy::Managed,
+            MetalMemoryStrategy::Auto,
+        ];
+        // Just check all four can be constructed
+        assert_eq!(strategies.len(), 4);
+    }
+
+    // ── Optimization level variants ───────────────────────────────────────────
+
+    #[test]
+    fn test_optimization_level_variants() {
+        let levels = [
+            MetalOptimizationLevel::O1,
+            MetalOptimizationLevel::O2,
+            MetalOptimizationLevel::O3,
+            MetalOptimizationLevel::Ofast,
+        ];
+        assert_eq!(levels.len(), 4);
+    }
+
+    // ── Backend inference ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_run_inference_returns_logits() {
+        let config = MetalBackendConfig::for_apple_silicon();
+        let backend = MetalBackend::new(config).expect("backend creation failed");
+        let inputs = HashMap::new();
+        let outputs = backend.run_inference(inputs).expect("inference failed");
+        assert!(
+            outputs.contains_key("logits"),
+            "output must contain 'logits' key"
+        );
+    }
+
+    #[test]
+    fn test_run_inference_output_shape_product() {
+        let config = MetalBackendConfig::for_apple_silicon();
+        let backend = MetalBackend::new(config).expect("backend creation failed");
+        let inputs = HashMap::new();
+        let outputs = backend.run_inference(inputs).expect("inference failed");
+        let logits = outputs.get("logits").expect("logits key must be present");
+        let data = logits.data().expect("tensor data must be accessible");
+        assert_eq!(
+            data.len(),
+            512,
+            "output shape should be [1, 512] → 512 elements"
+        );
+    }
+
+    // ── Shader loading ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_load_shaders_sets_pipeline_state() {
+        let config = MetalBackendConfig::for_apple_silicon();
+        let mut backend = MetalBackend::new(config).expect("backend creation failed");
+        let dummy_path = std::path::Path::new("/tmp/dummy.metallib");
+        let result = backend.load_shaders(dummy_path);
+        assert!(result.is_ok(), "load_shaders should succeed (mock impl)");
+        assert!(
+            backend.compute_pipeline.is_some(),
+            "compute_pipeline must be set after load_shaders"
+        );
+        assert!(
+            backend.library.is_some(),
+            "library must be set after load_shaders"
+        );
+    }
+
+    // ── Compile model ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_compile_model_ok() {
+        let config = MetalBackendConfig::for_apple_silicon();
+        let mut backend = MetalBackend::new(config).expect("backend creation failed");
+        let dummy_path = std::path::Path::new("/tmp/model.onnx");
+        let result = backend.compile_model(dummy_path);
+        assert!(result.is_ok(), "compile_model should succeed (mock impl)");
+    }
+
+    // ── Maximum performance preset ────────────────────────────────────────────
+
+    #[test]
+    fn test_maximum_performance_preset() {
+        let cfg = MetalBackendConfig::for_maximum_performance();
+        assert_eq!(cfg.precision_mode, MetalPrecisionMode::INT8);
+        assert!(cfg.enable_neural_engine);
+        assert!(cfg.enable_mps);
+        assert!(cfg.enable_fast_math);
+        assert!(cfg.enable_threadgroup_optimization);
+    }
+
+    // ── Device capabilities fields ────────────────────────────────────────────
+
+    #[test]
+    fn test_device_capabilities_max_threads_positive() {
+        let config = MetalBackendConfig::default();
+        let backend = MetalBackend::new(config).expect("backend creation failed");
+        let cap = backend.get_device_capabilities();
+        assert!(cap.max_threads_per_threadgroup > 0);
+    }
+
+    #[test]
+    fn test_device_capabilities_max_buffer_size_positive() {
+        let config = MetalBackendConfig::default();
+        let backend = MetalBackend::new(config).expect("backend creation failed");
+        let cap = backend.get_device_capabilities();
+        assert!(cap.max_buffer_size > 0);
+    }
+
+    #[test]
+    fn test_device_capabilities_int8_support() {
+        let config = MetalBackendConfig::for_apple_silicon();
+        let backend = MetalBackend::new(config).expect("backend creation failed");
+        let cap = backend.get_device_capabilities();
+        assert!(cap.supports_int8);
+    }
+
+    // ── iOS config specifics ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_ios_config_128mb_buffer() {
+        let cfg = MetalBackendConfig::for_ios();
+        assert_eq!(cfg.buffer_allocation_size, 128 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_ios_config_o2_optimization() {
+        let cfg = MetalBackendConfig::for_ios();
+        assert!(matches!(cfg.optimization_level, MetalOptimizationLevel::O2));
+    }
+
+    // ── Intel Mac config ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_intel_mac_no_mps() {
+        let cfg = MetalBackendConfig::for_intel_mac();
+        assert!(!cfg.enable_mps);
+        assert!(!cfg.enable_fast_math);
+    }
+
+    #[test]
+    fn test_intel_mac_private_memory() {
+        let cfg = MetalBackendConfig::for_intel_mac();
+        assert!(matches!(cfg.memory_strategy, MetalMemoryStrategy::Private));
+    }
+
+    // ── Profiling disabled by default ─────────────────────────────────────────
+
+    #[test]
+    fn test_profiling_disabled_by_default_in_presets() {
+        for cfg in [
+            MetalBackendConfig::for_apple_silicon(),
+            MetalBackendConfig::for_ios(),
+            MetalBackendConfig::for_intel_mac(),
+            MetalBackendConfig::for_maximum_performance(),
+        ] {
+            assert!(
+                !cfg.enable_profiling,
+                "profiling should be disabled by default"
+            );
+        }
+    }
+
+    // ── LCG-based deterministic output check ──────────────────────────────────
+
+    #[test]
+    fn test_inference_output_values_are_finite() {
+        let config = MetalBackendConfig::default();
+        let backend = MetalBackend::new(config).expect("backend ok");
+        let outputs = backend.run_inference(HashMap::new()).expect("inference ok");
+        let logits = outputs.get("logits").expect("logits");
+        let data = logits.data().expect("data");
+        for v in &data {
+            assert!(v.is_finite(), "every logit output must be finite");
+        }
+    }
 }

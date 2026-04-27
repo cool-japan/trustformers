@@ -699,4 +699,206 @@ mod tests {
         assert_eq!(trainer.config.phase, RLHFPhase::PPO);
         assert_eq!(trainer.metrics.phase, RLHFPhase::PPO);
     }
+
+    #[test]
+    fn test_trainer_config_defaults() {
+        let config = RLHFTrainerConfig::default();
+        assert_eq!(config.phase, RLHFPhase::SFT);
+        assert_eq!(config.learning_rate, 1e-5);
+        assert_eq!(config.batch_size, 8);
+        assert_eq!(config.epochs, 3);
+        assert_eq!(config.kl_penalty, 0.1);
+        assert_eq!(config.reward_scale, 1.0);
+        assert_eq!(config.max_seq_length, 512);
+        assert!(config.constitutional_principles.is_empty());
+    }
+
+    #[test]
+    fn test_add_multiple_feedback() {
+        let mut trainer = RLHFTrainer::new(RLHFTrainerConfig::default());
+        for i in 0..5 {
+            let feedback = HumanFeedback {
+                id: format!("fb_{}", i),
+                prompt: format!("Prompt {}", i),
+                response: format!("Response {}", i),
+                rating: (i + 1) as f32,
+                feedback_text: None,
+                timestamp: Utc::now(),
+                annotator_id: None,
+                metadata: HashMap::new(),
+            };
+            trainer.add_feedback(feedback);
+        }
+        assert_eq!(trainer.feedback_data.len(), 5);
+    }
+
+    #[test]
+    fn test_add_preference_pair() {
+        let mut trainer = RLHFTrainer::new(RLHFTrainerConfig::default());
+        let pair = PreferencePair {
+            prompt: "Test prompt".to_string(),
+            chosen: "Good response".to_string(),
+            rejected: "Bad response".to_string(),
+            confidence: 0.8,
+            reasoning: None,
+        };
+        trainer.add_preference_pair(pair);
+        assert_eq!(trainer.preference_pairs.len(), 1);
+    }
+
+    #[test]
+    fn test_metrics_access() {
+        let trainer = RLHFTrainer::new(RLHFTrainerConfig::default());
+        let metrics = trainer.metrics();
+        assert_eq!(metrics.phase, RLHFPhase::SFT);
+    }
+
+    #[test]
+    fn test_phase_sft_to_reward() {
+        let mut trainer = RLHFTrainer::new(RLHFTrainerConfig::default());
+        assert_eq!(trainer.config.phase, RLHFPhase::SFT);
+        trainer.set_phase(RLHFPhase::RewardModel);
+        assert_eq!(trainer.config.phase, RLHFPhase::RewardModel);
+    }
+
+    #[test]
+    fn test_phase_to_dpo() {
+        let mut trainer = RLHFTrainer::new(RLHFTrainerConfig::default());
+        trainer.set_phase(RLHFPhase::DPO);
+        assert_eq!(trainer.config.phase, RLHFPhase::DPO);
+        assert_eq!(trainer.metrics.phase, RLHFPhase::DPO);
+    }
+
+    #[test]
+    fn test_phase_to_constitutional() {
+        let mut trainer = RLHFTrainer::new(RLHFTrainerConfig::default());
+        trainer.set_phase(RLHFPhase::Constitutional);
+        assert_eq!(trainer.config.phase, RLHFPhase::Constitutional);
+    }
+
+    #[test]
+    fn test_config_with_constitutional_principles() {
+        let config = RLHFTrainerConfig {
+            phase: RLHFPhase::Constitutional,
+            constitutional_principles: vec![ConstitutionalPrinciple {
+                name: "helpfulness".to_string(),
+                description: "Be helpful".to_string(),
+                weight: 1.0,
+                criteria: "Must be helpful".to_string(),
+                violation_examples: vec![],
+                adherence_examples: vec![],
+            }],
+            ..Default::default()
+        };
+        assert_eq!(config.constitutional_principles.len(), 1);
+    }
+
+    #[test]
+    fn test_config_custom_values() {
+        let config = RLHFTrainerConfig {
+            phase: RLHFPhase::PPO,
+            learning_rate: 5e-6,
+            batch_size: 16,
+            epochs: 5,
+            kl_penalty: 0.05,
+            reward_scale: 2.0,
+            max_seq_length: 1024,
+            constitutional_principles: Vec::new(),
+        };
+        assert_eq!(config.learning_rate, 5e-6);
+        assert_eq!(config.batch_size, 16);
+        assert_eq!(config.max_seq_length, 1024);
+    }
+
+    #[test]
+    fn test_feedback_with_metadata() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "source".to_string(),
+            serde_json::Value::String("human".to_string()),
+        );
+        metadata.insert(
+            "task".to_string(),
+            serde_json::Value::String("qa".to_string()),
+        );
+        let feedback = HumanFeedback {
+            id: "meta_fb".to_string(),
+            prompt: "Test".to_string(),
+            response: "Answer".to_string(),
+            rating: 4.5,
+            feedback_text: Some("Good answer".to_string()),
+            timestamp: Utc::now(),
+            annotator_id: Some("ann_001".to_string()),
+            metadata,
+        };
+        assert!(feedback.feedback_text.is_some());
+        assert!(feedback.annotator_id.is_some());
+        assert_eq!(feedback.metadata.len(), 2);
+    }
+
+    #[test]
+    fn test_preference_pair_with_reasoning() {
+        let pair = PreferencePair {
+            prompt: "Explain AI".to_string(),
+            chosen: "AI is a broad field...".to_string(),
+            rejected: "AI is robots".to_string(),
+            confidence: 0.95,
+            reasoning: Some("More comprehensive answer".to_string()),
+        };
+        assert!(pair.confidence > 0.5);
+        assert!(pair.reasoning.is_some());
+    }
+
+    #[test]
+    fn test_trainer_initial_state() {
+        let trainer = RLHFTrainer::new(RLHFTrainerConfig::default());
+        assert!(trainer.feedback_data.is_empty());
+        assert!(trainer.preference_pairs.is_empty());
+    }
+
+    #[test]
+    fn test_trainer_multiple_phase_changes() {
+        let mut trainer = RLHFTrainer::new(RLHFTrainerConfig::default());
+        let phases = [
+            RLHFPhase::SFT,
+            RLHFPhase::RewardModel,
+            RLHFPhase::PPO,
+            RLHFPhase::DPO,
+            RLHFPhase::Constitutional,
+        ];
+        for phase in &phases {
+            trainer.set_phase(*phase);
+            assert_eq!(trainer.config.phase, *phase);
+        }
+    }
+
+    #[test]
+    fn test_feedback_rating_range() {
+        let feedback = HumanFeedback {
+            id: "range_test".to_string(),
+            prompt: "test".to_string(),
+            response: "test".to_string(),
+            rating: 5.0,
+            feedback_text: None,
+            timestamp: Utc::now(),
+            annotator_id: None,
+            metadata: HashMap::new(),
+        };
+        assert!(feedback.rating >= 0.0 && feedback.rating <= 5.0);
+    }
+
+    #[tokio::test]
+    async fn test_train_sft_requires_feedback() {
+        let mut trainer = RLHFTrainer::new(RLHFTrainerConfig::default());
+        let result = trainer.train().await;
+        assert!(result.is_err()); // No feedback data
+    }
+
+    #[tokio::test]
+    async fn test_train_reward_model_requires_preferences() {
+        let mut trainer = RLHFTrainer::new(RLHFTrainerConfig::default());
+        trainer.set_phase(RLHFPhase::RewardModel);
+        let result = trainer.train().await;
+        assert!(result.is_err()); // No preference pairs
+    }
 }

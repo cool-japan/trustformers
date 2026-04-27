@@ -1500,6 +1500,9 @@ macro_rules! ai_analyze {
     }};
 }
 
+#[path = "ai_code_analyzer_tests.rs"]
+mod ai_code_analyzer_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;

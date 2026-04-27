@@ -520,7 +520,7 @@ where
             step_count += 1;
 
             // Logging
-            if self.state.global_step % self.config.logging_steps == 0 {
+            if self.state.global_step.is_multiple_of(self.config.logging_steps) {
                 let logs = {
                     let mut logs = HashMap::new();
                     logs.insert("train_loss".to_string(), step_loss);
@@ -535,14 +535,14 @@ where
 
             // Evaluation
             if let Some(eval_steps) = self.config.eval_steps {
-                if self.state.global_step % eval_steps == 0 {
+                if self.state.global_step.is_multiple_of(eval_steps) {
                     self.evaluate()?;
                 }
             }
 
             // Saving
             if let Some(save_steps) = self.config.save_steps {
-                if self.state.global_step % save_steps == 0 {
+                if self.state.global_step.is_multiple_of(save_steps) {
                     for callback in &mut self.callbacks {
                         callback.on_save(&self.state)?;
                     }

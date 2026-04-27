@@ -72,21 +72,24 @@ impl Default for ElectraConfig {
 
 impl Config for ElectraConfig {
     fn validate(&self) -> trustformers_core::errors::Result<()> {
-        if self.hidden_size % self.num_attention_heads != 0 {
+        if !self.hidden_size.is_multiple_of(self.num_attention_heads) {
             return Err(trustformers_core::errors::invalid_config(
                 "hidden_size",
                 "hidden_size must be divisible by num_attention_heads",
             ));
         }
 
-        if self.discriminator_hidden_size % self.discriminator_num_attention_heads != 0 {
+        if !self
+            .discriminator_hidden_size
+            .is_multiple_of(self.discriminator_num_attention_heads)
+        {
             return Err(trustformers_core::errors::invalid_config(
                 "discriminator_hidden_size",
                 "discriminator_hidden_size must be divisible by discriminator_num_attention_heads",
             ));
         }
 
-        if self.generator_hidden_size % self.generator_num_attention_heads != 0 {
+        if !self.generator_hidden_size.is_multiple_of(self.generator_num_attention_heads) {
             return Err(trustformers_core::errors::invalid_config(
                 "generator_hidden_size",
                 "generator_hidden_size must be divisible by generator_num_attention_heads",

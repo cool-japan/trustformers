@@ -249,3 +249,7 @@ pub type LookaheadNAdam = Lookahead<crate::adam::NAdam>;
 
 /// Convenience wrapper for Lookahead + SGD combination.
 pub type LookaheadSGD = Lookahead<crate::sgd::SGD>;
+
+#[cfg(test)]
+#[path = "lookahead_tests.rs"]
+mod lookahead_tests;

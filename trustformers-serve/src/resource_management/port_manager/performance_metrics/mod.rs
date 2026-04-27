@@ -14,3 +14,8 @@ pub use performancealertthresholds_traits::*;
 pub use performancetrends_traits::*;
 pub use types::*;
 pub use functions::*;
+
+#[cfg(test)]
+mod types_tests;
+#[cfg(test)]
+mod analysis_tests;

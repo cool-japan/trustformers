@@ -724,3 +724,282 @@ impl TextAnalyzer {
         flags
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- Sentiment analysis tests ----
+
+    #[test]
+    fn test_sentiment_positive_text() {
+        let sentiment = TextAnalyzer::analyze_sentiment("This is great and amazing work!");
+        assert_eq!(
+            sentiment.as_deref(),
+            Some("positive"),
+            "clearly positive text should detect positive sentiment"
+        );
+    }
+
+    #[test]
+    fn test_sentiment_negative_text() {
+        let sentiment =
+            TextAnalyzer::analyze_sentiment("I hate this terrible and awful experience.");
+        assert_eq!(
+            sentiment.as_deref(),
+            Some("negative"),
+            "clearly negative text should detect negative sentiment"
+        );
+    }
+
+    #[test]
+    fn test_sentiment_neutral_text() {
+        let sentiment = TextAnalyzer::analyze_sentiment("okay fine normal standard");
+        assert_eq!(
+            sentiment.as_deref(),
+            Some("neutral"),
+            "neutral filler words should detect neutral sentiment"
+        );
+    }
+
+    #[test]
+    fn test_sentiment_empty_text_returns_some() {
+        // Empty text: no matches → defaults to neutral
+        let sentiment = TextAnalyzer::analyze_sentiment("");
+        assert!(
+            sentiment.is_some(),
+            "empty text must still return Some variant"
+        );
+    }
+
+    // ---- Intent classification tests ----
+
+    #[test]
+    fn test_intent_question_with_question_mark() {
+        let intent = TextAnalyzer::classify_intent("What is the meaning of life?");
+        assert_eq!(
+            intent.as_deref(),
+            Some("question"),
+            "text with '?' should classify as question"
+        );
+    }
+
+    #[test]
+    fn test_intent_question_starts_with_how() {
+        let intent = TextAnalyzer::classify_intent("How does this work?");
+        assert_eq!(
+            intent.as_deref(),
+            Some("question"),
+            "'how' prefix should classify as question"
+        );
+    }
+
+    #[test]
+    fn test_intent_request_contains_please() {
+        let intent = TextAnalyzer::classify_intent("Please help me with this.");
+        assert_eq!(
+            intent.as_deref(),
+            Some("request"),
+            "'please' should classify as request"
+        );
+    }
+
+    #[test]
+    fn test_intent_gratitude_thanks() {
+        let intent = TextAnalyzer::classify_intent("Thanks for your help.");
+        assert_eq!(
+            intent.as_deref(),
+            Some("gratitude"),
+            "'thanks' should classify as gratitude"
+        );
+    }
+
+    #[test]
+    fn test_intent_greeting_hello() {
+        let intent = TextAnalyzer::classify_intent("Hello there!");
+        assert_eq!(
+            intent.as_deref(),
+            Some("greeting"),
+            "'hello' should classify as greeting"
+        );
+    }
+
+    #[test]
+    fn test_intent_farewell() {
+        let intent = TextAnalyzer::classify_intent("Goodbye, see you later.");
+        assert_eq!(
+            intent.as_deref(),
+            Some("farewell"),
+            "farewell keywords should classify as farewell"
+        );
+    }
+
+    #[test]
+    fn test_intent_complaint_with_problem() {
+        // Use a string that does not accidentally trigger earlier patterns (e.g. contains "hi" → greeting)
+        let intent = TextAnalyzer::classify_intent("I am experiencing a problem.");
+        assert_eq!(
+            intent.as_deref(),
+            Some("complaint"),
+            "'problem' should classify as complaint"
+        );
+    }
+
+    #[test]
+    fn test_intent_statement_for_generic_text() {
+        let intent = TextAnalyzer::classify_intent("The sky is blue.");
+        assert_eq!(
+            intent.as_deref(),
+            Some("statement"),
+            "generic sentence should classify as statement"
+        );
+    }
+
+    // ---- Topic extraction tests ----
+
+    #[test]
+    fn test_extract_topics_technology() {
+        let topics = TextAnalyzer::extract_topics("I love programming and software development.");
+        assert!(
+            topics.contains(&"technology".to_string()),
+            "tech keywords should extract technology topic"
+        );
+    }
+
+    #[test]
+    fn test_extract_topics_health() {
+        let topics = TextAnalyzer::extract_topics("I exercise daily for fitness and wellness.");
+        assert!(
+            topics.contains(&"health".to_string()),
+            "health keywords should extract health topic"
+        );
+    }
+
+    #[test]
+    fn test_extract_topics_empty_text_returns_no_topics() {
+        let topics = TextAnalyzer::extract_topics("xyz_obscure_none");
+        assert!(topics.is_empty(), "obscure text should yield no topics");
+    }
+
+    // ---- Entity extraction tests ----
+
+    #[test]
+    fn test_extract_entities_finds_email() {
+        let entities =
+            TextAnalyzer::extract_entities("Contact me at user@example.com for details.");
+        let emails: Vec<_> = entities.iter().filter(|e| e.entity_type == "EMAIL").collect();
+        assert!(
+            !emails.is_empty(),
+            "email address should be extracted as EMAIL entity"
+        );
+    }
+
+    #[test]
+    fn test_extract_entities_finds_money() {
+        let entities = TextAnalyzer::extract_entities("The price is $42.99 today.");
+        let money: Vec<_> = entities.iter().filter(|e| e.entity_type == "MONEY").collect();
+        assert!(
+            !money.is_empty(),
+            "dollar amount should be extracted as MONEY entity"
+        );
+    }
+
+    #[test]
+    fn test_extract_entities_finds_url() {
+        let entities = TextAnalyzer::extract_entities("Visit https://example.com for more info.");
+        let urls: Vec<_> = entities.iter().filter(|e| e.entity_type == "URL").collect();
+        assert!(!urls.is_empty(), "URL should be extracted as URL entity");
+    }
+
+    // ---- Quality / confidence tests ----
+
+    #[test]
+    fn test_confidence_increases_with_length() {
+        let short_conf = TextAnalyzer::calculate_confidence("hi");
+        let long_conf = TextAnalyzer::calculate_confidence(
+            "This is a much longer statement that contains more information.",
+        );
+        assert!(
+            long_conf > short_conf,
+            "longer text should yield higher confidence"
+        );
+    }
+
+    #[test]
+    fn test_quality_score_reasonable_text() {
+        let score = TextAnalyzer::calculate_quality_score("This is a complete sentence.");
+        assert!(score > 0.5, "well-formed sentence should score above 0.5");
+    }
+
+    // ---- Engagement assessment tests ----
+
+    #[test]
+    fn test_engagement_low_for_plain_text() {
+        let level = TextAnalyzer::assess_engagement("hello");
+        assert_eq!(
+            level,
+            EngagementLevel::Low,
+            "minimal text should have low engagement"
+        );
+    }
+
+    #[test]
+    fn test_engagement_high_with_exclamations_and_keywords() {
+        let level = TextAnalyzer::assess_engagement(
+            "Wow! This is absolutely amazing and incredible!! I love it so much!",
+        );
+        assert!(
+            matches!(level, EngagementLevel::High | EngagementLevel::VeryHigh),
+            "enthusiastic text should have high engagement"
+        );
+    }
+
+    // ---- Reasoning type detection tests ----
+
+    #[test]
+    fn test_detect_reasoning_logical() {
+        let rt = TextAnalyzer::detect_reasoning_type("Because it rained, the ground is wet.");
+        assert_eq!(
+            rt,
+            Some(ReasoningType::Logical),
+            "'because' should detect logical reasoning"
+        );
+    }
+
+    #[test]
+    fn test_detect_reasoning_causal() {
+        let rt = TextAnalyzer::detect_reasoning_type("Stress causes health problems.");
+        assert_eq!(
+            rt,
+            Some(ReasoningType::Causal),
+            "'causes' should detect causal reasoning"
+        );
+    }
+
+    #[test]
+    fn test_detect_reasoning_mathematical() {
+        let rt = TextAnalyzer::detect_reasoning_type("Please calculate the equation.");
+        assert_eq!(
+            rt,
+            Some(ReasoningType::Mathematical),
+            "math keywords should detect mathematical reasoning"
+        );
+    }
+
+    // ---- Safety detection tests ----
+
+    #[test]
+    fn test_safety_detects_violence_keywords() {
+        let flags = TextAnalyzer::detect_safety_issues("Someone wants to hurt others.");
+        assert!(
+            flags.contains(&"violence".to_string()),
+            "'hurt' should trigger violence flag"
+        );
+    }
+
+    #[test]
+    fn test_safety_clean_text_returns_empty() {
+        let flags = TextAnalyzer::detect_safety_issues("I love sunny days and good food.");
+        assert!(flags.is_empty(), "clean text should return no safety flags");
+    }
+}

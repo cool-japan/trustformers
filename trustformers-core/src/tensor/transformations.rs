@@ -72,9 +72,7 @@ impl Tensor {
                 }
                 let mut result = a.clone();
                 result.swap_axes(dim0, dim1);
-                // Ensure contiguous memory layout
-                let contiguous_result = result.to_owned();
-                Ok(Tensor::F32(contiguous_result))
+                Ok(Tensor::F32(result.as_standard_layout().to_owned()))
             },
             Tensor::F64(a) => {
                 if dim0 >= a.ndim() || dim1 >= a.ndim() {
@@ -85,9 +83,7 @@ impl Tensor {
                 }
                 let mut result = a.clone();
                 result.swap_axes(dim0, dim1);
-                // Ensure contiguous memory layout
-                let contiguous_result = result.to_owned();
-                Ok(Tensor::F64(contiguous_result))
+                Ok(Tensor::F64(result.as_standard_layout().to_owned()))
             },
             Tensor::I64(a) => {
                 if dim0 >= a.ndim() || dim1 >= a.ndim() {
@@ -98,9 +94,7 @@ impl Tensor {
                 }
                 let mut result = a.clone();
                 result.swap_axes(dim0, dim1);
-                // Ensure contiguous memory layout
-                let contiguous_result = result.to_owned();
-                Ok(Tensor::I64(contiguous_result))
+                Ok(Tensor::I64(result.as_standard_layout().to_owned()))
             },
             Tensor::C32(a) => {
                 if dim0 >= a.ndim() || dim1 >= a.ndim() {
@@ -111,9 +105,7 @@ impl Tensor {
                 }
                 let mut result = a.clone();
                 result.swap_axes(dim0, dim1);
-                // Ensure contiguous memory layout
-                let contiguous_result = result.to_owned();
-                Ok(Tensor::C32(contiguous_result))
+                Ok(Tensor::C32(result.as_standard_layout().to_owned()))
             },
             Tensor::C64(a) => {
                 if dim0 >= a.ndim() || dim1 >= a.ndim() {
@@ -124,9 +116,7 @@ impl Tensor {
                 }
                 let mut result = a.clone();
                 result.swap_axes(dim0, dim1);
-                // Ensure contiguous memory layout
-                let contiguous_result = result.to_owned();
-                Ok(Tensor::C64(contiguous_result))
+                Ok(Tensor::C64(result.as_standard_layout().to_owned()))
             },
             _ => Err(TrustformersError::tensor_op_error(
                 "Transpose not supported for this tensor type",

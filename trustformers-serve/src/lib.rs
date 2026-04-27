@@ -51,6 +51,7 @@
 #![allow(clippy::unnecessary_to_owned)]
 #![allow(clippy::empty_line_after_outer_attr)]
 
+pub mod ab_testing;
 pub mod alerting;
 pub mod async_performance;
 pub mod async_runtime_chaos;
@@ -58,6 +59,7 @@ pub mod audit;
 pub mod auth;
 pub mod batching;
 pub mod caching;
+pub mod canary;
 pub mod chaos_testing;
 pub mod cloud_providers;
 pub mod contract_testing;
@@ -78,9 +80,12 @@ pub mod graph_optimization;
 pub mod graphql;
 // TODO: Re-enable when proto compilation is fixed
 // pub mod grpc;
+pub mod continuous_batching;
 pub mod health;
 pub mod kernel_fusion;
+pub mod kv_cache;
 pub mod load_balancer;
+pub mod load_shedding;
 pub mod load_testing;
 pub mod logging;
 pub mod memory_pressure;
@@ -98,8 +103,11 @@ pub mod parallel_execution_engine;
 pub mod performance_optimizer;
 pub mod pipeline_parallelism;
 pub mod polling;
+pub mod precision;
+pub mod prefix_cache;
 pub mod production;
 pub mod rate_limit;
+pub mod rate_limiting;
 pub mod request_profiling;
 pub mod resource_management;
 pub mod resource_manager;
@@ -108,6 +116,7 @@ pub mod serverless;
 pub mod service_mesh;
 pub mod shadow;
 pub mod slo;
+pub mod speculative;
 pub mod speculative_decoding;
 pub mod streaming;
 pub mod test_cicd_integration;
@@ -120,6 +129,48 @@ pub mod test_timeout_optimization;
 pub mod test_utilities;
 pub mod tracing;
 pub mod validation;
+pub mod wasm_backend;
+
+pub mod ensemble;
+pub mod hot_reload;
+pub mod monitoring;
+pub mod openai_compat;
+pub mod queue;
+pub mod scheduler;
+pub mod scheduling;
+pub mod traffic;
+
+// Re-export request_tracer types (new OTel-compatible tracing infrastructure).
+// Note: Several names overlap with distributed_tracing exports above, so we
+// use aliases throughout.
+pub use tracing::{
+    AttributeValue as RequestAttributeValue, RequestTracer, Span as RequestSpan,
+    SpanAttribute as RequestSpanAttribute, SpanEvent as RequestSpanEvent, SpanId as RequestSpanId,
+    SpanKind as RequestSpanKind, SpanStatus as RequestSpanStatus, Trace as RequestTrace,
+    TraceError, TraceId as RequestTraceId, TracingConfig as RequestTracingConfig,
+    TracingStats as RequestTracingStats,
+};
+
+// Re-export load shedding types
+pub use load_shedding::{
+    LoadShedder, LoadSheddingConfig, LoadSheddingPolicy, SheddingDecision, SheddingReason,
+    SheddingStats, SystemLoad,
+};
+
+// Re-export queue and scheduler types (alias RequestPriority to avoid clash with cloud_providers)
+pub use queue::{
+    PriorityQueue, QueueError, QueueStats, QueuedRequest, RequestPriority as QueueRequestPriority,
+};
+pub use scheduler::{
+    PriorityScheduler, ScheduledBatch, SchedulerConfig, SchedulerError, SchedulerMetrics,
+    SchedulingPolicy,
+};
+pub use speculative::{
+    log_softmax, sample_from_logits, sample_residual, softmax, top_p_filter,
+    DraftToken as SpecDraftToken, SpeculativeBatchProcessor, SpeculativeConfig,
+    SpeculativeDecoder as SpecDecoder, SpeculativeError, SpeculativeRequest, SpeculativeResponse,
+    SpeculativeStats as SpecStats, SpeculativeStep, VerificationResult as SpecVerificationResult,
+};
 
 // Re-export main components
 pub use alerting::{
@@ -166,6 +217,11 @@ pub use cloud_providers::{
     OutputConfig, OutputData, OutputFormat, PerformanceCharacteristics, PerformanceEstimate,
     PerformanceMetrics, PricingInfo, ProviderConfig, ProviderMetrics, RequestPriority,
     ResourceRequirements, ResourceUtilization, ResponseMetadata, RetryPolicy as CloudRetryPolicy,
+};
+pub use continuous_batching::{
+    BatchSnapshot, BatchingConfig as ContinuousBatchingConfig,
+    BatchingStats as ContinuousBatchingStats, ContinuousBatchScheduler, SequenceGroup,
+    SequenceState, StopReason,
 };
 pub use contract_testing::{
     ApiContract, AuthContract, AuthType as ContractAuthType, ContractError, ContractTestConfig,
@@ -263,6 +319,9 @@ pub use graph_optimization::{
     GraphOptimizationStatsSummary, Operation, OptimizationResult, OptimizationStats,
     OptimizationStep, OptimizationTarget, PoolType,
 };
+pub use prefix_cache::{
+    PrefixCache, PrefixCacheConfig, PrefixEvictionPolicy, PrefixHash, PrefixNode, PrefixTrieStats,
+};
 pub use serverless::{
     CostBreakdown, CostOptimizationResult, DetailedMetrics, OptimizationRecommendation,
     PerformanceBreakdown, RecommendationEffort, RecommendationPriority,
@@ -283,6 +342,9 @@ pub use kernel_fusion::{
     ComputeKernel, DeviceType, FusedKernel, FusionOpportunity, FusionStrategy, KernelFusionConfig,
     KernelFusionError, KernelFusionService, KernelFusionStatsSummary, KernelOperationType,
     TensorMetadata,
+};
+pub use kv_cache::{
+    EvictionPolicy as KvEvictionPolicy, KvCacheEntry, KvCacheError, KvCacheManager, KvCacheStats,
 };
 pub use load_balancer::{
     AutoScalingConfig, BackendInstance, CircuitBreakerSettings, ConnectionPoolConfig,
@@ -319,7 +381,11 @@ pub use message_queue_middleware::{
     EventTopicConfig, MessageQueueMiddleware, MessageQueueMiddlewareConfig, MessageQueueRequest,
     MessageQueueResponse, SubscriptionRequest,
 };
-pub use metrics::{MetricsCollector as ServerMetricsCollector, MetricsService, RequestMetrics};
+pub use metrics::{
+    Counter as MetricsCounter, Gauge as MetricsGauge, HistogramMetric, Label as MetricsLabel,
+    MetricType, MetricsCollector as ServerMetricsCollector, MetricsService,
+    MetricsSummary as ServingMetricsSummary, RequestMetrics, ServingMetrics,
+};
 pub use migration::{
     BackupInfo, BackupManager, BackupType, LogLevel as MigrationLogLevel, MigrationConfig,
     MigrationExecution, MigrationExecutor, MigrationLogEntry, MigrationManager, MigrationOptions,
@@ -348,6 +414,10 @@ pub use multimodal::{
     MediaData, MultiModalConfig, MultiModalError, MultiModalInput, MultiModalRequest,
     MultiModalResponse, MultiModalService, MultiModalStatsSummary, OcrConfig, OcrEngine,
     ProcessingOptions, TextPreprocessingConfig, VideoFormat,
+};
+pub use multimodal::{
+    Modality, MultiModalMessage, MultiModalProcessor, MultiModalServingError,
+    MultiModalServingInput, MultiModalServingRequest, MultiModalServingResponse, ValidationReport,
 };
 pub use openapi::ApiDoc;
 pub use operator_scheduling::DeviceType as OpSchedulerDeviceType;
@@ -439,6 +509,10 @@ pub use speculative_decoding::{
 pub use streaming::{
     ChunkStream, SseEvent, SseHandler, StreamType, StreamingConfig, StreamingService,
     StreamingStats, TokenStream, WebSocketHandler, WsMessage,
+};
+pub use streaming::{
+    FinishReason, OpenAiStreamChunk, SseStream, SseStreamConfig, StreamChoice, StreamDelta,
+    TokenChunk, TokenSseEvent,
 };
 pub use test_cicd_integration::{
     AuthConfig as CicdAuthConfig, CicdFeature, CicdIntegrationConfig, CicdIntegrationManager,

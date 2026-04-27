@@ -54,6 +54,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up QEMU
+        if: matrix.target == 'aarch64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -61,6 +67,9 @@ jobs:
           args: --release --out dist --find-interpreter
           manylinux: auto
           working-directory: ${{ env.PY_CRATE_PATH }}
+          # Fix aws-lc-sys cross-compilation: the manylinux cross-compiler sysroot
+          # lacks AT_HWCAP2 (added in glibc 2.18). Define it via CFLAGS.
+          docker-options: ${{ matrix.target == 'aarch64' && '-e CFLAGS_aarch64_unknown_linux_gnu=-DAT_HWCAP2=26' || '' }}
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4

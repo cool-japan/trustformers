@@ -935,4 +935,233 @@ mod tests {
         assert_eq!(pool.total_allocated, 0);
         assert_eq!(pool.peak_memory, 0);
     }
+
+    // Tests that work without CUDA feature (stub implementations)
+
+    #[test]
+    #[cfg(not(all(feature = "cuda", any(target_os = "linux", target_os = "windows"))))]
+    fn test_cuda_new_returns_error_without_feature() {
+        let result = CudaImpl::new();
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.err().expect("expected error"));
+        assert!(err_msg.contains("CUDA support not available"));
+    }
+
+    #[test]
+    #[cfg(not(all(feature = "cuda", any(target_os = "linux", target_os = "windows"))))]
+    fn test_cuda_global_returns_error_without_feature() {
+        let result = CudaImpl::global();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cuda_init_api() {
+        let result = api::init_cuda();
+        // On macOS and systems without CUDA, this should return an error
+        // On CUDA systems, it should succeed
+        let _ = result;
+    }
+
+    #[test]
+    fn test_cuda_device_info_api() {
+        let result = api::cuda_device_info();
+        // May fail on non-CUDA systems, that's expected
+        let _ = result;
+    }
+
+    #[test]
+    fn test_cuda_memory_stats_api() {
+        let result = api::cuda_memory_stats();
+        let _ = result;
+    }
+
+    #[test]
+    fn test_cuda_matmul_api() {
+        let a = Tensor::ones(&[2, 2]).expect("tensor failed");
+        let b = Tensor::ones(&[2, 2]).expect("tensor failed");
+        let mut c = Tensor::zeros(&[2, 2]).expect("tensor failed");
+        let result = api::cuda_matmul(&a, &b, &mut c);
+        // May fail on non-CUDA systems
+        let _ = result;
+    }
+
+    #[test]
+    fn test_cuda_flash_attention_api() {
+        let q = Tensor::ones(&[1, 4, 8]).expect("tensor failed");
+        let k = Tensor::ones(&[1, 4, 8]).expect("tensor failed");
+        let v = Tensor::ones(&[1, 4, 8]).expect("tensor failed");
+        let mut out = Tensor::zeros(&[1, 4, 8]).expect("tensor failed");
+        let result = api::cuda_flash_attention(&q, &k, &v, &mut out);
+        let _ = result;
+    }
+
+    #[test]
+    fn test_cuda_fused_gelu_api() {
+        let input = Tensor::ones(&[4, 4]).expect("tensor failed");
+        let mut output = Tensor::zeros(&[4, 4]).expect("tensor failed");
+        let result = api::cuda_fused_gelu(&input, &mut output, false);
+        let _ = result;
+    }
+
+    #[test]
+    fn test_cuda_fused_gelu_approximate_api() {
+        let input = Tensor::ones(&[4, 4]).expect("tensor failed");
+        let mut output = Tensor::zeros(&[4, 4]).expect("tensor failed");
+        let result = api::cuda_fused_gelu(&input, &mut output, true);
+        let _ = result;
+    }
+
+    #[test]
+    fn test_cuda_fused_bias_activation_relu_api() {
+        let input = Tensor::ones(&[4, 4]).expect("tensor failed");
+        let bias = Tensor::ones(&[4]).expect("tensor failed");
+        let mut output = Tensor::zeros(&[4, 4]).expect("tensor failed");
+        let result = api::cuda_fused_bias_activation(&input, &bias, &mut output, "relu");
+        let _ = result;
+    }
+
+    #[test]
+    fn test_cuda_fused_bias_activation_gelu_api() {
+        let input = Tensor::ones(&[4, 4]).expect("tensor failed");
+        let bias = Tensor::ones(&[4]).expect("tensor failed");
+        let mut output = Tensor::zeros(&[4, 4]).expect("tensor failed");
+        let result = api::cuda_fused_bias_activation(&input, &bias, &mut output, "gelu");
+        let _ = result;
+    }
+
+    #[test]
+    fn test_cuda_fused_bias_activation_silu_api() {
+        let input = Tensor::ones(&[2, 3]).expect("tensor failed");
+        let bias = Tensor::ones(&[3]).expect("tensor failed");
+        let mut output = Tensor::zeros(&[2, 3]).expect("tensor failed");
+        let result = api::cuda_fused_bias_activation(&input, &bias, &mut output, "silu");
+        let _ = result;
+    }
+
+    #[test]
+    fn test_tensor_creation_for_cuda() {
+        // Tests that tensors can be created in the shapes CUDA kernels expect
+        let query = Tensor::ones(&[2, 8, 64]).expect("tensor failed");
+        let key = Tensor::ones(&[2, 8, 64]).expect("tensor failed");
+        let value = Tensor::ones(&[2, 8, 64]).expect("tensor failed");
+        assert_eq!(query.shape(), &[2, 8, 64]);
+        assert_eq!(key.shape(), &[2, 8, 64]);
+        assert_eq!(value.shape(), &[2, 8, 64]);
+    }
+
+    #[test]
+    fn test_tensor_shapes_for_matmul() {
+        let a = Tensor::ones(&[32, 64]).expect("tensor failed");
+        let b = Tensor::ones(&[64, 128]).expect("tensor failed");
+        let c = Tensor::zeros(&[32, 128]).expect("tensor failed");
+        assert_eq!(a.shape(), &[32, 64]);
+        assert_eq!(b.shape(), &[64, 128]);
+        assert_eq!(c.shape(), &[32, 128]);
+    }
+
+    #[test]
+    fn test_tensor_memory_usage_for_gpu() {
+        let small = Tensor::ones(&[4, 4]).expect("tensor failed");
+        let large = Tensor::ones(&[64, 64]).expect("tensor failed");
+        assert!(large.memory_usage() > small.memory_usage());
+    }
+
+    #[test]
+    fn test_multiple_tensor_sizes_for_kernels() {
+        // Test various tensor sizes that would be used with CUDA kernels
+        let sizes: Vec<(usize, usize)> = vec![
+            (1, 1), (4, 4), (16, 16), (32, 32), (64, 64), (128, 128), (256, 256),
+        ];
+        for (rows, cols) in sizes {
+            let t = Tensor::ones(&[rows, cols]).expect("tensor failed");
+            assert_eq!(t.shape(), &[rows, cols]);
+        }
+    }
+
+    #[test]
+    fn test_tensor_from_vec_for_cuda_input() {
+        // Simulate creating tensors from data that would be sent to GPU
+        let data: Vec<f32> = (0..64).map(|i| i as f32 * 0.1).collect();
+        let tensor = Tensor::from_vec(data.clone(), &[8, 8]).expect("tensor failed");
+        let retrieved = tensor.data_f32().expect("data failed");
+        for (original, retrieved_val) in data.iter().zip(retrieved.iter()) {
+            assert!((original - retrieved_val).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn test_cuda_batch_dims_validation() {
+        // Ensure batch dimension tensors are properly shaped
+        let batch_sizes = [1, 2, 4, 8];
+        let seq_lengths = [16, 32, 64];
+        let head_dims = [32, 64];
+        for &batch in &batch_sizes {
+            for &seq_len in &seq_lengths {
+                for &head_dim in &head_dims {
+                    let t = Tensor::ones(&[batch, seq_len, head_dim]).expect("tensor failed");
+                    assert_eq!(t.shape()[0], batch);
+                    assert_eq!(t.shape()[1], seq_len);
+                    assert_eq!(t.shape()[2], head_dim);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_tensor_zeros_for_output_buffer() {
+        let output = Tensor::zeros(&[16, 32]).expect("tensor failed");
+        let data = output.data_f32().expect("data failed");
+        assert!(data.iter().all(|&x| x.abs() < f32::EPSILON));
+    }
+
+    #[test]
+    fn test_tensor_ones_for_weight_init() {
+        let weight = Tensor::ones(&[64, 128]).expect("tensor failed");
+        let data = weight.data_f32().expect("data failed");
+        assert!(data.iter().all(|&x| (x - 1.0).abs() < f32::EPSILON));
+    }
+
+    #[test]
+    fn test_cuda_stub_matmul_error_message() {
+        // When CUDA is not available, verify error contains useful info
+        match CudaImpl::new() {
+            Ok(cuda) => {
+                // CUDA available - test actual matmul
+                let a = Tensor::ones(&[2, 2]).expect("tensor failed");
+                let b = Tensor::ones(&[2, 2]).expect("tensor failed");
+                let mut c = Tensor::zeros(&[2, 2]).expect("tensor failed");
+                let _ = cuda.matmul(&a, &b, &mut c);
+            },
+            Err(e) => {
+                let msg = format!("{}", e);
+                assert!(!msg.is_empty());
+            },
+        }
+    }
+
+    #[test]
+    fn test_cuda_stub_device_info() {
+        match CudaImpl::new() {
+            Ok(cuda) => {
+                let info = cuda.device_info();
+                assert!(!info.is_empty());
+            },
+            Err(_) => {
+                // Expected on non-CUDA platforms
+            },
+        }
+    }
+
+    #[test]
+    fn test_cuda_stub_memory_stats() {
+        match CudaImpl::new() {
+            Ok(cuda) => {
+                let (total, peak) = cuda.memory_stats();
+                assert!(peak >= total || total == 0);
+            },
+            Err(_) => {
+                // Expected on non-CUDA platforms
+            },
+        }
+    }
 }

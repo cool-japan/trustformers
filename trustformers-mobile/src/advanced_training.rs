@@ -1325,4 +1325,244 @@ mod tests {
 
         assert!(bitfit_memory < qlora_memory);
     }
+
+    #[test]
+    fn test_ia3_initialization() {
+        let method = AdvancedTrainingMethod::IA3 {
+            target_modules: vec!["attention".to_string()],
+            scaling_rank: 4,
+            init_scale: 1.0,
+        };
+        let base_config = crate::training::OnDeviceTrainingConfig::default();
+        let mobile_config = crate::MobileConfig::default();
+        let trainer = AdvancedTrainer::new(method, base_config, mobile_config);
+        assert!(trainer.is_ok());
+    }
+
+    #[test]
+    fn test_bitfit_initialization() {
+        let method = AdvancedTrainingMethod::BitFit {
+            target_layers: vec!["layer1".to_string()],
+            learning_rate_scale: 2.0,
+        };
+        let base_config = crate::training::OnDeviceTrainingConfig::default();
+        let mobile_config = crate::MobileConfig::default();
+        let trainer = AdvancedTrainer::new(method, base_config, mobile_config);
+        assert!(trainer.is_ok());
+    }
+
+    #[test]
+    fn test_layernorm_tuning_initialization() {
+        let method = AdvancedTrainingMethod::LayerNormTuning {
+            include_bias: true,
+            include_scale: true,
+        };
+        let base_config = crate::training::OnDeviceTrainingConfig::default();
+        let mobile_config = crate::MobileConfig::default();
+        let trainer = AdvancedTrainer::new(method, base_config, mobile_config);
+        assert!(trainer.is_ok());
+    }
+
+    #[test]
+    fn test_compacter_initialization() {
+        let method = AdvancedTrainingMethod::Compacter {
+            reduction_factor: 16,
+            num_shared_components: 2,
+            hypercomplex_division: 4,
+        };
+        let base_config = crate::training::OnDeviceTrainingConfig::default();
+        let mobile_config = crate::MobileConfig::default();
+        let trainer = AdvancedTrainer::new(method, base_config, mobile_config);
+        assert!(trainer.is_ok());
+    }
+
+    #[test]
+    fn test_unipelt_initialization() {
+        let method = AdvancedTrainingMethod::UniPELT {
+            lora_rank: 8,
+            adapter_size: 64,
+            prefix_length: 10,
+            gate_type: GateType::Linear,
+        };
+        let base_config = crate::training::OnDeviceTrainingConfig::default();
+        let mobile_config = crate::MobileConfig::default();
+        let trainer = AdvancedTrainer::new(method, base_config, mobile_config);
+        assert!(trainer.is_ok());
+    }
+
+    #[test]
+    fn test_mam_adapter_initialization() {
+        let method = AdvancedTrainingMethod::MAMAdapter {
+            parallel_blocks: 2,
+            serial_blocks: 2,
+            reduction_factor: 8,
+        };
+        let base_config = crate::training::OnDeviceTrainingConfig::default();
+        let mobile_config = crate::MobileConfig::default();
+        let trainer = AdvancedTrainer::new(method, base_config, mobile_config);
+        assert!(trainer.is_ok());
+    }
+
+    #[test]
+    fn test_memory_estimation_prompt_tuning() {
+        let mem =
+            AdvancedTrainer::estimate_memory_requirement(&AdvancedTrainingMethod::PromptTuning {
+                num_virtual_tokens: 50,
+                prompt_embedding_dim: 768,
+                encoder_type: PromptEncoderType::Embedding,
+                init_method: PromptInitMethod::Random,
+            });
+        assert_eq!(mem, 100); // 50 * 2
+    }
+
+    #[test]
+    fn test_memory_estimation_ia3() {
+        let mem = AdvancedTrainer::estimate_memory_requirement(&AdvancedTrainingMethod::IA3 {
+            target_modules: vec!["attn".to_string()],
+            scaling_rank: 4,
+            init_scale: 1.0,
+        });
+        assert_eq!(mem, 30);
+    }
+
+    #[test]
+    fn test_memory_estimation_layernorm() {
+        let mem = AdvancedTrainer::estimate_memory_requirement(
+            &AdvancedTrainingMethod::LayerNormTuning {
+                include_bias: true,
+                include_scale: true,
+            },
+        );
+        assert_eq!(mem, 20);
+    }
+
+    #[test]
+    fn test_memory_estimation_compacter() {
+        let mem =
+            AdvancedTrainer::estimate_memory_requirement(&AdvancedTrainingMethod::Compacter {
+                reduction_factor: 16,
+                num_shared_components: 2,
+                hypercomplex_division: 4,
+            });
+        assert_eq!(mem, 50);
+    }
+
+    #[test]
+    fn test_memory_estimation_unipelt() {
+        let mem = AdvancedTrainer::estimate_memory_requirement(&AdvancedTrainingMethod::UniPELT {
+            lora_rank: 8,
+            adapter_size: 64,
+            prefix_length: 10,
+            gate_type: GateType::Linear,
+        });
+        assert_eq!(mem, 100);
+    }
+
+    #[test]
+    fn test_memory_estimation_mam() {
+        let mem =
+            AdvancedTrainer::estimate_memory_requirement(&AdvancedTrainingMethod::MAMAdapter {
+                parallel_blocks: 2,
+                serial_blocks: 2,
+                reduction_factor: 8,
+            });
+        assert_eq!(mem, 80);
+    }
+
+    #[test]
+    fn test_parameter_stats_creation() {
+        let stats = ParameterStats {
+            num_params: 100,
+            total_elements: 1000,
+            quantized_elements: 500,
+        };
+        assert_eq!(stats.num_params, 100);
+        assert!(stats.quantized_elements <= stats.total_elements);
+    }
+
+    #[test]
+    fn test_step_result_creation() {
+        let result = StepResult {
+            loss: 0.5,
+            main_loss: 0.3,
+            auxiliary_loss: 0.2,
+            gradients_norm: 1.5,
+            learning_rate: 0.001,
+            sparsity: 0.1,
+        };
+        assert!((result.loss - (result.main_loss + result.auxiliary_loss)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_memory_stats_creation() {
+        let stats = MemoryStats {
+            total_parameters: 1000,
+            total_memory_bytes: 4000,
+            quantized_parameters: 0,
+            sparse_parameters: 0,
+            compression_ratio: 1.0,
+        };
+        assert_eq!(stats.total_memory_bytes, stats.total_parameters * 4);
+    }
+
+    #[test]
+    fn test_prompt_encoder_type_variants() {
+        let types = vec![
+            PromptEncoderType::Embedding,
+            PromptEncoderType::MLP,
+            PromptEncoderType::LSTM,
+            PromptEncoderType::Prefix,
+        ];
+        assert_eq!(types.len(), 4);
+    }
+
+    #[test]
+    fn test_prompt_init_method_variants() {
+        let methods = vec![
+            PromptInitMethod::Random,
+            PromptInitMethod::FromVocab,
+            PromptInitMethod::FromTask,
+            PromptInitMethod::Learned,
+        ];
+        assert_eq!(methods.len(), 4);
+    }
+
+    #[test]
+    fn test_gate_type_variants() {
+        let gates = vec![GateType::Linear, GateType::Attention, GateType::Mixture];
+        assert_eq!(gates.len(), 3);
+    }
+
+    #[test]
+    fn test_get_memory_stats_empty_trainer() {
+        let method = AdvancedTrainingMethod::BitFit {
+            target_layers: vec!["layer".to_string()],
+            learning_rate_scale: 1.0,
+        };
+        let base_config = crate::training::OnDeviceTrainingConfig::default();
+        let mobile_config = crate::MobileConfig::default();
+        let trainer =
+            AdvancedTrainer::new(method, base_config, mobile_config).expect("Operation failed");
+        let stats = trainer.get_memory_stats();
+        assert_eq!(stats.total_parameters, 0);
+    }
+
+    #[test]
+    fn test_quantization_info_creation() {
+        let info = QuantizationInfo {
+            bits: 4,
+            scheme: "QLoRA".to_string(),
+        };
+        assert_eq!(info.bits, 4);
+        assert_eq!(info.scheme, "QLoRA");
+    }
+
+    #[test]
+    fn test_compression_info_creation() {
+        let info = CompressionInfo {
+            sparse_ratio: 0.5,
+            compression_method: "pruning".to_string(),
+        };
+        assert_eq!(info.sparse_ratio, 0.5);
+    }
 }

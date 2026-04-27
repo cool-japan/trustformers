@@ -8,7 +8,7 @@ use trustformers_core::autodiff::variable::Variable;
 use trustformers_core::tensor::Tensor;
 
 /// Python wrapper for TrustformeRS Tensor
-#[pyclass(name = "Tensor", module = "trustformers")]
+#[pyclass(name = "Tensor", module = "trustformers", from_py_object)]
 #[derive(Clone)]
 pub struct PyTensor {
     pub(crate) inner: Tensor,
@@ -110,8 +110,8 @@ impl PyTensor {
         if array.is_c_contiguous() {
             // Zero-copy path: create tensor from existing data
             // SAFETY: We ensure the data outlives the tensor by keeping a reference
-            let data_slice = array.as_slice().ok_or_else(|| {
-                PyValueError::new_err("Failed to get contiguous slice from array")
+            let data_slice = array.as_slice().map_err(|e| {
+                PyValueError::new_err(format!("Failed to get contiguous slice from array: {}", e))
             })?;
 
             // For true zero-copy, we need to work with the array's memory directly

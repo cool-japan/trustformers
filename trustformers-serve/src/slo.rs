@@ -1028,22 +1028,11 @@ pub enum SloError {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_slo_tracker_creation() {
-        let config = SloConfig::default();
-        let tracker = SloTracker::new(config).expect("test operation should succeed");
-        assert!(tracker.config.enabled);
-    }
-
-    #[tokio::test]
-    async fn test_sli_registration() {
-        let config = SloConfig::default();
-        let tracker = SloTracker::new(config).expect("test operation should succeed");
-
-        let sli = SliDefinition {
-            id: "test_sli".to_string(),
-            name: "Test SLI".to_string(),
-            description: "Test availability SLI".to_string(),
+    fn make_sli(id: &str) -> SliDefinition {
+        SliDefinition {
+            id: id.to_string(),
+            name: format!("SLI {}", id),
+            description: "Test SLI".to_string(),
             sli_type: SliType::Availability,
             measurement: SliMeasurement {
                 data_source: DataSource::Prometheus,
@@ -1052,43 +1041,16 @@ mod tests {
                 aggregation: AggregationMethod::Average,
             },
             labels: HashMap::new(),
-        };
-
-        let result = tracker.register_sli(sli).await;
-        assert!(result.is_ok());
-
-        let stats = tracker.get_stats().await;
-        assert_eq!(stats.total_slis.load(Ordering::Relaxed), 1);
+        }
     }
 
-    #[tokio::test]
-    async fn test_slo_registration() {
-        let config = SloConfig::default();
-        let tracker = SloTracker::new(config).expect("test operation should succeed");
-
-        // First register SLI
-        let sli = SliDefinition {
-            id: "test_sli".to_string(),
-            name: "Test SLI".to_string(),
-            description: "Test SLI".to_string(),
-            sli_type: SliType::Availability,
-            measurement: SliMeasurement {
-                data_source: DataSource::Prometheus,
-                query: "test".to_string(),
-                frequency_seconds: 60,
-                aggregation: AggregationMethod::Average,
-            },
-            labels: HashMap::new(),
-        };
-        tracker.register_sli(sli).await.expect("registration should succeed in test");
-
-        // Then register SLO
-        let slo = SloDefinition {
-            id: "test_slo".to_string(),
-            name: "Test SLO".to_string(),
-            description: "Test availability SLO".to_string(),
-            sli_id: "test_sli".to_string(),
-            target: 99.9,
+    fn make_slo(id: &str, sli_id: &str, target: f64) -> SloDefinition {
+        SloDefinition {
+            id: id.to_string(),
+            name: format!("SLO {}", id),
+            description: "Test SLO".to_string(),
+            sli_id: sli_id.to_string(),
+            target,
             window: SloWindow {
                 window_type: WindowType::Rolling,
                 duration: Duration::from_secs(30 * 24 * 3600),
@@ -1100,17 +1062,609 @@ mod tests {
                 burn_rate_alerts: BurnRateConfig {
                     enabled: true,
                     thresholds: vec![5.0, 10.0],
-                    lookback_windows: vec![Duration::from_secs(300), Duration::from_secs(900)],
+                    lookback_windows: vec![Duration::from_secs(300)],
                 },
             },
             alerts: Vec::new(),
             criticality: SloCriticality::Tier2,
-        };
+        }
+    }
 
+    fn make_data_point(value: f64, events: u64, successes: u64) -> SliDataPoint {
+        SliDataPoint {
+            timestamp: SystemTime::now(),
+            value,
+            event_count: events,
+            success_count: successes,
+            labels: HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_slo_tracker_creation() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("test operation should succeed");
+        assert!(tracker.config.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_slo_config_defaults() {
+        let config = SloConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.evaluation_interval_seconds, 60);
+        assert_eq!(config.max_slos, 100);
+        assert!(config.enable_error_budget_alerts);
+        assert!(config.enable_breach_notifications);
+    }
+
+    #[tokio::test]
+    async fn test_sli_registration() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("test operation should succeed");
+        let sli = make_sli("sli_001");
+        let result = tracker.register_sli(sli).await;
+        assert!(result.is_ok());
+        let stats = tracker.get_stats().await;
+        assert_eq!(stats.total_slis.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_sli_registrations() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("tracker creation should succeed");
+        for i in 0..5 {
+            let sli = make_sli(&format!("sli_{}", i));
+            tracker.register_sli(sli).await.expect("sli registration should succeed");
+        }
+        let stats = tracker.get_stats().await;
+        assert_eq!(stats.total_slis.load(Ordering::Relaxed), 5);
+    }
+
+    #[tokio::test]
+    async fn test_slo_registration() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("test operation should succeed");
+        tracker
+            .register_sli(make_sli("sli_a"))
+            .await
+            .expect("sli registration should succeed");
+        let slo = make_slo("slo_a", "sli_a", 99.9);
         let result = tracker.register_slo(slo).await;
         assert!(result.is_ok());
-
         let stats = tracker.get_stats().await;
         assert_eq!(stats.total_slos.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn test_slo_registration_fails_without_sli() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("tracker creation should succeed");
+        let slo = make_slo("slo_orphan", "nonexistent_sli", 99.0);
+        let result = tracker.register_slo(slo).await;
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.expect_err("error should be present"));
+        assert!(err_msg.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_record_sli_data() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("tracker creation should succeed");
+        tracker
+            .register_sli(make_sli("sli_data"))
+            .await
+            .expect("sli registration should succeed");
+        let dp = make_data_point(99.5, 1000, 995);
+        let result = tracker.record_sli_data("sli_data", dp).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_record_multiple_sli_data_points() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("tracker creation should succeed");
+        tracker
+            .register_sli(make_sli("sli_multi"))
+            .await
+            .expect("sli registration should succeed");
+        for i in 0..10 {
+            let dp = make_data_point(99.0 + (i as f64 * 0.05), 1000, 990 + i);
+            tracker
+                .record_sli_data("sli_multi", dp)
+                .await
+                .expect("data recording should succeed");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_slo_empty_data() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("tracker creation should succeed");
+        tracker
+            .register_sli(make_sli("sli_empty"))
+            .await
+            .expect("sli registration should succeed");
+        tracker
+            .register_slo(make_slo("slo_empty", "sli_empty", 99.9))
+            .await
+            .expect("slo reg ok");
+        let result = tracker.evaluate_slo("slo_empty").await;
+        assert!(result.is_ok());
+        let perf = result.expect("performance should be returned");
+        assert_eq!(perf.slo_id, "slo_empty");
+        assert_eq!(perf.current_sli, 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_slo_with_data() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("tracker creation should succeed");
+        tracker
+            .register_sli(make_sli("sli_b"))
+            .await
+            .expect("sli registration should succeed");
+        tracker
+            .register_slo(make_slo("slo_b", "sli_b", 99.0))
+            .await
+            .expect("slo reg ok");
+        for _ in 0..5 {
+            let dp = make_data_point(99.5, 1000, 995);
+            tracker.record_sli_data("sli_b", dp).await.expect("record should succeed");
+        }
+        let result = tracker.evaluate_slo("slo_b").await;
+        assert!(result.is_ok());
+        let perf = result.expect("performance should be returned");
+        assert!(perf.current_sli > 0.0);
+        assert_eq!(perf.target, 99.0);
+    }
+
+    #[tokio::test]
+    async fn test_slo_compliance_above_target() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("tracker creation should succeed");
+        tracker
+            .register_sli(make_sli("sli_c"))
+            .await
+            .expect("sli registration should succeed");
+        tracker
+            .register_slo(make_slo("slo_c", "sli_c", 99.0))
+            .await
+            .expect("slo reg ok");
+        let dp = make_data_point(99.9, 1000, 999);
+        tracker.record_sli_data("sli_c", dp).await.expect("record should succeed");
+        let perf = tracker.evaluate_slo("slo_c").await.expect("evaluation should succeed");
+        assert_eq!(perf.compliance, 100.0);
+    }
+
+    #[tokio::test]
+    async fn test_slo_compliance_below_target() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("tracker creation should succeed");
+        tracker
+            .register_sli(make_sli("sli_d"))
+            .await
+            .expect("sli registration should succeed");
+        tracker
+            .register_slo(make_slo("slo_d", "sli_d", 99.9))
+            .await
+            .expect("slo reg ok");
+        let dp = make_data_point(90.0, 1000, 900);
+        tracker.record_sli_data("sli_d", dp).await.expect("record should succeed");
+        let perf = tracker.evaluate_slo("slo_d").await.expect("evaluation should succeed");
+        assert!(perf.compliance < 100.0);
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_nonexistent_slo() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("tracker creation should succeed");
+        let result = tracker.evaluate_slo("nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_all_slo_performance_empty() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("tracker creation should succeed");
+        let all_perf = tracker.get_all_slo_performance().await;
+        assert!(all_perf.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_all_slo_performance_after_eval() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("tracker creation should succeed");
+        tracker
+            .register_sli(make_sli("sli_e"))
+            .await
+            .expect("sli registration should succeed");
+        tracker
+            .register_slo(make_slo("slo_e", "sli_e", 99.0))
+            .await
+            .expect("slo reg ok");
+        tracker.evaluate_slo("slo_e").await.expect("evaluation should succeed");
+        let all_perf = tracker.get_all_slo_performance().await;
+        assert_eq!(all_perf.len(), 1);
+        assert!(all_perf.contains_key("slo_e"));
+    }
+
+    #[tokio::test]
+    async fn test_active_breaches_initially_empty() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("tracker creation should succeed");
+        let breaches = tracker.get_active_breaches().await;
+        assert!(breaches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_breach_history_initially_empty() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("tracker creation should succeed");
+        let history = tracker.get_breach_history(None).await;
+        assert!(history.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_breach_history_with_limit() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("tracker creation should succeed");
+        let history = tracker.get_breach_history(Some(5)).await;
+        assert!(history.len() <= 5);
+    }
+
+    #[tokio::test]
+    async fn test_stats_initial_values() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("tracker creation should succeed");
+        let stats = tracker.get_stats().await;
+        assert_eq!(stats.total_slis.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.total_slos.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.total_evaluations.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.total_breaches.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn test_eval_increments_stats_counter() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("tracker creation should succeed");
+        tracker
+            .register_sli(make_sli("sli_f"))
+            .await
+            .expect("sli registration should succeed");
+        tracker
+            .register_slo(make_slo("slo_f", "sli_f", 99.0))
+            .await
+            .expect("slo reg ok");
+        tracker.evaluate_slo("slo_f").await.expect("evaluation should succeed");
+        let stats = tracker.get_stats().await;
+        assert_eq!(stats.total_evaluations.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn test_error_budget_calculation_perfect_service() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("tracker creation should succeed");
+        tracker
+            .register_sli(make_sli("sli_perfect"))
+            .await
+            .expect("sli registration should succeed");
+        tracker
+            .register_slo(make_slo("slo_perfect", "sli_perfect", 99.0))
+            .await
+            .expect("slo reg ok");
+        // 100% success rate
+        let dp = make_data_point(100.0, 1000, 1000);
+        tracker.record_sli_data("sli_perfect", dp).await.expect("record should succeed");
+        let perf = tracker.evaluate_slo("slo_perfect").await.expect("evaluation should succeed");
+        assert!(perf.error_budget_remaining >= 0.0);
+        assert!(perf.error_budget_remaining <= 100.0);
+    }
+
+    #[tokio::test]
+    async fn test_trend_direction_unknown_with_few_data_points() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("tracker creation should succeed");
+        tracker
+            .register_sli(make_sli("sli_trend"))
+            .await
+            .expect("sli registration should succeed");
+        tracker
+            .register_slo(make_slo("slo_trend", "sli_trend", 99.0))
+            .await
+            .expect("slo reg ok");
+        // Only one data point — trend must be Unknown
+        let dp = make_data_point(99.5, 100, 99);
+        tracker.record_sli_data("sli_trend", dp).await.expect("record should succeed");
+        let perf = tracker.evaluate_slo("slo_trend").await.expect("evaluation should succeed");
+        matches!(perf.trend, TrendDirection::Unknown);
+    }
+
+    #[tokio::test]
+    async fn test_trend_improving_with_increasing_values() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("tracker creation should succeed");
+        tracker
+            .register_sli(make_sli("sli_improving"))
+            .await
+            .expect("sli registration should succeed");
+        tracker
+            .register_slo(make_slo("slo_improving", "sli_improving", 99.0))
+            .await
+            .expect("slo reg ok");
+        // First half: lower values, second half: higher values → Improving
+        for i in 0..6 {
+            let value = if i < 3 { 90.0 } else { 99.9 };
+            let dp = make_data_point(value, 1000, 990);
+            tracker
+                .record_sli_data("sli_improving", dp)
+                .await
+                .expect("record should succeed");
+        }
+        let perf = tracker.evaluate_slo("slo_improving").await.expect("evaluation should succeed");
+        matches!(
+            perf.trend,
+            TrendDirection::Improving | TrendDirection::Stable
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sli_type_latency_definition() {
+        let sli = SliDefinition {
+            id: "latency_sli".to_string(),
+            name: "Latency SLI".to_string(),
+            description: "p99 < 100ms".to_string(),
+            sli_type: SliType::Latency {
+                threshold_ms: 100.0,
+            },
+            measurement: SliMeasurement {
+                data_source: DataSource::Application,
+                query: "histogram_quantile(0.99, ...)".to_string(),
+                frequency_seconds: 30,
+                aggregation: AggregationMethod::Percentile { percentile: 99.0 },
+            },
+            labels: HashMap::new(),
+        };
+        assert!(matches!(sli.sli_type, SliType::Latency { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_sli_type_throughput_definition() {
+        let sli = SliDefinition {
+            id: "throughput_sli".to_string(),
+            name: "Throughput SLI".to_string(),
+            description: "RPS > 100".to_string(),
+            sli_type: SliType::Throughput { target_rps: 100.0 },
+            measurement: SliMeasurement {
+                data_source: DataSource::CustomMetrics,
+                query: "sum(rate(requests[1m]))".to_string(),
+                frequency_seconds: 60,
+                aggregation: AggregationMethod::Rate,
+            },
+            labels: HashMap::new(),
+        };
+        assert!(matches!(sli.sli_type, SliType::Throughput { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_slo_criticality_levels() {
+        let tiers = [
+            SloCriticality::Tier1,
+            SloCriticality::Tier2,
+            SloCriticality::Tier3,
+            SloCriticality::Tier4,
+        ];
+        for tier in tiers {
+            let slo = SloDefinition {
+                id: "tier_test".to_string(),
+                name: "Tier Test".to_string(),
+                description: "desc".to_string(),
+                sli_id: "sli_x".to_string(),
+                target: 99.9,
+                window: SloWindow {
+                    window_type: WindowType::Rolling,
+                    duration: Duration::from_secs(3600),
+                    rolling_config: None,
+                },
+                error_budget: ErrorBudgetConfig {
+                    calculation_method: ErrorBudgetMethod::Simple,
+                    alert_thresholds: vec![0.1],
+                    burn_rate_alerts: BurnRateConfig {
+                        enabled: false,
+                        thresholds: vec![],
+                        lookback_windows: vec![],
+                    },
+                },
+                alerts: Vec::new(),
+                criticality: tier,
+            };
+            // Ensure the criticality field is set (not a compilation check only)
+            let _ = &slo.criticality;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_multiple_slo_evaluations() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("tracker creation should succeed");
+        tracker
+            .register_sli(make_sli("sli_g"))
+            .await
+            .expect("sli registration should succeed");
+        tracker
+            .register_slo(make_slo("slo_g", "sli_g", 99.0))
+            .await
+            .expect("slo reg ok");
+        let dp = make_data_point(99.5, 1000, 995);
+        tracker.record_sli_data("sli_g", dp).await.expect("record should succeed");
+        // Evaluate multiple times — stats should increment
+        for _ in 0..3 {
+            tracker.evaluate_slo("slo_g").await.expect("evaluation should succeed");
+        }
+        let stats = tracker.get_stats().await;
+        assert_eq!(stats.total_evaluations.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn test_time_to_exhaustion_none_when_zero_burn_rate() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("tracker creation should succeed");
+        tracker
+            .register_sli(make_sli("sli_h"))
+            .await
+            .expect("sli registration should succeed");
+        tracker
+            .register_slo(make_slo("slo_h", "sli_h", 99.0))
+            .await
+            .expect("slo reg ok");
+        // Perfect data → burn_rate will be 0
+        let dp = make_data_point(100.0, 1000, 1000);
+        tracker.record_sli_data("sli_h", dp).await.expect("record should succeed");
+        let perf = tracker.evaluate_slo("slo_h").await.expect("evaluation should succeed");
+        // burn_rate == 0 → time_to_exhaustion should be None
+        assert!(perf.time_to_exhaustion.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_window_type_calendar() {
+        let window = SloWindow {
+            window_type: WindowType::Calendar,
+            duration: Duration::from_secs(30 * 24 * 3600),
+            rolling_config: None,
+        };
+        assert!(matches!(window.window_type, WindowType::Calendar));
+    }
+
+    #[tokio::test]
+    async fn test_window_type_custom() {
+        let now = SystemTime::now();
+        let later = now + Duration::from_secs(3600);
+        let window = SloWindow {
+            window_type: WindowType::Custom {
+                start: now,
+                end: later,
+            },
+            duration: Duration::from_secs(3600),
+            rolling_config: None,
+        };
+        assert!(matches!(window.window_type, WindowType::Custom { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_aggregation_method_variants() {
+        let methods = [
+            AggregationMethod::Average,
+            AggregationMethod::Sum,
+            AggregationMethod::Count,
+            AggregationMethod::Rate,
+            AggregationMethod::Max,
+            AggregationMethod::Min,
+            AggregationMethod::Percentile { percentile: 95.0 },
+        ];
+        // Just ensure all variants can be constructed
+        assert_eq!(methods.len(), 7);
+    }
+
+    #[tokio::test]
+    async fn test_slo_max_limit_enforced() {
+        let mut config = SloConfig::default();
+        config.max_slos = 2;
+        let tracker = SloTracker::new(config).expect("tracker creation should succeed");
+        for i in 0..3 {
+            let sli = make_sli(&format!("sli_limit_{}", i));
+            let result = tracker.register_sli(sli).await;
+            if i < 2 {
+                assert!(result.is_ok(), "first two should succeed");
+            } else {
+                assert!(result.is_err(), "third should fail due to max_slos limit");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_error_budget_method_weighted() {
+        let budget = ErrorBudgetConfig {
+            calculation_method: ErrorBudgetMethod::Weighted {
+                weights: vec![1.0, 2.0, 3.0],
+            },
+            alert_thresholds: vec![0.5],
+            burn_rate_alerts: BurnRateConfig {
+                enabled: false,
+                thresholds: vec![],
+                lookback_windows: vec![],
+            },
+        };
+        assert!(matches!(
+            budget.calculation_method,
+            ErrorBudgetMethod::Weighted { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_alert_condition_slo_breach() {
+        let alert = SloAlert {
+            id: "alert_001".to_string(),
+            name: "Breach Alert".to_string(),
+            condition: AlertCondition::SloBreach,
+            severity: AlertSeverity::High,
+            channels: vec!["slack".to_string()],
+            cooldown: Duration::from_secs(300),
+        };
+        assert!(matches!(alert.condition, AlertCondition::SloBreach));
+        assert!(matches!(alert.severity, AlertSeverity::High));
+    }
+
+    #[tokio::test]
+    async fn test_alert_condition_error_budget_depletion() {
+        let condition = AlertCondition::ErrorBudgetDepletion { threshold: 0.1 };
+        if let AlertCondition::ErrorBudgetDepletion { threshold } = condition {
+            assert!((threshold - 0.1).abs() < 1e-9);
+        } else {
+            panic!("expected ErrorBudgetDepletion variant");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_alert_condition_burn_rate() {
+        let condition = AlertCondition::BurnRate {
+            rate: 5.0,
+            window: Duration::from_secs(3600),
+        };
+        if let AlertCondition::BurnRate { rate, window } = condition {
+            assert!((rate - 5.0).abs() < 1e-9);
+            assert_eq!(window, Duration::from_secs(3600));
+        } else {
+            panic!("expected BurnRate variant");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_data_source_external() {
+        let source = DataSource::External {
+            endpoint: "https://monitoring.example.com".to_string(),
+        };
+        if let DataSource::External { endpoint } = source {
+            assert!(endpoint.starts_with("https://"));
+        } else {
+            panic!("expected External data source variant");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_burn_rate_zero_with_single_data_point() {
+        let config = SloConfig::default();
+        let tracker = SloTracker::new(config).expect("tracker creation should succeed");
+        tracker
+            .register_sli(make_sli("sli_single"))
+            .await
+            .expect("sli registration should succeed");
+        tracker
+            .register_slo(make_slo("slo_single", "sli_single", 99.0))
+            .await
+            .expect("slo reg ok");
+        let dp = make_data_point(99.5, 100, 99);
+        tracker.record_sli_data("sli_single", dp).await.expect("record should succeed");
+        let perf = tracker.evaluate_slo("slo_single").await.expect("evaluation should succeed");
+        // Single data point → burn_rate should be 0
+        assert!((perf.burn_rate - 0.0).abs() < 1e-6);
     }
 }

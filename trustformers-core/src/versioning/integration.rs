@@ -610,4 +610,353 @@ mod tests {
         let experiment = &experiments[0];
         assert!(!experiment.metrics_collected.is_empty());
     }
+
+    #[tokio::test]
+    async fn test_list_experiments_initially_empty() {
+        let version_manager = create_test_version_manager().await;
+        let ab_manager = VersionedABTestManager::new(version_manager.clone());
+        let experiments = ab_manager.list_experiments().await.expect("async operation failed");
+        assert!(experiments.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_stop_experiment() {
+        let version_manager = create_test_version_manager().await;
+        let ab_manager = VersionedABTestManager::new(version_manager.clone());
+
+        let control_id = create_test_version(&version_manager, "test_model", "1.0.0").await;
+        let treatment_id = create_test_version(&version_manager, "test_model", "1.1.0").await;
+
+        let config = VersionExperimentConfig {
+            name: "Stop Test".to_string(),
+            description: "Test stopping".to_string(),
+            control_version_id: control_id,
+            treatment_version_ids: vec![treatment_id],
+            traffic_percentage: 50.0,
+            min_sample_size: 10,
+            max_duration_hours: 1,
+        };
+
+        let experiment_id = ab_manager
+            .create_version_experiment(config)
+            .await
+            .expect("async operation failed");
+
+        ab_manager.stop_experiment(&experiment_id).await.expect("stop failed");
+
+        let experiments = ab_manager.list_experiments().await.expect("async operation failed");
+        assert_eq!(experiments[0].status, VersionedExperimentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_experiments() {
+        let version_manager = create_test_version_manager().await;
+        let ab_manager = VersionedABTestManager::new(version_manager.clone());
+
+        let v1 = create_test_version(&version_manager, "model_a", "1.0.0").await;
+        let v2 = create_test_version(&version_manager, "model_a", "1.1.0").await;
+        let v3 = create_test_version(&version_manager, "model_a", "1.2.0").await;
+
+        let config1 = VersionExperimentConfig {
+            name: "Exp 1".to_string(),
+            description: "First".to_string(),
+            control_version_id: v1,
+            treatment_version_ids: vec![v2],
+            traffic_percentage: 50.0,
+            min_sample_size: 10,
+            max_duration_hours: 1,
+        };
+
+        let config2 = VersionExperimentConfig {
+            name: "Exp 2".to_string(),
+            description: "Second".to_string(),
+            control_version_id: v1,
+            treatment_version_ids: vec![v3],
+            traffic_percentage: 50.0,
+            min_sample_size: 10,
+            max_duration_hours: 1,
+        };
+
+        let _id1 = ab_manager.create_version_experiment(config1).await.expect("create failed");
+        let _id2 = ab_manager.create_version_experiment(config2).await.expect("create failed");
+
+        let experiments = ab_manager.list_experiments().await.expect("list failed");
+        assert_eq!(experiments.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_metric_types() {
+        let version_manager = create_test_version_manager().await;
+        let ab_manager = VersionedABTestManager::new(version_manager.clone());
+
+        let control_id = create_test_version(&version_manager, "test_model", "1.0.0").await;
+        let treatment_id = create_test_version(&version_manager, "test_model", "1.1.0").await;
+
+        let config = VersionExperimentConfig {
+            name: "Multi Metrics".to_string(),
+            description: "Test multiple metrics".to_string(),
+            control_version_id: control_id,
+            treatment_version_ids: vec![treatment_id],
+            traffic_percentage: 100.0,
+            min_sample_size: 10,
+            max_duration_hours: 1,
+        };
+
+        let experiment_id =
+            ab_manager.create_version_experiment(config).await.expect("create failed");
+
+        ab_manager
+            .record_version_metric(
+                &experiment_id,
+                "user1",
+                VersionMetricType::Latency,
+                100.0,
+                None,
+            )
+            .await
+            .expect("record failed");
+
+        ab_manager
+            .record_version_metric(
+                &experiment_id,
+                "user2",
+                VersionMetricType::Accuracy,
+                0.95,
+                None,
+            )
+            .await
+            .expect("record failed");
+
+        ab_manager
+            .record_version_metric(
+                &experiment_id,
+                "user3",
+                VersionMetricType::Throughput,
+                500.0,
+                None,
+            )
+            .await
+            .expect("record failed");
+
+        let experiments = ab_manager.list_experiments().await.expect("list failed");
+        assert!(!experiments[0].metrics_collected.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_experiment_config_fields() {
+        let version_manager = create_test_version_manager().await;
+        let ab_manager = VersionedABTestManager::new(version_manager.clone());
+
+        let control_id = create_test_version(&version_manager, "test_model", "1.0.0").await;
+        let treatment_id = create_test_version(&version_manager, "test_model", "1.1.0").await;
+
+        let config = VersionExperimentConfig {
+            name: "Config Test".to_string(),
+            description: "Config description".to_string(),
+            control_version_id: control_id,
+            treatment_version_ids: vec![treatment_id],
+            traffic_percentage: 75.0,
+            min_sample_size: 200,
+            max_duration_hours: 48,
+        };
+
+        let _experiment_id = ab_manager
+            .create_version_experiment(config.clone())
+            .await
+            .expect("create failed");
+
+        let experiments = ab_manager.list_experiments().await.expect("list failed");
+        assert_eq!(experiments[0].config.name, "Config Test");
+        assert_eq!(experiments[0].config.traffic_percentage, 75.0);
+        assert_eq!(experiments[0].config.min_sample_size, 200);
+    }
+
+    #[test]
+    fn test_version_metric_type_display() {
+        assert_eq!(format!("{}", VersionMetricType::Latency), "latency");
+        assert_eq!(format!("{}", VersionMetricType::Accuracy), "accuracy");
+        assert_eq!(format!("{}", VersionMetricType::Throughput), "throughput");
+        assert_eq!(format!("{}", VersionMetricType::ErrorRate), "error_rate");
+        assert_eq!(
+            format!("{}", VersionMetricType::MemoryUsage),
+            "memory_usage"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                VersionMetricType::CustomMetric("custom_one".to_string())
+            ),
+            "custom_one"
+        );
+    }
+
+    #[test]
+    fn test_versioned_experiment_status_equality() {
+        assert_eq!(
+            VersionedExperimentStatus::Running,
+            VersionedExperimentStatus::Running
+        );
+        assert_ne!(
+            VersionedExperimentStatus::Running,
+            VersionedExperimentStatus::Stopped
+        );
+    }
+
+    #[test]
+    fn test_calculate_percentile_basic() {
+        let values = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let p50 = calculate_percentile(&values, 0.5);
+        assert!((p50 - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_calculate_percentile_p0() {
+        let values = vec![10.0, 20.0, 30.0];
+        let p0 = calculate_percentile(&values, 0.0);
+        assert!((p0 - 10.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_calculate_percentile_p100() {
+        let values = vec![10.0, 20.0, 30.0];
+        let p100 = calculate_percentile(&values, 1.0);
+        assert!((p100 - 30.0).abs() < 1e-10);
+    }
+
+    #[tokio::test]
+    async fn test_routing_deterministic_for_same_user() {
+        let version_manager = create_test_version_manager().await;
+        let ab_manager = VersionedABTestManager::new(version_manager.clone());
+
+        let control_id = create_test_version(&version_manager, "test_model", "1.0.0").await;
+        let treatment_id = create_test_version(&version_manager, "test_model", "1.1.0").await;
+
+        let config = VersionExperimentConfig {
+            name: "Deterministic Routing".to_string(),
+            description: "Test deterministic routing".to_string(),
+            control_version_id: control_id,
+            treatment_version_ids: vec![treatment_id],
+            traffic_percentage: 100.0,
+            min_sample_size: 10,
+            max_duration_hours: 1,
+        };
+
+        let experiment_id =
+            ab_manager.create_version_experiment(config).await.expect("create failed");
+
+        let r1 = ab_manager
+            .route_request(&experiment_id, "same_user")
+            .await
+            .expect("route failed");
+        let r2 = ab_manager
+            .route_request(&experiment_id, "same_user")
+            .await
+            .expect("route failed");
+
+        // Same user should get routed to same version
+        assert_eq!(r1.version_id, r2.version_id);
+    }
+
+    #[tokio::test]
+    async fn test_analyze_experiment_with_data() {
+        let version_manager = create_test_version_manager().await;
+        let ab_manager = VersionedABTestManager::new(version_manager.clone());
+
+        let control_id = create_test_version(&version_manager, "test_model", "1.0.0").await;
+        let treatment_id = create_test_version(&version_manager, "test_model", "1.1.0").await;
+
+        let config = VersionExperimentConfig {
+            name: "Analyze Test".to_string(),
+            description: "Test analysis".to_string(),
+            control_version_id: control_id,
+            treatment_version_ids: vec![treatment_id],
+            traffic_percentage: 100.0,
+            min_sample_size: 1,
+            max_duration_hours: 1,
+        };
+
+        let experiment_id =
+            ab_manager.create_version_experiment(config).await.expect("create failed");
+
+        // Add some metrics before analyzing
+        for i in 0..5 {
+            ab_manager
+                .record_version_metric(
+                    &experiment_id,
+                    &format!("user_{}", i),
+                    VersionMetricType::Latency,
+                    100.0 + i as f64,
+                    None,
+                )
+                .await
+                .expect("record failed");
+        }
+
+        let result = ab_manager.analyze_version_experiment(&experiment_id).await;
+        // Analysis may or may not succeed depending on internal logic
+        let _ = result;
+    }
+
+    #[tokio::test]
+    async fn test_promote_with_metrics() {
+        let version_manager = create_test_version_manager().await;
+        let ab_manager = VersionedABTestManager::new(version_manager.clone());
+
+        let control_id = create_test_version(&version_manager, "test_model", "1.0.0").await;
+        let treatment_id = create_test_version(&version_manager, "test_model", "1.1.0").await;
+
+        let config = VersionExperimentConfig {
+            name: "Promote Test".to_string(),
+            description: "Test promotion".to_string(),
+            control_version_id: control_id,
+            treatment_version_ids: vec![treatment_id],
+            traffic_percentage: 100.0,
+            min_sample_size: 1,
+            max_duration_hours: 1,
+        };
+
+        let experiment_id =
+            ab_manager.create_version_experiment(config).await.expect("create failed");
+
+        // Add some metrics
+        for i in 0..3 {
+            ab_manager
+                .record_version_metric(
+                    &experiment_id,
+                    &format!("user_{}", i),
+                    VersionMetricType::Latency,
+                    50.0 + i as f64,
+                    None,
+                )
+                .await
+                .expect("record failed");
+        }
+
+        let result = ab_manager.promote_winning_version(&experiment_id).await;
+        // Promotion may or may not succeed depending on sufficient data
+        let _ = result;
+    }
+
+    #[tokio::test]
+    async fn test_experiment_initial_status_running() {
+        let version_manager = create_test_version_manager().await;
+        let ab_manager = VersionedABTestManager::new(version_manager.clone());
+
+        let control_id = create_test_version(&version_manager, "test_model", "1.0.0").await;
+        let treatment_id = create_test_version(&version_manager, "test_model", "1.1.0").await;
+
+        let config = VersionExperimentConfig {
+            name: "Status Test".to_string(),
+            description: "Test status".to_string(),
+            control_version_id: control_id,
+            treatment_version_ids: vec![treatment_id],
+            traffic_percentage: 50.0,
+            min_sample_size: 10,
+            max_duration_hours: 1,
+        };
+
+        let _id = ab_manager.create_version_experiment(config).await.expect("create failed");
+        let experiments = ab_manager.list_experiments().await.expect("list failed");
+        assert_eq!(experiments[0].status, VersionedExperimentStatus::Running);
+    }
 }

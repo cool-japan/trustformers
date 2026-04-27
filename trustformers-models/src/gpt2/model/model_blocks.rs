@@ -171,7 +171,7 @@ impl Gpt2Attention {
     }
 
     fn new_with_device(config: &Gpt2Config, device: Device) -> Result<Self> {
-        if config.n_embd % config.n_head != 0 {
+        if !config.n_embd.is_multiple_of(config.n_head) {
             return Err(invalid_config(
                 "n_embd",
                 "n_embd must be divisible by n_head",
@@ -1207,5 +1207,306 @@ pub(crate) fn stack_tensors(tensors: &[Tensor]) -> Result<Tensor> {
             "tensor_operation",
             "Only F32 tensors supported for stacking".to_string(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gpt2::config::Gpt2Config;
+    use scirs2_core::ndarray::{ArrayD, IxDyn};
+    use trustformers_core::tensor::Tensor;
+
+    // LCG PRNG: a=6364136223846793005, c=1442695040888963407
+    fn lcg_next(state: &mut u64) -> u64 {
+        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *state
+    }
+
+    fn lcg_f32_range(state: &mut u64, lo: f32, hi: f32) -> f32 {
+        let raw = (lcg_next(state) >> 11) as f32 / (1u64 << 53) as f32;
+        lo + raw * (hi - lo)
+    }
+
+    fn make_array(shape: &[usize], seed: u64) -> ArrayD<f32> {
+        let mut state = seed;
+        let n: usize = shape.iter().product();
+        let data: Vec<f32> = (0..n).map(|_| lcg_f32_range(&mut state, -1.0, 1.0)).collect();
+        ArrayD::from_shape_vec(IxDyn(shape), data).expect("Failed to create array")
+    }
+
+    fn make_tensor(shape: &[usize], seed: u64) -> Tensor {
+        Tensor::F32(make_array(shape, seed))
+    }
+
+    // ---- create_causal_mask tests ----
+
+    #[test]
+    fn test_causal_mask_shape() {
+        let seq_len = 5;
+        let mask = create_causal_mask(seq_len).expect("create_causal_mask failed");
+        let shape = mask.shape();
+        assert_eq!(shape, &[1, 1, seq_len, seq_len]);
+    }
+
+    #[test]
+    fn test_causal_mask_diagonal_not_neg_inf() {
+        let seq_len = 4;
+        let mask = create_causal_mask(seq_len).expect("create_causal_mask failed");
+        if let Tensor::F32(arr) = &mask {
+            for i in 0..seq_len {
+                let val = arr[[0, 0, i, i]];
+                assert!(
+                    val.is_finite(),
+                    "Diagonal of causal mask must be finite at ({i},{i})"
+                );
+            }
+        } else {
+            panic!("Expected F32 tensor");
+        }
+    }
+
+    #[test]
+    fn test_causal_mask_future_tokens_are_neg_inf() {
+        let seq_len = 5;
+        let mask = create_causal_mask(seq_len).expect("create_causal_mask failed");
+        if let Tensor::F32(arr) = &mask {
+            for i in 0..seq_len {
+                for j in (i + 1)..seq_len {
+                    let val = arr[[0, 0, i, j]];
+                    assert!(
+                        val.is_infinite() && val < 0.0,
+                        "Future token at ({i},{j}) must be -inf, got {val}"
+                    );
+                }
+            }
+        } else {
+            panic!("Expected F32 tensor");
+        }
+    }
+
+    #[test]
+    fn test_causal_mask_past_tokens_are_zero() {
+        let seq_len = 4;
+        let mask = create_causal_mask(seq_len).expect("create_causal_mask failed");
+        if let Tensor::F32(arr) = &mask {
+            for i in 0..seq_len {
+                for j in 0..=i {
+                    let val = arr[[0, 0, i, j]];
+                    assert!(
+                        val == 0.0,
+                        "Past/current token at ({i},{j}) must be 0, got {val}"
+                    );
+                }
+            }
+        } else {
+            panic!("Expected F32 tensor");
+        }
+    }
+
+    #[test]
+    fn test_causal_mask_length_1() {
+        let mask = create_causal_mask(1).expect("create_causal_mask(1) failed");
+        if let Tensor::F32(arr) = &mask {
+            assert_eq!(arr[[0, 0, 0, 0]], 0.0);
+        }
+    }
+
+    // ---- softmax tests ----
+
+    #[test]
+    fn test_softmax_sums_to_one() {
+        let mut state = 7u64;
+        let n = 10;
+        let data: Vec<f32> = (0..n).map(|_| lcg_f32_range(&mut state, -2.0, 2.0)).collect();
+        let arr = ArrayD::from_shape_vec(IxDyn(&[n]), data).expect("array creation failed");
+        let result = softmax(arr).expect("softmax failed");
+        let sum: f32 = result.iter().sum();
+        assert!(
+            (sum - 1.0).abs() < 1e-5,
+            "softmax sum must be ~1.0, got {sum}"
+        );
+    }
+
+    #[test]
+    fn test_softmax_all_positive() {
+        let mut state = 13u64;
+        let n = 8;
+        let data: Vec<f32> = (0..n).map(|_| lcg_f32_range(&mut state, -3.0, 3.0)).collect();
+        let arr = ArrayD::from_shape_vec(IxDyn(&[n]), data).expect("array creation failed");
+        let result = softmax(arr).expect("softmax failed");
+        for val in result.iter() {
+            assert!(*val >= 0.0, "softmax output must be non-negative");
+        }
+    }
+
+    // ---- log_softmax tests ----
+
+    #[test]
+    fn test_log_softmax_non_positive() {
+        let mut state = 17u64;
+        let n = 8;
+        let data: Vec<f32> = (0..n).map(|_| lcg_f32_range(&mut state, -2.0, 2.0)).collect();
+        let arr = ArrayD::from_shape_vec(IxDyn(&[n]), data).expect("array creation failed");
+        let result = log_softmax(arr).expect("log_softmax failed");
+        for val in result.iter() {
+            assert!(
+                *val <= 0.0 + 1e-6,
+                "log_softmax output must be <= 0, got {val}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_log_softmax_exp_sums_to_one() {
+        let mut state = 31u64;
+        let n = 6;
+        let data: Vec<f32> = (0..n).map(|_| lcg_f32_range(&mut state, -1.0, 1.0)).collect();
+        let arr = ArrayD::from_shape_vec(IxDyn(&[n]), data).expect("array creation failed");
+        let result = log_softmax(arr).expect("log_softmax failed");
+        let sum_exp: f32 = result.iter().map(|x| x.exp()).sum();
+        assert!(
+            (sum_exp - 1.0).abs() < 1e-5,
+            "exp(log_softmax) must sum to 1, got {sum_exp}"
+        );
+    }
+
+    // ---- apply_top_k_filtering tests ----
+
+    #[test]
+    fn test_top_k_keeps_k_finite_values() {
+        let data: Vec<f32> = (0..10).map(|i| i as f32).collect();
+        let arr = ArrayD::from_shape_vec(IxDyn(&[10]), data).expect("array creation failed");
+        let k = 3;
+        let result = apply_top_k_filtering(arr, k).expect("top_k filter failed");
+        let finite_count = result.iter().filter(|&&v| v.is_finite()).count();
+        assert_eq!(finite_count, k, "top-k should keep exactly k finite values");
+    }
+
+    #[test]
+    fn test_top_k_largest_values_retained() {
+        // data: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        let data: Vec<f32> = (0..10).map(|i| i as f32).collect();
+        let arr = ArrayD::from_shape_vec(IxDyn(&[10]), data).expect("array failed");
+        let k = 3;
+        let result = apply_top_k_filtering(arr, k).expect("top_k filter failed");
+        // Top 3 values are 7, 8, 9 at indices 7, 8, 9
+        assert!(result[7].is_finite());
+        assert!(result[8].is_finite());
+        assert!(result[9].is_finite());
+        assert!(result[0].is_infinite());
+    }
+
+    // ---- apply_top_p_filtering tests ----
+
+    #[test]
+    fn test_top_p_at_least_one_finite() {
+        let data: Vec<f32> = (0..10).map(|i| i as f32 + 1.0).collect();
+        let arr = ArrayD::from_shape_vec(IxDyn(&[10]), data).expect("array failed");
+        let result = apply_top_p_filtering(arr, 0.5).expect("top_p filter failed");
+        let finite_count = result.iter().filter(|&&v| v.is_finite()).count();
+        assert!(finite_count >= 1, "top-p must keep at least one token");
+    }
+
+    #[test]
+    fn test_top_p_full_probability_keeps_all() {
+        let data: Vec<f32> = (0..5).map(|i| i as f32 + 1.0).collect();
+        let arr = ArrayD::from_shape_vec(IxDyn(&[5]), data).expect("array failed");
+        let result = apply_top_p_filtering(arr, 1.0).expect("top_p filter failed");
+        let finite_count = result.iter().filter(|&&v| v.is_finite()).count();
+        assert_eq!(finite_count, 5, "p=1.0 should keep all tokens");
+    }
+
+    // ---- stack_tensors tests ----
+
+    #[test]
+    fn test_stack_tensors_basic() {
+        let t1 = make_tensor(&[3, 4], 11);
+        let t2 = make_tensor(&[3, 4], 22);
+        let stacked = stack_tensors(&[t1, t2]).expect("stack_tensors failed");
+        let shape = stacked.shape();
+        assert_eq!(shape[0], 2, "Batch dim must be 2");
+        assert_eq!(shape[1], 3);
+        assert_eq!(shape[2], 4);
+    }
+
+    #[test]
+    fn test_stack_tensors_empty_fails() {
+        let result = stack_tensors(&[]);
+        assert!(result.is_err(), "Stacking empty list must fail");
+    }
+
+    #[test]
+    fn test_stack_tensors_shape_mismatch_fails() {
+        let t1 = make_tensor(&[3, 4], 11);
+        let t2 = make_tensor(&[4, 4], 22); // different shape
+        let result = stack_tensors(&[t1, t2]);
+        assert!(
+            result.is_err(),
+            "Stacking tensors with different shapes must fail"
+        );
+    }
+
+    // ---- Gpt2Block creation test ----
+
+    #[test]
+    fn test_gpt2_block_creates_ok() {
+        let cfg = Gpt2Config::default();
+        let block = Gpt2Block::new(&cfg);
+        assert!(
+            block.is_ok(),
+            "Gpt2Block::new should succeed with default config"
+        );
+    }
+
+    #[test]
+    fn test_gpt2_block_parameter_count_nonzero() {
+        let cfg = Gpt2Config::default();
+        let block = Gpt2Block::new(&cfg).expect("Block creation failed");
+        assert!(block.parameter_count() > 0, "Block must have parameters");
+    }
+
+    // ---- MLP inner dim test ----
+
+    #[test]
+    fn test_gpt2_mlp_inner_dim_4x() {
+        // When n_inner is None, inner dim = 4 * n_embd
+        let cfg = Gpt2Config::default();
+        assert!(cfg.n_inner.is_none(), "Default n_inner must be None");
+        // The MLP created with this config should have inner_dim = 4 * 768 = 3072
+        // We verify by checking the block can be created (it uses 4*n_embd internally)
+        let block = Gpt2Block::new(&cfg).expect("Block creation failed");
+        // The parameter count should reflect the 4x expansion
+        let count = block.parameter_count();
+        // rough lower bound: at least n_embd * 4 * n_embd for c_fc weight
+        assert!(
+            count > 768 * 3072,
+            "MLP param count must reflect 4x expansion"
+        );
+    }
+
+    // ---- ActivationType tests ----
+
+    #[test]
+    fn test_gelu_activation_on_zero() {
+        let t = Tensor::from_vec(vec![0.0f32], &[1]).expect("tensor creation failed");
+        let result = trustformers_core::ops::activations::gelu(&t).expect("gelu failed");
+        if let Tensor::F32(arr) = result {
+            assert!(arr[0].abs() < 1e-5, "gelu(0) must be ~0");
+        }
+    }
+
+    #[test]
+    fn test_silu_activation_on_positive() {
+        let t = Tensor::from_vec(vec![2.0f32], &[1]).expect("tensor creation failed");
+        let result = trustformers_core::ops::activations::silu(&t).expect("silu failed");
+        if let Tensor::F32(arr) = result {
+            // SiLU(2) = 2 * sigmoid(2) ≈ 1.762
+            assert!(
+                arr[0] > 1.5 && arr[0] < 2.0,
+                "SiLU(2) should be ~1.76, got {}",
+                arr[0]
+            );
+        }
     }
 }

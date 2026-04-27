@@ -1,4 +1,6 @@
-use anyhow::{Context, Result};
+#[cfg(feature = "kafka")]
+use anyhow::Context;
+use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -23,6 +25,7 @@ pub struct MessageQueueConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MessageQueueBackend {
+    #[cfg(feature = "kafka")]
     Kafka,
     RabbitMQ,
     RedisStreams,
@@ -238,6 +241,7 @@ impl MessageQueueManager {
         config: &MessageQueueConfig,
     ) -> Result<(Arc<dyn MessageQueueProducer>, Arc<dyn MessageQueueConsumer>)> {
         match config.backend {
+            #[cfg(feature = "kafka")]
             MessageQueueBackend::Kafka => Self::create_kafka_clients(config).await,
             MessageQueueBackend::RabbitMQ => Self::create_rabbitmq_clients(config).await,
             MessageQueueBackend::RedisStreams => Self::create_redis_clients(config).await,
@@ -247,6 +251,7 @@ impl MessageQueueManager {
         }
     }
 
+    #[cfg(feature = "kafka")]
     async fn create_kafka_clients(
         config: &MessageQueueConfig,
     ) -> Result<(Arc<dyn MessageQueueProducer>, Arc<dyn MessageQueueConsumer>)> {
@@ -484,10 +489,12 @@ impl Default for MessageQueueConfig {
 }
 
 // Kafka implementation
+#[cfg(feature = "kafka")]
 struct KafkaProducer {
     producer: rdkafka::producer::FutureProducer,
 }
 
+#[cfg(feature = "kafka")]
 impl KafkaProducer {
     async fn new(config: &MessageQueueConfig) -> Result<Self> {
         use rdkafka::config::ClientConfig;
@@ -512,6 +519,7 @@ impl KafkaProducer {
     }
 }
 
+#[cfg(feature = "kafka")]
 #[async_trait]
 impl MessageQueueProducer for KafkaProducer {
     async fn send_message(&self, message: Message) -> Result<MessageResult> {
@@ -600,10 +608,12 @@ impl MessageQueueProducer for KafkaProducer {
     }
 }
 
+#[cfg(feature = "kafka")]
 struct KafkaConsumer {
     consumer: rdkafka::consumer::StreamConsumer,
 }
 
+#[cfg(feature = "kafka")]
 impl KafkaConsumer {
     async fn new(config: &MessageQueueConfig) -> Result<Self> {
         use rdkafka::config::ClientConfig;
@@ -625,6 +635,7 @@ impl KafkaConsumer {
     }
 }
 
+#[cfg(feature = "kafka")]
 #[async_trait]
 impl MessageQueueConsumer for KafkaConsumer {
     async fn subscribe(&self, topics: &[String]) -> Result<()> {
@@ -834,3 +845,401 @@ impl_placeholder_backend!(RedisProducer, RedisConsumer);
 impl_placeholder_backend!(NatsProducer, NatsConsumer);
 impl_placeholder_backend!(SqsProducer, SqsConsumer);
 impl_placeholder_backend!(InMemoryProducer, InMemoryConsumer);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn make_default_config() -> MessageQueueConfig {
+        MessageQueueConfig::default()
+    }
+
+    fn make_test_message(topic: &str, payload: &[u8]) -> Message {
+        Message {
+            id: Uuid::new_v4(),
+            topic: topic.to_string(),
+            key: None,
+            payload: payload.to_vec(),
+            headers: HashMap::new(),
+            timestamp: Utc::now(),
+            partition: None,
+            offset: None,
+            delivery_count: 0,
+            correlation_id: None,
+            reply_to: None,
+        }
+    }
+
+    fn make_test_batch(topic: &str, messages: Vec<Message>) -> MessageBatch {
+        MessageBatch {
+            messages,
+            topic: topic.to_string(),
+            batch_id: Uuid::new_v4(),
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_default_config_backend_is_inmemory() {
+        let config = make_default_config();
+        assert!(matches!(config.backend, MessageQueueBackend::InMemory));
+    }
+
+    #[test]
+    fn test_default_config_topics_nonempty() {
+        let config = make_default_config();
+        assert!(!config.topics.is_empty());
+    }
+
+    #[test]
+    fn test_default_config_batch_size() {
+        let config = make_default_config();
+        assert_eq!(config.batch_size, 100);
+    }
+
+    #[test]
+    fn test_default_config_consumer_group_present() {
+        let config = make_default_config();
+        assert!(config.consumer_group.is_some());
+    }
+
+    #[test]
+    fn test_default_config_retry_policy() {
+        let config = make_default_config();
+        assert_eq!(config.retry_policy.max_retries, 3);
+        assert!(config.retry_policy.exponential_backoff);
+    }
+
+    #[test]
+    fn test_default_config_tls_disabled() {
+        let config = make_default_config();
+        assert!(!config.security.tls_enabled);
+    }
+
+    #[test]
+    fn test_stats_default_values() {
+        let stats = MessageQueueStats::default();
+        assert_eq!(stats.messages_produced, 0);
+        assert_eq!(stats.messages_consumed, 0);
+        assert_eq!(stats.bytes_produced, 0);
+        assert_eq!(stats.bytes_consumed, 0);
+        assert_eq!(stats.errors, 0);
+        assert_eq!(stats.connection_count, 0);
+        assert_eq!(stats.active_transactions, 0);
+    }
+
+    #[test]
+    fn test_message_creation() {
+        let msg = make_test_message("test-topic", b"hello world");
+        assert_eq!(msg.topic, "test-topic");
+        assert_eq!(msg.payload, b"hello world");
+        assert_eq!(msg.delivery_count, 0);
+        assert!(msg.key.is_none());
+        assert!(msg.partition.is_none());
+        assert!(msg.offset.is_none());
+        assert!(msg.correlation_id.is_none());
+        assert!(msg.reply_to.is_none());
+    }
+
+    #[test]
+    fn test_message_with_key() {
+        let mut msg = make_test_message("topic", b"data");
+        msg.key = Some("partition-key".to_string());
+        assert_eq!(msg.key.as_deref(), Some("partition-key"));
+    }
+
+    #[test]
+    fn test_message_headers() {
+        let mut msg = make_test_message("topic", b"data");
+        msg.headers.insert("content-type".to_string(), "application/json".to_string());
+        assert_eq!(
+            msg.headers.get("content-type").map(|s| s.as_str()),
+            Some("application/json")
+        );
+    }
+
+    #[test]
+    fn test_message_batch_creation() {
+        let msgs = vec![
+            make_test_message("t", b"a"),
+            make_test_message("t", b"b"),
+            make_test_message("t", b"c"),
+        ];
+        let batch = make_test_batch("t", msgs);
+        assert_eq!(batch.messages.len(), 3);
+        assert_eq!(batch.topic, "t");
+    }
+
+    #[test]
+    fn test_batch_result_counts() {
+        let result = BatchResult {
+            batch_id: Uuid::new_v4(),
+            results: vec![],
+            success_count: 7,
+            failure_count: 2,
+            total_size: 1024,
+        };
+        assert_eq!(result.success_count, 7);
+        assert_eq!(result.failure_count, 2);
+        assert_eq!(result.total_size, 1024);
+    }
+
+    #[test]
+    fn test_message_result_fields() {
+        let result = MessageResult {
+            message_id: Uuid::new_v4(),
+            topic: "my-topic".to_string(),
+            partition: 3,
+            offset: 42,
+            timestamp: Utc::now(),
+            size: 256,
+        };
+        assert_eq!(result.topic, "my-topic");
+        assert_eq!(result.partition, 3);
+        assert_eq!(result.offset, 42);
+        assert_eq!(result.size, 256);
+    }
+
+    #[test]
+    fn test_health_status_variants() {
+        let healthy = HealthStatus::Healthy;
+        let degraded = HealthStatus::Degraded;
+        let unhealthy = HealthStatus::Unhealthy;
+        assert!(matches!(healthy, HealthStatus::Healthy));
+        assert!(matches!(degraded, HealthStatus::Degraded));
+        assert!(matches!(unhealthy, HealthStatus::Unhealthy));
+    }
+
+    #[test]
+    fn test_auto_offset_reset_variants() {
+        let earliest = AutoOffsetReset::Earliest;
+        let latest = AutoOffsetReset::Latest;
+        let none = AutoOffsetReset::None;
+        assert!(matches!(earliest, AutoOffsetReset::Earliest));
+        assert!(matches!(latest, AutoOffsetReset::Latest));
+        assert!(matches!(none, AutoOffsetReset::None));
+    }
+
+    #[test]
+    fn test_acknowledgment_mode_variants() {
+        assert!(matches!(AcknowledgmentMode::None, AcknowledgmentMode::None));
+        assert!(matches!(
+            AcknowledgmentMode::Leader,
+            AcknowledgmentMode::Leader
+        ));
+        assert!(matches!(AcknowledgmentMode::All, AcknowledgmentMode::All));
+    }
+
+    #[test]
+    fn test_compression_algorithm_variants() {
+        assert!(matches!(
+            CompressionAlgorithm::Gzip,
+            CompressionAlgorithm::Gzip
+        ));
+        assert!(matches!(
+            CompressionAlgorithm::Snappy,
+            CompressionAlgorithm::Snappy
+        ));
+        assert!(matches!(
+            CompressionAlgorithm::Lz4,
+            CompressionAlgorithm::Lz4
+        ));
+        assert!(matches!(
+            CompressionAlgorithm::Zstd,
+            CompressionAlgorithm::Zstd
+        ));
+    }
+
+    #[test]
+    fn test_serialization_format_variants() {
+        assert!(matches!(
+            SerializationFormat::Json,
+            SerializationFormat::Json
+        ));
+        assert!(matches!(
+            SerializationFormat::Avro,
+            SerializationFormat::Avro
+        ));
+        assert!(matches!(
+            SerializationFormat::Protobuf,
+            SerializationFormat::Protobuf
+        ));
+        assert!(matches!(
+            SerializationFormat::MessagePack,
+            SerializationFormat::MessagePack
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_inmemory_manager_creation() {
+        let config = MessageQueueConfig {
+            backend: MessageQueueBackend::InMemory,
+            ..Default::default()
+        };
+        let manager = MessageQueueManager::new(config).await;
+        assert!(manager.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_manager_config_accessor() {
+        let config = MessageQueueConfig {
+            backend: MessageQueueBackend::InMemory,
+            connection_string: "localhost:1234".to_string(),
+            ..Default::default()
+        };
+        let manager =
+            MessageQueueManager::new(config).await.expect("manager creation should succeed");
+        assert_eq!(manager.config().connection_string, "localhost:1234");
+    }
+
+    #[tokio::test]
+    async fn test_manager_backend_accessor() {
+        let config = make_default_config();
+        let manager =
+            MessageQueueManager::new(config).await.expect("manager creation should succeed");
+        assert!(matches!(manager.backend(), MessageQueueBackend::InMemory));
+    }
+
+    #[tokio::test]
+    async fn test_manager_topics_accessor() {
+        let config = MessageQueueConfig {
+            backend: MessageQueueBackend::InMemory,
+            topics: vec!["topic-a".to_string(), "topic-b".to_string()],
+            ..Default::default()
+        };
+        let manager =
+            MessageQueueManager::new(config).await.expect("manager creation should succeed");
+        assert_eq!(manager.topics().len(), 2);
+        assert!(manager.topics().contains(&"topic-a".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_manager_consumer_group_accessor() {
+        let config = MessageQueueConfig {
+            backend: MessageQueueBackend::InMemory,
+            consumer_group: Some("test-group".to_string()),
+            ..Default::default()
+        };
+        let manager =
+            MessageQueueManager::new(config).await.expect("manager creation should succeed");
+        assert_eq!(
+            manager.consumer_group().map(|s| s.as_str()),
+            Some("test-group")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_manager_send_message() {
+        let config = make_default_config();
+        let manager =
+            MessageQueueManager::new(config).await.expect("manager creation should succeed");
+        let msg = make_test_message("test-topic", b"test payload");
+        let result = manager.send_message(msg).await;
+        assert!(result.is_ok());
+        let msg_result = result.expect("send should succeed");
+        assert_eq!(msg_result.topic, "test-topic");
+        assert_eq!(msg_result.size, b"test payload".len());
+    }
+
+    #[tokio::test]
+    async fn test_manager_stats_after_send() {
+        let config = make_default_config();
+        let manager =
+            MessageQueueManager::new(config).await.expect("manager creation should succeed");
+
+        let msg = make_test_message("t", b"abc");
+        manager.send_message(msg).await.expect("send should succeed");
+
+        let stats = manager.get_stats().await;
+        assert_eq!(stats.messages_produced, 1);
+        assert_eq!(stats.bytes_produced, 3);
+    }
+
+    #[tokio::test]
+    async fn test_manager_health_check() {
+        let config = make_default_config();
+        let manager =
+            MessageQueueManager::new(config).await.expect("manager creation should succeed");
+
+        let health = manager.health_check().await;
+        assert!(health.is_ok());
+        let h = health.expect("health check should succeed");
+        assert!(matches!(h.status, HealthStatus::Healthy));
+    }
+
+    #[tokio::test]
+    async fn test_manager_send_batch() {
+        let config = make_default_config();
+        let manager =
+            MessageQueueManager::new(config).await.expect("manager creation should succeed");
+
+        let msgs = vec![
+            make_test_message("batch-topic", b"msg1"),
+            make_test_message("batch-topic", b"msg2"),
+        ];
+        let batch = make_test_batch("batch-topic", msgs);
+        let result = manager.send_batch(batch).await;
+        assert!(result.is_ok());
+        let batch_result = result.expect("batch send should succeed");
+        assert_eq!(batch_result.success_count, 2);
+        assert_eq!(batch_result.failure_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_manager_stats_after_batch() {
+        let config = make_default_config();
+        let manager =
+            MessageQueueManager::new(config).await.expect("manager creation should succeed");
+
+        let msgs = vec![make_test_message("t", b"x"), make_test_message("t", b"yy")];
+        let batch = make_test_batch("t", msgs);
+        manager.send_batch(batch).await.expect("batch should succeed");
+
+        let stats = manager.get_stats().await;
+        assert_eq!(stats.messages_produced, 2);
+    }
+
+    #[tokio::test]
+    async fn test_manager_close() {
+        let config = make_default_config();
+        let manager =
+            MessageQueueManager::new(config).await.expect("manager creation should succeed");
+        let result = manager.close().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_message_queue_event_variants() {
+        let msg_id = Uuid::new_v4();
+        let result = MessageResult {
+            message_id: msg_id,
+            topic: "t".to_string(),
+            partition: 0,
+            offset: 0,
+            timestamp: Utc::now(),
+            size: 10,
+        };
+        let event = MessageQueueEvent::MessageProduced(result);
+        assert!(matches!(event, MessageQueueEvent::MessageProduced(_)));
+
+        let conn_lost = MessageQueueEvent::ConnectionLost;
+        assert!(matches!(conn_lost, MessageQueueEvent::ConnectionLost));
+
+        let error_event = MessageQueueEvent::Error("test error".to_string());
+        assert!(matches!(error_event, MessageQueueEvent::Error(_)));
+    }
+
+    #[tokio::test]
+    async fn test_manager_register_event_handler() {
+        let config = make_default_config();
+        let manager =
+            MessageQueueManager::new(config).await.expect("manager creation should succeed");
+
+        manager
+            .register_event_handler("test_handler".to_string(), Box::new(|_event| {}))
+            .await;
+
+        // No panic means the handler was registered successfully
+    }
+}

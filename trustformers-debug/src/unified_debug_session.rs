@@ -217,7 +217,9 @@ impl UnifiedDebugSession {
         self.step += 1;
 
         // Auto-save if enabled
-        if self.config.auto_save_interval > 0 && self.step % self.config.auto_save_interval == 0 {
+        if self.config.auto_save_interval > 0
+            && self.step.is_multiple_of(self.config.auto_save_interval)
+        {
             let _ = self.save();
         }
     }

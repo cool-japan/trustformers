@@ -49,6 +49,10 @@ pub mod transformations;
 mod utils;
 
 #[cfg(test)]
+mod complex_tests;
+#[cfg(test)]
+mod constructors_tests;
+#[cfg(test)]
 mod property_tests;
 
 use crate::errors::Result;

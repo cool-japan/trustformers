@@ -667,3 +667,209 @@ unsafe fn simd_min_max_f64_sse2(data: &[f64]) -> (f64, f64) {
 
     (min_result, max_result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::errors::Result;
+    use crate::tensor::Tensor;
+
+    #[test]
+    fn test_scale() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0, 3.0], &[3])?;
+        let s = t.scale(2.0)?;
+        let data = s.data()?;
+        assert!((data[0] - 2.0).abs() < 1e-6);
+        assert!((data[1] - 4.0).abs() < 1e-6);
+        assert!((data[2] - 6.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_clamp() -> Result<()> {
+        let t = Tensor::from_data(vec![-5.0, 0.0, 5.0, 10.0], &[4])?;
+        let c = t.clamp(0.0, 7.0)?;
+        let data = c.data()?;
+        assert!((data[0] - 0.0).abs() < 1e-6);
+        assert!((data[1] - 0.0).abs() < 1e-6);
+        assert!((data[2] - 5.0).abs() < 1e-6);
+        assert!((data[3] - 7.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_clamp_all_within() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0, 3.0], &[3])?;
+        let c = t.clamp(0.0, 10.0)?;
+        let data = c.data()?;
+        assert!((data[0] - 1.0).abs() < 1e-6);
+        assert!((data[1] - 2.0).abs() < 1e-6);
+        assert!((data[2] - 3.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_broadcast_to_f32() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0, 3.0], &[1, 3])?;
+        let b = t.broadcast_to(&[4, 3])?;
+        assert_eq!(b.shape(), vec![4, 3]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_broadcast_to_scalar() -> Result<()> {
+        let t = Tensor::from_data(vec![5.0], &[1])?;
+        let b = t.broadcast_to(&[4])?;
+        assert_eq!(b.shape(), vec![4]);
+        let data = b.data()?;
+        for val in &data {
+            assert!((val - 5.0).abs() < 1e-6);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_scalar() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0, 3.0, 4.0], &[2, 2])?;
+        let v = t.get_scalar(&[0, 1])?;
+        assert!((v - 2.0).abs() < 1e-6);
+        let v2 = t.get_scalar(&[1, 0])?;
+        assert!((v2 - 3.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_scalar_out_of_bounds() {
+        let t = Tensor::from_data(vec![1.0, 2.0], &[2]).expect("create failed");
+        let result = t.get_scalar(&[5]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_scalar_wrong_dims() {
+        let t = Tensor::from_data(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("create failed");
+        let result = t.get_scalar(&[0]); // need 2 indices
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_scalar() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0, 3.0, 4.0], &[2, 2])?;
+        let t2 = t.set_scalar(&[0, 1], 99.0)?;
+        let v = t2.get_scalar(&[0, 1])?;
+        assert!((v - 99.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_set_scalar_preserves_other() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0, 3.0, 4.0], &[2, 2])?;
+        let t2 = t.set_scalar(&[1, 1], 99.0)?;
+        let v = t2.get_scalar(&[0, 0])?;
+        assert!((v - 1.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_greater() -> Result<()> {
+        let a = Tensor::from_data(vec![1.0, 5.0, 3.0], &[3])?;
+        let b = Tensor::from_data(vec![2.0, 4.0, 3.0], &[3])?;
+        let result = a.greater(&b)?;
+        let data = result.data()?;
+        assert!((data[0] - 0.0).abs() < 1e-6); // 1 > 2 = false
+        assert!((data[1] - 1.0).abs() < 1e-6); // 5 > 4 = true
+        assert!((data[2] - 0.0).abs() < 1e-6); // 3 > 3 = false
+        Ok(())
+    }
+
+    #[test]
+    fn test_lerp() -> Result<()> {
+        let a = Tensor::from_data(vec![0.0, 0.0], &[2])?;
+        let b = Tensor::from_data(vec![10.0, 20.0], &[2])?;
+        let c = a.lerp(&b, 0.5)?;
+        let data = c.data()?;
+        assert!((data[0] - 5.0).abs() < 1e-5);
+        assert!((data[1] - 10.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_lerp_weight_zero() -> Result<()> {
+        let a = Tensor::from_data(vec![1.0, 2.0], &[2])?;
+        let b = Tensor::from_data(vec![10.0, 20.0], &[2])?;
+        let c = a.lerp(&b, 0.0)?;
+        let data = c.data()?;
+        assert!((data[0] - 1.0).abs() < 1e-5);
+        assert!((data[1] - 2.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_lerp_weight_one() -> Result<()> {
+        let a = Tensor::from_data(vec![1.0, 2.0], &[2])?;
+        let b = Tensor::from_data(vec![10.0, 20.0], &[2])?;
+        let c = a.lerp(&b, 1.0)?;
+        let data = c.data()?;
+        assert!((data[0] - 10.0).abs() < 1e-5);
+        assert!((data[1] - 20.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_simd_min_max_f32_basic() {
+        let data = vec![3.0f32, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0];
+        let (min_val, max_val) = simd_min_max_f32(&data);
+        assert!((min_val - 1.0).abs() < 1e-6);
+        assert!((max_val - 9.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_simd_min_max_f32_single() {
+        let data = vec![42.0f32];
+        let (min_val, max_val) = simd_min_max_f32(&data);
+        assert!((min_val - 42.0).abs() < 1e-6);
+        assert!((max_val - 42.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_simd_min_max_f32_negative() {
+        let data = vec![-5.0f32, -1.0, -10.0, -3.0];
+        let (min_val, max_val) = simd_min_max_f32(&data);
+        assert!((min_val - (-10.0)).abs() < 1e-6);
+        assert!((max_val - (-1.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_simd_min_max_f64_basic() {
+        let data = vec![3.0f64, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0];
+        let (min_val, max_val) = simd_min_max_f64(&data);
+        assert!((min_val - 1.0).abs() < 1e-10);
+        assert!((max_val - 9.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_simd_min_max_f64_single() {
+        let data = vec![7.0f64];
+        let (min_val, max_val) = simd_min_max_f64(&data);
+        assert!((min_val - 7.0).abs() < 1e-10);
+        assert!((max_val - 7.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_broadcast_to_i64() -> Result<()> {
+        let t = Tensor::from_vec_i64(vec![1, 2, 3], &[1, 3])?;
+        let b = t.broadcast_to(&[3, 3])?;
+        assert_eq!(b.shape(), vec![3, 3]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_scale_negative() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0], &[2])?;
+        let s = t.scale(-1.0)?;
+        let data = s.data()?;
+        assert!((data[0] - (-1.0)).abs() < 1e-6);
+        assert!((data[1] - (-2.0)).abs() < 1e-6);
+        Ok(())
+    }
+}

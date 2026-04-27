@@ -324,3 +324,222 @@ impl Default for ConfigurationValidator {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_config() -> ConversationalConfig {
+        ConversationalConfig::default()
+    }
+
+    fn validator() -> ConfigurationValidator {
+        ConfigurationValidator::new()
+    }
+
+    fn rules() -> ValidationRules {
+        ValidationRules::default()
+    }
+
+    // ---- Temperature range tests ----
+
+    #[test]
+    fn test_valid_config_passes_validation() {
+        let result = validator().validate(&valid_config(), &rules());
+        assert!(result.is_ok(), "default config must pass validation");
+    }
+
+    #[test]
+    fn test_temperature_above_max_fails() {
+        let mut config = valid_config();
+        config.temperature = 2.1;
+        let result = validator().validate(&config, &rules());
+        assert!(result.is_err(), "temperature 2.1 must fail validation");
+    }
+
+    #[test]
+    fn test_temperature_below_min_fails() {
+        let mut config = valid_config();
+        config.temperature = -0.1;
+        let result = validator().validate(&config, &rules());
+        assert!(result.is_err(), "negative temperature must fail validation");
+    }
+
+    #[test]
+    fn test_temperature_at_boundary_zero_passes() {
+        let mut config = valid_config();
+        config.temperature = 0.0;
+        let result = validator().validate(&config, &rules());
+        assert!(result.is_ok(), "temperature 0.0 must pass validation");
+    }
+
+    #[test]
+    fn test_temperature_at_boundary_two_passes() {
+        let mut config = valid_config();
+        config.temperature = 2.0;
+        let result = validator().validate(&config, &rules());
+        assert!(result.is_ok(), "temperature 2.0 must pass validation");
+    }
+
+    // ---- top_p range tests ----
+
+    #[test]
+    fn test_top_p_above_one_fails() {
+        let mut config = valid_config();
+        config.top_p = 1.1;
+        let result = validator().validate(&config, &rules());
+        assert!(result.is_err(), "top_p 1.1 must fail validation");
+    }
+
+    #[test]
+    fn test_top_p_negative_fails() {
+        let mut config = valid_config();
+        config.top_p = -0.1;
+        let result = validator().validate(&config, &rules());
+        assert!(result.is_err(), "negative top_p must fail validation");
+    }
+
+    #[test]
+    fn test_top_p_zero_passes() {
+        let mut config = valid_config();
+        config.top_p = 0.0;
+        let result = validator().validate(&config, &rules());
+        assert!(result.is_ok(), "top_p 0.0 must pass validation");
+    }
+
+    // ---- top_k range tests ----
+
+    #[test]
+    fn test_top_k_above_max_fails() {
+        let mut config = valid_config();
+        config.top_k = Some(1001);
+        let result = validator().validate(&config, &rules());
+        assert!(
+            result.is_err(),
+            "top_k 1001 must fail validation (max is 1000)"
+        );
+    }
+
+    #[test]
+    fn test_top_k_zero_fails() {
+        let mut config = valid_config();
+        config.top_k = Some(0);
+        let result = validator().validate(&config, &rules());
+        assert!(result.is_err(), "top_k 0 must fail validation (min is 1)");
+    }
+
+    #[test]
+    fn test_top_k_none_passes() {
+        let mut config = valid_config();
+        config.top_k = None;
+        let result = validator().validate(&config, &rules());
+        assert!(result.is_ok(), "top_k None must pass validation");
+    }
+
+    // ---- max_response_tokens vs max_context_tokens cross-field test ----
+
+    #[test]
+    fn test_response_tokens_exceed_context_tokens_fails() {
+        let mut config = valid_config();
+        config.max_context_tokens = 100;
+        config.max_response_tokens = 200; // response > context
+        let result = validator().validate(&config, &rules());
+        assert!(
+            result.is_err(),
+            "response tokens exceeding context tokens must fail"
+        );
+    }
+
+    // ---- system prompt length test ----
+
+    #[test]
+    fn test_system_prompt_too_long_fails() {
+        let mut config = valid_config();
+        config.system_prompt = Some("x".repeat(10_001)); // exceeds 10000 limit
+        let result = validator().validate(&config, &rules());
+        assert!(
+            result.is_err(),
+            "system prompt exceeding 10000 chars must fail"
+        );
+    }
+
+    #[test]
+    fn test_system_prompt_at_max_length_passes() {
+        let mut config = valid_config();
+        config.system_prompt = Some("x".repeat(10_000));
+        let result = validator().validate(&config, &rules());
+        assert!(
+            result.is_ok(),
+            "system prompt at exactly 10000 chars must pass"
+        );
+    }
+
+    // ---- memory config tests ----
+
+    #[test]
+    fn test_memory_compression_threshold_out_of_range_fails() {
+        let mut config = valid_config();
+        config.memory_config.compression_threshold = 1.5;
+        let result = validator().validate(&config, &rules());
+        assert!(
+            result.is_err(),
+            "memory compression_threshold > 1.0 must fail"
+        );
+    }
+
+    #[test]
+    fn test_memory_decay_rate_negative_fails() {
+        let mut config = valid_config();
+        config.memory_config.decay_rate = -0.1;
+        let result = validator().validate(&config, &rules());
+        assert!(result.is_err(), "negative decay_rate must fail");
+    }
+
+    #[test]
+    fn test_memory_max_memories_zero_fails() {
+        let mut config = valid_config();
+        config.memory_config.max_memories = 0;
+        let result = validator().validate(&config, &rules());
+        assert!(result.is_err(), "max_memories 0 must fail");
+    }
+
+    // ---- streaming config tests ----
+
+    #[test]
+    fn test_streaming_chunk_size_zero_fails() {
+        let mut config = valid_config();
+        config.streaming_config.chunk_size = 0;
+        let result = validator().validate(&config, &rules());
+        assert!(result.is_err(), "chunk_size 0 must fail");
+    }
+
+    #[test]
+    fn test_streaming_buffer_smaller_than_chunk_fails() {
+        let mut config = valid_config();
+        config.streaming_config.chunk_size = 50;
+        config.streaming_config.buffer_size = 10;
+        let result = validator().validate(&config, &rules());
+        assert!(
+            result.is_err(),
+            "buffer_size smaller than chunk_size must fail"
+        );
+    }
+
+    // ---- ValidationRules defaults ----
+
+    #[test]
+    fn test_default_rules_temperature_range() {
+        let r = ValidationRules::default();
+        assert!((r.min_temperature - 0.0).abs() < f32::EPSILON);
+        assert!((r.max_temperature - 2.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_validate_config_convenience_method_passes_default() {
+        let result = validator().validate_config(&valid_config());
+        assert!(
+            result.is_ok(),
+            "validate_config must pass for default config"
+        );
+    }
+}

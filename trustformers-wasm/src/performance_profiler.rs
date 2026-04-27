@@ -1277,7 +1277,7 @@ impl PerformanceProfiler {
         {
             if let Some(window) = web_sys::window() {
                 if let Ok(navigator) = js_sys::Reflect::get(&window, &"navigator".into()) {
-                    if let Ok(get_battery) = js_sys::Reflect::get(&navigator, &"getBattery".into())
+                    if let Ok(_get_battery) = js_sys::Reflect::get(&navigator, &"getBattery".into())
                     {
                         // Battery API is async, so we use cached value or estimate
                         // In a real implementation, you would cache the battery object

@@ -46,11 +46,11 @@ pub fn gelu(x: &Tensor) -> Result<Tensor> {
                 // Execute GELU GPU-to-GPU (NO CPU transfers!)
                 let output_buffer_id = backend.gelu_gpu_to_gpu(&cuda_data.buffer_id, size)?;
 
-                return Ok(Tensor::CUDA(CudaTensorData {
+                Ok(Tensor::CUDA(CudaTensorData {
                     buffer_id: output_buffer_id,
                     shape: cuda_data.shape.clone(),
                     dtype: cuda_data.dtype,
-                }));
+                }))
             }
 
             // Fallback for non-Linux/Windows platforms

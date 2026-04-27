@@ -1146,3 +1146,391 @@ pub struct StreamingManager {
     /// Quality analyzer
     quality_analyzer: QualityAnalyzer,
 }
+
+// ================================================================================================
+// TESTS
+// ================================================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    // --- AdvancedStreamingConfig tests ---
+
+    #[test]
+    fn test_advanced_streaming_config_default_values() {
+        let config = AdvancedStreamingConfig::default();
+        assert!(
+            config.max_chunk_size > config.min_chunk_size,
+            "max_chunk_size ({}) should exceed min_chunk_size ({})",
+            config.max_chunk_size,
+            config.min_chunk_size
+        );
+        assert!(
+            config.base_typing_speed > 0.0,
+            "base_typing_speed should be positive"
+        );
+        assert!(
+            config.speed_variation >= 0.0 && config.speed_variation <= 1.0,
+            "speed_variation must be in [0.0, 1.0]"
+        );
+        assert!(
+            config.max_buffer_size > 0,
+            "max_buffer_size should be positive"
+        );
+        assert!(
+            config.max_retry_attempts > 0,
+            "max_retry_attempts should be positive"
+        );
+    }
+
+    #[test]
+    fn test_advanced_streaming_config_chunk_size_validation() {
+        let mut config = AdvancedStreamingConfig::default();
+        config.max_chunk_size = 100;
+        config.min_chunk_size = 10;
+        assert!(
+            config.min_chunk_size < config.max_chunk_size,
+            "ChunkSize invariant: min < max must hold"
+        );
+    }
+
+    // --- StreamChunk tests ---
+
+    #[test]
+    fn test_stream_chunk_construction() {
+        let chunk = StreamChunk {
+            content: "hello world".to_string(),
+            index: 3,
+            chunk_type: ChunkType::Content,
+            timing: ChunkTiming::default(),
+            metadata: ChunkMetadata::default(),
+        };
+        assert_eq!(chunk.content, "hello world");
+        assert_eq!(chunk.index, 3);
+        assert_eq!(chunk.chunk_type, ChunkType::Content);
+    }
+
+    #[test]
+    fn test_stream_chunk_content_field() {
+        let text = "This is the token text content";
+        let chunk = StreamChunk {
+            content: text.to_string(),
+            index: 0,
+            chunk_type: ChunkType::Sentence,
+            timing: ChunkTiming::default(),
+            metadata: ChunkMetadata::default(),
+        };
+        assert_eq!(chunk.content, text);
+    }
+
+    #[test]
+    fn test_stream_chunk_index_field() {
+        for i in 0..5usize {
+            let chunk = StreamChunk {
+                content: "test".to_string(),
+                index: i,
+                chunk_type: ChunkType::Content,
+                timing: ChunkTiming::default(),
+                metadata: ChunkMetadata::default(),
+            };
+            assert_eq!(
+                chunk.index, i,
+                "chunk index should match construction value"
+            );
+        }
+    }
+
+    // --- ChunkType tests ---
+
+    #[test]
+    fn test_chunk_type_equality() {
+        assert_eq!(ChunkType::Content, ChunkType::Content);
+        assert_eq!(ChunkType::Sentence, ChunkType::Sentence);
+        assert_ne!(ChunkType::Content, ChunkType::Sentence);
+        assert_ne!(ChunkType::Adaptive, ChunkType::Semantic);
+    }
+
+    // --- ChunkTiming tests ---
+
+    #[test]
+    fn test_chunk_timing_default() {
+        let timing = ChunkTiming::default();
+        assert_eq!(timing.delay_ms, 50, "default delay_ms should be 50");
+        assert_eq!(timing.pause_ms, 0, "default pause_ms should be 0");
+        assert!(
+            (timing.timing_factor - 1.0).abs() < 1e-6,
+            "default timing_factor should be 1.0"
+        );
+    }
+
+    #[test]
+    fn test_chunk_timing_with_pause() {
+        let timing = ChunkTiming::with_pause(200);
+        assert_eq!(
+            timing.pause_ms, 200,
+            "with_pause should set pause_ms to 200"
+        );
+        assert_eq!(timing.delay_ms, 50);
+    }
+
+    #[test]
+    fn test_chunk_timing_adaptive_low_complexity() {
+        let timing = ChunkTiming::adaptive(0.1);
+        assert!(timing.delay_ms > 0, "adaptive delay_ms should be positive");
+        assert_eq!(timing.pause_ms, 0, "low complexity should not add pause");
+    }
+
+    #[test]
+    fn test_chunk_timing_adaptive_high_complexity() {
+        let timing = ChunkTiming::adaptive(0.9);
+        assert!(
+            timing.delay_ms > 0,
+            "adaptive delay_ms should be positive for high complexity"
+        );
+        assert!(
+            timing.pause_ms > 0,
+            "high complexity should add pause_ms > 0"
+        );
+    }
+
+    #[test]
+    fn test_chunk_timing_adaptive_factor_increases_with_complexity() {
+        let low_timing = ChunkTiming::adaptive(0.0);
+        let high_timing = ChunkTiming::adaptive(1.0);
+        assert!(
+            high_timing.timing_factor >= low_timing.timing_factor,
+            "timing_factor should increase with complexity"
+        );
+    }
+
+    // --- ChunkMetadata tests ---
+
+    #[test]
+    fn test_chunk_metadata_default() {
+        let meta = ChunkMetadata::default();
+        assert!(
+            meta.complexity >= 0.0 && meta.complexity <= 1.0,
+            "default complexity must be in [0.0, 1.0]"
+        );
+        assert!(
+            meta.importance >= 0.0 && meta.importance <= 1.0,
+            "default importance must be in [0.0, 1.0]"
+        );
+    }
+
+    #[test]
+    fn test_chunk_metadata_with_complexity() {
+        let meta = ChunkMetadata::with_complexity(0.75);
+        assert!(
+            (meta.complexity - 0.75).abs() < 1e-6,
+            "with_complexity should set complexity to 0.75"
+        );
+        assert!(
+            !meta.quality_indicators.is_empty(),
+            "with_complexity should populate quality_indicators"
+        );
+    }
+
+    #[test]
+    fn test_chunk_metadata_semantic() {
+        let meta = ChunkMetadata::semantic();
+        assert!(
+            !meta.quality_indicators.is_empty(),
+            "semantic metadata should have quality indicators"
+        );
+        assert!(
+            !meta.processing_hints.is_empty(),
+            "semantic metadata should have processing hints"
+        );
+    }
+
+    // --- BufferState tests ---
+
+    #[test]
+    fn test_buffer_state_capacity_invariant() {
+        let state = BufferState {
+            current_size: 300,
+            max_size: 1000,
+            utilization: 0.3,
+            pending_chunks: 5,
+        };
+        assert!(
+            state.current_size <= state.max_size,
+            "current_size ({}) should not exceed max_size ({})",
+            state.current_size,
+            state.max_size
+        );
+    }
+
+    #[test]
+    fn test_buffer_state_utilization_in_range() {
+        let state = BufferState {
+            current_size: 500,
+            max_size: 1000,
+            utilization: 0.5,
+            pending_chunks: 10,
+        };
+        assert!(
+            state.utilization >= 0.0 && state.utilization <= 1.0,
+            "buffer utilization must be in [0.0, 1.0]"
+        );
+    }
+
+    // --- StreamState tests ---
+
+    #[test]
+    fn test_stream_state_default() {
+        let state = StreamState::default();
+        assert_eq!(
+            state.connection,
+            StreamConnection::Connecting,
+            "default connection state should be Connecting"
+        );
+        assert_eq!(
+            state.buffer.current_size, 0,
+            "default buffer should be empty"
+        );
+        assert!(
+            state.error_info.is_none(),
+            "default state should have no error_info"
+        );
+    }
+
+    #[test]
+    fn test_stream_connection_idle_to_streaming_transition() {
+        // Test enum transitions via equality
+        assert_ne!(StreamConnection::Connecting, StreamConnection::Connected);
+        assert_ne!(StreamConnection::Connected, StreamConnection::Streaming);
+        assert_ne!(StreamConnection::Streaming, StreamConnection::Disconnected);
+    }
+
+    #[test]
+    fn test_stream_connection_error_holds_message() {
+        let conn = StreamConnection::Error("test error message".to_string());
+        if let StreamConnection::Error(msg) = &conn {
+            assert_eq!(msg, "test error message");
+        } else {
+            panic!("Expected Error variant");
+        }
+    }
+
+    // --- StreamingMetrics tests ---
+
+    #[test]
+    fn test_streaming_metrics_default() {
+        let metrics = StreamingMetrics::default();
+        assert_eq!(metrics.total_chunks, 0);
+        assert_eq!(metrics.bytes_streamed, 0);
+        assert_eq!(metrics.error_count, 0);
+        assert_eq!(metrics.retry_count, 0);
+        assert_eq!(metrics.buffer_utilization, 0.0);
+    }
+
+    // --- StreamingQuality tests (types.rs version) ---
+
+    #[test]
+    fn test_streaming_quality_types_default_all_ones() {
+        let quality = StreamingQuality::default();
+        assert!((quality.smoothness - 1.0).abs() < 1e-6);
+        assert!((quality.naturalness - 1.0).abs() < 1e-6);
+        assert!((quality.responsiveness - 1.0).abs() < 1e-6);
+        assert!((quality.coherence - 1.0).abs() < 1e-6);
+        assert!((quality.overall_quality - 1.0).abs() < 1e-6);
+    }
+
+    // --- QualityThresholds (types.rs version) ---
+
+    #[test]
+    fn test_quality_thresholds_types_min_responsiveness_higher() {
+        let thresholds = QualityThresholds::default();
+        assert!(
+            thresholds.min_responsiveness >= thresholds.min_naturalness,
+            "responsiveness threshold ({}) should be >= naturalness threshold ({})",
+            thresholds.min_responsiveness,
+            thresholds.min_naturalness
+        );
+    }
+
+    // --- PressureLevel tests ---
+
+    #[test]
+    fn test_pressure_level_ordering() {
+        assert!(PressureLevel::None < PressureLevel::Low);
+        assert!(PressureLevel::Low < PressureLevel::Medium);
+        assert!(PressureLevel::Medium < PressureLevel::High);
+        assert!(PressureLevel::High < PressureLevel::Critical);
+    }
+
+    #[test]
+    fn test_pressure_level_equality() {
+        assert_eq!(PressureLevel::None, PressureLevel::None);
+        assert_ne!(PressureLevel::None, PressureLevel::Critical);
+    }
+
+    // --- FlowState tests ---
+
+    #[test]
+    fn test_flow_state_default() {
+        let state = FlowState::default();
+        assert!(
+            state.flow_rate > 0.0,
+            "default flow_rate should be positive"
+        );
+        assert!(
+            state.target_rate > 0.0,
+            "default target_rate should be positive"
+        );
+        assert_eq!(state.buffer_fill, 0.0, "default buffer_fill should be 0.0");
+        assert!(
+            state.actions_taken.is_empty(),
+            "default actions_taken should be empty"
+        );
+    }
+
+    // --- StreamingSession tests ---
+
+    #[test]
+    fn test_streaming_session_new() {
+        let config = StreamingConfig::default();
+        let session = StreamingSession::new(config);
+        assert!(
+            !session.session_id.is_empty(),
+            "session_id should not be empty"
+        );
+        assert!(
+            matches!(session.state, StreamingState::NotStarted),
+            "new session should be in NotStarted state"
+        );
+        assert!(
+            session.end_time.is_none(),
+            "new session should have no end_time"
+        );
+        assert!(session.stats.is_none(), "new session should have no stats");
+    }
+
+    #[test]
+    fn test_streaming_session_complete() {
+        let config = StreamingConfig::default();
+        let mut session = StreamingSession::new(config);
+        let stats = StreamingStats {
+            total_chunks: 10,
+            total_characters: 500,
+            total_words: 80,
+            avg_chunk_size: 50.0,
+            estimated_duration_seconds: 2.5,
+        };
+        session.complete(stats.clone());
+        assert!(
+            matches!(session.state, StreamingState::Completed),
+            "completed session should be in Completed state"
+        );
+        assert!(
+            session.end_time.is_some(),
+            "completed session should have end_time"
+        );
+        let session_stats = session.stats.as_ref().expect("completed session should have stats");
+        assert_eq!(session_stats.total_chunks, 10);
+    }
+}

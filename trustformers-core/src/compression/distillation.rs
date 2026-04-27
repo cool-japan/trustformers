@@ -689,6 +689,330 @@ mod tests {
         let grad_value = grad_norm.expect("operation failed in test");
         assert!(grad_value >= 0.0, "Gradient norm should be non-negative");
     }
+
+    // ── DistillationConfig tests ──
+
+    #[test]
+    fn test_distillation_config_default() {
+        let config = DistillationConfig::default();
+        assert!((config.temperature - 3.0).abs() < 1e-6);
+        assert!((config.alpha - 0.7).abs() < 1e-6);
+        assert!((config.learning_rate - 1e-4).abs() < 1e-8);
+        assert_eq!(config.epochs, 10);
+        assert_eq!(config.batch_size, 32);
+        assert!(config.matched_layers.is_empty());
+        assert!(!config.use_feature_distillation);
+        assert!((config.feature_weight - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_distillation_config_clone() {
+        let config = DistillationConfig {
+            epochs: 42,
+            temperature: 5.0,
+            ..DistillationConfig::default()
+        };
+        let cloned = config.clone();
+        assert_eq!(cloned.epochs, 42);
+        assert!((cloned.temperature - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_distillation_config_custom_layers() {
+        let mut config = DistillationConfig::default();
+        config
+            .matched_layers
+            .insert("teacher.layer_0".to_string(), "student.layer_0".to_string());
+        assert_eq!(config.matched_layers.len(), 1);
+    }
+
+    // ── DistillationLoss tests ──
+
+    #[test]
+    fn test_distillation_loss_kl_debug() {
+        let loss = DistillationLoss::KLDivergence;
+        assert_eq!(format!("{:?}", loss), "KLDivergence");
+    }
+
+    #[test]
+    fn test_distillation_loss_mse_debug() {
+        let loss = DistillationLoss::MSE;
+        assert_eq!(format!("{:?}", loss), "MSE");
+    }
+
+    #[test]
+    fn test_distillation_loss_cross_entropy_debug() {
+        let loss = DistillationLoss::CrossEntropy;
+        assert_eq!(format!("{:?}", loss), "CrossEntropy");
+    }
+
+    #[test]
+    fn test_distillation_loss_custom_debug() {
+        let loss = DistillationLoss::Custom(Box::new(|_a, _b| 0.0));
+        assert_eq!(format!("{:?}", loss), "Custom(<closure>)");
+    }
+
+    #[test]
+    fn test_distillation_loss_clone_kl() {
+        let loss = DistillationLoss::KLDivergence;
+        let cloned = loss.clone();
+        assert_eq!(format!("{:?}", cloned), "KLDivergence");
+    }
+
+    #[test]
+    fn test_distillation_loss_clone_mse() {
+        let loss = DistillationLoss::MSE;
+        let cloned = loss.clone();
+        assert_eq!(format!("{:?}", cloned), "MSE");
+    }
+
+    #[test]
+    fn test_distillation_loss_clone_custom_fallback() {
+        // Custom loss falls back to KLDivergence on clone
+        let loss = DistillationLoss::Custom(Box::new(|_a, _b| 42.0));
+        let cloned = loss.clone();
+        assert_eq!(format!("{:?}", cloned), "KLDivergence");
+    }
+
+    // ── KnowledgeDistiller loss computation tests ──
+
+    #[test]
+    fn test_kl_divergence_identical_distributions() {
+        let distiller = KnowledgeDistiller::new(1.0);
+        let logits =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).expect("Tensor from_vec failed");
+        // Identical inputs should produce KL ~ 0
+        let loss = distiller
+            .compute_distillation_loss(&logits, &logits)
+            .expect("loss computation failed");
+        assert!(
+            loss.abs() < 1e-4,
+            "KL divergence of identical distributions should be ~0, got {}",
+            loss
+        );
+    }
+
+    #[test]
+    fn test_mse_loss_identical() {
+        let distiller = KnowledgeDistiller::new(1.0).with_loss(DistillationLoss::MSE);
+        let logits =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).expect("Tensor from_vec failed");
+        let loss = distiller
+            .compute_distillation_loss(&logits, &logits)
+            .expect("loss computation failed");
+        assert!(loss.abs() < 1e-6, "MSE of identical inputs should be 0");
+    }
+
+    #[test]
+    fn test_cross_entropy_loss() {
+        let distiller = KnowledgeDistiller::new(1.0).with_loss(DistillationLoss::CrossEntropy);
+        let student =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).expect("Tensor from_vec failed");
+        let teacher =
+            Tensor::from_vec(vec![1.5, 2.5, 3.5], &[1, 3]).expect("Tensor from_vec failed");
+        let loss = distiller
+            .compute_distillation_loss(&student, &teacher)
+            .expect("loss computation failed");
+        assert!(loss >= 0.0, "Cross entropy should be non-negative");
+    }
+
+    #[test]
+    fn test_softmax_with_temperature_high_temp() {
+        let distiller = KnowledgeDistiller::new(100.0);
+        let logits =
+            Tensor::from_vec(vec![1.0, 10.0, 1.0], &[1, 3]).expect("Tensor from_vec failed");
+        let probs = distiller.softmax_with_temperature(&logits).expect("softmax failed");
+        let data = probs.data().expect("data extraction failed");
+        // High temperature -> near-uniform distribution
+        let diff = (data[0] - data[1]).abs();
+        assert!(
+            diff < 0.1,
+            "High temperature should produce near-uniform distribution, diff={}",
+            diff
+        );
+    }
+
+    #[test]
+    fn test_softmax_with_temperature_low_temp() {
+        let distiller = KnowledgeDistiller::new(0.01);
+        let logits =
+            Tensor::from_vec(vec![1.0, 10.0, 1.0], &[1, 3]).expect("Tensor from_vec failed");
+        let probs = distiller.softmax_with_temperature(&logits).expect("softmax failed");
+        let data = probs.data().expect("data extraction failed");
+        // Low temperature -> peaked distribution
+        assert!(
+            data[1] > 0.99,
+            "Low temperature should produce peaked distribution at max"
+        );
+    }
+
+    #[test]
+    fn test_softmax_sums_to_one() {
+        let distiller = KnowledgeDistiller::new(3.0);
+        let logits = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0], &[1, 5])
+            .expect("Tensor from_vec failed");
+        let probs = distiller.softmax_with_temperature(&logits).expect("softmax failed");
+        let data = probs.data().expect("data extraction failed");
+        let sum: f32 = data.iter().sum();
+        assert!(
+            (sum - 1.0).abs() < 1e-5,
+            "Softmax should sum to 1, got {}",
+            sum
+        );
+    }
+
+    #[test]
+    fn test_knowledge_distiller_with_loss() {
+        let distiller = KnowledgeDistiller::new(2.0).with_loss(DistillationLoss::MSE);
+        let student =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).expect("Tensor from_vec failed");
+        let teacher =
+            Tensor::from_vec(vec![4.0, 5.0, 6.0], &[1, 3]).expect("Tensor from_vec failed");
+        let loss = distiller
+            .compute_distillation_loss(&student, &teacher)
+            .expect("loss computation failed");
+        assert!(loss >= 0.0);
+    }
+
+    #[test]
+    fn test_kl_divergence_size_mismatch() {
+        let distiller = KnowledgeDistiller::new(1.0);
+        let student = Tensor::from_vec(vec![1.0, 2.0], &[1, 2]).expect("Tensor from_vec failed");
+        let teacher =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).expect("Tensor from_vec failed");
+        // Note: softmax is applied first, but the underlying kl_divergence checks size
+        // The softmax produces same-size tensors as input, so the mismatch is caught in kl_divergence
+        let result = distiller.kl_divergence(&student, &teacher);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_mse_loss_size_mismatch() {
+        let distiller = KnowledgeDistiller::new(1.0);
+        let student = Tensor::from_vec(vec![1.0, 2.0], &[1, 2]).expect("Tensor from_vec failed");
+        let teacher =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).expect("Tensor from_vec failed");
+        let result = distiller.mse_loss(&student, &teacher);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cross_entropy_size_mismatch() {
+        let distiller = KnowledgeDistiller::new(1.0);
+        let student = Tensor::from_vec(vec![1.0, 2.0], &[1, 2]).expect("Tensor from_vec failed");
+        let teacher =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).expect("Tensor from_vec failed");
+        let result = distiller.cross_entropy(&student, &teacher);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_feature_distillation_loss() {
+        let distiller = KnowledgeDistiller::new(3.0);
+        let config = DistillationConfig {
+            feature_weight: 0.5,
+            ..DistillationConfig::default()
+        };
+
+        let teacher =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).expect("Tensor from_vec failed");
+        let student =
+            Tensor::from_vec(vec![1.5, 2.5, 3.5], &[1, 3]).expect("Tensor from_vec failed");
+
+        let loss = distiller
+            .compute_feature_distillation_loss(&teacher, &student, &config)
+            .expect("feature distillation loss failed");
+        assert!(loss >= 0.0);
+        // MSE of [0.5, 0.5, 0.5] = 0.25, scaled by feature_weight=0.5 => 0.125
+        assert!((loss - 0.125).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_gradient_simulation_scales_with_alpha() {
+        let distiller = KnowledgeDistiller::new(1.0);
+        let config_low = DistillationConfig {
+            alpha: 0.1,
+            ..DistillationConfig::default()
+        };
+        let config_high = DistillationConfig {
+            alpha: 0.9,
+            ..DistillationConfig::default()
+        };
+
+        let student =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).expect("Tensor from_vec failed");
+        let teacher =
+            Tensor::from_vec(vec![4.0, 5.0, 6.0], &[1, 3]).expect("Tensor from_vec failed");
+
+        let grad_low = distiller
+            .simulate_gradient_computation(&student, &teacher, &config_low)
+            .expect("gradient computation failed");
+        let grad_high = distiller
+            .simulate_gradient_computation(&student, &teacher, &config_high)
+            .expect("gradient computation failed");
+
+        assert!(
+            grad_high > grad_low,
+            "Higher alpha should produce larger gradient"
+        );
+    }
+
+    // ── DistillationStrategy tests ──
+
+    #[test]
+    fn test_distillation_strategy_variants() {
+        let _response = DistillationStrategy::Response;
+        let _feature = DistillationStrategy::Feature;
+        let _attention = DistillationStrategy::Attention;
+        let _combined = DistillationStrategy::Combined {
+            response_weight: 0.5,
+            feature_weight: 0.3,
+            attention_weight: 0.2,
+        };
+    }
+
+    // ── Helper struct tests ──
+
+    #[test]
+    fn test_feature_distiller_creation() {
+        let mut mappings = HashMap::new();
+        mappings.insert("layer_0".to_string(), "student_layer_0".to_string());
+        let _distiller = super::FeatureDistiller::new(mappings);
+    }
+
+    #[test]
+    fn test_response_distiller_creation() {
+        let _distiller = super::ResponseDistiller::new(2.0);
+    }
+
+    #[test]
+    fn test_attention_distiller_creation() {
+        let layers = vec!["attn.0".to_string(), "attn.1".to_string()];
+        let _distiller = super::AttentionDistiller::new(layers);
+    }
+
+    #[test]
+    fn test_layer_distiller_creation() {
+        let pairs = vec![
+            ("t.layer_0".to_string(), "s.layer_0".to_string()),
+            ("t.layer_1".to_string(), "s.layer_1".to_string()),
+        ];
+        let _distiller = super::LayerDistiller::new(pairs);
+    }
+
+    #[test]
+    fn test_hidden_state_distiller_creation() {
+        let _distiller = super::HiddenStateDistiller::new(768, 384);
+    }
+
+    #[test]
+    fn test_evaluate_mock() {
+        let distiller = KnowledgeDistiller::new(3.0);
+        let teacher = MockTeacherModel::new("teacher");
+        let student = MockStudentModel::new("student");
+        let accuracy = distiller.evaluate(&teacher, &student).expect("evaluation failed");
+        assert!((accuracy - 0.95).abs() < 1e-6);
+    }
 }
 
 /// Feature-based distillation

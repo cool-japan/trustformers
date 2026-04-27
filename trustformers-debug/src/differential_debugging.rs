@@ -1390,6 +1390,293 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[test]
+    fn test_config_default() {
+        let config = DifferentialDebuggingConfig::default();
+        assert!(config.enable_model_comparison);
+        assert!(config.enable_ab_analysis);
+        assert!(config.enable_version_diff);
+        assert!(config.enable_regression_detection);
+        assert!(config.enable_performance_delta);
+        assert!((config.significance_threshold - 0.05).abs() < f64::EPSILON);
+        assert_eq!(config.max_comparison_models, 10);
+    }
+
+    #[tokio::test]
+    async fn test_max_comparison_models_limit() {
+        let mut config = DifferentialDebuggingConfig::default();
+        config.max_comparison_models = 2;
+        let mut debugger = DifferentialDebugger::new(config);
+
+        debugger
+            .add_model_snapshot(create_test_snapshot("model_1"))
+            .expect("add should succeed");
+        debugger
+            .add_model_snapshot(create_test_snapshot("model_2"))
+            .expect("add should succeed");
+        debugger
+            .add_model_snapshot(create_test_snapshot("model_3"))
+            .expect("add should succeed");
+        assert_eq!(debugger.model_snapshots.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_compare_models_disabled() {
+        let mut config = DifferentialDebuggingConfig::default();
+        config.enable_model_comparison = false;
+        let mut debugger = DifferentialDebugger::new(config);
+
+        let snapshot1 = create_test_snapshot("a");
+        let snapshot2 = create_test_snapshot("b");
+        debugger.add_model_snapshot(snapshot1).expect("add should succeed");
+        debugger.add_model_snapshot(snapshot2).expect("add should succeed");
+
+        let result = debugger.compare_models(vec!["a".to_string(), "b".to_string()]).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_compare_models_too_few() {
+        let config = DifferentialDebuggingConfig::default();
+        let mut debugger = DifferentialDebugger::new(config);
+        let snapshot1 = create_test_snapshot("only_one");
+        debugger.add_model_snapshot(snapshot1).expect("add should succeed");
+        let result = debugger.compare_models(vec!["only_one".to_string()]).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_compare_models_missing_model() {
+        let config = DifferentialDebuggingConfig::default();
+        let mut debugger = DifferentialDebugger::new(config);
+        let snapshot1 = create_test_snapshot("existing");
+        debugger.add_model_snapshot(snapshot1).expect("add should succeed");
+        let result = debugger
+            .compare_models(vec!["existing".to_string(), "missing".to_string()])
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_ab_test_analysis() {
+        let config = DifferentialDebuggingConfig::default();
+        let mut debugger = DifferentialDebugger::new(config);
+
+        let ab_config = ABTestConfig {
+            name: "test_ab".to_string(),
+            model_a: "model_a".to_string(),
+            model_b: "model_b".to_string(),
+            duration_hours: None,
+            sample_size: 100,
+            tracked_metrics: vec!["accuracy".to_string()],
+            min_effect_size: 0.05,
+            power: 0.8,
+        };
+
+        // Simple LCG for deterministic test data
+        let mut seed: u64 = 42;
+        let model_a_data: Vec<f64> = (0..100)
+            .map(|_| {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                0.8 + (seed as f64 / u64::MAX as f64) * 0.1
+            })
+            .collect();
+        let model_b_data: Vec<f64> = (0..100)
+            .map(|_| {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                0.82 + (seed as f64 / u64::MAX as f64) * 0.1
+            })
+            .collect();
+
+        let result = debugger.run_ab_test(ab_config, model_a_data, model_b_data).await;
+        assert!(result.is_ok());
+        let ab_result = result.expect("ab test should succeed");
+        assert!(ab_result.conclusion.confidence >= 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_ab_test_disabled() {
+        let mut config = DifferentialDebuggingConfig::default();
+        config.enable_ab_analysis = false;
+        let mut debugger = DifferentialDebugger::new(config);
+
+        let ab_config = ABTestConfig {
+            name: "test".to_string(),
+            model_a: "a".to_string(),
+            model_b: "b".to_string(),
+            duration_hours: None,
+            sample_size: 10,
+            tracked_metrics: vec![],
+            min_effect_size: 0.05,
+            power: 0.8,
+        };
+
+        let result = debugger.run_ab_test(ab_config, vec![1.0], vec![2.0]).await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_model_metrics_creation() {
+        let metrics = ModelMetrics {
+            train_accuracy: 0.95,
+            val_accuracy: 0.90,
+            test_accuracy: None,
+            train_loss: 0.05,
+            val_loss: 0.10,
+            test_loss: None,
+            inference_latency_ms: 50.0,
+            memory_usage_mb: 2048.0,
+            model_size_mb: 500.0,
+            flops: 1_000_000_000,
+            training_time_s: 3600.0,
+            custom_metrics: HashMap::new(),
+        };
+        assert!(metrics.train_accuracy > metrics.val_accuracy);
+        assert!(metrics.test_accuracy.is_none());
+    }
+
+    #[test]
+    fn test_architecture_info() {
+        let info = ArchitectureInfo {
+            parameter_count: 175_000_000,
+            layer_count: 24,
+            depth: 24,
+            hidden_size: 1024,
+            num_heads: Some(16),
+            ff_dim: Some(4096),
+            vocab_size: Some(50257),
+            max_seq_length: Some(2048),
+        };
+        assert_eq!(info.parameter_count, 175_000_000);
+        assert_eq!(info.layer_count, 24);
+    }
+
+    #[test]
+    fn test_summary_stats() {
+        let stats = SummaryStats {
+            mean: 0.85,
+            std_dev: 0.05,
+            min: 0.70,
+            max: 0.95,
+            median: 0.86,
+            q25: 0.82,
+            q75: 0.89,
+        };
+        assert!(stats.min < stats.q25);
+        assert!(stats.q25 < stats.median);
+        assert!(stats.median < stats.q75);
+        assert!(stats.q75 < stats.max);
+    }
+
+    #[test]
+    fn test_performance_delta() {
+        let delta = PerformanceDelta {
+            accuracy_delta: 0.02,
+            loss_delta: -0.01,
+            latency_delta: -5.0,
+            memory_delta: 100.0,
+            size_delta: 50.0,
+            training_time_delta: -300.0,
+            custom_deltas: HashMap::new(),
+        };
+        assert!(delta.accuracy_delta > 0.0);
+        assert!(delta.loss_delta < 0.0);
+    }
+
+    #[test]
+    fn test_regression_severity_variants() {
+        let severities = [
+            RegressionSeverity::Critical,
+            RegressionSeverity::Major,
+            RegressionSeverity::Minor,
+            RegressionSeverity::Negligible,
+        ];
+        assert_eq!(severities.len(), 4);
+    }
+
+    #[test]
+    fn test_version_diff_creation() {
+        let diff = VersionDiff {
+            from_version: "1.0.0".to_string(),
+            to_version: "1.1.0".to_string(),
+            timestamp: Utc::now(),
+            performance_delta: PerformanceDelta {
+                accuracy_delta: 0.01,
+                loss_delta: -0.005,
+                latency_delta: 0.0,
+                memory_delta: 0.0,
+                size_delta: 10.0,
+                training_time_delta: 0.0,
+                custom_deltas: HashMap::new(),
+            },
+            architecture_changes: vec![ArchitectureChange {
+                change_type: "layer_added".to_string(),
+                description: "Added dropout layer".to_string(),
+                impact: "minor".to_string(),
+            }],
+            config_changes: vec![],
+            weight_changes: WeightChangesSummary {
+                avg_magnitude: 0.001,
+                max_change: 0.05,
+                significant_change_ratio: 0.1,
+                layer_changes: HashMap::new(),
+            },
+        };
+        assert_eq!(diff.from_version, "1.0.0");
+        assert_eq!(diff.architecture_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_statistical_test_result() {
+        let result = StatisticalTestResult {
+            test_type: "t-test".to_string(),
+            statistic: 2.5,
+            p_value: 0.01,
+            effect_size: 0.4,
+            confidence_interval: (0.01, 0.05),
+            is_significant: true,
+        };
+        assert!(result.is_significant);
+        assert!(result.p_value < 0.05);
+    }
+
+    #[test]
+    fn test_ab_test_conclusion() {
+        let conclusion = ABTestConclusion {
+            winner: Some("model_b".to_string()),
+            confidence: 0.95,
+            practical_significance: true,
+            recommendation: "Deploy model_b".to_string(),
+            summary: "Model B outperforms Model A significantly".to_string(),
+        };
+        assert!(conclusion.winner.is_some());
+        assert!(conclusion.practical_significance);
+    }
+
+    #[tokio::test]
+    async fn test_compare_two_different_models() {
+        let config = DifferentialDebuggingConfig::default();
+        let mut debugger = DifferentialDebugger::new(config);
+
+        let mut snap_a = create_test_snapshot("model_a");
+        snap_a.metrics.train_accuracy = 0.90;
+        snap_a.metrics.val_accuracy = 0.85;
+
+        let mut snap_b = create_test_snapshot("model_b");
+        snap_b.metrics.train_accuracy = 0.95;
+        snap_b.metrics.val_accuracy = 0.92;
+
+        debugger.add_model_snapshot(snap_a).expect("add should succeed");
+        debugger.add_model_snapshot(snap_b).expect("add should succeed");
+
+        let result = debugger
+            .compare_models(vec!["model_a".to_string(), "model_b".to_string()])
+            .await;
+        assert!(result.is_ok());
+        let comparison = result.expect("comparison should succeed");
+        assert_eq!(comparison.models.len(), 2);
+    }
+
     fn create_test_snapshot(name: &str) -> ModelSnapshot {
         ModelSnapshot {
             id: Uuid::new_v4(),

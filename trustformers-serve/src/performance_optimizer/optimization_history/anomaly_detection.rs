@@ -1162,3 +1162,298 @@ fn calculate_variance(values: &[f64], mean: f64) -> f64 {
 
     values.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / values.len() as f64
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::performance_optimizer::types::{
+        PerformanceDataPoint, SystemState, TestCharacteristics,
+    };
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    fn make_data_point(throughput: f64, latency_ms: u64) -> PerformanceDataPoint {
+        PerformanceDataPoint {
+            parallelism: 1,
+            throughput,
+            latency: Duration::from_millis(latency_ms),
+            cpu_utilization: 0.5,
+            memory_utilization: 0.5,
+            resource_efficiency: 0.8,
+            timestamp: chrono::Utc::now(),
+            test_characteristics: TestCharacteristics::default(),
+            system_state: SystemState::default(),
+        }
+    }
+
+    fn make_normal_data(count: usize) -> Vec<PerformanceDataPoint> {
+        (0..count).map(|i| make_data_point(100.0 + (i % 5) as f64, 50)).collect()
+    }
+
+    fn make_data_with_spike(count: usize, spike_idx: usize) -> Vec<PerformanceDataPoint> {
+        (0..count)
+            .map(|i| {
+                if i == spike_idx {
+                    make_data_point(1000.0, 5) // Spike
+                } else {
+                    make_data_point(100.0 + (i % 3) as f64, 50)
+                }
+            })
+            .collect()
+    }
+
+    // =========================================================================
+    // SYSTEM TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_anomaly_detection_system_new() {
+        let system = AnomalyDetectionSystem::new();
+        let stats = system.get_anomaly_statistics();
+        assert_eq!(stats.total_anomalies, 0);
+    }
+
+    #[test]
+    fn test_anomaly_detection_system_with_config() {
+        let config = AnomalyDetectionConfig {
+            enable_detection: true,
+            sensitivity: 0.8,
+            min_severity_threshold: 0.3,
+            enable_ml_detection: false,
+            learning_rate: 0.05,
+        };
+        let system = AnomalyDetectionSystem::with_config(config);
+        let stats = system.get_anomaly_statistics();
+        assert_eq!(stats.total_anomalies, 0);
+    }
+
+    #[test]
+    fn test_anomaly_detection_system_default() {
+        let system = AnomalyDetectionSystem::default();
+        let stats = system.get_anomaly_statistics();
+        assert_eq!(stats.total_anomalies, 0);
+    }
+
+    #[test]
+    fn test_anomaly_system_update_config() {
+        let system = AnomalyDetectionSystem::new();
+        let new_config = AnomalyDetectionConfig {
+            enable_detection: false,
+            sensitivity: 0.5,
+            min_severity_threshold: 0.7,
+            enable_ml_detection: false,
+            learning_rate: 0.2,
+        };
+        system.update_config(new_config);
+        // No panic expected
+    }
+
+    #[test]
+    fn test_anomaly_system_add_detector() {
+        let system = AnomalyDetectionSystem::new();
+        system.add_detector(Box::new(ZScoreAnomalyDetector::new()));
+        // No panic expected
+    }
+
+    #[test]
+    fn test_anomaly_system_add_learning_model() {
+        let system = AnomalyDetectionSystem::new();
+        system.add_learning_model(Box::new(SimpleAnomalyLearner::new()));
+        // No panic expected
+    }
+
+    #[test]
+    fn test_anomaly_statistics_construction() {
+        let stats = AnomalyStatistics {
+            total_anomalies: 5,
+            anomaly_type_distribution: HashMap::new(),
+            severity_distribution: HashMap::new(),
+            average_severity: 0.6,
+            cache_memory_usage: 1024,
+        };
+        assert_eq!(stats.total_anomalies, 5);
+        assert!(stats.average_severity > 0.0);
+    }
+
+    // =========================================================================
+    // DETECTOR TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_statistical_anomaly_detector_new() {
+        let detector = StatisticalAnomalyDetector::new();
+        assert_eq!(detector.name(), "statistical_anomaly_detector");
+    }
+
+    #[test]
+    fn test_statistical_anomaly_detector_with_threshold() {
+        let detector = StatisticalAnomalyDetector::with_threshold(3.0);
+        assert_eq!(detector.name(), "statistical_anomaly_detector");
+    }
+
+    #[test]
+    fn test_statistical_detector_normal_data() {
+        let detector = StatisticalAnomalyDetector::new();
+        let data = make_normal_data(20);
+        let result = detector.detect_anomalies(&data);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_statistical_detector_with_spike() {
+        let detector = StatisticalAnomalyDetector::new();
+        let data = make_data_with_spike(20, 10);
+        let result = detector.detect_anomalies(&data);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_zscore_detector_new() {
+        let detector = ZScoreAnomalyDetector::new();
+        assert_eq!(detector.name(), "zscore_anomaly_detector");
+    }
+
+    #[test]
+    fn test_zscore_detector_with_params() {
+        let detector = ZScoreAnomalyDetector::with_params(2.5, 20);
+        assert_eq!(detector.name(), "zscore_anomaly_detector");
+    }
+
+    #[test]
+    fn test_zscore_detector_normal_data() {
+        let detector = ZScoreAnomalyDetector::new();
+        let data = make_normal_data(20);
+        let result = detector.detect_anomalies(&data);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_iqr_detector_new() {
+        let detector = IQRAnomalyDetector::new();
+        assert_eq!(detector.name(), "iqr_anomaly_detector");
+    }
+
+    #[test]
+    fn test_iqr_detector_with_multiplier() {
+        let detector = IQRAnomalyDetector::with_multiplier(2.0);
+        assert_eq!(detector.name(), "iqr_anomaly_detector");
+    }
+
+    #[test]
+    fn test_iqr_detector_normal_data() {
+        let detector = IQRAnomalyDetector::new();
+        let data = make_normal_data(20);
+        let result = detector.detect_anomalies(&data);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_moving_average_detector_new() {
+        let detector = MovingAverageAnomalyDetector::new();
+        assert_eq!(detector.name(), "moving_average_anomaly_detector");
+    }
+
+    #[test]
+    fn test_moving_average_detector_with_params() {
+        let detector = MovingAverageAnomalyDetector::with_params(7, 3.0);
+        assert_eq!(detector.name(), "moving_average_anomaly_detector");
+    }
+
+    #[test]
+    fn test_threshold_detector_new() {
+        let detector = ThresholdAnomalyDetector::new();
+        assert_eq!(detector.name(), "threshold_anomaly_detector");
+    }
+
+    #[test]
+    fn test_threshold_detector_with_thresholds() {
+        let mut thresholds = HashMap::new();
+        thresholds.insert("throughput".to_string(), (50.0, 200.0));
+        let detector = ThresholdAnomalyDetector::with_thresholds(thresholds);
+        assert_eq!(detector.name(), "threshold_anomaly_detector");
+    }
+
+    // =========================================================================
+    // LEARNING MODEL TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_simple_anomaly_learner_new() {
+        let learner = SimpleAnomalyLearner::new();
+        assert_eq!(learner.name(), "simple_anomaly_learner");
+    }
+
+    #[test]
+    fn test_historical_anomaly_predictor_new() {
+        let predictor = HistoricalAnomalyPredictor::new();
+        assert_eq!(predictor.name(), "historical_anomaly_predictor");
+    }
+
+    #[test]
+    fn test_pattern_based_anomaly_predictor_new() {
+        let predictor = PatternBasedAnomalyPredictor::new();
+        assert_eq!(predictor.name(), "pattern_based_anomaly_predictor");
+    }
+
+    // =========================================================================
+    // ASYNC TESTS
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_detect_anomalies_detection_disabled() {
+        let config = AnomalyDetectionConfig {
+            enable_detection: false,
+            sensitivity: 0.7,
+            min_severity_threshold: 0.5,
+            enable_ml_detection: false,
+            learning_rate: 0.1,
+        };
+        let system = AnomalyDetectionSystem::with_config(config);
+        let data = make_normal_data(10);
+        let result = system.detect_anomalies(&data).await;
+        assert!(result.is_ok());
+        let anomalies = result.expect("detect_anomalies should succeed");
+        assert!(
+            anomalies.is_empty(),
+            "disabled detection should return empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detect_anomalies_insufficient_data() {
+        let system = AnomalyDetectionSystem::new();
+        let data = vec![make_data_point(100.0, 50), make_data_point(110.0, 45)];
+        let result = system.detect_anomalies(&data).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_detect_anomalies_normal_data() {
+        let system = AnomalyDetectionSystem::new();
+        let data = make_normal_data(20);
+        let result = system.detect_anomalies(&data).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_get_anomalies_by_type_empty() {
+        let system = AnomalyDetectionSystem::new();
+        let anomalies = system.get_anomalies_by_type(AnomalyType::Spike).await;
+        assert!(anomalies.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_recent_anomalies_empty() {
+        let system = AnomalyDetectionSystem::new();
+        let anomalies = system.get_recent_anomalies(Duration::from_secs(3600)).await;
+        assert!(anomalies.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_clear_cache() {
+        let system = AnomalyDetectionSystem::new();
+        system.clear_cache().await;
+        let stats = system.get_anomaly_statistics();
+        assert_eq!(stats.total_anomalies, 0);
+    }
+}

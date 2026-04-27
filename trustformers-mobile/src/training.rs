@@ -427,7 +427,7 @@ impl OnDeviceTrainer {
 
     fn should_trigger_gc(&self) -> bool {
         // Trigger GC based on memory pressure (simplified)
-        self.training_stats.current_step % 50 == 0
+        self.training_stats.current_step.is_multiple_of(50)
     }
 
     fn mobile_gc(&self) -> Result<()> {

@@ -376,3 +376,199 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         dot_product / (norm_a * norm_b)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::caching::config::{EvictionPolicy, TierConfig};
+    use crate::caching::metrics::CacheStatsCollector;
+    use std::time::Duration;
+
+    fn make_tier_config(max_entries: usize) -> TierConfig {
+        TierConfig {
+            max_size_bytes: 64 * 1024 * 1024,
+            max_entries,
+            default_ttl: Duration::from_secs(3600),
+            eviction_policy: EvictionPolicy::LFU,
+            compression_enabled: false,
+            tier_name: "test_embedding".to_string(),
+        }
+    }
+
+    fn make_key(text: &str) -> EmbeddingKey {
+        EmbeddingKey {
+            text: text.to_string(),
+            model_id: "test_model".to_string(),
+            embedding_type: "dense".to_string(),
+        }
+    }
+
+    // --- EmbeddingEntry tests ---
+
+    #[test]
+    fn test_embedding_entry_dimension_matches_vec_len() {
+        let emb = vec![0.1f32, 0.2, 0.3, 0.4];
+        let entry = EmbeddingEntry::new(emb.clone());
+        assert_eq!(entry.dimension, 4);
+        assert_eq!(entry.embedding.len(), 4);
+    }
+
+    #[test]
+    fn test_embedding_entry_initial_access_count_zero() {
+        let entry = EmbeddingEntry::new(vec![1.0, 2.0]);
+        assert_eq!(entry.access_count, 0);
+    }
+
+    #[test]
+    fn test_embedding_entry_mark_accessed_increments_count() {
+        let mut entry = EmbeddingEntry::new(vec![1.0, 2.0]);
+        entry.mark_accessed();
+        assert_eq!(entry.access_count, 1);
+        entry.mark_accessed();
+        assert_eq!(entry.access_count, 2);
+    }
+
+    #[test]
+    fn test_embedding_entry_created_at_and_last_accessed_non_zero() {
+        let entry = EmbeddingEntry::new(vec![0.5]);
+        assert!(entry.created_at > 0);
+        assert!(entry.last_accessed > 0);
+    }
+
+    // --- VectorIndex tests ---
+
+    #[test]
+    fn test_vector_index_find_similar_empty_returns_empty() {
+        let index = VectorIndex::new();
+        let results = index.find_similar(&[1.0, 0.0], 5);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_vector_index_find_similar_returns_at_most_k() {
+        let mut index = VectorIndex::new();
+        for i in 0..10u32 {
+            let key = make_key(&format!("query_{}", i));
+            let emb = vec![i as f32, 0.0];
+            index.embeddings.insert(key, EmbeddingEntry::new(emb));
+        }
+        let results = index.find_similar(&[1.0, 0.0], 3);
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn test_vector_index_find_similar_sorted_by_similarity() {
+        let mut index = VectorIndex::new();
+        let key_a = make_key("a");
+        let key_b = make_key("b");
+        // key_a is more similar to [1,0] than key_b
+        index.embeddings.insert(key_a, EmbeddingEntry::new(vec![1.0, 0.0]));
+        index.embeddings.insert(key_b, EmbeddingEntry::new(vec![0.0, 1.0]));
+        let results = index.find_similar(&[1.0, 0.0], 2);
+        assert_eq!(results.len(), 2);
+        // First result should have higher similarity
+        assert!(results[0].1 >= results[1].1);
+    }
+
+    // --- cosine_similarity function tests (via VectorIndex) ---
+
+    #[test]
+    fn test_cosine_similarity_identical_vectors() {
+        let mut index = VectorIndex::new();
+        let key = make_key("same");
+        index.embeddings.insert(key, EmbeddingEntry::new(vec![0.6, 0.8]));
+        let results = index.find_similar(&[0.6, 0.8], 1);
+        assert_eq!(results.len(), 1);
+        assert!((results[0].1 - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_cosine_similarity_orthogonal_vectors() {
+        let mut index = VectorIndex::new();
+        let key = make_key("ortho");
+        index.embeddings.insert(key, EmbeddingEntry::new(vec![0.0, 1.0]));
+        let results = index.find_similar(&[1.0, 0.0], 1);
+        assert!((results[0].1 - 0.0).abs() < 1e-5);
+    }
+
+    // --- EmbeddingCacheService async tests ---
+
+    #[tokio::test]
+    async fn test_embedding_service_miss_on_empty() {
+        let metrics = Arc::new(CacheStatsCollector::new());
+        let service = EmbeddingCacheService::new(make_tier_config(100), metrics);
+        let result = service.get(&make_key("missing")).await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_embedding_service_put_and_get() {
+        let metrics = Arc::new(CacheStatsCollector::new());
+        let service = EmbeddingCacheService::new(make_tier_config(100), metrics);
+        let key = make_key("hello");
+        let emb = vec![0.1f32, 0.2, 0.3];
+        service.put(key.clone(), emb.clone()).await.expect("put should succeed");
+        let result = service.get(&key).await;
+        assert!(result.is_some());
+        let retrieved = result.expect("result should be Some");
+        assert_eq!(retrieved.len(), 3);
+        assert!((retrieved[0] - 0.1).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn test_embedding_service_clear_removes_all() {
+        let metrics = Arc::new(CacheStatsCollector::new());
+        let service = EmbeddingCacheService::new(make_tier_config(100), metrics);
+        service.put(make_key("a"), vec![0.1, 0.2]).await.expect("put should succeed");
+        service.put(make_key("b"), vec![0.3, 0.4]).await.expect("put should succeed");
+        service.clear().await.expect("clear should succeed");
+        assert!(service.get(&make_key("a")).await.is_none());
+        assert!(service.get(&make_key("b")).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_embedding_service_find_similar() {
+        let metrics = Arc::new(CacheStatsCollector::new());
+        let service = EmbeddingCacheService::new(make_tier_config(100), metrics);
+        service
+            .put(make_key("close"), vec![1.0, 0.0])
+            .await
+            .expect("put should succeed");
+        service.put(make_key("far"), vec![0.0, 1.0]).await.expect("put should succeed");
+        let results = service.find_similar(&[1.0, 0.0], 1).await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0.text, "close");
+    }
+
+    #[tokio::test]
+    async fn test_embedding_service_stats_entry_count() {
+        let metrics = Arc::new(CacheStatsCollector::new());
+        let service = EmbeddingCacheService::new(make_tier_config(100), metrics);
+        service.put(make_key("a"), vec![1.0]).await.expect("put should succeed");
+        service.put(make_key("b"), vec![2.0]).await.expect("put should succeed");
+        let stats = service.get_stats().await;
+        assert_eq!(stats.entry_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_embedding_service_stats_avg_dimension() {
+        let metrics = Arc::new(CacheStatsCollector::new());
+        let service = EmbeddingCacheService::new(make_tier_config(100), metrics);
+        service
+            .put(make_key("d4"), vec![1.0, 2.0, 3.0, 4.0])
+            .await
+            .expect("put should succeed");
+        service.put(make_key("d2"), vec![1.0, 2.0]).await.expect("put should succeed");
+        let stats = service.get_stats().await;
+        assert!((stats.avg_dimension - 3.0).abs() < 1e-4);
+    }
+
+    #[tokio::test]
+    async fn test_embedding_service_run_maintenance_no_panic() {
+        let metrics = Arc::new(CacheStatsCollector::new());
+        let service = EmbeddingCacheService::new(make_tier_config(100), metrics);
+        service.put(make_key("m"), vec![0.5]).await.expect("put should succeed");
+        let result = service.run_maintenance().await;
+        assert!(result.is_ok());
+    }
+}

@@ -298,3 +298,191 @@ impl LoadBalancerConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- LoadBalancerConfig validation tests ---
+
+    #[test]
+    fn test_config_default_is_valid() {
+        let config = LoadBalancerConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_cpu_threshold_out_of_range_fails() {
+        let mut config = LoadBalancerConfig::default();
+        config.cpu_threshold = 1.5;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_cpu_threshold_negative_fails() {
+        let mut config = LoadBalancerConfig::default();
+        config.cpu_threshold = -0.1;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_gpu_threshold_out_of_range_fails() {
+        let mut config = LoadBalancerConfig::default();
+        config.gpu_threshold = 1.1;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_cpu_power_weight_out_of_range_fails() {
+        let mut config = LoadBalancerConfig::default();
+        config.cpu_power_weight = -0.1;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_gpu_power_weight_out_of_range_fails() {
+        let mut config = LoadBalancerConfig::default();
+        config.gpu_power_weight = 1.5;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_zero_power_consumption_fails() {
+        let mut config = LoadBalancerConfig::default();
+        config.max_power_consumption = 0.0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_negative_power_consumption_fails() {
+        let mut config = LoadBalancerConfig::default();
+        config.max_power_consumption = -100.0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_zero_queue_capacity_fails() {
+        let mut config = LoadBalancerConfig::default();
+        config.task_queue_capacity = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_zero_cpu_pool_fails() {
+        let mut config = LoadBalancerConfig::default();
+        config.cpu_pool_size = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_numa_affinity_out_of_range_fails() {
+        let mut config = LoadBalancerConfig::default();
+        config.numa_affinity_threshold = 1.5;
+        assert!(config.validate().is_err());
+    }
+
+    // --- Performance optimized preset ---
+
+    #[test]
+    fn test_performance_optimized_uses_performance_strategy() {
+        let config = LoadBalancerConfig::performance_optimized();
+        assert_eq!(config.strategy, LoadBalancingStrategy::PerformanceOptimized);
+    }
+
+    #[test]
+    fn test_performance_optimized_power_efficiency_disabled() {
+        let config = LoadBalancerConfig::performance_optimized();
+        assert!(!config.enable_power_efficiency);
+    }
+
+    #[test]
+    fn test_performance_optimized_is_valid() {
+        let config = LoadBalancerConfig::performance_optimized();
+        assert!(config.validate().is_ok());
+    }
+
+    // --- Power optimized preset ---
+
+    #[test]
+    fn test_power_optimized_uses_power_efficient_strategy() {
+        let config = LoadBalancerConfig::power_optimized();
+        assert_eq!(config.strategy, LoadBalancingStrategy::PowerEfficient);
+    }
+
+    #[test]
+    fn test_power_optimized_has_lower_power_limit() {
+        let config = LoadBalancerConfig::power_optimized();
+        assert!(config.max_power_consumption < 1000.0);
+    }
+
+    #[test]
+    fn test_power_optimized_is_valid() {
+        let config = LoadBalancerConfig::power_optimized();
+        assert!(config.validate().is_ok());
+    }
+
+    // --- NUMA optimized preset ---
+
+    #[test]
+    fn test_numa_optimized_uses_numa_strategy() {
+        let config = LoadBalancerConfig::numa_optimized();
+        assert_eq!(config.strategy, LoadBalancingStrategy::NumaAware);
+    }
+
+    #[test]
+    fn test_numa_optimized_enables_numa_awareness() {
+        let config = LoadBalancerConfig::numa_optimized();
+        assert!(config.enable_numa_awareness);
+    }
+
+    #[test]
+    fn test_numa_optimized_is_valid() {
+        let config = LoadBalancerConfig::numa_optimized();
+        assert!(config.validate().is_ok());
+    }
+
+    // --- PowerScalingFactors tests ---
+
+    #[test]
+    fn test_power_scaling_defaults_all_one() {
+        let factors = PowerScalingFactors::default();
+        assert!((factors.cpu_frequency_scaling - 1.0).abs() < 1e-6);
+        assert!((factors.gpu_power_limit_scaling - 1.0).abs() < 1e-6);
+        assert!((factors.memory_frequency_scaling - 1.0).abs() < 1e-6);
+        assert!((factors.voltage_scaling - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_power_scaling_defaults_dvfs_enabled() {
+        let factors = PowerScalingFactors::default();
+        assert!(factors.dvfs_enabled);
+    }
+
+    #[test]
+    fn test_power_scaling_defaults_sleep_states_enabled() {
+        let factors = PowerScalingFactors::default();
+        assert!(factors.sleep_states_enabled);
+    }
+
+    // --- PowerEfficiencyMode tests ---
+
+    #[test]
+    fn test_power_efficiency_mode_default_is_balanced() {
+        let mode = PowerEfficiencyMode::default();
+        matches!(mode, PowerEfficiencyMode::Balanced);
+    }
+
+    // --- LoadBalancingStrategy equality ---
+
+    #[test]
+    fn test_strategy_equality() {
+        assert_eq!(
+            LoadBalancingStrategy::RoundRobin,
+            LoadBalancingStrategy::RoundRobin
+        );
+        assert_ne!(
+            LoadBalancingStrategy::Adaptive,
+            LoadBalancingStrategy::LeastLoaded
+        );
+    }
+}

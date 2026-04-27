@@ -1121,3 +1121,384 @@ fn calculate_standard_deviation(values: &[f64]) -> f64 {
     let variance = calculate_variance(values, mean);
     variance.sqrt()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::performance_optimizer::types::{
+        PerformanceDataPoint, SystemState, TestCharacteristics,
+    };
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    struct Lcg {
+        state: u64,
+    }
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Lcg { state: seed }
+        }
+        fn next(&mut self) -> u64 {
+            self.state = self
+                .state
+                .wrapping_mul(6364136223846793005u64)
+                .wrapping_add(1442695040888963407u64);
+            self.state
+        }
+        fn next_f64(&mut self) -> f64 {
+            (self.next() >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+
+    fn make_data_point(throughput: f64, latency_ms: u64) -> PerformanceDataPoint {
+        PerformanceDataPoint {
+            parallelism: 1,
+            throughput,
+            latency: Duration::from_millis(latency_ms),
+            cpu_utilization: 0.5,
+            memory_utilization: 0.5,
+            resource_efficiency: 0.8,
+            timestamp: chrono::Utc::now(),
+            test_characteristics: TestCharacteristics::default(),
+            system_state: SystemState::default(),
+        }
+    }
+
+    fn make_increasing_data(count: usize) -> Vec<PerformanceDataPoint> {
+        (0..count).map(|i| make_data_point(100.0 + i as f64 * 10.0, 50)).collect()
+    }
+
+    fn make_decreasing_data(count: usize) -> Vec<PerformanceDataPoint> {
+        (0..count).map(|i| make_data_point(200.0 - i as f64 * 10.0, 50)).collect()
+    }
+
+    fn make_stable_data(count: usize) -> Vec<PerformanceDataPoint> {
+        (0..count).map(|_| make_data_point(100.0, 50)).collect()
+    }
+
+    // =========================================================================
+    // ENGINE TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_engine_new() {
+        let engine = EnhancedTrendAnalysisEngine::new();
+        let stats = engine.get_cache_stats();
+        assert_eq!(stats.total_entries, 0);
+    }
+
+    #[test]
+    fn test_engine_default() {
+        let engine = EnhancedTrendAnalysisEngine::default();
+        let stats = engine.get_cache_stats();
+        assert_eq!(stats.total_entries, 0);
+    }
+
+    #[test]
+    fn test_engine_with_config() {
+        let config = TrendAnalysisConfig {
+            min_data_points: 10,
+            analysis_window: Duration::from_secs(7200),
+            confidence_threshold: 0.9,
+            enable_prediction: false,
+            prediction_horizon: Duration::from_secs(600),
+            cache_expiry: Duration::from_secs(30),
+            enable_ml_models: false,
+        };
+        let engine = EnhancedTrendAnalysisEngine::with_config(config);
+        let stats = engine.get_cache_stats();
+        assert_eq!(stats.total_entries, 0);
+    }
+
+    #[test]
+    fn test_engine_update_config() {
+        let engine = EnhancedTrendAnalysisEngine::new();
+        let config = TrendAnalysisConfig {
+            min_data_points: 20,
+            analysis_window: Duration::from_secs(3600),
+            confidence_threshold: 0.5,
+            enable_prediction: true,
+            prediction_horizon: Duration::from_secs(900),
+            cache_expiry: Duration::from_secs(60),
+            enable_ml_models: true,
+        };
+        engine.update_config(config);
+        // Verify it accepts new config without error
+        let stats = engine.get_cache_stats();
+        assert_eq!(stats.total_entries, 0);
+    }
+
+    #[test]
+    fn test_engine_add_algorithm() {
+        let engine = EnhancedTrendAnalysisEngine::new();
+        engine.add_algorithm(Box::new(LinearRegressionTrendDetector::new()));
+        // Should not panic
+    }
+
+    #[test]
+    fn test_engine_add_prediction_model() {
+        let engine = EnhancedTrendAnalysisEngine::new();
+        engine.add_prediction_model(Box::new(LinearRegressionPredictor::new()));
+        // Should not panic
+    }
+
+    // =========================================================================
+    // LINEAR REGRESSION DETECTOR TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_lr_detector_new() {
+        let detector = LinearRegressionTrendDetector::new();
+        assert_eq!(detector.name(), "linear_regression");
+    }
+
+    #[test]
+    fn test_lr_detector_default() {
+        let detector = LinearRegressionTrendDetector;
+        assert_eq!(detector.name(), "linear_regression");
+    }
+
+    #[test]
+    fn test_lr_detector_increasing_trend() {
+        let detector = LinearRegressionTrendDetector::new();
+        let data = make_increasing_data(10);
+        let result = detector.detect_trend(&data);
+        assert!(result.is_ok());
+        let trend = result.expect("detect_trend should succeed");
+        assert!(
+            matches!(trend.direction, TrendDirection::Increasing),
+            "increasing data should show increasing trend"
+        );
+        assert!(trend.strength > 0.0);
+    }
+
+    #[test]
+    fn test_lr_detector_decreasing_trend() {
+        let detector = LinearRegressionTrendDetector::new();
+        let data = make_decreasing_data(10);
+        let result = detector.detect_trend(&data);
+        assert!(result.is_ok());
+        let trend = result.expect("detect_trend should succeed");
+        assert!(
+            matches!(trend.direction, TrendDirection::Decreasing),
+            "decreasing data should show decreasing trend"
+        );
+    }
+
+    #[test]
+    fn test_lr_detector_stable_trend() {
+        let detector = LinearRegressionTrendDetector::new();
+        let data = make_stable_data(10);
+        let result = detector.detect_trend(&data);
+        assert!(result.is_ok());
+        let trend = result.expect("detect_trend should succeed");
+        assert!(
+            matches!(trend.direction, TrendDirection::Stable),
+            "constant data should show stable trend"
+        );
+    }
+
+    #[test]
+    fn test_lr_detector_insufficient_data() {
+        let detector = LinearRegressionTrendDetector::new();
+        let data = vec![make_data_point(100.0, 50)];
+        let result = detector.detect_trend(&data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_lr_detector_is_applicable() {
+        let detector = LinearRegressionTrendDetector::new();
+        assert!(detector.is_applicable(&make_increasing_data(5)));
+        assert!(detector.is_applicable(&make_increasing_data(2)));
+        assert!(!detector.is_applicable(&make_increasing_data(1)));
+    }
+
+    #[test]
+    fn test_lr_detector_confidence_levels() {
+        let detector = LinearRegressionTrendDetector::new();
+        let large_data = make_increasing_data(15);
+        let medium_data = make_increasing_data(7);
+        let small_data = make_increasing_data(3);
+        assert!(detector.confidence(&large_data) > detector.confidence(&medium_data));
+        assert!(detector.confidence(&medium_data) > detector.confidence(&small_data));
+    }
+
+    // =========================================================================
+    // MOVING AVERAGE DETECTOR TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_ma_detector_new() {
+        let detector = MovingAverageTrendDetector::new();
+        assert_eq!(detector.name(), "moving_average");
+    }
+
+    #[test]
+    fn test_ma_detector_default() {
+        let detector = MovingAverageTrendDetector::default();
+        assert_eq!(detector.name(), "moving_average");
+    }
+
+    #[test]
+    fn test_ma_detector_with_window() {
+        let detector = MovingAverageTrendDetector::with_window_size(3);
+        let data = make_increasing_data(10);
+        let result = detector.detect_trend(&data);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ma_detector_insufficient_data() {
+        let detector = MovingAverageTrendDetector::with_window_size(10);
+        let data = make_increasing_data(5);
+        let result = detector.detect_trend(&data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ma_detector_is_applicable() {
+        let detector = MovingAverageTrendDetector::with_window_size(5);
+        assert!(detector.is_applicable(&make_increasing_data(5)));
+        assert!(!detector.is_applicable(&make_increasing_data(4)));
+    }
+
+    // =========================================================================
+    // EXPONENTIAL SMOOTHING DETECTOR TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_es_detector_new() {
+        let detector = ExponentialSmoothingTrendDetector::new();
+        assert_eq!(detector.name(), "exponential_smoothing");
+    }
+
+    #[test]
+    fn test_es_detector_with_alpha() {
+        let detector = ExponentialSmoothingTrendDetector::with_alpha(0.5);
+        let data = make_increasing_data(10);
+        let result = detector.detect_trend(&data);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_es_detector_insufficient_data() {
+        let detector = ExponentialSmoothingTrendDetector::new();
+        let data = make_increasing_data(2);
+        let result = detector.detect_trend(&data);
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // STATISTICAL TREND DETECTOR TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_stat_detector_new() {
+        let detector = StatisticalTrendDetector::new();
+        assert_eq!(detector.name(), "statistical_correlation");
+    }
+
+    #[test]
+    fn test_stat_detector_default() {
+        let detector = StatisticalTrendDetector;
+        assert_eq!(detector.name(), "statistical_correlation");
+    }
+
+    #[test]
+    fn test_stat_detector_insufficient_data() {
+        let detector = StatisticalTrendDetector::new();
+        let data = make_increasing_data(3);
+        let result = detector.detect_trend(&data);
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // CONVERSION / FROM TRAIT TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_trend_analysis_result_to_performance_trend() {
+        let result = TrendAnalysisResult {
+            direction: TrendDirection::Increasing,
+            strength: 0.8,
+            confidence: 0.9,
+            duration: Duration::from_secs(600),
+            significance: 0.95,
+            data_points: Vec::new(),
+            method: "test".to_string(),
+            metrics: HashMap::new(),
+        };
+        let trend: PerformanceTrend = result.into();
+        assert!(matches!(trend.direction, TrendDirection::Increasing));
+        assert!((trend.strength - 0.8).abs() < 1e-6);
+        assert!((trend.confidence - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_performance_trend_to_trend_analysis_result() {
+        let trend = PerformanceTrend {
+            direction: TrendDirection::Decreasing,
+            strength: 0.6,
+            confidence: 0.7,
+            period: Duration::from_secs(300),
+            data_points: Vec::new(),
+        };
+        let result: TrendAnalysisResult = trend.into();
+        assert!(matches!(result.direction, TrendDirection::Decreasing));
+        assert_eq!(result.method, "Cached");
+    }
+
+    // =========================================================================
+    // CACHE STATISTICS TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_cache_statistics_construction() {
+        let stats = CacheStatistics {
+            total_entries: 10,
+            expired_entries: 2,
+            hit_rate: 0.8,
+            memory_usage: 1024,
+        };
+        assert_eq!(stats.total_entries, 10);
+        assert!(stats.hit_rate >= 0.0 && stats.hit_rate <= 1.0);
+    }
+
+    // =========================================================================
+    // ASYNC ENGINE TESTS
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_engine_analyze_trend_increasing() {
+        let engine = EnhancedTrendAnalysisEngine::new();
+        let data = make_increasing_data(10);
+        let result = engine.analyze_trend(&data).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_engine_analyze_trend_insufficient() {
+        let config = TrendAnalysisConfig {
+            min_data_points: 10,
+            analysis_window: Duration::from_secs(3600),
+            confidence_threshold: 0.7,
+            enable_prediction: true,
+            prediction_horizon: Duration::from_secs(1800),
+            cache_expiry: Duration::from_secs(300),
+            enable_ml_models: true,
+        };
+        let engine = EnhancedTrendAnalysisEngine::with_config(config);
+        let data = make_increasing_data(3);
+        let result = engine.analyze_trend(&data).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_engine_clear_cache() {
+        let engine = EnhancedTrendAnalysisEngine::new();
+        engine.clear_cache().await;
+        let stats = engine.get_cache_stats();
+        assert_eq!(stats.total_entries, 0);
+    }
+}

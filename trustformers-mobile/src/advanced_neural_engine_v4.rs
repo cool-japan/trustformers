@@ -1217,4 +1217,198 @@ mod tests {
         assert!(precision_config.mixed_precision.enabled);
         assert!(precision_config.quantization.adaptive_quantization);
     }
+
+    #[test]
+    fn test_dynamic_recompilation_config_defaults() {
+        let config = DynamicRecompilationConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.min_executions, 10);
+        assert_eq!(config.performance_threshold, 0.05);
+        assert_eq!(config.compilation_time_budget_ms, 500);
+        assert!(config.enable_speculative_compilation);
+        assert_eq!(config.analysis_depth, 3);
+    }
+
+    #[test]
+    fn test_memory_hierarchy_config_defaults() {
+        let config = MemoryHierarchyConfig::default();
+        assert!(config.enable_prefetching);
+        assert!(matches!(config.cache_strategy, CacheStrategy::Adaptive));
+        assert!(matches!(
+            config.bandwidth_optimization,
+            BandwidthOptimization::Aggressive
+        ));
+    }
+
+    #[test]
+    fn test_buffer_pooling_config_defaults() {
+        let config = BufferPoolingConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.max_pool_size_bytes, 256 * 1024 * 1024);
+        assert_eq!(config.alignment_bytes, 64);
+        assert!(matches!(
+            config.growth_strategy,
+            PoolGrowthStrategy::Exponential
+        ));
+    }
+
+    #[test]
+    fn test_mixed_precision_config_defaults() {
+        let config = MixedPrecisionConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.loss_scale, 65536.0);
+        assert_eq!(config.gradient_clip_threshold, 1.0);
+        assert!(!config.force_fp16_ops.is_empty());
+        assert!(!config.force_fp32_ops.is_empty());
+    }
+
+    #[test]
+    fn test_quantization_config_defaults() {
+        let config = QuantizationConfig::default();
+        assert!(config.adaptive_quantization);
+        assert!(config.per_channel_quantization);
+        assert_eq!(config.calibration_samples, 1000);
+        assert!(config.qat_config.is_some());
+    }
+
+    #[test]
+    fn test_qat_config_defaults() {
+        let config = QATConfig::default();
+        assert_eq!(config.learning_rate, 1e-5);
+        assert_eq!(config.warmup_steps, 1000);
+        assert_eq!(config.fake_quant_noise, 0.1);
+    }
+
+    #[test]
+    fn test_sparsity_config_defaults() {
+        let config = SparsityConfig::default();
+        assert!(config.exploit_sparsity);
+    }
+
+    #[test]
+    fn test_thermal_management_config_defaults() {
+        let config = ThermalManagementConfig::default();
+        assert!(config.enabled);
+    }
+
+    #[test]
+    fn test_concurrency_config_defaults() {
+        let config = ConcurrencyConfig::default();
+        assert!(config.enable_overlapped_execution);
+    }
+
+    #[test]
+    fn test_attention_optimization_config_defaults() {
+        let config = AttentionOptimizationConfig::default();
+        assert!(config.enable_flash_attention);
+    }
+
+    #[test]
+    fn test_kv_cache_config_defaults() {
+        let config = KVCacheConfig::default();
+        assert!(config.enabled);
+    }
+
+    #[test]
+    fn test_detect_neural_engine_cores_a17pro() {
+        let device_info = IOSDeviceInfo {
+            device_name: "iPhone 15 Pro".to_string(),
+            chip_name: "A17 Pro".to_string(),
+            neural_engine_version: "v4".to_string(),
+            memory_gb: 8,
+            gpu_cores: 6,
+            cpu_cores: 6,
+        };
+        assert_eq!(
+            AdvancedNeuralEngineV4::detect_neural_engine_cores(&device_info),
+            16
+        );
+    }
+
+    #[test]
+    fn test_detect_neural_engine_cores_m3() {
+        let device_info = IOSDeviceInfo {
+            device_name: "MacBook Pro".to_string(),
+            chip_name: "M3 Pro".to_string(),
+            neural_engine_version: "v4".to_string(),
+            memory_gb: 16,
+            gpu_cores: 14,
+            cpu_cores: 12,
+        };
+        assert_eq!(
+            AdvancedNeuralEngineV4::detect_neural_engine_cores(&device_info),
+            16
+        );
+    }
+
+    #[test]
+    fn test_detect_neural_engine_cores_a16() {
+        let device_info = IOSDeviceInfo {
+            device_name: "iPhone 14 Pro".to_string(),
+            chip_name: "A16".to_string(),
+            neural_engine_version: "v3".to_string(),
+            memory_gb: 6,
+            gpu_cores: 5,
+            cpu_cores: 6,
+        };
+        // A16 should get fewer cores
+        let cores = AdvancedNeuralEngineV4::detect_neural_engine_cores(&device_info);
+        assert!(cores > 0);
+    }
+
+    #[test]
+    fn test_neural_engine_precision_variants() {
+        let precisions = vec![
+            NeuralEnginePrecision::INT4,
+            NeuralEnginePrecision::INT8,
+            NeuralEnginePrecision::FP16,
+            NeuralEnginePrecision::Mixed,
+        ];
+        assert_eq!(precisions.len(), 4);
+    }
+
+    #[test]
+    fn test_cache_strategy_variants() {
+        let strategies = vec![
+            CacheStrategy::Conservative,
+            CacheStrategy::Balanced,
+            CacheStrategy::Adaptive,
+            CacheStrategy::Aggressive,
+        ];
+        assert_eq!(strategies.len(), 4);
+    }
+
+    #[test]
+    fn test_bandwidth_optimization_variants() {
+        let levels = vec![
+            BandwidthOptimization::Minimal,
+            BandwidthOptimization::Balanced,
+            BandwidthOptimization::Aggressive,
+        ];
+        assert_eq!(levels.len(), 3);
+    }
+
+    #[test]
+    fn test_pool_growth_strategy_variants() {
+        let strategies = vec![
+            PoolGrowthStrategy::Linear,
+            PoolGrowthStrategy::Exponential,
+            PoolGrowthStrategy::Fibonacci,
+        ];
+        assert_eq!(strategies.len(), 3);
+    }
+
+    #[test]
+    fn test_mixed_precision_fp16_ops_contains_conv() {
+        let config = MixedPrecisionConfig::default();
+        assert!(config.force_fp16_ops.contains(&"conv2d".to_string()));
+        assert!(config.force_fp16_ops.contains(&"matmul".to_string()));
+    }
+
+    #[test]
+    fn test_mixed_precision_fp32_ops_contains_softmax() {
+        let config = MixedPrecisionConfig::default();
+        assert!(config.force_fp32_ops.contains(&"softmax".to_string()));
+        assert!(config.force_fp32_ops.contains(&"layer_norm".to_string()));
+    }
 }

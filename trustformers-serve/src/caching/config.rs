@@ -331,3 +331,194 @@ pub enum CacheOperation {
     Warm,
     Invalidate,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- CacheConfig tests ---
+
+    #[test]
+    fn test_cache_config_default_result_cache_size() {
+        let cfg = CacheConfig::default();
+        assert_eq!(cfg.result_cache.max_size_bytes, 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_cache_config_default_embedding_cache_entries() {
+        let cfg = CacheConfig::default();
+        assert_eq!(cfg.embedding_cache.max_entries, 50_000);
+    }
+
+    #[test]
+    fn test_cache_config_default_kv_cache_layers() {
+        let cfg = CacheConfig::default();
+        assert_eq!(cfg.kv_cache.max_layers, 80);
+    }
+
+    #[test]
+    fn test_cache_config_default_distributed_disabled() {
+        let cfg = CacheConfig::default();
+        assert!(!cfg.enable_distributed);
+    }
+
+    #[test]
+    fn test_cache_config_default_warming_enabled() {
+        let cfg = CacheConfig::default();
+        assert!(cfg.enable_warming);
+    }
+
+    #[test]
+    fn test_cache_config_default_mode_is_performance() {
+        let cfg = CacheConfig::default();
+        assert_eq!(cfg.cache_mode, CacheMode::Performance);
+    }
+
+    #[test]
+    fn test_cache_config_default_consistency_eventual() {
+        let cfg = CacheConfig::default();
+        assert_eq!(cfg.consistency_level, ConsistencyLevel::Eventual);
+    }
+
+    // --- KVCacheConfig tests ---
+
+    #[test]
+    fn test_kv_cache_config_sharing_enabled() {
+        let cfg = CacheConfig::default();
+        assert!(cfg.kv_cache.sharing_enabled);
+    }
+
+    #[test]
+    fn test_kv_cache_config_compression_disabled_by_default() {
+        let cfg = CacheConfig::default();
+        assert!(!cfg.kv_cache.compression_enabled);
+    }
+
+    #[test]
+    fn test_kv_cache_config_eviction_lru() {
+        let cfg = CacheConfig::default();
+        assert_eq!(cfg.kv_cache.eviction_policy, EvictionPolicy::LRU);
+    }
+
+    // --- DistributedConfig tests ---
+
+    #[test]
+    fn test_distributed_config_default_nodes() {
+        let cfg = DistributedConfig::default();
+        assert_eq!(cfg.nodes.len(), 1);
+        assert_eq!(cfg.nodes[0], "localhost:6379");
+    }
+
+    #[test]
+    fn test_distributed_config_default_replication_factor() {
+        let cfg = DistributedConfig::default();
+        assert_eq!(cfg.replication_factor, 1);
+    }
+
+    #[test]
+    fn test_distributed_config_failover_enabled_by_default() {
+        let cfg = DistributedConfig::default();
+        assert!(cfg.enable_failover);
+    }
+
+    #[test]
+    fn test_distributed_config_retry_attempts() {
+        let cfg = DistributedConfig::default();
+        assert_eq!(cfg.retry_attempts, 3);
+    }
+
+    // --- WarmingConfig tests ---
+
+    #[test]
+    fn test_warming_config_default_enabled() {
+        let cfg = WarmingConfig::default();
+        assert!(cfg.enabled);
+    }
+
+    #[test]
+    fn test_warming_config_default_has_two_strategies() {
+        let cfg = WarmingConfig::default();
+        assert_eq!(cfg.strategies.len(), 2);
+    }
+
+    #[test]
+    fn test_warming_config_default_strategies_include_popular() {
+        let cfg = WarmingConfig::default();
+        assert!(cfg.strategies.contains(&WarmingStrategy::PopularQueries));
+    }
+
+    #[test]
+    fn test_warming_config_default_strategies_include_recent() {
+        let cfg = WarmingConfig::default();
+        assert!(cfg.strategies.contains(&WarmingStrategy::RecentQueries));
+    }
+
+    #[test]
+    fn test_warming_config_default_max_concurrent() {
+        let cfg = WarmingConfig::default();
+        assert_eq!(cfg.max_concurrent_requests, 10);
+    }
+
+    #[test]
+    fn test_warming_config_hit_rate_threshold() {
+        let cfg = WarmingConfig::default();
+        assert!((cfg.min_hit_rate_threshold - 0.7).abs() < 1e-6);
+    }
+
+    // --- EvictionPolicy tests ---
+
+    #[test]
+    fn test_eviction_policy_equality_lru() {
+        let p1 = EvictionPolicy::LRU;
+        let p2 = EvictionPolicy::LRU;
+        assert_eq!(p1, p2);
+    }
+
+    #[test]
+    fn test_eviction_policy_inequality() {
+        assert_ne!(EvictionPolicy::LRU, EvictionPolicy::LFU);
+        assert_ne!(EvictionPolicy::TTL, EvictionPolicy::FIFO);
+        assert_ne!(EvictionPolicy::Priority, EvictionPolicy::Random);
+    }
+
+    // --- CacheMode tests ---
+
+    #[test]
+    fn test_cache_mode_equality() {
+        assert_eq!(CacheMode::Performance, CacheMode::Performance);
+        assert_ne!(CacheMode::Memory, CacheMode::Balanced);
+    }
+
+    // --- ConsistencyLevel tests ---
+
+    #[test]
+    fn test_consistency_level_equality() {
+        assert_eq!(ConsistencyLevel::Strong, ConsistencyLevel::Strong);
+        assert_ne!(ConsistencyLevel::Eventual, ConsistencyLevel::Weak);
+    }
+
+    // --- WarmingSchedule tests ---
+
+    #[test]
+    fn test_warming_schedule_startup_equality() {
+        assert_eq!(WarmingSchedule::Startup, WarmingSchedule::Startup);
+        assert_ne!(WarmingSchedule::Manual, WarmingSchedule::Startup);
+    }
+
+    // --- PowerScalingFactors (no direct dep but TierConfig clone) ---
+
+    #[test]
+    fn test_tier_config_clone() {
+        let tier = TierConfig {
+            max_size_bytes: 100,
+            max_entries: 10,
+            default_ttl: Duration::from_secs(60),
+            eviction_policy: EvictionPolicy::LRU,
+            compression_enabled: false,
+            tier_name: "test".to_string(),
+        };
+        let cloned = tier.clone();
+        assert_eq!(cloned.max_size_bytes, 100);
+        assert_eq!(cloned.tier_name, "test");
+    }
+}

@@ -740,3 +740,196 @@ impl Default for KernelFusionEngine {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel_fusion::graph::{
+        ComputationGraph, DataType, Device as GraphDevice, GraphNode, MemoryLayout, NodeMetadata,
+        TensorInfo,
+    };
+    use crate::kernel_fusion::operation_types::OperationType;
+
+    fn make_tensor_info(shape: Vec<usize>) -> TensorInfo {
+        TensorInfo {
+            shape,
+            dtype: DataType::F32,
+            device: GraphDevice::CPU,
+            memory_layout: MemoryLayout::RowMajor,
+        }
+    }
+
+    fn make_node(id: &str, op: OperationType) -> GraphNode {
+        GraphNode {
+            id: id.to_string(),
+            operation: op,
+            inputs: vec![make_tensor_info(vec![2, 3])],
+            outputs: vec![make_tensor_info(vec![2, 3])],
+            metadata: NodeMetadata {
+                estimated_ops: 100,
+                estimated_memory: 1024,
+                is_fusible: true,
+                fusion_priority: 1.0,
+                execution_time_ns: None,
+            },
+        }
+    }
+
+    fn make_empty_graph() -> ComputationGraph {
+        ComputationGraph {
+            nodes: HashMap::new(),
+            edges: HashMap::new(),
+            execution_order: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_engine_creation() {
+        let engine = KernelFusionEngine::new();
+        assert!(!engine.patterns.is_empty());
+    }
+
+    #[test]
+    fn test_engine_default() {
+        let engine = KernelFusionEngine::default();
+        assert!(!engine.patterns.is_empty());
+    }
+
+    #[test]
+    fn test_engine_has_constraints() {
+        let engine = KernelFusionEngine::new();
+        assert!(!engine.constraints.is_empty());
+    }
+
+    #[test]
+    fn test_analyze_empty_graph() -> crate::errors::Result<()> {
+        let engine = KernelFusionEngine::new();
+        let graph = make_empty_graph();
+        let opportunities = engine.analyze_graph(&graph)?;
+        assert!(opportunities.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_analyze_single_node_graph() -> crate::errors::Result<()> {
+        let engine = KernelFusionEngine::new();
+        let mut graph = make_empty_graph();
+        let node = make_node("n1", OperationType::Add);
+        graph.nodes.insert("n1".to_string(), node);
+        graph.execution_order.push("n1".to_string());
+        let opportunities = engine.analyze_graph(&graph)?;
+        // Single node cannot form a pattern
+        assert!(opportunities.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_shapes_broadcastable_same() {
+        let engine = KernelFusionEngine::new();
+        assert!(engine.shapes_broadcastable(&[2, 3], &[2, 3]));
+    }
+
+    #[test]
+    fn test_shapes_broadcastable_broadcast_1() {
+        let engine = KernelFusionEngine::new();
+        assert!(engine.shapes_broadcastable(&[1, 3], &[2, 3]));
+    }
+
+    #[test]
+    fn test_shapes_broadcastable_different_ndim() {
+        let engine = KernelFusionEngine::new();
+        // This engine's shapes_broadcastable requires same ndim
+        assert!(!engine.shapes_broadcastable(&[3], &[2, 3]));
+    }
+
+    #[test]
+    fn test_shapes_not_broadcastable() {
+        let engine = KernelFusionEngine::new();
+        assert!(!engine.shapes_broadcastable(&[2, 3], &[2, 4]));
+    }
+
+    #[test]
+    fn test_shapes_broadcastable_empty() {
+        let engine = KernelFusionEngine::new();
+        assert!(engine.shapes_broadcastable(&[], &[]));
+    }
+
+    #[test]
+    fn test_generated_kernels_initially_empty() {
+        let engine = KernelFusionEngine::new();
+        let kernels_lock = engine.generated_kernels.read();
+        if let Ok(kernels) = kernels_lock {
+            assert!(kernels.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_fusion_statistics_initially_zero() {
+        let engine = KernelFusionEngine::new();
+        let stats_lock = engine.fusion_statistics.read();
+        if let Ok(stats) = stats_lock {
+            assert_eq!(stats.total_fusions_attempted, 0);
+            assert_eq!(stats.successful_fusions, 0);
+        }
+    }
+
+    #[test]
+    fn test_fuse_operations_empty_graph() -> crate::errors::Result<()> {
+        let engine = KernelFusionEngine::new();
+        let graph = make_empty_graph();
+        let opportunities = engine.analyze_graph(&graph)?;
+        // No opportunities means no fusions
+        for opp in &opportunities {
+            let _result = engine.fuse_operations(&graph, opp);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_analyze_graph_with_two_nodes() -> crate::errors::Result<()> {
+        let engine = KernelFusionEngine::new();
+        let mut graph = make_empty_graph();
+        let n1 = make_node("n1", OperationType::MatMul);
+        let n2 = make_node("n2", OperationType::ReLU);
+        graph.nodes.insert("n1".to_string(), n1);
+        graph.nodes.insert("n2".to_string(), n2);
+        graph.edges.insert("n2".to_string(), vec!["n1".to_string()]);
+        graph.execution_order.push("n1".to_string());
+        graph.execution_order.push("n2".to_string());
+        let opportunities = engine.analyze_graph(&graph)?;
+        // May or may not find opportunities depending on pattern matching
+        let _ = opportunities;
+        Ok(())
+    }
+
+    #[test]
+    fn test_shapes_broadcastable_scalar() {
+        let engine = KernelFusionEngine::new();
+        assert!(engine.shapes_broadcastable(&[1], &[5]));
+    }
+
+    #[test]
+    fn test_shapes_broadcastable_high_dim() {
+        let engine = KernelFusionEngine::new();
+        assert!(engine.shapes_broadcastable(&[1, 1, 3], &[2, 4, 3]));
+    }
+
+    #[test]
+    fn test_performance_database_initially_populated() {
+        let engine = KernelFusionEngine::new();
+        let db_lock = engine.performance_database.read();
+        if let Ok(db) = db_lock {
+            let _ = &db.operation_costs;
+        }
+    }
+
+    #[test]
+    fn test_engine_patterns_contain_linear_activation() {
+        let engine = KernelFusionEngine::new();
+        let has_linear = engine
+            .patterns
+            .iter()
+            .any(|p| matches!(p, FusionPattern::LinearActivation { .. }));
+        assert!(has_linear);
+    }
+}

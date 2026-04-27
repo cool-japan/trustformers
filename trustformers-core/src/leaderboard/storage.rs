@@ -471,4 +471,193 @@ mod tests {
         let all = storage.list_all().await.expect("async operation failed");
         assert_eq!(all.len(), 0);
     }
+
+    #[tokio::test]
+    async fn test_memory_storage_default() {
+        let storage = MemoryStorage::default();
+        let all = storage.list_all().await.expect("async operation failed");
+        assert!(all.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_memory_storage_multiple_entries() {
+        let storage = MemoryStorage::new();
+        let entry1 = create_test_entry().await;
+        let entry2 = create_test_entry().await;
+
+        storage.store(&entry1).await.expect("store failed");
+        storage.store(&entry2).await.expect("store failed");
+
+        let all = storage.list_all().await.expect("list failed");
+        assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_memory_storage_get_nonexistent() {
+        let storage = MemoryStorage::new();
+        let result = storage.get(Uuid::new_v4()).await.expect("get failed");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_memory_storage_delete_nonexistent() {
+        let storage = MemoryStorage::new();
+        // Deleting nonexistent should not error
+        let result = storage.delete(Uuid::new_v4()).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_memory_storage_update() {
+        let storage = MemoryStorage::new();
+        let mut entry = create_test_entry().await;
+
+        storage.store(&entry).await.expect("store failed");
+        entry.model_version = "2.0".to_string();
+        storage.update(&entry).await.expect("update failed");
+
+        let retrieved = storage.get(entry.id).await.expect("get failed");
+        assert!(retrieved.is_some());
+        if let Some(r) = retrieved {
+            assert_eq!(r.model_version, "2.0");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_memory_storage_clear_multiple() {
+        let storage = MemoryStorage::new();
+        let e1 = create_test_entry().await;
+        let e2 = create_test_entry().await;
+        let e3 = create_test_entry().await;
+
+        storage.store(&e1).await.expect("store failed");
+        storage.store(&e2).await.expect("store failed");
+        storage.store(&e3).await.expect("store failed");
+
+        let all_before = storage.list_all().await.expect("list failed");
+        assert_eq!(all_before.len(), 3);
+
+        storage.clear().await.expect("clear failed");
+        let all_after = storage.list_all().await.expect("list failed");
+        assert_eq!(all_after.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_memory_storage_query_with_limit() {
+        let storage = MemoryStorage::new();
+        let e1 = create_test_entry().await;
+        let e2 = create_test_entry().await;
+        let e3 = create_test_entry().await;
+
+        storage.store(&e1).await.expect("store failed");
+        storage.store(&e2).await.expect("store failed");
+        storage.store(&e3).await.expect("store failed");
+
+        let query = LeaderboardQuery {
+            limit: Some(2),
+            ..LeaderboardQuery::default()
+        };
+        let results = storage.query(&query).await.expect("query failed");
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_file_storage_multiple_entries() {
+        let temp_dir = TempDir::new().expect("temp dir failed");
+        let storage = FileStorage::new(temp_dir.path()).await.expect("create failed");
+
+        let e1 = create_test_entry().await;
+        let e2 = create_test_entry().await;
+
+        storage.store(&e1).await.expect("store failed");
+        storage.store(&e2).await.expect("store failed");
+
+        let all = storage.list_all().await.expect("list failed");
+        assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_file_storage_update() {
+        let temp_dir = TempDir::new().expect("temp dir failed");
+        let storage = FileStorage::new(temp_dir.path()).await.expect("create failed");
+
+        let mut entry = create_test_entry().await;
+        storage.store(&entry).await.expect("store failed");
+
+        entry.model_version = "3.0".to_string();
+        storage.update(&entry).await.expect("update failed");
+
+        let retrieved = storage.get(entry.id).await.expect("get failed");
+        if let Some(r) = retrieved {
+            assert_eq!(r.model_version, "3.0");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_file_storage_clear() {
+        let temp_dir = TempDir::new().expect("temp dir failed");
+        let storage = FileStorage::new(temp_dir.path()).await.expect("create failed");
+
+        let entry = create_test_entry().await;
+        storage.store(&entry).await.expect("store failed");
+
+        storage.clear().await.expect("clear failed");
+        let all = storage.list_all().await.expect("list failed");
+        assert_eq!(all.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_file_storage_query() {
+        let temp_dir = TempDir::new().expect("temp dir failed");
+        let storage = FileStorage::new(temp_dir.path()).await.expect("create failed");
+
+        let entry = create_test_entry().await;
+        storage.store(&entry).await.expect("store failed");
+
+        let query = LeaderboardQuery::default();
+        let results = storage.query(&query).await.expect("query failed");
+        assert_eq!(results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_file_storage_get_nonexistent() {
+        let temp_dir = TempDir::new().expect("temp dir failed");
+        let storage = FileStorage::new(temp_dir.path()).await.expect("create failed");
+
+        let result = storage.get(Uuid::new_v4()).await.expect("get failed");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_memory_storage_store_get_roundtrip() {
+        let storage = MemoryStorage::new();
+        let entry = create_test_entry().await;
+        let entry_id = entry.id;
+
+        storage.store(&entry).await.expect("store failed");
+        let retrieved = storage.get(entry_id).await.expect("get failed");
+
+        assert!(retrieved.is_some());
+        if let Some(r) = retrieved {
+            assert_eq!(r.model_name, "test_model");
+            assert_eq!(r.benchmark_name, "test_benchmark");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_memory_storage_delete_specific() {
+        let storage = MemoryStorage::new();
+        let e1 = create_test_entry().await;
+        let e2 = create_test_entry().await;
+        let e1_id = e1.id;
+
+        storage.store(&e1).await.expect("store failed");
+        storage.store(&e2).await.expect("store failed");
+
+        storage.delete(e1_id).await.expect("delete failed");
+
+        let all = storage.list_all().await.expect("list failed");
+        assert_eq!(all.len(), 1);
+        assert!(storage.get(e1_id).await.expect("get failed").is_none());
+    }
 }

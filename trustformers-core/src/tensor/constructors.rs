@@ -933,3 +933,417 @@ impl Tensor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_1d_tensor() -> Result<()> {
+        let t = Tensor::new(vec![1.0, 2.0, 3.0])?;
+        assert_eq!(t.shape(), vec![3]);
+        assert_eq!(t.dtype(), DType::F32);
+        Ok(())
+    }
+
+    #[test]
+    fn test_new_empty_tensor() -> Result<()> {
+        let t = Tensor::new(vec![])?;
+        assert_eq!(t.shape(), vec![0]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_with_shape_2d() -> Result<()> {
+        let t = Tensor::with_shape(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2])?;
+        assert_eq!(t.shape(), vec![2, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_with_shape_mismatch() {
+        let result = Tensor::with_shape(vec![1.0, 2.0, 3.0], vec![2, 2]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_vec_i64() -> Result<()> {
+        let t = Tensor::from_vec_i64(vec![10, 20, 30, 40], &[2, 2])?;
+        assert_eq!(t.shape(), vec![2, 2]);
+        assert_eq!(t.dtype(), DType::I64);
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_vec_i64_shape_mismatch() {
+        let result = Tensor::from_vec_i64(vec![1, 2, 3], &[2, 2]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_zeros() -> Result<()> {
+        let t = Tensor::zeros(&[3, 4])?;
+        assert_eq!(t.shape(), vec![3, 4]);
+        let data = t.data()?;
+        for val in &data {
+            assert!((val - 0.0).abs() < 1e-7);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_ones() -> Result<()> {
+        let t = Tensor::ones(&[2, 3])?;
+        assert_eq!(t.shape(), vec![2, 3]);
+        let data = t.data()?;
+        for val in &data {
+            assert!((val - 1.0).abs() < 1e-7);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_zeros_like() -> Result<()> {
+        let orig = Tensor::ones(&[3, 5])?;
+        let z = Tensor::zeros_like(&orig)?;
+        assert_eq!(z.shape(), vec![3, 5]);
+        let data = z.data()?;
+        for val in &data {
+            assert!((val - 0.0).abs() < 1e-7);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_ones_like() -> Result<()> {
+        let orig = Tensor::zeros(&[4, 2])?;
+        let o = Tensor::ones_like(&orig)?;
+        assert_eq!(o.shape(), vec![4, 2]);
+        let data = o.data()?;
+        for val in &data {
+            assert!((val - 1.0).abs() < 1e-7);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_data() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])?;
+        assert_eq!(t.shape(), vec![2, 3]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_data_shape_mismatch() {
+        let result = Tensor::from_data(vec![1.0, 2.0], &[3, 3]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_slice() -> Result<()> {
+        let data = [1.0, 2.0, 3.0, 4.0];
+        let t = Tensor::from_slice(&data, &[4])?;
+        assert_eq!(t.shape(), vec![4]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_slice_shape_mismatch() {
+        let data = [1.0, 2.0];
+        let result = Tensor::from_slice(&data, &[5]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_randn() -> Result<()> {
+        let t = Tensor::randn(&[10, 10])?;
+        assert_eq!(t.shape(), vec![10, 10]);
+        assert_eq!(t.dtype(), DType::F32);
+        Ok(())
+    }
+
+    #[test]
+    fn test_randn_like() -> Result<()> {
+        let orig = Tensor::zeros(&[5, 3])?;
+        let r = Tensor::randn_like(&orig)?;
+        assert_eq!(r.shape(), vec![5, 3]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_zeros_f64() -> Result<()> {
+        let t = Tensor::zeros_f64(&[2, 2])?;
+        assert_eq!(t.shape(), vec![2, 2]);
+        assert_eq!(t.dtype(), DType::F64);
+        Ok(())
+    }
+
+    #[test]
+    fn test_zeros_i64() -> Result<()> {
+        let t = Tensor::zeros_i64(&[3])?;
+        assert_eq!(t.shape(), vec![3]);
+        assert_eq!(t.dtype(), DType::I64);
+        Ok(())
+    }
+
+    #[test]
+    fn test_zeros_c32() -> Result<()> {
+        let t = Tensor::zeros_c32(&[2, 3])?;
+        assert_eq!(t.shape(), vec![2, 3]);
+        assert_eq!(t.dtype(), DType::C32);
+        Ok(())
+    }
+
+    #[test]
+    fn test_zeros_c64() -> Result<()> {
+        let t = Tensor::zeros_c64(&[4])?;
+        assert_eq!(t.shape(), vec![4]);
+        assert_eq!(t.dtype(), DType::C64);
+        Ok(())
+    }
+
+    #[test]
+    fn test_zeros_f16() -> Result<()> {
+        let t = Tensor::zeros_f16(&[2, 2])?;
+        assert_eq!(t.shape(), vec![2, 2]);
+        assert_eq!(t.dtype(), DType::F16);
+        Ok(())
+    }
+
+    #[test]
+    fn test_zeros_bf16() -> Result<()> {
+        let t = Tensor::zeros_bf16(&[3, 3])?;
+        assert_eq!(t.shape(), vec![3, 3]);
+        assert_eq!(t.dtype(), DType::BF16);
+        Ok(())
+    }
+
+    #[test]
+    fn test_complex_c32() -> Result<()> {
+        let t = Tensor::complex(vec![1.0, 2.0], vec![3.0, 4.0], &[2])?;
+        assert_eq!(t.shape(), vec![2]);
+        assert_eq!(t.dtype(), DType::C32);
+        Ok(())
+    }
+
+    #[test]
+    fn test_complex_c32_length_mismatch() {
+        let result = Tensor::complex(vec![1.0], vec![2.0, 3.0], &[2]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_complex_f64() -> Result<()> {
+        let t = Tensor::complex_f64(vec![1.0, 2.0], vec![3.0, 4.0], &[2])?;
+        assert_eq!(t.shape(), vec![2]);
+        assert_eq!(t.dtype(), DType::C64);
+        Ok(())
+    }
+
+    #[test]
+    fn test_full() -> Result<()> {
+        let t = Tensor::full(std::f32::consts::PI, vec![2, 3])?;
+        assert_eq!(t.shape(), vec![2, 3]);
+        let data = t.data()?;
+        for val in &data {
+            assert!((val - std::f32::consts::PI).abs() < 1e-5);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_full_with_dtype_f32() -> Result<()> {
+        let t = Tensor::full_with_dtype(&[3, 2], 5.0, DType::F32)?;
+        assert_eq!(t.shape(), vec![3, 2]);
+        assert_eq!(t.dtype(), DType::F32);
+        Ok(())
+    }
+
+    #[test]
+    fn test_full_with_dtype_f64() -> Result<()> {
+        let t = Tensor::full_with_dtype(&[2], 7.0, DType::F64)?;
+        assert_eq!(t.dtype(), DType::F64);
+        Ok(())
+    }
+
+    #[test]
+    fn test_full_with_dtype_i64() -> Result<()> {
+        let t = Tensor::full_with_dtype(&[4], 42.0, DType::I64)?;
+        assert_eq!(t.dtype(), DType::I64);
+        Ok(())
+    }
+
+    #[test]
+    fn test_scalar() -> Result<()> {
+        let t = Tensor::scalar(std::f32::consts::E)?;
+        assert_eq!(t.shape(), Vec::<usize>::new());
+        assert_eq!(t.dtype(), DType::F32);
+        Ok(())
+    }
+
+    #[test]
+    fn test_eye_f32() -> Result<()> {
+        let t = Tensor::eye_f32(3)?;
+        assert_eq!(t.shape(), vec![3, 3]);
+        let data = t.data()?;
+        // Check diagonal is 1, off-diagonal is 0
+        for i in 0..3 {
+            for j in 0..3 {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!((data[i * 3 + j] - expected).abs() < 1e-7);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_vec_with_dtype_f32() -> Result<()> {
+        let t = Tensor::from_vec_with_dtype(vec![1.0, 2.0, 3.0], &[3], DType::F32)?;
+        assert_eq!(t.dtype(), DType::F32);
+        assert_eq!(t.shape(), vec![3]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_vec_with_dtype_f64() -> Result<()> {
+        let t = Tensor::from_vec_with_dtype(vec![1.0, 2.0], &[2], DType::F64)?;
+        assert_eq!(t.dtype(), DType::F64);
+        Ok(())
+    }
+
+    #[test]
+    fn test_zeros_dtype_various() -> Result<()> {
+        for dtype in &[DType::F32, DType::F64, DType::I64, DType::C32, DType::C64] {
+            let t = Tensor::zeros_dtype(*dtype, &[2, 2])?;
+            assert_eq!(t.dtype(), *dtype);
+            assert_eq!(t.shape(), vec![2, 2]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_ones_dtype_f32() -> Result<()> {
+        let t = Tensor::ones_dtype(DType::F32, &[3])?;
+        assert_eq!(t.dtype(), DType::F32);
+        let data = t.data()?;
+        for val in &data {
+            assert!((val - 1.0).abs() < 1e-7);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_full_with_shape() -> Result<()> {
+        let t = Tensor::full_with_shape(&[2, 4], 9.9)?;
+        assert_eq!(t.shape(), vec![2, 4]);
+        let data = t.data()?;
+        for val in &data {
+            assert!((val - 9.9).abs() < 1e-5);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_slice_f64() -> Result<()> {
+        let data = [1.0f64, 2.0, 3.0, 4.0];
+        let t = Tensor::from_slice_f64(&data, &[2, 2])?;
+        assert_eq!(t.shape(), vec![2, 2]);
+        assert_eq!(t.dtype(), DType::F64);
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_slice_i64() -> Result<()> {
+        let data = [10i64, 20, 30];
+        let t = Tensor::from_slice_i64(&data, &[3])?;
+        assert_eq!(t.shape(), vec![3]);
+        assert_eq!(t.dtype(), DType::I64);
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_slice_i32() -> Result<()> {
+        let data = [1i32, 2, 3, 4];
+        let t = Tensor::from_slice_i32(&data, &[4])?;
+        assert_eq!(t.shape(), vec![4]);
+        // Stored as I64
+        assert_eq!(t.dtype(), DType::I64);
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_scalar_f32() -> Result<()> {
+        let t = Tensor::from_scalar(42.0, DType::F32)?;
+        assert_eq!(t.shape(), Vec::<usize>::new());
+        assert_eq!(t.dtype(), DType::F32);
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_scalar_f64() -> Result<()> {
+        let t = Tensor::from_scalar(std::f32::consts::PI, DType::F64)?;
+        assert_eq!(t.dtype(), DType::F64);
+        Ok(())
+    }
+
+    #[test]
+    fn test_range_i64() -> Result<()> {
+        let t = Tensor::range(0, 5, DType::I64)?;
+        assert_eq!(t.shape(), vec![5]);
+        assert_eq!(t.dtype(), DType::I64);
+        Ok(())
+    }
+
+    #[test]
+    fn test_range_f32() -> Result<()> {
+        let t = Tensor::range(1, 4, DType::F32)?;
+        assert_eq!(t.shape(), vec![3]);
+        assert_eq!(t.dtype(), DType::F32);
+        Ok(())
+    }
+
+    #[test]
+    fn test_range_invalid() {
+        let result = Tensor::range(5, 2, DType::I64);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_randint_i64() -> Result<()> {
+        let t = Tensor::randint(0, 10, &[5], DType::I64)?;
+        assert_eq!(t.shape(), vec![5]);
+        assert_eq!(t.dtype(), DType::I64);
+        Ok(())
+    }
+
+    #[test]
+    fn test_randint_invalid_range() {
+        let result = Tensor::randint(10, 5, &[3], DType::I64);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_3d_tensor_construction() -> Result<()> {
+        let data: Vec<f32> = (0..24).map(|i| i as f32).collect();
+        let t = Tensor::from_data(data, &[2, 3, 4])?;
+        assert_eq!(t.shape(), vec![2, 3, 4]);
+        assert_eq!(t.ndim(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn test_ones_f16() -> Result<()> {
+        let t = Tensor::ones_f16(&[2, 2])?;
+        assert_eq!(t.shape(), vec![2, 2]);
+        assert_eq!(t.dtype(), DType::F16);
+        Ok(())
+    }
+
+    #[test]
+    fn test_ones_bf16() -> Result<()> {
+        let t = Tensor::ones_bf16(&[3])?;
+        assert_eq!(t.shape(), vec![3]);
+        assert_eq!(t.dtype(), DType::BF16);
+        Ok(())
+    }
+}

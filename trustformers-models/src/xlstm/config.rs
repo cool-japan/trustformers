@@ -185,7 +185,7 @@ impl MLstmConfig {
     /// Create a new mLSTM configuration with proper head dimension calculation
     pub fn new(hidden_size: usize, num_heads: usize) -> Self {
         assert!(
-            hidden_size % num_heads == 0,
+            hidden_size.is_multiple_of(num_heads),
             "Hidden size must be divisible by number of heads"
         );
 

@@ -286,13 +286,13 @@ impl Config for AlbertConfig {
                 "num_attention_heads must be greater than 0",
             ));
         }
-        if self.hidden_size % self.num_attention_heads != 0 {
+        if !self.hidden_size.is_multiple_of(self.num_attention_heads) {
             return Err(invalid_config(
                 "hidden_size",
                 "hidden_size must be divisible by num_attention_heads",
             ));
         }
-        if self.num_hidden_layers % self.num_hidden_groups != 0 {
+        if !self.num_hidden_layers.is_multiple_of(self.num_hidden_groups) {
             return Err(invalid_config(
                 "num_hidden_layers",
                 "num_hidden_layers must be divisible by num_hidden_groups",

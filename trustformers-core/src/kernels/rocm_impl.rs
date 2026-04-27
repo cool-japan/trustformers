@@ -473,7 +473,13 @@ impl RocmImpl {
         Ok(gpu_ptr)
     }
 
-    /// Copy data from GPU to tensor
+    /// Copy data from GPU to tensor.
+    ///
+    /// # Safety
+    ///
+    /// `gpu_ptr` must be a valid HIP device pointer allocated for the tensor's data.
+    /// The caller must ensure the pointer remains valid and that no concurrent GPU
+    /// writes are in flight during the copy.
     pub unsafe fn copy_from_gpu(
         &self,
         gpu_ptr: *mut std::ffi::c_void,
@@ -523,7 +529,7 @@ impl RocmImpl {
         let kernel = self.compile_kernel(
             "rocm_matmul",
             &kernel_source,
-            ((n + 15) / 16, (m + 15) / 16, 1),
+            (n.div_ceil(16), m.div_ceil(16), 1),
             (16, 16, 1),
         )?;
 
@@ -589,9 +595,9 @@ impl RocmImpl {
     }
 
     /// Generate ROCm-optimized matrix multiplication kernel
-    fn generate_rocm_matmul_kernel(&self, m: u32, k: u32, n: u32) -> String {
-        format!(
-            r#"
+    fn generate_rocm_matmul_kernel(&self, _m: u32, _k: u32, _n: u32) -> String {
+        // Kernel template uses C-level constants; dimension params drive grid launch not source.
+        r#"
 #include <hip/hip_runtime.h>
 
 extern "C" __global__ void rocm_matmul(
@@ -601,7 +607,7 @@ extern "C" __global__ void rocm_matmul(
     const unsigned int M,
     const unsigned int K,
     const unsigned int N
-) {{
+) {
     // Optimized for AMD RDNA architecture with 64-wide wavefronts
     const int TILE_SIZE = 16;
     const int tx = threadIdx.x;
@@ -620,7 +626,7 @@ extern "C" __global__ void rocm_matmul(
     float sum = 0.0f;
 
     // Tile loop optimized for AMD GPU memory hierarchy
-    for (int t = 0; t < (K + TILE_SIZE - 1) / TILE_SIZE; ++t) {{
+    for (int t = 0; t < (K + TILE_SIZE - 1) / TILE_SIZE; ++t) {
         // Load tile into LDS with coalesced access
         int a_col = t * TILE_SIZE + tx;
         int b_row = t * TILE_SIZE + ty;
@@ -633,20 +639,20 @@ extern "C" __global__ void rocm_matmul(
 
         // Compute partial dot product with manual unrolling for AMD ALUs
         #pragma unroll
-        for (int i = 0; i < TILE_SIZE; ++i) {{
+        for (int i = 0; i < TILE_SIZE; ++i) {
             sum += As[ty][i] * Bs[i][tx];
-        }}
+        }
 
         __syncthreads();
-    }}
+    }
 
     // Write result with bounds checking
-    if (row < M && col < N) {{
+    if (row < M && col < N) {
         C[row * N + col] = sum;
-    }}
-}}
+    }
+}
 "#
-        )
+        .to_string()
     }
 
     /// Execute Flash Attention using ROCm
@@ -739,12 +745,12 @@ extern "C" __global__ void rocm_matmul(
     /// Generate ROCm Flash Attention kernel
     fn generate_rocm_flash_attention_kernel(
         &self,
-        batch_size: u32,
-        seq_len: u32,
-        head_dim: u32,
+        _batch_size: u32,
+        _seq_len: u32,
+        _head_dim: u32,
     ) -> String {
-        format!(
-            r#"
+        // Kernel template uses C-level params passed at launch; dimension args drive grid not source.
+        r#"
 #include <hip/hip_runtime.h>
 
 extern "C" __global__ void rocm_flash_attention(
@@ -755,7 +761,7 @@ extern "C" __global__ void rocm_flash_attention(
     const unsigned int batch_size,
     const unsigned int seq_len,
     const unsigned int head_dim
-) {{
+) {
     // Flash Attention optimized for AMD RDNA architecture
     const int batch_id = blockIdx.x;
     const int seq_id = blockIdx.y;
@@ -770,63 +776,63 @@ extern "C" __global__ void rocm_flash_attention(
 
     // Compute QK^T scores with wavefront-optimized memory access
     float max_score = -INFINITY;
-    for (int k = lane_id; k < seq_len; k += 64) {{ // 64-wide wavefront
+    for (int k = lane_id; k < seq_len; k += 64) { // 64-wide wavefront
         float score = 0.0f;
-        for (int d = 0; d < head_dim; d++) {{
+        for (int d = 0; d < head_dim; d++) {
             int q_idx = batch_id * seq_len * head_dim + seq_id * head_dim + d;
             int k_idx = batch_id * seq_len * head_dim + k * head_dim + d;
             score += Q[q_idx] * K[k_idx];
-        }}
+        }
         lds_scores[k] = score;
         max_score = fmaxf(max_score, score);
-    }}
+    }
 
     // Wavefront-level reduction for maximum
     #pragma unroll
-    for (int offset = 32; offset > 0; offset >>= 1) {{
+    for (int offset = 32; offset > 0; offset >>= 1) {
         max_score = fmaxf(max_score, __shfl_down(max_score, offset));
-    }}
+    }
 
     // Broadcast max to all lanes in wavefront
     max_score = __shfl(max_score, 0);
 
     // Compute softmax with numerical stability
     float sum_exp = 0.0f;
-    for (int k = lane_id; k < seq_len; k += 64) {{
+    for (int k = lane_id; k < seq_len; k += 64) {
         float exp_score = expf(lds_scores[k] - max_score);
         lds_scores[k] = exp_score;
         sum_exp += exp_score;
-    }}
+    }
 
     // Wavefront-level reduction for sum
     #pragma unroll
-    for (int offset = 32; offset > 0; offset >>= 1) {{
+    for (int offset = 32; offset > 0; offset >>= 1) {
         sum_exp += __shfl_down(sum_exp, offset);
-    }}
+    }
 
     // Broadcast sum to all lanes
     sum_exp = __shfl(sum_exp, 0);
 
     // Normalize attention weights
-    for (int k = lane_id; k < seq_len; k += 64) {{
+    for (int k = lane_id; k < seq_len; k += 64) {
         lds_scores[k] /= sum_exp;
-    }}
+    }
 
     __syncthreads();
 
     // Compute output with optimized memory access
-    for (int d = lane_id; d < head_dim; d += 64) {{
+    for (int d = lane_id; d < head_dim; d += 64) {
         float output_val = 0.0f;
-        for (int k = 0; k < seq_len; k++) {{
+        for (int k = 0; k < seq_len; k++) {
             int v_idx = batch_id * seq_len * head_dim + k * head_dim + d;
             output_val += lds_scores[k] * V[v_idx];
-        }}
+        }
         int o_idx = batch_id * seq_len * head_dim + seq_id * head_dim + d;
         O[o_idx] = output_val;
-    }}
-}}
+    }
+}
 "#
-        )
+        .to_string()
     }
 
     /// Get device information
@@ -852,7 +858,7 @@ extern "C" __global__ void rocm_flash_attention(
 
         // Generate optimized GELU kernel for ROCm/HIP
         let kernel_source = self.generate_fused_gelu_kernel(approximate);
-        let grid_size = ((total_elements + 255) / 256) as u32;
+        let grid_size = total_elements.div_ceil(256) as u32;
         let kernel = self.compile_kernel(
             "fused_gelu_kernel",
             &kernel_source,
@@ -928,7 +934,7 @@ extern "C" __global__ void rocm_flash_attention(
 
         // Generate optimized bias+activation kernel for ROCm/HIP
         let kernel_source = self.generate_fused_bias_activation_kernel(activation);
-        let grid_size = ((total_elements + 255) / 256) as u32;
+        let grid_size = total_elements.div_ceil(256) as u32;
         let kernel = self.compile_kernel(
             "fused_bias_activation_kernel",
             &kernel_source,

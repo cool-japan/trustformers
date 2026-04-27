@@ -83,6 +83,7 @@
 
 use super::{Metric, MetricInput, MetricResult};
 use crate::error::{Result, TrustformersError};
+use crate::evaluation::bridge::NlpAdapter;
 use std::collections::HashMap;
 
 /// Generation metric implementation
@@ -130,6 +131,14 @@ impl GenerationMetric {
             predictions: Vec::new(),
             references: Vec::new(),
         }
+    }
+
+    pub fn predictions(&self) -> &Vec<String> {
+        &self.predictions
+    }
+
+    pub fn references(&self) -> &Vec<String> {
+        &self.references
     }
 }
 
@@ -243,52 +252,21 @@ impl Metric for GenerationMetric {
             ));
         }
 
-        // Simplified BLEU-like score calculation
-        let mut total_score = 0.0;
-        let num_pairs = self.predictions.len().min(self.references.len());
+        // Delegate to NlpAdapter::bleu(4, true) for production-quality BLEU-4 scoring.
+        let mut bleu_adapter = NlpAdapter::bleu(4, true);
+        let preds = MetricInput::Text(self.predictions.clone());
+        let refs = MetricInput::Text(self.references.clone());
+        bleu_adapter.add_batch(&preds, &refs)?;
+        let bleu_result = bleu_adapter.compute()?;
+        let bleu_score = bleu_result.value;
 
-        for (pred, ref_) in self.predictions.iter().zip(self.references.iter()) {
-            // Tokenize texts by whitespace
-            let pred_words: Vec<&str> = pred.split_whitespace().collect();
-            let ref_words: Vec<&str> = ref_.split_whitespace().collect();
-
-            // Skip empty texts
-            if pred_words.is_empty() || ref_words.is_empty() {
-                continue;
-            }
-
-            // Calculate word overlap
-            let mut matches = 0;
-            for pred_word in &pred_words {
-                if ref_words.contains(pred_word) {
-                    matches += 1;
-                }
-            }
-
-            // Calculate precision and recall
-            let precision = matches as f64 / pred_words.len() as f64;
-            let recall = matches as f64 / ref_words.len() as f64;
-
-            // Calculate F1 score for this pair
-            let f1 = if precision + recall > 0.0 {
-                2.0 * precision * recall / (precision + recall)
-            } else {
-                0.0
-            };
-
-            total_score += f1;
-        }
-
-        // Average score across all pairs
-        let average_score = if num_pairs > 0 { total_score / num_pairs as f64 } else { 0.0 };
-
-        // Build result details
         let mut details = HashMap::new();
-        details.insert("bleu_like".to_string(), average_score);
+        details.insert("bleu_like".to_string(), bleu_score);
+        details.insert("bleu".to_string(), bleu_score);
 
         Ok(MetricResult {
             name: "generation".to_string(),
-            value: average_score, // Primary metric is the BLEU-like score
+            value: bleu_score,
             details,
             metadata: HashMap::new(),
         })
@@ -366,13 +344,23 @@ mod tests {
     fn test_generation_metric_perfect_match() {
         let mut metric = GenerationMetric::new();
 
-        let predictions = MetricInput::Text(vec!["hello world".to_string()]);
-        let references = MetricInput::Text(vec!["hello world".to_string()]);
+        // Use a longer sentence so all 4-gram orders are present → BLEU-4 = 1.0.
+        let predictions = MetricInput::Text(vec![
+            "the quick brown fox jumps over the lazy dog".to_string()
+        ]);
+        let references = MetricInput::Text(vec![
+            "the quick brown fox jumps over the lazy dog".to_string()
+        ]);
 
         metric.add_batch(&predictions, &references).expect("add operation failed");
 
         let result = metric.compute().expect("operation failed in test");
-        assert_eq!(result.value, 1.0); // Perfect match should give 1.0
+        // Perfect match on a ≥4-token sentence: BLEU-4 with smoothing = 1.0
+        assert!(
+            (result.value - 1.0).abs() < 1e-6,
+            "perfect match should give BLEU=1.0, got {}",
+            result.value
+        );
     }
 
     #[test]
@@ -385,7 +373,12 @@ mod tests {
         metric.add_batch(&predictions, &references).expect("add operation failed");
 
         let result = metric.compute().expect("operation failed in test");
-        assert_eq!(result.value, 0.0); // No overlap should give 0.0
+        // No token overlap → BLEU is very low (smoothing may yield a small positive value)
+        assert!(
+            result.value < 0.5,
+            "no-overlap BLEU should be low, got {}",
+            result.value
+        );
     }
 
     #[test]
@@ -398,8 +391,8 @@ mod tests {
         metric.add_batch(&predictions, &references).expect("add operation failed");
 
         let result = metric.compute().expect("operation failed in test");
-        // Empty prediction should not contribute to score
-        assert_eq!(result.value, 0.0);
+        // Empty hypothesis → BLEU = 0.0
+        assert_eq!(result.value, 0.0, "empty hypothesis should give BLEU=0.0");
     }
 
     #[test]
@@ -462,7 +455,13 @@ mod tests {
             .expect("operation failed in test");
 
         let result = metric.compute().expect("operation failed in test");
-        // Should average: 1.0 (perfect) + 0.0 (no overlap) = 0.5
-        assert_eq!(result.value, 0.5);
+        // Sentence-level BLEU averaged: one perfect pair, one no-overlap pair.
+        // With smoothing the no-overlap pair yields a small positive value,
+        // so the average is in (0, 1) and below the perfect pair's score of 1.0.
+        assert!(
+            result.value > 0.0 && result.value < 1.0,
+            "averaged BLEU should be in (0, 1), got {}",
+            result.value
+        );
     }
 }

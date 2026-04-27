@@ -18,9 +18,9 @@ pub fn get_cuda_backend(device_id: usize) -> Result<Arc<CudaBackend>> {
         TrustformersError::hardware_error("Failed to lock CUDA backend cache", "get_cuda_backend")
     })?;
 
-    if !cache.contains_key(&device_id) {
+    if let std::collections::hash_map::Entry::Vacant(e) = cache.entry(device_id) {
         let backend = CudaBackend::new(device_id)?;
-        cache.insert(device_id, Arc::new(backend));
+        e.insert(Arc::new(backend));
     }
 
     cache.get(&device_id).cloned().ok_or_else(|| {
@@ -82,11 +82,11 @@ pub fn dispatch_cuda_matmul(a: &Tensor, b: &Tensor, device_id: usize) -> Result<
                 })?;
 
                 let result_dyn = result_2d.into_dyn();
-                return Ok(Tensor::F32(result_dyn));
+                Ok(Tensor::F32(result_dyn))
             },
             _ => {
                 // Fallback to CPU matmul for non-F32 tensors
-                return a.matmul(b);
+                a.matmul(b)
             },
         }
     }
@@ -166,7 +166,7 @@ mod tests {
         let result = backend.matmul_f32(&a, &b, 2, 2, 2)?;
 
         // Expected: [[19, 22], [43, 50]]
-        let expected = vec![19.0, 22.0, 43.0, 50.0];
+        let expected = [19.0_f32, 22.0_f32, 43.0_f32, 50.0_f32];
 
         for (i, (&res, &exp)) in result.iter().zip(expected.iter()).enumerate() {
             assert!(

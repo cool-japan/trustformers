@@ -403,14 +403,14 @@ impl Muon {
             let candidate1 = sqrt_size + offset;
             let candidate2 = sqrt_size - offset;
 
-            if candidate1 > 0 && size % candidate1 == 0 {
+            if candidate1 > 0 && size.is_multiple_of(candidate1) {
                 let other = size / candidate1;
                 if candidate1 >= self.config.min_dim_2d && other >= self.config.min_dim_2d {
                     return (candidate1, other);
                 }
             }
 
-            if candidate2 > 0 && size % candidate2 == 0 {
+            if candidate2 > 0 && size.is_multiple_of(candidate2) {
                 let other = size / candidate2;
                 if candidate2 >= self.config.min_dim_2d && other >= self.config.min_dim_2d {
                     return (candidate2, other);

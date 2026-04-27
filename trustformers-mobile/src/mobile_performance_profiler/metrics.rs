@@ -606,3 +606,266 @@ impl Default for GenericMobileMetrics {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::config::MobileProfilerConfig;
+    use super::*;
+
+    fn lcg_f32(state: &mut u64) -> f32 {
+        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (*state % 1000) as f32 / 1000.0
+    }
+
+    #[test]
+    fn test_mobile_metrics_collector_new() {
+        let config = MobileProfilerConfig::default();
+        let collector = MobileMetricsCollector::new(config);
+        assert!(collector.is_ok());
+    }
+
+    #[test]
+    fn test_mobile_metrics_collector_initial_total_samples() {
+        let config = MobileProfilerConfig::default();
+        let collector = MobileMetricsCollector::new(config)
+            .unwrap_or_else(|_| panic!("collector creation failed"));
+        let stats = collector.get_collection_stats();
+        assert_eq!(stats.total_samples, 0);
+    }
+
+    #[test]
+    fn test_mobile_metrics_collector_initial_history_empty() {
+        let config = MobileProfilerConfig::default();
+        let collector = MobileMetricsCollector::new(config)
+            .unwrap_or_else(|_| panic!("collector creation failed"));
+        let snapshots = collector.get_all_snapshots();
+        assert!(snapshots.is_empty());
+    }
+
+    #[test]
+    fn test_collect_metrics_increments_samples() {
+        let config = MobileProfilerConfig::default();
+        let mut collector = MobileMetricsCollector::new(config)
+            .unwrap_or_else(|_| panic!("collector creation failed"));
+        let result = collector.collect_metrics();
+        assert!(result.is_ok());
+        let stats = collector.get_collection_stats();
+        assert_eq!(stats.total_samples, 1);
+    }
+
+    #[test]
+    fn test_collect_metrics_multiple_accumulates() {
+        let config = MobileProfilerConfig::default();
+        let mut collector = MobileMetricsCollector::new(config)
+            .unwrap_or_else(|_| panic!("collector creation failed"));
+        for _ in 0..5 {
+            let _ = collector.collect_metrics();
+        }
+        let stats = collector.get_collection_stats();
+        assert_eq!(stats.total_samples, 5);
+    }
+
+    #[test]
+    fn test_get_current_snapshot_ok() {
+        let config = MobileProfilerConfig::default();
+        let mut collector = MobileMetricsCollector::new(config)
+            .unwrap_or_else(|_| panic!("collector creation failed"));
+        let _ = collector.collect_metrics();
+        let snapshot = collector.get_current_snapshot();
+        assert!(snapshot.is_ok());
+    }
+
+    #[test]
+    fn test_stop_collection_ok() {
+        let config = MobileProfilerConfig::default();
+        let mut collector = MobileMetricsCollector::new(config)
+            .unwrap_or_else(|_| panic!("collector creation failed"));
+        let result = collector.stop_collection();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_collection_statistics_fields() {
+        let config = MobileProfilerConfig::default();
+        let mut collector = MobileMetricsCollector::new(config)
+            .unwrap_or_else(|_| panic!("collector creation failed"));
+        let _ = collector.collect_metrics();
+        let stats = collector.get_collection_stats();
+        assert_eq!(stats.history_size, 1);
+        assert!(stats.current_memory_usage_mb >= 0.0);
+    }
+
+    #[test]
+    fn test_thermal_metrics_default() {
+        let thermal = ThermalMetrics::default();
+        assert_eq!(thermal.temperature_c, 25.0);
+        assert_eq!(thermal.throttling_level, 0.0);
+        assert_eq!(thermal.cooling_efficiency, 1.0);
+    }
+
+    #[test]
+    fn test_temperature_trend_default() {
+        let trend = TemperatureTrend::default();
+        assert_eq!(trend.current, 25.0);
+        assert_eq!(trend.previous, 25.0);
+        assert_eq!(trend.rate_of_change, 0.0);
+        assert!(matches!(trend.direction, TrendDirection::Stable));
+    }
+
+    #[test]
+    fn test_trend_direction_variants() {
+        let rising = TrendDirection::Rising;
+        let falling = TrendDirection::Falling;
+        let stable = TrendDirection::Stable;
+        assert_eq!(rising, TrendDirection::Rising);
+        assert_eq!(falling, TrendDirection::Falling);
+        assert_eq!(stable, TrendDirection::Stable);
+    }
+
+    #[test]
+    fn test_battery_metrics_default() {
+        let battery = BatteryMetrics::default();
+        assert_eq!(battery.level_percent, 100);
+        assert!(!battery.is_charging);
+        assert_eq!(battery.power_consumption_mw, 0.0);
+        assert!(battery.time_remaining_min.is_none());
+        assert_eq!(battery.health_percent, 100);
+        assert_eq!(battery.voltage_v, 3.7);
+    }
+
+    #[test]
+    fn test_battery_metrics_construction() {
+        let mut s = 42u64;
+        let battery = BatteryMetrics {
+            level_percent: 75,
+            is_charging: true,
+            power_consumption_mw: lcg_f32(&mut s) * 5000.0,
+            time_remaining_min: Some(120),
+            health_percent: 95,
+            temperature_c: 30.0,
+            voltage_v: 3.8,
+        };
+        assert_eq!(battery.level_percent, 75);
+        assert!(battery.is_charging);
+        assert_eq!(battery.time_remaining_min, Some(120));
+    }
+
+    #[test]
+    fn test_platform_metrics_default() {
+        let platform = PlatformMetrics::default();
+        assert!(platform.ios_metrics.is_none());
+        assert!(platform.android_metrics.is_none());
+    }
+
+    #[test]
+    fn test_generic_mobile_metrics_default() {
+        let generic = GenericMobileMetrics::default();
+        assert_eq!(generic.screen_brightness, 0.5);
+        assert!(!generic.location_services_active);
+        assert!(matches!(generic.orientation, DeviceOrientation::Portrait));
+        assert!(matches!(generic.network_type, NetworkType::WiFi));
+    }
+
+    #[test]
+    fn test_device_orientation_variants() {
+        let _portrait = DeviceOrientation::Portrait;
+        let _ll = DeviceOrientation::LandscapeLeft;
+        let _lr = DeviceOrientation::LandscapeRight;
+        let _upside = DeviceOrientation::PortraitUpsideDown;
+        let _face_up = DeviceOrientation::FaceUp;
+        let _face_down = DeviceOrientation::FaceDown;
+    }
+
+    #[test]
+    fn test_network_type_variants() {
+        let _wifi = NetworkType::WiFi;
+        let _cell = NetworkType::Cellular;
+        let _eth = NetworkType::Ethernet;
+        let _none = NetworkType::None;
+        let _unk = NetworkType::Unknown;
+    }
+
+    #[test]
+    fn test_memory_pressure_level_variants() {
+        let _normal = MemoryPressureLevel::Normal;
+        let _warning = MemoryPressureLevel::Warning;
+        let _urgent = MemoryPressureLevel::Urgent;
+        let _critical = MemoryPressureLevel::Critical;
+    }
+
+    #[test]
+    fn test_thermal_pressure_level_variants() {
+        let _nominal = ThermalPressureLevel::Nominal;
+        let _fair = ThermalPressureLevel::Fair;
+        let _serious = ThermalPressureLevel::Serious;
+        let _critical = ThermalPressureLevel::Critical;
+    }
+
+    #[test]
+    fn test_coreml_compute_unit_variants() {
+        let _cpu_only = CoreMLComputeUnit::CPUOnly;
+        let _cpu_gpu = CoreMLComputeUnit::CPUAndGPU;
+        let _cpu_ne = CoreMLComputeUnit::CPUAndNeuralEngine;
+        let _all = CoreMLComputeUnit::All;
+    }
+
+    #[test]
+    fn test_mobile_metrics_snapshot_default_timestamp_zero() {
+        let snapshot = MobileMetricsSnapshot::default();
+        assert_eq!(snapshot.timestamp, 0);
+    }
+
+    #[test]
+    fn test_history_size_limited_by_config() {
+        let mut config = MobileProfilerConfig::default();
+        config.sampling.max_samples = 3;
+        let mut collector = MobileMetricsCollector::new(config)
+            .unwrap_or_else(|_| panic!("collector creation failed"));
+        for _ in 0..10 {
+            let _ = collector.collect_metrics();
+        }
+        let stats = collector.get_collection_stats();
+        assert!(stats.history_size <= 3);
+        // total_samples keeps counting even when history is bounded
+        assert_eq!(stats.total_samples, 10);
+    }
+
+    #[test]
+    fn test_thermal_metrics_construction_with_lcg() {
+        let mut s = 99u64;
+        let thermal = ThermalMetrics {
+            temperature_c: lcg_f32(&mut s) * 80.0,
+            thermal_state: crate::device_info::ThermalState::Nominal,
+            throttling_level: lcg_f32(&mut s),
+            temperature_trend: TemperatureTrend::default(),
+            heat_generation_rate: lcg_f32(&mut s) * 10.0,
+            cooling_efficiency: lcg_f32(&mut s),
+        };
+        assert!(thermal.temperature_c >= 0.0);
+        assert!(thermal.throttling_level >= 0.0 && thermal.throttling_level <= 1.0);
+    }
+
+    #[test]
+    fn test_android_runtime_metrics_fields() {
+        let runtime = AndroidRuntimeMetrics {
+            gc_count: 5,
+            gc_time_ms: 12.3,
+            heap_utilization: 0.7,
+            compilation_time_ms: 45.0,
+        };
+        assert_eq!(runtime.gc_count, 5);
+        assert_eq!(runtime.gc_time_ms, 12.3);
+    }
+
+    #[test]
+    fn test_android_gpu_metrics_fields() {
+        let gpu = AndroidGpuMetrics {
+            frequency_mhz: 800,
+            busy_percent: 45.0,
+            memory_usage_mb: 128.0,
+            power_mw: 500.0,
+        };
+        assert_eq!(gpu.frequency_mhz, 800);
+        assert_eq!(gpu.busy_percent, 45.0);
+    }
+}

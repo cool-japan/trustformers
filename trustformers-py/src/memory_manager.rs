@@ -2,7 +2,7 @@
 // Allow excessive_nesting for complex memory management algorithms
 #![allow(clippy::result_large_err, clippy::excessive_nesting)]
 
-use crate::errors::TrustformersPyResult;
+use crate::errors::{TrustformersPyError, TrustformersPyResult};
 use parking_lot::RwLock;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::HashMap;

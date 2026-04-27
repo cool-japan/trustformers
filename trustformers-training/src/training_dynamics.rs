@@ -219,7 +219,7 @@ impl TrainingDynamicsAnalyzer {
         self.last_weights = weights.clone();
 
         // Perform analysis if it's time
-        if step % self.config.analysis_interval == 0 {
+        if step.is_multiple_of(self.config.analysis_interval) {
             self.analyze_current_state(step, loss, gradients, weights)?;
         }
 

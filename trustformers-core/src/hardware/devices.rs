@@ -1323,3 +1323,205 @@ pub struct GPUMemory {
 }
 
 // Removed DeviceMemory impl for GPUMemory - DeviceMemory is a struct, not a trait
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cpu_device_creation() {
+        let dev = CPUDevice::new("cpu-0".to_string());
+        assert_eq!(dev.id, "cpu-0");
+        assert!(!dev.is_initialized);
+    }
+
+    #[test]
+    fn test_cpu_device_capabilities() {
+        let dev = CPUDevice::new("cpu-test".to_string());
+        assert!(dev.capabilities.max_dimensions > 0);
+        assert!(!dev.capabilities.data_types.is_empty());
+        assert!(!dev.capabilities.operations.is_empty());
+    }
+
+    #[test]
+    fn test_cpu_device_has_f32_support() {
+        let dev = CPUDevice::new("cpu-f32".to_string());
+        assert!(dev.capabilities.data_types.contains(&DataType::F32));
+    }
+
+    #[test]
+    fn test_cpu_device_has_f64_support() {
+        let dev = CPUDevice::new("cpu-f64".to_string());
+        assert!(dev.capabilities.data_types.contains(&DataType::F64));
+    }
+
+    #[test]
+    fn test_cpu_device_operations_include_add() {
+        let dev = CPUDevice::new("cpu-ops".to_string());
+        assert!(dev.capabilities.operations.contains(&"add".to_string()));
+    }
+
+    #[test]
+    fn test_cpu_device_operations_include_matmul() {
+        let dev = CPUDevice::new("cpu-ops2".to_string());
+        assert!(dev.capabilities.operations.contains(&"matmul".to_string()));
+    }
+
+    #[test]
+    fn test_cpu_memory_detection() {
+        let mem = CPUDevice::get_system_memory();
+        assert!(mem > 0);
+    }
+
+    #[test]
+    fn test_cpu_memory_bandwidth() {
+        let bw = CPUDevice::detect_memory_bandwidth();
+        assert!(bw > 0.0);
+    }
+
+    #[test]
+    fn test_gpu_device_cuda_creation() {
+        let dev = GPUDevice::new("gpu-0".to_string(), GPUBackendType::CUDA);
+        assert_eq!(dev.id, "gpu-0");
+        assert_eq!(dev.backend_type, GPUBackendType::CUDA);
+        assert!(!dev.is_initialized);
+    }
+
+    #[test]
+    fn test_gpu_device_metal_creation() {
+        let dev = GPUDevice::new("gpu-metal".to_string(), GPUBackendType::Metal);
+        assert_eq!(dev.backend_type, GPUBackendType::Metal);
+    }
+
+    #[test]
+    fn test_gpu_device_rocm_creation() {
+        let dev = GPUDevice::new("gpu-rocm".to_string(), GPUBackendType::ROCm);
+        assert_eq!(dev.backend_type, GPUBackendType::ROCm);
+    }
+
+    #[test]
+    fn test_gpu_device_vulkan_creation() {
+        let dev = GPUDevice::new("gpu-vulkan".to_string(), GPUBackendType::Vulkan);
+        assert_eq!(dev.backend_type, GPUBackendType::Vulkan);
+    }
+
+    #[test]
+    fn test_gpu_device_opencl_creation() {
+        let dev = GPUDevice::new("gpu-cl".to_string(), GPUBackendType::OpenCL);
+        assert_eq!(dev.backend_type, GPUBackendType::OpenCL);
+    }
+
+    #[test]
+    fn test_gpu_device_unknown_creation() {
+        let dev = GPUDevice::new("gpu-unknown".to_string(), GPUBackendType::Unknown);
+        assert_eq!(dev.backend_type, GPUBackendType::Unknown);
+    }
+
+    #[test]
+    fn test_gpu_backend_type_equality() {
+        assert_eq!(GPUBackendType::CUDA, GPUBackendType::CUDA);
+        assert_ne!(GPUBackendType::CUDA, GPUBackendType::Metal);
+    }
+
+    #[test]
+    fn test_cpu_device_initial_status() {
+        let dev = CPUDevice::new("cpu-status".to_string());
+        let status_lock = dev.status.lock();
+        if let Ok(status) = status_lock {
+            assert!(status.online);
+            assert!(!status.busy);
+            assert!(status.error.is_none());
+        }
+    }
+
+    #[test]
+    fn test_gpu_device_initial_status() {
+        let dev = GPUDevice::new("gpu-status".to_string(), GPUBackendType::CUDA);
+        let status_lock = dev.status.lock();
+        if let Ok(status) = status_lock {
+            assert!(status.online);
+            assert!(!status.busy);
+            assert!(status.error.is_none());
+        }
+    }
+
+    #[test]
+    fn test_cpu_device_memory_pools_initially_empty() {
+        let dev = CPUDevice::new("cpu-mem".to_string());
+        let pools_lock = dev.memory_pools.lock();
+        if let Ok(pools) = pools_lock {
+            assert!(pools.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_gpu_device_memory_pools_initially_empty() {
+        let dev = GPUDevice::new("gpu-mem".to_string(), GPUBackendType::Metal);
+        let pools_lock = dev.memory_pools.lock();
+        if let Ok(pools) = pools_lock {
+            assert!(pools.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_cpu_execute_add() {
+        let dev = CPUDevice::new("cpu-exec".to_string());
+        let a = Tensor::from_data(vec![1.0, 2.0], &[2]).expect("create failed");
+        let b = Tensor::from_data(vec![3.0, 4.0], &[2]).expect("create failed");
+        let result = dev.execute_operation(
+            "add",
+            &[a, b],
+            OperationMode::Performance,
+            PrecisionMode::Single,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_cpu_execute_mul() {
+        let dev = CPUDevice::new("cpu-mul".to_string());
+        let a = Tensor::from_data(vec![2.0, 3.0], &[2]).expect("create failed");
+        let b = Tensor::from_data(vec![4.0, 5.0], &[2]).expect("create failed");
+        let result = dev.execute_operation(
+            "mul",
+            &[a, b],
+            OperationMode::Performance,
+            PrecisionMode::Single,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_cpu_execute_insufficient_inputs() {
+        let dev = CPUDevice::new("cpu-err".to_string());
+        let a = Tensor::from_data(vec![1.0], &[1]).expect("create failed");
+        let result = dev.execute_operation(
+            "add",
+            &[a],
+            OperationMode::Performance,
+            PrecisionMode::Single,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_gpu_capabilities_include_f32() {
+        let dev = GPUDevice::new("gpu-caps".to_string(), GPUBackendType::CUDA);
+        assert!(dev.capabilities.data_types.contains(&DataType::F32));
+    }
+
+    #[test]
+    fn test_cpu_device_clone() {
+        let dev = CPUDevice::new("cpu-clone".to_string());
+        let cloned = dev.clone();
+        assert_eq!(cloned.id, "cpu-clone");
+    }
+
+    #[test]
+    fn test_gpu_device_clone() {
+        let dev = GPUDevice::new("gpu-clone".to_string(), GPUBackendType::Metal);
+        let cloned = dev.clone();
+        assert_eq!(cloned.id, "gpu-clone");
+        assert_eq!(cloned.backend_type, GPUBackendType::Metal);
+    }
+}

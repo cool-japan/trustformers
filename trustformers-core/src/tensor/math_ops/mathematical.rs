@@ -570,3 +570,273 @@ impl Tensor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::errors::Result;
+    use crate::tensor::Tensor;
+
+    #[test]
+    fn test_pow() -> Result<()> {
+        let t = Tensor::from_data(vec![2.0, 3.0], &[2])?;
+        let r = t.pow(2.0)?;
+        let data = r.data()?;
+        assert!((data[0] - 4.0).abs() < 1e-5);
+        assert!((data[1] - 9.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_abs() -> Result<()> {
+        let t = Tensor::from_data(vec![-3.0, 2.0, -1.0, 0.0], &[4])?;
+        let r = t.abs()?;
+        let data = r.data()?;
+        assert!((data[0] - 3.0).abs() < 1e-6);
+        assert!((data[1] - 2.0).abs() < 1e-6);
+        assert!((data[2] - 1.0).abs() < 1e-6);
+        assert!(data[3].abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_neg() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, -2.0, 3.0], &[3])?;
+        let r = t.neg()?;
+        let data = r.data()?;
+        assert!((data[0] - (-1.0)).abs() < 1e-6);
+        assert!((data[1] - 2.0).abs() < 1e-6);
+        assert!((data[2] - (-3.0)).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_sqrt() -> Result<()> {
+        let t = Tensor::from_data(vec![4.0, 9.0, 16.0], &[3])?;
+        let r = t.sqrt()?;
+        let data = r.data()?;
+        assert!((data[0] - 2.0).abs() < 1e-5);
+        assert!((data[1] - 3.0).abs() < 1e-5);
+        assert!((data[2] - 4.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_log() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, std::f32::consts::E], &[2])?;
+        let r = t.log()?;
+        let data = r.data()?;
+        assert!(data[0].abs() < 1e-5);
+        assert!((data[1] - 1.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_exp() -> Result<()> {
+        let t = Tensor::from_data(vec![0.0, 1.0], &[2])?;
+        let r = t.exp()?;
+        let data = r.data()?;
+        assert!((data[0] - 1.0).abs() < 1e-5);
+        assert!((data[1] - std::f32::consts::E).abs() < 1e-4);
+        Ok(())
+    }
+
+    #[test]
+    fn test_sin() -> Result<()> {
+        let t = Tensor::from_data(vec![0.0, std::f32::consts::FRAC_PI_2], &[2])?;
+        let r = t.sin()?;
+        let data = r.data()?;
+        assert!(data[0].abs() < 1e-5);
+        assert!((data[1] - 1.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_cos() -> Result<()> {
+        let t = Tensor::from_data(vec![0.0, std::f32::consts::PI], &[2])?;
+        let r = t.cos()?;
+        let data = r.data()?;
+        assert!((data[0] - 1.0).abs() < 1e-5);
+        assert!((data[1] - (-1.0)).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_tan() -> Result<()> {
+        let t = Tensor::from_data(vec![0.0], &[1])?;
+        let r = t.tan()?;
+        let data = r.data()?;
+        assert!(data[0].abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_square() -> Result<()> {
+        let t = Tensor::from_data(vec![2.0, -3.0, 4.0], &[3])?;
+        let r = t.square()?;
+        let data = r.data()?;
+        assert!((data[0] - 4.0).abs() < 1e-5);
+        assert!((data[1] - 9.0).abs() < 1e-5);
+        assert!((data[2] - 16.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_reciprocal() -> Result<()> {
+        let t = Tensor::from_data(vec![2.0, 4.0, 5.0], &[3])?;
+        let r = t.reciprocal()?;
+        let data = r.data()?;
+        assert!((data[0] - 0.5).abs() < 1e-5);
+        assert!((data[1] - 0.25).abs() < 1e-5);
+        assert!((data[2] - 0.2).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_rsqrt() -> Result<()> {
+        let t = Tensor::from_data(vec![4.0, 9.0], &[2])?;
+        let r = t.rsqrt()?;
+        let data = r.data()?;
+        assert!((data[0] - 0.5).abs() < 1e-5);
+        assert!((data[1] - 1.0 / 3.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_isnan() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, f32::NAN, 3.0], &[3])?;
+        let r = t.isnan()?;
+        let data = r.data()?;
+        assert!(data[0].abs() < 1e-6);
+        assert!((data[1] - 1.0).abs() < 1e-6);
+        assert!(data[2].abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_isinf() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, f32::INFINITY, f32::NEG_INFINITY], &[3])?;
+        let r = t.isinf()?;
+        let data = r.data()?;
+        assert!(data[0].abs() < 1e-6);
+        assert!((data[1] - 1.0).abs() < 1e-6);
+        assert!((data[2] - 1.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_isfinite() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, f32::INFINITY, f32::NAN], &[3])?;
+        let r = t.isfinite()?;
+        let data = r.data()?;
+        assert!((data[0] - 1.0).abs() < 1e-6);
+        assert!(data[1].abs() < 1e-6);
+        assert!(data[2].abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_sign() -> Result<()> {
+        let t = Tensor::from_data(vec![-5.0, 0.0, 3.0], &[3])?;
+        let r = t.sign()?;
+        let data = r.data()?;
+        assert!((data[0] - (-1.0)).abs() < 1e-6);
+        assert!(data[1].abs() < 1e-6);
+        assert!((data[2] - 1.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_round() -> Result<()> {
+        let t = Tensor::from_data(vec![1.4, 2.5, 3.6, -1.5], &[4])?;
+        let r = t.round()?;
+        let data = r.data()?;
+        assert!((data[0] - 1.0).abs() < 1e-6);
+        assert!((data[2] - 4.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_floor() -> Result<()> {
+        let t = Tensor::from_data(vec![1.7, 2.3, -1.5], &[3])?;
+        let r = t.floor()?;
+        let data = r.data()?;
+        assert!((data[0] - 1.0).abs() < 1e-6);
+        assert!((data[1] - 2.0).abs() < 1e-6);
+        assert!((data[2] - (-2.0)).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_ceil() -> Result<()> {
+        let t = Tensor::from_data(vec![1.1, 2.9, -1.5], &[3])?;
+        let r = t.ceil()?;
+        let data = r.data()?;
+        assert!((data[0] - 2.0).abs() < 1e-6);
+        assert!((data[1] - 3.0).abs() < 1e-6);
+        assert!((data[2] - (-1.0)).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_trunc() -> Result<()> {
+        let t = Tensor::from_data(vec![1.7, -2.3], &[2])?;
+        let r = t.trunc()?;
+        let data = r.data()?;
+        assert!((data[0] - 1.0).abs() < 1e-6);
+        assert!((data[1] - (-2.0)).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_asin() -> Result<()> {
+        let t = Tensor::from_data(vec![0.0, 1.0], &[2])?;
+        let r = t.asin()?;
+        let data = r.data()?;
+        assert!(data[0].abs() < 1e-5);
+        assert!((data[1] - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_acos() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0], &[1])?;
+        let r = t.acos()?;
+        let data = r.data()?;
+        assert!(data[0].abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_atan() -> Result<()> {
+        let t = Tensor::from_data(vec![0.0], &[1])?;
+        let r = t.atan()?;
+        let data = r.data()?;
+        assert!(data[0].abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_exp_log_roundtrip() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0, 3.0], &[3])?;
+        let e = t.exp()?;
+        let l = e.log()?;
+        let data = l.data()?;
+        let orig = t.data()?;
+        for i in 0..3 {
+            assert!((data[i] - orig[i]).abs() < 1e-4);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_neg_neg_identity() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, -2.0, 3.0], &[3])?;
+        let r = t.neg()?.neg()?;
+        let data = r.data()?;
+        let orig = t.data()?;
+        for i in 0..3 {
+            assert!((data[i] - orig[i]).abs() < 1e-6);
+        }
+        Ok(())
+    }
+}

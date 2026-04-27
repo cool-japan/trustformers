@@ -522,14 +522,208 @@ pub fn create_ultra_long_sequence_mamba2_pipeline() -> Result<Mamba2Pipeline> {
 mod tests {
     use super::*;
 
+    // ── Config defaults ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_config_default_d_model() {
+        let config = Mamba2Config::default();
+        assert_eq!(config.d_model, 768);
+    }
+
+    #[test]
+    fn test_config_default_d_state() {
+        let config = Mamba2Config::default();
+        assert_eq!(config.d_state, 16);
+    }
+
+    #[test]
+    fn test_config_default_n_heads_one() {
+        let config = Mamba2Config::default();
+        assert_eq!(config.n_heads, 1);
+    }
+
+    #[test]
+    fn test_config_dt_rank_auto_calculation() {
+        let config = Mamba2Config::default();
+        let expected_dt_rank = config.d_model / 16;
+        let actual = config.dt_rank.unwrap_or(config.d_model / 16);
+        assert_eq!(
+            actual, expected_dt_rank,
+            "dt_rank should default to d_model/16"
+        );
+    }
+
+    // ── Model initialisation ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_model_initialisation_24_layers() {
+        let config = Mamba2Config::default();
+        let model = Mamba2Pipeline::initialize_model(&config).expect("model init should succeed");
+        assert_eq!(model.layers.len(), 24, "model should have 24 layers");
+    }
+
+    #[test]
+    fn test_model_layer_hidden_state_dimension() {
+        let config = Mamba2Config::default();
+        let model = Mamba2Pipeline::initialize_model(&config).expect("model init should succeed");
+        for layer in &model.layers {
+            assert_eq!(
+                layer.hidden_state.len(),
+                config.d_model,
+                "each layer hidden state must match d_model"
+            );
+        }
+    }
+
+    #[test]
+    fn test_model_layer_ssm_state_dimension() {
+        let config = Mamba2Config::default();
+        let model = Mamba2Pipeline::initialize_model(&config).expect("model init should succeed");
+        for layer in &model.layers {
+            assert_eq!(
+                layer.ssm_state.len(),
+                config.d_state * config.d_model,
+                "SSM state size must be d_state × d_model"
+            );
+        }
+    }
+
+    #[test]
+    fn test_model_layer_conv_state_dimension() {
+        let config = Mamba2Config::default();
+        let model = Mamba2Pipeline::initialize_model(&config).expect("model init should succeed");
+        for layer in &model.layers {
+            assert_eq!(layer.conv_state.len(), config.d_conv * config.d_model);
+        }
+    }
+
+    // ── A matrix initialisation (discretisation params) ───────────────────────
+
+    #[test]
+    fn test_a_matrix_simplified_init_non_positive() {
+        // val = -ln(i+1): for i=0 yields 0, for i>0 yields negative values
+        let a = Mamba2Pipeline::initialize_a_matrix(8, true);
+        for &val in &a {
+            assert!(
+                val <= 0.0,
+                "simplified A-matrix values should be ≤ 0 (negative log of positive index)"
+            );
+        }
+        // At least all-but-first should be strictly negative
+        let strictly_negative = a.iter().filter(|&&v| v < 0.0).count();
+        assert!(
+            strictly_negative >= a.len() - 1,
+            "all A-matrix values except index 0 should be strictly negative"
+        );
+    }
+
+    #[test]
+    fn test_a_matrix_simplified_size() {
+        let d_state = 16;
+        let a = Mamba2Pipeline::initialize_a_matrix(d_state, true);
+        assert_eq!(a.len(), d_state);
+    }
+
+    #[test]
+    fn test_a_matrix_complex_init_size() {
+        let d_state = 8;
+        let a = Mamba2Pipeline::initialize_a_matrix(d_state, false);
+        assert_eq!(a.len(), d_state);
+    }
+
+    #[test]
+    fn test_a_matrix_values_finite() {
+        let a = Mamba2Pipeline::initialize_a_matrix(16, true);
+        for &val in &a {
+            assert!(val.is_finite(), "all A-matrix values should be finite");
+        }
+    }
+
+    // ── Selective scan (delta computation) ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_selective_scan_output_length_matches_input() {
+        let config = Mamba2Config {
+            d_model: 4,
+            d_state: 2,
+            d_conv: 2,
+            ..Default::default()
+        };
+        let pipeline =
+            Mamba2Pipeline::new(config.clone()).expect("pipeline creation should succeed");
+        // 2 timesteps × d_model
+        let input = vec![0.1_f32; 2 * config.d_model];
+        let mut model = pipeline.model.write().await;
+        let layer = &mut model.layers[0];
+        let result = pipeline
+            .selective_scan(&input, layer, &config)
+            .await
+            .expect("selective scan should succeed");
+        assert_eq!(
+            result.len(),
+            input.len(),
+            "selective scan output length should match input length"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_selective_scan_output_finite() {
+        let config = Mamba2Config {
+            d_model: 4,
+            d_state: 2,
+            d_conv: 2,
+            ..Default::default()
+        };
+        let pipeline =
+            Mamba2Pipeline::new(config.clone()).expect("pipeline creation should succeed");
+        let input = vec![0.5_f32; 2 * config.d_model];
+        let mut model = pipeline.model.write().await;
+        let layer = &mut model.layers[0];
+        let result = pipeline
+            .selective_scan(&input, layer, &config)
+            .await
+            .expect("selective scan should succeed");
+        for &v in &result {
+            assert!(
+                v.is_finite(),
+                "selective scan outputs should be finite numbers"
+            );
+        }
+    }
+
+    #[test]
+    fn test_compute_delta_positive() {
+        let config = Mamba2Config::default();
+        let pipeline = Mamba2Pipeline::new(config).expect("pipeline creation should succeed");
+        let input = vec![0.1_f32; 4];
+        let delta_params = vec![0.5_f32; 4];
+        let delta = pipeline
+            .compute_delta(&input, &delta_params)
+            .expect("compute_delta should succeed");
+        assert!(delta > 0.0, "delta must always be positive");
+    }
+
+    #[test]
+    fn test_compute_delta_minimum_clamped() {
+        // All-zero input should yield the minimum clamped value (0.001)
+        let config = Mamba2Config::default();
+        let pipeline = Mamba2Pipeline::new(config).expect("pipeline creation should succeed");
+        let input = vec![0.0_f32; 4];
+        let delta_params = vec![0.0_f32; 4];
+        let delta = pipeline
+            .compute_delta(&input, &delta_params)
+            .expect("compute_delta should succeed");
+        assert!(delta >= 0.001, "delta should be clamped to at least 0.001");
+    }
+
+    // ── Pipeline end-to-end ──────────────────────────────────────────────────
+
     #[tokio::test]
     async fn test_mamba2_basic_functionality() {
         let pipeline = create_memory_efficient_mamba2_pipeline().expect("operation failed in test");
         let input = PipelineInput::Text("Hello, Mamba-2!".to_string());
-
         let result = pipeline.process_async(input).await;
         assert!(result.is_ok());
-
         let output = result.expect("operation failed in test");
         assert!(!output.text.is_empty());
         assert!(!output.logits.is_empty());
@@ -543,10 +737,8 @@ mod tests {
             ..Default::default()
         };
         let pipeline = Mamba2Pipeline::new(config).expect("operation failed in test");
-
         let long_text = "A".repeat(1000);
         let input = PipelineInput::Text(long_text);
-
         let result = pipeline.process_async(input).await;
         assert!(result.is_ok());
     }
@@ -555,12 +747,113 @@ mod tests {
     async fn test_mamba2_performance_tracking() {
         let pipeline = create_high_performance_mamba2_pipeline().expect("operation failed in test");
         let input = PipelineInput::Text("Performance test".to_string());
-
         let result = pipeline.process_async(input).await.expect("async operation failed");
-
-        // Verify performance metrics are populated
         assert!(result.performance.inference_time_ms > 0.0);
         assert!(result.performance.memory_usage_mb > 0.0);
         assert!(result.performance.hardware_efficiency > 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_mamba2_token_input() {
+        let config = Mamba2Config {
+            d_model: 4,
+            d_state: 2,
+            d_conv: 2,
+            ..Default::default()
+        };
+        let pipeline = Mamba2Pipeline::new(config).expect("pipeline creation should succeed");
+        let tokens = vec![100_u32, 200, 300, 400];
+        let input = PipelineInput::Tokens(tokens);
+        let result = pipeline.process_async(input).await;
+        assert!(result.is_ok(), "token input should be accepted");
+    }
+
+    #[tokio::test]
+    async fn test_mamba2_batch_text_input_rejected() {
+        let pipeline =
+            create_memory_efficient_mamba2_pipeline().expect("pipeline creation should succeed");
+        // BatchText is not supported by Mamba2 pipeline
+        let input = PipelineInput::BatchText(vec!["a".to_string(), "b".to_string()]);
+        let result = pipeline.process_async(input).await;
+        assert!(
+            result.is_err(),
+            "BatchText input should be rejected by Mamba2 pipeline"
+        );
+    }
+
+    // ── Output structure ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_mamba2_output_ssm_states_correct_size() {
+        let config = Mamba2Config {
+            d_model: 8,
+            d_state: 4,
+            d_conv: 2,
+            ..Default::default()
+        };
+        let pipeline =
+            Mamba2Pipeline::new(config.clone()).expect("pipeline creation should succeed");
+        let result = pipeline
+            .process_async(PipelineInput::Text("abc".to_string()))
+            .await
+            .expect("processing should succeed");
+        assert_eq!(
+            result.ssm_states.len(),
+            config.d_state * config.d_model,
+            "SSM states size should be d_state × d_model"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mamba2_output_has_attention_weights() {
+        let pipeline =
+            create_memory_efficient_mamba2_pipeline().expect("pipeline creation should succeed");
+        let result = pipeline
+            .process_async(PipelineInput::Text("test".to_string()))
+            .await
+            .expect("processing should succeed");
+        assert!(
+            result.attention_weights.is_some(),
+            "attention_weights should be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mamba2_performance_metrics_scan_utilization() {
+        let pipeline =
+            create_memory_efficient_mamba2_pipeline().expect("pipeline creation should succeed");
+        let result = pipeline
+            .process_async(PipelineInput::Text("scan utilization test".to_string()))
+            .await
+            .expect("processing should succeed");
+        assert!(result.performance.selective_scan_utilization > 0.0);
+    }
+
+    // ── Ultra-long sequence factory ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_ultra_long_sequence_pipeline_basic() {
+        let pipeline = create_ultra_long_sequence_mamba2_pipeline()
+            .expect("ultra long sequence pipeline should be created");
+        let input = PipelineInput::Text("Ultra long test input".to_string());
+        let result = pipeline.process_async(input).await;
+        assert!(
+            result.is_ok(),
+            "ultra long sequence pipeline should process successfully"
+        );
+    }
+
+    // ── From conversion ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_from_mamba2_output_to_pipeline_output() {
+        let pipeline =
+            create_memory_efficient_mamba2_pipeline().expect("pipeline creation should succeed");
+        let mamba_out = pipeline
+            .process_async(PipelineInput::Text("hi".to_string()))
+            .await
+            .expect("processing should succeed");
+        let pipeline_output: PipelineOutput = mamba_out.into();
+        assert!(matches!(pipeline_output, PipelineOutput::Mamba2(_)));
     }
 }

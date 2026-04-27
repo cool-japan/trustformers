@@ -556,3 +556,132 @@ impl Default for PortReservationSystem {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resource_management::types::PortPoolConfig;
+
+    #[tokio::test]
+    async fn test_network_port_manager_creation() {
+        let config = PortPoolConfig::default();
+        let mgr = NetworkPortManager::new(config).await;
+        assert!(mgr.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_allocate_ports_basic() {
+        let mut config = PortPoolConfig::default();
+        config.port_range = (10000, 10099);
+        config.reserved_ranges = vec![];
+        let mgr = NetworkPortManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("creation failed"));
+        let ports = mgr.allocate_ports(3, "test-001").await;
+        assert!(ports.is_ok());
+        assert_eq!(ports.unwrap_or_default().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_allocate_zero_ports() {
+        let config = PortPoolConfig::default();
+        let mgr = NetworkPortManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("creation failed"));
+        let ports = mgr.allocate_ports(0, "test-zero").await;
+        assert!(ports.is_ok());
+        assert!(ports.unwrap_or_default().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_deallocate_ports_for_test() {
+        let mut config = PortPoolConfig::default();
+        config.port_range = (10000, 10099);
+        config.reserved_ranges = vec![];
+        let mgr = NetworkPortManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("creation failed"));
+        let before = mgr.get_available_port_count().await;
+        mgr.allocate_ports(5, "test-dealloc").await.unwrap_or_default();
+        let result = mgr.deallocate_ports_for_test("test-dealloc").await;
+        assert!(result.is_ok());
+        let after = mgr.get_available_port_count().await;
+        assert_eq!(before, after);
+    }
+
+    #[tokio::test]
+    async fn test_get_usage_statistics() {
+        let config = PortPoolConfig::default();
+        let mgr = NetworkPortManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("creation failed"));
+        let stats = mgr.get_statistics().await;
+        assert!(stats.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_check_availability() {
+        let mut config = PortPoolConfig::default();
+        config.port_range = (10000, 10099);
+        config.reserved_ranges = vec![];
+        let mgr = NetworkPortManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("creation failed"));
+        let ok = mgr.check_availability(5).await.unwrap_or(false);
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    async fn test_generate_allocation_report() {
+        let config = PortPoolConfig::default();
+        let mgr = NetworkPortManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("creation failed"));
+        let report = mgr.generate_allocation_report().await;
+        assert!(report.contains("Port Allocation Report"));
+    }
+
+    #[test]
+    fn test_port_reservation_system_default() {
+        let system = PortReservationSystem::default();
+        let (active, history) = system.get_reservation_statistics();
+        assert_eq!(active, 0);
+        assert_eq!(history, 0);
+    }
+
+    #[test]
+    fn test_port_not_reserved_initially() {
+        let system = PortReservationSystem::default();
+        assert!(!system.is_port_reserved(8080));
+        assert!(!system.is_port_reserved(9090));
+    }
+
+    #[tokio::test]
+    async fn test_cancel_reservations_empty() {
+        let system = PortReservationSystem::new();
+        let result = system.cancel_reservations("test").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_expired_reservations_empty() {
+        let system = PortReservationSystem::new();
+        let cleaned = system.cleanup_expired_reservations().await;
+        assert!(cleaned.is_ok());
+        assert_eq!(cleaned.unwrap_or(1), 0);
+    }
+
+    #[tokio::test]
+    async fn test_available_count_decreases_on_allocation() {
+        let mut config = PortPoolConfig::default();
+        config.port_range = (10000, 10099);
+        config.reserved_ranges = vec![];
+        let mgr = NetworkPortManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("creation failed"));
+        let before = mgr.get_available_port_count().await;
+        mgr.allocate_ports(3, "t1").await.unwrap_or_default();
+        let after = mgr.get_available_port_count().await;
+        assert_eq!(before - 3, after);
+    }
+}

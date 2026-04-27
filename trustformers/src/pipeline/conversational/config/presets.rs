@@ -517,3 +517,481 @@ impl ConfigurationPresets {
             .build_unchecked()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Preset existence tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_default_preset_exists() {
+        let cfg = ConfigurationPresets::get_preset(ConfigurationPreset::Default);
+        assert!(
+            cfg.temperature >= 0.0,
+            "default temperature must be non-negative"
+        );
+    }
+
+    #[test]
+    fn test_creative_preset_exists() {
+        let cfg = ConfigurationPresets::get_preset(ConfigurationPreset::Creative);
+        assert!(
+            cfg.temperature > 0.0,
+            "creative temperature must be positive"
+        );
+    }
+
+    #[test]
+    fn test_focused_preset_exists() {
+        let cfg = ConfigurationPresets::get_preset(ConfigurationPreset::Focused);
+        assert!(
+            cfg.temperature > 0.0,
+            "focused temperature must be positive"
+        );
+    }
+
+    #[test]
+    fn test_educational_preset_exists() {
+        let cfg = ConfigurationPresets::get_preset(ConfigurationPreset::Educational);
+        assert!(
+            cfg.max_response_tokens > 0,
+            "educational max_response_tokens must be positive"
+        );
+    }
+
+    #[test]
+    fn test_customer_support_preset_exists() {
+        let cfg = ConfigurationPresets::get_preset(ConfigurationPreset::CustomerSupport);
+        assert!(
+            cfg.max_response_tokens > 0,
+            "customer support max_response_tokens must be positive"
+        );
+    }
+
+    #[test]
+    fn test_medical_preset_exists() {
+        let cfg = ConfigurationPresets::get_preset(ConfigurationPreset::Medical);
+        assert!(
+            cfg.enable_safety_filter,
+            "medical preset must enable safety filter"
+        );
+    }
+
+    #[test]
+    fn test_legal_preset_exists() {
+        let cfg = ConfigurationPresets::get_preset(ConfigurationPreset::Legal);
+        assert!(
+            cfg.enable_safety_filter,
+            "legal preset must enable safety filter"
+        );
+    }
+
+    #[test]
+    fn test_technical_preset_exists() {
+        let cfg = ConfigurationPresets::get_preset(ConfigurationPreset::Technical);
+        assert!(
+            cfg.max_response_tokens > 0,
+            "technical max_response_tokens must be positive"
+        );
+    }
+
+    #[test]
+    fn test_casual_preset_exists() {
+        let cfg = ConfigurationPresets::get_preset(ConfigurationPreset::Casual);
+        assert!(cfg.temperature > 0.0, "casual temperature must be positive");
+    }
+
+    #[test]
+    fn test_professional_preset_exists() {
+        let cfg = ConfigurationPresets::get_preset(ConfigurationPreset::Professional);
+        assert!(
+            cfg.max_response_tokens > 0,
+            "professional max_response_tokens must be positive"
+        );
+    }
+
+    #[test]
+    fn test_research_preset_exists() {
+        let cfg = ConfigurationPresets::get_preset(ConfigurationPreset::Research);
+        assert!(
+            cfg.max_response_tokens >= 2000,
+            "research should allow long responses"
+        );
+    }
+
+    #[test]
+    fn test_writing_preset_exists() {
+        let cfg = ConfigurationPresets::get_preset(ConfigurationPreset::Writing);
+        assert!(
+            cfg.temperature > 0.0,
+            "writing temperature must be positive"
+        );
+    }
+
+    #[test]
+    fn test_coding_preset_exists() {
+        let cfg = ConfigurationPresets::get_preset(ConfigurationPreset::Coding);
+        assert!(
+            cfg.max_response_tokens >= 2000,
+            "coding should allow long responses"
+        );
+    }
+
+    #[test]
+    fn test_gaming_preset_exists() {
+        let cfg = ConfigurationPresets::get_preset(ConfigurationPreset::Gaming);
+        assert!(cfg.temperature > 0.0, "gaming temperature must be positive");
+    }
+
+    #[test]
+    fn test_language_learning_preset_exists() {
+        let cfg = ConfigurationPresets::get_preset(ConfigurationPreset::LanguageLearning);
+        assert!(
+            cfg.max_response_tokens > 0,
+            "language learning max_response_tokens must be positive"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Temperature ordering tests: creative/casual must be higher than focused/coding
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_creative_temperature_higher_than_focused() {
+        let creative = ConfigurationPresets::creative_config();
+        let focused = ConfigurationPresets::focused_config();
+        assert!(
+            creative.temperature > focused.temperature,
+            "creative ({}) should have higher temperature than focused ({})",
+            creative.temperature,
+            focused.temperature
+        );
+    }
+
+    #[test]
+    fn test_writing_temperature_higher_than_coding() {
+        let writing = ConfigurationPresets::writing_config();
+        let coding = ConfigurationPresets::coding_config();
+        assert!(
+            writing.temperature > coding.temperature,
+            "writing ({}) should have higher temperature than coding ({})",
+            writing.temperature,
+            coding.temperature
+        );
+    }
+
+    #[test]
+    fn test_casual_temperature_higher_than_legal() {
+        let casual = ConfigurationPresets::casual_config();
+        let legal = ConfigurationPresets::legal_config();
+        assert!(
+            casual.temperature > legal.temperature,
+            "casual ({}) should have higher temperature than legal ({})",
+            casual.temperature,
+            legal.temperature
+        );
+    }
+
+    #[test]
+    fn test_medical_temperature_lower_than_creative() {
+        let medical = ConfigurationPresets::medical_config();
+        let creative = ConfigurationPresets::creative_config();
+        assert!(
+            medical.temperature < creative.temperature,
+            "medical ({}) should have lower temperature than creative ({})",
+            medical.temperature,
+            creative.temperature
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // max_tokens limits
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_research_max_tokens_large() {
+        let cfg = ConfigurationPresets::research_config();
+        assert!(
+            cfg.max_response_tokens >= 2000,
+            "research should allow >=2000 tokens"
+        );
+    }
+
+    #[test]
+    fn test_coding_max_tokens_large() {
+        let cfg = ConfigurationPresets::coding_config();
+        assert!(
+            cfg.max_response_tokens >= 2000,
+            "coding should allow >=2000 tokens"
+        );
+    }
+
+    #[test]
+    fn test_casual_max_tokens_smaller_than_research() {
+        let casual = ConfigurationPresets::casual_config();
+        let research = ConfigurationPresets::research_config();
+        assert!(
+            casual.max_response_tokens < research.max_response_tokens,
+            "casual max_tokens ({}) should be less than research ({})",
+            casual.max_response_tokens,
+            research.max_response_tokens
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // System prompt non-empty
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_all_presets_have_system_prompt() {
+        let all_presets = [
+            ConfigurationPreset::Default,
+            ConfigurationPreset::Creative,
+            ConfigurationPreset::Focused,
+            ConfigurationPreset::Educational,
+            ConfigurationPreset::CustomerSupport,
+            ConfigurationPreset::Medical,
+            ConfigurationPreset::Legal,
+            ConfigurationPreset::Technical,
+            ConfigurationPreset::Casual,
+            ConfigurationPreset::Professional,
+            ConfigurationPreset::Research,
+            ConfigurationPreset::Writing,
+            ConfigurationPreset::Coding,
+            ConfigurationPreset::Gaming,
+            ConfigurationPreset::LanguageLearning,
+        ];
+
+        for preset in all_presets {
+            let cfg = ConfigurationPresets::get_preset(preset);
+            let prompt = cfg.system_prompt.expect("every preset must have a system prompt");
+            assert!(
+                !prompt.is_empty(),
+                "system prompt for {:?} must not be empty",
+                preset
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Safety filter
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_medical_safety_filter_enabled() {
+        let cfg = ConfigurationPresets::medical_config();
+        assert!(
+            cfg.enable_safety_filter,
+            "medical preset must enable safety filter"
+        );
+    }
+
+    #[test]
+    fn test_legal_safety_filter_enabled() {
+        let cfg = ConfigurationPresets::legal_config();
+        assert!(
+            cfg.enable_safety_filter,
+            "legal preset must enable safety filter"
+        );
+    }
+
+    #[test]
+    fn test_customer_support_safety_filter_enabled() {
+        let cfg = ConfigurationPresets::customer_support_config();
+        assert!(
+            cfg.enable_safety_filter,
+            "customer support preset must enable safety filter"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Memory configuration
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_educational_memory_enabled() {
+        let cfg = ConfigurationPresets::educational_config();
+        assert!(
+            cfg.memory_config.enabled,
+            "educational preset memory must be enabled"
+        );
+    }
+
+    #[test]
+    fn test_research_memory_max_entries_large() {
+        let cfg = ConfigurationPresets::research_config();
+        assert!(
+            cfg.memory_config.max_memories >= 200,
+            "research preset should store at least 200 memories"
+        );
+    }
+
+    #[test]
+    fn test_educational_memory_persist_important() {
+        let cfg = ConfigurationPresets::educational_config();
+        assert!(
+            cfg.memory_config.persist_important_memories,
+            "educational preset must persist important memories"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Streaming configuration
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_streaming_optimized_config_has_streaming() {
+        let cfg = ConfigurationPresets::streaming_optimized_config();
+        assert!(
+            cfg.streaming_config.enabled,
+            "streaming optimized config must have streaming enabled"
+        );
+    }
+
+    #[test]
+    fn test_casual_streaming_enabled() {
+        let cfg = ConfigurationPresets::casual_config();
+        assert!(
+            cfg.streaming_config.enabled,
+            "casual config must have streaming enabled"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Conversation mode assignment
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_gaming_is_roleplay_mode() {
+        let cfg = ConfigurationPresets::gaming_config();
+        assert_eq!(
+            cfg.conversation_mode,
+            ConversationMode::RolePlay,
+            "gaming preset should use RolePlay mode"
+        );
+    }
+
+    #[test]
+    fn test_educational_is_educational_mode() {
+        let cfg = ConfigurationPresets::educational_config();
+        assert_eq!(
+            cfg.conversation_mode,
+            ConversationMode::Educational,
+            "educational preset should use Educational mode"
+        );
+    }
+
+    #[test]
+    fn test_coding_is_instruction_following_mode() {
+        let cfg = ConfigurationPresets::coding_config();
+        assert_eq!(
+            cfg.conversation_mode,
+            ConversationMode::InstructionFollowing,
+            "coding preset should use InstructionFollowing mode"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // top_p in valid range
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_all_presets_top_p_in_range() {
+        let all_presets = [
+            ConfigurationPreset::Default,
+            ConfigurationPreset::Creative,
+            ConfigurationPreset::Focused,
+            ConfigurationPreset::Educational,
+            ConfigurationPreset::CustomerSupport,
+            ConfigurationPreset::Medical,
+            ConfigurationPreset::Legal,
+            ConfigurationPreset::Technical,
+            ConfigurationPreset::Casual,
+            ConfigurationPreset::Professional,
+            ConfigurationPreset::Research,
+            ConfigurationPreset::Writing,
+            ConfigurationPreset::Coding,
+            ConfigurationPreset::Gaming,
+            ConfigurationPreset::LanguageLearning,
+        ];
+
+        for preset in all_presets {
+            let cfg = ConfigurationPresets::get_preset(preset);
+            assert!(
+                cfg.top_p >= 0.0 && cfg.top_p <= 1.0,
+                "top_p={} for {:?} must be in [0.0, 1.0]",
+                cfg.top_p,
+                preset
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Repair configuration
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_customer_support_repair_enabled() {
+        let cfg = ConfigurationPresets::customer_support_config();
+        assert!(
+            cfg.repair_config.enabled,
+            "customer support must have repair enabled"
+        );
+    }
+
+    #[test]
+    fn test_educational_repair_has_strategies() {
+        let cfg = ConfigurationPresets::educational_config();
+        assert!(
+            !cfg.repair_config.repair_strategies.is_empty(),
+            "educational preset must specify repair strategies"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Utility / named constructors
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_chat_config_chat_mode() {
+        let cfg = ConfigurationPresets::chat_config();
+        assert_eq!(
+            cfg.conversation_mode,
+            ConversationMode::Chat,
+            "chat_config must use Chat mode"
+        );
+    }
+
+    #[test]
+    fn test_assistant_config_assistant_mode() {
+        let cfg = ConfigurationPresets::assistant_config();
+        assert_eq!(
+            cfg.conversation_mode,
+            ConversationMode::Assistant,
+            "assistant_config must use Assistant mode"
+        );
+    }
+
+    #[test]
+    fn test_qa_config_question_answering_mode() {
+        let cfg = ConfigurationPresets::qa_config();
+        assert_eq!(
+            cfg.conversation_mode,
+            ConversationMode::QuestionAnswering,
+            "qa_config must use QuestionAnswering mode"
+        );
+    }
+
+    #[test]
+    fn test_instruction_config_instruction_following_mode() {
+        let cfg = ConfigurationPresets::instruction_config();
+        assert_eq!(
+            cfg.conversation_mode,
+            ConversationMode::InstructionFollowing,
+            "instruction_config must use InstructionFollowing mode"
+        );
+    }
+}

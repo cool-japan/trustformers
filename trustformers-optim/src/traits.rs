@@ -485,4 +485,204 @@ mod tests {
         );
         assert!(stats.optimizer_memory <= stats.used_memory);
     }
+
+    #[test]
+    fn test_staleness_compensation_none() {
+        let comp = StalenessCompensation::None;
+        assert!(matches!(comp, StalenessCompensation::None));
+    }
+
+    #[test]
+    fn test_staleness_compensation_exponential() {
+        let comp = StalenessCompensation::Exponential;
+        assert!(matches!(comp, StalenessCompensation::Exponential));
+    }
+
+    #[test]
+    fn test_staleness_compensation_polynomial() {
+        let comp = StalenessCompensation::Polynomial(2.0);
+        if let StalenessCompensation::Polynomial(degree) = comp {
+            assert_eq!(degree, 2.0);
+        } else {
+            panic!("Expected Polynomial variant");
+        }
+    }
+
+    #[test]
+    fn test_hardware_stats_all_zero() {
+        let stats = HardwareStats {
+            memory_bandwidth_utilization: 0.0,
+            compute_utilization: 0.0,
+            cache_hit_rate: 0.0,
+            flops_per_second: 0.0,
+        };
+        assert_eq!(stats.memory_bandwidth_utilization, 0.0);
+        assert_eq!(stats.flops_per_second, 0.0);
+    }
+
+    #[test]
+    fn test_hardware_stats_max_utilization() {
+        let stats = HardwareStats {
+            memory_bandwidth_utilization: 1.0,
+            compute_utilization: 1.0,
+            cache_hit_rate: 1.0,
+            flops_per_second: 1e15,
+        };
+        assert!(stats.memory_bandwidth_utilization <= 1.0);
+        assert!(stats.compute_utilization <= 1.0);
+        assert!(stats.cache_hit_rate <= 1.0);
+    }
+
+    #[test]
+    fn test_gpu_memory_stats_zero_usage() {
+        let stats = GPUMemoryStats {
+            total_memory: 16 * 1024 * 1024 * 1024,
+            used_memory: 0,
+            available_memory: 16 * 1024 * 1024 * 1024,
+            optimizer_memory: 0,
+        };
+        assert_eq!(stats.used_memory, 0);
+        assert_eq!(stats.total_memory, stats.available_memory);
+    }
+
+    #[test]
+    fn test_gpu_memory_stats_full_usage() {
+        let total = 8 * 1024 * 1024 * 1024_usize;
+        let stats = GPUMemoryStats {
+            total_memory: total,
+            used_memory: total,
+            available_memory: 0,
+            optimizer_memory: total / 4,
+        };
+        assert_eq!(stats.available_memory, 0);
+        assert!(stats.optimizer_memory <= stats.used_memory);
+    }
+
+    #[test]
+    fn test_gpu_memory_stats_optimizer_fraction() {
+        let total = 16 * 1024 * 1024 * 1024_usize;
+        let used = 12 * 1024 * 1024 * 1024_usize;
+        let optimizer = 3 * 1024 * 1024 * 1024_usize;
+        let stats = GPUMemoryStats {
+            total_memory: total,
+            used_memory: used,
+            available_memory: total - used,
+            optimizer_memory: optimizer,
+        };
+        assert_eq!(stats.available_memory, 4 * 1024 * 1024 * 1024);
+        assert!(stats.optimizer_memory < stats.used_memory);
+    }
+
+    #[test]
+    fn test_hardware_stats_clone() {
+        let stats = HardwareStats {
+            memory_bandwidth_utilization: 0.5,
+            compute_utilization: 0.7,
+            cache_hit_rate: 0.9,
+            flops_per_second: 5e11,
+        };
+        let cloned = stats.clone();
+        assert_eq!(cloned.memory_bandwidth_utilization, 0.5);
+        assert_eq!(cloned.compute_utilization, 0.7);
+    }
+
+    #[test]
+    fn test_gpu_memory_stats_clone() {
+        let stats = GPUMemoryStats {
+            total_memory: 1000,
+            used_memory: 500,
+            available_memory: 500,
+            optimizer_memory: 100,
+        };
+        let cloned = stats.clone();
+        assert_eq!(cloned.total_memory, 1000);
+    }
+
+    #[test]
+    fn test_staleness_compensation_copy() {
+        let comp = StalenessCompensation::Linear;
+        let copied = comp;
+        assert!(matches!(copied, StalenessCompensation::Linear));
+    }
+
+    #[test]
+    fn test_hardware_stats_realistic_gpu() {
+        let stats = HardwareStats {
+            memory_bandwidth_utilization: 0.75,
+            compute_utilization: 0.85,
+            cache_hit_rate: 0.92,
+            flops_per_second: 1.2e13,
+        };
+        assert!(
+            stats.memory_bandwidth_utilization > 0.0 && stats.memory_bandwidth_utilization <= 1.0
+        );
+        assert!(stats.compute_utilization > 0.0 && stats.compute_utilization <= 1.0);
+        assert!(stats.flops_per_second > 1e12);
+    }
+
+    #[test]
+    fn test_hardware_stats_edge_device() {
+        let stats = HardwareStats {
+            memory_bandwidth_utilization: 0.3,
+            compute_utilization: 0.4,
+            cache_hit_rate: 0.6,
+            flops_per_second: 1e9,
+        };
+        assert!(stats.flops_per_second < 1e10);
+        assert!(stats.compute_utilization < 0.5);
+    }
+
+    #[test]
+    fn test_gpu_memory_stats_consistency() {
+        let stats = GPUMemoryStats {
+            total_memory: 8 * 1024 * 1024 * 1024,
+            used_memory: 6 * 1024 * 1024 * 1024,
+            available_memory: 2 * 1024 * 1024 * 1024,
+            optimizer_memory: 2 * 1024 * 1024 * 1024,
+        };
+        assert_eq!(
+            stats.used_memory + stats.available_memory,
+            stats.total_memory
+        );
+    }
+
+    #[test]
+    fn test_staleness_polynomial_fractional() {
+        let comp = StalenessCompensation::Polynomial(0.5);
+        if let StalenessCompensation::Polynomial(degree) = comp {
+            assert!(degree > 0.0 && degree < 1.0);
+        }
+    }
+
+    #[test]
+    fn test_staleness_polynomial_high_degree() {
+        let comp = StalenessCompensation::Polynomial(10.0);
+        if let StalenessCompensation::Polynomial(degree) = comp {
+            assert!(degree > 5.0);
+        }
+    }
+
+    #[test]
+    fn test_hardware_stats_debug_format() {
+        let stats = HardwareStats {
+            memory_bandwidth_utilization: 0.5,
+            compute_utilization: 0.5,
+            cache_hit_rate: 0.5,
+            flops_per_second: 1.0,
+        };
+        let debug_str = format!("{:?}", stats);
+        assert!(debug_str.contains("HardwareStats"));
+    }
+
+    #[test]
+    fn test_gpu_memory_stats_debug_format() {
+        let stats = GPUMemoryStats {
+            total_memory: 100,
+            used_memory: 50,
+            available_memory: 50,
+            optimizer_memory: 10,
+        };
+        let debug_str = format!("{:?}", stats);
+        assert!(debug_str.contains("GPUMemoryStats"));
+    }
 }

@@ -178,4 +178,240 @@ mod tests {
             assert_eq!(arr[[1, 1]], -3.0); // -3.0 unchanged
         }
     }
+
+    #[test]
+    fn test_clip_grad_norm_empty() {
+        let mut gradients: Vec<Tensor> = vec![];
+        let norm =
+            GradientUtils::clip_grad_norm(&mut gradients, 5.0).expect("operation failed in test");
+        assert_eq!(norm, 0.0);
+    }
+
+    #[test]
+    fn test_clip_grad_norm_no_clipping_needed() {
+        let mut gradients = vec![Tensor::zeros(&[2, 2]).expect("tensor operation failed")];
+        if let Tensor::F32(ref mut arr) = gradients[0] {
+            arr[[0, 0]] = 1.0;
+            arr[[0, 1]] = 1.0;
+        }
+        let norm =
+            GradientUtils::clip_grad_norm(&mut gradients, 100.0).expect("operation failed in test");
+        assert!(norm < 100.0);
+        // Values should remain unchanged
+        if let Tensor::F32(ref arr) = gradients[0] {
+            assert_eq!(arr[[0, 0]], 1.0);
+            assert_eq!(arr[[0, 1]], 1.0);
+        }
+    }
+
+    #[test]
+    fn test_clip_grad_norm_single_tensor() {
+        let mut gradients = vec![Tensor::zeros(&[2]).expect("tensor operation failed")];
+        if let Tensor::F32(ref mut arr) = gradients[0] {
+            arr[0] = 3.0;
+            arr[1] = 4.0;
+        }
+        let norm =
+            GradientUtils::clip_grad_norm(&mut gradients, 2.5).expect("operation failed in test");
+        assert!((norm - 5.0).abs() < 1e-4);
+        // After clipping, norm should be scaled to 2.5
+        if let Tensor::F32(ref arr) = gradients[0] {
+            let new_norm = (arr[0] * arr[0] + arr[1] * arr[1]).sqrt();
+            assert!((new_norm - 2.5).abs() < 0.1);
+        }
+    }
+
+    #[test]
+    fn test_clip_grad_value_no_clipping() {
+        let mut gradients = vec![Tensor::zeros(&[2, 2]).expect("tensor operation failed")];
+        if let Tensor::F32(ref mut arr) = gradients[0] {
+            arr[[0, 0]] = 1.0;
+            arr[[0, 1]] = -1.0;
+        }
+        GradientUtils::clip_grad_value(&mut gradients, 5.0).expect("operation failed in test");
+        if let Tensor::F32(ref arr) = gradients[0] {
+            assert_eq!(arr[[0, 0]], 1.0);
+            assert_eq!(arr[[0, 1]], -1.0);
+        }
+    }
+
+    #[test]
+    fn test_clip_grad_value_all_exceed() {
+        let mut gradients = vec![Tensor::zeros(&[2]).expect("tensor operation failed")];
+        if let Tensor::F32(ref mut arr) = gradients[0] {
+            arr[0] = 100.0;
+            arr[1] = -100.0;
+        }
+        GradientUtils::clip_grad_value(&mut gradients, 1.0).expect("operation failed in test");
+        if let Tensor::F32(ref arr) = gradients[0] {
+            assert_eq!(arr[0], 1.0);
+            assert_eq!(arr[1], -1.0);
+        }
+    }
+
+    #[test]
+    fn test_accumulate_gradients() {
+        let mut accumulated = vec![Tensor::zeros(&[3]).expect("tensor operation failed")];
+        let mut new_grads = vec![Tensor::zeros(&[3]).expect("tensor operation failed")];
+        if let Tensor::F32(ref mut arr) = new_grads[0] {
+            arr[0] = 2.0;
+            arr[1] = 4.0;
+            arr[2] = 6.0;
+        }
+        GradientUtils::accumulate_gradients(&mut accumulated, &new_grads, 2)
+            .expect("operation failed in test");
+        if let Tensor::F32(ref arr) = accumulated[0] {
+            assert!((arr[0] - 1.0).abs() < 1e-6); // 2.0 / 2 = 1.0
+            assert!((arr[1] - 2.0).abs() < 1e-6); // 4.0 / 2 = 2.0
+            assert!((arr[2] - 3.0).abs() < 1e-6); // 6.0 / 2 = 3.0
+        }
+    }
+
+    #[test]
+    fn test_accumulate_gradients_mismatched_length() {
+        let mut accumulated = vec![Tensor::zeros(&[3]).expect("tensor operation failed")];
+        let new_grads = vec![
+            Tensor::zeros(&[3]).expect("tensor operation failed"),
+            Tensor::zeros(&[3]).expect("tensor operation failed"),
+        ];
+        let result = GradientUtils::accumulate_gradients(&mut accumulated, &new_grads, 1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_zero_accumulated_gradients() {
+        let mut grads = vec![Tensor::zeros(&[2, 2]).expect("tensor operation failed")];
+        if let Tensor::F32(ref mut arr) = grads[0] {
+            arr[[0, 0]] = 5.0;
+            arr[[1, 1]] = 10.0;
+        }
+        GradientUtils::zero_accumulated_gradients(&mut grads).expect("operation failed in test");
+        if let Tensor::F32(ref arr) = grads[0] {
+            assert_eq!(arr[[0, 0]], 0.0);
+            assert_eq!(arr[[1, 1]], 0.0);
+        }
+    }
+
+    #[test]
+    fn test_zero_accumulated_gradients_multiple() {
+        let mut grads = vec![
+            Tensor::zeros(&[2]).expect("tensor operation failed"),
+            Tensor::zeros(&[3]).expect("tensor operation failed"),
+        ];
+        if let Tensor::F32(ref mut arr) = grads[0] {
+            arr[0] = 1.0;
+        }
+        if let Tensor::F32(ref mut arr) = grads[1] {
+            arr[0] = 2.0;
+        }
+        GradientUtils::zero_accumulated_gradients(&mut grads).expect("operation failed in test");
+        if let Tensor::F32(ref arr) = grads[0] {
+            assert_eq!(arr[0], 0.0);
+        }
+        if let Tensor::F32(ref arr) = grads[1] {
+            assert_eq!(arr[0], 0.0);
+        }
+    }
+
+    #[test]
+    fn test_clip_grad_norm_exact_boundary() {
+        let mut gradients = vec![Tensor::zeros(&[2]).expect("tensor operation failed")];
+        if let Tensor::F32(ref mut arr) = gradients[0] {
+            arr[0] = 3.0;
+            arr[1] = 4.0; // norm = 5.0
+        }
+        let norm =
+            GradientUtils::clip_grad_norm(&mut gradients, 5.0).expect("operation failed in test");
+        assert!((norm - 5.0).abs() < 1e-4);
+        // At exact boundary, no clipping should occur
+        if let Tensor::F32(ref arr) = gradients[0] {
+            assert!((arr[0] - 3.0).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn test_accumulate_gradients_multiple_steps() {
+        let mut accumulated = vec![Tensor::zeros(&[2]).expect("tensor operation failed")];
+        let steps = 4;
+        for _ in 0..steps {
+            let mut new_grads = vec![Tensor::zeros(&[2]).expect("tensor operation failed")];
+            if let Tensor::F32(ref mut arr) = new_grads[0] {
+                arr[0] = 4.0;
+                arr[1] = 8.0;
+            }
+            GradientUtils::accumulate_gradients(&mut accumulated, &new_grads, steps)
+                .expect("operation failed in test");
+        }
+        if let Tensor::F32(ref arr) = accumulated[0] {
+            assert!((arr[0] - 4.0).abs() < 1e-4); // 4 * (4.0/4) = 4.0
+            assert!((arr[1] - 8.0).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn test_clip_grad_value_symmetric() {
+        let mut gradients = vec![Tensor::zeros(&[4]).expect("tensor operation failed")];
+        if let Tensor::F32(ref mut arr) = gradients[0] {
+            arr[0] = 3.0;
+            arr[1] = -3.0;
+            arr[2] = 0.5;
+            arr[3] = -0.5;
+        }
+        GradientUtils::clip_grad_value(&mut gradients, 2.0).expect("operation failed in test");
+        if let Tensor::F32(ref arr) = gradients[0] {
+            assert_eq!(arr[0], 2.0);
+            assert_eq!(arr[1], -2.0);
+            assert_eq!(arr[2], 0.5);
+            assert_eq!(arr[3], -0.5);
+        }
+    }
+
+    #[test]
+    fn test_clip_grad_value_f64_tensor() {
+        let mut gradients = vec![Tensor::zeros_f64(&[2]).expect("tensor operation failed")];
+        if let Tensor::F64(ref mut arr) = gradients[0] {
+            arr[0] = 100.0;
+            arr[1] = -100.0;
+        }
+        GradientUtils::clip_grad_value(&mut gradients, 5.0).expect("operation failed in test");
+        if let Tensor::F64(ref arr) = gradients[0] {
+            assert_eq!(arr[0], 5.0);
+            assert_eq!(arr[1], -5.0);
+        }
+    }
+
+    #[test]
+    fn test_zero_gradients_f64() {
+        let mut grads = vec![Tensor::zeros_f64(&[3]).expect("tensor operation failed")];
+        if let Tensor::F64(ref mut arr) = grads[0] {
+            arr[0] = 5.0;
+            arr[1] = 10.0;
+            arr[2] = 15.0;
+        }
+        GradientUtils::zero_accumulated_gradients(&mut grads).expect("operation failed in test");
+        if let Tensor::F64(ref arr) = grads[0] {
+            assert_eq!(arr[0], 0.0);
+            assert_eq!(arr[1], 0.0);
+            assert_eq!(arr[2], 0.0);
+        }
+    }
+
+    #[test]
+    fn test_clip_grad_norm_multiple_tensors() {
+        let mut gradients = vec![
+            Tensor::zeros(&[2]).expect("tensor operation failed"),
+            Tensor::zeros(&[2]).expect("tensor operation failed"),
+            Tensor::zeros(&[2]).expect("tensor operation failed"),
+        ];
+        for grad in gradients.iter_mut() {
+            if let Tensor::F32(ref mut arr) = grad {
+                arr[0] = 1.0;
+                arr[1] = 1.0;
+            }
+        }
+        let norm =
+            GradientUtils::clip_grad_norm(&mut gradients, 1.0).expect("operation failed in test");
+        // Total norm = sqrt(3 * (1^2 + 1^2)) = sqrt(6) ≈ 2.449
+        assert!(norm > 2.0);
+    }
 }

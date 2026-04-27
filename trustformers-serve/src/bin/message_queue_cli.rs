@@ -668,7 +668,14 @@ fn create_config(
     topics: Vec<String>,
 ) -> Result<MessageQueueConfig> {
     let backend_enum = match backend.to_lowercase().as_str() {
+        #[cfg(feature = "kafka")]
         "kafka" => MessageQueueBackend::Kafka,
+        #[cfg(not(feature = "kafka"))]
+        "kafka" => {
+            return Err(anyhow::anyhow!(
+                "Kafka backend is not enabled. Rebuild with --features kafka"
+            ))
+        },
         "rabbitmq" => MessageQueueBackend::RabbitMQ,
         "redis" => MessageQueueBackend::RedisStreams,
         "nats" => MessageQueueBackend::Nats,
@@ -678,6 +685,7 @@ fn create_config(
     };
 
     let connection_string = match backend_enum {
+        #[cfg(feature = "kafka")]
         MessageQueueBackend::Kafka => {
             if connection == "localhost" {
                 "localhost:9092".to_string()

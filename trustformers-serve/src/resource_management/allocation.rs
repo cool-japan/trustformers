@@ -219,3 +219,112 @@ impl Default for WorkerPool {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_parallelization::ResourceAllocation;
+    use std::time::Duration;
+
+    fn make_allocation(id: &str) -> ResourceAllocation {
+        ResourceAllocation {
+            resource_type: "network_port".to_string(),
+            resource_id: id.to_string(),
+            allocated_at: chrono::Utc::now(),
+            deallocated_at: None,
+            duration: Duration::from_secs(0),
+            utilization: 0.5,
+            efficiency: 0.8,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resource_allocator_creation() {
+        let allocator = ResourceAllocator::new().await;
+        assert!(allocator.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_resource_allocator_track_allocation() {
+        let allocator =
+            ResourceAllocator::new().await.unwrap_or_else(|_| panic!("creation failed"));
+        let alloc = make_allocation("port-8080");
+        let result = allocator.track_allocation(&alloc).await;
+        assert!(result.is_ok());
+        let active = allocator.get_active_allocations().await;
+        assert_eq!(active.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_resource_allocator_mark_deallocated() {
+        let allocator =
+            ResourceAllocator::new().await.unwrap_or_else(|_| panic!("creation failed"));
+        let alloc = make_allocation("port-9090");
+        allocator.track_allocation(&alloc).await.unwrap_or(());
+        let result = allocator.mark_deallocated(&alloc).await;
+        assert!(result.is_ok());
+        let active = allocator.get_active_allocations().await;
+        assert!(active.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_resource_allocator_history_grows() {
+        let allocator =
+            ResourceAllocator::new().await.unwrap_or_else(|_| panic!("creation failed"));
+        allocator.track_allocation(&make_allocation("p1")).await.unwrap_or(());
+        allocator.track_allocation(&make_allocation("p2")).await.unwrap_or(());
+        let history = allocator.get_allocation_history().await;
+        assert_eq!(history.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_worker_pool_new() {
+        let pool = WorkerPool::new();
+        assert_eq!(pool.get_worker_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_worker_pool_add_workers() {
+        let pool = WorkerPool::new();
+        pool.add_worker("w1").await.unwrap_or(());
+        pool.add_worker("w2").await.unwrap_or(());
+        assert_eq!(pool.get_worker_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_worker_pool_remove_worker() {
+        let pool = WorkerPool::new();
+        pool.add_worker("w-1").await.unwrap_or(());
+        let result = pool.remove_worker("w-1").await;
+        assert!(result.is_ok());
+        assert_eq!(pool.get_worker_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_worker_pool_remove_nonexistent() {
+        let pool = WorkerPool::new();
+        let result = pool.remove_worker("nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_worker_pool_load_metrics() {
+        let pool = WorkerPool::new();
+        let metrics = pool.get_load_metrics().await;
+        assert_eq!(metrics.cpu_usage, 0.0);
+        assert_eq!(metrics.active_tasks, 0);
+    }
+
+    #[tokio::test]
+    async fn test_resource_allocator_multiple_allocs() {
+        let allocator =
+            ResourceAllocator::new().await.unwrap_or_else(|_| panic!("creation failed"));
+        for i in 0..5_usize {
+            allocator
+                .track_allocation(&make_allocation(&format!("r{}", i)))
+                .await
+                .unwrap_or(());
+        }
+        assert_eq!(allocator.get_active_allocations().await.len(), 5);
+    }
+}

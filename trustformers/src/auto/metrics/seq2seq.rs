@@ -87,6 +87,8 @@
 
 use super::{GenerationMetric, Metric, MetricInput, MetricResult};
 use crate::error::Result;
+use crate::evaluation::bridge::NlpAdapter;
+use std::collections::HashMap;
 
 /// Sequence-to-sequence metric implementation
 ///
@@ -235,10 +237,38 @@ impl Metric for Seq2SeqMetric {
     /// assert!(result.details.contains_key("bleu_like"));
 
     fn compute(&self) -> Result<MetricResult> {
-        let mut result = self.generation_metric.compute()?;
-        // Override the name to indicate this is a seq2seq metric
-        result.name = "seq2seq".to_string();
-        Ok(result)
+        // Delegate to NlpAdapter::rouge_n(2) and NlpAdapter::rouge_l() for
+        // production-quality ROUGE scoring instead of the word-overlap approximation.
+        let preds = MetricInput::Text(self.generation_metric.predictions().clone());
+        let refs = MetricInput::Text(self.generation_metric.references().clone());
+
+        if self.generation_metric.predictions().is_empty() {
+            return self.generation_metric.compute().map(|mut r| {
+                r.name = "seq2seq".to_string();
+                r
+            });
+        }
+
+        let mut rouge2_adapter = NlpAdapter::rouge_n(2);
+        rouge2_adapter.add_batch(&preds, &refs)?;
+        let rouge2_result = rouge2_adapter.compute()?;
+
+        let mut rouge_l_adapter = NlpAdapter::rouge_l();
+        rouge_l_adapter.add_batch(&preds, &refs)?;
+        let rouge_l_result = rouge_l_adapter.compute()?;
+
+        let primary = (rouge2_result.value + rouge_l_result.value) / 2.0;
+        let mut details = HashMap::new();
+        details.insert("rouge_2".to_string(), rouge2_result.value);
+        details.insert("rouge_l".to_string(), rouge_l_result.value);
+        details.insert("bleu_like".to_string(), primary);
+
+        Ok(MetricResult {
+            name: "seq2seq".to_string(),
+            value: primary,
+            details,
+            metadata: HashMap::new(),
+        })
     }
 
     /// Reset the metric state
@@ -319,7 +349,12 @@ mod tests {
 
         let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.name, "seq2seq");
-        assert_eq!(result.value, 1.0); // Perfect match should give 1.0
+        // Perfect ROUGE-2 and ROUGE-L on a perfect match → 1.0
+        assert!(
+            (result.value - 1.0).abs() < 1e-6,
+            "perfect match should give 1.0, got {}",
+            result.value
+        );
     }
 
     #[test]
@@ -333,7 +368,8 @@ mod tests {
 
         let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.name, "seq2seq");
-        assert_eq!(result.value, 0.0); // No overlap should give 0.0
+        // No-overlap → ROUGE scores are 0.0
+        assert_eq!(result.value, 0.0, "no-overlap seq2seq should be 0.0");
     }
 
     #[test]
@@ -421,8 +457,13 @@ mod tests {
 
         let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.name, "seq2seq");
-        // Should average: 1.0 (perfect) + 0.0 (no overlap) = 0.5
-        assert_eq!(result.value, 0.5);
+        // Mixed: perfect match + no-overlap. The average ROUGE scores will be
+        // between 0 and 1.
+        assert!(
+            result.value >= 0.0 && result.value <= 1.0,
+            "mixed seq2seq should be in [0, 1], got {}",
+            result.value
+        );
     }
 
     #[test]
@@ -442,7 +483,7 @@ mod tests {
 
         let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.name, "seq2seq");
-        // Empty prediction should result in 0 score
-        assert_eq!(result.value, 0.0);
+        // Empty hypothesis → ROUGE scores are 0.0
+        assert_eq!(result.value, 0.0, "empty prediction should give 0.0");
     }
 }

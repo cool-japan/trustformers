@@ -810,4 +810,304 @@ mod tests {
         let task = active_tasks.get(&task_id).expect("key should exist in test data");
         assert_eq!(task.contention_events.len(), 1);
     }
+
+    #[test]
+    fn test_default_config_values() {
+        let config = AsyncPerformanceConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.tracking_interval_seconds, 5);
+        assert_eq!(config.max_history_size, 1000);
+        assert!(config.enable_stack_traces);
+        assert_eq!(config.slow_task_threshold_ms, 1000);
+        assert!(config.enable_contention_monitoring);
+        assert!((config.sampling_rate - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_default_thresholds_values() {
+        let t = PerformanceThresholds::default();
+        assert_eq!(t.max_avg_duration_ms, 5000);
+        assert_eq!(t.max_queue_size, 1000);
+        assert_eq!(t.max_blocked_tasks, 100);
+        assert!((t.max_contention_percentage - 0.8).abs() < 1e-6);
+        assert_eq!(t.max_memory_per_task_bytes, 100 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn test_task_status_completed() {
+        let config = AsyncPerformanceConfig {
+            sampling_rate: 1.0,
+            ..Default::default()
+        };
+        let tracker = AsyncPerformanceTracker::new(config);
+
+        let task_id = tracker.track_task_start("completed_task", None).await;
+        tracker.track_task_completion(&task_id, TaskStatus::Completed).await;
+
+        let history = tracker.task_history.lock().await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].status, TaskStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn test_task_status_failed() {
+        let config = AsyncPerformanceConfig {
+            sampling_rate: 1.0,
+            ..Default::default()
+        };
+        let tracker = AsyncPerformanceTracker::new(config);
+
+        let task_id = tracker.track_task_start("failing_task", None).await;
+        tracker.track_task_completion(&task_id, TaskStatus::Failed).await;
+
+        let history = tracker.task_history.lock().await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].status, TaskStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn test_task_status_cancelled() {
+        let config = AsyncPerformanceConfig {
+            sampling_rate: 1.0,
+            ..Default::default()
+        };
+        let tracker = AsyncPerformanceTracker::new(config);
+
+        let task_id = tracker.track_task_start("cancelled_task", None).await;
+        tracker.track_task_completion(&task_id, TaskStatus::Cancelled).await;
+
+        let history = tracker.task_history.lock().await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].status, TaskStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn test_empty_task_id_does_not_track() {
+        let config = AsyncPerformanceConfig {
+            sampling_rate: 1.0,
+            ..Default::default()
+        };
+        let tracker = AsyncPerformanceTracker::new(config);
+
+        // Pass empty task_id - should be a no-op
+        tracker.track_task_completion("", TaskStatus::Completed).await;
+
+        let history = tracker.task_history.lock().await;
+        assert_eq!(history.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_empty_task_id_contention_is_noop() {
+        let config = AsyncPerformanceConfig {
+            sampling_rate: 1.0,
+            ..Default::default()
+        };
+        let tracker = AsyncPerformanceTracker::new(config);
+
+        // Should not panic with empty task_id
+        tracker
+            .record_contention("", ContentionType::RwLock, 500, "resource".to_string())
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_active_task_removed_on_completion() {
+        let config = AsyncPerformanceConfig {
+            sampling_rate: 1.0,
+            ..Default::default()
+        };
+        let tracker = AsyncPerformanceTracker::new(config);
+
+        let task_id = tracker.track_task_start("ephemeral", None).await;
+
+        {
+            let active = tracker.active_tasks.read().await;
+            assert!(active.contains_key(&task_id));
+        }
+
+        tracker.track_task_completion(&task_id, TaskStatus::Completed).await;
+
+        {
+            let active = tracker.active_tasks.read().await;
+            assert!(!active.contains_key(&task_id));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_multiple_contention_events() {
+        let config = AsyncPerformanceConfig {
+            sampling_rate: 1.0,
+            ..Default::default()
+        };
+        let tracker = AsyncPerformanceTracker::new(config);
+
+        let task_id = tracker.track_task_start("multi_contention", None).await;
+
+        tracker
+            .record_contention(&task_id, ContentionType::Mutex, 100, "lock_a".to_string())
+            .await;
+        tracker
+            .record_contention(&task_id, ContentionType::Channel, 200, "chan_b".to_string())
+            .await;
+        tracker
+            .record_contention(&task_id, ContentionType::Memory, 50, "heap".to_string())
+            .await;
+
+        let active = tracker.active_tasks.read().await;
+        let task = active.get(&task_id).expect("task should exist");
+        assert_eq!(task.contention_events.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_spawn_location_stored() {
+        let config = AsyncPerformanceConfig {
+            sampling_rate: 1.0,
+            ..Default::default()
+        };
+        let tracker = AsyncPerformanceTracker::new(config);
+
+        let task_id = tracker
+            .track_task_start("located_task", Some("src/main.rs:42".to_string()))
+            .await;
+
+        let active = tracker.active_tasks.read().await;
+        let task = active.get(&task_id).expect("task should exist");
+        assert_eq!(task.spawn_location.as_deref(), Some("src/main.rs:42"));
+    }
+
+    #[tokio::test]
+    async fn test_task_name_stored() {
+        let config = AsyncPerformanceConfig {
+            sampling_rate: 1.0,
+            ..Default::default()
+        };
+        let tracker = AsyncPerformanceTracker::new(config);
+
+        let task_id = tracker.track_task_start("my_special_task", None).await;
+
+        let active = tracker.active_tasks.read().await;
+        let task = active.get(&task_id).expect("task should exist");
+        assert_eq!(task.task_name, "my_special_task");
+    }
+
+    #[tokio::test]
+    async fn test_tracker_clone_shares_state() {
+        let config = AsyncPerformanceConfig {
+            sampling_rate: 1.0,
+            ..Default::default()
+        };
+        let tracker = AsyncPerformanceTracker::new(config);
+        let tracker_clone = tracker.clone();
+
+        let task_id = tracker.track_task_start("shared_task", None).await;
+
+        // Clone should see the same active task
+        let active = tracker_clone.active_tasks.read().await;
+        assert!(active.contains_key(&task_id));
+    }
+
+    #[tokio::test]
+    async fn test_alerts_initially_empty() {
+        let config = AsyncPerformanceConfig::default();
+        let tracker = AsyncPerformanceTracker::new(config);
+
+        let alerts = tracker.get_alerts().await;
+        assert!(alerts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_to_alerts_returns_receiver() {
+        let config = AsyncPerformanceConfig::default();
+        let tracker = AsyncPerformanceTracker::new(config);
+
+        let _receiver = tracker.subscribe_to_alerts();
+        // If we get here, subscription succeeded
+    }
+
+    #[tokio::test]
+    async fn test_history_size_capped() {
+        let config = AsyncPerformanceConfig {
+            sampling_rate: 1.0,
+            max_history_size: 5,
+            ..Default::default()
+        };
+        let tracker = AsyncPerformanceTracker::new(config);
+
+        for i in 0..10usize {
+            let task_id = tracker.track_task_start(&format!("task_{}", i), None).await;
+            tracker.track_task_completion(&task_id, TaskStatus::Completed).await;
+        }
+
+        let history = tracker.task_history.lock().await;
+        assert!(history.len() <= 5);
+    }
+
+    #[tokio::test]
+    async fn test_update_runtime_stats_with_history() {
+        let config = AsyncPerformanceConfig {
+            sampling_rate: 1.0,
+            ..Default::default()
+        };
+        let tracker = AsyncPerformanceTracker::new(config);
+
+        // Add a completed task
+        let task_id = tracker.track_task_start("stat_task", None).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        tracker.track_task_completion(&task_id, TaskStatus::Completed).await;
+
+        tracker.update_runtime_stats().await.expect("update should succeed");
+
+        let stats = tracker.get_runtime_stats().await;
+        assert_eq!(stats.completed_tasks, 1);
+        assert_eq!(stats.failed_tasks, 0);
+    }
+
+    #[tokio::test]
+    async fn test_contention_type_variants() {
+        let types = vec![
+            ContentionType::Mutex,
+            ContentionType::RwLock,
+            ContentionType::Channel,
+            ContentionType::Scheduler,
+            ContentionType::Memory,
+            ContentionType::IoWait,
+        ];
+        assert_eq!(types.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn test_alert_type_variants() {
+        let types = vec![
+            AlertType::SlowTask,
+            AlertType::HighMemoryUsage,
+            AlertType::Contention,
+            AlertType::QueueSizeExceeded,
+            AlertType::TooManyBlockedTasks,
+            AlertType::HighFailureRate,
+        ];
+        assert_eq!(types.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn test_alert_severity_variants() {
+        let severities = vec![
+            AlertSeverity::Info,
+            AlertSeverity::Warning,
+            AlertSeverity::Critical,
+        ];
+        assert_eq!(severities.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_task_status_variants() {
+        let statuses = vec![
+            TaskStatus::Running,
+            TaskStatus::Completed,
+            TaskStatus::Failed,
+            TaskStatus::Cancelled,
+            TaskStatus::Blocked,
+            TaskStatus::Yielding,
+        ];
+        assert_eq!(statuses.len(), 6);
+    }
 }

@@ -211,7 +211,7 @@ pub enum SamplingStrategy {
 }
 
 /// Helper struct for managing generation state
-struct GenerationState {
+pub struct GenerationState {
     input_ids: Vec<u32>,
     past_key_values: Option<Vec<crate::Tensor>>,
     attention_mask: Vec<u32>,
@@ -235,7 +235,7 @@ impl GenerationState {
         self.position += 1;
     }
 
-    fn is_done(&self, eos_token_id: Option<u32>, max_length: usize) -> bool {
+    pub fn is_done(&self, eos_token_id: Option<u32>, max_length: usize) -> bool {
         if self.position >= max_length {
             return true;
         }
@@ -247,5 +247,352 @@ impl GenerationState {
         }
 
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- Sampling helpers (pure functions, no model required) ----
+
+    /// Greedy: pick the token with the highest logit.
+    fn greedy_decode(logits: &[f32]) -> usize {
+        logits
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    }
+
+    /// Softmax-normalised probability distribution.
+    fn softmax(logits: &[f32]) -> Vec<f32> {
+        let max_v = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let exps: Vec<f32> = logits.iter().map(|&x| (x - max_v).exp()).collect();
+        let sum: f32 = exps.iter().sum();
+        exps.iter().map(|&x| x / sum).collect()
+    }
+
+    /// Temperature scaling: divide logits by temperature before softmax.
+    fn temperature_scale(logits: &[f32], temperature: f32) -> Vec<f32> {
+        let scaled: Vec<f32> = logits.iter().map(|&x| x / temperature.max(1e-8)).collect();
+        softmax(&scaled)
+    }
+
+    /// Top-k filtering: keep only top k logits, zero rest.
+    fn top_k_filter(logits: &[f32], k: usize) -> Vec<f32> {
+        let mut indexed: Vec<(usize, f32)> = logits.iter().cloned().enumerate().collect();
+        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut result = vec![f32::NEG_INFINITY; logits.len()];
+        for (i, v) in indexed.iter().take(k) {
+            result[*i] = *v;
+        }
+        result
+    }
+
+    /// Top-p (nucleus) filtering: keep smallest set of tokens whose cumulative
+    /// probability >= p.
+    fn top_p_filter(probs: &[f32], p: f32) -> Vec<f32> {
+        let mut indexed: Vec<(usize, f32)> = probs.iter().cloned().enumerate().collect();
+        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut cum = 0.0_f32;
+        let mut result = vec![0.0_f32; probs.len()];
+        for (i, v) in &indexed {
+            if cum < p {
+                result[*i] = *v;
+                cum += *v;
+            }
+        }
+        result
+    }
+
+    /// Repetition penalty: divide logit by penalty if the token already appeared.
+    fn apply_repetition_penalty(logits: &mut [f32], generated: &[u32], penalty: f32) {
+        for &token in generated {
+            let idx = token as usize;
+            if idx < logits.len() {
+                if logits[idx] > 0.0 {
+                    logits[idx] /= penalty;
+                } else {
+                    logits[idx] *= penalty;
+                }
+            }
+        }
+    }
+
+    // ---- GenerationConfig tests ----
+
+    #[test]
+    fn test_generation_config_default() {
+        let cfg = GenerationConfig::default();
+        assert_eq!(cfg.max_length, 50);
+        assert_eq!(cfg.min_length, 1);
+        assert!((cfg.temperature - 1.0).abs() < 1e-6);
+        assert_eq!(cfg.top_k, Some(50));
+        assert_eq!(cfg.num_beams, 1);
+        assert!(cfg.do_sample);
+        assert!((cfg.repetition_penalty - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_generation_config_clone_debug() {
+        let cfg = GenerationConfig {
+            max_length: 128,
+            ..GenerationConfig::default()
+        };
+        let c2 = cfg.clone();
+        assert_eq!(c2.max_length, 128);
+        let dbg = format!("{:?}", c2);
+        assert!(dbg.contains("GenerationConfig"));
+    }
+
+    // ---- Greedy decoding tests ----
+
+    #[test]
+    fn test_greedy_decode_picks_max() {
+        let logits = vec![0.1, 0.5, 0.9, 0.2];
+        assert_eq!(greedy_decode(&logits), 2);
+    }
+
+    #[test]
+    fn test_greedy_decode_single_token() {
+        let logits = vec![42.0];
+        assert_eq!(greedy_decode(&logits), 0);
+    }
+
+    #[test]
+    fn test_greedy_is_deterministic() {
+        let logits = vec![1.0, 3.0, 2.0];
+        let t1 = greedy_decode(&logits);
+        let t2 = greedy_decode(&logits);
+        assert_eq!(t1, t2);
+    }
+
+    // ---- Temperature scaling tests ----
+
+    #[test]
+    fn test_temperature_one_is_standard_softmax() {
+        let logits = vec![1.0, 2.0, 3.0];
+        let t1 = temperature_scale(&logits, 1.0);
+        let sm = softmax(&logits);
+        for (a, b) in t1.iter().zip(sm.iter()) {
+            assert!((a - b).abs() < 1e-5, "mismatch: {} vs {}", a, b);
+        }
+    }
+
+    #[test]
+    fn test_high_temperature_flattens_distribution() {
+        let logits = vec![0.0, 1.0, 10.0]; // last is dominant
+        let probs_cold = temperature_scale(&logits, 0.1);
+        let probs_hot = temperature_scale(&logits, 10.0);
+        // Hot temperature should give smaller maximum probability
+        let max_cold = probs_cold.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let max_hot = probs_hot.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            max_hot < max_cold,
+            "hot should be flatter: {} vs {}",
+            max_hot,
+            max_cold
+        );
+    }
+
+    #[test]
+    fn test_low_temperature_sharpens_distribution() {
+        let logits = vec![1.0, 2.0, 3.0];
+        let probs = temperature_scale(&logits, 0.01);
+        // Essentially all mass on index 2
+        assert!(
+            probs[2] > 0.99,
+            "should be nearly deterministic: {:?}",
+            probs
+        );
+    }
+
+    #[test]
+    fn test_temperature_probabilities_sum_to_one() {
+        let logits = vec![1.0, -1.0, 2.5, 0.3];
+        let probs = temperature_scale(&logits, 0.7);
+        let sum: f32 = probs.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-5);
+    }
+
+    // ---- Top-k filtering tests ----
+
+    #[test]
+    fn test_top_k_keeps_k_tokens() {
+        let logits = vec![1.0, 5.0, 3.0, 0.5, 2.0];
+        let filtered = top_k_filter(&logits, 2);
+        let finite_count = filtered.iter().filter(|&&v| v > f32::NEG_INFINITY).count();
+        assert_eq!(finite_count, 2);
+    }
+
+    #[test]
+    fn test_top_k_keeps_highest() {
+        let logits = vec![1.0, 5.0, 3.0];
+        let filtered = top_k_filter(&logits, 1);
+        assert!(filtered[1] > f32::NEG_INFINITY);
+        assert!(filtered[0] <= f32::NEG_INFINITY);
+        assert!(filtered[2] <= f32::NEG_INFINITY);
+    }
+
+    #[test]
+    fn test_top_k_all_kept_when_k_ge_vocab() {
+        let logits = vec![1.0, 2.0, 3.0];
+        let filtered = top_k_filter(&logits, 10);
+        let finite_count = filtered.iter().filter(|&&v| v > f32::NEG_INFINITY).count();
+        assert_eq!(finite_count, 3);
+    }
+
+    // ---- Top-p (nucleus) sampling tests ----
+
+    #[test]
+    fn test_top_p_includes_at_least_one_token() {
+        // uniform distribution: every token has prob 0.25
+        let probs = vec![0.25, 0.25, 0.25, 0.25];
+        let filtered = top_p_filter(&probs, 0.5);
+        let nonzero = filtered.iter().filter(|&&v| v > 0.0).count();
+        assert!(nonzero >= 1, "at least one token should be kept");
+    }
+
+    #[test]
+    fn test_top_p_high_p_keeps_more_tokens() {
+        let probs = vec![0.4, 0.3, 0.2, 0.1];
+        let f_low = top_p_filter(&probs, 0.4);
+        let f_high = top_p_filter(&probs, 0.95);
+        let count_low = f_low.iter().filter(|&&v| v > 0.0).count();
+        let count_high = f_high.iter().filter(|&&v| v > 0.0).count();
+        assert!(count_high >= count_low);
+    }
+
+    #[test]
+    fn test_top_p_does_not_exceed_p() {
+        let probs = vec![0.5, 0.3, 0.15, 0.05];
+        let filtered = top_p_filter(&probs, 0.6);
+        let cum: f32 = filtered.iter().sum();
+        // The cumulative sum of kept tokens may slightly exceed p due to boundary
+        assert!(cum >= 0.5, "should cover at least the top token");
+    }
+
+    // ---- Repetition penalty tests ----
+
+    #[test]
+    fn test_repetition_penalty_reduces_positive_logit() {
+        let mut logits = vec![1.0, 2.0, 3.0];
+        let generated = vec![2u32]; // token 2 was already generated
+        apply_repetition_penalty(&mut logits, &generated, 2.0);
+        assert!(
+            logits[2] < 3.0,
+            "positive logit should be reduced: {}",
+            logits[2]
+        );
+    }
+
+    #[test]
+    fn test_repetition_penalty_amplifies_negative_logit() {
+        let mut logits = vec![-1.0, -2.0, -3.0];
+        let generated = vec![1u32]; // token 1
+        apply_repetition_penalty(&mut logits, &generated, 2.0);
+        assert!(
+            logits[1] < -2.0,
+            "negative logit should be more negative: {}",
+            logits[1]
+        );
+    }
+
+    #[test]
+    fn test_no_repetition_penalty_unchanged() {
+        let mut logits = vec![1.0, 2.0, 3.0];
+        let original = logits.clone();
+        apply_repetition_penalty(&mut logits, &[], 1.5);
+        for (a, b) in logits.iter().zip(original.iter()) {
+            assert!((a - b).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_repetition_penalty_one_is_noop() {
+        let mut logits = vec![1.0, 2.0, 3.0];
+        let generated = vec![0u32, 1, 2];
+        let original = logits.clone();
+        apply_repetition_penalty(&mut logits, &generated, 1.0);
+        for (a, b) in logits.iter().zip(original.iter()) {
+            assert!((a - b).abs() < 1e-6);
+        }
+    }
+
+    // ---- GenerationState tests ----
+
+    #[test]
+    fn test_generation_state_new() {
+        let state = GenerationState::new(vec![1, 2, 3]);
+        assert_eq!(state.input_ids, vec![1, 2, 3]);
+        assert_eq!(state.attention_mask, vec![1, 1, 1]);
+        assert_eq!(state.position, 3);
+    }
+
+    #[test]
+    fn test_generation_state_add_token() {
+        let mut state = GenerationState::new(vec![1, 2]);
+        state.add_token(42);
+        assert_eq!(state.input_ids.last(), Some(&42));
+        assert_eq!(state.position, 3);
+        assert_eq!(state.attention_mask.len(), 3);
+    }
+
+    #[test]
+    fn test_generation_state_done_by_length() {
+        let state = GenerationState::new(vec![1, 2, 3, 4, 5]);
+        assert!(state.is_done(None, 5));
+        assert!(!state.is_done(None, 10));
+    }
+
+    #[test]
+    fn test_generation_state_done_by_eos() {
+        let mut state = GenerationState::new(vec![1, 2]);
+        state.add_token(2); // EOS = 2
+        assert!(state.is_done(Some(2), 100));
+    }
+
+    #[test]
+    fn test_generation_state_not_done_if_no_eos() {
+        let state = GenerationState::new(vec![1, 2, 3]);
+        assert!(!state.is_done(Some(99), 100));
+    }
+
+    // ---- Stopping criteria tests ----
+
+    #[test]
+    fn test_stopping_by_max_length() {
+        // Simulate generating until max_length
+        let mut state = GenerationState::new(vec![0]);
+        let max_len = 5;
+        let mut steps = 0;
+        while !state.is_done(None, max_len) && steps < 100 {
+            state.add_token(steps as u32 + 1);
+            steps += 1;
+        }
+        assert!(state.position >= max_len);
+    }
+
+    #[test]
+    fn test_stopping_by_eos_token() {
+        let eos_token = 50256u32;
+        let mut state = GenerationState::new(vec![0]);
+        state.add_token(100);
+        state.add_token(eos_token);
+        assert!(state.is_done(Some(eos_token), 1000));
+    }
+
+    // ---- SamplingStrategy enum tests ----
+
+    #[test]
+    fn test_sampling_strategy_variants_exist() {
+        let _g = SamplingStrategy::Greedy;
+        let _m = SamplingStrategy::Multinomial;
+        let _b = SamplingStrategy::Beam { num_beams: 4 };
+        let _k = SamplingStrategy::TopK { k: 50 };
+        let _p = SamplingStrategy::TopP { p: 0.9 };
+        let _t = SamplingStrategy::Typical { p: 0.95 };
     }
 }

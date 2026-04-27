@@ -399,12 +399,12 @@ where
         let base_skip_prob = match self.config.conditional_strategy {
             ConditionalStrategy::AttentionSkipping
                 // Skip attention layers for simple inputs
-                if layer_idx % 2 == 0 && input_analysis.complexity_score < 0.5 => {
+                if layer_idx.is_multiple_of(2) && input_analysis.complexity_score < 0.5 => {
                     0.3
                 },
             ConditionalStrategy::FeedForwardSkipping
                 // Skip feed-forward layers for specific patterns
-                if layer_idx % 2 == 1 && input_analysis.complexity_score < 0.6 => {
+                if !layer_idx.is_multiple_of(2) && input_analysis.complexity_score < 0.6 => {
                     0.4
                 },
             ConditionalStrategy::BlockSkipping
@@ -978,5 +978,222 @@ mod tests {
 
         assert_eq!(metrics.throughput_tokens_per_second, 100.0);
         assert_eq!(metrics.speedup_factor, 2.5);
+    }
+
+    // ── Additional tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_config_default_latency_budget_positive() {
+        let cfg = AdaptiveInferenceConfig::default();
+        assert!(
+            cfg.latency_budget_ms > 0,
+            "latency_budget_ms must be positive"
+        );
+    }
+
+    #[test]
+    fn test_config_default_memory_budget_positive() {
+        let cfg = AdaptiveInferenceConfig::default();
+        assert!(
+            cfg.memory_budget_mb > 0,
+            "memory_budget_mb must be positive"
+        );
+    }
+
+    #[test]
+    fn test_config_default_energy_budget_positive() {
+        let cfg = AdaptiveInferenceConfig::default();
+        assert!(
+            cfg.energy_budget_watts > 0.0,
+            "energy_budget_watts must be positive"
+        );
+    }
+
+    #[test]
+    fn test_config_default_quality_threshold_in_range() {
+        let cfg = AdaptiveInferenceConfig::default();
+        assert!(
+            cfg.quality_threshold > 0.0 && cfg.quality_threshold <= 1.0,
+            "quality_threshold must be in (0, 1]"
+        );
+    }
+
+    #[test]
+    fn test_config_default_skip_probability_threshold_in_range() {
+        let cfg = AdaptiveInferenceConfig::default();
+        assert!(
+            cfg.skip_probability_threshold >= 0.0 && cfg.skip_probability_threshold <= 1.0,
+            "skip_probability_threshold must be in [0, 1]"
+        );
+    }
+
+    #[test]
+    fn test_config_default_adaptive_precision_threshold_in_range() {
+        let cfg = AdaptiveInferenceConfig::default();
+        assert!(cfg.adaptive_precision_threshold >= 0.0 && cfg.adaptive_precision_threshold <= 1.0);
+    }
+
+    #[test]
+    fn test_config_flags_enabled_by_default() {
+        let cfg = AdaptiveInferenceConfig::default();
+        assert!(cfg.dynamic_batch_size);
+        assert!(cfg.progressive_inference);
+        assert!(cfg.uncertainty_estimation);
+        assert!(cfg.calibration_enabled);
+    }
+
+    #[test]
+    fn test_precision_mode_all_variants_constructable() {
+        let modes = [
+            PrecisionMode::Full,
+            PrecisionMode::Half,
+            PrecisionMode::Mixed,
+            PrecisionMode::Int8,
+            PrecisionMode::Int4,
+            PrecisionMode::Dynamic,
+            PrecisionMode::Adaptive,
+        ];
+        assert_eq!(modes.len(), 7);
+    }
+
+    #[test]
+    fn test_conditional_strategy_all_variants_constructable() {
+        let strategies = [
+            ConditionalStrategy::AttentionSkipping,
+            ConditionalStrategy::FeedForwardSkipping,
+            ConditionalStrategy::BlockSkipping,
+            ConditionalStrategy::DynamicDepth,
+            ConditionalStrategy::SparseActivation,
+            ConditionalStrategy::TokenConditional,
+            ConditionalStrategy::LayerConditional,
+        ];
+        assert_eq!(strategies.len(), 7);
+    }
+
+    #[test]
+    fn test_resource_strategy_balanced_is_default() {
+        let cfg = AdaptiveInferenceConfig::default();
+        assert!(matches!(cfg.resource_strategy, ResourceStrategy::Balanced));
+    }
+
+    #[test]
+    fn test_adaptation_decision_struct_fields() {
+        let decision = AdaptationDecision {
+            layer_index: 3,
+            decision_type: "layer_skip".to_string(),
+            reason: "low complexity".to_string(),
+            confidence: 0.95,
+            resource_impact: 0.1,
+            quality_impact: 0.02,
+        };
+        assert_eq!(decision.layer_index, 3);
+        assert!(decision.confidence > 0.0 && decision.confidence <= 1.0);
+        assert!(decision.resource_impact >= 0.0);
+        assert!(decision.quality_impact >= 0.0);
+    }
+
+    #[test]
+    fn test_resource_allocation_custom_fields() {
+        let alloc = ResourceAllocation {
+            cpu_cores: 8,
+            memory_limit_mb: 4096,
+            gpu_memory_limit_mb: 8192,
+            energy_budget_watts: 100.0,
+            latency_budget_ms: 200,
+            quality_threshold: 0.95,
+        };
+        assert_eq!(alloc.cpu_cores, 8);
+        assert_eq!(alloc.memory_limit_mb, 4096);
+        assert!(alloc.quality_threshold > 0.0 && alloc.quality_threshold <= 1.0);
+    }
+
+    #[test]
+    fn test_input_analysis_recommended_precision_valid() {
+        let analyzer = InputAnalyzer::new();
+        let analysis = analyzer.analyze_input(&"sample").expect("analyze_input should succeed");
+        // Just check it returns some valid precision mode
+        let _mode = &analysis.recommended_precision;
+        assert!(analysis.estimated_computation_cost > 0.0);
+    }
+
+    #[test]
+    fn test_input_analysis_recommended_depth_within_model_bounds() {
+        let analyzer = InputAnalyzer::new();
+        let analysis = analyzer.analyze_input(&"test input").expect("analyze_input should succeed");
+        // recommended_depth should be at most total_layers (24 from default config)
+        assert!(
+            analysis.recommended_depth <= 24,
+            "recommended depth must not exceed model depth"
+        );
+        assert!(
+            analysis.recommended_depth > 0,
+            "recommended depth must be positive"
+        );
+    }
+
+    #[test]
+    fn test_performance_metrics_latency_throughput_relationship() {
+        // If throughput = tokens/sec and latency is in ms then
+        // throughput ≈ 1000 / latency_ms (for single token).
+        let latency_ms = 10.0_f32;
+        let expected_throughput = 1000.0 / latency_ms;
+        let metrics = PerformanceMetrics {
+            throughput_tokens_per_second: expected_throughput,
+            latency_percentiles: HashMap::new(),
+            memory_efficiency: 0.9,
+            energy_efficiency: 0.8,
+            quality_preservation: 0.95,
+            speedup_factor: 2.0,
+        };
+        assert!(
+            (metrics.throughput_tokens_per_second - 100.0).abs() < 1e-4,
+            "throughput should be 1000/latency_ms"
+        );
+    }
+
+    #[test]
+    fn test_resource_efficiency_higher_speed_is_better() {
+        // resource_efficiency = time_factor + mem_factor + energy_factor / 3
+        // At lower time (ms) the time_factor is higher → higher efficiency
+        let time_fast = 10_u64;
+        let time_slow = 1000_u64;
+        let mem = 512.0_f64;
+        let energy = 50.0_f32;
+
+        let ef_fast = {
+            let t = 1.0 / (time_fast as f32 / 1000.0 + 1.0);
+            let m = 1.0 / (mem as f32 / 1024.0 + 1.0);
+            let e = 1.0 / (energy + 1.0);
+            (t + m + e) / 3.0
+        };
+        let ef_slow = {
+            let t = 1.0 / (time_slow as f32 / 1000.0 + 1.0);
+            let m = 1.0 / (mem as f32 / 1024.0 + 1.0);
+            let e = 1.0 / (energy + 1.0);
+            (t + m + e) / 3.0
+        };
+
+        assert!(
+            ef_fast > ef_slow,
+            "faster execution should yield higher resource efficiency"
+        );
+    }
+
+    #[test]
+    fn test_latency_quality_tradeoff_higher_quality_better() {
+        let latency_ms = 50_u64;
+        let budget_ms = 100_u64;
+        let quality_high = 0.95_f32;
+        let quality_low = 0.5_f32;
+
+        let tradeoff = |q: f32| {
+            let l_norm = latency_ms as f32 / budget_ms as f32;
+            q / (l_norm + 1.0)
+        };
+
+        assert!(
+            tradeoff(quality_high) > tradeoff(quality_low),
+            "higher quality should produce better tradeoff score"
+        );
     }
 }

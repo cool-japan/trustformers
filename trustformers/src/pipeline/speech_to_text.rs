@@ -471,3 +471,259 @@ mod base64 {
         Ok(vec![])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- AudioFormat tests ----
+
+    #[test]
+    fn test_audio_format_from_extension_wav() {
+        let fmt = AudioFormat::from_extension("wav");
+        assert!(matches!(fmt, Some(AudioFormat::Wav)));
+    }
+
+    #[test]
+    fn test_audio_format_from_extension_flac() {
+        let fmt = AudioFormat::from_extension("flac");
+        assert!(matches!(fmt, Some(AudioFormat::Flac)));
+    }
+
+    #[test]
+    fn test_audio_format_from_extension_mp3() {
+        let fmt = AudioFormat::from_extension("mp3");
+        assert!(matches!(fmt, Some(AudioFormat::Mp3)));
+    }
+
+    #[test]
+    fn test_audio_format_from_extension_case_insensitive() {
+        let fmt = AudioFormat::from_extension("WAV");
+        assert!(matches!(fmt, Some(AudioFormat::Wav)));
+    }
+
+    #[test]
+    fn test_audio_format_from_extension_unknown() {
+        let fmt = AudioFormat::from_extension("xyz");
+        assert!(fmt.is_none());
+    }
+
+    #[test]
+    fn test_audio_format_all_variants() {
+        let exts = ["wav", "flac", "mp3", "m4a", "ogg", "webm"];
+        for ext in &exts {
+            assert!(
+                AudioFormat::from_extension(ext).is_some(),
+                "missing: {}",
+                ext
+            );
+        }
+    }
+
+    // ---- SpeechToTextConfig tests ----
+
+    #[test]
+    fn test_config_default_values() {
+        let cfg = SpeechToTextConfig::default();
+        assert_eq!(cfg.sample_rate, 16000);
+        assert_eq!(cfg.max_duration, Some(30.0));
+        assert!(!cfg.return_timestamps);
+        assert!(cfg.language.is_none());
+        assert!(matches!(cfg.task, SpeechTask::Transcribe));
+        assert_eq!(cfg.num_beams, 1);
+        assert!((cfg.temperature - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_config_chunk_length() {
+        let cfg = SpeechToTextConfig::default();
+        assert_eq!(cfg.chunk_length_s, Some(30.0));
+        assert_eq!(cfg.stride_length_s, Some(5.0));
+    }
+
+    // ---- AudioFeatureExtractor tests ----
+
+    #[test]
+    fn test_extractor_creates_successfully() {
+        let extractor = AudioFeatureExtractor::new(16000).expect("extractor creation succeeded");
+        assert_eq!(extractor.sample_rate, 16000);
+    }
+
+    #[test]
+    fn test_extract_features_duration_calculation() {
+        let extractor = AudioFeatureExtractor::new(16000).expect("ok");
+        let samples = vec![0.0f32; 16000]; // 1 second of silence
+        let features = extractor.extract_features(&samples).expect("ok");
+        assert!((features.duration_s - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_extract_features_frame_count() {
+        let extractor = AudioFeatureExtractor::new(16000).expect("ok");
+        let samples = vec![0.0f32; 1600]; // 0.1 seconds
+        let features = extractor.extract_features(&samples).expect("ok");
+        // n_frames = (1600 / 160) + 1 = 11
+        assert_eq!(features.features.len(), 11);
+    }
+
+    #[test]
+    fn test_extract_features_mel_dims() {
+        let extractor = AudioFeatureExtractor::new(16000).expect("ok");
+        let samples = vec![0.0f32; 3200];
+        let features = extractor.extract_features(&samples).expect("ok");
+        // Each frame should have n_mels = 80 dimensions
+        for frame in &features.features {
+            assert_eq!(frame.len(), 80);
+        }
+    }
+
+    // ---- Resampling tests ----
+
+    #[test]
+    fn test_resample_same_rate_no_op() {
+        let extractor = AudioFeatureExtractor::new(16000).expect("ok");
+        let samples = vec![0.1_f32, 0.2, 0.3];
+        let resampled = extractor.resample(&samples, 16000, 16000).expect("ok");
+        assert_eq!(resampled.len(), samples.len());
+        for (a, b) in resampled.iter().zip(samples.iter()) {
+            assert!((a - b).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_resample_upsample_increases_length() {
+        let extractor = AudioFeatureExtractor::new(16000).expect("ok");
+        let samples = vec![0.0f32; 100];
+        let resampled = extractor.resample(&samples, 8000, 16000).expect("ok");
+        assert!(
+            resampled.len() > samples.len(),
+            "upsampled should be longer: {}",
+            resampled.len()
+        );
+    }
+
+    #[test]
+    fn test_resample_downsample_decreases_length() {
+        let extractor = AudioFeatureExtractor::new(16000).expect("ok");
+        let samples = vec![0.0f32; 200];
+        let resampled = extractor.resample(&samples, 16000, 8000).expect("ok");
+        assert!(
+            resampled.len() < samples.len(),
+            "downsampled should be shorter: {}",
+            resampled.len()
+        );
+    }
+
+    // ---- AudioFeatures tests ----
+
+    #[test]
+    fn test_audio_features_duration() {
+        let af = AudioFeatures {
+            features: vec![vec![0.0; 80]; 50],
+            sample_rate: 16000,
+            duration_s: 3.5,
+        };
+        assert!((af.duration() - 3.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_audio_features_to_tensor_shape() {
+        let n_frames = 10;
+        let n_mels = 80;
+        let af = AudioFeatures {
+            features: vec![vec![0.1; n_mels]; n_frames],
+            sample_rate: 16000,
+            duration_s: 1.0,
+        };
+        let tensor = af.to_tensor().expect("tensor creation succeeded");
+        let shape = tensor.shape();
+        // Expected shape: [1, n_frames, n_mels]
+        assert_eq!(shape[0], 1);
+        assert_eq!(shape[1], n_frames);
+        assert_eq!(shape[2], n_mels);
+    }
+
+    #[test]
+    fn test_audio_features_resample_to_same_rate() {
+        let af = AudioFeatures {
+            features: vec![vec![0.0; 80]; 5],
+            sample_rate: 16000,
+            duration_s: 1.0,
+        };
+        let result = af.resample_to(16000).expect("ok");
+        assert_eq!(result.sample_rate, 16000);
+    }
+
+    // ---- WordTimestamp tests ----
+
+    #[test]
+    fn test_word_timestamp_time_ordering() {
+        let ts = WordTimestamp {
+            word: "hello".to_string(),
+            start_time: 0.0,
+            end_time: 0.5,
+            confidence: 0.95,
+        };
+        assert!(ts.start_time < ts.end_time);
+        assert!(ts.confidence >= 0.0 && ts.confidence <= 1.0);
+    }
+
+    #[test]
+    fn test_word_timestamp_confidence_range() {
+        let ts = WordTimestamp {
+            word: "world".to_string(),
+            start_time: 0.5,
+            end_time: 1.0,
+            confidence: 0.87,
+        };
+        assert!(ts.confidence >= 0.0 && ts.confidence <= 1.0);
+    }
+
+    // ---- SpeechTask enum ----
+
+    #[test]
+    fn test_speech_task_transcribe_variant() {
+        let task = SpeechTask::Transcribe;
+        assert!(matches!(task, SpeechTask::Transcribe));
+    }
+
+    #[test]
+    fn test_speech_task_translate_variant() {
+        let task = SpeechTask::Translate;
+        assert!(matches!(task, SpeechTask::Translate));
+    }
+
+    // ---- Feature extraction simulation (MFCC-like) ----
+
+    #[test]
+    fn test_frame_level_processing_non_empty() {
+        let extractor = AudioFeatureExtractor::new(16000).expect("ok");
+        // Use LCG to generate deterministic pseudo-random audio samples
+        let mut seed = 12345u64;
+        let samples: Vec<f32> = (0..4800)
+            .map(|_| {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                ((seed >> 33) as f32 / u32::MAX as f32) * 2.0 - 1.0
+            })
+            .collect();
+        let features = extractor.extract_features(&samples).expect("ok");
+        assert!(!features.features.is_empty());
+        assert_eq!(features.features[0].len(), 80);
+    }
+
+    #[test]
+    fn test_load_and_extract_returns_features() {
+        let extractor = AudioFeatureExtractor::new(16000).expect("ok");
+        let af = extractor.load_and_extract("dummy_path.wav").expect("ok");
+        assert!(!af.features.is_empty());
+        assert!(af.duration_s > 0.0);
+    }
+
+    #[test]
+    fn test_decode_and_extract_wav() {
+        let extractor = AudioFeatureExtractor::new(16000).expect("ok");
+        let dummy_data = vec![0u8; 512];
+        let af = extractor.decode_and_extract(&dummy_data, AudioFormat::Wav).expect("ok");
+        assert!(!af.features.is_empty());
+    }
+}

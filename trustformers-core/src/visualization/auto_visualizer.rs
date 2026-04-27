@@ -631,3 +631,222 @@ pub struct AnalysisReport {
     pub bottlenecks: Vec<String>,
     pub optimization_suggestions: Vec<String>,
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // 1. AutoVisualizer default construction
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_auto_visualizer_default_construction() {
+        let v = AutoVisualizer::default();
+        // node_counter starts at 0 — verified by producing an ID with prefix "x"
+        // and inspecting the suffix via the next call indirectly through
+        // visualize_bert_model which adds many nodes.
+        let _ = v; // If this compiles the struct is constructible.
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. AutoVisualizer::new produces a fresh instance
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_auto_visualizer_new() {
+        let v = AutoVisualizer::new();
+        let _ = v;
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. visualize_bert_model with 0 layers produces a valid graph
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_visualize_bert_model_zero_layers() {
+        let mut v = AutoVisualizer::new();
+        let graph = v.visualize_bert_model(0).expect("bert 0 layers");
+
+        // Must still have embedding-related nodes and no transformer nodes.
+        assert!(
+            !graph.nodes.is_empty(),
+            "zero-layer BERT should still have embedding nodes"
+        );
+        assert_eq!(
+            graph.metadata.get("architecture").map(|s| s.as_str()),
+            Some("BERT")
+        );
+        assert_eq!(
+            graph.metadata.get("num_layers").map(|s| s.as_str()),
+            Some("0")
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. visualize_bert_model with 2 layers — node and edge counts
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_visualize_bert_model_two_layers_node_count() {
+        let mut v = AutoVisualizer::new();
+        let graph = v.visualize_bert_model(2).expect("bert 2 layers");
+
+        // 0-layer graph has: input, token_embed, pos_embed, embed_sum, pooler = 5 nodes
+        // Each transformer layer adds: attn, attn_norm, ffn, ffn_norm = 4 nodes
+        let expected_nodes = 5 + 2 * 4;
+        assert_eq!(
+            graph.nodes.len(),
+            expected_nodes,
+            "expected {} nodes, got {}",
+            expected_nodes,
+            graph.nodes.len()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. visualize_bert_model metadata contains total_params key
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_visualize_bert_model_metadata_total_params() {
+        let mut v = AutoVisualizer::new();
+        let graph = v.visualize_bert_model(1).expect("bert 1 layer");
+        assert!(
+            graph.metadata.contains_key("total_params"),
+            "BERT graph must carry total_params metadata"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. visualize_gpt_model with 1 layer returns a graph with edges
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_visualize_gpt_model_one_layer_has_edges() {
+        let mut v = AutoVisualizer::new();
+        let graph = v.visualize_gpt_model(1).expect("gpt 1 layer");
+        assert!(
+            !graph.edges.is_empty(),
+            "GPT 1-layer graph should have at least one edge"
+        );
+        assert_eq!(
+            graph.metadata.get("architecture").map(|s| s.as_str()),
+            Some("GPT")
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. visualize_gpt_model with 3 layers — node count
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_visualize_gpt_model_three_layers_node_count() {
+        let mut v = AutoVisualizer::new();
+        let graph = v.visualize_gpt_model(3).expect("gpt 3 layers");
+
+        // 0-layer: input, embeddings, final_ln, lm_head = 4 nodes
+        // Each layer: ln1, attn, res1, ln2, ffn, res2 = 6 nodes
+        let expected_nodes = 4 + 3 * 6;
+        assert_eq!(
+            graph.nodes.len(),
+            expected_nodes,
+            "expected {} nodes, got {}",
+            expected_nodes,
+            graph.nodes.len()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 8. GraphAnalyzer::analyze on an empty ModelGraph
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_graph_analyzer_empty_graph() {
+        let graph = ModelGraph::new("empty");
+        let report = GraphAnalyzer::analyze(&graph);
+        assert_eq!(report.total_parameters, 0);
+        assert!(report.layer_distribution.is_empty());
+        assert!(report.bottlenecks.is_empty());
+        assert!(report.optimization_suggestions.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // 9. GraphAnalyzer::analyze counts layer types correctly
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_graph_analyzer_layer_distribution() {
+        let mut v = AutoVisualizer::new();
+        let graph = v.visualize_bert_model(2).expect("bert 2 layers");
+        let report = GraphAnalyzer::analyze(&graph);
+
+        // Every BERT graph must include Attention and LayerNorm nodes.
+        assert!(
+            report.layer_distribution.contains_key("Attention"),
+            "BERT graph must have Attention nodes"
+        );
+        assert!(
+            report.layer_distribution.contains_key("LayerNorm"),
+            "BERT graph must have LayerNorm nodes"
+        );
+
+        // 2 transformer layers → 2 Attention nodes
+        assert_eq!(
+            report.layer_distribution.get("Attention").copied().unwrap_or(0),
+            2,
+            "BERT-2 should have exactly 2 Attention nodes"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 10. GraphAnalyzer suggests sparse attention for deep GPT
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_graph_analyzer_suggests_sparse_attention_for_deep_model() {
+        let mut v = AutoVisualizer::new();
+        // 9 attention layers > threshold of 8
+        let graph = v.visualize_gpt_model(9).expect("gpt 9 layers");
+        let report = GraphAnalyzer::analyze(&graph);
+        let has_sparse_suggestion =
+            report.optimization_suggestions.iter().any(|s| s.contains("sparse attention"));
+        assert!(
+            has_sparse_suggestion,
+            "deep GPT model should suggest sparse attention; got: {:?}",
+            report.optimization_suggestions
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 11. Multiple calls to AutoVisualizer increment node IDs monotonically
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_node_ids_are_unique_across_successive_calls() {
+        let mut v = AutoVisualizer::new();
+        let graph_a = v.visualize_bert_model(1).expect("bert 1");
+        let graph_b = v.visualize_gpt_model(1).expect("gpt 1");
+
+        let ids_a: std::collections::HashSet<&str> =
+            graph_a.nodes.iter().map(|n| n.id.as_str()).collect();
+        let ids_b: std::collections::HashSet<&str> =
+            graph_b.nodes.iter().map(|n| n.id.as_str()).collect();
+
+        // No ID overlap between the two graphs (counter keeps incrementing).
+        let intersection_count = ids_a.intersection(&ids_b).count();
+        assert_eq!(
+            intersection_count, 0,
+            "node IDs must be unique across successive visualization calls"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 12. AnalysisReport derives Debug and Default correctly
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_analysis_report_default_is_empty() {
+        let report = AnalysisReport::default();
+        assert_eq!(report.total_parameters, 0);
+        assert!(report.layer_distribution.is_empty());
+        assert!(report.bottlenecks.is_empty());
+        assert!(report.optimization_suggestions.is_empty());
+
+        // Debug must not panic.
+        let dbg = format!("{report:?}");
+        assert!(!dbg.is_empty());
+    }
+}

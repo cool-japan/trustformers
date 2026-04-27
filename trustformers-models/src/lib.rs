@@ -170,6 +170,22 @@ pub mod vit;
 #[cfg(feature = "llama")]
 pub mod llama;
 
+// LLaMA-2: grouped-query attention, RLHF chat variants
+#[cfg(feature = "llama2")]
+pub mod llama2;
+
+// LLaMA-3: extended Tiktoken vocab (128256), RoPE θ=500000, GQA on all sizes
+#[cfg(feature = "llama3")]
+pub mod llama3;
+
+// CodeLlama: code-specialised LLaMA-2 fine-tune with FIM and RoPE scaling
+#[cfg(feature = "codellama")]
+pub mod codellama;
+
+// DeepSeek-V2: Multi-Head Latent Attention + DeepSeekMoE
+#[cfg(feature = "deepseek")]
+pub mod deepseek;
+
 #[cfg(feature = "gpt_neox")]
 pub mod gpt_neox;
 
@@ -203,6 +219,21 @@ pub mod qwen;
 #[cfg(feature = "phi3")]
 pub mod phi3;
 
+#[cfg(feature = "gemma2")]
+pub mod gemma2;
+
+#[cfg(feature = "internlm2")]
+pub mod internlm2;
+
+#[cfg(feature = "falcon2")]
+pub mod falcon2;
+
+#[cfg(feature = "deepseek_v2")]
+pub mod deepseek_v2;
+
+#[cfg(feature = "qwen2_5")]
+pub mod qwen2_5;
+
 // State-space and efficient models
 pub mod hyena;
 pub mod mamba;
@@ -214,8 +245,72 @@ pub mod s4;
 pub mod falcon;
 pub mod stablelm;
 
+// Meta Models
+#[cfg(feature = "opt")]
+pub mod opt;
+
 // Cohere Models
 pub mod command_r;
+
+// IBM Models
+#[cfg(feature = "granite")]
+pub mod granite;
+
+// Cohere Aya multilingual models
+#[cfg(feature = "aya")]
+pub mod aya;
+
+// AI21 Jamba hybrid Mamba-Transformer model
+#[cfg(feature = "jamba")]
+pub mod jamba;
+
+// AI21 Jamba-2 hybrid Mamba-Transformer model
+#[cfg(feature = "jamba2")]
+pub mod jamba2;
+
+// Stable Diffusion 3 text encoder pipeline
+#[cfg(feature = "sd3")]
+pub mod sd3;
+
+// Llama-3.2 multimodal vision-language models
+#[cfg(feature = "llama3_2")]
+pub mod llama3_2;
+
+// Mistral-7B-v0.3 with function calling
+#[cfg(feature = "mistral_v3")]
+pub mod mistral_v3;
+
+// Mixtral Sparse Mixture of Experts
+#[cfg(feature = "mixtral")]
+pub mod mixtral;
+
+// Microsoft Phi-2 parallel transformer
+#[cfg(feature = "phi2")]
+pub mod phi2;
+
+// Mamba-2 State Space Model with SSD
+#[cfg(feature = "mamba2")]
+pub mod mamba2;
+
+// Microsoft Phi-4 (Dec 2024) — 14B dense decoder with GQA, RoPE θ=250000, tied embeddings
+#[cfg(feature = "phi4")]
+pub mod phi4;
+
+// NVIDIA Nemotron — squared-ReLU, partial rotary embeddings, GQA
+#[cfg(feature = "nemotron")]
+pub mod nemotron;
+
+// OpenAI Whisper — encoder-decoder speech recognition
+#[cfg(feature = "whisper")]
+pub mod whisper;
+
+// 01.AI Yi-1.5 — bilingual GQA decoder family
+#[cfg(feature = "yi")]
+pub mod yi;
+
+// BigCode StarCoder2 — code generation with FIM and near-MQA
+#[cfg(feature = "starcoder2")]
+pub mod starcoder2;
 
 // Anthropic Models
 pub mod claude;
@@ -433,6 +528,20 @@ pub use qwen::{QwenConfig, QwenForCausalLM, QwenModel};
 #[cfg(feature = "phi3")]
 pub use phi3::{Phi3Config, Phi3ForCausalLM, Phi3Model};
 
+#[cfg(feature = "gemma2")]
+pub use gemma2::{Gemma2Config, Gemma2ForCausalLM, Gemma2Model};
+
+#[cfg(feature = "deepseek_v2")]
+pub use deepseek_v2::{
+    ActivationType as DeepSeekV2ActivationType, DeepSeekV2Config, DeepSeekV2Error,
+    DeepSeekV2ForCausalLM, DeepSeekV2Model, TopKMethod,
+};
+
+#[cfg(feature = "qwen2_5")]
+pub use qwen2_5::{
+    Qwen25Config, Qwen25Error, Qwen25ForCausalLM, Qwen25ForSequenceClassification, Qwen25Model,
+};
+
 pub use automated_model_design::{
     ArchitectureTemplate, ConstraintSolver, DeploymentEnvironment, DesignPatternLibrary,
     DesignRequirements, DesignRequirementsBuilder, Modality, ModelDesign, ModelDesignMetadata,
@@ -563,6 +672,12 @@ pub use neural_architecture_search::{
     OptimizationObjective as NASOptimizationObjective, SearchSpace, SearchStatistics,
     SearchStrategy,
 };
+#[cfg(feature = "opt")]
+pub use opt::{
+    format_completion_prompt, OptAttention, OptCausalLMOutput, OptConfig, OptDecoder,
+    OptDecoderLayer, OptError, OptFeedForward, OptForCausalLM, OptLayerNorm,
+    OptLearnedPositionalEmbedding, OptLinear, OptModel,
+};
 pub use performance_optimization::{
     BatchProcessor, BatchingStrategy, CachedTensor, DynamicBatchManager, GpuCacheStatistics,
     GpuMemoryChunk, GpuMemoryOptimizer, GpuMemoryPool, GpuMemoryStats,
@@ -597,6 +712,12 @@ pub use weight_loading::{
     HuggingFaceLoader, LazyTensor, MemoryMappedLoader, QuantizationConfig, StreamingLoader,
     TensorMetadata, WeightDataType, WeightFormat, WeightLoader, WeightLoadingConfig,
 };
+
+#[cfg(feature = "phi4")]
+pub use phi4::{Phi4Config, Phi4Error, Phi4ForCausalLM, Phi4Model, Phi4RopeScaling};
+
+#[cfg(feature = "nemotron")]
+pub use nemotron::{NemotronConfig, NemotronError, NemotronForCausalLM, NemotronModel, NormType};
 
 pub use xlstm::{
     ExponentialGatingConfig, FeedForward, MLstmBlock, MLstmConfig, SLstmBlock, SLstmConfig,

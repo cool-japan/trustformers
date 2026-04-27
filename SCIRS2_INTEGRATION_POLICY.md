@@ -167,14 +167,19 @@ use tch::*;                    // PyTorch
 use tch::Tensor;
 use candle_core::*;            // Candle
 use candle_core::Tensor;
-use ort::*;                    // ONNX Runtime
+use ort::*;                    // ONNX Runtime (replaced by oxionnx)
 
 // Tokenization
 use tokenizers::*;
 use tokenizers::Tokenizer;
 ```
 
-**Rationale**: TrustformeRS-core provides unified abstractions. Use `trustformers_core::tensor` and `trustformers_core::tokenizer`.
+```rust
+// ✅ ALLOWED - Use oxionnx (COOLJAPAN Pure Rust ONNX)
+use oxionnx::*;                // Pure Rust ONNX Runtime replacement
+```
+
+**Rationale**: TrustformeRS-core provides unified abstractions. Use `trustformers_core::tensor` and `trustformers_core::tokenizer`. For ONNX inference, use `oxionnx` (COOLJAPAN Pure Rust ONNX Runtime) instead of `ort`.
 
 ---
 

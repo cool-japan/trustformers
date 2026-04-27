@@ -986,3 +986,334 @@ impl Profiler {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_config() -> FlameGraphConfig {
+        FlameGraphConfig {
+            sampling_rate: 100,
+            min_width: 0.1,
+            color_scheme: FlameGraphColorScheme::Hot,
+            direction: FlameGraphDirection::TopDown,
+            title: "Test Profile".to_string(),
+            subtitle: None,
+            include_memory: false,
+            include_gpu: false,
+            differential_mode: false,
+            merge_similar_stacks: false,
+            filter_noise: false,
+            noise_threshold: 0.01,
+        }
+    }
+
+    fn make_sample(func_name: &str, duration_ns: u64) -> FlameGraphSample {
+        FlameGraphSample {
+            stack: vec![StackFrame {
+                function_name: func_name.to_string(),
+                module_name: None,
+                file_name: None,
+                line_number: None,
+                address: None,
+            }],
+            duration_ns,
+            timestamp: 1000,
+            thread_id: 1,
+            cpu_id: Some(0),
+            memory_usage: None,
+            gpu_kernel: None,
+            metadata: HashMap::new(),
+        }
+    }
+
+    fn make_nested_sample(funcs: &[&str], duration_ns: u64) -> FlameGraphSample {
+        let stack = funcs
+            .iter()
+            .map(|name| StackFrame {
+                function_name: name.to_string(),
+                module_name: None,
+                file_name: None,
+                line_number: None,
+                address: None,
+            })
+            .collect();
+        FlameGraphSample {
+            stack,
+            duration_ns,
+            timestamp: 1000,
+            thread_id: 1,
+            cpu_id: None,
+            memory_usage: None,
+            gpu_kernel: None,
+            metadata: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_flame_graph_profiler_creation() {
+        let profiler = FlameGraphProfiler::new(make_config());
+        assert!(profiler.samples.is_empty());
+        assert!(profiler.root_node.is_none());
+    }
+
+    #[test]
+    fn test_start_sampling() {
+        let mut profiler = FlameGraphProfiler::new(make_config());
+        let result = profiler.start_sampling();
+        assert!(result.is_ok());
+        assert!(profiler.sampling_timer.is_some());
+    }
+
+    #[test]
+    fn test_add_sample() {
+        let mut profiler = FlameGraphProfiler::new(make_config());
+        profiler.add_sample(make_sample("main", 1000));
+        assert_eq!(profiler.samples.len(), 1);
+    }
+
+    #[test]
+    fn test_add_multiple_samples() {
+        let mut profiler = FlameGraphProfiler::new(make_config());
+        for i in 0..10 {
+            profiler.add_sample(make_sample(&format!("func_{}", i), (i + 1) * 100));
+        }
+        assert_eq!(profiler.samples.len(), 10);
+    }
+
+    #[test]
+    fn test_sample_gpu_kernel() {
+        let mut profiler = FlameGraphProfiler::new(make_config());
+        profiler.sample_gpu_kernel("matmul_kernel", 5000);
+        assert_eq!(profiler.samples.len(), 1);
+        assert_eq!(
+            profiler.samples[0].gpu_kernel,
+            Some("matmul_kernel".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_flame_graph_empty() {
+        let mut profiler = FlameGraphProfiler::new(make_config());
+        let result = profiler.build_flame_graph();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_flame_graph_single_sample() {
+        let mut profiler = FlameGraphProfiler::new(make_config());
+        profiler.add_sample(make_sample("main", 1000));
+        let result = profiler.build_flame_graph();
+        assert!(result.is_ok());
+        assert!(profiler.root_node.is_some());
+    }
+
+    #[test]
+    fn test_build_flame_graph_nested_stacks() {
+        let mut profiler = FlameGraphProfiler::new(make_config());
+        profiler.add_sample(make_nested_sample(&["main", "compute", "matmul"], 5000));
+        profiler.add_sample(make_nested_sample(&["main", "compute", "softmax"], 3000));
+        profiler.add_sample(make_nested_sample(&["main", "io", "load_data"], 2000));
+        let result = profiler.build_flame_graph();
+        assert!(result.is_ok());
+        let root = profiler.root_node.as_ref().expect("root should exist");
+        assert!(root.children.contains_key("main"));
+    }
+
+    #[test]
+    fn test_set_baseline() {
+        let mut profiler = FlameGraphProfiler::new(make_config());
+        profiler.add_sample(make_sample("func_a", 100));
+        profiler.add_sample(make_sample("func_b", 200));
+        profiler.set_baseline();
+        assert!(profiler.baseline_samples.is_some());
+        let baseline = profiler.baseline_samples.as_ref().expect("baseline should exist");
+        assert_eq!(baseline.len(), 2);
+    }
+
+    #[test]
+    fn test_performance_counters() {
+        let mut profiler = FlameGraphProfiler::new(make_config());
+        let start_result = profiler.start_sampling();
+        assert!(start_result.is_ok());
+        profiler.add_sample(make_nested_sample(&["a", "b", "c"], 100));
+        profiler.add_sample(make_nested_sample(&["a", "d"], 200));
+        let counter = profiler.performance_counters.get("samples_collected");
+        assert_eq!(counter, Some(&2));
+        let depth = profiler.performance_counters.get("stack_depth_max");
+        assert_eq!(depth, Some(&3));
+    }
+
+    #[test]
+    fn test_stop_sampling_with_data() {
+        let mut profiler = FlameGraphProfiler::new(make_config());
+        let _ = profiler.start_sampling();
+        profiler.add_sample(make_sample("test_func", 500));
+        let result = profiler.stop_sampling();
+        assert!(result.is_ok());
+        assert!(profiler.sampling_timer.is_none());
+        assert!(profiler.root_node.is_some());
+    }
+
+    #[test]
+    fn test_flame_graph_node_structure() {
+        let mut profiler = FlameGraphProfiler::new(make_config());
+        profiler.add_sample(make_nested_sample(&["root_fn", "child_fn"], 1000));
+        profiler.add_sample(make_nested_sample(&["root_fn", "child_fn"], 2000));
+        let _ = profiler.build_flame_graph();
+        let root = profiler.root_node.as_ref().expect("root should exist");
+        assert_eq!(root.name, "root");
+    }
+
+    #[test]
+    fn test_stack_frame_equality() {
+        let frame1 = StackFrame {
+            function_name: "test".to_string(),
+            module_name: None,
+            file_name: None,
+            line_number: None,
+            address: None,
+        };
+        let frame2 = StackFrame {
+            function_name: "test".to_string(),
+            module_name: None,
+            file_name: None,
+            line_number: None,
+            address: None,
+        };
+        assert_eq!(frame1, frame2);
+    }
+
+    #[test]
+    fn test_flame_graph_config_differential_mode() {
+        let mut config = make_config();
+        config.differential_mode = true;
+        let mut profiler = FlameGraphProfiler::new(config);
+        profiler.add_sample(make_sample("func_a", 100));
+        profiler.set_baseline();
+        profiler.add_sample(make_sample("func_a", 200));
+        let result = profiler.build_flame_graph();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_flame_graph_config_noise_filter() {
+        let mut config = make_config();
+        config.filter_noise = true;
+        config.noise_threshold = 0.05;
+        let mut profiler = FlameGraphProfiler::new(config);
+        profiler.add_sample(make_nested_sample(&["main", "big_func"], 10000));
+        profiler.add_sample(make_nested_sample(&["main", "tiny_func"], 1));
+        let result = profiler.build_flame_graph();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_sample_current_stack() {
+        let mut profiler = FlameGraphProfiler::new(make_config());
+        let result = profiler.sample_current_stack(500);
+        assert!(result.is_ok());
+        assert_eq!(profiler.samples.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_export_no_graph() {
+        let profiler = FlameGraphProfiler::new(make_config());
+        let tmp = std::env::temp_dir().join("test_flamegraph_export.json");
+        let result = profiler.export(FlameGraphExportFormat::JSON, &tmp).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_export_json() {
+        let mut profiler = FlameGraphProfiler::new(make_config());
+        profiler.add_sample(make_sample("test", 100));
+        let _ = profiler.build_flame_graph();
+        let tmp = std::env::temp_dir().join("test_flamegraph_export_ok.json");
+        let result = profiler.export(FlameGraphExportFormat::JSON, &tmp).await;
+        assert!(result.is_ok());
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+
+    #[test]
+    fn test_flame_graph_color_schemes() {
+        let schemes = [
+            FlameGraphColorScheme::Hot,
+            FlameGraphColorScheme::Cool,
+            FlameGraphColorScheme::Java,
+            FlameGraphColorScheme::Memory,
+            FlameGraphColorScheme::Differential,
+            FlameGraphColorScheme::Random,
+            FlameGraphColorScheme::Custom(HashMap::new()),
+        ];
+        assert_eq!(schemes.len(), 7);
+    }
+
+    #[test]
+    fn test_flame_graph_directions() {
+        let directions = [FlameGraphDirection::TopDown, FlameGraphDirection::BottomUp];
+        assert_eq!(directions.len(), 2);
+    }
+
+    #[test]
+    fn test_flame_graph_export_formats() {
+        let formats = [
+            FlameGraphExportFormat::SVG,
+            FlameGraphExportFormat::InteractiveHTML,
+            FlameGraphExportFormat::JSON,
+            FlameGraphExportFormat::Speedscope,
+            FlameGraphExportFormat::D3,
+            FlameGraphExportFormat::Folded,
+        ];
+        assert_eq!(formats.len(), 6);
+    }
+
+    #[test]
+    fn test_flame_graph_config_with_subtitle() {
+        let mut config = make_config();
+        config.subtitle = Some("Test Subtitle".to_string());
+        let profiler = FlameGraphProfiler::new(config);
+        assert!(profiler.samples.is_empty());
+    }
+
+    #[test]
+    fn test_flame_graph_config_with_gpu_and_memory() {
+        let mut config = make_config();
+        config.include_gpu = true;
+        config.include_memory = true;
+        let profiler = FlameGraphProfiler::new(config);
+        assert!(profiler.samples.is_empty());
+    }
+
+    #[test]
+    fn test_flame_graph_node_creation() {
+        let node = FlameGraphNode {
+            name: "test_func".to_string(),
+            value: 1000,
+            delta: None,
+            children: HashMap::new(),
+            total_value: 1000,
+            self_value: 500,
+            percentage: 50.0,
+            color: Some("#ff0000".to_string()),
+            metadata: HashMap::new(),
+        };
+        assert_eq!(node.name, "test_func");
+        assert_eq!(node.value, 1000);
+        assert!((node.percentage - 50.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_stack_frame_with_all_fields() {
+        let frame = StackFrame {
+            function_name: "my_func".to_string(),
+            module_name: Some("my_module".to_string()),
+            file_name: Some("src/lib.rs".to_string()),
+            line_number: Some(42),
+            address: Some(0x12345678),
+        };
+        assert_eq!(frame.function_name, "my_func");
+        assert_eq!(frame.module_name, Some("my_module".to_string()));
+        assert_eq!(frame.line_number, Some(42));
+    }
+}

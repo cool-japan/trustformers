@@ -1396,4 +1396,202 @@ mod tests {
         let non_zero_count = params.iter().filter(|&&x| x != 0.0).count();
         assert_eq!(non_zero_count, 3);
     }
+
+    #[test]
+    fn test_default_differential_privacy_config() {
+        let config = DifferentialPrivacyConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.epsilon, 1.0);
+        assert_eq!(config.noise_scale, 0.1);
+        assert_eq!(config.clipping_norm, 1.0);
+        assert_eq!(config.sensitivity, 1.0);
+        assert!(config.use_local_dp);
+    }
+
+    #[test]
+    fn test_default_training_config() {
+        let config = FederatedTrainingConfig::default();
+        assert_eq!(config.learning_rate, 0.01);
+        assert_eq!(config.local_epochs, 5);
+        assert_eq!(config.batch_size, 32);
+        assert_eq!(config.max_rounds, 100);
+        assert!(!config.enable_personalization);
+        assert!(config.use_momentum);
+        assert_eq!(config.momentum, 0.9);
+    }
+
+    #[test]
+    fn test_default_communication_config() {
+        let config = CommunicationConfig::default();
+        assert_eq!(config.round_timeout_seconds, 3600);
+        assert_eq!(config.max_message_size_bytes, 10 * 1024 * 1024);
+        assert_eq!(config.quantization_bits, 8);
+        assert!(config.enable_secure_aggregation);
+        assert_eq!(config.retry_attempts, 3);
+        assert_eq!(config.min_participants, 10);
+    }
+
+    #[test]
+    fn test_default_security_config() {
+        let config = SecurityConfig::default();
+        assert!(config.enable_encryption);
+        assert!(!config.enable_smpc);
+        assert!(config.validate_certificates);
+        assert!(config.enable_gradient_verification);
+    }
+
+    #[test]
+    fn test_default_resource_constraints() {
+        let config = ResourceConstraints::default();
+        assert_eq!(config.max_memory_mb, 512);
+        assert_eq!(config.max_cpu_usage_percent, 70.0);
+        assert_eq!(config.max_battery_usage_percent, 10.0);
+        assert_eq!(config.min_battery_level_percent, 30.0);
+        assert!(config.enable_thermal_throttling);
+        assert_eq!(config.max_training_time_seconds, 600);
+    }
+
+    #[test]
+    fn test_invalid_client_id() {
+        let mut config = FederatedLearningConfig::default();
+        config.client_id = String::new();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_invalid_learning_rate() {
+        let mut config = FederatedTrainingConfig::default();
+        config.learning_rate = 0.0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_invalid_local_epochs() {
+        let mut config = FederatedTrainingConfig::default();
+        config.local_epochs = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_invalid_batch_size() {
+        let mut config = FederatedTrainingConfig::default();
+        config.batch_size = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_invalid_max_rounds() {
+        let mut config = FederatedTrainingConfig::default();
+        config.max_rounds = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_invalid_round_timeout() {
+        let mut config = CommunicationConfig::default();
+        config.round_timeout_seconds = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_invalid_message_size() {
+        let mut config = CommunicationConfig::default();
+        config.max_message_size_bytes = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_invalid_quantization_bits() {
+        let mut config = CommunicationConfig::default();
+        config.quantization_bits = 33;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_invalid_memory_constraint() {
+        let mut config = ResourceConstraints::default();
+        config.max_memory_mb = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_invalid_cpu_usage() {
+        let mut config = ResourceConstraints::default();
+        config.max_cpu_usage_percent = 0.0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_invalid_battery_level() {
+        let mut config = ResourceConstraints::default();
+        config.min_battery_level_percent = 101.0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_disabled_dp_validation_passes() {
+        let mut config = DifferentialPrivacyConfig::default();
+        config.enabled = false;
+        config.epsilon = -1.0; // Would be invalid if enabled
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_invalid_clipping_norm() {
+        let mut config = DifferentialPrivacyConfig::default();
+        config.clipping_norm = 0.0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_client_can_participate() {
+        let config = FederatedLearningConfig::default();
+        let client = FederatedLearningClient::new(config).expect("Operation failed");
+        assert!(client.can_participate());
+    }
+
+    #[test]
+    fn test_client_get_stats() {
+        let config = FederatedLearningConfig::default();
+        let client = FederatedLearningClient::new(config).expect("Operation failed");
+        let stats = client.get_stats();
+        assert_eq!(stats.rounds_completed, 0);
+    }
+
+    #[test]
+    fn test_training_metrics_default() {
+        let metrics = TrainingMetrics {
+            accuracy: 0.0,
+            loss: f32::MAX,
+            iterations: 0,
+            converged: false,
+            gradient_norm: 0.0,
+        };
+        assert!(!metrics.converged);
+        assert_eq!(metrics.iterations, 0);
+    }
+
+    #[test]
+    fn test_model_parameters_creation() {
+        let params = ModelParameters {
+            parameters: HashMap::new(),
+            shapes: HashMap::new(),
+            version: "1.0".to_string(),
+            checksum: "abc123".to_string(),
+        };
+        assert!(params.parameters.is_empty());
+        assert_eq!(params.version, "1.0");
+    }
+
+    #[test]
+    fn test_privacy_guarantees_creation() {
+        let guarantees = PrivacyGuarantees {
+            epsilon_used: 0.5,
+            noise_scale: 0.1,
+            gradient_clipped: true,
+            local_dp_applied: true,
+        };
+        assert_eq!(guarantees.epsilon_used, 0.5);
+        assert!(guarantees.gradient_clipped);
+    }
 }

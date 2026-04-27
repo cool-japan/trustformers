@@ -1144,13 +1144,11 @@ impl EnhancedServingManager {
 
     /// Get approximate CPU utilization based on system metrics
     fn get_approximate_cpu_utilization(&self) -> f64 {
-        use std::fs;
-        use std::io::Read;
-
         // Try to read from /proc/loadavg on Unix systems
         #[cfg(unix)]
         {
-            if let Ok(mut file) = fs::File::open("/proc/loadavg") {
+            use std::io::Read;
+            if let Ok(mut file) = std::fs::File::open("/proc/loadavg") {
                 let mut contents = String::new();
                 if file.read_to_string(&mut contents).is_ok() {
                     let parts: Vec<&str> = contents.split_whitespace().collect();

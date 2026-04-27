@@ -940,4 +940,192 @@ mod tests {
         // In a real test, we would create a mock ONNX model
         // For now, just test the basic structure
     }
+
+    // ── Default config fields ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_default_config_cpu_provider() {
+        let cfg = ONNXBackendConfig::default();
+        assert!(
+            !cfg.execution_providers.is_empty(),
+            "must have at least one provider"
+        );
+        assert!(matches!(cfg.execution_providers[0], ExecutionProvider::CPU));
+    }
+
+    #[test]
+    fn test_default_config_memory_pattern_enabled() {
+        let cfg = ONNXBackendConfig::default();
+        assert!(cfg.enable_memory_pattern);
+        assert!(cfg.enable_cpu_mem_arena);
+    }
+
+    #[test]
+    fn test_default_config_profiling_disabled() {
+        let cfg = ONNXBackendConfig::default();
+        assert!(!cfg.enable_profiling);
+        assert!(cfg.profile_output_path.is_none());
+    }
+
+    #[test]
+    fn test_default_config_threads_none() {
+        let cfg = ONNXBackendConfig::default();
+        assert!(cfg.inter_op_threads.is_none());
+        assert!(cfg.intra_op_threads.is_none());
+    }
+
+    // ── CPU optimised config ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_cpu_optimized_threads_set() {
+        let temp_dir = tempdir().expect("temp dir");
+        let model_path = temp_dir.path().join("model.onnx");
+        let cfg = ONNXBackendConfig::cpu_optimized(model_path);
+        assert!(
+            cfg.inter_op_threads.is_some(),
+            "CPU-optimised config should set thread count"
+        );
+    }
+
+    #[test]
+    fn test_cpu_optimized_optimization_level_all() {
+        let temp_dir = tempdir().expect("temp dir");
+        let model_path = temp_dir.path().join("model.onnx");
+        let cfg = ONNXBackendConfig::cpu_optimized(model_path);
+        assert!(matches!(
+            cfg.optimization_level,
+            GraphOptimizationLevel::All
+        ));
+    }
+
+    // ── GPU optimised config ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_gpu_optimized_has_cuda_provider() {
+        let temp_dir = tempdir().expect("temp dir");
+        let model_path = temp_dir.path().join("model.onnx");
+        let cfg = ONNXBackendConfig::gpu_optimized(model_path, Some(0));
+        let has_cuda = cfg
+            .execution_providers
+            .iter()
+            .any(|p| matches!(p, ExecutionProvider::CUDA { .. }));
+        assert!(has_cuda, "GPU config must include CUDA provider");
+    }
+
+    // ── Pipeline manager operations ───────────────────────────────────────────
+
+    #[test]
+    fn test_pipeline_manager_list_models_starts_empty() {
+        let cfg = ONNXBackendConfig::default();
+        let manager = ONNXPipelineManager::new(cfg);
+        assert_eq!(manager.list_models().len(), 0);
+    }
+
+    #[test]
+    fn test_pipeline_manager_get_nonexistent_model() {
+        let cfg = ONNXBackendConfig::default();
+        let manager = ONNXPipelineManager::new(cfg);
+        assert!(
+            manager.get_model("does_not_exist").is_none(),
+            "get_model for non-registered name must return None"
+        );
+    }
+
+    // ── Profiling pipeline option ─────────────────────────────────────────────
+
+    #[test]
+    fn test_pipeline_options_with_profiling() {
+        let temp_dir = tempdir().expect("temp dir");
+        let model_path = temp_dir.path().join("model.onnx");
+        let options = ONNXPipelineOptions::cpu_optimized(model_path).with_profiling(true);
+        assert!(options.enable_profiling);
+    }
+
+    #[test]
+    fn test_pipeline_options_with_warmup_runs() {
+        let temp_dir = tempdir().expect("temp dir");
+        let model_path = temp_dir.path().join("model.onnx");
+        let options = ONNXPipelineOptions::cpu_optimized(model_path).with_warmup_runs(10);
+        assert_eq!(options.warmup_runs, 10);
+    }
+
+    // ── Session mock ops ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_mock_session_benchmark_results() {
+        let temp_dir = tempdir().expect("temp dir");
+        let model_path = temp_dir.path().join("model.onnx");
+        let _ = fs::File::create(&model_path).expect("create model file");
+        let backend = ONNXRuntimeBackend::new(ONNXRuntimeConfig::default())
+            .expect("runtime backend creation failed");
+        let result = backend.load_model(&model_path);
+        if let Ok(session) = result {
+            let inputs = HashMap::new();
+            let bench = ONNXSessionOps::benchmark(&session, inputs, 5, 2);
+            if let Ok(b) = bench {
+                assert!(b.avg_latency_ms > 0.0, "avg latency must be positive");
+                assert!(b.throughput > 0.0, "throughput must be positive");
+                assert!(b.memory_usage > 0, "memory usage must be non-zero");
+            }
+        }
+    }
+
+    #[test]
+    fn test_mock_session_memory_info() {
+        let temp_dir = tempdir().expect("temp dir");
+        let model_path = temp_dir.path().join("model.onnx");
+        let _ = fs::File::create(&model_path).expect("create model file");
+        let backend = ONNXRuntimeBackend::new(ONNXRuntimeConfig::default())
+            .expect("runtime backend creation failed");
+        let result = backend.load_model(&model_path);
+        if let Ok(session) = result {
+            let info = ONNXSessionOps::get_memory_info(&session);
+            if let Ok(m) = info {
+                assert!(
+                    m.total_memory_bytes > 0,
+                    "total memory bytes must be positive"
+                );
+                assert!(
+                    m.available_memory_bytes <= m.total_memory_bytes,
+                    "available must be ≤ total"
+                );
+            }
+        }
+    }
+
+    // ── Benchmark results struct ──────────────────────────────────────────────
+
+    #[test]
+    fn test_benchmark_results_struct_fields() {
+        let b = BenchmarkResults {
+            avg_latency_ms: 25.5,
+            throughput: 40.0,
+            memory_usage: 256 * 1024 * 1024,
+        };
+        assert!(b.avg_latency_ms > 0.0);
+        assert!(b.throughput > 0.0);
+        assert!(b.memory_usage > 0);
+    }
+
+    // ── GPU options device field ──────────────────────────────────────────────
+
+    #[test]
+    fn test_gpu_options_device_id_zero() {
+        let temp_dir = tempdir().expect("temp dir");
+        let model_path = temp_dir.path().join("model.onnx");
+        let opts = ONNXPipelineOptions::gpu_optimized(model_path, Some(0));
+        assert!(matches!(opts.base_options.device, Some(Device::Gpu(0))));
+    }
+
+    #[test]
+    fn test_cpu_options_no_gpu_device() {
+        let temp_dir = tempdir().expect("temp dir");
+        let model_path = temp_dir.path().join("model.onnx");
+        let opts = ONNXPipelineOptions::cpu_optimized(model_path);
+        // CPU config should not force a GPU device
+        assert!(
+            !matches!(opts.base_options.device, Some(Device::Gpu(_))),
+            "CPU-optimised options should not set a GPU device"
+        );
+    }
 }

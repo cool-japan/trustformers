@@ -1321,4 +1321,263 @@ mod tests {
         assert_eq!(v1.y + v2.y, 7.0);
         assert_eq!(v1.z + v2.z, 9.0);
     }
+
+    #[test]
+    fn test_arkit_session_config_default() {
+        let config = ARSessionConfig::default();
+        assert!(config.world_tracking);
+        assert!(!config.face_tracking);
+        assert!(!config.body_tracking);
+        assert!(config.auto_focus);
+    }
+
+    #[test]
+    fn test_object_detection_config_default() {
+        let config = ObjectDetectionConfig::default();
+        assert!(config.enabled);
+        assert!(config.confidence_threshold > 0.0);
+        assert!(config.max_detections > 0);
+    }
+
+    #[test]
+    fn test_pose_estimation_config_default() {
+        let config = PoseEstimationConfig::default();
+        assert!(config.confidence_threshold > 0.0);
+    }
+
+    #[test]
+    fn test_plane_detection_config_default() {
+        let config = PlaneDetectionConfig::default();
+        assert!(config.enabled);
+    }
+
+    #[test]
+    fn test_light_estimation_config_default() {
+        let config = LightEstimationConfig::default();
+        assert!(config.enabled);
+    }
+
+    #[test]
+    fn test_ar_rendering_config_default() {
+        let config = ARRenderingConfig::default();
+        assert!(config.enable_occlusion);
+    }
+
+    #[test]
+    fn test_ar_performance_config_default() {
+        let config = ARPerformanceConfig::default();
+        assert!(config.target_fps > 0);
+    }
+
+    #[test]
+    fn test_bounding_box_3d_creation() {
+        let bbox = BoundingBox3D {
+            center: Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            extent: Vec3 {
+                x: 1.0,
+                y: 1.0,
+                z: 1.0,
+            },
+        };
+        assert_eq!(bbox.extent.x, 1.0);
+        assert_eq!(bbox.center.x, 0.0);
+    }
+
+    #[test]
+    fn test_quaternion_identity() {
+        let q = Quaternion {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            w: 1.0,
+        };
+        assert_eq!(q.w, 1.0);
+        let norm_sq = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
+        assert!((norm_sq - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_pose_creation() {
+        let pose = Pose {
+            position: Vec3 {
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+            },
+            orientation: Quaternion {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                w: 1.0,
+            },
+            confidence: 0.95,
+        };
+        assert_eq!(pose.confidence, 0.95);
+        assert_eq!(pose.position.x, 1.0);
+    }
+
+    #[test]
+    fn test_joint_creation() {
+        let joint = Joint {
+            name: "left_wrist".to_string(),
+            position: Vec3 {
+                x: 0.5,
+                y: 0.3,
+                z: 0.1,
+            },
+            confidence: 0.8,
+            parent: Some("left_elbow".to_string()),
+        };
+        assert_eq!(joint.name, "left_wrist");
+        assert!(joint.parent.is_some());
+    }
+
+    #[test]
+    fn test_vec2_creation() {
+        let v = Vec2 { x: 3.0, y: 4.0 };
+        let magnitude = (v.x * v.x + v.y * v.y).sqrt();
+        assert!((magnitude - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_detection_creation() {
+        let detection = Detection {
+            class_name: "person".to_string(),
+            class_id: 0,
+            confidence: 0.92,
+            bounding_box_2d: BoundingBox2D {
+                x: 10.0,
+                y: 20.0,
+                width: 50.0,
+                height: 100.0,
+            },
+            bounding_box_3d: None,
+            tracking_id: Some("track_1".to_string()),
+            timestamp: 0.0,
+        };
+        assert_eq!(detection.class_name, "person");
+        assert!(detection.bounding_box_3d.is_none());
+        assert!(detection.tracking_id.is_some());
+    }
+
+    #[test]
+    fn test_depth_buffer_creation() {
+        let buffer = DepthBuffer {
+            data: vec![1.0, 2.0, 3.0, 4.0],
+            width: 2,
+            height: 2,
+            min_depth: 0.5,
+            max_depth: 5.0,
+            confidence: vec![0.9, 0.8, 0.7, 0.6],
+        };
+        assert_eq!(buffer.data.len(), buffer.width * buffer.height);
+        assert_eq!(buffer.confidence.len(), buffer.data.len());
+        assert!(buffer.min_depth < buffer.max_depth);
+    }
+
+    #[test]
+    fn test_ar_world_map_creation() {
+        let world_map = ARWorldMap {
+            anchors: Vec::new(),
+            feature_points: Vec::new(),
+            planes: Vec::new(),
+            center: Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            extent: Vec3 {
+                x: 10.0,
+                y: 10.0,
+                z: 10.0,
+            },
+            raw_feature_points_count: 0,
+        };
+        assert!(world_map.anchors.is_empty());
+        assert_eq!(world_map.raw_feature_points_count, 0);
+    }
+
+    #[test]
+    fn test_matrix4x4_identity() {
+        let m = Matrix4x4 {
+            data: [
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+        };
+        assert_eq!(m.data[0], 1.0);
+        assert_eq!(m.data[5], 1.0);
+        assert_eq!(m.data[10], 1.0);
+        assert_eq!(m.data[15], 1.0);
+    }
+
+    #[test]
+    fn test_directional_light_creation() {
+        let light = DirectionalLight {
+            intensity: 1000.0,
+            color_temperature: 6500.0,
+            direction: Vec3 {
+                x: 0.0,
+                y: -1.0,
+                z: 0.0,
+            },
+        };
+        assert_eq!(light.intensity, 1000.0);
+        assert_eq!(light.color_temperature, 6500.0);
+    }
+
+    #[test]
+    fn test_arkit_engine_creation() {
+        let config = ARKitConfig::default();
+        let result = ARKitInferenceEngine::new(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_quality_thresholds_default() {
+        let config = ARPerformanceConfig::default();
+        assert!(config.quality_thresholds.min_detection_confidence > 0.0);
+    }
+
+    #[test]
+    fn test_bounding_box_area() {
+        let bbox = BoundingBox2D {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 200.0,
+        };
+        let area = bbox.width * bbox.height;
+        assert_eq!(area, 20000.0);
+    }
+
+    #[test]
+    fn test_vec3_dot_product() {
+        let v1 = Vec3 {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        let v2 = Vec3 {
+            x: 0.0,
+            y: 1.0,
+            z: 0.0,
+        };
+        let dot = v1.x * v2.x + v1.y * v2.y + v1.z * v2.z;
+        assert_eq!(dot, 0.0); // Orthogonal vectors
+    }
+
+    #[test]
+    fn test_vec3_magnitude() {
+        let v = Vec3 {
+            x: 3.0,
+            y: 4.0,
+            z: 0.0,
+        };
+        let mag = (v.x * v.x + v.y * v.y + v.z * v.z).sqrt();
+        assert!((mag - 5.0).abs() < 1e-6);
+    }
 }

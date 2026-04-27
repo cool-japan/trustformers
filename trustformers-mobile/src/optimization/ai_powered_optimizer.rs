@@ -1000,4 +1000,204 @@ mod tests {
         assert_eq!(config.max_iterations, 100);
         assert!(config.optimization_targets.contains(&OptimizationTarget::Latency));
     }
+
+    #[test]
+    fn test_optimization_target_variants() {
+        let targets = vec![
+            OptimizationTarget::Latency,
+            OptimizationTarget::Memory,
+            OptimizationTarget::Power,
+            OptimizationTarget::Accuracy,
+            OptimizationTarget::ModelSize,
+            OptimizationTarget::Energy,
+        ];
+        assert_eq!(targets.len(), 6);
+    }
+
+    #[test]
+    fn test_search_strategy_random() {
+        let strategy = SearchStrategy::Random;
+        assert!(matches!(strategy, SearchStrategy::Random));
+    }
+
+    #[test]
+    fn test_search_strategy_evolutionary() {
+        let strategy = SearchStrategy::Evolutionary {
+            population_size: 50,
+            mutation_rate: 0.1,
+            crossover_rate: 0.5,
+        };
+        if let SearchStrategy::Evolutionary {
+            population_size, ..
+        } = strategy
+        {
+            assert_eq!(population_size, 50);
+        }
+    }
+
+    #[test]
+    fn test_activation_type_variants() {
+        let activations = vec![
+            ActivationType::Swish,
+            ActivationType::HardSwish,
+            ActivationType::ReLU6,
+            ActivationType::GeluApprox,
+            ActivationType::Mish,
+        ];
+        assert_eq!(activations.len(), 5);
+    }
+
+    #[test]
+    fn test_connection_type_variants() {
+        let connections = vec![
+            ConnectionType::Residual,
+            ConnectionType::Dense,
+            ConnectionType::Attention { num_heads: 4 },
+            ConnectionType::ChannelShuffle,
+        ];
+        assert_eq!(connections.len(), 4);
+    }
+
+    #[test]
+    fn test_quantization_scheme_variants() {
+        let schemes = vec![
+            QuantizationScheme::Int4 { symmetric: true },
+            QuantizationScheme::Int8 { symmetric: false },
+            QuantizationScheme::FP16,
+            QuantizationScheme::BlockWise { block_size: 32 },
+            QuantizationScheme::FP32,
+        ];
+        assert_eq!(schemes.len(), 5);
+    }
+
+    #[test]
+    fn test_layer_type_depthwise_conv() {
+        let layer = LayerType::DepthwiseSeparableConv {
+            kernel_size: 3,
+            stride: 1,
+            dilation: 1,
+        };
+        if let LayerType::DepthwiseSeparableConv { kernel_size, .. } = layer {
+            assert_eq!(kernel_size, 3);
+        }
+    }
+
+    #[test]
+    fn test_layer_type_mobile_bottleneck() {
+        let layer = LayerType::MobileBottleneck {
+            expansion_ratio: 6.0,
+            kernel_size: 3,
+            squeeze_excitation: true,
+        };
+        if let LayerType::MobileBottleneck {
+            expansion_ratio, ..
+        } = layer
+        {
+            assert_eq!(expansion_ratio, 6.0);
+        }
+    }
+
+    #[test]
+    fn test_layer_config_creation() {
+        let config = LayerConfig {
+            layer_type: LayerType::MobileLinear {
+                use_bias: true,
+                quantized: false,
+            },
+            input_dim: vec![768],
+            output_dim: vec![256],
+            parameters: HashMap::new(),
+            activation: ActivationType::ReLU6,
+        };
+        assert_eq!(config.input_dim, vec![768]);
+        assert_eq!(config.output_dim, vec![256]);
+    }
+
+    #[test]
+    fn test_skip_connection_creation() {
+        let skip = SkipConnection {
+            from_layer: 0,
+            to_layer: 2,
+            connection_type: ConnectionType::Residual,
+        };
+        assert_eq!(skip.from_layer, 0);
+        assert_eq!(skip.to_layer, 2);
+    }
+
+    #[test]
+    fn test_architecture_metrics_throughput() {
+        let metrics = ArchitectureMetrics {
+            latency_ms: 10.0,
+            memory_mb: 64.0,
+            power_mw: 200.0,
+            accuracy: Some(0.95),
+            model_size_mb: 10.0,
+            energy_per_inference_mj: 2.0,
+            throughput_fps: 100.0,
+        };
+        assert!((metrics.throughput_fps - 1000.0 / metrics.latency_ms).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_early_stopping_config() {
+        let config = EarlyStoppingConfig {
+            patience: 10,
+            min_improvement: 0.001,
+            monitor_metric: OptimizationTarget::Accuracy,
+        };
+        assert_eq!(config.patience, 10);
+        assert!(config.min_improvement > 0.0);
+    }
+
+    #[test]
+    fn test_device_constraints_creation() {
+        let constraints = DeviceConstraints {
+            max_memory_mb: 256,
+            max_latency_ms: 50.0,
+            performance_tier: PerformanceTier::Medium,
+            available_backends: vec![MobileBackend::CPU],
+            power_budget_mw: 1000.0,
+        };
+        assert_eq!(constraints.max_memory_mb, 256);
+        assert!(!constraints.available_backends.is_empty());
+    }
+
+    #[test]
+    fn test_quantization_config_creation() {
+        let config = QuantizationConfig {
+            layer_schemes: HashMap::new(),
+            mixed_precision: true,
+            dynamic_quantization: false,
+        };
+        assert!(config.mixed_precision);
+        assert!(!config.dynamic_quantization);
+        assert!(config.layer_schemes.is_empty());
+    }
+
+    #[test]
+    fn test_mobile_architecture_creation() {
+        let arch = MobileArchitecture {
+            id: "arch_001".to_string(),
+            layers: vec![],
+            skip_connections: vec![],
+            quantization: QuantizationConfig {
+                layer_schemes: HashMap::new(),
+                mixed_precision: false,
+                dynamic_quantization: false,
+            },
+            estimated_metrics: None,
+        };
+        assert_eq!(arch.id, "arch_001");
+        assert!(arch.layers.is_empty());
+        assert!(arch.estimated_metrics.is_none());
+    }
+
+    #[test]
+    fn test_nas_with_added_candidates() {
+        let config = NASConfig::default();
+        let nas = MobileNAS::new(config);
+        assert_eq!(nas.architecture_candidates.len(), 0);
+        // Verify performance history starts empty
+        assert_eq!(nas.performance_history.len(), 0);
+    }
 }

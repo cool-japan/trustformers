@@ -671,3 +671,254 @@ where
         Ok(self.coordinator.cleanup_expired_sessions(max_age_minutes).await)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::conversational::streaming::chunking::ResponseChunker;
+    use crate::pipeline::conversational::streaming::types::{
+        AdvancedStreamingConfig, ChunkingStrategy, StreamingQuality,
+    };
+    use crate::pipeline::conversational::types::{
+        ConversationMetadata, ConversationRole, ConversationTurn, EngagementLevel,
+    };
+
+    fn default_adv_config() -> AdvancedStreamingConfig {
+        AdvancedStreamingConfig::default()
+    }
+
+    fn empty_metadata() -> ConversationMetadata {
+        ConversationMetadata {
+            sentiment: None,
+            intent: None,
+            confidence: 0.0,
+            topics: vec![],
+            safety_flags: vec![],
+            entities: vec![],
+            quality_score: 0.0,
+            engagement_level: EngagementLevel::Medium,
+            reasoning_type: None,
+        }
+    }
+
+    // ---- AdvancedStreamingConfig tests ----
+
+    #[test]
+    fn test_advanced_config_default_values() {
+        let config = default_adv_config();
+        assert!(
+            config.adaptive_chunking,
+            "adaptive_chunking should be true by default"
+        );
+        assert!(
+            config.natural_pausing,
+            "natural_pausing should be true by default"
+        );
+        assert!(
+            config.enable_backpressure,
+            "enable_backpressure should be true by default"
+        );
+        assert!(
+            config.enable_error_recovery,
+            "enable_error_recovery should be true by default"
+        );
+    }
+
+    #[test]
+    fn test_advanced_config_max_buffer_size_positive() {
+        let config = default_adv_config();
+        assert!(
+            config.max_buffer_size > 0,
+            "max_buffer_size must be positive"
+        );
+    }
+
+    #[test]
+    fn test_advanced_config_typing_speed_positive() {
+        let config = default_adv_config();
+        assert!(
+            config.base_typing_speed > 0.0,
+            "base_typing_speed must be positive"
+        );
+    }
+
+    // ---- ResponseChunker tests ----
+
+    #[test]
+    fn test_chunker_fixed_size_produces_chunks() {
+        let chunker = ResponseChunker::new(ChunkingStrategy::FixedSize(5), default_adv_config());
+        let chunks = chunker.chunk_response("Hello World!", &empty_metadata());
+        assert!(
+            !chunks.is_empty(),
+            "chunker must produce at least one chunk"
+        );
+    }
+
+    #[test]
+    fn test_chunker_word_boundary_preserves_content() {
+        let chunker = ResponseChunker::new(ChunkingStrategy::WordBoundary, default_adv_config());
+        let text = "The quick brown fox";
+        let chunks = chunker.chunk_response(text, &empty_metadata());
+        let reassembled: String = chunks
+            .iter()
+            .map(|c| c.content.clone())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim()
+            .to_string();
+        // Word boundary split may add/remove whitespace but words must be present
+        for word in ["The", "quick", "brown", "fox"] {
+            assert!(
+                reassembled.contains(word),
+                "reassembled text must contain original word '{}'",
+                word
+            );
+        }
+    }
+
+    #[test]
+    fn test_chunker_sentence_boundary_splits_on_period() {
+        let chunker =
+            ResponseChunker::new(ChunkingStrategy::SentenceBoundary, default_adv_config());
+        let text = "First sentence. Second sentence. Third sentence.";
+        let chunks = chunker.chunk_response(text, &empty_metadata());
+        assert!(
+            !chunks.is_empty(),
+            "sentence boundary chunker must produce chunks"
+        );
+    }
+
+    #[test]
+    fn test_chunker_adaptive_produces_nonempty_chunks_for_nonempty_text() {
+        let chunker = ResponseChunker::new(ChunkingStrategy::Adaptive, default_adv_config());
+        let text = "This is a test of the adaptive chunking strategy.";
+        let chunks = chunker.chunk_response(text, &empty_metadata());
+        assert!(
+            !chunks.is_empty(),
+            "adaptive chunker must produce chunks for nonempty text"
+        );
+    }
+
+    #[test]
+    fn test_chunker_fixed_size_chunks_have_sequential_indices() {
+        let chunker = ResponseChunker::new(ChunkingStrategy::FixedSize(3), default_adv_config());
+        let chunks = chunker.chunk_response("abcdefghij", &empty_metadata());
+        for (i, chunk) in chunks.iter().enumerate() {
+            assert_eq!(
+                chunk.index, i,
+                "chunk index must be sequential starting from 0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_chunker_empty_text_produces_no_chunks() {
+        let chunker = ResponseChunker::new(ChunkingStrategy::FixedSize(10), default_adv_config());
+        let chunks = chunker.chunk_response("", &empty_metadata());
+        assert!(chunks.is_empty(), "empty text should yield no chunks");
+    }
+
+    // ---- StreamingQuality tests ----
+
+    #[test]
+    fn test_streaming_quality_default_all_ones() {
+        let quality = StreamingQuality::default();
+        assert!(
+            (quality.smoothness - 1.0).abs() < f32::EPSILON,
+            "default smoothness must be 1.0"
+        );
+        assert!(
+            (quality.naturalness - 1.0).abs() < f32::EPSILON,
+            "default naturalness must be 1.0"
+        );
+        assert!(
+            (quality.responsiveness - 1.0).abs() < f32::EPSILON,
+            "default responsiveness must be 1.0"
+        );
+        assert!(
+            (quality.coherence - 1.0).abs() < f32::EPSILON,
+            "default coherence must be 1.0"
+        );
+        assert!(
+            (quality.overall_quality - 1.0).abs() < f32::EPSILON,
+            "default overall_quality must be 1.0"
+        );
+    }
+
+    // ---- Streaming pipeline coordinator session lifecycle ----
+
+    #[tokio::test]
+    async fn test_pipeline_coordinator_session_lifecycle() {
+        let coord = StreamingCoordinator::new(default_adv_config());
+        assert_eq!(
+            coord.get_active_session_count().await,
+            0,
+            "coordinator should start with 0 sessions"
+        );
+        let id = coord
+            .create_session("conv-test".to_string())
+            .await
+            .expect("create_session must succeed");
+        assert_eq!(
+            coord.get_active_session_count().await,
+            1,
+            "one session must be active after creation"
+        );
+        coord.close_session(&id).await.expect("close_session must succeed");
+        assert_eq!(
+            coord.get_active_session_count().await,
+            0,
+            "count must be 0 after close"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_coordinator_cleanup_empty_returns_zero() {
+        let coord = StreamingCoordinator::new(default_adv_config());
+        let removed = coord.cleanup_expired_sessions(1).await;
+        assert_eq!(removed, 0, "cleanup on empty coordinator must return 0");
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_get_global_metrics_initial() {
+        let coord = StreamingCoordinator::new(default_adv_config());
+        let metrics = coord.get_global_metrics().await;
+        assert_eq!(
+            metrics.active_streams, 0,
+            "initial active_streams must be 0"
+        );
+        assert_eq!(
+            metrics.total_streams_created, 0,
+            "initial total_streams_created must be 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_metrics_update_after_session_create() {
+        let coord = StreamingCoordinator::new(default_adv_config());
+        let _id = coord
+            .create_session("c1".to_string())
+            .await
+            .expect("create_session must succeed");
+        let metrics = coord.get_global_metrics().await;
+        assert_eq!(
+            metrics.total_streams_created, 1,
+            "total_streams_created must be 1 after one session"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_sessions_by_conversation() {
+        let coord = StreamingCoordinator::new(default_adv_config());
+        let _id1 = coord
+            .create_session("conv-a".to_string())
+            .await
+            .expect("session 1 must succeed");
+        let _id2 = coord
+            .create_session("conv-a".to_string())
+            .await
+            .expect("session 2 must succeed");
+        let sessions = coord.get_sessions_by_conversation("conv-a").await;
+        assert_eq!(sessions.len(), 2, "two sessions for conv-a must be found");
+    }
+}

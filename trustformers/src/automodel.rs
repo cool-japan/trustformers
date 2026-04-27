@@ -1282,3 +1282,7 @@ impl AutoModel {
         Ok(generated)
     }
 }
+
+#[cfg(test)]
+#[path = "automodel_tests.rs"]
+mod automodel_tests;

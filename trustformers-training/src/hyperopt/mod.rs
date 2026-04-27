@@ -134,4 +134,174 @@ mod tests {
             _ => panic!("Expected Percentile strategy"),
         }
     }
+
+    // ── Direction serialization round-trip ──────────────────────────────────
+
+    #[test]
+    fn test_direction_serialize_roundtrip() {
+        let minimize = Direction::Minimize;
+        let json = serde_json::to_string(&minimize).expect("serialize Direction::Minimize");
+        let back: Direction = serde_json::from_str(&json).expect("deserialize Direction::Minimize");
+        assert_eq!(back, Direction::Minimize);
+
+        let maximize = Direction::Maximize;
+        let json2 = serde_json::to_string(&maximize).expect("serialize Direction::Maximize");
+        let back2: Direction =
+            serde_json::from_str(&json2).expect("deserialize Direction::Maximize");
+        assert_eq!(back2, Direction::Maximize);
+    }
+
+    #[test]
+    fn test_direction_clone() {
+        let d = Direction::Maximize;
+        let d2 = d.clone();
+        assert_eq!(d, d2);
+    }
+
+    // ── PruningConfig construction ──────────────────────────────────────────
+
+    #[test]
+    fn test_pruning_config_construction() {
+        let config = PruningConfig {
+            strategy: PruningStrategy::Median,
+            min_steps: 10,
+            percentile: 0.5,
+        };
+        assert_eq!(config.min_steps, 10);
+        assert!((config.percentile - 0.5).abs() < 1e-10);
+        assert!(matches!(config.strategy, PruningStrategy::Median));
+    }
+
+    #[test]
+    fn test_pruning_config_none_strategy() {
+        let config = PruningConfig {
+            strategy: PruningStrategy::None,
+            min_steps: 0,
+            percentile: 0.0,
+        };
+        assert!(matches!(config.strategy, PruningStrategy::None));
+    }
+
+    #[test]
+    fn test_pruning_config_successive_halving() {
+        let config = PruningConfig {
+            strategy: PruningStrategy::SuccessiveHalving,
+            min_steps: 5,
+            percentile: 0.3,
+        };
+        assert!(matches!(
+            config.strategy,
+            PruningStrategy::SuccessiveHalving
+        ));
+    }
+
+    // ── EarlyStoppingConfig ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_early_stopping_config_construction() {
+        let config = EarlyStoppingConfig {
+            patience: 5,
+            min_delta: 1e-4,
+            restore_best_weights: true,
+        };
+        assert_eq!(config.patience, 5);
+        assert!((config.min_delta - 1e-4).abs() < 1e-12);
+        assert!(config.restore_best_weights);
+    }
+
+    #[test]
+    fn test_early_stopping_config_no_restore() {
+        let config = EarlyStoppingConfig {
+            patience: 3,
+            min_delta: 0.01,
+            restore_best_weights: false,
+        };
+        assert!(!config.restore_best_weights);
+    }
+
+    // ── PruningStrategy clone and debug ────────────────────────────────────
+
+    #[test]
+    fn test_pruning_strategy_debug_output() {
+        let strat = PruningStrategy::SuccessiveHalving;
+        let debug_str = format!("{strat:?}");
+        assert!(debug_str.contains("SuccessiveHalving"), "got: {debug_str}");
+    }
+
+    #[test]
+    fn test_pruning_strategy_percentile_clone() {
+        let s = PruningStrategy::Percentile(0.75);
+        let s2 = s.clone();
+        if let PruningStrategy::Percentile(p) = s2 {
+            assert!((p - 0.75).abs() < 1e-10);
+        } else {
+            panic!("Expected Percentile after clone");
+        }
+    }
+
+    #[test]
+    fn test_direction_debug_output() {
+        let d = Direction::Minimize;
+        let debug_str = format!("{d:?}");
+        assert!(debug_str.contains("Minimize"), "got: {debug_str}");
+    }
+
+    // ── StudyStatistics structure ───────────────────────────────────────────
+
+    #[test]
+    fn test_study_statistics_fields_accessible() {
+        let stats = StudyStatistics {
+            total_trials: 5,
+            completed_trials: 4,
+            failed_trials: 1,
+            pruned_trials: 0,
+            best_value: Some(0.9),
+            best_trial_number: Some(2),
+            total_duration: std::time::Duration::from_secs(10),
+            average_trial_duration: std::time::Duration::from_secs(2),
+            success_rate: 80.0,
+            pruning_rate: 0.0,
+        };
+        assert_eq!(stats.total_trials, 5);
+        assert_eq!(stats.completed_trials, 4);
+        assert_eq!(stats.failed_trials, 1);
+        assert!(stats.best_value.is_some());
+        assert_eq!(stats.best_trial_number, Some(2));
+    }
+
+    // ── EarlyStoppingConfig serialization ──────────────────────────────────
+
+    #[test]
+    fn test_early_stopping_config_serialize_roundtrip() {
+        let config = EarlyStoppingConfig {
+            patience: 7,
+            min_delta: 0.001,
+            restore_best_weights: true,
+        };
+        let json = serde_json::to_string(&config).expect("serialize EarlyStoppingConfig");
+        let back: EarlyStoppingConfig =
+            serde_json::from_str(&json).expect("deserialize EarlyStoppingConfig");
+        assert_eq!(back.patience, 7);
+        assert!((back.min_delta - 0.001).abs() < 1e-10);
+        assert!(back.restore_best_weights);
+    }
+
+    // ── PruningConfig serialization ─────────────────────────────────────────
+
+    #[test]
+    fn test_pruning_config_serialize_roundtrip() {
+        let config = PruningConfig {
+            strategy: PruningStrategy::Percentile(0.4),
+            min_steps: 8,
+            percentile: 0.4,
+        };
+        let json = serde_json::to_string(&config).expect("serialize PruningConfig");
+        let back: PruningConfig = serde_json::from_str(&json).expect("deserialize PruningConfig");
+        assert_eq!(back.min_steps, 8);
+        if let PruningStrategy::Percentile(p) = back.strategy {
+            assert!((p - 0.4).abs() < 1e-10);
+        } else {
+            panic!("Expected Percentile strategy after roundtrip");
+        }
+    }
 }

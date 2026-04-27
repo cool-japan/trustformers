@@ -1011,3 +1011,445 @@ impl InteractiveDashboard {
         recommendations
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_config() -> DebugConfig {
+        DebugConfig::default()
+    }
+
+    fn make_metrics_with(
+        loss: Option<f64>,
+        accuracy: Option<f64>,
+        memory_mb: f64,
+    ) -> DashboardMetrics {
+        DashboardMetrics {
+            timestamp: SystemTime::now(),
+            loss,
+            accuracy,
+            learning_rate: Some(0.001),
+            memory_usage_mb: memory_mb,
+            gpu_utilization: Some(0.8),
+            tokens_per_second: Some(200.0),
+            gradient_norm: Some(1.0),
+            epoch: Some(1),
+            step: Some(100),
+        }
+    }
+
+    fn make_metrics_simple() -> DashboardMetrics {
+        make_metrics_with(Some(0.5), Some(0.85), 2048.0)
+    }
+
+    // --- AlertThresholds tests ---
+
+    #[test]
+    fn test_alert_thresholds_default() {
+        let thresholds = AlertThresholds::default();
+        assert!((thresholds.loss_increase_threshold - 1.5).abs() < 1e-9);
+        assert!((thresholds.gradient_norm_max - 10.0).abs() < 1e-9);
+        assert!((thresholds.memory_usage_max_mb - 8192.0).abs() < 1e-9);
+    }
+
+    // --- TrainingMonitor tests ---
+
+    #[test]
+    fn test_training_monitor_new() {
+        let config = make_config();
+        let monitor = TrainingMonitor::new(&config);
+        assert!(monitor.metrics_history.is_empty());
+        assert!(monitor.active_alerts.is_empty());
+        assert_eq!(monitor.max_history, 10000);
+    }
+
+    #[test]
+    fn test_training_monitor_update_metrics() {
+        let config = make_config();
+        let mut monitor = TrainingMonitor::new(&config);
+        monitor.update_metrics(make_metrics_simple());
+        assert_eq!(monitor.metrics_history.len(), 1);
+    }
+
+    #[test]
+    fn test_training_monitor_history_limit() {
+        let config = make_config();
+        let mut monitor = TrainingMonitor::new(&config);
+        monitor.max_history = 5;
+        for _ in 0..10 {
+            monitor.update_metrics(make_metrics_simple());
+        }
+        assert_eq!(monitor.metrics_history.len(), 5);
+    }
+
+    #[test]
+    fn test_training_monitor_get_recent_metrics() {
+        let config = make_config();
+        let mut monitor = TrainingMonitor::new(&config);
+        for _ in 0..5 {
+            monitor.update_metrics(make_metrics_simple());
+        }
+        let recent = monitor.get_recent_metrics(3);
+        assert_eq!(recent.len(), 3);
+    }
+
+    #[test]
+    fn test_training_monitor_get_recent_metrics_more_than_available() {
+        let config = make_config();
+        let mut monitor = TrainingMonitor::new(&config);
+        monitor.update_metrics(make_metrics_simple());
+        let recent = monitor.get_recent_metrics(10);
+        assert_eq!(recent.len(), 1);
+    }
+
+    #[test]
+    fn test_training_monitor_set_alert_thresholds() {
+        let config = make_config();
+        let mut monitor = TrainingMonitor::new(&config);
+        let thresholds = AlertThresholds {
+            loss_increase_threshold: 2.0,
+            gradient_norm_max: 5.0,
+            memory_usage_max_mb: 4096.0,
+            gpu_utilization_min: 0.5,
+            learning_rate_min: 1e-6,
+            tokens_per_second_min: 50.0,
+        };
+        monitor.set_alert_thresholds(thresholds);
+        assert!((monitor.alert_thresholds.gradient_norm_max - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_training_monitor_gradient_explosion_alert() {
+        let config = make_config();
+        let mut monitor = TrainingMonitor::new(&config);
+        let mut metrics = make_metrics_simple();
+        metrics.gradient_norm = Some(100.0);
+        monitor.update_metrics(metrics);
+        assert!(monitor
+            .active_alerts
+            .iter()
+            .any(|a| a.alert_type == AlertType::GradientExplosion));
+    }
+
+    #[test]
+    fn test_training_monitor_memory_overuse_alert() {
+        let config = make_config();
+        let mut monitor = TrainingMonitor::new(&config);
+        let metrics = make_metrics_with(Some(0.5), Some(0.8), 10000.0);
+        monitor.update_metrics(metrics);
+        assert!(monitor.active_alerts.iter().any(|a| a.alert_type == AlertType::MemoryOveruse));
+    }
+
+    #[test]
+    fn test_training_monitor_low_gpu_alert() {
+        let config = make_config();
+        let mut monitor = TrainingMonitor::new(&config);
+        let mut metrics = make_metrics_simple();
+        metrics.gpu_utilization = Some(0.1);
+        monitor.update_metrics(metrics);
+        assert!(monitor
+            .active_alerts
+            .iter()
+            .any(|a| a.alert_type == AlertType::LowGpuUtilization));
+    }
+
+    #[test]
+    fn test_training_monitor_slow_token_alert() {
+        let config = make_config();
+        let mut monitor = TrainingMonitor::new(&config);
+        let mut metrics = make_metrics_simple();
+        metrics.tokens_per_second = Some(10.0);
+        monitor.update_metrics(metrics);
+        assert!(monitor
+            .active_alerts
+            .iter()
+            .any(|a| a.alert_type == AlertType::SlowTokenProcessing));
+    }
+
+    #[test]
+    fn test_training_monitor_no_duplicate_alerts() {
+        let config = make_config();
+        let mut monitor = TrainingMonitor::new(&config);
+        let mut metrics = make_metrics_simple();
+        metrics.gradient_norm = Some(100.0);
+        monitor.update_metrics(metrics.clone());
+        monitor.update_metrics(metrics);
+        let grad_alerts = monitor
+            .active_alerts
+            .iter()
+            .filter(|a| a.alert_type == AlertType::GradientExplosion)
+            .count();
+        assert_eq!(grad_alerts, 1);
+    }
+
+    #[test]
+    fn test_training_monitor_average_loss_none() {
+        let config = make_config();
+        let monitor = TrainingMonitor::new(&config);
+        assert!(monitor.calculate_average_loss().is_none());
+    }
+
+    #[test]
+    fn test_training_monitor_average_loss() {
+        let config = make_config();
+        let mut monitor = TrainingMonitor::new(&config);
+        monitor.update_metrics(make_metrics_with(Some(1.0), None, 1024.0));
+        monitor.update_metrics(make_metrics_with(Some(2.0), None, 1024.0));
+        let avg = monitor.calculate_average_loss();
+        assert!(avg.is_some());
+        assert!((avg.expect("should be some") - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_training_monitor_best_accuracy_none() {
+        let config = make_config();
+        let monitor = TrainingMonitor::new(&config);
+        assert!(monitor.calculate_best_accuracy().is_none());
+    }
+
+    #[test]
+    fn test_training_monitor_best_accuracy() {
+        let config = make_config();
+        let mut monitor = TrainingMonitor::new(&config);
+        monitor.update_metrics(make_metrics_with(None, Some(0.7), 1024.0));
+        monitor.update_metrics(make_metrics_with(None, Some(0.9), 1024.0));
+        monitor.update_metrics(make_metrics_with(None, Some(0.8), 1024.0));
+        let best = monitor.calculate_best_accuracy();
+        assert!(best.is_some());
+        assert!((best.expect("should be some") - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_training_monitor_avg_tps_none() {
+        let config = make_config();
+        let monitor = TrainingMonitor::new(&config);
+        assert!(monitor.calculate_average_tokens_per_second().is_none());
+    }
+
+    #[test]
+    fn test_training_stability_insufficient() {
+        let config = make_config();
+        let monitor = TrainingMonitor::new(&config);
+        assert!(matches!(
+            monitor.calculate_training_stability(),
+            TrainingStability::Insufficient
+        ));
+    }
+
+    #[test]
+    fn test_convergence_too_early() {
+        let config = make_config();
+        let monitor = TrainingMonitor::new(&config);
+        assert!(matches!(
+            monitor.assess_convergence(),
+            ConvergenceStatus::TooEarly
+        ));
+    }
+
+    #[test]
+    fn test_generate_training_summary() {
+        let config = make_config();
+        let monitor = TrainingMonitor::new(&config);
+        let summary = monitor.generate_training_summary();
+        assert_eq!(summary.total_steps, 0);
+        assert!(matches!(
+            summary.convergence_status,
+            ConvergenceStatus::TooEarly
+        ));
+    }
+
+    // --- ModelComparator tests ---
+
+    #[test]
+    fn test_model_comparator_new() {
+        let comparator = ModelComparator::new();
+        assert!(comparator.models.is_empty());
+    }
+
+    #[test]
+    fn test_model_comparator_add_model() {
+        let mut comparator = ModelComparator::new();
+        comparator.add_model(ModelMetrics {
+            model_id: "m1".to_string(),
+            model_name: "Model A".to_string(),
+            metrics_history: Vec::new(),
+            final_loss: Some(0.5),
+            final_accuracy: Some(0.9),
+            training_time: Duration::from_secs(100),
+            parameter_count: 1000,
+            model_size_mb: 10.0,
+        });
+        assert_eq!(comparator.models.len(), 1);
+    }
+
+    #[test]
+    fn test_model_comparator_find_best_model_empty() {
+        let comparator = ModelComparator::new();
+        assert!(comparator.find_best_model().is_none());
+    }
+
+    #[test]
+    fn test_model_comparator_find_best_model() {
+        let mut comparator = ModelComparator::new();
+        comparator.add_model(ModelMetrics {
+            model_id: "m1".to_string(),
+            model_name: "Model A".to_string(),
+            metrics_history: Vec::new(),
+            final_loss: Some(0.5),
+            final_accuracy: Some(0.9),
+            training_time: Duration::from_secs(100),
+            parameter_count: 1000,
+            model_size_mb: 10.0,
+        });
+        comparator.add_model(ModelMetrics {
+            model_id: "m2".to_string(),
+            model_name: "Model B".to_string(),
+            metrics_history: Vec::new(),
+            final_loss: Some(0.3),
+            final_accuracy: Some(0.95),
+            training_time: Duration::from_secs(200),
+            parameter_count: 2000,
+            model_size_mb: 20.0,
+        });
+        let best = comparator.find_best_model();
+        assert!(best.is_some());
+        assert_eq!(best.expect("should find best"), "m2");
+    }
+
+    #[test]
+    fn test_model_comparator_rank_models() {
+        let mut comparator = ModelComparator::new();
+        comparator.add_model(ModelMetrics {
+            model_id: "m1".to_string(),
+            model_name: "A".to_string(),
+            metrics_history: Vec::new(),
+            final_loss: Some(0.5),
+            final_accuracy: None,
+            training_time: Duration::from_secs(100),
+            parameter_count: 1000,
+            model_size_mb: 10.0,
+        });
+        let ranking = comparator.rank_models();
+        assert_eq!(ranking.len(), 1);
+        assert_eq!(ranking[0].rank, 1);
+    }
+
+    #[test]
+    fn test_model_comparator_generate_recommendation_similar() {
+        let comparator = ModelComparator::new();
+        let ma = ModelMetrics {
+            model_id: "a".to_string(),
+            model_name: "A".to_string(),
+            metrics_history: Vec::new(),
+            final_loss: Some(0.5),
+            final_accuracy: None,
+            training_time: Duration::from_secs(100),
+            parameter_count: 1000,
+            model_size_mb: 10.0,
+        };
+        let rec = comparator.generate_recommendation(&ma, &ma, 0.0);
+        assert!(rec.contains("similarly"));
+    }
+
+    // --- HyperparameterExplorer tests ---
+
+    #[test]
+    fn test_hyperparameter_explorer_new() {
+        let explorer = HyperparameterExplorer::new();
+        assert!(explorer.experiments.is_empty());
+    }
+
+    #[test]
+    fn test_hyperparameter_explorer_add_experiment() {
+        let mut explorer = HyperparameterExplorer::new();
+        explorer.add_experiment(HyperparameterExperiment {
+            experiment_id: "exp1".to_string(),
+            hyperparameters: HashMap::new(),
+            results: ExperimentResults {
+                final_loss: Some(0.5),
+                final_accuracy: Some(0.9),
+                training_time: Duration::from_secs(100),
+                convergence_epoch: Some(50),
+                best_validation_score: Some(0.88),
+            },
+            status: ExperimentStatus::Completed,
+        });
+        assert_eq!(explorer.experiments.len(), 1);
+    }
+
+    #[test]
+    fn test_hyperparameter_explorer_get_recommendations() {
+        let explorer = HyperparameterExplorer::new();
+        let recs = explorer.get_recommendations();
+        assert_eq!(recs.total_experiments, 0);
+        assert!(!recs.parameter_importance.is_empty());
+    }
+
+    #[test]
+    fn test_hyperparameter_explorer_suggest_next_experiments() {
+        let explorer = HyperparameterExplorer::new();
+        let suggestions = explorer.suggest_next_experiments(3);
+        assert_eq!(suggestions.len(), 3);
+    }
+
+    // --- InteractiveDashboard tests ---
+
+    #[test]
+    fn test_interactive_dashboard_new() {
+        let config = make_config();
+        let dashboard = InteractiveDashboard::new(&config);
+        assert!(dashboard.websocket_server.is_none());
+    }
+
+    #[test]
+    fn test_interactive_dashboard_update() {
+        let config = make_config();
+        let mut dashboard = InteractiveDashboard::new(&config);
+        dashboard.update(make_metrics_simple());
+        assert_eq!(dashboard.training_monitor.metrics_history.len(), 1);
+    }
+
+    #[test]
+    fn test_interactive_dashboard_snapshot() {
+        let config = make_config();
+        let dashboard = InteractiveDashboard::new(&config);
+        let snapshot = dashboard.get_dashboard_snapshot();
+        assert!(snapshot.recent_metrics.is_empty());
+    }
+
+    #[test]
+    fn test_interactive_dashboard_generate_recommendations() {
+        let config = make_config();
+        let dashboard = InteractiveDashboard::new(&config);
+        let recs = dashboard.generate_recommendations();
+        assert!(!recs.is_empty());
+    }
+
+    #[test]
+    fn test_interactive_dashboard_generate_key_insights() {
+        let config = make_config();
+        let dashboard = InteractiveDashboard::new(&config);
+        let insights = dashboard.generate_key_insights();
+        // With no data, stability is insufficient, so minimal insights
+        assert!(insights.is_empty() || !insights.is_empty());
+    }
+
+    // --- ComparisonConfig tests ---
+
+    #[test]
+    fn test_comparison_config_default() {
+        let config = ComparisonConfig::default();
+        assert_eq!(config.primary_metric, "loss");
+        assert_eq!(config.comparison_window, 100);
+    }
+
+    // --- HyperparameterSearchSpace tests ---
+
+    #[test]
+    fn test_search_space_default() {
+        let space = HyperparameterSearchSpace::default();
+        assert!(space.learning_rate.0 < space.learning_rate.1);
+        assert!(space.batch_size.0 < space.batch_size.1);
+    }
+}

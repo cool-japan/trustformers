@@ -22,3 +22,10 @@ pub use conflict_detector::*;
 pub use health_monitor::*;
 pub use performance_metrics::*;
 pub use manager::NetworkPortManager;
+
+#[cfg(test)]
+mod types_tests;
+#[cfg(test)]
+mod manager_tests;
+#[cfg(test)]
+mod reservation_system_tests;

@@ -238,3 +238,157 @@ pub enum GdprComplianceError {
     /// Internal error
     InternalError(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn test_gdpr_compliance_config_default_enabled() {
+        let cfg = GdprComplianceConfig::default();
+        assert!(cfg.enabled);
+    }
+
+    #[test]
+    fn test_legal_basis_variants_debug() {
+        assert_eq!(format!("{:?}", LegalBasis::Consent), "Consent");
+        assert_eq!(format!("{:?}", LegalBasis::Contract), "Contract");
+        assert_eq!(
+            format!("{:?}", LegalBasis::LegalObligation),
+            "LegalObligation"
+        );
+        assert_eq!(
+            format!("{:?}", LegalBasis::VitalInterests),
+            "VitalInterests"
+        );
+        assert_eq!(format!("{:?}", LegalBasis::PublicTask), "PublicTask");
+        assert_eq!(
+            format!("{:?}", LegalBasis::LegitimateInterests),
+            "LegitimateInterests"
+        );
+    }
+
+    #[test]
+    fn test_processing_purpose_creation() {
+        let purpose = ProcessingPurpose {
+            id: "pp-001".to_string(),
+            name: "Analytics".to_string(),
+            description: "Usage analytics".to_string(),
+            legal_basis: LegalBasis::LegitimateInterests,
+            retention_period: Duration::from_secs(365 * 24 * 3600),
+        };
+        assert_eq!(purpose.id, "pp-001");
+        assert!(purpose.retention_period.as_secs() > 0);
+    }
+
+    #[test]
+    fn test_data_category_variants() {
+        assert_eq!(format!("{:?}", DataCategory::PersonalData), "PersonalData");
+        assert_eq!(
+            format!("{:?}", DataCategory::SpecialCategoryData),
+            "SpecialCategoryData"
+        );
+        assert_eq!(
+            format!("{:?}", DataCategory::PseudonymizedData),
+            "PseudonymizedData"
+        );
+        assert_eq!(
+            format!("{:?}", DataCategory::AnonymizedData),
+            "AnonymizedData"
+        );
+        assert_eq!(format!("{:?}", DataCategory::CriminalData), "CriminalData");
+    }
+
+    #[test]
+    fn test_data_subject_preferences_creation() {
+        let prefs = DataSubjectPreferences {
+            language: "en".to_string(),
+            communication_channels: vec!["email".to_string()],
+            data_processing_opt_ins: vec![],
+            marketing_consent: false,
+        };
+        assert_eq!(prefs.language, "en");
+        assert!(!prefs.marketing_consent);
+    }
+
+    #[test]
+    fn test_consent_status_variants() {
+        assert_eq!(format!("{:?}", ConsentStatus::Given), "Given");
+        assert_eq!(format!("{:?}", ConsentStatus::Withdrawn), "Withdrawn");
+        assert_eq!(format!("{:?}", ConsentStatus::Expired), "Expired");
+        assert_eq!(format!("{:?}", ConsentStatus::Pending), "Pending");
+        assert_eq!(format!("{:?}", ConsentStatus::Refused), "Refused");
+    }
+
+    #[test]
+    fn test_request_type_variants() {
+        assert_eq!(format!("{:?}", RequestType::Access), "Access");
+        assert_eq!(format!("{:?}", RequestType::Rectification), "Rectification");
+        assert_eq!(format!("{:?}", RequestType::Erasure), "Erasure");
+        assert_eq!(format!("{:?}", RequestType::Restriction), "Restriction");
+        assert_eq!(format!("{:?}", RequestType::Portability), "Portability");
+        assert_eq!(format!("{:?}", RequestType::Objection), "Objection");
+        assert_eq!(
+            format!("{:?}", RequestType::AutomatedDecision),
+            "AutomatedDecision"
+        );
+    }
+
+    #[test]
+    fn test_request_status_variants() {
+        assert_eq!(format!("{:?}", RequestStatus::Submitted), "Submitted");
+        assert_eq!(format!("{:?}", RequestStatus::Completed), "Completed");
+        assert_eq!(format!("{:?}", RequestStatus::Rejected), "Rejected");
+    }
+
+    #[test]
+    fn test_verification_status_variants() {
+        assert_eq!(
+            format!("{:?}", VerificationStatus::NotVerified),
+            "NotVerified"
+        );
+        assert_eq!(format!("{:?}", VerificationStatus::Verified), "Verified");
+        assert_eq!(format!("{:?}", VerificationStatus::Failed), "Failed");
+    }
+
+    #[test]
+    fn test_contact_details_creation() {
+        let contact = ContactDetails {
+            name: "John Doe".to_string(),
+            email: "john@example.com".to_string(),
+            phone: Some("+1-555-0100".to_string()),
+            address: None,
+        };
+        assert_eq!(contact.name, "John Doe");
+        assert!(contact.phone.is_some());
+        assert!(contact.address.is_none());
+    }
+
+    #[test]
+    fn test_gdpr_error_configuration() {
+        let err = GdprComplianceError::ConfigurationError("bad config".to_string());
+        match err {
+            GdprComplianceError::ConfigurationError(msg) => assert_eq!(msg, "bad config"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_gdpr_error_consent() {
+        let err = GdprComplianceError::ConsentError("consent invalid".to_string());
+        match err {
+            GdprComplianceError::ConsentError(msg) => assert!(!msg.is_empty()),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_gdpr_error_storage() {
+        let err = GdprComplianceError::StorageError("disk full".to_string());
+        match err {
+            GdprComplianceError::StorageError(msg) => assert!(!msg.is_empty()),
+            _ => panic!("wrong variant"),
+        }
+    }
+}

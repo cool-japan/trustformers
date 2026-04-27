@@ -932,3 +932,462 @@ where
 {
     DocumentUnderstandingPipeline::new(model, tokenizer)
 }
+
+// ================================================================================================
+// TESTS
+// ================================================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- DocumentUnderstandingConfig tests ---
+
+    #[test]
+    fn test_config_default_values() {
+        let config = DocumentUnderstandingConfig::default();
+        assert_eq!(config.max_length, 512, "default max_length should be 512");
+        assert!(
+            config.return_ocr_results,
+            "default should return OCR results"
+        );
+        assert!(config.return_layout, "default should return layout");
+        assert!(
+            config.return_key_value_pairs,
+            "default should return key-value pairs"
+        );
+        assert!(config.return_entities, "default should return entities");
+        assert!(config.return_text, "default should return text");
+        assert!(config.preprocess_text, "default should preprocess text");
+    }
+
+    #[test]
+    fn test_config_confidence_threshold_default_in_range() {
+        let config = DocumentUnderstandingConfig::default();
+        assert!(
+            config.confidence_threshold >= 0.0 && config.confidence_threshold <= 1.0,
+            "confidence_threshold should be in [0.0, 1.0], got {}",
+            config.confidence_threshold
+        );
+    }
+
+    #[test]
+    fn test_config_language_hints_default_contains_english() {
+        let config = DocumentUnderstandingConfig::default();
+        assert!(
+            config.language_hints.contains(&"en".to_string()),
+            "default language_hints should contain 'en'"
+        );
+    }
+
+    // --- BoundingBox tests ---
+
+    #[test]
+    fn test_bounding_box_construction() {
+        let bbox = BoundingBox {
+            x: 10.0,
+            y: 20.0,
+            width: 100.0,
+            height: 50.0,
+        };
+        assert!((bbox.x - 10.0).abs() < 1e-6);
+        assert!((bbox.y - 20.0).abs() < 1e-6);
+        assert!((bbox.width - 100.0).abs() < 1e-6);
+        assert!((bbox.height - 50.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_bounding_box_dimensions_non_negative() {
+        let bbox = BoundingBox {
+            x: 0.0,
+            y: 0.0,
+            width: 50.0,
+            height: 30.0,
+        };
+        assert!(
+            bbox.width >= 0.0,
+            "bounding box width should be non-negative"
+        );
+        assert!(
+            bbox.height >= 0.0,
+            "bounding box height should be non-negative"
+        );
+    }
+
+    // --- TextBlock tests ---
+
+    #[test]
+    fn test_text_block_confidence_in_range() {
+        let block = TextBlock {
+            text: "Sample paragraph text".to_string(),
+            bounding_box: BoundingBox {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 30.0,
+            },
+            confidence: 0.88,
+            block_type: TextBlockType::Paragraph,
+        };
+        assert!(
+            block.confidence >= 0.0 && block.confidence <= 1.0,
+            "confidence must be in [0.0, 1.0]"
+        );
+    }
+
+    #[test]
+    fn test_text_block_heading_type() {
+        let block = TextBlock {
+            text: "Chapter 1: Introduction".to_string(),
+            bounding_box: BoundingBox {
+                x: 0.0,
+                y: 0.0,
+                width: 300.0,
+                height: 40.0,
+            },
+            confidence: 0.95,
+            block_type: TextBlockType::Heading,
+        };
+        assert!(
+            matches!(block.block_type, TextBlockType::Heading),
+            "block_type should be Heading"
+        );
+    }
+
+    #[test]
+    fn test_text_block_title_type() {
+        let block = TextBlock {
+            text: "Annual Report 2024".to_string(),
+            bounding_box: BoundingBox {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 60.0,
+            },
+            confidence: 0.97,
+            block_type: TextBlockType::Title,
+        };
+        assert!(matches!(block.block_type, TextBlockType::Title));
+    }
+
+    // --- Table tests ---
+
+    #[test]
+    fn test_table_row_col_count() {
+        let headers = vec!["Name".to_string(), "Value".to_string()];
+        let rows = vec![
+            vec!["Row1".to_string(), "100".to_string()],
+            vec!["Row2".to_string(), "200".to_string()],
+            vec!["Row3".to_string(), "300".to_string()],
+        ];
+        let table = Table {
+            rows: rows.clone(),
+            headers: Some(headers),
+            bounding_box: BoundingBox {
+                x: 0.0,
+                y: 0.0,
+                width: 300.0,
+                height: 100.0,
+            },
+            confidence: 0.92,
+        };
+        assert_eq!(table.rows.len(), 3, "table should have 3 rows");
+        assert_eq!(table.rows[0].len(), 2, "each row should have 2 columns");
+    }
+
+    #[test]
+    fn test_table_headers_present() {
+        let headers = vec!["Item".to_string(), "Qty".to_string(), "Price".to_string()];
+        let table = Table {
+            rows: vec![headers.clone()],
+            headers: Some(headers.clone()),
+            bounding_box: BoundingBox {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 200.0,
+            },
+            confidence: 0.90,
+        };
+        assert!(table.headers.is_some(), "table should have headers");
+        assert_eq!(
+            table.headers.as_ref().expect("headers present").len(),
+            3,
+            "table should have 3 column headers"
+        );
+    }
+
+    #[test]
+    fn test_table_confidence_in_range() {
+        let table = Table {
+            rows: vec![vec!["data".to_string()]],
+            headers: None,
+            bounding_box: BoundingBox {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 50.0,
+            },
+            confidence: 0.85,
+        };
+        assert!(
+            table.confidence >= 0.0 && table.confidence <= 1.0,
+            "table confidence must be in [0.0, 1.0]"
+        );
+    }
+
+    // --- OCRResult tests ---
+
+    #[test]
+    fn test_ocr_result_confidence_threshold() {
+        let ocr = OCRResult {
+            text: "Extracted text here".to_string(),
+            bounding_box: BoundingBox {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 25.0,
+            },
+            confidence: 0.92,
+            word_level_boxes: None,
+        };
+        let threshold = 0.5;
+        assert!(
+            ocr.confidence >= threshold,
+            "OCR result with confidence {} should pass threshold {}",
+            ocr.confidence,
+            threshold
+        );
+    }
+
+    #[test]
+    fn test_ocr_result_with_word_boxes() {
+        let ocr = OCRResult {
+            text: "Sample OCR".to_string(),
+            bounding_box: BoundingBox {
+                x: 0.0,
+                y: 0.0,
+                width: 150.0,
+                height: 25.0,
+            },
+            confidence: 0.95,
+            word_level_boxes: Some(vec![
+                (
+                    "Sample".to_string(),
+                    BoundingBox {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 70.0,
+                        height: 25.0,
+                    },
+                ),
+                (
+                    "OCR".to_string(),
+                    BoundingBox {
+                        x: 75.0,
+                        y: 0.0,
+                        width: 50.0,
+                        height: 25.0,
+                    },
+                ),
+            ]),
+        };
+        let boxes = ocr.word_level_boxes.as_ref().expect("word level boxes should be present");
+        assert_eq!(boxes.len(), 2, "should have 2 word-level bounding boxes");
+    }
+
+    // --- KeyValuePair tests ---
+
+    #[test]
+    fn test_key_value_pair_fields() {
+        let kv = KeyValuePair {
+            key: "Invoice Number".to_string(),
+            value: "INV-12345".to_string(),
+            key_bbox: BoundingBox {
+                x: 10.0,
+                y: 50.0,
+                width: 100.0,
+                height: 20.0,
+            },
+            value_bbox: BoundingBox {
+                x: 120.0,
+                y: 50.0,
+                width: 80.0,
+                height: 20.0,
+            },
+            confidence: 0.88,
+        };
+        assert_eq!(kv.key, "Invoice Number");
+        assert_eq!(kv.value, "INV-12345");
+        assert!(kv.confidence >= 0.0 && kv.confidence <= 1.0);
+    }
+
+    // --- DocumentMetadata tests ---
+
+    #[test]
+    fn test_document_metadata_quality_score_in_range() {
+        let meta = DocumentMetadata {
+            page_count: 1,
+            processing_time_ms: 150,
+            detected_language: "en".to_string(),
+            text_orientation: 0.0,
+            quality_score: 0.92,
+        };
+        assert!(
+            meta.quality_score >= 0.0 && meta.quality_score <= 1.0,
+            "quality_score must be in [0.0, 1.0]"
+        );
+    }
+
+    #[test]
+    fn test_document_metadata_page_count_positive() {
+        let meta = DocumentMetadata {
+            page_count: 5,
+            processing_time_ms: 500,
+            detected_language: "en".to_string(),
+            text_orientation: 0.0,
+            quality_score: 0.85,
+        };
+        assert!(meta.page_count > 0, "page_count should be at least 1");
+    }
+
+    // --- DocumentUnderstandingOutput tests ---
+
+    #[test]
+    fn test_document_understanding_output_construction() {
+        let output = DocumentUnderstandingOutput {
+            text: Some("Sample document text".to_string()),
+            text_blocks: None,
+            key_value_pairs: None,
+            entities: None,
+            tables: None,
+            ocr_results: None,
+            answer: None,
+            metadata: DocumentMetadata {
+                page_count: 1,
+                processing_time_ms: 200,
+                detected_language: "en".to_string(),
+                text_orientation: 0.0,
+                quality_score: 0.9,
+            },
+        };
+        assert!(output.text.is_some(), "output should have text");
+        assert_eq!(output.metadata.page_count, 1);
+    }
+
+    // --- Reading order / layout order tests ---
+
+    #[test]
+    fn test_layout_reading_order_top_to_bottom() {
+        // Simulate multiple text blocks and verify they can be sorted top-to-bottom
+        let blocks = vec![
+            TextBlock {
+                text: "Header text".to_string(),
+                bounding_box: BoundingBox {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 500.0,
+                    height: 30.0,
+                },
+                confidence: 0.95,
+                block_type: TextBlockType::Header,
+            },
+            TextBlock {
+                text: "Body text paragraph".to_string(),
+                bounding_box: BoundingBox {
+                    x: 10.0,
+                    y: 100.0,
+                    width: 500.0,
+                    height: 60.0,
+                },
+                confidence: 0.90,
+                block_type: TextBlockType::Paragraph,
+            },
+            TextBlock {
+                text: "Footer text".to_string(),
+                bounding_box: BoundingBox {
+                    x: 10.0,
+                    y: 900.0,
+                    width: 500.0,
+                    height: 20.0,
+                },
+                confidence: 0.85,
+                block_type: TextBlockType::Footer,
+            },
+        ];
+        // Sort by y-coordinate (top-to-bottom reading order)
+        let mut sorted = blocks.clone();
+        sorted.sort_by(|a, b| {
+            a.bounding_box
+                .y
+                .partial_cmp(&b.bounding_box.y)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        assert_eq!(
+            sorted[0].bounding_box.y, 10.0,
+            "first block should have smallest y"
+        );
+        assert_eq!(
+            sorted[2].bounding_box.y, 900.0,
+            "last block should have largest y"
+        );
+    }
+
+    #[test]
+    fn test_layout_reading_order_left_to_right() {
+        // Two columns at same height should be sorted left-to-right
+        let left_block = TextBlock {
+            text: "Left column".to_string(),
+            bounding_box: BoundingBox {
+                x: 10.0,
+                y: 100.0,
+                width: 200.0,
+                height: 50.0,
+            },
+            confidence: 0.90,
+            block_type: TextBlockType::Paragraph,
+        };
+        let right_block = TextBlock {
+            text: "Right column".to_string(),
+            bounding_box: BoundingBox {
+                x: 300.0,
+                y: 100.0,
+                width: 200.0,
+                height: 50.0,
+            },
+            confidence: 0.88,
+            block_type: TextBlockType::Paragraph,
+        };
+        // Left block should come before right block in reading order
+        assert!(
+            left_block.bounding_box.x < right_block.bounding_box.x,
+            "left column x ({}) should be less than right column x ({})",
+            left_block.bounding_box.x,
+            right_block.bounding_box.x
+        );
+    }
+
+    // --- TextBlockType variants test ---
+
+    #[test]
+    fn test_text_block_type_variants_accessible() {
+        let variants = [
+            TextBlockType::Title,
+            TextBlockType::Heading,
+            TextBlockType::Paragraph,
+            TextBlockType::List,
+            TextBlockType::Table,
+            TextBlockType::Footer,
+            TextBlockType::Header,
+            TextBlockType::Caption,
+            TextBlockType::Other,
+        ];
+        // H1/H2/H3 hierarchy via heading level detection can be represented
+        // via the same Heading variant. Verify Heading is among variants.
+        let has_heading = variants.iter().any(|v| matches!(v, TextBlockType::Heading));
+        assert!(
+            has_heading,
+            "TextBlockType should include Heading variant for H1/H2/H3 detection"
+        );
+    }
+}

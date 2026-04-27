@@ -50,7 +50,7 @@ impl Default for GptNeoConfig {
 
 impl Config for GptNeoConfig {
     fn validate(&self) -> trustformers_core::errors::Result<()> {
-        if self.hidden_size % self.num_heads != 0 {
+        if !self.hidden_size.is_multiple_of(self.num_heads) {
             return Err(
                 trustformers_core::errors::TrustformersError::invalid_config(
                     "hidden_size must be divisible by num_heads".to_string(),

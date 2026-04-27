@@ -1531,3 +1531,13 @@ npm run demo:classifier     # Launch image classifier demo
 **TypeScript Support:** ✅ Full definitions
 **Documentation:** ✅ Complete API reference
 **All TODO items completed!** 🎉
+
+## Future Enhancements (added 2026-04-24)
+- [ ] WebRTC support for real-time collaborative inference sessions
+- [ ] Browser support expansion to Safari/Firefox via WebNN fallback path
+  - **Refinement needed:** What WebNN API subset is available? Requires testing on Firefox 127+, Safari 17.4+.
+- [ ] Large-model quantization guidance for browser deployment (GGUF int4 > 2GB limit workaround)
+  - **Refinement needed:** IndexedDB chunking strategy? SharedArrayBuffer limits?
+
+## Proposed follow-ups
+- **Workspace governance:** `trustformers-js/` is not declared in root `Cargo.toml` workspace `members` or `exclude`. This means cargo commands won't validate its (WASM) integration. Consider: add a stub `Cargo.toml` or add to `exclude` explicitly.

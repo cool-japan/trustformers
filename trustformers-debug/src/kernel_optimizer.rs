@@ -1362,3 +1362,401 @@ impl Default for KernelOptimizationConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_kernel_optimization_config_default() {
+        let config = KernelOptimizationConfig::default();
+        assert!(config.enable_launch_config_optimization);
+        assert!(config.enable_memory_access_optimization);
+        assert!(config.enable_kernel_fusion);
+        assert!(config.enable_regression_detection);
+        assert_eq!(config.max_optimization_suggestions, 10);
+        assert!((config.min_improvement_threshold - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_launch_config_search_space_creation() {
+        let space = LaunchConfigSearchSpace {
+            kernel_name: "matmul_kernel".to_string(),
+            min_block_size: (1, 1, 1),
+            max_block_size: (1024, 1024, 64),
+            block_size_constraints: vec![
+                BlockSizeConstraint::MultipleOf(32),
+                BlockSizeConstraint::PowerOfTwo,
+            ],
+            shared_memory_constraints: MemoryConstraints {
+                max_shared_memory_per_block: 49152,
+                bank_conflict_aware: true,
+                coalescing_optimization: true,
+            },
+            register_constraints: RegisterConstraints {
+                max_registers_per_thread: 255,
+                spill_threshold: 64,
+                occupancy_impact_threshold: 0.5,
+            },
+            occupancy_targets: OccupancyTargets {
+                minimum_occupancy: 0.25,
+                target_occupancy: 0.75,
+                theoretical_occupancy: 1.0,
+            },
+        };
+        assert_eq!(space.kernel_name, "matmul_kernel");
+        assert_eq!(space.block_size_constraints.len(), 2);
+    }
+
+    #[test]
+    fn test_stride_analysis_result_creation() {
+        let result = StrideAnalysisResult {
+            kernel_name: "conv_kernel".to_string(),
+            detected_strides: vec![DetectedStride {
+                stride_bytes: 4,
+                frequency: 1000,
+                memory_region: "global".to_string(),
+                performance_impact: StrideImpact::Optimal,
+            }],
+            access_pattern_classification: AccessPatternType::Sequential,
+            optimization_potential: 0.3,
+            recommended_optimizations: vec![],
+        };
+        assert_eq!(result.detected_strides.len(), 1);
+        assert!(matches!(
+            result.access_pattern_classification,
+            AccessPatternType::Sequential
+        ));
+    }
+
+    #[test]
+    fn test_bank_conflict_pattern_creation() {
+        let pattern = BankConflictPattern {
+            kernel_name: "shared_mem_kernel".to_string(),
+            conflict_count: 50,
+            conflict_severity: ConflictSeverity::Medium,
+            conflicting_addresses: vec![ConflictingAccess {
+                address_pattern: "stride_4".to_string(),
+                conflict_degree: 4,
+                access_frequency: 100,
+                performance_penalty: 0.15,
+            }],
+            bank_utilization: vec![0.8, 0.7, 0.9, 0.6],
+        };
+        assert_eq!(pattern.conflict_count, 50);
+        assert!(matches!(
+            pattern.conflict_severity,
+            ConflictSeverity::Medium
+        ));
+    }
+
+    #[test]
+    fn test_conflict_resolution_strategy_creation() {
+        let strategy = ConflictResolutionStrategy {
+            strategy_type: ConflictResolutionType::ArrayPadding,
+            description: "Add padding to shared memory arrays".to_string(),
+            expected_speedup: 1.3,
+            implementation_steps: vec![
+                "Identify conflicting arrays".to_string(),
+                "Add padding to array declarations".to_string(),
+            ],
+        };
+        assert!(matches!(
+            strategy.strategy_type,
+            ConflictResolutionType::ArrayPadding
+        ));
+        assert!(strategy.expected_speedup > 1.0);
+    }
+
+    #[test]
+    fn test_arithmetic_intensity_profile() {
+        let profile = ArithmeticIntensityProfile {
+            kernel_name: "gemm".to_string(),
+            operations_per_byte: 50.0,
+            compute_intensity: ComputeIntensityCategory::ComputeBound,
+            memory_bound_ratio: 0.2,
+            compute_bound_ratio: 0.8,
+            roofline_position: RooflinePosition {
+                current_performance: 500.0,
+                theoretical_peak: 1000.0,
+                memory_bandwidth_limit: 900.0,
+                efficiency_percentage: 50.0,
+            },
+            optimization_direction: OptimizationDirection::IncreaseComputeIntensity,
+        };
+        assert!(matches!(
+            profile.compute_intensity,
+            ComputeIntensityCategory::ComputeBound
+        ));
+        assert!((profile.roofline_position.efficiency_percentage - 50.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_roofline_model() {
+        let model = RooflineModel {
+            device_id: 0,
+            peak_compute_performance: 10000.0,
+            peak_memory_bandwidth: 900.0,
+            cache_hierarchy: CacheHierarchy {
+                l1_cache_bandwidth: 12000.0,
+                l2_cache_bandwidth: 3000.0,
+                shared_memory_bandwidth: 6000.0,
+                texture_cache_bandwidth: 2000.0,
+                constant_cache_bandwidth: 8000.0,
+            },
+            compute_capabilities: ComputeCapabilities {
+                fp32_performance: 10000.0,
+                fp16_performance: 20000.0,
+                int32_performance: 5000.0,
+                tensor_performance: 100000.0,
+                special_function_performance: 2500.0,
+            },
+        };
+        assert!(model.peak_compute_performance > 0.0);
+        assert!(
+            model.cache_hierarchy.l1_cache_bandwidth > model.cache_hierarchy.l2_cache_bandwidth
+        );
+    }
+
+    #[test]
+    fn test_resource_profile() {
+        let profile = ResourceProfile {
+            kernel_name: "attention_kernel".to_string(),
+            register_pressure: ResourcePressure::High,
+            shared_memory_pressure: ResourcePressure::Medium,
+            occupancy_limiting_factor: OccupancyLimitingFactor::RegisterCount,
+            resource_utilization_efficiency: 0.65,
+        };
+        assert!(matches!(profile.register_pressure, ResourcePressure::High));
+        assert!(matches!(
+            profile.occupancy_limiting_factor,
+            OccupancyLimitingFactor::RegisterCount
+        ));
+    }
+
+    #[test]
+    fn test_balancing_strategy() {
+        let strategy = BalancingStrategy {
+            strategy_type: BalancingStrategyType::RegisterOptimization,
+            description: "Reduce register usage per thread".to_string(),
+            expected_occupancy_improvement: 0.15,
+            performance_impact: 0.10,
+        };
+        assert!(strategy.expected_occupancy_improvement > 0.0);
+    }
+
+    #[test]
+    fn test_fusion_opportunity() {
+        let opportunity = FusionOpportunity {
+            opportunity_id: Uuid::new_v4(),
+            kernel_group: vec!["bias_add".to_string(), "relu".to_string()],
+            fusion_type: FusionType::ElementwiseFusion,
+            data_dependencies: vec![DataDependency {
+                source_kernel: "bias_add".to_string(),
+                target_kernel: "relu".to_string(),
+                dependency_type: DependencyType::ReadAfterWrite,
+                data_size: 4096,
+                access_pattern: "sequential".to_string(),
+            }],
+            expected_speedup: 1.5,
+            memory_savings: 4096,
+            implementation_complexity: ImplementationDifficulty::Easy,
+            fusion_feasibility: FusionFeasibility {
+                resource_constraints_satisfied: true,
+                register_usage_feasible: true,
+                shared_memory_feasible: true,
+                synchronization_complexity: SynchronizationComplexity::None,
+                fusion_confidence: 0.95,
+            },
+        };
+        assert_eq!(opportunity.kernel_group.len(), 2);
+        assert!(matches!(
+            opportunity.fusion_type,
+            FusionType::ElementwiseFusion
+        ));
+        assert!(opportunity.fusion_feasibility.resource_constraints_satisfied);
+    }
+
+    #[test]
+    fn test_fusion_cost_benefit_analyzer_new_stub() {
+        let analyzer = FusionCostBenefitAnalyzer::new_stub();
+        assert!(analyzer.cost_models.is_empty());
+    }
+
+    #[test]
+    fn test_statistical_analyzer_new_stub() {
+        let analyzer = StatisticalAnalyzer::new_stub();
+        assert!(analyzer.sample_size_requirements.is_empty());
+    }
+
+    #[test]
+    fn test_stride_impact_variants() {
+        let impacts = [
+            StrideImpact::Optimal,
+            StrideImpact::Good,
+            StrideImpact::Moderate,
+            StrideImpact::Poor,
+            StrideImpact::Critical,
+        ];
+        assert_eq!(impacts.len(), 5);
+    }
+
+    #[test]
+    fn test_access_pattern_type_variants() {
+        let patterns = [
+            AccessPatternType::Sequential,
+            AccessPatternType::Strided,
+            AccessPatternType::Random,
+            AccessPatternType::Blocked,
+            AccessPatternType::Sparse,
+            AccessPatternType::Irregular,
+        ];
+        assert_eq!(patterns.len(), 6);
+    }
+
+    #[test]
+    fn test_stride_optimization() {
+        let opt = StrideOptimization {
+            optimization_type: StrideOptimizationType::TilingStrategy,
+            description: "Apply loop tiling for better cache utilization".to_string(),
+            expected_improvement: 0.25,
+            implementation_complexity: ImplementationDifficulty::Moderate,
+        };
+        assert!(matches!(
+            opt.optimization_type,
+            StrideOptimizationType::TilingStrategy
+        ));
+    }
+
+    #[test]
+    fn test_occupancy_targets() {
+        let targets = OccupancyTargets {
+            minimum_occupancy: 0.25,
+            target_occupancy: 0.75,
+            theoretical_occupancy: 1.0,
+        };
+        assert!(targets.minimum_occupancy < targets.target_occupancy);
+        assert!(targets.target_occupancy <= targets.theoretical_occupancy);
+    }
+
+    #[test]
+    fn test_memory_constraints() {
+        let constraints = MemoryConstraints {
+            max_shared_memory_per_block: 49152,
+            bank_conflict_aware: true,
+            coalescing_optimization: true,
+        };
+        assert!(constraints.bank_conflict_aware);
+        assert_eq!(constraints.max_shared_memory_per_block, 49152);
+    }
+
+    #[test]
+    fn test_compute_capabilities() {
+        let caps = ComputeCapabilities {
+            fp32_performance: 10000.0,
+            fp16_performance: 20000.0,
+            int32_performance: 5000.0,
+            tensor_performance: 100000.0,
+            special_function_performance: 2500.0,
+        };
+        assert!(caps.fp16_performance > caps.fp32_performance);
+        assert!(caps.tensor_performance > caps.fp16_performance);
+    }
+
+    #[test]
+    fn test_fusion_cost_benefit_analyzer_new() {
+        let result = FusionCostBenefitAnalyzer::new();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_statistical_analyzer_new() {
+        let result = StatisticalAnalyzer::new();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_fusion_type_variants() {
+        let types = [
+            FusionType::ElementwiseFusion,
+            FusionType::ProducerConsumerFusion,
+            FusionType::LoopFusion,
+            FusionType::ReductionFusion,
+            FusionType::ConvolutionFusion,
+            FusionType::AttentionFusion,
+        ];
+        assert_eq!(types.len(), 6);
+    }
+
+    #[test]
+    fn test_dependency_type_variants() {
+        let types = [
+            DependencyType::ReadAfterWrite,
+            DependencyType::WriteAfterRead,
+            DependencyType::WriteAfterWrite,
+            DependencyType::Reduction,
+            DependencyType::Broadcast,
+        ];
+        assert_eq!(types.len(), 5);
+    }
+
+    #[test]
+    fn test_data_dependency_creation() {
+        let dep = DataDependency {
+            source_kernel: "conv1".to_string(),
+            target_kernel: "relu1".to_string(),
+            dependency_type: DependencyType::ReadAfterWrite,
+            data_size: 8192,
+            access_pattern: "contiguous".to_string(),
+        };
+        assert_eq!(dep.source_kernel, "conv1");
+        assert_eq!(dep.data_size, 8192);
+    }
+
+    #[test]
+    fn test_fusion_feasibility_creation() {
+        let feasibility = FusionFeasibility {
+            resource_constraints_satisfied: true,
+            register_usage_feasible: true,
+            shared_memory_feasible: false,
+            synchronization_complexity: SynchronizationComplexity::None,
+            fusion_confidence: 0.7,
+        };
+        assert!(feasibility.resource_constraints_satisfied);
+        assert!(!feasibility.shared_memory_feasible);
+    }
+
+    #[test]
+    fn test_optimization_direction_variants() {
+        let dirs = [
+            OptimizationDirection::IncreaseComputeIntensity,
+            OptimizationDirection::ImproveMemoryEfficiency,
+            OptimizationDirection::BalanceComputeMemory,
+            OptimizationDirection::OptimizeForLatency,
+        ];
+        assert_eq!(dirs.len(), 4);
+    }
+
+    #[test]
+    fn test_block_size_constraint_variants() {
+        let constraints = [
+            BlockSizeConstraint::MultipleOf(32),
+            BlockSizeConstraint::PowerOfTwo,
+            BlockSizeConstraint::MaxThreadsPerBlock(1024),
+            BlockSizeConstraint::SharedMemoryLimit(49152),
+            BlockSizeConstraint::RegisterLimit(255),
+        ];
+        assert_eq!(constraints.len(), 5);
+    }
+
+    #[test]
+    fn test_register_constraints_creation() {
+        let constraints = RegisterConstraints {
+            max_registers_per_thread: 255,
+            spill_threshold: 64,
+            occupancy_impact_threshold: 0.5,
+        };
+        assert_eq!(constraints.max_registers_per_thread, 255);
+        assert!((constraints.occupancy_impact_threshold - 0.5).abs() < f64::EPSILON);
+    }
+}

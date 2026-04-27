@@ -289,7 +289,7 @@ impl AsyncSGD {
         }
 
         // Send updates to parameter server periodically
-        if current_step % 5 == 0 {
+        if current_step.is_multiple_of(5) {
             self.push_to_server(gradients)?;
         }
 

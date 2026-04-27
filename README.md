@@ -1,12 +1,12 @@
 # TrustformeRS 🦀
 
 [![Rust](https://img.shields.io/badge/rust-%23000000.svg?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://github.com/cool-japan/trustformers)
+[![Version](https://img.shields.io/badge/version-0.1.1-blue.svg)](https://github.com/cool-japan/trustformers)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
 A high-performance, memory-safe Rust implementation of Hugging Face Transformers. TrustformeRS brings the power of transformer models to the Rust ecosystem with zero-cost abstractions, fearless concurrency, and deployment flexibility from edge to cloud.
 
-> **Project Status**: TrustformeRS 0.1.0 was released on 2026-03-21. This first stable release delivers 27+ transformer architectures, 5,007 tests with 100% pass rate, ~900,000+ lines of 100% Pure Rust, and full multi-platform deployment (WebAssembly, server REST/gRPC/GraphQL, mobile iOS/Android, RLHF/DPO training). Multi-backend GPU support: CUDA, Metal, ROCm, WebGPU, Vulkan, OpenCL, TPU.
+> **Project Status**: TrustformeRS 0.1.1 was released on 2026-04-25. This release delivers 49+ transformer architectures, 5,358 tests with 100% pass rate, ~1,408,134 lines of 100% Pure Rust, and full multi-platform deployment (WebAssembly, server REST/gRPC/GraphQL, mobile iOS/Android, RLHF/DPO training). Multi-backend GPU support: CUDA, Metal, ROCm, WebGPU, Vulkan, OpenCL, TPU.
 
 ## 🚀 Why TrustformeRS?
 
@@ -35,19 +35,19 @@ TrustformeRS follows a modular workspace structure inspired by Hugging Face Tran
 
 ```
 trustformers/
-├── trustformers-core/      # Core traits and tensor abstractions  (121,799 SLoC, Stable)
-├── trustformers-models/    # 27+ model implementations           (113,086 SLoC, Alpha)
+├── trustformers-core/      # Core traits and tensor abstractions  (204,130 SLoC, Stable)
+├── trustformers-models/    # 49+ model implementations           (196,463 SLoC, Alpha)
 ├── trustformers-tokenizers/# BPE, WordPiece, SentencePiece       ( 51,211 SLoC, Stable)
-├── trustformers-optim/     # 20+ optimizers and LR schedulers    ( 43,888 SLoC, Stable)
-├── trustformers-training/  # Distributed training, RLHF/DPO      ( 38,667 SLoC, Stable)
-├── trustformers-serve/     # REST/gRPC/GraphQL serving           (206,636 SLoC, Stable)
+├── trustformers-optim/     # 20+ optimizers and LR schedulers    ( 71,429 SLoC, Stable)
+├── trustformers-training/  # Distributed training, RLHF/DPO      ( 89,413 SLoC, Stable)
+├── trustformers-serve/     # REST/gRPC/GraphQL serving           (361,251 SLoC, Stable)
 ├── trustformers-wasm/      # WebAssembly + WebGPU deployment     ( 55,504 SLoC, Stable)
-├── trustformers-mobile/    # iOS/Android deployment              (131,187 SLoC, Alpha)
-├── trustformers-debug/     # Profilers, visualizers, TensorBoard ( 61,841 SLoC, Alpha)
-└── trustformers/           # High-level integration crate        ( 59,862 SLoC, Alpha)
+├── trustformers-mobile/    # iOS/Android deployment              (143,001 SLoC, Alpha)
+├── trustformers-debug/     # Profilers, visualizers, TensorBoard (101,448 SLoC, Alpha)
+└── trustformers/           # High-level integration crate        (134,295 SLoC, Alpha)
 ```
 
-**Total**: ~900,000+ SLoC, 100% Pure Rust (COOLJAPAN Policy)
+**Total**: ~1.4M+ SLoC, 100% Pure Rust (COOLJAPAN Policy)
 
 ### Design Principles
 
@@ -62,7 +62,7 @@ trustformers/
 
 ```toml
 [dependencies]
-trustformers = "0.1.0"
+trustformers = "0.1.1"
 ```
 
 ### Basic Usage
@@ -108,7 +108,7 @@ let result = classifier("I love writing Rust code!")?;
 
 ## 🏛️ Model Zoo
 
-### Currently Supported (27+ architectures!)
+### Currently Supported (49+ architectures!)
 
 #### Encoder Models
 | Model | Variants | Tasks |
@@ -314,8 +314,8 @@ let outputs = model.forward(&inputs)?;
 
 ## 🎯 Development Status
 
-### Completed Features (v0.1.0 - 2026-03-21)
-- [x] **27+ transformer architectures** (BERT, RoBERTa, ALBERT, DistilBERT, ELECTRA, DeBERTa, GPT-2, GPT-Neo, GPT-J, GPT-NeoX, LLaMA, Mistral, Gemma, Qwen, Phi-3, Falcon, StableLM, T5, ViT, CLIP, BLIP-2, LLaVA, DALL-E, Flamingo, Mamba, RWKV, S4)
+### Completed Features (v0.1.1 - 2026-04-25)
+- [x] **49+ transformer architectures** (BERT, RoBERTa, ALBERT, DistilBERT, ELECTRA, DeBERTa, GPT-2, GPT-Neo, GPT-J, GPT-NeoX, LLaMA, Mistral, Gemma, Qwen, Phi-3, Falcon, StableLM, T5, ViT, CLIP, BLIP-2, LLaVA, DALL-E, Flamingo, Mamba, RWKV, S4, Falcon2, Gemma2, Granite, Hyena, InternLM2, Jamba, Jamba2, Linformer, LLaMA3.2, Mamba2, Nemotron, Performer, Phi4, Qwen2.5, RetNet, SD3, StarCoder2, Whisper, xLSTM, Yi)
 - [x] **All major NLP pipelines** fully implemented (text-generation, classification, QA, NER, fill-mask, summarization, translation)
 - [x] **Complete training infrastructure** with distributed training, ZeRO optimization, mixed precision, RLHF and DPO support
 - [x] **Mobile deployment** with iOS (Core ML, Metal) and Android (NNAPI, Vulkan) support
@@ -325,9 +325,9 @@ let outputs = model.forward(&inputs)?;
 - [x] **Advanced optimizations**: FlashAttention, PagedAttention, quantization (INT8/INT4/GPTQ/AWQ)
 - [x] **Hardware acceleration**: CUDA, Metal, ROCm, WebGPU, Vulkan, OpenCL, TPU support
 - [x] **AutoModel/AutoTokenizer** system with HuggingFace Hub integration
-- [x] **Comprehensive test suite**: 5,007 tests with 100% pass rate
+- [x] **Comprehensive test suite**: 5,358 tests with 100% pass rate
 - [x] **Debugging tools**: Profilers, visualizers, interactive debugging, TensorBoard integration
-- [x] **100% Pure Rust** (COOLJAPAN Policy) - ~900,000+ SLoC across 10 crates
+- [x] **100% Pure Rust** (COOLJAPAN Policy) - ~1,408,134 SLoC across 10 crates
 
 ### Future Enhancements
 

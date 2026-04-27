@@ -1437,4 +1437,247 @@ mod tests {
         let result = is_cached("bert-base-uncased", None);
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn test_hub_options_default() {
+        let opts = HubOptions::default();
+        assert_eq!(opts.revision, Some("main".to_string()));
+        assert!(opts.cache_dir.is_none());
+        assert!(!opts.force_download);
+        assert!(opts.token.is_none());
+        assert!(opts.parallel_downloads);
+        assert_eq!(opts.max_concurrent_downloads, 4);
+        assert!(opts.enable_resumable_downloads);
+        assert!(opts.enable_delta_compression);
+        assert_eq!(opts.chunk_size, 8 * 1024 * 1024);
+        assert_eq!(opts.timeout_seconds, 300);
+        assert_eq!(opts.retry_attempts, 3);
+        assert!(opts.use_cdn);
+        assert!(opts.smart_caching);
+    }
+
+    #[test]
+    fn test_download_config_default() {
+        let config = DownloadConfig::default();
+        assert!(config.parallel_downloads);
+        assert_eq!(config.max_concurrent, 4);
+        assert!(config.enable_resumable);
+        assert!(config.enable_compression);
+        assert_eq!(config.chunk_size, 8 * 1024 * 1024);
+        assert_eq!(config.timeout, Duration::from_secs(300));
+        assert_eq!(config.retry_attempts, 3);
+        assert!(config.verify_checksums);
+        assert!(config.progress_reporting);
+    }
+
+    #[test]
+    fn test_download_stats_default() {
+        let stats = DownloadStats::default();
+        assert_eq!(stats.total_files, 0);
+        assert_eq!(stats.downloaded_files, 0);
+        assert_eq!(stats.failed_files, 0);
+        assert_eq!(stats.total_bytes, 0);
+        assert_eq!(stats.downloaded_bytes, 0);
+    }
+
+    #[test]
+    fn test_download_stats_success_rate_empty() {
+        let stats = DownloadStats::default();
+        assert!((stats.success_rate() - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_download_stats_success_rate_partial() {
+        let stats = DownloadStats {
+            total_files: 10,
+            downloaded_files: 7,
+            failed_files: 3,
+            ..DownloadStats::default()
+        };
+        assert!((stats.success_rate() - 0.7).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_download_stats_success_rate_all() {
+        let stats = DownloadStats {
+            total_files: 5,
+            downloaded_files: 5,
+            failed_files: 0,
+            ..DownloadStats::default()
+        };
+        assert!((stats.success_rate() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_download_stats_duration_none() {
+        let stats = DownloadStats::default();
+        assert!(stats.duration().is_none());
+    }
+
+    #[test]
+    fn test_download_stats_duration_with_times() {
+        let start = Instant::now();
+        let stats = DownloadStats {
+            start_time: Some(start),
+            end_time: Some(start),
+            ..DownloadStats::default()
+        };
+        let dur = stats.duration();
+        assert!(dur.is_some());
+    }
+
+    #[test]
+    fn test_cdn_config_default() {
+        let config = CdnConfig::default();
+        assert!(!config.primary_urls.is_empty());
+        assert!(!config.fallback_urls.is_empty());
+        assert_eq!(config.health_check_interval, Duration::from_secs(300));
+        assert_eq!(config.latency_threshold, Duration::from_millis(1000));
+        assert!(config.enable_geographic_routing);
+        assert!(!config.region_preferences.is_empty());
+    }
+
+    #[test]
+    fn test_smart_cache_config_default() {
+        let config = SmartCacheConfig::default();
+        assert!((config.max_cache_size_gb - 50.0).abs() < f64::EPSILON);
+        assert!((config.cleanup_threshold - 0.9).abs() < f64::EPSILON);
+        // Weights should sum to approximately 1.0
+        let total = config.access_weight
+            + config.frequency_weight
+            + config.recency_weight
+            + config.size_penalty;
+        assert!((total - 1.0).abs() < f64::EPSILON);
+        assert!(config.enable_predictive_caching);
+        assert!(config.enable_compression);
+    }
+
+    #[test]
+    fn test_resume_info_can_resume_recent() {
+        let info = ResumeInfo {
+            url: "https://example.com/file".to_string(),
+            local_path: PathBuf::from("/tmp/file"),
+            expected_size: 1000,
+            downloaded_size: 500,
+            checksum: None,
+            last_modified: None,
+            created_at: Instant::now(),
+        };
+        assert!(info.can_resume(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn test_resume_info_cannot_resume_zero_downloaded() {
+        let info = ResumeInfo {
+            url: "https://example.com/file".to_string(),
+            local_path: PathBuf::from("/tmp/file"),
+            expected_size: 1000,
+            downloaded_size: 0,
+            checksum: None,
+            last_modified: None,
+            created_at: Instant::now(),
+        };
+        assert!(!info.can_resume(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn test_delta_info_creation() {
+        let delta = DeltaInfo {
+            base_version: "v1".to_string(),
+            target_version: "v2".to_string(),
+            delta_url: "https://example.com/delta".to_string(),
+            compression_ratio: 0.3,
+            delta_size: 30_000_000,
+            full_size: 100_000_000,
+        };
+        assert!(delta.delta_size < delta.full_size);
+        assert!((delta.compression_ratio - 0.3).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_model_info_creation() {
+        let info = ModelInfo {
+            model_id: "bert-base".to_string(),
+            sha: "abc123".to_string(),
+            pipeline_tag: Some("text-classification".to_string()),
+            library_name: Some("trustformers".to_string()),
+            downloads: 10000,
+            likes: 500,
+        };
+        assert_eq!(info.model_id, "bert-base");
+        assert!(info.pipeline_tag.is_some());
+        assert!(info.downloads > 0);
+    }
+
+    #[test]
+    fn test_hub_options_custom() {
+        let opts = HubOptions {
+            revision: Some("develop".to_string()),
+            cache_dir: Some(PathBuf::from("/custom/cache")),
+            force_download: true,
+            token: Some("hf_token".to_string()),
+            parallel_downloads: false,
+            max_concurrent_downloads: 1,
+            enable_resumable_downloads: false,
+            enable_delta_compression: false,
+            chunk_size: 1024 * 1024,
+            timeout_seconds: 60,
+            retry_attempts: 1,
+            use_cdn: false,
+            cdn_urls: vec![],
+            smart_caching: false,
+        };
+        assert!(opts.force_download);
+        assert!(!opts.parallel_downloads);
+        assert_eq!(opts.max_concurrent_downloads, 1);
+    }
+
+    #[test]
+    fn test_download_config_custom() {
+        let config = DownloadConfig {
+            parallel_downloads: false,
+            max_concurrent: 1,
+            enable_resumable: false,
+            enable_compression: false,
+            chunk_size: 1024,
+            timeout: Duration::from_secs(10),
+            retry_attempts: 0,
+            verify_checksums: false,
+            progress_reporting: false,
+        };
+        assert!(!config.parallel_downloads);
+        assert_eq!(config.retry_attempts, 0);
+    }
+
+    #[test]
+    fn test_is_cached_nonexistent_model() {
+        let result = is_cached("nonexistent-model-xyz-123", None);
+        assert!(result.is_ok());
+        assert!(!result.expect("Operation failed"));
+    }
+
+    #[test]
+    fn test_is_cached_with_revision() {
+        let result = is_cached("bert-base", Some("v1.0"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_cdn_config_primary_url_count() {
+        let config = CdnConfig::default();
+        assert_eq!(config.primary_urls.len(), 2);
+    }
+
+    #[test]
+    fn test_hub_options_cdn_urls_default() {
+        let opts = HubOptions::default();
+        assert_eq!(opts.cdn_urls.len(), 2);
+    }
+
+    #[test]
+    fn test_download_manager_creation() {
+        let config = DownloadConfig::default();
+        let manager = DownloadManager::new(config);
+        assert_eq!(manager.stats.total_files, 0);
+    }
 }

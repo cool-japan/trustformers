@@ -750,18 +750,20 @@ See detailed migration guide in `docs/migration/fairseq_to_trustformers.md`
 ## Future Enhancements
 
 ### High Priority
-- Additional tokenizer algorithms (Unigram with sampling, BPE-dropout)
+- [ ] Unigram with sampling / BPE-dropout (stochastic tokenization for data augmentation: Unigram sampling + BPE dropout)
 - Enhanced multilingual support (better handling of non-Latin scripts)
-- Tokenizer ONNX export
+- [ ] ONNX export for tokenizers (export tokenizer to ONNX for cross-framework compatibility)
+  - **Note:** Use oxionnx crate per COOLJAPAN policy.
 
 ### Performance
 - Further optimization of vocabulary lookups
-- GPU-accelerated tokenization for very large batches
-- Streaming tokenization for infinite sequences
+- [ ] GPU-accelerated tokenization for very large batches
+  - **Refinement needed:** which ops to GPU-accelerate (vocab lookup? regex? both)? Target throughput (tokens/sec)?
+- [ ] Streaming tokenization (tokenize a stream of bytes incrementally without buffering full input)
 
 ### Features
-- More normalization options (custom normalizers)
-- Tokenizer alignment visualization
+- [ ] Custom normalizers / pre-tokenizers (plugin API for user-supplied normalizers)
+- [ ] Tokenizer alignment visualization (show which input bytes map to which tokens, useful for debugging)
 - Automatic tokenizer repair/optimization
 
 ---

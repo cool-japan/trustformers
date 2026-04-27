@@ -89,13 +89,12 @@ impl EvictionPolicy for LRUEviction {
     }
 
     fn next_eviction(&mut self) -> Option<CacheKey> {
-        self.access_order.pop_front().map(|key| {
+        self.access_order.pop_front().inspect(|_| {
             // Rebuild positions map
             self.key_positions.clear();
             for (idx, k) in self.access_order.iter().enumerate() {
                 self.key_positions.insert(k.clone(), idx);
             }
-            key
         })
     }
 
@@ -225,11 +224,10 @@ impl EvictionPolicy for SizeBasedEviction {
 
     fn next_eviction(&mut self) -> Option<CacheKey> {
         // Evict least recently used entry
-        self.access_order.pop_front().map(|key| {
-            if let Some(size) = self.entry_sizes.remove(&key) {
+        self.access_order.pop_front().inspect(|key| {
+            if let Some(size) = self.entry_sizes.remove(key) {
                 self.current_memory = self.current_memory.saturating_sub(size);
             }
-            key
         })
     }
 

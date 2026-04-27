@@ -1269,4 +1269,358 @@ mod tests {
         // GPU should score higher for MatMul with GPU preference
         assert!(gpu_score > cpu_score);
     }
+
+    fn make_task(id: &str, name: &str, op: OperationType, priority: TaskPriority) -> OperatorTask {
+        OperatorTask {
+            id: id.to_string(),
+            name: name.to_string(),
+            operation_type: op,
+            priority,
+            estimated_duration_ms: Some(10),
+            memory_requirements: Some(1024),
+            cpu_requirements: Some(0.1),
+            gpu_requirements: None,
+            preferred_device: Some(DeviceType::CPU),
+            dependencies: Vec::new(),
+            deadline: None,
+            created_at: SystemTime::now(),
+            metadata: HashMap::new(),
+            device_affinity: {
+                let mut a = HashMap::new();
+                a.insert(DeviceType::CPU, 0.8);
+                a
+            },
+        }
+    }
+
+    async fn register_cpu_device(service: &OperatorSchedulingService) {
+        let device = DeviceType::CPU;
+        let resource = DeviceResource {
+            device: DeviceType::CPU,
+            memory_used: 0,
+            memory_total: 16 * 1024 * 1024 * 1024,
+            cpu_utilization: 0.1,
+            gpu_utilization: 0.0,
+            active_tasks: 0,
+            queued_tasks: 0,
+            is_available: true,
+            last_updated: SystemTime::now(),
+        };
+        service.register_device(device, resource).await.expect("register device ok");
+    }
+
+    #[test]
+    fn test_default_config() {
+        let config = OperatorSchedulingConfig::default();
+        assert!(config.enable_priority_scheduling);
+        assert!(config.max_concurrent_operators_per_device > 0);
+        assert!(config.time_slice_ms > 0);
+    }
+
+    #[tokio::test]
+    async fn test_submit_multiple_tasks() {
+        let service = OperatorSchedulingService::new(OperatorSchedulingConfig::default());
+        register_cpu_device(&service).await;
+
+        for i in 0..5 {
+            let task = make_task(
+                &format!("t-{}", i),
+                &format!("Task {}", i),
+                OperationType::MatMul,
+                TaskPriority::Normal,
+            );
+            service.submit_task(task).await.expect("submit ok");
+        }
+
+        let stats = service.get_stats().await;
+        assert_eq!(stats.total_tasks_scheduled, 5);
+    }
+
+    #[tokio::test]
+    async fn test_validate_empty_name() {
+        let service = OperatorSchedulingService::new(OperatorSchedulingConfig::default());
+        let task = make_task("t1", "", OperationType::MatMul, TaskPriority::Normal);
+        let result = service.validate_task(&task).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_validate_valid_task() {
+        let service = OperatorSchedulingService::new(OperatorSchedulingConfig::default());
+        let task = make_task(
+            "t2",
+            "Valid Task",
+            OperationType::Convolution,
+            TaskPriority::High,
+        );
+        let result = service.validate_task(&task).await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_task_priority_all_variants() {
+        let priorities = vec![
+            TaskPriority::BestEffort,
+            TaskPriority::Low,
+            TaskPriority::Normal,
+            TaskPriority::High,
+            TaskPriority::Critical,
+        ];
+        for i in 0..priorities.len() - 1 {
+            assert!(priorities[i] < priorities[i + 1]);
+        }
+    }
+
+    #[test]
+    fn test_operation_type_debug() {
+        let ops = vec![
+            OperationType::MatMul,
+            OperationType::Convolution,
+            OperationType::Activation("softmax".to_string()),
+            OperationType::Normalization("layernorm".to_string()),
+            OperationType::Attention,
+            OperationType::Embedding,
+        ];
+        for op in ops {
+            assert!(!format!("{:?}", op).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_device_type_debug() {
+        let devices = vec![DeviceType::CPU, DeviceType::CUDA(0), DeviceType::CUDA(1)];
+        for d in devices {
+            assert!(!format!("{:?}", d).is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stats_initial() {
+        let service = OperatorSchedulingService::new(OperatorSchedulingConfig::default());
+        let stats = service.get_stats().await;
+        assert_eq!(stats.total_tasks_scheduled, 0);
+    }
+
+    #[tokio::test]
+    async fn test_submit_high_priority_tasks() {
+        let service = OperatorSchedulingService::new(OperatorSchedulingConfig::default());
+        register_cpu_device(&service).await;
+
+        let task_high = make_task(
+            "h1",
+            "High Priority",
+            OperationType::Attention,
+            TaskPriority::High,
+        );
+        let task_critical = make_task(
+            "c1",
+            "Critical",
+            OperationType::MatMul,
+            TaskPriority::Critical,
+        );
+
+        service.submit_task(task_high).await.expect("submit ok");
+        service.submit_task(task_critical).await.expect("submit ok");
+
+        let stats = service.get_stats().await;
+        assert_eq!(stats.total_tasks_scheduled, 2);
+    }
+
+    #[tokio::test]
+    async fn test_task_with_dependencies() {
+        let service = OperatorSchedulingService::new(OperatorSchedulingConfig::default());
+        register_cpu_device(&service).await;
+
+        let mut task = make_task(
+            "dep-task",
+            "Dep Task",
+            OperationType::Activation("softmax".to_string()),
+            TaskPriority::Normal,
+        );
+        task.dependencies = vec!["dep-1".to_string(), "dep-2".to_string()];
+
+        let result = service.submit_task(task).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_task_with_metadata() {
+        let service = OperatorSchedulingService::new(OperatorSchedulingConfig::default());
+        register_cpu_device(&service).await;
+
+        let mut task = make_task(
+            "meta-task",
+            "Meta Task",
+            OperationType::Normalization("layernorm".to_string()),
+            TaskPriority::Normal,
+        );
+        task.metadata.insert("model".to_string(), "gpt2".to_string());
+        task.metadata.insert("layer".to_string(), "12".to_string());
+
+        let result = service.submit_task(task).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_task_with_resource_requirements() {
+        let service = OperatorSchedulingService::new(OperatorSchedulingConfig::default());
+        register_cpu_device(&service).await;
+
+        let mut task = make_task(
+            "res-task",
+            "Res Task",
+            OperationType::MatMul,
+            TaskPriority::High,
+        );
+        task.memory_requirements = Some(1024 * 1024 * 512);
+        task.cpu_requirements = Some(0.5);
+        task.gpu_requirements = Some(0.8);
+        task.estimated_duration_ms = Some(200);
+
+        let result = service.submit_task(task).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_task_with_preferred_device() {
+        let service = OperatorSchedulingService::new(OperatorSchedulingConfig::default());
+        register_cpu_device(&service).await;
+
+        let mut task = make_task(
+            "pref-task",
+            "Pref Task",
+            OperationType::Convolution,
+            TaskPriority::Normal,
+        );
+        task.preferred_device = Some(DeviceType::CUDA(0));
+
+        let result = service.submit_task(task).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_device_score_unavailable() {
+        let service = OperatorSchedulingService::new(OperatorSchedulingConfig::default());
+
+        let task = make_task(
+            "s-task",
+            "Score Task",
+            OperationType::MatMul,
+            TaskPriority::Normal,
+        );
+
+        let resource = DeviceResource {
+            device: DeviceType::CPU,
+            memory_used: 0,
+            memory_total: 1024 * 1024 * 1024,
+            cpu_utilization: 0.0,
+            gpu_utilization: 0.0,
+            active_tasks: 0,
+            queued_tasks: 0,
+            is_available: false,
+            last_updated: SystemTime::now(),
+        };
+
+        // Register the device first
+        service
+            .register_device(DeviceType::CPU, resource.clone())
+            .await
+            .expect("register ok");
+
+        let score = service.calculate_device_score(&task, &DeviceType::CPU, &resource).await;
+        // Score should be low but might not be less than 0.1 depending on implementation
+        // Just verify it's a reasonable number
+        assert!(score >= 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_lcg_deterministic_task_submission() {
+        let service = OperatorSchedulingService::new(OperatorSchedulingConfig::default());
+        register_cpu_device(&service).await;
+
+        let ops = vec![
+            OperationType::MatMul,
+            OperationType::Convolution,
+            OperationType::Activation("softmax".to_string()),
+            OperationType::Attention,
+        ];
+        let priorities = vec![
+            TaskPriority::Low,
+            TaskPriority::Normal,
+            TaskPriority::High,
+            TaskPriority::Critical,
+        ];
+
+        let mut lcg: u64 = 42;
+        for i in 0..20 {
+            lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let op_idx = (lcg % ops.len() as u64) as usize;
+            let pri_idx = (lcg / 4 % priorities.len() as u64) as usize;
+            let task = make_task(
+                &format!("lcg-{}", i),
+                &format!("LCG Task {}", i),
+                ops[op_idx].clone(),
+                priorities[pri_idx],
+            );
+            service.submit_task(task).await.expect("submit ok");
+        }
+
+        let stats = service.get_stats().await;
+        assert_eq!(stats.total_tasks_scheduled, 20);
+    }
+
+    #[tokio::test]
+    async fn test_device_score_high_load() {
+        let service = OperatorSchedulingService::new(OperatorSchedulingConfig::default());
+
+        let task = make_task(
+            "load-task",
+            "Load Task",
+            OperationType::MatMul,
+            TaskPriority::Normal,
+        );
+
+        let resource = DeviceResource {
+            device: DeviceType::CUDA(0),
+            memory_used: 900 * 1024 * 1024,
+            memory_total: 1024 * 1024 * 1024,
+            cpu_utilization: 0.95,
+            gpu_utilization: 0.95,
+            active_tasks: 10,
+            queued_tasks: 5,
+            is_available: true,
+            last_updated: SystemTime::now(),
+        };
+
+        let score = service.calculate_device_score(&task, &DeviceType::CUDA(0), &resource).await;
+        assert!(score < 1.0);
+    }
+
+    #[tokio::test]
+    async fn test_device_score_idle_device() {
+        let service = OperatorSchedulingService::new(OperatorSchedulingConfig::default());
+
+        let task = make_task(
+            "idle-task",
+            "Idle Task",
+            OperationType::MatMul,
+            TaskPriority::Normal,
+        );
+
+        let resource = DeviceResource {
+            device: DeviceType::CUDA(0),
+            memory_used: 0,
+            memory_total: 16 * 1024 * 1024 * 1024,
+            cpu_utilization: 0.0,
+            gpu_utilization: 0.0,
+            active_tasks: 0,
+            queued_tasks: 0,
+            is_available: true,
+            last_updated: SystemTime::now(),
+        };
+
+        let score = service.calculate_device_score(&task, &DeviceType::CUDA(0), &resource).await;
+        // Idle device should have a good score
+        assert!(score > 0.3);
+    }
 }

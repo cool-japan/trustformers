@@ -245,7 +245,7 @@ impl TensorParallelism {
             ));
         }
 
-        if world_size % config.tensor_parallel_size != 0 {
+        if !world_size.is_multiple_of(config.tensor_parallel_size) {
             return Err(anyhow!(
                 "World size ({}) must be divisible by tensor parallel size ({})",
                 world_size,

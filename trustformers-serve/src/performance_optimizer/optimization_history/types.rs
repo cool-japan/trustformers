@@ -934,3 +934,7 @@ pub trait PredictiveModel {
     /// Get model performance metrics
     fn performance_metrics(&self) -> ModelPerformanceMetrics;
 }
+
+#[cfg(test)]
+#[path = "types_tests.rs"]
+mod types_tests;

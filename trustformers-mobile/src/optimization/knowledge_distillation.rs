@@ -1213,4 +1213,165 @@ mod tests {
         assert_eq!(stats.best_loss(), Some(0.4));
         assert!(!stats.converged()); // Not enough epochs
     }
+
+    #[test]
+    fn test_distillation_config_alpha_beta_sum() {
+        let config = DistillationConfig::default();
+        assert!((config.alpha + config.beta - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_distillation_config_temperature_positive() {
+        let config = DistillationConfig::default();
+        assert!(config.temperature > 0.0);
+    }
+
+    #[test]
+    fn test_distillation_config_learning_rate() {
+        let config = DistillationConfig::default();
+        assert_eq!(config.learning_rate, 0.001);
+        assert_eq!(config.student_learning_rate, 0.001);
+    }
+
+    #[test]
+    fn test_distillation_config_feature_matching() {
+        let config = DistillationConfig::default();
+        assert!(config.feature_matching);
+        assert!(!config.attention_transfer);
+    }
+
+    #[test]
+    fn test_distillation_config_mobile_opts() {
+        let config = DistillationConfig::default();
+        assert!(config.enable_mobile_optimizations);
+        assert!(!config.enable_quantization);
+        assert!(!config.enable_gradient_compression);
+    }
+
+    #[test]
+    fn test_distiller_with_different_backends() {
+        let config = DistillationConfig::default();
+        let cpu_distiller = KnowledgeDistiller::new(config.clone(), MobileBackend::CPU);
+        assert!(cpu_distiller.teacher_model.is_none());
+
+        let gpu_distiller = KnowledgeDistiller::new(config, MobileBackend::GPU);
+        assert!(gpu_distiller.student_model.is_none());
+    }
+
+    #[test]
+    fn test_distillation_strategy_variants() {
+        let strategies = vec![
+            DistillationStrategy::SoftTargets,
+            DistillationStrategy::FeatureBased,
+            DistillationStrategy::AttentionBased,
+            DistillationStrategy::Progressive,
+            DistillationStrategy::Online,
+        ];
+        assert_eq!(strategies.len(), 5);
+    }
+
+    #[test]
+    fn test_stats_best_loss_empty() {
+        let stats = DistillationStats::default();
+        assert_eq!(stats.best_loss(), None);
+    }
+
+    #[test]
+    fn test_stats_best_loss_single() {
+        let mut stats = DistillationStats::default();
+        stats.epoch_losses = vec![0.5];
+        assert_eq!(stats.best_loss(), Some(0.5));
+    }
+
+    #[test]
+    fn test_stats_best_loss_multiple() {
+        let mut stats = DistillationStats::default();
+        stats.epoch_losses = vec![1.0, 0.5, 0.3, 0.7, 0.2];
+        assert_eq!(stats.best_loss(), Some(0.2));
+    }
+
+    #[test]
+    fn test_stats_converged_with_constant_losses() {
+        let mut stats = DistillationStats::default();
+        // 10 identical losses should show convergence
+        stats.epoch_losses = vec![0.1; 10];
+        assert!(stats.converged());
+    }
+
+    #[test]
+    fn test_stats_not_converged_with_decreasing_losses() {
+        let mut stats = DistillationStats::default();
+        stats.epoch_losses = (0..10).map(|i| 1.0 - (i as f32 * 0.08)).collect();
+        assert!(!stats.converged());
+    }
+
+    #[test]
+    fn test_stats_not_converged_insufficient_epochs() {
+        let mut stats = DistillationStats::default();
+        stats.epoch_losses = vec![0.5, 0.5, 0.5];
+        assert!(!stats.converged()); // Need at least 10
+    }
+
+    #[test]
+    fn test_distillation_loss_creation() {
+        let loss = DistillationLoss {
+            distillation_loss: 0.3,
+            task_loss: 0.2,
+            total_loss: 0.5,
+        };
+        assert!((loss.total_loss - (loss.distillation_loss + loss.task_loss)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_stats_default_values() {
+        let stats = DistillationStats::default();
+        assert_eq!(stats.total_epochs, 0);
+        assert!(stats.epoch_losses.is_empty());
+        assert_eq!(stats.final_compression_ratio, 0.0);
+        assert_eq!(stats.knowledge_transfer_efficiency, 0.0);
+    }
+
+    #[test]
+    fn test_distiller_get_stats() {
+        let config = DistillationConfig::default();
+        let distiller = KnowledgeDistiller::new(config, MobileBackend::CPU);
+        let stats = distiller.get_stats();
+        assert_eq!(stats.total_epochs, 0);
+    }
+
+    #[test]
+    fn test_distillation_config_num_epochs() {
+        let config = DistillationConfig::default();
+        assert_eq!(config.num_epochs, 50);
+        assert_eq!(config.batch_size, 32);
+    }
+
+    #[test]
+    fn test_distillation_strategy_equality() {
+        assert_eq!(
+            DistillationStrategy::SoftTargets,
+            DistillationStrategy::SoftTargets
+        );
+        assert_ne!(
+            DistillationStrategy::SoftTargets,
+            DistillationStrategy::FeatureBased
+        );
+    }
+
+    #[test]
+    fn test_stats_best_loss_with_nan_like_values() {
+        let mut stats = DistillationStats::default();
+        stats.epoch_losses = vec![f32::MAX, 1.0, 0.5];
+        assert_eq!(stats.best_loss(), Some(0.5));
+    }
+
+    #[test]
+    fn test_stats_converged_near_zero_variance() {
+        let mut stats = DistillationStats::default();
+        // Very small differences should still converge
+        stats.epoch_losses = vec![
+            0.100, 0.101, 0.100, 0.100, 0.101, 0.100, 0.100, 0.101, 0.100, 0.100,
+        ];
+        assert!(stats.converged());
+    }
 }

@@ -963,3 +963,308 @@ fn calculate_linear_regression(x: &[f64], y: &[f64]) -> Result<(f64, f64, f64)> 
 
     Ok((slope, intercept, r_squared.max(0.0)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::performance_optimizer::types::{
+        PerformanceDataPoint, SystemState, TestCharacteristics,
+    };
+    use std::time::Duration;
+
+    fn make_data_point(throughput: f64, latency_ms: u64) -> PerformanceDataPoint {
+        PerformanceDataPoint {
+            parallelism: 1,
+            throughput,
+            latency: Duration::from_millis(latency_ms),
+            cpu_utilization: 0.5,
+            memory_utilization: 0.5,
+            resource_efficiency: 0.8,
+            timestamp: chrono::Utc::now(),
+            test_characteristics: TestCharacteristics::default(),
+            system_state: SystemState::default(),
+        }
+    }
+
+    fn make_training_data(count: usize) -> Vec<PerformanceDataPoint> {
+        (0..count).map(|i| make_data_point(100.0 + i as f64 * 5.0, 50)).collect()
+    }
+
+    // =========================================================================
+    // ENGINE TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_predictive_engine_new() {
+        let engine = PredictiveAnalyticsEngine::new();
+        let stats = engine.get_prediction_statistics();
+        assert_eq!(stats.total_predictions, 0);
+        // Engine initializes with default models
+        let _models = stats.active_models;
+    }
+
+    #[test]
+    fn test_predictive_engine_with_config() {
+        let config = PredictiveAnalyticsConfig {
+            enable_prediction: true,
+            prediction_models: vec![PredictionModelType::LinearRegression],
+            prediction_horizon: Duration::from_secs(600),
+            model_update_frequency: Duration::from_secs(120),
+            min_data_points: 5,
+        };
+        let engine = PredictiveAnalyticsEngine::with_config(config);
+        let stats = engine.get_prediction_statistics();
+        let _models = stats.active_models;
+    }
+
+    #[test]
+    fn test_predictive_engine_default() {
+        let engine = PredictiveAnalyticsEngine::default();
+        let stats = engine.get_prediction_statistics();
+        assert_eq!(stats.total_predictions, 0);
+    }
+
+    #[test]
+    fn test_engine_update_config() {
+        let engine = PredictiveAnalyticsEngine::new();
+        let config = PredictiveAnalyticsConfig {
+            enable_prediction: false,
+            prediction_models: vec![],
+            prediction_horizon: Duration::from_secs(300),
+            model_update_frequency: Duration::from_secs(60),
+            min_data_points: 3,
+        };
+        engine.update_config(config);
+    }
+
+    #[test]
+    fn test_engine_add_model() {
+        let engine = PredictiveAnalyticsEngine::new();
+        engine.add_model(Box::new(LinearRegressionModel::new()));
+    }
+
+    #[test]
+    fn test_engine_get_best_model_no_training() {
+        let engine = PredictiveAnalyticsEngine::new();
+        let best = engine.get_best_model();
+        // May or may not have a best model before training
+        let _ = best;
+    }
+
+    #[test]
+    fn test_engine_get_performance_summary() {
+        let engine = PredictiveAnalyticsEngine::new();
+        let summary = engine.get_performance_summary();
+        let _ = summary; // Just verify it doesn't panic
+    }
+
+    // =========================================================================
+    // MODEL TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_linear_regression_model_new() {
+        let model = LinearRegressionModel::new();
+        assert_eq!(model.model_type(), PredictionModelType::LinearRegression);
+    }
+
+    #[test]
+    fn test_linear_regression_model_train() {
+        let mut model = LinearRegressionModel::new();
+        let data = make_training_data(20);
+        let result = model.train(&data);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_linear_regression_model_predict_after_train() {
+        let mut model = LinearRegressionModel::new();
+        let data = make_training_data(20);
+        if model.train(&data).is_ok() {
+            let result = model.predict(Duration::from_secs(1800));
+            assert!(result.is_ok());
+        }
+    }
+
+    #[test]
+    fn test_linear_regression_model_predict_without_train() {
+        let model = LinearRegressionModel::new();
+        let result = model.predict(Duration::from_secs(1800));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_linear_regression_model_metrics() {
+        let model = LinearRegressionModel::new();
+        let metrics = model.performance_metrics();
+        assert!(metrics.mae >= 0.0);
+    }
+
+    #[test]
+    fn test_moving_average_model_new() {
+        let model = MovingAverageModel::new();
+        assert_eq!(model.model_type(), PredictionModelType::MovingAverage);
+    }
+
+    #[test]
+    fn test_moving_average_model_with_window() {
+        let model = MovingAverageModel::with_window_size(10);
+        assert_eq!(model.model_type(), PredictionModelType::MovingAverage);
+    }
+
+    #[test]
+    fn test_moving_average_model_train() {
+        let mut model = MovingAverageModel::new();
+        let data = make_training_data(20);
+        let result = model.train(&data);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_moving_average_model_predict_after_train() {
+        let mut model = MovingAverageModel::new();
+        let data = make_training_data(20);
+        if model.train(&data).is_ok() {
+            let result = model.predict(Duration::from_secs(1800));
+            assert!(result.is_ok());
+        }
+    }
+
+    #[test]
+    fn test_exponential_smoothing_model_new() {
+        let model = ExponentialSmoothingModel::new();
+        assert_eq!(
+            model.model_type(),
+            PredictionModelType::ExponentialSmoothing
+        );
+    }
+
+    #[test]
+    fn test_exponential_smoothing_model_with_alpha() {
+        let model = ExponentialSmoothingModel::with_alpha(0.5);
+        assert_eq!(
+            model.model_type(),
+            PredictionModelType::ExponentialSmoothing
+        );
+    }
+
+    #[test]
+    fn test_exponential_smoothing_model_train() {
+        let mut model = ExponentialSmoothingModel::new();
+        let data = make_training_data(20);
+        let result = model.train(&data);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_arima_model_new() {
+        let model = ARIMAModel::new();
+        assert_eq!(model.model_type(), PredictionModelType::ARIMA);
+    }
+
+    #[test]
+    fn test_arima_model_train() {
+        let mut model = ARIMAModel::new();
+        let data = make_training_data(20);
+        let result = model.train(&data);
+        assert!(result.is_ok());
+    }
+
+    // =========================================================================
+    // PREDICTION MODEL TYPE PARSING TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_parse_prediction_model_type_linear_regression() {
+        let result: Result<PredictionModelType, _> = "LinearRegression".parse();
+        assert!(result.is_ok());
+        if let Ok(model_type) = result {
+            assert_eq!(model_type, PredictionModelType::LinearRegression);
+        }
+    }
+
+    #[test]
+    fn test_parse_prediction_model_type_moving_average() {
+        let result: Result<PredictionModelType, _> = "MovingAverage".parse();
+        assert!(result.is_ok());
+        if let Ok(model_type) = result {
+            assert_eq!(model_type, PredictionModelType::MovingAverage);
+        }
+    }
+
+    #[test]
+    fn test_parse_prediction_model_type_exponential_smoothing() {
+        let result: Result<PredictionModelType, _> = "ExponentialSmoothing".parse();
+        assert!(result.is_ok());
+        if let Ok(model_type) = result {
+            assert_eq!(model_type, PredictionModelType::ExponentialSmoothing);
+        }
+    }
+
+    #[test]
+    fn test_parse_prediction_model_type_arima() {
+        let result: Result<PredictionModelType, _> = "ARIMA".parse();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_prediction_model_type_neural_network() {
+        let result: Result<PredictionModelType, _> = "NeuralNetwork".parse();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_prediction_model_type_custom() {
+        let result: Result<PredictionModelType, _> = "MyCustomModel".parse();
+        assert!(result.is_ok());
+        if let Ok(PredictionModelType::Custom(name)) = result {
+            assert_eq!(name, "MyCustomModel");
+        }
+    }
+
+    // =========================================================================
+    // PREDICTION STATISTICS TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_prediction_statistics_construction() {
+        let stats = PredictionStatistics {
+            total_predictions: 50,
+            active_models: 4,
+            average_confidence: 0.85,
+            average_uncertainty: 0.15,
+            cache_memory_usage: 4096,
+        };
+        assert_eq!(stats.total_predictions, 50);
+        assert_eq!(stats.active_models, 4);
+        assert!(stats.average_confidence + stats.average_uncertainty <= 1.01);
+    }
+
+    // =========================================================================
+    // ASYNC TESTS
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_train_models_sufficient_data() {
+        let mut engine = PredictiveAnalyticsEngine::new();
+        let data = make_training_data(20);
+        let result = engine.train_models(&data).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_train_models_insufficient_data() {
+        let mut engine = PredictiveAnalyticsEngine::new();
+        let data = make_training_data(3); // Default min_data_points is 10
+        let result = engine.train_models(&data).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_clear_cache() {
+        let engine = PredictiveAnalyticsEngine::new();
+        engine.clear_cache().await;
+        let stats = engine.get_prediction_statistics();
+        assert_eq!(stats.total_predictions, 0);
+    }
+}

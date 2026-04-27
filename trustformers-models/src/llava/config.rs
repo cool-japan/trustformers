@@ -127,7 +127,7 @@ impl Default for LlavaVisionConfig {
 impl Config for LlavaConfig {
     fn validate(&self) -> trustformers_core::errors::Result<()> {
         // Validate language model configuration
-        if self.hidden_size % self.num_attention_heads != 0 {
+        if !self.hidden_size.is_multiple_of(self.num_attention_heads) {
             return Err(trustformers_core::errors::invalid_config(
                 "hidden_size",
                 "hidden_size must be divisible by num_attention_heads",
@@ -135,7 +135,7 @@ impl Config for LlavaConfig {
         }
 
         if let Some(num_kv_heads) = self.num_key_value_heads {
-            if self.num_attention_heads % num_kv_heads != 0 {
+            if !self.num_attention_heads.is_multiple_of(num_kv_heads) {
                 return Err(trustformers_core::errors::invalid_config(
                     "num_attention_heads",
                     "num_attention_heads must be divisible by num_key_value_heads",
@@ -144,7 +144,11 @@ impl Config for LlavaConfig {
         }
 
         // Validate vision model configuration
-        if self.vision_config.hidden_size % self.vision_config.num_attention_heads != 0 {
+        if !self
+            .vision_config
+            .hidden_size
+            .is_multiple_of(self.vision_config.num_attention_heads)
+        {
             return Err(trustformers_core::errors::invalid_config(
                 "vision_hidden_size",
                 "vision hidden_size must be divisible by num_attention_heads",
@@ -371,5 +375,225 @@ impl LlavaConfig {
     pub fn with_vision_tower(&mut self, tower: &str) -> &mut Self {
         self.mm_vision_tower = tower.to_string();
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trustformers_core::traits::Config;
+
+    struct Lcg {
+        state: u64,
+    }
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Lcg { state: seed }
+        }
+        fn next(&mut self) -> u64 {
+            self.state = self
+                .state
+                .wrapping_mul(6364136223846793005u64)
+                .wrapping_add(1442695040888963407u64);
+            self.state
+        }
+        fn next_f32(&mut self) -> f32 {
+            (self.next() >> 11) as f32 / (1u64 << 53) as f32
+        }
+    }
+
+    #[test]
+    fn test_default_config_fields() {
+        let cfg = LlavaConfig::default();
+        assert_eq!(cfg.vocab_size, 32000);
+        assert_eq!(cfg.hidden_size, 4096);
+        assert_eq!(cfg.model_type, "llava");
+        assert!(cfg.use_cache);
+        assert_eq!(cfg.mm_projector_type, "mlp2x_gelu");
+    }
+
+    #[test]
+    fn test_default_validate_passes() {
+        let cfg = LlavaConfig::default();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_architecture_name() {
+        let cfg = LlavaConfig::default();
+        assert_eq!(cfg.architecture(), "LLaVA");
+    }
+
+    #[test]
+    fn test_hidden_size_not_divisible_fails() {
+        let cfg = LlavaConfig {
+            hidden_size: 100,
+            num_attention_heads: 32,
+            ..LlavaConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_kv_heads_not_divisible_fails() {
+        let cfg = LlavaConfig {
+            num_key_value_heads: Some(7),
+            ..LlavaConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_vision_hidden_not_divisible_fails() {
+        let cfg = LlavaConfig {
+            vision_config: LlavaVisionConfig {
+                hidden_size: 100,
+                num_attention_heads: 16,
+                ..LlavaVisionConfig::default()
+            },
+            ..LlavaConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_mm_vision_select_layer_out_of_bounds_fails() {
+        let cfg = LlavaConfig {
+            vision_config: LlavaVisionConfig {
+                num_hidden_layers: 24,
+                ..LlavaVisionConfig::default()
+            },
+            mm_vision_select_layer: 25, // >= 24
+            ..LlavaConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_head_dim_computation() {
+        let cfg = LlavaConfig::default();
+        assert_eq!(cfg.head_dim(), 4096 / 32);
+    }
+
+    #[test]
+    fn test_num_kv_heads_default() {
+        let cfg = LlavaConfig::default();
+        assert_eq!(cfg.num_kv_heads(), cfg.num_attention_heads);
+    }
+
+    #[test]
+    fn test_vision_head_dim() {
+        let cfg = LlavaConfig::default();
+        let expected = cfg.vision_config.hidden_size / cfg.vision_config.num_attention_heads;
+        assert_eq!(cfg.vision_head_dim(), expected);
+    }
+
+    #[test]
+    fn test_num_patches() {
+        let cfg = LlavaConfig::default();
+        let expected = (cfg.vision_config.image_size / cfg.vision_config.patch_size).pow(2);
+        assert_eq!(cfg.num_patches(), expected);
+    }
+
+    #[test]
+    fn test_llava_7b_config() {
+        let cfg = LlavaConfig::llava_7b();
+        assert_eq!(cfg.hidden_size, 4096);
+        assert_eq!(cfg.num_hidden_layers, 32);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_llava_13b_config() {
+        let cfg = LlavaConfig::llava_13b();
+        assert_eq!(cfg.hidden_size, 5120);
+        assert_eq!(cfg.num_hidden_layers, 40);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_llava_v1_5_7b_config() {
+        let cfg = LlavaConfig::llava_v1_5_7b();
+        assert_eq!(cfg.max_position_embeddings, 4096);
+        assert_eq!(cfg.mm_vision_select_layer, -2);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_llava_v1_6_7b_has_anyres() {
+        let cfg = LlavaConfig::llava_v1_6_7b();
+        assert_eq!(cfg.image_aspect_ratio, "anyres");
+        assert!(cfg.image_grid_pinpoints.is_some());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_llava_v1_6_34b_config() {
+        let cfg = LlavaConfig::llava_v1_6_34b();
+        assert_eq!(cfg.hidden_size, 8192);
+        assert_eq!(cfg.num_hidden_layers, 60);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_llava_phi3_mini_config() {
+        let cfg = LlavaConfig::llava_phi3_mini();
+        assert_eq!(cfg.vocab_size, 32064);
+        assert_eq!(cfg.hidden_size, 3072);
+        assert_eq!(cfg.num_key_value_heads, Some(32));
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_from_pretrained_name_7b() {
+        let result = LlavaConfig::from_pretrained_name("llava-7b");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_from_pretrained_name_unknown() {
+        let result = LlavaConfig::from_pretrained_name("no-such-model");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_high_resolution_mode() {
+        let mut cfg = LlavaConfig::default();
+        cfg.with_high_resolution(true);
+        assert_eq!(cfg.image_aspect_ratio, "anyres");
+        assert!(cfg.image_grid_pinpoints.is_some());
+    }
+
+    #[test]
+    fn test_disable_high_resolution() {
+        let mut cfg = LlavaConfig::llava_v1_6_7b();
+        cfg.with_high_resolution(false);
+        assert_eq!(cfg.image_aspect_ratio, "square");
+        assert!(cfg.image_grid_pinpoints.is_none());
+    }
+
+    #[test]
+    fn test_with_vision_tower() {
+        let mut cfg = LlavaConfig::default();
+        cfg.with_vision_tower("openai/clip-vit-base-patch32");
+        assert_eq!(cfg.mm_vision_tower, "openai/clip-vit-base-patch32");
+    }
+
+    #[test]
+    fn test_vision_default_config() {
+        let vcfg = LlavaVisionConfig::default();
+        assert_eq!(vcfg.hidden_size, 1024);
+        assert_eq!(vcfg.patch_size, 14);
+        assert_eq!(vcfg.image_size, 336);
+        assert_eq!(vcfg.num_channels, 3);
+    }
+
+    #[test]
+    fn test_lcg_produces_values_in_range() {
+        let mut rng = Lcg::new(54321);
+        for _ in 0..100 {
+            let v = rng.next_f32();
+            assert!((0.0..1.0).contains(&v));
+        }
     }
 }

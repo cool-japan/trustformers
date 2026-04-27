@@ -495,7 +495,7 @@ impl MobileTestingFramework {
             match test_type {
                 MemoryTestType::LeakDetection
                     // Simulate potential memory leaks
-                    if start_time.elapsed().as_secs() % 10 == 0 => {
+                    if start_time.elapsed().as_secs().is_multiple_of(10) => {
                         leak_count += self.detect_memory_leaks();
                     },
                 MemoryTestType::PressureTesting => {

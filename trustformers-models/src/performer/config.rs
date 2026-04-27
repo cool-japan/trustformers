@@ -66,7 +66,7 @@ impl Default for PerformerConfig {
 
 impl Config for PerformerConfig {
     fn validate(&self) -> trustformers_core::errors::Result<()> {
-        if self.hidden_size % self.num_attention_heads != 0 {
+        if !self.hidden_size.is_multiple_of(self.num_attention_heads) {
             return Err(trustformers_core::errors::TrustformersError::config_error(
                 "hidden_size must be divisible by num_attention_heads",
                 "PerformerConfig::validate",

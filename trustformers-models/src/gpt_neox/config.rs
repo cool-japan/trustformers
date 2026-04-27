@@ -101,7 +101,7 @@ impl Config for GPTNeoXConfig {
             );
         }
 
-        if self.hidden_size % self.num_attention_heads != 0 {
+        if !self.hidden_size.is_multiple_of(self.num_attention_heads) {
             return Err(
                 trustformers_core::errors::TrustformersError::invalid_config(format!(
                     "hidden_size must be divisible by num_attention_heads ({})",

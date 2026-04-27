@@ -1237,3 +1237,284 @@ impl CLIPModel {
         self.load_from_path(model_path)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn small_text_config() -> CLIPTextConfig {
+        CLIPTextConfig {
+            vocab_size: 100,
+            hidden_size: 32,
+            intermediate_size: 64,
+            num_hidden_layers: 2,
+            num_attention_heads: 4,
+            max_position_embeddings: 32,
+            hidden_act: "quick_gelu".to_string(),
+            layer_norm_eps: 1e-5,
+            dropout: 0.0,
+            attention_dropout: 0.0,
+            initializer_range: 0.02,
+            initializer_factor: 1.0,
+            pad_token_id: 0,
+            bos_token_id: 1,
+            eos_token_id: 2,
+        }
+    }
+
+    fn small_vision_config() -> CLIPVisionConfig {
+        CLIPVisionConfig {
+            hidden_size: 32,
+            intermediate_size: 64,
+            num_hidden_layers: 2,
+            num_attention_heads: 4,
+            image_size: 32,
+            patch_size: 8,
+            num_channels: 3,
+            hidden_act: "quick_gelu".to_string(),
+            layer_norm_eps: 1e-5,
+            dropout: 0.0,
+            attention_dropout: 0.0,
+            initializer_range: 0.02,
+            initializer_factor: 1.0,
+        }
+    }
+
+    fn small_clip_config() -> CLIPConfig {
+        CLIPConfig {
+            text_config: small_text_config(),
+            vision_config: small_vision_config(),
+            projection_dim: 32,
+            logit_scale_init_value: 2.6592,
+            initializer_range: 0.02,
+            initializer_factor: 1.0,
+        }
+    }
+
+    #[test]
+    fn test_clip_text_config_creation() {
+        let config = small_text_config();
+        assert_eq!(config.vocab_size, 100);
+        assert_eq!(config.hidden_size, 32);
+        assert_eq!(config.num_hidden_layers, 2);
+    }
+
+    #[test]
+    fn test_clip_vision_config_creation() {
+        let config = small_vision_config();
+        assert_eq!(config.image_size, 32);
+        assert_eq!(config.patch_size, 8);
+        assert_eq!(config.num_channels, 3);
+    }
+
+    #[test]
+    fn test_clip_config_creation() {
+        let config = small_clip_config();
+        assert_eq!(config.projection_dim, 32);
+        assert!((config.logit_scale_init_value - 2.6592).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_clip_vision_config_num_patches() {
+        let config = small_vision_config();
+        let num_patches = config.num_patches();
+        // (32/8)^2 = 16
+        assert_eq!(num_patches, 16);
+    }
+
+    #[test]
+    fn test_clip_vision_config_seq_length() {
+        let config = small_vision_config();
+        let seq_len = config.seq_length();
+        // num_patches + 1 (for CLS token)
+        assert_eq!(seq_len, 17);
+    }
+
+    #[test]
+    fn test_clip_vision_embeddings_creation() {
+        let config = small_vision_config();
+        let result = CLIPVisionEmbeddings::new(&config);
+        assert!(result.is_ok());
+        let emb = result.expect("embeddings creation should succeed");
+        assert!(matches!(emb.device(), Device::CPU));
+    }
+
+    #[test]
+    fn test_clip_vision_embeddings_with_device() {
+        let config = small_vision_config();
+        let result = CLIPVisionEmbeddings::new_with_device(&config, Device::CPU);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_clip_encoder_layer_config() {
+        let config = CLIPEncoderLayerConfig {
+            hidden_size: 32,
+            intermediate_size: 64,
+            num_attention_heads: 4,
+            hidden_act: "quick_gelu".to_string(),
+            layer_norm_eps: 1e-5,
+            dropout: 0.0,
+            attention_dropout: 0.0,
+        };
+        assert_eq!(config.hidden_size, 32);
+        assert_eq!(config.num_attention_heads, 4);
+    }
+
+    #[test]
+    fn test_clip_model_creation() {
+        let config = small_clip_config();
+        let result = CLIPModel::new(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_clip_model_with_device() {
+        let config = small_clip_config();
+        let result = CLIPModel::new_with_device(config, Device::CPU);
+        assert!(result.is_ok());
+        let model = result.expect("model creation should succeed");
+        assert!(matches!(model.device(), Device::CPU));
+    }
+
+    #[test]
+    fn test_clip_model_num_parameters() {
+        let config = small_clip_config();
+        let model = CLIPModel::new(config).expect("model creation should succeed");
+        assert!(model.num_parameters() > 0);
+    }
+
+    #[test]
+    fn test_clip_model_text_config_access() {
+        let config = small_clip_config();
+        let model = CLIPModel::new(config.clone()).expect("model creation should succeed");
+        let mc = model.get_config();
+        assert_eq!(mc.text_config.vocab_size, config.text_config.vocab_size);
+    }
+
+    #[test]
+    fn test_clip_text_config_values() {
+        let config = small_text_config();
+        assert_eq!(config.vocab_size, 100);
+        assert_eq!(config.hidden_size, 32);
+        assert_eq!(config.num_hidden_layers, 2);
+        assert_eq!(config.num_attention_heads, 4);
+    }
+
+    #[test]
+    fn test_clip_vision_config_values() {
+        let config = small_vision_config();
+        assert_eq!(config.image_size, 32);
+        assert_eq!(config.patch_size, 8);
+        assert_eq!(config.hidden_size, 32);
+    }
+
+    #[test]
+    fn test_clip_config_values() {
+        let config = small_clip_config();
+        assert_eq!(config.projection_dim, 32);
+        assert_eq!(config.text_config.vocab_size, 100);
+    }
+
+    #[test]
+    fn test_clip_model_projection_dim() {
+        let config = small_clip_config();
+        assert_eq!(config.projection_dim, 32);
+        let model = CLIPModel::new(config).expect("model creation should succeed");
+        // Model should have been created with the correct projection dim
+        assert!(model.num_parameters() > 0);
+    }
+
+    #[test]
+    fn test_clip_vision_different_patch_sizes() {
+        for patch_size in &[4, 8, 16] {
+            let mut config = small_vision_config();
+            config.patch_size = *patch_size;
+            let num_patches = config.num_patches();
+            let expected = (config.image_size / patch_size).pow(2);
+            assert_eq!(num_patches, expected);
+        }
+    }
+
+    #[test]
+    fn test_clip_vision_different_image_sizes() {
+        for image_size in &[16, 32, 64] {
+            let mut config = small_vision_config();
+            config.image_size = *image_size;
+            let num_patches = config.num_patches();
+            let expected = (image_size / config.patch_size).pow(2);
+            assert_eq!(num_patches, expected);
+        }
+    }
+
+    #[test]
+    fn test_clip_encoder_layer_config_creation() {
+        let config = CLIPEncoderLayerConfig {
+            hidden_size: 64,
+            intermediate_size: 256,
+            num_attention_heads: 8,
+            hidden_act: "gelu".to_string(),
+            layer_norm_eps: 1e-6,
+            dropout: 0.1,
+            attention_dropout: 0.1,
+        };
+        assert_eq!(config.hidden_size, 64);
+        assert_eq!(config.num_attention_heads, 8);
+    }
+
+    #[test]
+    fn test_clip_model_config_projection_dim() {
+        let config = small_clip_config();
+        let model = CLIPModel::new(config).expect("model creation should succeed");
+        let mc = model.get_config();
+        assert_eq!(mc.projection_dim, 32);
+    }
+
+    #[test]
+    fn test_clip_config_initializer_values() {
+        let config = small_clip_config();
+        assert!((config.initializer_range - 0.02).abs() < f32::EPSILON);
+        assert!((config.initializer_factor - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_clip_text_config_special_tokens() {
+        let config = small_text_config();
+        assert_eq!(config.pad_token_id, 0);
+        assert_eq!(config.bos_token_id, 1);
+        assert_eq!(config.eos_token_id, 2);
+    }
+
+    #[test]
+    fn test_clip_encoder_layer_config_clone() {
+        let config = CLIPEncoderLayerConfig {
+            hidden_size: 32,
+            intermediate_size: 64,
+            num_attention_heads: 4,
+            hidden_act: "gelu".to_string(),
+            layer_norm_eps: 1e-5,
+            dropout: 0.0,
+            attention_dropout: 0.0,
+        };
+        let cloned = config.clone();
+        assert_eq!(cloned.hidden_size, 32);
+        assert_eq!(cloned.hidden_act, "gelu");
+    }
+
+    #[test]
+    fn test_clip_vision_config_channels() {
+        let config = small_vision_config();
+        assert_eq!(config.num_channels, 3);
+        assert_eq!(config.hidden_act, "quick_gelu");
+    }
+
+    #[test]
+    fn test_clip_model_with_different_projection_dim() {
+        let mut config = small_clip_config();
+        config.projection_dim = 16;
+        let result = CLIPModel::new(config);
+        assert!(result.is_ok());
+        let model = result.expect("model creation should succeed");
+        assert!(model.num_parameters() > 0);
+    }
+}

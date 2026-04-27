@@ -321,4 +321,248 @@ mod tests {
         assert_abs_diff_eq!(fisher[0], 2.0, epsilon = 1e-6);
         assert_abs_diff_eq!(fisher[1], 2.0, epsilon = 1e-6);
     }
+
+    // ── Additional tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_ewc_config_default_values() {
+        let cfg = EWCConfig::default();
+        assert!(cfg.lambda > 0.0, "lambda must be positive");
+        assert!(cfg.fisher_samples > 0, "fisher_samples must be positive");
+        assert!(!cfg.online, "default should not be online EWC");
+        assert!(cfg.decay_factor > 0.0 && cfg.decay_factor < 1.0);
+        assert!(
+            cfg.diagonal_fisher,
+            "diagonal_fisher default should be true"
+        );
+    }
+
+    #[test]
+    fn test_ewc_config_custom_lambda() {
+        let cfg = EWCConfig {
+            lambda: 1.0,
+            ..EWCConfig::default()
+        };
+        assert!((cfg.lambda - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_ewc_config_online_mode() {
+        let cfg = EWCConfig {
+            online: true,
+            decay_factor: 0.9,
+            ..EWCConfig::default()
+        };
+        assert!(cfg.online);
+        assert!((cfg.decay_factor - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_fisher_information_values_empty() {
+        let fi = FisherInformation::new("w".to_string(), 0, "task0".to_string());
+        assert_eq!(fi.values.len(), 0, "empty fisher should have no values");
+    }
+
+    #[test]
+    fn test_fisher_information_values_uniform() {
+        let fi = FisherInformation::new("w".to_string(), 4, "task0".to_string());
+        // Default is zeros
+        assert_eq!(fi.values.len(), 4);
+        assert!(fi.values.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn test_fisher_information_normalize() {
+        let mut fi = FisherInformation::new("w".to_string(), 3, "task0".to_string());
+        let grad = Array1::from_vec(vec![3.0, 6.0, 9.0]);
+        fi.update(&grad);
+        fi.normalize(3);
+        // After update: [9, 36, 81]; after /3: [3, 12, 27]
+        assert!((fi.values[0] - 3.0).abs() < 1e-5);
+        assert!((fi.values[1] - 12.0).abs() < 1e-5);
+        assert!((fi.values[2] - 27.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_fisher_information_compute_penalty_zero_deviation() {
+        let mut fi = FisherInformation::new("w".to_string(), 3, "task0".to_string());
+        fi.values = Array1::from_vec(vec![1.0, 1.0, 1.0]);
+        fi.optimal_params = Array1::from_vec(vec![1.0, 2.0, 3.0]);
+        // current == optimal => penalty should be 0
+        let current = Array1::from_vec(vec![1.0, 2.0, 3.0]);
+        let penalty = fi.compute_penalty(&current);
+        assert!(
+            penalty.abs() < 1e-6,
+            "penalty should be 0 when at optimal params"
+        );
+    }
+
+    #[test]
+    fn test_fisher_information_compute_penalty_nonzero() {
+        let mut fi = FisherInformation::new("w".to_string(), 2, "task0".to_string());
+        fi.values = Array1::from_vec(vec![1.0, 1.0]);
+        fi.optimal_params = Array1::from_vec(vec![0.0, 0.0]);
+        let current = Array1::from_vec(vec![1.0, 1.0]);
+        // penalty = 0.5 * sum(F_i * (theta_i - theta_star_i)^2)
+        // = 0.5 * (1*1 + 1*1) = 1.0
+        let penalty = fi.compute_penalty(&current);
+        assert!((penalty - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_ewc_trainer_no_task_error() {
+        let mut trainer = EWCTrainer::new(EWCConfig::default());
+        let result = trainer.add_parameter("w".to_string(), 4);
+        assert!(result.is_err(), "should fail when no current task set");
+    }
+
+    #[test]
+    fn test_ewc_trainer_num_tasks_after_finalize() {
+        let mut trainer = EWCTrainer::new(EWCConfig::default());
+        trainer.start_task("task_a".to_string());
+        trainer.add_parameter("p".to_string(), 2).unwrap_or(());
+
+        let grad = Array1::from_vec(vec![1.0, 1.0]);
+        trainer.update_fisher("p", &grad).unwrap_or(());
+
+        let mut optimal = HashMap::new();
+        optimal.insert("p".to_string(), Array1::from_vec(vec![0.5, 0.5]));
+        trainer.finalize_task(optimal).unwrap_or(());
+        assert_eq!(trainer.num_tasks(), 1);
+    }
+
+    #[test]
+    fn test_ewc_trainer_clear_task() {
+        let mut trainer = EWCTrainer::new(EWCConfig::default());
+        trainer.start_task("task_b".to_string());
+        trainer.add_parameter("p".to_string(), 2).unwrap_or(());
+
+        let mut optimal = HashMap::new();
+        optimal.insert("p".to_string(), Array1::from_vec(vec![0.0, 0.0]));
+        trainer.finalize_task(optimal).unwrap_or(());
+        assert_eq!(trainer.num_tasks(), 1);
+
+        trainer.clear_task("task_b");
+        assert_eq!(trainer.num_tasks(), 0);
+    }
+
+    #[test]
+    fn test_ewc_trainer_zero_penalty_for_unregistered_params() {
+        let trainer = EWCTrainer::new(EWCConfig::default());
+        let mut params = HashMap::new();
+        params.insert("unregistered".to_string(), Array1::from_vec(vec![1.0, 2.0]));
+        // No tasks registered => penalty should be 0
+        let penalty = trainer.compute_penalty(&params);
+        assert!((penalty).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_ewc_trainer_get_fisher_info_missing() {
+        let trainer = EWCTrainer::new(EWCConfig::default());
+        assert!(trainer.get_fisher_info("nonexistent_task", "param").is_none());
+    }
+
+    #[test]
+    fn test_ewc_trainer_penalty_scales_with_lambda() {
+        let mut trainer_low = EWCTrainer::new(EWCConfig {
+            lambda: 1.0,
+            ..EWCConfig::default()
+        });
+        let mut trainer_high = EWCTrainer::new(EWCConfig {
+            lambda: 10.0,
+            ..EWCConfig::default()
+        });
+
+        for trainer in [&mut trainer_low, &mut trainer_high] {
+            trainer.start_task("t".to_string());
+            trainer.add_parameter("p".to_string(), 2).unwrap_or(());
+            let grad = Array1::from_vec(vec![1.0, 1.0]);
+            trainer.update_fisher("p", &grad).unwrap_or(());
+            let mut opt = HashMap::new();
+            opt.insert("p".to_string(), Array1::from_vec(vec![0.0, 0.0]));
+            trainer.finalize_task(opt).unwrap_or(());
+        }
+
+        let mut params = HashMap::new();
+        params.insert("p".to_string(), Array1::from_vec(vec![1.0, 1.0]));
+
+        let penalty_low = trainer_low.compute_penalty(&params);
+        let penalty_high = trainer_high.compute_penalty(&params);
+
+        // higher lambda => higher penalty
+        assert!(
+            penalty_high > penalty_low,
+            "penalty should scale with lambda"
+        );
+    }
+
+    #[test]
+    fn test_diagonal_fisher_single_gradient() {
+        let gradients = vec![Array1::from_vec(vec![3.0, 4.0])];
+        let fisher = utils::compute_diagonal_fisher(&gradients);
+        // F = [9.0, 16.0] / 1 = [9.0, 16.0]
+        assert!((fisher[0] - 9.0).abs() < 1e-5);
+        assert!((fisher[1] - 16.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_fisher_information_multiple_updates() {
+        let mut fi = FisherInformation::new("layer".to_string(), 2, "t0".to_string());
+        let g1 = Array1::from_vec(vec![1.0, 0.0]);
+        let g2 = Array1::from_vec(vec![0.0, 2.0]);
+        fi.update(&g1);
+        fi.update(&g2);
+        // values = [1.0, 4.0]
+        assert!((fi.values[0] - 1.0).abs() < 1e-5);
+        assert!((fi.values[1] - 4.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_ewc_config_different_lambda_values() {
+        // Verify different lambdas can be constructed
+        let lambdas = [0.0, 0.1, 1.0, 100.0, 5000.0];
+        for l in lambdas {
+            let cfg = EWCConfig {
+                lambda: l,
+                ..EWCConfig::default()
+            };
+            assert!((cfg.lambda - l).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_ewc_trainer_multiple_tasks_accumulation() {
+        let mut trainer = EWCTrainer::new(EWCConfig {
+            lambda: 1.0,
+            ..EWCConfig::default()
+        });
+
+        for task_idx in 0..3usize {
+            let task_id = format!("task_{}", task_idx);
+            trainer.start_task(task_id.clone());
+            trainer.add_parameter("p".to_string(), 2).unwrap_or(());
+            let grad = Array1::from_vec(vec![1.0, 1.0]);
+            trainer.update_fisher("p", &grad).unwrap_or(());
+            let mut opt = HashMap::new();
+            opt.insert("p".to_string(), Array1::from_vec(vec![0.0, 0.0]));
+            trainer.finalize_task(opt).unwrap_or(());
+        }
+
+        assert_eq!(trainer.num_tasks(), 3);
+    }
+
+    #[test]
+    fn test_ewc_get_all_fisher_info_populated() {
+        let mut trainer = EWCTrainer::new(EWCConfig::default());
+        trainer.start_task("t1".to_string());
+        trainer.add_parameter("q".to_string(), 2).unwrap_or(());
+        let grad = Array1::from_vec(vec![0.5, 0.5]);
+        trainer.update_fisher("q", &grad).unwrap_or(());
+        let mut opt = HashMap::new();
+        opt.insert("q".to_string(), Array1::from_vec(vec![0.0, 0.0]));
+        trainer.finalize_task(opt).unwrap_or(());
+
+        let all_info = trainer.get_all_fisher_info();
+        assert!(all_info.contains_key("t1"));
+    }
 }

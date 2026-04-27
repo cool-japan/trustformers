@@ -1688,3 +1688,239 @@ impl StreamingDataProcessor {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0
+        }
+        fn next_f64(&mut self) -> f64 {
+            (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+        }
+        fn next_usize(&mut self, bound: usize) -> usize {
+            (self.next_u64() as usize) % bound.max(1)
+        }
+    }
+
+    // ---- RealTimePerformanceCounters tests ----
+    #[test]
+    fn test_performance_counters_new() {
+        let counters = RealTimePerformanceCounters::new();
+        let stats = counters.get_current_stats();
+        assert_eq!(stats.data_points_processed, 0);
+        assert_eq!(stats.anomalies_detected, 0);
+        assert_eq!(stats.insights_generated, 0);
+    }
+
+    #[test]
+    fn test_performance_counters_increment_data_points() {
+        let counters = RealTimePerformanceCounters::new();
+        counters.increment_data_points_processed();
+        counters.increment_data_points_processed();
+        counters.increment_data_points_processed();
+        let stats = counters.get_current_stats();
+        assert_eq!(stats.data_points_processed, 3);
+    }
+
+    #[test]
+    fn test_performance_counters_increment_anomalies() {
+        let counters = RealTimePerformanceCounters::new();
+        counters.increment_anomalies_detected();
+        let stats = counters.get_current_stats();
+        assert_eq!(stats.anomalies_detected, 1);
+    }
+
+    #[test]
+    fn test_performance_counters_increment_insights() {
+        let counters = RealTimePerformanceCounters::new();
+        counters.increment_insights_generated();
+        counters.increment_insights_generated();
+        let stats = counters.get_current_stats();
+        assert_eq!(stats.insights_generated, 2);
+    }
+
+    #[test]
+    fn test_performance_counters_independent_increments() {
+        let counters = RealTimePerformanceCounters::new();
+        counters.increment_data_points_processed();
+        counters.increment_anomalies_detected();
+        counters.increment_insights_generated();
+        let stats = counters.get_current_stats();
+        assert_eq!(stats.data_points_processed, 1);
+        assert_eq!(stats.anomalies_detected, 1);
+        assert_eq!(stats.insights_generated, 1);
+    }
+
+    #[test]
+    fn test_performance_counters_multiple_increments() {
+        let counters = RealTimePerformanceCounters::new();
+        for _ in 0..100 {
+            counters.increment_data_points_processed();
+        }
+        let stats = counters.get_current_stats();
+        assert_eq!(stats.data_points_processed, 100);
+    }
+
+    // ---- ProfileDataPoint tests ----
+    #[test]
+    fn test_profile_data_point_from_metrics() {
+        let metrics = RealTimeMetrics::default();
+        let point = ProfileDataPoint::from_metrics(metrics);
+        assert!(point.test_id.is_none());
+        assert!((point.value - 0.0).abs() < f64::EPSILON);
+        assert!(point.point_id.starts_with("point_"));
+    }
+
+    #[test]
+    fn test_profile_data_point_from_metrics_has_timestamp() {
+        let before = Utc::now();
+        let metrics = RealTimeMetrics::default();
+        let point = ProfileDataPoint::from_metrics(metrics);
+        let after = Utc::now();
+        assert!(point.timestamp >= before);
+        assert!(point.timestamp <= after);
+    }
+
+    // ---- PerformanceCounterStats construction ----
+    #[test]
+    fn test_performance_counter_stats_construction() {
+        let stats = PerformanceCounterStats {
+            data_points_processed: 1000,
+            anomalies_detected: 5,
+            insights_generated: 20,
+            processing_rate: 100,
+        };
+        assert_eq!(stats.data_points_processed, 1000);
+        assert!(stats.anomalies_detected < stats.insights_generated);
+    }
+
+    // ---- ProfilingSession construction ----
+    #[test]
+    fn test_profiling_context_default() {
+        let ctx = ProfilingContext::default();
+        let formatted = format!("{:?}", ctx);
+        assert!(formatted.contains("ProfilingContext"));
+    }
+
+    // ---- RealTimeMetrics default ----
+    #[test]
+    fn test_real_time_metrics_default() {
+        let m = RealTimeMetrics::default();
+        let formatted = format!("{:?}", m);
+        assert!(formatted.contains("RealTimeMetrics"));
+    }
+
+    // ---- StrategySwitcherConfig default ----
+    #[test]
+    fn test_strategy_switcher_config_default() {
+        let c = StrategySwitcherConfig::default();
+        let formatted = format!("{:?}", c);
+        assert!(formatted.contains("StrategySwitcherConfig"));
+    }
+
+    // ---- PerformanceCounterStats zero values ----
+    #[test]
+    fn test_performance_counter_stats_all_zero() {
+        let stats = PerformanceCounterStats {
+            data_points_processed: 0,
+            anomalies_detected: 0,
+            insights_generated: 0,
+            processing_rate: 0,
+        };
+        assert_eq!(
+            stats.data_points_processed + stats.anomalies_detected + stats.insights_generated,
+            0
+        );
+    }
+
+    // ---- RealTimeProfilerConfig default ----
+    #[test]
+    fn test_real_time_profiler_config_default() {
+        let c = RealTimeProfilerConfig::default();
+        let formatted = format!("{:?}", c);
+        assert!(formatted.contains("RealTimeProfilerConfig"));
+    }
+
+    // ---- LCG-driven counter tests ----
+    #[test]
+    fn test_lcg_driven_counter_increments() {
+        let mut rng = Lcg::new(42);
+        let counters = RealTimePerformanceCounters::new();
+        let mut expected_data = 0u64;
+        let mut expected_anomalies = 0u64;
+        let mut expected_insights = 0u64;
+        for _ in 0..100 {
+            let choice = rng.next_usize(3);
+            match choice {
+                0 => {
+                    counters.increment_data_points_processed();
+                    expected_data += 1;
+                },
+                1 => {
+                    counters.increment_anomalies_detected();
+                    expected_anomalies += 1;
+                },
+                _ => {
+                    counters.increment_insights_generated();
+                    expected_insights += 1;
+                },
+            }
+        }
+        let stats = counters.get_current_stats();
+        assert_eq!(stats.data_points_processed, expected_data);
+        assert_eq!(stats.anomalies_detected, expected_anomalies);
+        assert_eq!(stats.insights_generated, expected_insights);
+    }
+
+    #[test]
+    fn test_lcg_generates_metric_values() {
+        let mut rng = Lcg::new(999);
+        for _ in 0..50 {
+            let v = rng.next_f64() * 100.0;
+            assert!((0.0..100.0).contains(&v));
+        }
+    }
+
+    // ---- Concurrent counter safety ----
+    #[test]
+    fn test_counters_arc_shared() {
+        let counters = Arc::new(RealTimePerformanceCounters::new());
+        let c1 = Arc::clone(&counters);
+        let c2 = Arc::clone(&counters);
+        c1.increment_data_points_processed();
+        c2.increment_data_points_processed();
+        let stats = counters.get_current_stats();
+        assert_eq!(stats.data_points_processed, 2);
+    }
+
+    #[test]
+    fn test_lcg_determinism() {
+        let mut rng1 = Lcg::new(42);
+        let mut rng2 = Lcg::new(42);
+        for _ in 0..50 {
+            assert_eq!(rng1.next_u64(), rng2.next_u64());
+        }
+    }
+
+    #[test]
+    fn test_lcg_different_seeds_different_sequence() {
+        let mut rng1 = Lcg::new(1);
+        let mut rng2 = Lcg::new(2);
+        let mut all_same = true;
+        for _ in 0..10 {
+            if rng1.next_u64() != rng2.next_u64() {
+                all_same = false;
+                break;
+            }
+        }
+        assert!(!all_same);
+    }
+}

@@ -862,3 +862,222 @@ impl Tensor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::errors::Result;
+    use crate::tensor::DType;
+
+    #[test]
+    fn test_is_stable_c32_normal() {
+        let z = Complex32::new(1.0, 2.0);
+        assert!(is_stable_c32(z));
+    }
+
+    #[test]
+    fn test_is_stable_c32_nan() {
+        let z = Complex32::new(f32::NAN, 0.0);
+        assert!(!is_stable_c32(z));
+    }
+
+    #[test]
+    fn test_is_stable_c32_inf() {
+        let z = Complex32::new(f32::INFINITY, 0.0);
+        assert!(!is_stable_c32(z));
+    }
+
+    #[test]
+    fn test_is_stable_c64_normal() {
+        let z = Complex64::new(3.0, 4.0);
+        assert!(is_stable_c64(z));
+    }
+
+    #[test]
+    fn test_is_stable_c64_nan() {
+        let z = Complex64::new(0.0, f64::NAN);
+        assert!(!is_stable_c64(z));
+    }
+
+    #[test]
+    fn test_stabilize_c32_nan_to_zero() {
+        let z = Complex32::new(f32::NAN, f32::NAN);
+        let s = stabilize_c32(z);
+        assert_eq!(s.re, 0.0);
+        assert_eq!(s.im, 0.0);
+    }
+
+    #[test]
+    fn test_stabilize_c32_normal_unchanged() {
+        let z = Complex32::new(1.0, 2.0);
+        let s = stabilize_c32(z);
+        assert!((s.re - 1.0).abs() < 1e-6);
+        assert!((s.im - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_stabilize_c64_nan_to_zero() {
+        let z = Complex64::new(f64::INFINITY, 0.0);
+        let s = stabilize_c64(z);
+        assert_eq!(s.re, 0.0);
+        assert_eq!(s.im, 0.0);
+    }
+
+    #[test]
+    fn test_stabilize_c64_normal_unchanged() {
+        let z = Complex64::new(5.0, 3.0);
+        let s = stabilize_c64(z);
+        assert!((s.re - 5.0).abs() < 1e-10);
+        assert!((s.im - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_real_part_c32() -> Result<()> {
+        let t = Tensor::complex(vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0], &[3])?;
+        let real = t.real()?;
+        assert_eq!(real.dtype(), DType::F32);
+        let data = real.data()?;
+        assert!((data[0] - 1.0).abs() < 1e-6);
+        assert!((data[1] - 2.0).abs() < 1e-6);
+        assert!((data[2] - 3.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_imag_part_c32() -> Result<()> {
+        let t = Tensor::complex(vec![1.0, 2.0], vec![3.0, 4.0], &[2])?;
+        let imag = t.imag()?;
+        assert_eq!(imag.dtype(), DType::F32);
+        let data = imag.data()?;
+        assert!((data[0] - 3.0).abs() < 1e-6);
+        assert!((data[1] - 4.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_real_part_of_real_tensor() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0], &[2])?;
+        let real = t.real()?;
+        assert_eq!(real.dtype(), DType::F32);
+        Ok(())
+    }
+
+    #[test]
+    fn test_magnitude_c32() -> Result<()> {
+        // 3+4i has magnitude 5
+        let t = Tensor::complex(vec![3.0], vec![4.0], &[1])?;
+        let mag = t.magnitude()?;
+        let data = mag.data()?;
+        assert!((data[0] - 5.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_magnitude_zero() -> Result<()> {
+        let t = Tensor::complex(vec![0.0], vec![0.0], &[1])?;
+        let mag = t.magnitude()?;
+        let data = mag.data()?;
+        assert!(data[0].abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_phase_c32() -> Result<()> {
+        // 1+0i has phase 0
+        let t = Tensor::complex(vec![1.0], vec![0.0], &[1])?;
+        let phase = t.phase()?;
+        let data = phase.data()?;
+        assert!(data[0].abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_conj_c32() -> Result<()> {
+        let t = Tensor::complex(vec![1.0, 2.0], vec![3.0, 4.0], &[2])?;
+        let conj = t.conj()?;
+        let imag = conj.imag()?;
+        let data = imag.data()?;
+        assert!((data[0] - (-3.0)).abs() < 1e-6);
+        assert!((data[1] - (-4.0)).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_to_complex_from_f32() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0, 3.0], &[3])?;
+        let c = t.to_complex()?;
+        assert_eq!(c.dtype(), DType::C32);
+        assert_eq!(c.shape(), vec![3]);
+        // Imaginary parts should be zero
+        let imag = c.imag()?;
+        let data = imag.data()?;
+        for val in &data {
+            assert!(val.abs() < 1e-6);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_complex_hadamard() -> Result<()> {
+        let a = Tensor::complex(vec![1.0, 2.0], vec![0.0, 0.0], &[2])?;
+        let b = Tensor::complex(vec![3.0, 4.0], vec![0.0, 0.0], &[2])?;
+        let result = a.complex_hadamard(&b)?;
+        let real = result.real()?;
+        let data = real.data()?;
+        assert!((data[0] - 3.0).abs() < 1e-5);
+        assert!((data[1] - 8.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_complex_relu_positive_real() -> Result<()> {
+        let t = Tensor::complex(vec![1.0, -1.0], vec![2.0, 3.0], &[2])?;
+        let result = t.complex_relu()?;
+        let real = result.real()?;
+        let data = real.data()?;
+        // Positive real stays
+        assert!((data[0] - 1.0).abs() < 1e-5);
+        // Negative real -> 0
+        assert!(data[1].abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_complex_c64_real_imag() -> Result<()> {
+        let t = Tensor::complex_f64(vec![1.0, 2.0], vec![3.0, 4.0], &[2])?;
+        let real = t.real()?;
+        assert_eq!(real.dtype(), DType::F64);
+        let imag = t.imag()?;
+        assert_eq!(imag.dtype(), DType::F64);
+        Ok(())
+    }
+
+    #[test]
+    fn test_conj_of_real_is_itself() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0], &[2])?;
+        // conjugate of real number is itself
+        let conj = t.conj()?;
+        let data = conj.data()?;
+        assert!((data[0] - 1.0).abs() < 1e-6);
+        assert!((data[1] - 2.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_magnitude_c64() -> Result<()> {
+        // 3+4i -> magnitude 5
+        let t = Tensor::complex_f64(vec![3.0], vec![4.0], &[1])?;
+        let mag = t.magnitude()?;
+        assert_eq!(mag.dtype(), DType::F64);
+        Ok(())
+    }
+
+    #[test]
+    fn test_complex_2d() -> Result<()> {
+        let t = Tensor::complex(vec![1.0, 2.0, 3.0, 4.0], vec![5.0, 6.0, 7.0, 8.0], &[2, 2])?;
+        assert_eq!(t.shape(), vec![2, 2]);
+        let real = t.real()?;
+        assert_eq!(real.shape(), vec![2, 2]);
+        Ok(())
+    }
+}

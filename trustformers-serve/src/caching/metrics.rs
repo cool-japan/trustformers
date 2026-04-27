@@ -379,3 +379,226 @@ impl CacheStatsCollector {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- HitRateTracker tests ---
+
+    #[test]
+    fn test_hit_rate_tracker_initial_rate_zero() {
+        let tracker = HitRateTracker::new(100);
+        assert!((tracker.get_hit_rate() - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_hit_rate_tracker_all_hits() {
+        let mut tracker = HitRateTracker::new(100);
+        for _ in 0..10 {
+            tracker.record_hit();
+        }
+        assert!((tracker.get_hit_rate() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_hit_rate_tracker_all_misses() {
+        let mut tracker = HitRateTracker::new(100);
+        for _ in 0..10 {
+            tracker.record_miss();
+        }
+        assert!((tracker.get_hit_rate() - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_hit_rate_tracker_mixed() {
+        let mut tracker = HitRateTracker::new(200);
+        for _ in 0..3 {
+            tracker.record_hit();
+        }
+        for _ in 0..7 {
+            tracker.record_miss();
+        }
+        let rate = tracker.get_hit_rate();
+        assert!((rate - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_hit_rate_tracker_windowed_rate() {
+        let mut tracker = HitRateTracker::new(100);
+        tracker.record_hit();
+        tracker.record_hit();
+        tracker.record_miss();
+        let windowed = tracker.get_windowed_hit_rate();
+        // 2 hits out of 3 total
+        assert!((windowed - 2.0 / 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_hit_rate_tracker_windowed_empty_returns_zero() {
+        let tracker = HitRateTracker::new(100);
+        assert!((tracker.get_windowed_hit_rate() - 0.0).abs() < 1e-6);
+    }
+
+    // --- EvictionTracker tests ---
+
+    #[test]
+    fn test_eviction_tracker_initial_zero() {
+        let tracker = EvictionTracker::new();
+        assert_eq!(tracker.get_total_evictions(), 0);
+    }
+
+    #[test]
+    fn test_eviction_tracker_record_and_count() {
+        let mut tracker = EvictionTracker::new();
+        tracker.record_eviction("size_limit");
+        tracker.record_eviction("size_limit");
+        tracker.record_eviction("expired");
+        assert_eq!(tracker.get_total_evictions(), 3);
+    }
+
+    #[test]
+    fn test_eviction_tracker_rate_by_reason() {
+        let mut tracker = EvictionTracker::new();
+        tracker.record_eviction("expired");
+        tracker.record_eviction("expired");
+        tracker.record_eviction("size_limit");
+        let rate = tracker.get_eviction_rate("expired");
+        assert!((rate - 2.0 / 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_eviction_tracker_unknown_reason_rate_zero() {
+        let mut tracker = EvictionTracker::new();
+        tracker.record_eviction("expired");
+        let rate = tracker.get_eviction_rate("unknown_reason");
+        assert!((rate - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_eviction_tracker_rate_when_empty_is_zero() {
+        let tracker = EvictionTracker::new();
+        assert!((tracker.get_eviction_rate("any") - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_eviction_tracker_default_is_same_as_new() {
+        let tracker = EvictionTracker::default();
+        assert_eq!(tracker.get_total_evictions(), 0);
+    }
+
+    // --- PerformanceMonitor tests ---
+
+    #[test]
+    fn test_performance_monitor_initial_latency_zero() {
+        let monitor = PerformanceMonitor::new(100);
+        assert!((monitor.get_average_latency("get") - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_performance_monitor_record_and_average() {
+        let mut monitor = PerformanceMonitor::new(100);
+        monitor.record_operation_time("get", 10.0);
+        monitor.record_operation_time("get", 20.0);
+        let avg = monitor.get_average_latency("get");
+        assert!((avg - 15.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_performance_monitor_percentile_latency() {
+        let mut monitor = PerformanceMonitor::new(200);
+        for i in 1..=10u32 {
+            monitor.record_operation_time("put", i as f32 * 10.0);
+        }
+        let p50 = monitor.get_percentile_latency("put", 50.0);
+        // sorted: [10,20,30,40,50,60,70,80,90,100], index=4 => 50.0
+        assert!((p50 - 50.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_performance_monitor_percentile_empty_returns_zero() {
+        let monitor = PerformanceMonitor::new(100);
+        assert!((monitor.get_percentile_latency("missing", 99.0) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_performance_monitor_window_caps_samples() {
+        let mut monitor = PerformanceMonitor::new(5);
+        for i in 0..10u32 {
+            monitor.record_operation_time("op", i as f32);
+        }
+        // Only last 5 samples: 5,6,7,8,9 => avg = 7.0
+        let avg = monitor.get_average_latency("op");
+        assert!((avg - 7.0).abs() < 1e-4);
+    }
+
+    // --- CacheStatsCollector async tests ---
+
+    #[tokio::test]
+    async fn test_stats_collector_hit_rate_starts_zero() {
+        let collector = CacheStatsCollector::new();
+        let rate = collector.get_hit_rate("test_cache").await;
+        assert!((rate - 0.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn test_stats_collector_record_hits_and_misses() {
+        let collector = CacheStatsCollector::new();
+        collector.record_cache_hit("my_cache").await;
+        collector.record_cache_hit("my_cache").await;
+        collector.record_cache_miss("my_cache", "not_found").await;
+        let rate = collector.get_hit_rate("my_cache").await;
+        assert!((rate - 2.0 / 3.0).abs() < 1e-5);
+    }
+
+    #[tokio::test]
+    async fn test_stats_collector_get_metrics_totals() {
+        let collector = CacheStatsCollector::new();
+        collector.record_cache_hit("cache_a").await;
+        collector.record_cache_miss("cache_a", "reason").await;
+        collector.record_cache_hit("cache_b").await;
+        let metrics = collector.get_metrics().await;
+        assert_eq!(metrics.total_hits, 2);
+        assert_eq!(metrics.total_misses, 1);
+        assert_eq!(metrics.total_requests, 3);
+    }
+
+    #[tokio::test]
+    async fn test_stats_collector_record_put_increases_size() {
+        let collector = CacheStatsCollector::new();
+        collector.record_cache_put("cache_x", 1024).await;
+        collector.record_cache_put("cache_x", 512).await;
+        let metrics = collector.get_metrics().await;
+        let size = metrics.cache_sizes.get("cache_x").copied().unwrap_or(0);
+        assert_eq!(size, 1536);
+    }
+
+    #[tokio::test]
+    async fn test_stats_collector_clear_resets_size() {
+        let collector = CacheStatsCollector::new();
+        collector.record_cache_put("cache_y", 2048).await;
+        collector.record_cache_clear("cache_y", 10).await;
+        let metrics = collector.get_metrics().await;
+        let size = metrics.cache_sizes.get("cache_y").copied().unwrap_or(999);
+        assert_eq!(size, 0);
+    }
+
+    #[tokio::test]
+    async fn test_stats_collector_eviction_tracking() {
+        let collector = CacheStatsCollector::new();
+        collector.record_cache_eviction("cache_z", "size_limit").await;
+        collector.record_cache_eviction("cache_z", "expired").await;
+        // Verify metrics doesn't panic and returns valid data
+        let metrics = collector.get_metrics().await;
+        assert!(metrics.eviction_rates.contains_key("cache_z"));
+    }
+
+    #[tokio::test]
+    async fn test_stats_collector_operation_time_recording() {
+        let collector = CacheStatsCollector::new();
+        collector.record_operation_time("get_op", 5.5).await;
+        collector.record_operation_time("get_op", 6.5).await;
+        // Just verify it doesn't panic and returns valid metrics
+        let _metrics = collector.get_metrics().await;
+    }
+}

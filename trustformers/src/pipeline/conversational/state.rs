@@ -358,3 +358,242 @@ impl ConversationPace {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_turn(role: ConversationRole, content: &str, tokens: usize) -> ConversationTurn {
+        ConversationTurn {
+            role,
+            content: content.to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            token_count: tokens,
+        }
+    }
+
+    #[test]
+    fn test_new_state_has_empty_turns() {
+        let state = ConversationState::new("id-1".to_string());
+        assert!(
+            state.turns.is_empty(),
+            "new ConversationState must have no turns"
+        );
+    }
+
+    #[test]
+    fn test_new_state_id_preserved() {
+        let id = "test-conversation-99";
+        let state = ConversationState::new(id.to_string());
+        assert_eq!(
+            state.conversation_id, id,
+            "conversation_id must match the supplied id"
+        );
+    }
+
+    #[test]
+    fn test_add_user_turn_increments_counter() {
+        let mut state = ConversationState::new("s1".to_string());
+        state.add_turn(make_turn(ConversationRole::User, "hi", 2));
+        assert_eq!(state.stats.user_turns, 1, "user_turns must increment by 1");
+    }
+
+    #[test]
+    fn test_add_assistant_turn_increments_counter() {
+        let mut state = ConversationState::new("s2".to_string());
+        state.add_turn(make_turn(ConversationRole::Assistant, "hello", 4));
+        assert_eq!(
+            state.stats.assistant_turns, 1,
+            "assistant_turns must increment by 1"
+        );
+    }
+
+    #[test]
+    fn test_token_accumulation_across_turns() {
+        let mut state = ConversationState::new("s3".to_string());
+        state.add_turn(make_turn(ConversationRole::User, "msg1", 5));
+        state.add_turn(make_turn(ConversationRole::User, "msg2", 8));
+        assert_eq!(
+            state.total_tokens, 13,
+            "total_tokens must sum all turn token counts"
+        );
+    }
+
+    #[test]
+    fn test_get_recent_context_returns_within_limit() {
+        let mut state = ConversationState::new("s4".to_string());
+        for i in 0..10u32 {
+            state.add_turn(make_turn(ConversationRole::User, &format!("m{i}"), 50));
+        }
+        // With 500 total tokens, requesting max 150 should give at most 3 turns
+        let ctx = state.get_recent_context(150);
+        assert!(
+            ctx.len() <= 3,
+            "context must not exceed token budget (50 per turn, 150 max)"
+        );
+    }
+
+    #[test]
+    fn test_get_recent_context_ordering_preserved() {
+        let mut state = ConversationState::new("s5".to_string());
+        state.add_turn(make_turn(ConversationRole::User, "first", 10));
+        state.add_turn(make_turn(ConversationRole::User, "second", 10));
+        let ctx = state.get_recent_context(1000);
+        assert_eq!(
+            ctx[0].content, "first",
+            "context must preserve chronological order"
+        );
+        assert_eq!(ctx[1].content, "second", "second message must be last");
+    }
+
+    #[test]
+    fn test_trim_history_keeps_last_n_turns() {
+        let mut state = ConversationState::new("s6".to_string());
+        for i in 0..8u32 {
+            state.add_turn(make_turn(ConversationRole::User, &format!("t{i}"), 1));
+        }
+        state.trim_history(4, usize::MAX);
+        assert_eq!(
+            state.turns.len(),
+            4,
+            "trim_history(4) must keep only the last 4 turns"
+        );
+    }
+
+    #[test]
+    fn test_trim_history_by_tokens() {
+        let mut state = ConversationState::new("s7".to_string());
+        for _ in 0..5u32 {
+            state.add_turn(make_turn(ConversationRole::User, "x", 20));
+        }
+        // total = 100; trim to 60 means at most 3 turns remain
+        state.trim_history(usize::MAX, 60);
+        assert!(
+            state.total_tokens <= 60,
+            "total_tokens must not exceed 60 after token trim"
+        );
+    }
+
+    #[test]
+    fn test_set_and_get_variable_roundtrip() {
+        let mut state = ConversationState::new("s8".to_string());
+        state.set_variable("lang".to_string(), "en".to_string());
+        assert_eq!(
+            state.get_variable("lang").map(String::as_str),
+            Some("en"),
+            "get_variable must return the value set by set_variable"
+        );
+    }
+
+    #[test]
+    fn test_set_variable_overwrite() {
+        let mut state = ConversationState::new("s9".to_string());
+        state.set_variable("key".to_string(), "v1".to_string());
+        state.set_variable("key".to_string(), "v2".to_string());
+        assert_eq!(
+            state.get_variable("key").map(String::as_str),
+            Some("v2"),
+            "second set_variable must overwrite the previous value"
+        );
+    }
+
+    #[test]
+    fn test_update_health_averages_correctly() {
+        let mut state = ConversationState::new("s10".to_string());
+        state.update_health(0.6, 0.9, 1.0);
+        let expected = (0.6 + 0.9 + 1.0) / 3.0;
+        assert!(
+            (state.health.overall_score - expected).abs() < 1e-5,
+            "overall_score must be the mean of the three supplied scores"
+        );
+    }
+
+    #[test]
+    fn test_needs_repair_threshold_coherence() {
+        let mut state = ConversationState::new("s11".to_string());
+        state.update_health(0.4, 0.9, 0.9);
+        assert!(
+            state.needs_repair(),
+            "low coherence (< 0.5) must trigger needs_repair"
+        );
+    }
+
+    #[test]
+    fn test_no_repair_needed_when_scores_high() {
+        let mut state = ConversationState::new("s12".to_string());
+        state.update_health(0.95, 0.95, 0.95);
+        assert!(
+            !state.needs_repair(),
+            "healthy state must not require repair"
+        );
+    }
+
+    #[test]
+    fn test_start_reasoning_initialises_context() {
+        let mut state = ConversationState::new("s13".to_string());
+        assert!(
+            state.reasoning_context.is_none(),
+            "reasoning context should be None initially"
+        );
+        state.start_reasoning(Some("goal".to_string()));
+        assert!(
+            state.reasoning_context.is_some(),
+            "reasoning context must be Some after start"
+        );
+    }
+
+    #[test]
+    fn test_add_reasoning_step_appended() {
+        let mut state = ConversationState::new("s14".to_string());
+        state.start_reasoning(None);
+        let step = ReasoningStep {
+            step_type: ReasoningType::Causal,
+            description: "A causes B".to_string(),
+            inputs: vec!["A".to_string()],
+            output: "B".to_string(),
+            confidence: 0.75,
+        };
+        state.add_reasoning_step(step);
+        let ctx = state.reasoning_context.as_ref().expect("context must exist");
+        assert_eq!(
+            ctx.reasoning_chain.len(),
+            1,
+            "one reasoning step must be in the chain"
+        );
+    }
+
+    #[test]
+    fn test_memory_sorting_by_importance() {
+        let mut state = ConversationState::new("s15".to_string());
+        for i in 0..5u32 {
+            state.add_memory(ConversationMemory {
+                id: format!("m{i}"),
+                content: "fact".to_string(),
+                importance: i as f32 * 0.2,
+                last_accessed: chrono::Utc::now(),
+                access_count: 1,
+                memory_type: MemoryType::Fact,
+                tags: vec![],
+            });
+        }
+        // After sorting by importance desc, first element should have highest importance
+        assert!(
+            state.memories[0].importance >= state.memories[1].importance,
+            "memories should be sorted by descending importance"
+        );
+    }
+
+    #[test]
+    fn test_get_summary_stats_reflects_turns() {
+        let mut state = ConversationState::new("s16".to_string());
+        state.add_turn(make_turn(ConversationRole::User, "hello", 2));
+        state.add_turn(make_turn(ConversationRole::Assistant, "hi there", 4));
+        let stats = state.get_summary_stats();
+        assert_eq!(stats.total_turns, 2, "summary stats must count both turns");
+        assert_eq!(
+            stats.total_tokens, 6,
+            "summary stats total_tokens must sum all tokens"
+        );
+    }
+}

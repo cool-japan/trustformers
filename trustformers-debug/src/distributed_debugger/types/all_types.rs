@@ -73,13 +73,13 @@ pub enum EventPriority {
     Critical,
 }
 #[derive(Debug, Clone)]
-pub(super) struct GradientSyncStatistics {
-    pub(super) total_sync_rounds: u64,
-    pub(super) average_sync_time: Duration,
-    pub(super) sync_efficiency: f64,
+pub(crate) struct GradientSyncStatistics {
+    pub(crate) total_sync_rounds: u64,
+    pub(crate) average_sync_time: Duration,
+    pub(crate) sync_efficiency: f64,
     #[allow(dead_code)]
-    pub(super) gradient_staleness: f64,
-    pub(super) _convergence_rate: f64,
+    pub(crate) gradient_staleness: f64,
+    pub(crate) _convergence_rate: f64,
 }
 #[derive(Debug, Clone)]
 pub(super) struct PendingOperation {
@@ -300,7 +300,7 @@ pub struct ClusterAnalysisReport {
     pub scalability_analysis: ScalabilityAnalysis,
 }
 impl ClusterAnalysisReport {
-    pub(super) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             performance_metrics: ClusterPerformanceMetrics {
                 total_throughput: 0.0,
@@ -354,16 +354,16 @@ pub(super) struct ResourceContention {
     pub(super) contention_level: f64,
 }
 #[derive(Debug, Clone)]
-pub(super) struct CompressionStats {
+pub(crate) struct CompressionStats {
     #[allow(dead_code)]
-    pub(super) compression_algorithm: String,
-    pub(super) average_compression_ratio: f64,
+    pub(crate) compression_algorithm: String,
+    pub(crate) average_compression_ratio: f64,
     #[allow(dead_code)]
-    pub(super) compression_time: Duration,
+    pub(crate) compression_time: Duration,
     #[allow(dead_code)]
-    pub(super) decompression_time: Duration,
+    pub(crate) decompression_time: Duration,
     #[allow(dead_code)]
-    pub(super) accuracy_loss: f64,
+    pub(crate) accuracy_loss: f64,
 }
 #[derive(Debug, Clone)]
 pub enum SyncOperationType {
@@ -1677,3 +1677,6 @@ pub enum SyncPriority {
     High,
     Critical,
 }
+
+#[path = "all_types_tests.rs"]
+mod all_types_tests;

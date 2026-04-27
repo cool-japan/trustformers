@@ -675,7 +675,7 @@ impl PredictionCache {
     /// Get cached prediction
     pub fn get(&mut self, key: &str) -> Option<CachedPrediction> {
         // Clean expired entries periodically
-        if self.stats.hits % 100 == 0 {
+        if self.stats.hits.is_multiple_of(100) {
             self.clean_expired();
         }
 

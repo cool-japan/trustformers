@@ -354,22 +354,27 @@ pytest tests/benchmarks/ --benchmark-only
 ## Future Enhancements
 
 ### High Priority
-- Enhanced async support for all operations
-- Better PyTorch interoperability
-- Improved error messages
-- More pipeline types
+- [ ] Enhanced async support for all operations
+- [ ] Better PyTorch interoperability
+  - **Refinement needed:** DLPack zero-copy tensor exchange? autograd bridge? nn.Module adapter?
+- [ ] Improved error messages
+- [ ] More pipeline types
+  - **Refinement needed:** target pipeline list (image-classification ASR?), most audio/vision pipelines already exist in Rust.
 
 ### Performance
-- Further GIL optimization
-- Better memory management
-- Streaming responses
-- Batch processing improvements
+- [ ] Further GIL optimization
+- [ ] Better memory management
+  - **Refinement needed:** target metric (peak RSS? allocation count? leak detection?).
+- [ ] Streaming responses
+- [ ] Batch processing improvements
+  - **Refinement needed:** dynamic batching? padding strategy? target throughput multiplier?
 
 ### Features
-- Jupyter notebook widgets
-- TensorBoard integration
-- Model profiling tools
-- Distributed inference from Python
+- [ ] Jupyter notebook widgets
+- [ ] TensorBoard integration
+- [ ] Model profiling tools
+- [ ] Distributed inference: multi-GPU dispatch via Python API
+  - **Refinement needed:** RPC transport? model sharding API? at least 2 distinct sub-tasks needed.
 
 ---
 

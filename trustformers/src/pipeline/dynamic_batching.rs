@@ -411,6 +411,244 @@ mod tests {
     use super::*;
     use tokio::time::sleep;
 
+    // ── Config defaults ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_config_default_batch_size_within_bounds() {
+        let config = DynamicBatchingConfig::default();
+        assert!(config.initial_batch_size >= config.min_batch_size);
+        assert!(config.initial_batch_size <= config.max_batch_size);
+    }
+
+    #[test]
+    fn test_config_default_target_latency_positive() {
+        let config = DynamicBatchingConfig::default();
+        assert!(config.target_latency_ms > 0);
+    }
+
+    #[test]
+    fn test_config_default_adjustment_factor_gt_one() {
+        let config = DynamicBatchingConfig::default();
+        assert!(
+            config.adjustment_factor > 1.0,
+            "adjustment factor should be >1 for meaningful batch expansion"
+        );
+    }
+
+    #[test]
+    fn test_config_alias_type() {
+        // DynamicBatchConfig must be an alias for DynamicBatchingConfig
+        let _config: DynamicBatchConfig = DynamicBatchingConfig::default();
+    }
+
+    // ── Priority ordering ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_priority_ordering() {
+        let config = DynamicBatchingConfig {
+            initial_batch_size: 4,
+            max_wait_time_ms: 50,
+            ..Default::default()
+        };
+        let batcher = DynamicBatcher::new(config);
+        // Add requests; don't await – just inspect the queue
+        let _low = batcher.add_request(1_i32, RequestPriority::Low);
+        let _normal = batcher.add_request(2_i32, RequestPriority::Normal);
+        let _high = batcher.add_request(3_i32, RequestPriority::High);
+        let _critical = batcher.add_request(4_i32, RequestPriority::Critical);
+
+        let queue = batcher.pending_requests.lock().expect("lock should not be poisoned");
+        let priorities: Vec<_> = queue.iter().map(|r| r.priority).collect();
+        assert!(
+            priorities.windows(2).all(|w| w[0] >= w[1]),
+            "requests must be ordered highest-priority first"
+        );
+    }
+
+    #[test]
+    fn test_priority_order_values() {
+        assert!(RequestPriority::Critical > RequestPriority::High);
+        assert!(RequestPriority::High > RequestPriority::Normal);
+        assert!(RequestPriority::Normal > RequestPriority::Low);
+    }
+
+    #[test]
+    fn test_priority_default_is_normal() {
+        let p = RequestPriority::default();
+        assert_eq!(p, RequestPriority::Normal);
+    }
+
+    // ── Max batch tokens constraint (simulated) ───────────────────────────────
+
+    #[test]
+    fn test_batch_respects_max_batch_size() {
+        let max = 4_usize;
+        let config = DynamicBatchingConfig {
+            initial_batch_size: max,
+            min_batch_size: 1,
+            max_batch_size: max,
+            ..Default::default()
+        };
+        let batcher = DynamicBatcher::<i32>::new(config);
+        let current = *batcher.current_batch_size.read().expect("lock ok");
+        assert!(current <= max, "initial batch size must not exceed max");
+    }
+
+    // ── Throughput estimation ────────────────────────────────────────────────
+
+    #[test]
+    fn test_throughput_formula() {
+        // throughput = batch_size / (latency_ms / 1000)
+        let batch_size = 8_usize;
+        let latency_ms = 100_u64;
+        let throughput = (batch_size as f64) / (latency_ms as f64 / 1000.0);
+        assert!(
+            (throughput - 80.0).abs() < 1e-6,
+            "throughput should be batch/latency_sec"
+        );
+    }
+
+    #[test]
+    fn test_throughput_increases_with_larger_batch_same_latency() {
+        let latency_ms = 100_u64;
+        let t_small = (4_f64) / (latency_ms as f64 / 1000.0);
+        let t_large = (8_f64) / (latency_ms as f64 / 1000.0);
+        assert!(
+            t_large > t_small,
+            "larger batch at same latency → higher throughput"
+        );
+    }
+
+    // ── Latency SLO tracking ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_adjust_batch_size_reduces_on_high_latency() {
+        let config = DynamicBatchingConfig {
+            initial_batch_size: 16,
+            min_batch_size: 1,
+            max_batch_size: 64,
+            target_latency_ms: 10, // very tight SLO
+            max_wait_time_ms: 5,
+            throughput_threshold: 1.0,
+            performance_window_size: 5,
+            adjustment_factor: 1.5,
+        };
+        let batcher = DynamicBatcher::<i32>::new(config.clone());
+        // Record high-latency batches
+        for _ in 0..4 {
+            batcher.record_performance(8, 500).await; // 500ms >> 10ms SLO
+        }
+        batcher.adjust_batch_size().await;
+        let current = *batcher.current_batch_size.read().expect("lock ok");
+        assert!(
+            current < config.initial_batch_size,
+            "batch size should decrease when latency exceeds SLO"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_adjust_batch_size_increases_on_low_throughput() {
+        let config = DynamicBatchingConfig {
+            initial_batch_size: 4,
+            min_batch_size: 1,
+            max_batch_size: 64,
+            target_latency_ms: 1000, // very loose SLO
+            max_wait_time_ms: 5,
+            throughput_threshold: 1000.0, // throughput we'll never meet
+            performance_window_size: 5,
+            adjustment_factor: 1.5,
+        };
+        let batcher = DynamicBatcher::<i32>::new(config.clone());
+        // Very low throughput: latency=1ms, batch=1 → 1000 rps, but threshold=1000 exactly
+        // Force below threshold: latency=500ms, batch=1 → 2rps
+        for _ in 0..4 {
+            batcher.record_performance(1, 500).await;
+        }
+        batcher.adjust_batch_size().await;
+        let current = *batcher.current_batch_size.read().expect("lock ok");
+        assert!(
+            current >= config.initial_batch_size,
+            "batch size should increase when throughput is below threshold"
+        );
+    }
+
+    // ── Variable-length padding / grouping (logic tests) ─────────────────────
+
+    #[test]
+    fn test_sequence_grouping_short_sequences() {
+        // Sequences of lengths: group by ≤ 128 together
+        let seq_lens = [64_usize, 100, 128, 50];
+        let short_group: Vec<_> = seq_lens.iter().filter(|&&l| l <= 128).collect();
+        assert_eq!(
+            short_group.len(),
+            4,
+            "all sequences should be in the short group"
+        );
+    }
+
+    #[test]
+    fn test_sequence_grouping_long_sequences() {
+        let seq_lens = [64_usize, 256, 512, 128, 300];
+        let long_group: Vec<_> = seq_lens.iter().filter(|&&l| l > 128).collect();
+        assert_eq!(long_group.len(), 3);
+    }
+
+    // ── Batch formation by deadline ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_collect_batch_max_size_respected() {
+        let config = DynamicBatchingConfig {
+            initial_batch_size: 2,
+            max_wait_time_ms: 1000,
+            ..Default::default()
+        };
+        let batcher = DynamicBatcher::<i32>::new(config);
+        // Enqueue 5 requests
+        {
+            let mut queue = batcher.pending_requests.lock().expect("lock ok");
+            for i in 0..5_i32 {
+                let (tx, _rx) = tokio::sync::oneshot::channel();
+                queue.push_back(BatchRequest {
+                    input: i,
+                    response_sender: tx,
+                    timestamp: Instant::now(),
+                    priority: RequestPriority::Normal,
+                });
+            }
+        }
+        let batch = batcher.collect_batch().await;
+        assert_eq!(
+            batch.len(),
+            2,
+            "collect_batch should respect current_batch_size"
+        );
+    }
+
+    // ── Batcher stats ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_performance_stats_empty_returns_none() {
+        let batcher = DynamicBatcher::<i32>::new(DynamicBatchingConfig::default());
+        assert!(
+            batcher.get_performance_stats().is_none(),
+            "no performance stats before any batches processed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_performance_stats_after_recording() {
+        let batcher = DynamicBatcher::<i32>::new(DynamicBatchingConfig::default());
+        batcher.record_performance(4, 100).await;
+        batcher.record_performance(4, 110).await;
+        batcher.record_performance(4, 90).await;
+        let stats = batcher.get_performance_stats();
+        assert!(stats.is_some(), "stats should be available after recording");
+        let s = stats.expect("stats should be Some");
+        assert_eq!(s.avg_batch_size, 4);
+    }
+
+    // ── Basic end-to-end test ─────────────────────────────────────────────────
+
     #[tokio::test]
     async fn test_dynamic_batching_basic() {
         let config = DynamicBatchingConfig {
@@ -418,61 +656,66 @@ mod tests {
             max_wait_time_ms: 10,
             ..Default::default()
         };
-
         let batcher = DynamicBatcher::new(config);
-
-        // Mock processor that doubles the input
         let processor = |inputs: Vec<i32>| async move {
             sleep(Duration::from_millis(1)).await;
             Ok(inputs.into_iter().map(|x| x * 2).collect())
         };
-
-        // Start batcher in background
         let batcher_clone = Arc::new(batcher);
         let batcher_for_task = batcher_clone.clone();
-
         let process_task = tokio::spawn(async move { batcher_for_task.start(processor).await });
-
-        // Send some requests
         let results = futures::future::join_all(vec![
             batcher_clone.add_request(1, RequestPriority::Normal),
             batcher_clone.add_request(2, RequestPriority::Normal),
             batcher_clone.add_request(3, RequestPriority::High),
         ])
         .await;
-
-        // Stop the batcher
         batcher_clone.stop();
         let _ = process_task.await;
-
-        // Check results
         assert_eq!(results.len(), 3);
         for result in results {
             assert!(result.is_ok());
         }
     }
 
+    // ── BatchingStats fields ──────────────────────────────────────────────────
+
     #[tokio::test]
-    async fn test_priority_ordering() {
+    async fn test_batching_stats_current_size_within_bounds() {
         let config = DynamicBatchingConfig {
-            initial_batch_size: 3,
-            max_wait_time_ms: 50,
+            initial_batch_size: 4,
+            min_batch_size: 1,
+            max_batch_size: 64,
             ..Default::default()
         };
+        let batcher = DynamicBatcher::<i32>::new(config.clone());
+        for _ in 0..5 {
+            batcher.record_performance(4, 80).await;
+        }
+        let stats = batcher.get_performance_stats().expect("stats should exist");
+        assert!(stats.current_batch_size >= config.min_batch_size);
+        assert!(stats.current_batch_size <= config.max_batch_size);
+    }
 
-        let batcher = DynamicBatcher::new(config);
+    // ── DynamicBatchPipeline trait default implementation ─────────────────────
 
-        // Add requests with different priorities
-        let _low = batcher.add_request(1, RequestPriority::Low);
-        let _normal = batcher.add_request(2, RequestPriority::Normal);
-        let _high = batcher.add_request(3, RequestPriority::High);
-        let _critical = batcher.add_request(4, RequestPriority::Critical);
+    #[tokio::test]
+    async fn test_pipeline_trait_default_batch_falls_back_to_single() {
+        struct AddOnePipeline;
 
-        // Check the order in queue
-        let queue = batcher.pending_requests.lock().expect("lock should not be poisoned");
-        let priorities: Vec<_> = queue.iter().map(|r| r.priority).collect();
+        #[async_trait::async_trait]
+        impl DynamicBatchPipeline<i32> for AddOnePipeline {
+            type Output = i32;
+            async fn process_single(&self, input: i32) -> Result<i32> {
+                Ok(input + 1)
+            }
+        }
 
-        // Should be ordered by priority (highest first)
-        assert!(priorities.windows(2).all(|w| w[0] >= w[1]));
+        let pipeline = AddOnePipeline;
+        let results = pipeline
+            .process_batch(vec![1, 2, 3])
+            .await
+            .expect("process_batch should succeed via default impl");
+        assert_eq!(results, vec![2, 3, 4]);
     }
 }

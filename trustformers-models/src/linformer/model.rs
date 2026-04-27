@@ -1013,3 +1013,221 @@ impl Model for LinformerForMaskedLM {
         self.linformer.num_parameters() + self.mlm_head.parameter_count()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trustformers_core::traits::Config;
+
+    fn small_linformer_config() -> LinformerConfig {
+        LinformerConfig {
+            vocab_size: 100,
+            hidden_size: 32,
+            num_hidden_layers: 2,
+            num_attention_heads: 4,
+            intermediate_size: 64,
+            hidden_act: "gelu".to_string(),
+            hidden_dropout_prob: 0.0,
+            attention_probs_dropout_prob: 0.0,
+            max_position_embeddings: 64,
+            type_vocab_size: 2,
+            initializer_range: 0.02,
+            layer_norm_eps: 1e-12,
+            pad_token_id: 0,
+            position_embedding_type: "absolute".to_string(),
+            projected_attention_size: 16,
+            share_projection: true,
+            share_layers: false,
+            use_efficient_attention: true,
+        }
+    }
+
+    #[test]
+    fn test_linformer_config_default() {
+        let config = LinformerConfig::default();
+        assert_eq!(config.vocab_size, 30522);
+        assert_eq!(config.hidden_size, 768);
+        assert_eq!(config.num_hidden_layers, 12);
+        assert_eq!(config.num_attention_heads, 12);
+        assert!(config.use_efficient_attention);
+    }
+
+    #[test]
+    fn test_linformer_config_validate() {
+        let config = small_linformer_config();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_linformer_config_validate_invalid() {
+        let mut config = small_linformer_config();
+        config.hidden_size = 33; // Not divisible by num_attention_heads=4
+        let result = config.validate();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_linformer_config_validate_projected_size() {
+        let mut config = small_linformer_config();
+        config.projected_attention_size = config.max_position_embeddings + 1;
+        let result = config.validate();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_linformer_attention_creation() {
+        let config = small_linformer_config();
+        let result = LinformerAttention::new(&config);
+        assert!(result.is_ok());
+        let attn = result.expect("attention creation should succeed");
+        assert!(matches!(attn.device(), Device::CPU));
+    }
+
+    #[test]
+    fn test_linformer_attention_with_device() {
+        let config = small_linformer_config();
+        let result = LinformerAttention::new_with_device(&config, Device::CPU);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_linformer_attention_no_efficient() {
+        let mut config = small_linformer_config();
+        config.use_efficient_attention = false;
+        let result = LinformerAttention::new(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_linformer_attention_shared_projection() {
+        let config = small_linformer_config();
+        assert!(config.share_projection);
+        let attn = LinformerAttention::new(&config).expect("creation should succeed");
+        assert!(attn.share_projection);
+    }
+
+    #[test]
+    fn test_linformer_attention_separate_projection() {
+        let mut config = small_linformer_config();
+        config.share_projection = false;
+        let result = LinformerAttention::new(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_linformer_model_creation() {
+        let config = small_linformer_config();
+        let result = LinformerModel::new(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_linformer_model_with_device() {
+        let config = small_linformer_config();
+        let result = LinformerModel::new_with_device(config, Device::CPU);
+        assert!(result.is_ok());
+        let model = result.expect("model creation should succeed");
+        assert!(matches!(model.device(), Device::CPU));
+    }
+
+    #[test]
+    fn test_linformer_model_config() {
+        let config = small_linformer_config();
+        let model = LinformerModel::new(config.clone()).expect("model creation should succeed");
+        let mc = model.get_config();
+        assert_eq!(mc.vocab_size, config.vocab_size);
+        assert_eq!(mc.hidden_size, config.hidden_size);
+    }
+
+    #[test]
+    fn test_linformer_model_num_parameters() {
+        let config = small_linformer_config();
+        let model = LinformerModel::new(config).expect("model creation should succeed");
+        assert!(model.num_parameters() > 0);
+    }
+
+    #[test]
+    fn test_linformer_sequence_classification_creation() {
+        let config = small_linformer_config();
+        let result = LinformerForSequenceClassification::new(config, 5);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_linformer_sequence_classification_with_device() {
+        let config = small_linformer_config();
+        let result = LinformerForSequenceClassification::new_with_device(config, 3, Device::CPU);
+        assert!(result.is_ok());
+        let model = result.expect("model creation should succeed");
+        assert!(matches!(model.device(), Device::CPU));
+    }
+
+    #[test]
+    fn test_linformer_sequence_classification_num_parameters() {
+        let config = small_linformer_config();
+        let model = LinformerForSequenceClassification::new(config, 2)
+            .expect("model creation should succeed");
+        assert!(model.num_parameters() > 0);
+    }
+
+    #[test]
+    fn test_linformer_masked_lm_creation() {
+        let config = small_linformer_config();
+        let result = LinformerForMaskedLM::new(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_linformer_masked_lm_with_device() {
+        let config = small_linformer_config();
+        let result = LinformerForMaskedLM::new_with_device(config, Device::CPU);
+        assert!(result.is_ok());
+        let model = result.expect("model creation should succeed");
+        assert!(matches!(model.device(), Device::CPU));
+    }
+
+    #[test]
+    fn test_linformer_masked_lm_num_parameters() {
+        let config = small_linformer_config();
+        let model = LinformerForMaskedLM::new(config).expect("model creation should succeed");
+        assert!(model.num_parameters() > 0);
+    }
+
+    #[test]
+    fn test_linformer_head_dim() {
+        let config = small_linformer_config();
+        let head_dim = config.head_dim();
+        assert_eq!(head_dim, config.hidden_size / config.num_attention_heads);
+    }
+
+    #[test]
+    fn test_linformer_model_param_count_relationship() {
+        let config = small_linformer_config();
+        let base_model =
+            LinformerModel::new(config.clone()).expect("model creation should succeed");
+        let cls_model = LinformerForSequenceClassification::new(config.clone(), 3)
+            .expect("model creation should succeed");
+        // Classification model should have more params than base
+        assert!(cls_model.num_parameters() > base_model.num_parameters());
+    }
+
+    #[test]
+    fn test_linformer_masked_lm_param_count() {
+        let config = small_linformer_config();
+        let base_model =
+            LinformerModel::new(config.clone()).expect("model creation should succeed");
+        let mlm_model = LinformerForMaskedLM::new(config).expect("model creation should succeed");
+        // MLM model should have more params than base
+        assert!(mlm_model.num_parameters() > base_model.num_parameters());
+    }
+
+    #[test]
+    fn test_linformer_model_config_consistency() {
+        let config = small_linformer_config();
+        let model = LinformerModel::new(config.clone()).expect("model creation should succeed");
+        let mc = model.get_config();
+        assert_eq!(mc.projected_attention_size, config.projected_attention_size);
+        assert_eq!(mc.share_projection, config.share_projection);
+        assert_eq!(mc.use_efficient_attention, config.use_efficient_attention);
+    }
+}

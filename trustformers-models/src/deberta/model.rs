@@ -839,3 +839,251 @@ impl DebertaForMaskedLM {
         Ok(prediction_scores)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::deberta::config::DebertaConfig;
+    use scirs2_core::ndarray::Array1;
+    use trustformers_core::traits::Config;
+
+    /// Minimal DeBERTa config for fast tests.
+    fn mini_config() -> DebertaConfig {
+        DebertaConfig {
+            vocab_size: 100,
+            hidden_size: 64,
+            num_hidden_layers: 1,
+            num_attention_heads: 4,
+            intermediate_size: 256,
+            hidden_act: "gelu".to_string(),
+            hidden_dropout_prob: 0.0,
+            attention_probs_dropout_prob: 0.0,
+            max_position_embeddings: 32,
+            type_vocab_size: 0,
+            initializer_range: 0.02,
+            layer_norm_eps: 1e-7,
+            pad_token_id: 0,
+            position_embedding_type: "relative_key_query".to_string(),
+            use_cache: true,
+            classifier_dropout: None,
+            relative_attention: true,
+            max_relative_positions: -1,
+            pos_att_type: vec!["p2c".to_string(), "c2p".to_string()],
+            norm_rel_ebd: "layer_norm".to_string(),
+            share_att_key: true,
+            model_type: "deberta".to_string(),
+        }
+    }
+
+    fn sample_ids(len: usize) -> Array1<u32> {
+        (0..len as u32).collect()
+    }
+
+    // ── DebertaEmbeddings ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_deberta_embeddings_new_succeeds() {
+        let cfg = mini_config();
+        DebertaEmbeddings::new(&cfg).expect("DebertaEmbeddings::new should succeed");
+    }
+
+    #[test]
+    fn test_deberta_embeddings_forward_shape() {
+        let cfg = mini_config();
+        let emb = DebertaEmbeddings::new(&cfg).expect("DebertaEmbeddings::new failed");
+        let ids: Array1<u32> = sample_ids(6);
+        let out = emb.forward(&ids).expect("DebertaEmbeddings::forward failed");
+        assert_eq!(out.shape(), &[6, cfg.hidden_size]);
+    }
+
+    // ── DebertaDisentangledSelfAttention ──────────────────────────────────
+
+    #[test]
+    fn test_deberta_disentangled_attention_new_with_relative() {
+        let cfg = mini_config();
+        DebertaDisentangledSelfAttention::new(&cfg)
+            .expect("DebertaDisentangledSelfAttention::new should succeed");
+    }
+
+    #[test]
+    fn test_deberta_disentangled_attention_new_without_relative() {
+        let mut cfg = mini_config();
+        cfg.relative_attention = false;
+        DebertaDisentangledSelfAttention::new(&cfg)
+            .expect("DebertaDisentangledSelfAttention without relative should succeed");
+    }
+
+    #[test]
+    fn test_deberta_disentangled_attention_pos_att_type_p2c_and_c2p() {
+        let cfg = mini_config();
+        let attn = DebertaDisentangledSelfAttention::new(&cfg).expect("attention creation failed");
+        assert!(
+            cfg.pos_att_type.contains(&"p2c".to_string()),
+            "pos_att_type should contain 'p2c'"
+        );
+        assert!(
+            cfg.pos_att_type.contains(&"c2p".to_string()),
+            "pos_att_type should contain 'c2p'"
+        );
+        // When relative_attention is true, pos projections should be populated
+        assert!(attn.pos_query_proj.is_some() || attn.pos_key_proj.is_some());
+    }
+
+    // ── DebertaSelfOutput ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_deberta_self_output_new_succeeds() {
+        let cfg = mini_config();
+        DebertaSelfOutput::new(&cfg).expect("DebertaSelfOutput::new should succeed");
+    }
+
+    // ── DebertaAttention ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_deberta_attention_new_succeeds() {
+        let cfg = mini_config();
+        DebertaAttention::new(&cfg).expect("DebertaAttention::new should succeed");
+    }
+
+    // ── DebertaLayer ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_deberta_layer_new_succeeds() {
+        let cfg = mini_config();
+        DebertaLayer::new(&cfg).expect("DebertaLayer::new should succeed");
+    }
+
+    // ── DebertaEncoder ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_deberta_encoder_new_single_layer() {
+        let cfg = mini_config();
+        DebertaEncoder::new(&cfg).expect("DebertaEncoder::new should succeed");
+    }
+
+    #[test]
+    fn test_deberta_encoder_new_multi_layer() {
+        let mut cfg = mini_config();
+        cfg.num_hidden_layers = 2;
+        DebertaEncoder::new(&cfg).expect("DebertaEncoder with 2 layers should succeed");
+    }
+
+    // ── DebertaModel ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_deberta_model_new_with_base_config() {
+        let cfg = mini_config();
+        DebertaModel::new(cfg).expect("DebertaModel::new should succeed");
+    }
+
+    #[test]
+    fn test_deberta_model_forward_output_shape() {
+        let cfg = mini_config();
+        let model = DebertaModel::new(cfg.clone()).expect("DebertaModel::new failed");
+        let ids: Array1<u32> = sample_ids(5);
+        let out = model.forward(&ids, None).expect("DebertaModel::forward failed");
+        // Output should be [1 (batch), seq_len, hidden_size]
+        assert_eq!(out.shape(), &[1, 5, cfg.hidden_size]);
+    }
+
+    #[test]
+    fn test_deberta_model_from_pretrained_deberta_base() {
+        // from_pretrained uses config presets — no actual weight loading in tests
+        let _model = DebertaModel::from_pretrained("deberta-base")
+            .expect("from_pretrained deberta-base should succeed");
+    }
+
+    #[test]
+    fn test_deberta_model_from_pretrained_deberta_large() {
+        let _model = DebertaModel::from_pretrained("deberta-large")
+            .expect("from_pretrained deberta-large should succeed");
+    }
+
+    // ── DeBERTa-v2 config has vocab_size 128100 ───────────────────────────
+
+    #[test]
+    fn test_deberta_v2_xlarge_vocab_size() {
+        let cfg = DebertaConfig::xlarge();
+        assert_eq!(
+            cfg.vocab_size, 128100,
+            "DeBERTa-v2 xlarge should have vocab_size=128100"
+        );
+    }
+
+    #[test]
+    fn test_deberta_v3_large_vocab_size() {
+        let cfg = DebertaConfig::v3_large();
+        assert_eq!(
+            cfg.vocab_size, 128100,
+            "DeBERTa-v3 large should have vocab_size=128100"
+        );
+    }
+
+    // ── share_att_key default ─────────────────────────────────────────────
+
+    #[test]
+    fn test_deberta_default_share_att_key_true() {
+        let cfg = DebertaConfig::default();
+        assert!(cfg.share_att_key, "share_att_key should default to true");
+    }
+
+    // ── DebertaForSequenceClassification ──────────────────────────────────
+
+    #[test]
+    fn test_deberta_seq_class_new_two_labels() {
+        let cfg = mini_config();
+        DebertaForSequenceClassification::new(cfg, 2)
+            .expect("DebertaForSequenceClassification with 2 labels failed");
+    }
+
+    #[test]
+    fn test_deberta_seq_class_forward_output_shape() {
+        let cfg = mini_config();
+        let model = DebertaForSequenceClassification::new(cfg, 2).expect("model creation failed");
+        let ids: Array1<u32> = sample_ids(4);
+        let out = model.forward(&ids, None).expect("forward should succeed");
+        assert_eq!(out.shape(), &[1, 2]);
+    }
+
+    #[test]
+    fn test_deberta_seq_class_three_labels_output_shape() {
+        let cfg = mini_config();
+        let model =
+            DebertaForSequenceClassification::new(cfg, 3).expect("model with 3 labels failed");
+        let ids: Array1<u32> = sample_ids(4);
+        let out = model.forward(&ids, None).expect("forward should succeed");
+        assert_eq!(out.shape(), &[1, 3]);
+    }
+
+    // ── DebertaForMaskedLM ────────────────────────────────────────────────
+
+    #[test]
+    fn test_deberta_masked_lm_new_succeeds() {
+        let cfg = mini_config();
+        DebertaForMaskedLM::new(cfg).expect("DebertaForMaskedLM::new should succeed");
+    }
+
+    #[test]
+    fn test_deberta_masked_lm_forward_output_shape() {
+        let cfg = mini_config();
+        let model = DebertaForMaskedLM::new(cfg.clone()).expect("model creation failed");
+        let ids: Array1<u32> = sample_ids(4);
+        let out = model.forward(&ids, None).expect("forward should succeed");
+        // shape: [1 (batch), seq_len, vocab_size]
+        assert_eq!(out.shape(), &[1, 4, cfg.vocab_size]);
+    }
+
+    // ── Config validation ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_deberta_mini_config_validates() {
+        let cfg = mini_config();
+        cfg.validate().expect("mini_config should be valid");
+    }
+
+    #[test]
+    fn test_deberta_base_config_validates() {
+        let cfg = DebertaConfig::base();
+        cfg.validate().expect("base config should be valid");
+    }
+}

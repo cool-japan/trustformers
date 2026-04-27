@@ -781,3 +781,630 @@ impl Optimizer for ScheduledOptimizer {
 // - LearningRateSchedule: Learning rate scheduling strategies
 // - AdamWOptimizer/AdamOptimizer: Concrete optimizer implementations
 // - ScheduledOptimizer: Optimizer wrapper with learning rate scheduling
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // LCG for deterministic pseudo-random numbers (no rand crate)
+    // -------------------------------------------------------------------------
+
+    struct Lcg {
+        state: u64,
+    }
+
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Lcg { state: seed }
+        }
+
+        fn next(&mut self) -> u64 {
+            self.state = self
+                .state
+                .wrapping_mul(6_364_136_223_846_793_005_u64)
+                .wrapping_add(1_442_695_040_888_963_407_u64);
+            self.state
+        }
+
+        fn next_f32(&mut self) -> f32 {
+            (self.next() >> 11) as f32 / (1u64 << 53) as f32
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // AdamWConfig
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_adamw_config_creation() {
+        let config = AdamWConfig {
+            learning_rate: 2e-5,
+            beta1: 0.9,
+            beta2: 0.999,
+            weight_decay: 0.01,
+            eps: 1e-8,
+            amsgrad: false,
+        };
+        let diff = (config.learning_rate - 2e-5).abs();
+        assert!(diff < 1e-10, "learning_rate should be set correctly");
+        assert!(!config.amsgrad, "amsgrad should be false");
+    }
+
+    #[test]
+    fn test_adamw_config_weight_decay() {
+        let config = AdamWConfig {
+            learning_rate: 1e-4,
+            beta1: 0.9,
+            beta2: 0.999,
+            weight_decay: 0.1,
+            eps: 1e-8,
+            amsgrad: false,
+        };
+        let diff = (config.weight_decay - 0.1).abs();
+        assert!(diff < 1e-10, "weight_decay should be 0.1");
+    }
+
+    // -------------------------------------------------------------------------
+    // AdamConfig
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_adam_config_creation() {
+        let config = AdamConfig {
+            learning_rate: 5e-5,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            amsgrad: false,
+        };
+        let diff = (config.learning_rate - 5e-5).abs();
+        assert!(diff < 1e-12, "learning_rate should be set correctly");
+    }
+
+    #[test]
+    fn test_adam_config_beta_values() {
+        let config = AdamConfig {
+            learning_rate: 1e-3,
+            beta1: 0.95,
+            beta2: 0.99,
+            eps: 1e-6,
+            amsgrad: true,
+        };
+        let b1_diff = (config.beta1 - 0.95).abs();
+        let b2_diff = (config.beta2 - 0.99).abs();
+        assert!(b1_diff < 1e-10, "beta1 should be 0.95");
+        assert!(b2_diff < 1e-10, "beta2 should be 0.99");
+        assert!(config.amsgrad, "amsgrad should be true");
+    }
+
+    // -------------------------------------------------------------------------
+    // AdamWOptimizer
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_adamw_optimizer_creation() {
+        let config = AdamWConfig {
+            learning_rate: 2e-5,
+            beta1: 0.9,
+            beta2: 0.999,
+            weight_decay: 0.01,
+            eps: 1e-8,
+            amsgrad: false,
+        };
+        let optimizer = AdamWOptimizer::new(config);
+        let diff = (optimizer.get_lr() - 2e-5).abs();
+        assert!(diff < 1e-12, "Initial LR should match config");
+    }
+
+    #[test]
+    fn test_adamw_get_lr() {
+        let optimizer = AdamWOptimizer::new(AdamWConfig {
+            learning_rate: 3e-4,
+            beta1: 0.9,
+            beta2: 0.999,
+            weight_decay: 0.01,
+            eps: 1e-8,
+            amsgrad: false,
+        });
+        let diff = (optimizer.get_lr() - 3e-4).abs();
+        assert!(diff < 1e-12, "get_lr should return initial learning rate");
+    }
+
+    #[test]
+    fn test_adamw_set_lr() {
+        let mut optimizer = AdamWOptimizer::new(AdamWConfig {
+            learning_rate: 1e-4,
+            beta1: 0.9,
+            beta2: 0.999,
+            weight_decay: 0.01,
+            eps: 1e-8,
+            amsgrad: false,
+        });
+        optimizer.set_lr(5e-5);
+        let diff = (optimizer.get_lr() - 5e-5).abs();
+        assert!(diff < 1e-12, "LR should be updated after set_lr");
+    }
+
+    #[test]
+    fn test_adamw_step_produces_update() {
+        let mut optimizer = AdamWOptimizer::new(AdamWConfig {
+            learning_rate: 1e-3,
+            beta1: 0.9,
+            beta2: 0.999,
+            weight_decay: 0.01,
+            eps: 1e-8,
+            amsgrad: false,
+        });
+        let mut lcg = Lcg::new(42);
+        let grads: Vec<f32> = (0..4).map(|_| lcg.next_f32() - 0.5).collect();
+        let mut parameters = HashMap::new();
+        parameters.insert("layer.weight".to_string(), grads);
+        let mut parameter_shapes = HashMap::new();
+        parameter_shapes.insert("layer.weight".to_string(), vec![4]);
+        let gradients = OptimizerGradients {
+            parameters,
+            parameter_shapes,
+        };
+
+        let result = optimizer.step(&gradients);
+        assert!(result.is_ok(), "step() should succeed");
+        if let Ok(update) = result {
+            assert_eq!(
+                update.step_count, 1,
+                "Step count should be 1 after first step"
+            );
+            assert!(
+                update.parameter_updates.contains_key("layer.weight"),
+                "Update should contain parameter updates"
+            );
+        }
+    }
+
+    #[test]
+    fn test_adamw_step_count_increments() {
+        let mut optimizer = AdamWOptimizer::new(AdamWConfig {
+            learning_rate: 1e-3,
+            beta1: 0.9,
+            beta2: 0.999,
+            weight_decay: 0.0,
+            eps: 1e-8,
+            amsgrad: false,
+        });
+        let grads = vec![0.1_f32, -0.2, 0.05];
+        let mut parameters = HashMap::new();
+        parameters.insert("w".to_string(), grads);
+        let mut shapes = HashMap::new();
+        shapes.insert("w".to_string(), vec![3]);
+        let gradients = OptimizerGradients {
+            parameters,
+            parameter_shapes: shapes,
+        };
+
+        for expected_step in 1..=3usize {
+            let result = optimizer.step(&gradients);
+            if let Ok(update) = result {
+                assert_eq!(update.step_count, expected_step);
+            }
+        }
+    }
+
+    #[test]
+    fn test_adamw_state_dict_contains_step_count() {
+        let mut optimizer = AdamWOptimizer::new(AdamWConfig {
+            learning_rate: 1e-3,
+            beta1: 0.9,
+            beta2: 0.999,
+            weight_decay: 0.01,
+            eps: 1e-8,
+            amsgrad: false,
+        });
+        // Do one step to increment counter
+        let mut parameters = HashMap::new();
+        parameters.insert("w".to_string(), vec![0.1_f32]);
+        let mut shapes = HashMap::new();
+        shapes.insert("w".to_string(), vec![1]);
+        let _ = optimizer.step(&OptimizerGradients {
+            parameters,
+            parameter_shapes: shapes,
+        });
+        let state = optimizer.state_dict();
+        assert!(
+            state.contains_key("step_count"),
+            "state_dict should contain step_count"
+        );
+    }
+
+    #[test]
+    fn test_adamw_load_state_dict_updates_lr() {
+        let mut optimizer = AdamWOptimizer::new(AdamWConfig {
+            learning_rate: 1e-3,
+            beta1: 0.9,
+            beta2: 0.999,
+            weight_decay: 0.01,
+            eps: 1e-8,
+            amsgrad: false,
+        });
+        let mut state = HashMap::new();
+        state.insert("learning_rate".to_string(), serde_json::json!(2e-4));
+        let result = optimizer.load_state_dict(state);
+        assert!(result.is_ok(), "load_state_dict should succeed");
+        let diff = (optimizer.get_lr() - 2e-4).abs();
+        assert!(diff < 1e-12, "LR should be updated from loaded state");
+    }
+
+    // -------------------------------------------------------------------------
+    // AdamOptimizer
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_adam_optimizer_creation() {
+        let optimizer = AdamOptimizer::new(AdamConfig {
+            learning_rate: 5e-5,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            amsgrad: false,
+        });
+        let diff = (optimizer.get_lr() - 5e-5).abs();
+        assert!(diff < 1e-12, "Initial LR should match config");
+    }
+
+    #[test]
+    fn test_adam_set_lr() {
+        let mut optimizer = AdamOptimizer::new(AdamConfig {
+            learning_rate: 1e-3,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            amsgrad: false,
+        });
+        optimizer.set_lr(1e-4);
+        let diff = (optimizer.get_lr() - 1e-4).abs();
+        assert!(diff < 1e-12, "LR should be updated after set_lr");
+    }
+
+    #[test]
+    fn test_adam_step_produces_update() {
+        let mut optimizer = AdamOptimizer::new(AdamConfig {
+            learning_rate: 1e-3,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            amsgrad: false,
+        });
+        let mut parameters = HashMap::new();
+        parameters.insert("bias".to_string(), vec![0.5_f32, -0.3]);
+        let mut shapes = HashMap::new();
+        shapes.insert("bias".to_string(), vec![2]);
+        let gradients = OptimizerGradients {
+            parameters,
+            parameter_shapes: shapes,
+        };
+
+        let result = optimizer.step(&gradients);
+        assert!(result.is_ok(), "Adam step should succeed");
+        if let Ok(update) = result {
+            assert!(
+                update.parameter_updates.contains_key("bias"),
+                "Update should contain 'bias'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_adam_zero_grad_does_not_panic() {
+        let mut optimizer = AdamOptimizer::new(AdamConfig {
+            learning_rate: 1e-3,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            amsgrad: false,
+        });
+        optimizer.zero_grad(); // Should not panic
+    }
+
+    // -------------------------------------------------------------------------
+    // LearningRateSchedule
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_lr_schedule_constant_variant() {
+        let schedule = LearningRateSchedule::Constant;
+        // Just verifying that the variant can be created and matched
+        assert!(matches!(schedule, LearningRateSchedule::Constant));
+    }
+
+    #[test]
+    fn test_lr_schedule_linear_warmup_fields() {
+        let schedule = LearningRateSchedule::LinearWarmup {
+            warmup_steps: 1000,
+            max_lr: 5e-5,
+        };
+        if let LearningRateSchedule::LinearWarmup {
+            warmup_steps,
+            max_lr,
+        } = schedule
+        {
+            assert_eq!(warmup_steps, 1000);
+            let diff = (max_lr - 5e-5).abs();
+            assert!(diff < 1e-12, "max_lr should be 5e-5");
+        } else {
+            panic!("Expected LinearWarmup variant");
+        }
+    }
+
+    #[test]
+    fn test_lr_schedule_cosine_annealing_fields() {
+        let schedule = LearningRateSchedule::CosineAnnealing {
+            t_max: 500,
+            eta_min: 1e-6,
+        };
+        if let LearningRateSchedule::CosineAnnealing { t_max, eta_min } = schedule {
+            assert_eq!(t_max, 500);
+            let diff = (eta_min - 1e-6).abs();
+            assert!(diff < 1e-12, "eta_min should be 1e-6");
+        } else {
+            panic!("Expected CosineAnnealing variant");
+        }
+    }
+
+    #[test]
+    fn test_lr_schedule_step_lr_fields() {
+        let schedule = LearningRateSchedule::StepLR {
+            step_size: 100,
+            gamma: 0.1,
+        };
+        if let LearningRateSchedule::StepLR { step_size, gamma } = schedule {
+            assert_eq!(step_size, 100);
+            let diff = (gamma - 0.1).abs();
+            assert!(diff < 1e-12, "gamma should be 0.1");
+        } else {
+            panic!("Expected StepLR variant");
+        }
+    }
+
+    #[test]
+    fn test_lr_schedule_polynomial_decay_fields() {
+        let schedule = LearningRateSchedule::PolynomialDecay {
+            power: 2.0,
+            end_lr: 1e-7,
+            total_steps: 10_000,
+        };
+        if let LearningRateSchedule::PolynomialDecay {
+            power,
+            end_lr,
+            total_steps,
+        } = schedule
+        {
+            let p_diff = (power - 2.0).abs();
+            assert!(p_diff < 1e-10, "power should be 2.0");
+            let e_diff = (end_lr - 1e-7).abs();
+            assert!(e_diff < 1e-14, "end_lr should be 1e-7");
+            assert_eq!(total_steps, 10_000);
+        } else {
+            panic!("Expected PolynomialDecay variant");
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // ScheduledOptimizer
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_scheduled_optimizer_constant_lr() {
+        let base = AdamWOptimizer::new(AdamWConfig {
+            learning_rate: 1e-3,
+            beta1: 0.9,
+            beta2: 0.999,
+            weight_decay: 0.01,
+            eps: 1e-8,
+            amsgrad: false,
+        });
+        let mut sched = ScheduledOptimizer::new(Box::new(base), LearningRateSchedule::Constant);
+        let initial_lr = sched.get_lr();
+
+        let mut parameters = HashMap::new();
+        parameters.insert("w".to_string(), vec![0.1_f32]);
+        let mut shapes = HashMap::new();
+        shapes.insert("w".to_string(), vec![1]);
+        let _ = sched.step(&OptimizerGradients {
+            parameters,
+            parameter_shapes: shapes,
+        });
+
+        let lr_diff = (sched.get_lr() - initial_lr).abs();
+        assert!(
+            lr_diff < 1e-10,
+            "Constant schedule should keep LR unchanged"
+        );
+    }
+
+    #[test]
+    fn test_scheduled_optimizer_warmup_increases_lr() {
+        let initial_lr = 1e-5_f64;
+        let max_lr = 5e-4_f64;
+        let base = AdamWOptimizer::new(AdamWConfig {
+            learning_rate: initial_lr,
+            beta1: 0.9,
+            beta2: 0.999,
+            weight_decay: 0.01,
+            eps: 1e-8,
+            amsgrad: false,
+        });
+        let mut sched = ScheduledOptimizer::new(
+            Box::new(base),
+            LearningRateSchedule::LinearWarmup {
+                warmup_steps: 100,
+                max_lr,
+            },
+        );
+
+        let mut parameters = HashMap::new();
+        parameters.insert("w".to_string(), vec![0.01_f32]);
+        let mut shapes = HashMap::new();
+        shapes.insert("w".to_string(), vec![1]);
+
+        // After several warmup steps, LR should increase
+        for _ in 0..50 {
+            let _ = sched.step(&OptimizerGradients {
+                parameters: parameters.clone(),
+                parameter_shapes: shapes.clone(),
+            });
+        }
+        let lr_after = sched.get_lr();
+        assert!(lr_after > initial_lr, "LR should increase during warmup");
+        assert!(lr_after < max_lr + 1e-10, "LR should not exceed max_lr");
+    }
+
+    #[test]
+    fn test_scheduled_optimizer_state_dict_contains_step() {
+        let base = AdamOptimizer::new(AdamConfig {
+            learning_rate: 1e-3,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            amsgrad: false,
+        });
+        let mut sched = ScheduledOptimizer::new(Box::new(base), LearningRateSchedule::Constant);
+        let mut parameters = HashMap::new();
+        parameters.insert("w".to_string(), vec![0.1_f32]);
+        let mut shapes = HashMap::new();
+        shapes.insert("w".to_string(), vec![1]);
+        let _ = sched.step(&OptimizerGradients {
+            parameters,
+            parameter_shapes: shapes,
+        });
+        let state = sched.state_dict();
+        assert!(
+            state.contains_key("current_step"),
+            "state_dict should have current_step key"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // AutoOptimizer::from_config
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_auto_optimizer_from_config_small_model() {
+        let config = serde_json::json!({
+            "model_type": "bert",
+            "hidden_size": 128,
+            "num_hidden_layers": 2
+        });
+        let result = AutoOptimizer::from_config(&config);
+        assert!(result.is_ok(), "AutoOptimizer::from_config should succeed");
+        if let Ok(optimizer) = result {
+            assert!(
+                optimizer.get_lr() > 0.0,
+                "Optimizer should have positive LR"
+            );
+        }
+    }
+
+    #[test]
+    fn test_auto_optimizer_from_config_large_model() {
+        let config = serde_json::json!({
+            "model_type": "gpt2",
+            "hidden_size": 1024,
+            "num_hidden_layers": 36
+        });
+        let result = AutoOptimizer::from_config(&config);
+        assert!(
+            result.is_ok(),
+            "AutoOptimizer::from_config should succeed for large model"
+        );
+        if let Ok(optimizer) = result {
+            // Large model should use lower LR
+            assert!(
+                optimizer.get_lr() <= 2e-5 + 1e-12,
+                "Large model should use lower LR"
+            );
+        }
+    }
+
+    #[test]
+    fn test_auto_optimizer_for_task_text_generation() {
+        let config = serde_json::json!({});
+        let result = AutoOptimizer::for_task("text-generation", &config);
+        assert!(result.is_ok(), "for_task text-generation should succeed");
+    }
+
+    #[test]
+    fn test_auto_optimizer_for_task_classification() {
+        let config = serde_json::json!({});
+        let result = AutoOptimizer::for_task("text-classification", &config);
+        assert!(
+            result.is_ok(),
+            "for_task text-classification should succeed"
+        );
+    }
+
+    #[test]
+    fn test_auto_optimizer_for_task_question_answering() {
+        let config = serde_json::json!({});
+        let result = AutoOptimizer::for_task("question-answering", &config);
+        assert!(result.is_ok(), "for_task question-answering should succeed");
+    }
+
+    #[test]
+    fn test_auto_optimizer_for_task_unknown_uses_default() {
+        let config = serde_json::json!({
+            "hidden_size": 256,
+            "num_hidden_layers": 4
+        });
+        let result = AutoOptimizer::for_task("some-unknown-task", &config);
+        assert!(result.is_ok(), "Unknown task should fall back to default");
+    }
+
+    #[test]
+    fn test_auto_optimizer_with_schedule() {
+        let base = AutoOptimizer::from_config(&serde_json::json!({}));
+        assert!(base.is_ok(), "Base optimizer should be created");
+        if let Ok(base_opt) = base {
+            let schedule = LearningRateSchedule::LinearWarmup {
+                warmup_steps: 500,
+                max_lr: 5e-5,
+            };
+            let sched = AutoOptimizer::with_schedule(base_opt, schedule);
+            assert!(
+                sched.get_lr() > 0.0,
+                "Scheduled optimizer should have positive LR"
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // OptimizerGradients / OptimizerUpdate
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_optimizer_gradients_creation() {
+        let mut parameters = HashMap::new();
+        parameters.insert("layer1.weight".to_string(), vec![0.1_f32, 0.2, -0.3]);
+        let mut parameter_shapes = HashMap::new();
+        parameter_shapes.insert("layer1.weight".to_string(), vec![3]);
+        let gradients = OptimizerGradients {
+            parameters,
+            parameter_shapes,
+        };
+        assert_eq!(gradients.parameters.len(), 1);
+        assert!(gradients.parameters.contains_key("layer1.weight"));
+    }
+
+    #[test]
+    fn test_optimizer_update_fields() {
+        let mut parameter_updates = HashMap::new();
+        parameter_updates.insert("w".to_string(), vec![-0.001_f32, 0.002]);
+        let update = OptimizerUpdate {
+            parameter_updates,
+            learning_rate: 1e-3,
+            step_count: 5,
+        };
+        assert_eq!(update.step_count, 5);
+        let lr_diff = (update.learning_rate - 1e-3).abs();
+        assert!(lr_diff < 1e-12, "learning_rate should match");
+        assert!(update.parameter_updates.contains_key("w"));
+    }
+}

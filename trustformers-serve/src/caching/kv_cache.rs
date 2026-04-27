@@ -658,3 +658,253 @@ pub struct KVCacheStats {
     pub hit_rate: f32,
     pub sharing_ratio: f32,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::caching::config::{EvictionPolicy, KVCacheConfig};
+    use crate::caching::metrics::CacheStatsCollector;
+
+    fn make_kv_config(max_layers: usize, max_sequences: usize) -> KVCacheConfig {
+        KVCacheConfig {
+            max_size_bytes: 64 * 1024 * 1024,
+            max_sequences,
+            max_layers,
+            max_sequence_length: 512,
+            sharing_enabled: true,
+            compression_enabled: false,
+            eviction_policy: EvictionPolicy::LRU,
+        }
+    }
+
+    fn make_entry(seq_len: usize, head_dim: usize, num_heads: usize) -> KVCacheEntry {
+        let size = seq_len * head_dim * num_heads;
+        let keys = vec![0.1f32; size];
+        let values = vec![0.2f32; size];
+        KVCacheEntry::new(keys, values, seq_len, head_dim, num_heads)
+    }
+
+    // --- KVCacheEntry tests ---
+
+    #[test]
+    fn test_kv_entry_size_computed_correctly() {
+        let entry = make_entry(4, 8, 2);
+        let expected_size = (4 * 8 * 2 * 2) * std::mem::size_of::<f32>();
+        assert_eq!(entry.size_bytes, expected_size);
+    }
+
+    #[test]
+    fn test_kv_entry_initial_ref_count_one() {
+        let entry = make_entry(4, 8, 2);
+        assert_eq!(entry.ref_count, 1);
+    }
+
+    #[test]
+    fn test_kv_entry_mark_accessed_increments_count() {
+        let mut entry = make_entry(4, 8, 2);
+        assert_eq!(entry.access_count, 0);
+        entry.mark_accessed();
+        assert_eq!(entry.access_count, 1);
+        entry.mark_accessed();
+        assert_eq!(entry.access_count, 2);
+    }
+
+    #[test]
+    fn test_kv_entry_add_ref_increments() {
+        let mut entry = make_entry(4, 8, 2);
+        entry.add_ref();
+        assert_eq!(entry.ref_count, 2);
+    }
+
+    #[test]
+    fn test_kv_entry_remove_ref_decrements_and_returns_false() {
+        let mut entry = make_entry(4, 8, 2);
+        entry.add_ref(); // ref_count = 2
+        let dropped = entry.remove_ref(); // ref_count = 1
+        assert!(!dropped);
+        assert_eq!(entry.ref_count, 1);
+    }
+
+    #[test]
+    fn test_kv_entry_remove_ref_returns_true_when_zero() {
+        let mut entry = make_entry(4, 8, 2);
+        let dropped = entry.remove_ref(); // 1 -> 0
+        assert!(dropped);
+        assert_eq!(entry.ref_count, 0);
+    }
+
+    #[test]
+    fn test_kv_entry_remove_ref_saturates_at_zero() {
+        let mut entry = make_entry(4, 8, 2);
+        entry.remove_ref(); // 1 -> 0
+        entry.remove_ref(); // should saturate, not panic
+        assert_eq!(entry.ref_count, 0);
+    }
+
+    #[test]
+    fn test_kv_entry_extend_updates_seq_len_and_size() {
+        let mut entry = make_entry(4, 8, 2);
+        let old_keys_len = entry.keys.len();
+        let new_keys = vec![0.5f32; 16];
+        let new_values = vec![0.6f32; 16];
+        entry.extend(&new_keys, &new_values, 6);
+        assert_eq!(entry.seq_len, 6);
+        assert_eq!(entry.keys.len(), old_keys_len + 16);
+        let expected_size = (entry.keys.len() + entry.values.len()) * std::mem::size_of::<f32>();
+        assert_eq!(entry.size_bytes, expected_size);
+    }
+
+    // --- LayerCache tests ---
+
+    #[test]
+    fn test_layer_cache_put_and_get() {
+        let mut cache = LayerCache::new(0, 10, 1024 * 1024);
+        let entry = make_entry(4, 8, 2);
+        cache.put(1, entry).expect("put should succeed");
+        assert!(cache.get(1).is_some());
+    }
+
+    #[test]
+    fn test_layer_cache_get_nonexistent_returns_none() {
+        let mut cache = LayerCache::new(0, 10, 1024 * 1024);
+        assert!(cache.get(999).is_none());
+    }
+
+    #[test]
+    fn test_layer_cache_remove_existing_entry() {
+        let mut cache = LayerCache::new(0, 10, 1024 * 1024);
+        let entry = make_entry(4, 8, 2);
+        cache.put(42, entry).expect("put should succeed");
+        let removed = cache.remove(42);
+        assert!(removed.is_some());
+        assert!(cache.get(42).is_none());
+    }
+
+    #[test]
+    fn test_layer_cache_remove_updates_size() {
+        let mut cache = LayerCache::new(0, 10, 1024 * 1024);
+        let entry = make_entry(4, 8, 2);
+        let sz = entry.size_bytes;
+        cache.put(7, entry).expect("put should succeed");
+        assert_eq!(cache.current_size_bytes, sz);
+        cache.remove(7);
+        assert_eq!(cache.current_size_bytes, 0);
+    }
+
+    #[test]
+    fn test_layer_cache_clear_resets_everything() {
+        let mut cache = LayerCache::new(0, 10, 1024 * 1024);
+        cache.put(1, make_entry(4, 8, 2)).expect("put should succeed");
+        cache.put(2, make_entry(4, 8, 2)).expect("put should succeed");
+        cache.clear();
+        assert!(cache.get(1).is_none());
+        assert!(cache.get(2).is_none());
+        assert_eq!(cache.current_size_bytes, 0);
+    }
+
+    #[test]
+    fn test_layer_cache_stats_entry_count() {
+        let mut cache = LayerCache::new(3, 10, 1024 * 1024);
+        cache.put(1, make_entry(4, 8, 2)).expect("put should succeed");
+        cache.put(2, make_entry(6, 8, 2)).expect("put should succeed");
+        let stats = cache.get_stats();
+        assert_eq!(stats.layer_id, 3);
+        assert_eq!(stats.entry_count, 2);
+    }
+
+    #[test]
+    fn test_layer_cache_stats_avg_seq_len() {
+        let mut cache = LayerCache::new(0, 10, 1024 * 1024);
+        cache.put(1, make_entry(4, 8, 2)).expect("put should succeed");
+        cache.put(2, make_entry(8, 8, 2)).expect("put should succeed");
+        let stats = cache.get_stats();
+        assert!((stats.avg_seq_len - 6.0).abs() < 1e-4);
+    }
+
+    // --- AttentionCache tests ---
+
+    #[test]
+    fn test_attention_cache_put_and_get_by_layer() {
+        let config = make_kv_config(4, 100);
+        let mut cache = AttentionCache::new(config);
+        let entry = make_entry(4, 8, 2);
+        cache.put(0, 1, entry).expect("put should succeed");
+        assert!(cache.get(0, 1).is_some());
+        assert!(cache.get(1, 1).is_none()); // different layer
+    }
+
+    #[test]
+    fn test_attention_cache_out_of_bounds_layer_returns_none_on_get() {
+        let config = make_kv_config(2, 100);
+        let mut cache = AttentionCache::new(config);
+        assert!(cache.get(99, 1).is_none());
+    }
+
+    #[test]
+    fn test_attention_cache_out_of_bounds_layer_errors_on_put() {
+        let config = make_kv_config(2, 100);
+        let mut cache = AttentionCache::new(config);
+        let result = cache.put(99, 1, make_entry(4, 8, 2));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_attention_cache_clear_removes_all_entries() {
+        let config = make_kv_config(4, 100);
+        let mut cache = AttentionCache::new(config);
+        cache.put(0, 10, make_entry(4, 8, 2)).expect("put should succeed");
+        cache.put(1, 20, make_entry(4, 8, 2)).expect("put should succeed");
+        cache.clear();
+        assert!(cache.get(0, 10).is_none());
+        assert!(cache.get(1, 20).is_none());
+    }
+
+    #[test]
+    fn test_attention_cache_stats_sum_layers() {
+        let config = make_kv_config(4, 100);
+        let mut cache = AttentionCache::new(config);
+        cache.put(0, 1, make_entry(4, 8, 2)).expect("put should succeed");
+        cache.put(1, 2, make_entry(4, 8, 2)).expect("put should succeed");
+        let stats = cache.get_stats();
+        assert_eq!(stats.len(), 4);
+        let total_entries: usize = stats.iter().map(|s| s.entry_count).sum();
+        assert_eq!(total_entries, 2);
+    }
+
+    // --- KVCacheManager async tests ---
+
+    #[tokio::test]
+    async fn test_kv_manager_put_and_get() {
+        let config = make_kv_config(4, 100);
+        let metrics = Arc::new(CacheStatsCollector::new());
+        let manager = KVCacheManager::new(config, metrics);
+        let keys = vec![0.1f32; 64];
+        let values = vec![0.2f32; 64];
+        manager.put(0, 1, keys, values, 8, 8, 1).await.expect("put should succeed");
+        let result = manager.get(0, 1).await;
+        assert!(result.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_kv_manager_clear_removes_all() {
+        let config = make_kv_config(4, 100);
+        let metrics = Arc::new(CacheStatsCollector::new());
+        let manager = KVCacheManager::new(config, metrics);
+        manager
+            .put(0, 1, vec![0.1; 32], vec![0.2; 32], 4, 8, 1)
+            .await
+            .expect("put should succeed");
+        manager.clear().await.expect("clear should succeed");
+        let result = manager.get(0, 1).await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_kv_manager_stats_returns_layer_stats() {
+        let config = make_kv_config(4, 100);
+        let metrics = Arc::new(CacheStatsCollector::new());
+        let manager = KVCacheManager::new(config, metrics);
+        let stats = manager.get_stats().await;
+        assert_eq!(stats.layer_stats.len(), 4);
+    }
+}

@@ -399,4 +399,193 @@ mod tests {
             .expect("operation failed in test");
         assert!(context.contains("Input: What is 5+5?"));
     }
+
+    #[test]
+    fn test_in_context_config_default() {
+        let config = InContextConfig::default();
+        assert_eq!(config.max_context_length, 2048);
+        assert!(config.optimize_ordering);
+        assert_eq!(config.temperature, 1.0);
+        assert_eq!(config.num_demonstrations, 5);
+        assert!(config.include_instructions);
+    }
+
+    #[test]
+    fn test_selection_strategy_variants() {
+        let strategies = [
+            SelectionStrategy::Random,
+            SelectionStrategy::Similarity,
+            SelectionStrategy::Diverse,
+            SelectionStrategy::Uncertainty,
+            SelectionStrategy::Learned,
+        ];
+        assert_eq!(strategies.len(), 5);
+    }
+
+    #[test]
+    fn test_icl_example_new() {
+        let example = ICLExample::new("Hello".to_string(), "World".to_string());
+        assert_eq!(example.input, "Hello");
+        assert_eq!(example.output, "World");
+        assert!(example.explanation.is_none());
+        assert!(example.embedding.is_none());
+        assert_eq!(example.confidence, 1.0);
+    }
+
+    #[test]
+    fn test_icl_example_with_explanation() {
+        let mut example = ICLExample::new("2+2".to_string(), "4".to_string());
+        example.explanation = Some("Simple addition".to_string());
+        assert!(example.explanation.is_some());
+    }
+
+    #[test]
+    fn test_icl_example_similarity_no_embeddings() {
+        let ex1 = ICLExample::new("a".to_string(), "b".to_string());
+        let ex2 = ICLExample::new("c".to_string(), "d".to_string());
+        assert_eq!(ex1.similarity(&ex2), 0.0);
+    }
+
+    #[test]
+    fn test_icl_example_similarity_same_embedding() {
+        let mut ex1 = ICLExample::new("a".to_string(), "b".to_string());
+        let mut ex2 = ICLExample::new("c".to_string(), "d".to_string());
+        ex1.embedding = Some(Array1::from_vec(vec![1.0, 0.0]));
+        ex2.embedding = Some(Array1::from_vec(vec![1.0, 0.0]));
+        let sim = ex1.similarity(&ex2);
+        assert_abs_diff_eq!(sim, 1.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_icl_example_similarity_opposite() {
+        let mut ex1 = ICLExample::new("a".to_string(), "b".to_string());
+        let mut ex2 = ICLExample::new("c".to_string(), "d".to_string());
+        ex1.embedding = Some(Array1::from_vec(vec![1.0, 0.0]));
+        ex2.embedding = Some(Array1::from_vec(vec![-1.0, 0.0]));
+        let sim = ex1.similarity(&ex2);
+        assert_abs_diff_eq!(sim, -1.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_icl_context_creation() {
+        let context = ICLContext::new(500);
+        assert_eq!(context.examples.len(), 0);
+        assert_eq!(context.max_length, 500);
+    }
+
+    #[test]
+    fn test_icl_context_add_example() {
+        let mut context = ICLContext::new(10000);
+        let ex = ICLExample::new("Input".to_string(), "Output".to_string());
+        let result = context.add_example(ex);
+        assert!(result.is_ok());
+        assert_eq!(context.examples.len(), 1);
+    }
+
+    #[test]
+    fn test_icl_context_format_with_question() {
+        let mut context = ICLContext::new(10000);
+        let ex = ICLExample::new("Q1".to_string(), "A1".to_string());
+        context.add_example(ex).expect("add failed");
+        let formatted = context.format_context("Q2", true);
+        assert!(formatted.contains("Q1"));
+        assert!(formatted.contains("A1"));
+        assert!(formatted.contains("Q2"));
+    }
+
+    #[test]
+    fn test_icl_context_format_without_question() {
+        let mut context = ICLContext::new(10000);
+        let ex = ICLExample::new("Q1".to_string(), "A1".to_string());
+        context.add_example(ex).expect("add failed");
+        let formatted = context.format_context("Q2", false);
+        assert!(formatted.contains("Q1"));
+    }
+
+    #[test]
+    fn test_in_context_learner_creation() {
+        let config = InContextConfig::default();
+        let learner = InContextLearner::new(config);
+        assert!(learner.example_bank.is_empty());
+    }
+
+    #[test]
+    fn test_in_context_learner_add_examples() {
+        let config = InContextConfig::default();
+        let mut learner = InContextLearner::new(config);
+        let examples = vec![
+            ICLExample::new("a".to_string(), "1".to_string()),
+            ICLExample::new("b".to_string(), "2".to_string()),
+        ];
+        learner.add_task_examples("counting".to_string(), examples);
+        let result = learner.select_examples("counting", "d", 1);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_in_context_learner_select_fewer_than_available() {
+        let config = InContextConfig::default();
+        let mut learner = InContextLearner::new(config);
+        let examples = vec![
+            ICLExample::new("a".to_string(), "1".to_string()),
+            ICLExample::new("b".to_string(), "2".to_string()),
+            ICLExample::new("c".to_string(), "3".to_string()),
+        ];
+        learner.add_task_examples("test".to_string(), examples);
+        let selected = learner.select_examples("test", "d", 1).expect("select failed");
+        assert_eq!(selected.len(), 1);
+    }
+
+    #[test]
+    fn test_in_context_learner_select_more_than_available() {
+        let config = InContextConfig::default();
+        let mut learner = InContextLearner::new(config);
+        let examples = vec![ICLExample::new("a".to_string(), "1".to_string())];
+        learner.add_task_examples("test".to_string(), examples);
+        let selected = learner.select_examples("test", "query", 10).expect("select failed");
+        assert!(selected.len() <= 1);
+    }
+
+    #[test]
+    fn test_in_context_learner_unknown_task() {
+        let config = InContextConfig::default();
+        let learner = InContextLearner::new(config);
+        let result = learner.select_examples("nonexistent", "query", 5);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_context_contains_examples() {
+        let config = InContextConfig::default();
+        let mut learner = InContextLearner::new(config);
+        let examples = vec![
+            ICLExample::new("Capital of France?".to_string(), "Paris".to_string()),
+            ICLExample::new("Capital of Japan?".to_string(), "Tokyo".to_string()),
+        ];
+        learner.add_task_examples("geography".to_string(), examples);
+        let context = learner
+            .create_context("geography", "Capital of Germany?")
+            .expect("context creation failed");
+        assert!(context.contains("Capital of Germany?"));
+    }
+
+    #[test]
+    fn test_icl_example_confidence() {
+        let mut example = ICLExample::new("test".to_string(), "output".to_string());
+        assert_eq!(example.confidence, 1.0);
+        example.confidence = 0.5;
+        assert_eq!(example.confidence, 0.5);
+    }
+
+    #[test]
+    fn test_config_random_selection() {
+        let config = InContextConfig {
+            selection_strategy: SelectionStrategy::Random,
+            ..Default::default()
+        };
+        assert!(matches!(
+            config.selection_strategy,
+            SelectionStrategy::Random
+        ));
+    }
 }

@@ -69,7 +69,7 @@ impl Default for QwenConfig {
 
 impl Config for QwenConfig {
     fn validate(&self) -> trustformers_core::errors::Result<()> {
-        if self.hidden_size % self.num_attention_heads != 0 {
+        if !self.hidden_size.is_multiple_of(self.num_attention_heads) {
             return Err(invalid_config(
                 "config_field",
                 "hidden_size must be divisible by num_attention_heads".to_string(),
@@ -77,7 +77,7 @@ impl Config for QwenConfig {
         }
 
         if let Some(num_kv_heads) = self.num_key_value_heads {
-            if self.num_attention_heads % num_kv_heads != 0 {
+            if !self.num_attention_heads.is_multiple_of(num_kv_heads) {
                 return Err(invalid_config(
                     "config_field",
                     "num_attention_heads must be divisible by num_key_value_heads".to_string(),

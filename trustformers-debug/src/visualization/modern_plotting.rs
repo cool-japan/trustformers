@@ -1477,4 +1477,148 @@ mod tests {
         let plot_id = result.expect("operation failed in test");
         assert!(engine.active_plots.contains_key(&plot_id));
     }
+    // ── Additional sync tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_modern_plotting_config_default() {
+        let cfg = ModernPlottingConfig::default();
+        assert!(cfg.enable_interactive);
+        assert!(cfg.enable_realtime);
+        assert_eq!(cfg.dashboard_port, 8888);
+        assert_eq!(cfg.max_data_points, 10000);
+        assert_eq!(cfg.animation_fps, 30);
+    }
+
+    #[test]
+    fn test_modern_plotting_engine_new_empty() {
+        let mut cfg = ModernPlottingConfig::default();
+        cfg.output_directory = "/tmp/trustformers_test_mp".to_string();
+        cfg.enable_web_dashboard = false;
+        let engine = ModernPlottingEngine::new(cfg);
+        assert_eq!(engine.active_plots.len(), 0);
+        assert_eq!(engine.list_active_plots().len(), 0);
+    }
+
+    #[test]
+    fn test_modern_plotting_engine_statistics_missing() {
+        let mut cfg = ModernPlottingConfig::default();
+        cfg.output_directory = "/tmp/trustformers_test_mp2".to_string();
+        cfg.enable_web_dashboard = false;
+        let engine = ModernPlottingEngine::new(cfg);
+        assert!(engine.get_plot_statistics("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_plotting_backend_variants() {
+        let _ = PlottingBackend::PlotlyJS;
+        let _ = PlottingBackend::D3JS;
+        let _ = PlottingBackend::ChartJS;
+        let _ = PlottingBackend::ThreeJS;
+        let _ = PlottingBackend::WebGL;
+    }
+
+    #[test]
+    fn test_interactive_config_default() {
+        let ic = InteractiveConfig::default();
+        assert!(ic.enable_zoom);
+        assert!(ic.enable_pan);
+        assert!(ic.enable_hover);
+        assert!(!ic.enable_brush);
+    }
+
+    #[test]
+    fn test_plot_styling_default() {
+        let styling = PlotStyling::default();
+        assert_eq!(styling.color_palette.len(), 10);
+        assert!(styling.custom_css.is_none());
+    }
+
+    #[test]
+    fn test_font_config_default() {
+        let fc = FontConfig::default();
+        assert_eq!(fc.size, 12);
+        assert_eq!(fc.color, "#000000");
+    }
+
+    #[test]
+    fn test_font_weight_variants() {
+        let _ = FontWeight::Normal;
+        let _ = FontWeight::Bold;
+        let _ = FontWeight::Light;
+        let _ = FontWeight::ExtraBold;
+    }
+
+    #[test]
+    fn test_line_style_variants() {
+        let _ = [
+            LineStyle::Solid,
+            LineStyle::Dashed,
+            LineStyle::Dotted,
+            LineStyle::DashDot,
+        ];
+    }
+
+    #[test]
+    fn test_marker_style_variants() {
+        let _ = [
+            MarkerStyle::Circle,
+            MarkerStyle::Square,
+            MarkerStyle::Triangle,
+            MarkerStyle::Diamond,
+            MarkerStyle::Cross,
+            MarkerStyle::Plus,
+            MarkerStyle::Star,
+        ];
+    }
+
+    #[test]
+    fn test_interactive_plot_type_variants() {
+        let _ = InteractivePlotType::InteractiveLinePlot;
+        let _ = InteractivePlotType::InteractiveScatterPlot;
+        let _ = InteractivePlotType::InteractiveHeatmap;
+        let _ = InteractivePlotType::RealtimeStreamingPlot;
+        let _ = InteractivePlotType::MultiPlotDashboard;
+    }
+
+    #[test]
+    fn test_data_source_variants() {
+        let _ = DataSource::MemoryBuffer {
+            buffer_id: "buf1".to_string(),
+        };
+        let _ = DataSource::WebSocket {
+            url: "ws://localhost".to_string(),
+        };
+        let _ = DataSource::FileWatching {
+            path: "/tmp/test".to_string(),
+        };
+    }
+
+    #[test]
+    fn test_animation_type_variants() {
+        let _ = AnimationType::FadeIn;
+        let _ = AnimationType::SlideIn;
+        let _ = AnimationType::Grow;
+        let _ = AnimationType::TrainingProgress;
+        let _ = AnimationType::GradientFlow;
+    }
+
+    #[test]
+    fn test_easing_function_variants() {
+        let _ = EasingFunction::Linear;
+        let _ = EasingFunction::EaseIn;
+        let _ = EasingFunction::EaseOut;
+        let _ = EasingFunction::EaseInOut;
+        let _ = EasingFunction::Bounce;
+        let _ = EasingFunction::Elastic;
+    }
+
+    #[test]
+    fn test_legend_position_variants() {
+        let _ = LegendPosition::TopRight;
+        let _ = LegendPosition::TopLeft;
+        let _ = LegendPosition::BottomRight;
+        let _ = LegendPosition::Bottom;
+        let _ = LegendPosition::Left;
+        let _ = LegendPosition::Right;
+    }
 }

@@ -880,3 +880,234 @@ impl Model for GPTNeoXForCausalLM {
         self.gpt_neox.num_parameters() + self.embed_out.parameter_count()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trustformers_core::traits::{Config, Model};
+
+    fn tiny_config() -> GPTNeoXConfig {
+        GPTNeoXConfig {
+            vocab_size: 64,
+            hidden_size: 16,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            intermediate_size: 32,
+            max_position_embeddings: 32,
+            layer_norm_eps: 1e-5,
+            hidden_act: "gelu".to_string(),
+            rotary_emb_base: 10000.0,
+            rotary_pct: 0.25,
+            use_parallel_residual: false,
+            tie_word_embeddings: false,
+            initializer_range: 0.02,
+            bos_token_id: Some(0),
+            eos_token_id: Some(2),
+        }
+    }
+
+    // --- GPTNeoXConfig ---
+
+    #[test]
+    fn test_gpt_neox_config_default() {
+        let cfg = GPTNeoXConfig::default();
+        assert_eq!(cfg.hidden_size, 2048);
+        assert_eq!(cfg.num_hidden_layers, 16);
+        assert_eq!(cfg.num_attention_heads, 16);
+        assert!((cfg.rotary_pct - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_gpt_neox_config_validate_ok() {
+        let cfg = GPTNeoXConfig::default();
+        assert!(cfg.validate().is_ok(), "default config should validate");
+    }
+
+    #[test]
+    fn test_gpt_neox_config_validate_bad_heads() {
+        let cfg = GPTNeoXConfig {
+            hidden_size: 17,
+            num_attention_heads: 3,
+            ..GPTNeoXConfig::default()
+        };
+        assert!(
+            cfg.validate().is_err(),
+            "hidden not divisible by heads should fail"
+        );
+    }
+
+    #[test]
+    fn test_gpt_neox_config_rotary_pct_invalid() {
+        let cfg = GPTNeoXConfig {
+            rotary_pct: 1.5, // > 1.0 is invalid
+            ..GPTNeoXConfig::default()
+        };
+        assert!(cfg.validate().is_err(), "rotary_pct > 1.0 should fail");
+    }
+
+    #[test]
+    fn test_gpt_neox_rotary_ndims_25pct() {
+        // GPT-NeoX-20B uses rotary_pct=0.25 → rotary_ndims = head_dim * 0.25
+        let cfg = GPTNeoXConfig {
+            hidden_size: 6144,
+            num_attention_heads: 64,
+            rotary_pct: 0.25,
+            ..GPTNeoXConfig::default()
+        };
+        let head_dim = cfg.hidden_size / cfg.num_attention_heads; // 96
+        let rotary_ndims = (head_dim as f32 * cfg.rotary_pct) as usize; // 24
+        assert_eq!(head_dim, 96);
+        assert_eq!(
+            rotary_ndims, 24,
+            "25% of head_dim=96 should give 24 rotary dims"
+        );
+    }
+
+    #[test]
+    fn test_gpt_neox_pythia_160m_config() {
+        let cfg = GPTNeoXConfig::pythia_160m();
+        assert_eq!(cfg.hidden_size, 768);
+        assert_eq!(cfg.num_hidden_layers, 12);
+        assert!(
+            (cfg.rotary_pct - 0.25).abs() < 1e-6,
+            "Pythia uses 25% rotary"
+        );
+        assert!(cfg.use_parallel_residual, "Pythia uses parallel residual");
+    }
+
+    #[test]
+    fn test_gpt_neox_tie_embeddings_false() {
+        // GPT-NeoX-20B does NOT tie embeddings
+        let cfg = GPTNeoXConfig::default();
+        assert!(!cfg.tie_word_embeddings, "tie_embeddings should be false");
+    }
+
+    #[test]
+    fn test_gpt_neox_architecture_name() {
+        let cfg = GPTNeoXConfig::default();
+        assert_eq!(cfg.architecture(), "gpt_neox");
+    }
+
+    #[test]
+    fn test_gpt_neox_parallel_residual_flag() {
+        let cfg_parallel = GPTNeoXConfig {
+            use_parallel_residual: true,
+            ..tiny_config()
+        };
+        assert!(cfg_parallel.use_parallel_residual);
+        let cfg_sequential = GPTNeoXConfig {
+            use_parallel_residual: false,
+            ..tiny_config()
+        };
+        assert!(!cfg_sequential.use_parallel_residual);
+    }
+
+    // --- GPTNeoXMLP ---
+
+    #[test]
+    fn test_gpt_neox_mlp_construction() {
+        let cfg = tiny_config();
+        let mlp = GPTNeoXMLP::new(&cfg);
+        assert!(mlp.is_ok(), "GPTNeoXMLP should construct");
+    }
+
+    #[test]
+    fn test_gpt_neox_mlp_parameter_count() {
+        let cfg = tiny_config();
+        let mlp = GPTNeoXMLP::new(&cfg).expect("GPTNeoXMLP should construct");
+        assert!(
+            mlp.parameter_count() > 0,
+            "MLP should have positive parameter count"
+        );
+    }
+
+    // --- GPTNeoXAttention ---
+
+    #[test]
+    fn test_gpt_neox_attention_construction() {
+        let cfg = tiny_config();
+        let attn = GPTNeoXAttention::new(&cfg);
+        assert!(attn.is_ok(), "GPTNeoXAttention should construct");
+    }
+
+    #[test]
+    fn test_gpt_neox_attention_rotary_ndims() {
+        let cfg = tiny_config();
+        // head_dim = 16/2 = 8; rotary_pct=0.25 → rotary_ndims = 2
+        let head_dim = cfg.hidden_size / cfg.num_attention_heads;
+        let rotary_ndims = (head_dim as f32 * cfg.rotary_pct) as usize;
+        assert_eq!(rotary_ndims, 2, "tiny config: 8 * 0.25 = 2 rotary dims");
+    }
+
+    // --- GPTNeoXModel ---
+
+    #[test]
+    fn test_gpt_neox_model_construction() {
+        let cfg = tiny_config();
+        let model = GPTNeoXModel::new(cfg);
+        assert!(model.is_ok(), "GPTNeoXModel should construct");
+    }
+
+    #[test]
+    fn test_gpt_neox_model_num_parameters() {
+        let cfg = tiny_config();
+        let model = GPTNeoXModel::new(cfg).expect("GPTNeoXModel should construct");
+        assert!(
+            model.num_parameters() > 0,
+            "model should have positive params"
+        );
+    }
+
+    #[test]
+    fn test_gpt_neox_model_layers_count() {
+        let cfg = tiny_config();
+        let model = GPTNeoXModel::new(cfg.clone()).expect("GPTNeoXModel should construct");
+        assert_eq!(model.layers.len(), cfg.num_hidden_layers);
+    }
+
+    #[test]
+    fn test_gpt_neox_model_forward_output_shape() {
+        let cfg = tiny_config();
+        let model = GPTNeoXModel::new(cfg.clone()).expect("GPTNeoXModel should construct");
+        let input_ids: Vec<u32> = vec![1, 2, 3];
+        let output = model.forward(input_ids).expect("GPTNeoXModel forward should succeed");
+        let shape = output.shape();
+        let last_dim = *shape.last().expect("output should have dimensions");
+        assert_eq!(
+            last_dim, cfg.hidden_size,
+            "output last dim should be hidden_size"
+        );
+    }
+
+    // --- GPTNeoXForCausalLM ---
+
+    #[test]
+    fn test_gpt_neox_causal_lm_construction() {
+        let cfg = tiny_config();
+        let model = GPTNeoXForCausalLM::new(cfg);
+        assert!(model.is_ok(), "GPTNeoXForCausalLM should construct");
+    }
+
+    #[test]
+    fn test_gpt_neox_causal_lm_num_params_larger_than_base() {
+        let cfg = tiny_config();
+        let base = GPTNeoXModel::new(cfg.clone()).expect("GPTNeoXModel should construct");
+        let lm = GPTNeoXForCausalLM::new(cfg).expect("GPTNeoXForCausalLM should construct");
+        assert!(
+            lm.num_parameters() > base.num_parameters(),
+            "LM model should have more params than base (extra embed_out)"
+        );
+    }
+
+    #[test]
+    fn test_gpt_neox_causal_lm_forward_vocab_size() {
+        let cfg = tiny_config();
+        let model =
+            GPTNeoXForCausalLM::new(cfg.clone()).expect("GPTNeoXForCausalLM should construct");
+        let input_ids: Vec<u32> = vec![1, 2];
+        let output = model.forward(input_ids).expect("forward should succeed");
+        let shape = output.shape();
+        let last_dim = *shape.last().expect("output should have dimensions");
+        assert_eq!(last_dim, cfg.vocab_size, "last dim must be vocab_size");
+    }
+}

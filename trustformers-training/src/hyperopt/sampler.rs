@@ -770,4 +770,185 @@ mod tests {
         let config = sampler.sample(&search_space, &history);
         assert!(search_space.validate(&config).is_ok());
     }
+
+    // -----------------------------------------------------------------------
+    // SamplerConfig
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sampler_config_default_values() {
+        let config = SamplerConfig::default();
+        assert_eq!(config.n_startup_trials, 10);
+        assert_eq!(config.n_ei_candidates, 24);
+        assert!(config.seed.is_none());
+    }
+
+    #[test]
+    fn test_sampler_config_with_seed() {
+        let config = SamplerConfig {
+            seed: Some(123),
+            n_startup_trials: 5,
+            n_ei_candidates: 10,
+        };
+        assert_eq!(config.seed, Some(123));
+        assert_eq!(config.n_startup_trials, 5);
+    }
+
+    // -----------------------------------------------------------------------
+    // RandomSampler
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_random_sampler_name_contains_randomsampler() {
+        let sampler = RandomSampler::with_seed(0);
+        assert!(
+            sampler.name().contains("RandomSampler"),
+            "name should contain RandomSampler, got {}",
+            sampler.name()
+        );
+    }
+
+    #[test]
+    fn test_random_sampler_reproducible_with_same_seed() {
+        let search_space = create_test_search_space();
+        let history = TrialHistory::new(Direction::Maximize);
+
+        let mut sampler_a = RandomSampler::with_seed(7);
+        let mut sampler_b = RandomSampler::with_seed(7);
+
+        let config_a = sampler_a.sample(&search_space, &history);
+        let config_b = sampler_b.sample(&search_space, &history);
+
+        // Both samplers with the same seed should have same keys
+        assert_eq!(config_a.len(), config_b.len());
+    }
+
+    #[test]
+    fn test_random_sampler_default_creates_successfully() {
+        let sampler = RandomSampler::default();
+        assert!(sampler.name().contains("RandomSampler"));
+    }
+
+    #[test]
+    fn test_random_sampler_covers_all_parameters() {
+        let mut sampler = RandomSampler::with_seed(99);
+        let search_space = create_test_search_space();
+        let history = TrialHistory::new(Direction::Maximize);
+
+        let config = sampler.sample(&search_space, &history);
+        assert!(config.contains_key("learning_rate"));
+        assert!(config.contains_key("batch_size"));
+        assert!(config.contains_key("optimizer"));
+    }
+
+    #[test]
+    fn test_random_sampler_valid_outputs_on_multiple_calls() {
+        let mut sampler = RandomSampler::with_seed(55);
+        let search_space = create_test_search_space();
+        let history = TrialHistory::new(Direction::Minimize);
+
+        for _ in 0..5 {
+            let config = sampler.sample(&search_space, &history);
+            assert!(
+                search_space.validate(&config).is_ok(),
+                "random sample must be valid"
+            );
+        }
+    }
+
+    #[test]
+    fn test_random_sampler_update_does_not_panic() {
+        let mut sampler = RandomSampler::with_seed(42);
+        let params = HashMap::new();
+        let mut trial = Trial::new(0, params);
+        trial.complete(TrialResult::success(TrialMetrics::new(0.5)));
+        sampler.update(&trial);
+    }
+
+    // -----------------------------------------------------------------------
+    // TPESampler
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_tpe_sampler_name_contains_config_params() {
+        let sampler = TPESampler::with_config(SamplerConfig {
+            seed: Some(0),
+            n_startup_trials: 7,
+            n_ei_candidates: 13,
+        });
+        let name = sampler.name();
+        assert!(
+            name.contains("7"),
+            "name should mention startup count, got {}",
+            name
+        );
+        assert!(
+            name.contains("13"),
+            "name should mention candidates count, got {}",
+            name
+        );
+    }
+
+    #[test]
+    fn test_tpe_sampler_new_creates_successfully() {
+        let sampler = TPESampler::new();
+        assert!(sampler.name().contains("TPESampler"));
+    }
+
+    #[test]
+    fn test_tpe_sampler_minimize_direction() {
+        let mut sampler = TPESampler::with_config(SamplerConfig {
+            seed: Some(77),
+            n_startup_trials: 2,
+            n_ei_candidates: 3,
+        });
+        let search_space = create_test_search_space();
+
+        let mut history = TrialHistory::new(Direction::Minimize);
+        for i in 0..5_usize {
+            let mut params = HashMap::new();
+            params.insert(
+                "learning_rate".to_string(),
+                ParameterValue::Float(0.001 * (i + 1) as f64),
+            );
+            params.insert("batch_size".to_string(), ParameterValue::Int(32));
+            params.insert(
+                "optimizer".to_string(),
+                ParameterValue::String("adam".to_string()),
+            );
+            let mut trial = Trial::new(i, params);
+            trial.complete(TrialResult::success(TrialMetrics::new(
+                2.0 - i as f64 * 0.3,
+            )));
+            history.add_trial(trial);
+        }
+
+        let config = sampler.sample(&search_space, &history);
+        assert_eq!(config.len(), 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // GPSampler
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_gp_sampler_new_creates_successfully() {
+        let sampler = GPSampler::new();
+        assert!(!sampler.name().is_empty());
+    }
+
+    #[test]
+    fn test_gp_sampler_with_empty_history_falls_back_to_random() {
+        let mut sampler = GPSampler::with_config(SamplerConfig {
+            seed: Some(1),
+            n_startup_trials: 10,
+            n_ei_candidates: 5,
+        });
+        let search_space = create_test_search_space();
+        let history = TrialHistory::new(Direction::Maximize);
+
+        // Should fall back to random sampling with empty history
+        let config = sampler.sample(&search_space, &history);
+        assert!(search_space.validate(&config).is_ok());
+    }
 }

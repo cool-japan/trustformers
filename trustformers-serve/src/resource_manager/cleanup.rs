@@ -506,3 +506,167 @@ impl CleanupManager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cleanup_priority_ordering() {
+        assert!(CleanupPriority::Low < CleanupPriority::Medium);
+        assert!(CleanupPriority::Medium < CleanupPriority::High);
+        assert!(CleanupPriority::High < CleanupPriority::Critical);
+        assert!(CleanupPriority::Critical < CleanupPriority::Emergency);
+    }
+
+    #[test]
+    fn test_resource_type_debug() {
+        assert_eq!(format!("{:?}", ResourceType::NetworkPort), "NetworkPort");
+        assert_eq!(
+            format!("{:?}", ResourceType::TempDirectory),
+            "TempDirectory"
+        );
+        assert_eq!(format!("{:?}", ResourceType::GpuDevice), "GpuDevice");
+        assert_eq!(
+            format!("{:?}", ResourceType::DatabaseConnection),
+            "DatabaseConnection"
+        );
+        assert_eq!(format!("{:?}", ResourceType::Mixed), "Mixed");
+    }
+
+    #[test]
+    fn test_cleanup_strategy_variants() {
+        assert_eq!(format!("{:?}", CleanupStrategy::Immediate), "Immediate");
+        assert_eq!(format!("{:?}", CleanupStrategy::Background), "Background");
+        assert_eq!(format!("{:?}", CleanupStrategy::Force), "Force");
+        let graceful = CleanupStrategy::Graceful {
+            timeout: std::time::Duration::from_secs(30),
+        };
+        match graceful {
+            CleanupStrategy::Graceful { timeout } => assert_eq!(timeout.as_secs(), 30),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_cleanup_operation_status_variants() {
+        assert_eq!(
+            format!("{:?}", CleanupOperationStatus::Starting),
+            "Starting"
+        );
+        assert_eq!(
+            format!("{:?}", CleanupOperationStatus::InProgress),
+            "InProgress"
+        );
+        assert_eq!(
+            format!("{:?}", CleanupOperationStatus::Completed),
+            "Completed"
+        );
+        assert_eq!(
+            format!("{:?}", CleanupOperationStatus::Cancelled),
+            "Cancelled"
+        );
+        assert_eq!(
+            format!("{:?}", CleanupOperationStatus::TimedOut),
+            "TimedOut"
+        );
+        let failed = CleanupOperationStatus::Failed("disk error".to_string());
+        match failed {
+            CleanupOperationStatus::Failed(msg) => assert_eq!(msg, "disk error"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_cleanup_statistics_default() {
+        let stats = CleanupStatistics::default();
+        assert_eq!(stats.total_tasks, 0);
+        assert_eq!(stats.successful_cleanups, 0);
+        assert_eq!(stats.failed_cleanups, 0);
+    }
+
+    #[test]
+    fn test_cleanup_criteria_creation() {
+        let criteria = CleanupCriteria {
+            age_threshold: std::time::Duration::from_secs(3600),
+            unused_threshold: std::time::Duration::from_secs(1800),
+            status_filters: vec!["idle".to_string()],
+            custom_filters: HashMap::new(),
+        };
+        assert_eq!(criteria.age_threshold.as_secs(), 3600);
+        assert_eq!(criteria.status_filters.len(), 1);
+    }
+
+    #[test]
+    fn test_recurring_job_config_creation() {
+        let config = RecurringJobConfig {
+            resource_types: vec![ResourceType::NetworkPort],
+            criteria: CleanupCriteria {
+                age_threshold: std::time::Duration::from_secs(3600),
+                unused_threshold: std::time::Duration::from_secs(1800),
+                status_filters: vec![],
+                custom_filters: HashMap::new(),
+            },
+            max_items_per_run: 50,
+            enabled: true,
+        };
+        assert!(config.enabled);
+        assert_eq!(config.max_items_per_run, 50);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_manager_creation() {
+        let config = crate::test_parallelization::ResourceCleanupConfig::default();
+        let manager = CleanupManager::new(config).await;
+        assert!(manager.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_manager_get_statistics() {
+        let config = crate::test_parallelization::ResourceCleanupConfig::default();
+        let manager = CleanupManager::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        let stats = manager.get_statistics().await.unwrap_or(CleanupStatistics::default());
+        assert_eq!(stats.total_tasks, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_manager_active_ops_empty() {
+        let config = crate::test_parallelization::ResourceCleanupConfig::default();
+        let manager = CleanupManager::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        let ops = manager.get_active_operations().await.unwrap_or_default();
+        assert!(ops.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_manager_history_empty() {
+        let config = crate::test_parallelization::ResourceCleanupConfig::default();
+        let manager = CleanupManager::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        let history = manager.get_cleanup_history().await.unwrap_or_default();
+        assert!(history.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_manager_force_cleanup_all() {
+        let config = crate::test_parallelization::ResourceCleanupConfig::default();
+        let manager = CleanupManager::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        let result = manager.force_cleanup_all().await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_cleanup_task_creation() {
+        let task = CleanupTask {
+            task_id: "t-001".to_string(),
+            test_id: "test-001".to_string(),
+            resource_type: ResourceType::GpuDevice,
+            resource_id: "gpu-0".to_string(),
+            priority: CleanupPriority::High,
+            scheduled_time: chrono::Utc::now(),
+            strategy: CleanupStrategy::Force,
+            retry_count: 0,
+            metadata: HashMap::new(),
+        };
+        assert_eq!(task.retry_count, 0);
+        assert_eq!(task.resource_id, "gpu-0");
+    }
+}

@@ -670,7 +670,7 @@ mod tests {
 
         assert!(chunk_size_large > chunk_size_small);
         assert!(
-            chunk_size_large % (config.vector_size / std::mem::size_of::<f32>()) == 0
+            chunk_size_large.is_multiple_of(config.vector_size / std::mem::size_of::<f32>())
                 || chunk_size_large == 10000
         );
     }

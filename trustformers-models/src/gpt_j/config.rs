@@ -46,7 +46,7 @@ impl Default for GptJConfig {
 
 impl Config for GptJConfig {
     fn validate(&self) -> trustformers_core::errors::Result<()> {
-        if self.n_embd % self.n_head != 0 {
+        if !self.n_embd.is_multiple_of(self.n_head) {
             return Err(
                 trustformers_core::errors::TrustformersError::invalid_config(
                     "n_embd must be divisible by n_head".to_string(),

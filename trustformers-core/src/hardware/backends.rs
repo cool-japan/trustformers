@@ -916,3 +916,182 @@ impl Default for CPUBackend {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cpu_backend_creation() {
+        let backend = CPUBackend::new();
+        assert!(!backend.supported_ops.is_empty());
+    }
+
+    #[test]
+    fn test_cpu_backend_default() {
+        let backend = CPUBackend::default();
+        assert!(!backend.supported_ops.is_empty());
+    }
+
+    #[test]
+    fn test_cpu_backend_config_default() {
+        let config = CPUBackendConfig::default();
+        assert!(config.num_threads > 0);
+        assert!(config.enable_simd);
+    }
+
+    #[test]
+    fn test_cpu_backend_with_config() {
+        let config = CPUBackendConfig {
+            num_threads: 8,
+            enable_simd: true,
+            memory_pool_size: 1024 * 1024,
+            enable_monitoring: false,
+        };
+        let backend = CPUBackend::with_config(config);
+        assert!(!backend.supported_ops.is_empty());
+    }
+
+    #[test]
+    fn test_cpu_backend_supported_ops_include_add() {
+        let backend = CPUBackend::new();
+        assert!(backend.supported_ops.contains(&"add".to_string()));
+    }
+
+    #[test]
+    fn test_cpu_backend_supported_ops_include_matmul() {
+        let backend = CPUBackend::new();
+        assert!(backend.supported_ops.contains(&"matmul".to_string()));
+    }
+
+    #[test]
+    fn test_cpu_backend_supported_ops_include_relu() {
+        let backend = CPUBackend::new();
+        assert!(backend.supported_ops.contains(&"relu".to_string()));
+    }
+
+    #[test]
+    fn test_cpu_backend_discover_devices() {
+        let backend = CPUBackend::new();
+        let result = backend.discover_devices();
+        assert!(result.is_ok());
+        if let Ok(devices) = result {
+            assert!(!devices.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_cpu_backend_device_count_initially_zero() {
+        let backend = CPUBackend::new();
+        assert_eq!(backend.device_count(), 0);
+    }
+
+    #[test]
+    fn test_cpu_backend_get_nonexistent_device() {
+        let backend = CPUBackend::new();
+        let dev = backend.get_device("nonexistent");
+        assert!(dev.is_none());
+    }
+
+    #[test]
+    fn test_gpu_backend_cuda_creation() {
+        let backend = GPUBackend::new(GPUBackendType::CUDA);
+        assert_eq!(backend.backend_type(), GPUBackendType::CUDA);
+    }
+
+    #[test]
+    fn test_gpu_backend_metal_creation() {
+        let backend = GPUBackend::new(GPUBackendType::Metal);
+        assert_eq!(backend.backend_type(), GPUBackendType::Metal);
+    }
+
+    #[test]
+    fn test_gpu_backend_rocm_creation() {
+        let backend = GPUBackend::new(GPUBackendType::ROCm);
+        assert_eq!(backend.backend_type(), GPUBackendType::ROCm);
+    }
+
+    #[test]
+    fn test_gpu_backend_config_default() {
+        let config = GPUBackendConfig::default();
+        assert!(config.stream_count > 0);
+    }
+
+    #[test]
+    fn test_gpu_backend_with_config() {
+        let config = GPUBackendConfig {
+            memory_pool_size: 4 * 1024 * 1024,
+            enable_unified_memory: true,
+            stream_count: 4,
+            enable_kernel_fusion: true,
+            enable_monitoring: false,
+        };
+        let backend = GPUBackend::with_config(GPUBackendType::Vulkan, config);
+        assert_eq!(backend.backend_type(), GPUBackendType::Vulkan);
+    }
+
+    #[test]
+    fn test_gpu_backend_device_count_initially_zero() {
+        let backend = GPUBackend::new(GPUBackendType::CUDA);
+        assert_eq!(backend.device_count(), 0);
+    }
+
+    #[test]
+    fn test_gpu_backend_get_nonexistent_device() {
+        let backend = GPUBackend::new(GPUBackendType::Metal);
+        let dev = backend.get_device("nonexistent");
+        assert!(dev.is_none());
+    }
+
+    #[test]
+    fn test_gpu_backend_supported_ops() {
+        let backend = GPUBackend::new(GPUBackendType::CUDA);
+        assert!(!backend.supported_ops.is_empty());
+    }
+
+    #[test]
+    fn test_cpu_backend_config_clone() {
+        let config = CPUBackendConfig::default();
+        let cloned = config.clone();
+        assert_eq!(cloned.num_threads, config.num_threads);
+        assert_eq!(cloned.enable_simd, config.enable_simd);
+    }
+
+    #[test]
+    fn test_gpu_backend_config_clone() {
+        let config = GPUBackendConfig::default();
+        let cloned = config.clone();
+        assert_eq!(cloned.stream_count, config.stream_count);
+    }
+
+    #[test]
+    fn test_cpu_backend_discover_and_get() {
+        let backend = CPUBackend::new();
+        if let Ok(device_ids) = backend.discover_devices() {
+            if let Some(first_id) = device_ids.first() {
+                let dev = backend.get_device(first_id);
+                assert!(dev.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn test_cpu_backend_execute_add() {
+        let backend = CPUBackend::new();
+        let _ = backend.discover_devices();
+        let a = Tensor::from_data(vec![1.0, 2.0], &[2]).expect("create failed");
+        let b = Tensor::from_data(vec![3.0, 4.0], &[2]).expect("create failed");
+        if let Ok(device_ids) = backend.discover_devices() {
+            if let Some(first_id) = device_ids.first() {
+                let result = backend.execute_on_device(
+                    first_id,
+                    "add",
+                    &[a, b],
+                    OperationMode::Performance,
+                    PrecisionMode::Single,
+                );
+                assert!(result.is_ok());
+            }
+        }
+    }
+}

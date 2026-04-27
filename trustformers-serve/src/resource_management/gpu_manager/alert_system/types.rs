@@ -684,7 +684,7 @@ impl GpuAlertSystem {
         let history = self.alert_history.read();
         let mut events: Vec<_> = history
             .iter()
-            .filter(|event| device_id.map_or(true, |id| event.alert.device_id == id))
+            .filter(|event| device_id.is_none_or(|id| event.alert.device_id == id))
             .cloned()
             .collect();
         events.reverse();

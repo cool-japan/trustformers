@@ -618,18 +618,16 @@ fn estimate_flops(
 ) -> u64 {
     match layer_type {
         LayerType::Linear => {
-            // Matrix multiplication: input_features * output_features * batch_size
             if input_shape.len() >= 2 && output_shape.len() >= 2 {
                 let batch_size = input_shape[0] as u64;
                 let input_features = input_shape[1] as u64;
                 let output_features = output_shape[1] as u64;
-                batch_size * input_features * output_features * 2 // Multiply-add
+                batch_size * input_features * output_features * 2
             } else {
                 parameters as u64 * 2
             }
         },
         LayerType::Conv2D => {
-            // Convolution: output_h * output_w * kernel_h * kernel_w * input_channels * output_channels
             if output_shape.len() >= 4 {
                 let batch_size = output_shape[0] as u64;
                 let output_channels = output_shape[1] as u64;
@@ -646,19 +644,273 @@ fn estimate_flops(
             }
         },
         LayerType::Attention => {
-            // Attention: roughly O(sequence_length^2 * hidden_size)
             if input_shape.len() >= 3 {
                 let batch_size = input_shape[0] as u64;
                 let seq_len = input_shape[1] as u64;
                 let hidden_size = input_shape[2] as u64;
-                batch_size * seq_len * seq_len * hidden_size * 4 // Q, K, V, output projections
+                batch_size * seq_len * seq_len * hidden_size * 4
             } else {
                 parameters as u64 * 4
             }
         },
-        _ => {
-            // For other layers, estimate based on parameters
-            parameters as u64
-        },
+        _ => parameters as u64,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_linear_layer(id: &str, params: usize) -> LayerInfo {
+        create_layer_info(
+            id.to_string(),
+            format!("{}_layer", id),
+            LayerType::Linear,
+            vec![1, params],
+            vec![1, params],
+            params,
+        )
+    }
+
+    // ── Config ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_config_default() {
+        let cfg = ArchitectureAnalysisConfig::default();
+        assert!(cfg.enable_parameter_counting);
+        assert!(cfg.enable_receptive_field_calculation);
+        assert!(cfg.enable_depth_width_analysis);
+        assert!(cfg.enable_connectivity_patterns);
+        assert!(cfg.enable_symmetry_detection);
+        assert!(cfg.max_receptive_field_depth > 0);
+        assert!((cfg.sampling_rate - 1.0).abs() < 1e-6);
+    }
+
+    // ── ArchitectureAnalyzer ───────────────────────────────────────────────
+
+    #[test]
+    fn test_analyzer_new_empty() {
+        let analyzer = ArchitectureAnalyzer::new(ArchitectureAnalysisConfig::default());
+        let summary = analyzer.get_summary();
+        assert_eq!(summary.total_layers, 0);
+        assert_eq!(summary.total_parameters, 0);
+    }
+
+    #[test]
+    fn test_register_layer_accumulates() {
+        let mut analyzer = ArchitectureAnalyzer::new(ArchitectureAnalysisConfig::default());
+        analyzer.register_layer(make_linear_layer("l0", 512));
+        analyzer.register_layer(make_linear_layer("l1", 256));
+        assert_eq!(analyzer.get_summary().total_layers, 2);
+    }
+
+    #[test]
+    fn test_add_connection() {
+        let mut analyzer = ArchitectureAnalyzer::new(ArchitectureAnalysisConfig::default());
+        analyzer.register_layer(make_linear_layer("a", 128));
+        analyzer.register_layer(make_linear_layer("b", 128));
+        analyzer.add_connection(ConnectivityPattern {
+            from_layer: "a".to_string(),
+            to_layer: "b".to_string(),
+            connection_type: ConnectionType::Sequential,
+            strength: 1.0,
+        });
+        let summary = analyzer.get_summary();
+        assert_eq!(summary.total_layers, 2);
+    }
+
+    #[test]
+    fn test_clear_resets_state() {
+        let mut analyzer = ArchitectureAnalyzer::new(ArchitectureAnalysisConfig::default());
+        analyzer.register_layer(make_linear_layer("l0", 64));
+        analyzer.clear();
+        assert_eq!(analyzer.get_summary().total_layers, 0);
+    }
+
+    // ── LayerInfo via create_layer_info ────────────────────────────────────
+
+    #[test]
+    fn test_create_layer_info_parameters() {
+        let layer = make_linear_layer("dense", 1024);
+        assert_eq!(layer.parameters, 1024);
+        assert_eq!(layer.trainable_parameters, 1024);
+        assert_eq!(layer.memory_usage, 1024 * 4);
+        assert!(layer.receptive_field.is_none());
+    }
+
+    #[test]
+    fn test_create_layer_info_conv2d_flops() {
+        let layer = create_layer_info(
+            "conv".to_string(),
+            "conv_layer".to_string(),
+            LayerType::Conv2D,
+            vec![1, 3, 224, 224],
+            vec![1, 64, 112, 112],
+            64 * 3 * 3 * 3,
+        );
+        assert!(layer.flops > 0);
+    }
+
+    #[test]
+    fn test_create_layer_info_attention_flops() {
+        let layer = create_layer_info(
+            "attn".to_string(),
+            "attention".to_string(),
+            LayerType::Attention,
+            vec![1, 128, 768],
+            vec![1, 128, 768],
+            768 * 768 * 4,
+        );
+        assert!(layer.flops > 0);
+    }
+
+    // ── ArchitectureSummary ────────────────────────────────────────────────
+
+    #[test]
+    fn test_summary_totals() {
+        let mut analyzer = ArchitectureAnalyzer::new(ArchitectureAnalysisConfig::default());
+        analyzer.register_layer(make_linear_layer("l0", 100));
+        analyzer.register_layer(make_linear_layer("l1", 200));
+        let s = analyzer.get_summary();
+        assert_eq!(s.total_parameters, 300);
+        assert_eq!(s.average_layer_size, 150);
+    }
+
+    #[test]
+    fn test_summary_layer_type_distribution() {
+        let mut analyzer = ArchitectureAnalyzer::new(ArchitectureAnalysisConfig::default());
+        analyzer.register_layer(make_linear_layer("l0", 64));
+        analyzer.register_layer(make_linear_layer("l1", 64));
+        let s = analyzer.get_summary();
+        assert_eq!(
+            s.layer_type_distribution.get(&LayerType::Linear).copied().unwrap_or(0),
+            2
+        );
+    }
+
+    // ── LayerType variants ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_layer_type_all_variants() {
+        let types = [
+            LayerType::Linear,
+            LayerType::Conv2D,
+            LayerType::Conv3D,
+            LayerType::BatchNorm,
+            LayerType::LayerNorm,
+            LayerType::Attention,
+            LayerType::Embedding,
+            LayerType::Dropout,
+            LayerType::Activation,
+            LayerType::Pooling,
+            LayerType::Residual,
+            LayerType::Unknown,
+        ];
+        for t in &types {
+            assert!(!format!("{:?}", t).is_empty());
+        }
+    }
+
+    // ── ConnectionType variants ────────────────────────────────────────────
+
+    #[test]
+    fn test_connection_type_variants() {
+        let types = [
+            ConnectionType::Sequential,
+            ConnectionType::Residual,
+            ConnectionType::Attention,
+            ConnectionType::Skip,
+            ConnectionType::Recurrent,
+            ConnectionType::Branching,
+        ];
+        for t in &types {
+            assert!(!format!("{:?}", t).is_empty());
+        }
+    }
+
+    // ── SymmetryType variants ──────────────────────────────────────────────
+
+    #[test]
+    fn test_symmetry_type_variants() {
+        let types = [
+            SymmetryType::Translational,
+            SymmetryType::Rotational,
+            SymmetryType::Reflection,
+            SymmetryType::Permutation,
+            SymmetryType::Block,
+        ];
+        for t in &types {
+            assert!(!format!("{:?}", t).is_empty());
+        }
+    }
+
+    // ── EfficiencyMetrics ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_efficiency_metrics_construction() {
+        let metrics = EfficiencyMetrics {
+            parameter_efficiency: 0.8,
+            flops_efficiency: 0.7,
+            memory_efficiency: 0.9,
+            depth_efficiency: 0.6,
+            overall_score: 0.75,
+        };
+        assert!((metrics.overall_score - 0.75).abs() < 1e-6);
+    }
+
+    // ── async analyze ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_analyze_empty() {
+        let mut analyzer = ArchitectureAnalyzer::new(ArchitectureAnalysisConfig::default());
+        let report = analyzer.analyze().await.expect("analyze should succeed");
+        assert_eq!(report.total_parameters, 0);
+        assert_eq!(report.model_depth, 0);
+    }
+
+    #[tokio::test]
+    async fn test_analyze_parameter_counting() {
+        let mut analyzer = ArchitectureAnalyzer::new(ArchitectureAnalysisConfig::default());
+        analyzer.register_layer(make_linear_layer("l0", 512));
+        analyzer.register_layer(make_linear_layer("l1", 512));
+        let report = analyzer.analyze().await.expect("analyze should succeed");
+        assert_eq!(report.total_parameters, 1024);
+        assert_eq!(report.trainable_parameters, 1024);
+    }
+
+    #[tokio::test]
+    async fn test_analyze_depth_width() {
+        let mut analyzer = ArchitectureAnalyzer::new(ArchitectureAnalysisConfig::default());
+        analyzer.register_layer(make_linear_layer("l0", 128));
+        analyzer.register_layer(make_linear_layer("l1", 256));
+        analyzer.register_layer(make_linear_layer("l2", 64));
+        let report = analyzer.analyze().await.expect("analyze should succeed");
+        assert_eq!(report.model_depth, 3);
+        assert_eq!(report.model_width, 256);
+    }
+
+    #[tokio::test]
+    async fn test_quick_analysis_returns_summary() {
+        let mut analyzer = ArchitectureAnalyzer::new(ArchitectureAnalysisConfig::default());
+        analyzer.register_layer(make_linear_layer("l0", 1000));
+        let qs = analyzer.quick_analysis().await.expect("quick_analysis should succeed");
+        assert_eq!(qs.total_parameters, 1000);
+        assert!(!qs.recommendations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_generate_report_symmetry_detection() {
+        let mut analyzer = ArchitectureAnalyzer::new(ArchitectureAnalysisConfig::default());
+        // Register 6 identical layers — should trigger permutation symmetry detection.
+        for i in 0..6 {
+            analyzer.register_layer(make_linear_layer(&format!("l{}", i), 256));
+        }
+        let report = analyzer.generate_report().await.expect("report should succeed");
+        // Symmetry detection is heuristic; just verify the report is populated
+        assert_eq!(report.total_parameters, 6 * 256);
     }
 }

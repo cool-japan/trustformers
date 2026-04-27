@@ -991,4 +991,215 @@ mod tests {
 
         Ok(())
     }
+
+    // Non-feature-gated tests for CPU fallback and utility functions
+
+    #[test]
+    fn test_opencl_matmul_fallback_identity_like() -> Result<()> {
+        // Test CPU fallback path for matmul
+        let a = Tensor::from_vec(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]).expect("tensor failed");
+        let b = Tensor::from_vec(vec![3.0, 4.0, 5.0, 6.0], &[2, 2]).expect("tensor failed");
+        let result = a.matmul(&b)?;
+        let data = result.data_f32().expect("data failed");
+        assert!((data[0] - 3.0).abs() < 1e-5);
+        assert!((data[1] - 4.0).abs() < 1e-5);
+        assert!((data[2] - 5.0).abs() < 1e-5);
+        assert!((data[3] - 6.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_opencl_matmul_fallback_ones() -> Result<()> {
+        let a = Tensor::ones(&[3, 3]).expect("tensor failed");
+        let b = Tensor::ones(&[3, 3]).expect("tensor failed");
+        let result = a.matmul(&b)?;
+        let data = result.data_f32().expect("data failed");
+        for val in data.iter() {
+            assert!((val - 3.0).abs() < 1e-5, "Expected 3.0, got {}", val);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_opencl_matmul_fallback_zeros() -> Result<()> {
+        let a = Tensor::zeros(&[2, 3]).expect("tensor failed");
+        let b = Tensor::ones(&[3, 2]).expect("tensor failed");
+        let result = a.matmul(&b)?;
+        let data = result.data_f32().expect("data failed");
+        for val in data.iter() {
+            assert!((val - 0.0).abs() < 1e-5, "Expected 0.0, got {}", val);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_opencl_matmul_fallback_rectangular() -> Result<()> {
+        let a =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).expect("tensor failed");
+        let b = Tensor::from_vec(vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0], &[3, 2])
+            .expect("tensor failed");
+        let result = a.matmul(&b)?;
+        let data = result.data_f32().expect("data failed");
+        // [2,3] x [3,2] = [2,2]
+        assert_eq!(result.shape(), &[2, 2]);
+        // First row: 1*7+2*9+3*11 = 7+18+33 = 58, 1*8+2*10+3*12 = 8+20+36 = 64
+        assert!((data[0] - 58.0).abs() < 1e-4);
+        assert!((data[1] - 64.0).abs() < 1e-4);
+        Ok(())
+    }
+
+    #[test]
+    fn test_opencl_matmul_fallback_single_element() -> Result<()> {
+        let a = Tensor::from_vec(vec![3.0], &[1, 1]).expect("tensor failed");
+        let b = Tensor::from_vec(vec![4.0], &[1, 1]).expect("tensor failed");
+        let result = a.matmul(&b)?;
+        let data = result.data_f32().expect("data failed");
+        assert!((data[0] - 12.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_opencl_matmul_fallback_negative_values() -> Result<()> {
+        let a = Tensor::from_vec(vec![-1.0, 2.0, 3.0, -4.0], &[2, 2]).expect("tensor failed");
+        let b = Tensor::from_vec(vec![1.0, -1.0, -1.0, 1.0], &[2, 2]).expect("tensor failed");
+        let result = a.matmul(&b)?;
+        let data = result.data_f32().expect("data failed");
+        // [-1*1+2*(-1), -1*(-1)+2*1] = [-3, 3]
+        // [3*1+(-4)*(-1), 3*(-1)+(-4)*1] = [7, -7]
+        assert!((data[0] - (-3.0)).abs() < 1e-4);
+        assert!((data[1] - 3.0).abs() < 1e-4);
+        assert!((data[2] - 7.0).abs() < 1e-4);
+        assert!((data[3] - (-7.0)).abs() < 1e-4);
+        Ok(())
+    }
+
+    #[test]
+    fn test_opencl_matmul_fallback_large_matrix() -> Result<()> {
+        let n = 16;
+        let a = Tensor::ones(&[n, n]).expect("tensor failed");
+        let b = Tensor::ones(&[n, n]).expect("tensor failed");
+        let result = a.matmul(&b)?;
+        let data = result.data_f32().expect("data failed");
+        for val in data.iter() {
+            assert!((val - n as f32).abs() < 1e-4);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_opencl_matmul_fallback_asymmetric() -> Result<()> {
+        let a = Tensor::ones(&[1, 5]).expect("tensor failed");
+        let b = Tensor::ones(&[5, 1]).expect("tensor failed");
+        let result = a.matmul(&b)?;
+        assert_eq!(result.shape(), &[1, 1]);
+        let data = result.data_f32().expect("data failed");
+        assert!((data[0] - 5.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_opencl_matmul_fallback_wide_result() -> Result<()> {
+        let a = Tensor::ones(&[5, 1]).expect("tensor failed");
+        let b = Tensor::ones(&[1, 5]).expect("tensor failed");
+        let result = a.matmul(&b)?;
+        assert_eq!(result.shape(), &[5, 5]);
+        let data = result.data_f32().expect("data failed");
+        for val in data.iter() {
+            assert!((val - 1.0).abs() < 1e-5);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_opencl_matmul_fallback_deterministic() -> Result<()> {
+        // Use LCG for deterministic data
+        let mut seed: u64 = 42;
+        let mut gen = || -> f32 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 33) as f32) / (u32::MAX as f32)
+        };
+        let a_data: Vec<f32> = (0..12).map(|_| gen()).collect();
+        let b_data: Vec<f32> = (0..12).map(|_| gen()).collect();
+        let a = Tensor::from_vec(a_data, &[3, 4]).expect("tensor failed");
+        let b = Tensor::from_vec(b_data, &[4, 3]).expect("tensor failed");
+        let r1 = a.matmul(&b)?;
+        let r2 = a.matmul(&b)?;
+        let d1 = r1.data_f32().expect("data failed");
+        let d2 = r2.data_f32().expect("data failed");
+        for (v1, v2) in d1.iter().zip(d2.iter()) {
+            assert!((v1 - v2).abs() < 1e-6, "Results should be deterministic");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_opencl_matmul_preserves_shape() -> Result<()> {
+        let a = Tensor::ones(&[4, 6]).expect("tensor failed");
+        let b = Tensor::ones(&[6, 8]).expect("tensor failed");
+        let result = a.matmul(&b)?;
+        assert_eq!(result.shape(), &[4, 8]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_opencl_matmul_small_values() -> Result<()> {
+        let a = Tensor::from_vec(vec![0.001, 0.002, 0.003, 0.004], &[2, 2]).expect("tensor failed");
+        let b = Tensor::from_vec(vec![0.001, 0.002, 0.003, 0.004], &[2, 2]).expect("tensor failed");
+        let result = a.matmul(&b)?;
+        let data = result.data_f32().expect("data failed");
+        // Should be very small but non-zero
+        for val in data.iter() {
+            assert!(*val > 0.0);
+            assert!(*val < 0.1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_opencl_matmul_large_values() -> Result<()> {
+        let a =
+            Tensor::from_vec(vec![1000.0, 2000.0, 3000.0, 4000.0], &[2, 2]).expect("tensor failed");
+        let b = Tensor::from_vec(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]).expect("tensor failed");
+        let result = a.matmul(&b)?;
+        let data = result.data_f32().expect("data failed");
+        assert!((data[0] - 1000.0).abs() < 1e-1);
+        assert!((data[1] - 2000.0).abs() < 1e-1);
+        assert!((data[2] - 3000.0).abs() < 1e-1);
+        assert!((data[3] - 4000.0).abs() < 1e-1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_opencl_matmul_commutative_check() -> Result<()> {
+        // AB != BA in general
+        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("tensor failed");
+        let b = Tensor::from_vec(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("tensor failed");
+        let ab = a.matmul(&b)?;
+        let ba = b.matmul(&a)?;
+        let ab_data = ab.data_f32().expect("data failed");
+        let ba_data = ba.data_f32().expect("data failed");
+        // AB = [[19,22],[43,50]], BA = [[23,34],[31,46]]
+        assert!(
+            (ab_data[0] - ba_data[0]).abs() > 0.1,
+            "AB and BA should differ"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_opencl_matmul_associative() -> Result<()> {
+        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("tensor failed");
+        let b = Tensor::from_vec(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("tensor failed");
+        let c = Tensor::from_vec(vec![9.0, 10.0, 11.0, 12.0], &[2, 2]).expect("tensor failed");
+        let ab = a.matmul(&b)?;
+        let abc_1 = ab.matmul(&c)?;
+        let bc = b.matmul(&c)?;
+        let abc_2 = a.matmul(&bc)?;
+        let d1 = abc_1.data_f32().expect("data failed");
+        let d2 = abc_2.data_f32().expect("data failed");
+        for (v1, v2) in d1.iter().zip(d2.iter()) {
+            assert!((v1 - v2).abs() < 1e-2, "(AB)C should equal A(BC)");
+        }
+        Ok(())
+    }
 }

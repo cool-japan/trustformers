@@ -399,10 +399,12 @@ pub mod continual_learning;
 pub mod convergence;
 pub mod cpu_offload;
 pub mod cross_framework;
+pub mod cyclic_decay;
 pub mod deep_distributed_qp;
 pub mod enhanced_distributed_training;
 pub mod eva;
 pub mod federated;
+pub mod fsdp;
 pub mod fusion;
 pub mod genie_stub;
 pub mod gradient_processing;
@@ -414,10 +416,12 @@ pub mod jax_compat;
 pub mod kernel_fusion;
 pub mod lamb;
 pub mod lancbio;
+pub mod lazy_state;
 pub mod lion;
 pub mod lookahead;
 pub mod lora;
 pub mod lora_rite_stub;
+pub mod lr_finder;
 pub mod memory_layout;
 pub mod microadam;
 pub mod monitoring;
@@ -426,8 +430,10 @@ pub mod muon;
 pub mod novograd;
 pub mod onnx_export;
 pub mod optimizer;
+pub mod optimizer_surgery;
 pub mod parallel;
 pub mod pde_aware;
+pub mod per_layer_quant;
 pub mod performance_validation;
 pub mod prodigy;
 pub mod pytorch_compat;
@@ -479,7 +485,16 @@ pub use bge_adam_optimized::{OptimizedBGEAdam, OptimizedBGEAdamConfig};
 pub use cache_friendly::{
     CacheConfig, CacheFriendlyAdam, CacheFriendlyState, CacheStats, ParameterMetadata,
 };
-pub use came::{CAMEConfig, CAME};
+pub use came::{
+    came_update,
+    CAMEConfig,
+    // Advanced CAME (Wave 15 Workstream BB)
+    CameConfig,
+    CameOptimizer,
+    CameParamState,
+    OptimError as CameOptimError,
+    CAME,
+};
 pub use common::{
     BiasCorrection, GradientProcessor, OptimizerState, ParameterIds, ParameterUpdate,
     StateMemoryStats, WeightDecayMode,
@@ -612,7 +627,17 @@ pub use simd_optimizations::{SIMDConfig, SIMDOptimizer, SIMDPerformanceInfo};
 pub use sofo_stub::{
     ForwardModeStats, MemoryStats as SOFOMemoryStats, SOFOConfig, SOFOStats, SOFO,
 };
-pub use sophia::{Sophia, SophiaConfig};
+pub use sophia::{
+    hutchinson_hessian_estimate,
+    sophia_update,
+    Sophia,
+    // Advanced Sophia (Wave 15 Workstream BB)
+    SophiaConfig,
+    SophiaError,
+    SophiaLegacyConfig,
+    SophiaOptimizer,
+    SophiaParamState,
+};
 pub use sparse::{SparseAdam, SparseConfig, SparseMomentumState, SparseSGD};
 pub use task_specific::{
     create_bert_optimizer, create_gan_optimizer, create_maml_optimizer, create_ppo_optimizer,
@@ -644,3 +669,11 @@ pub use onnx_export::{
     OptimizerConfig,
 };
 pub use parallel::{BatchUpdate, ParallelAdam, ParallelConfig, ParallelStats};
+
+pub use cyclic_decay::{
+    AnnealStrategy, CyclicLrConfig, CyclicLrMode, CyclicLrScheduler, OneCycleLrScheduler,
+};
+pub use lazy_state::{LazyAdam, LazyOptimizerStats, LazyParamState};
+pub use lr_finder::{
+    find_optimal_lr, LrFinder, LrFinderAction, LrFinderConfig, LrFinderResult, LrStopReason,
+};

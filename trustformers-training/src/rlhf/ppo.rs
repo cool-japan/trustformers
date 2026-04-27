@@ -688,4 +688,266 @@ mod tests {
         assert_eq!(batch.rewards.len(), 4);
         assert_eq!(batch.sequences.shape(), &[4, 10]);
     }
+
+    // ── Additional tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_ppo_config_default_clip_param_range() {
+        let cfg = PPOConfig::default();
+        assert!(
+            cfg.clip_param > 0.0 && cfg.clip_param < 1.0,
+            "clip_param should be in (0,1), got {}",
+            cfg.clip_param
+        );
+    }
+
+    #[test]
+    fn test_ppo_config_default_positive_lr() {
+        let cfg = PPOConfig::default();
+        assert!(cfg.policy_lr > 0.0);
+        assert!(cfg.value_lr > 0.0);
+    }
+
+    #[test]
+    fn test_ppo_config_default_positive_coefficients() {
+        let cfg = PPOConfig::default();
+        assert!(cfg.vf_coef > 0.0);
+        assert!(cfg.entropy_coef >= 0.0);
+        assert!(cfg.kl_penalty >= 0.0);
+    }
+
+    #[test]
+    fn test_policy_model_empty_params() {
+        let model = PolicyModel {
+            model_id: "empty".to_string(),
+            parameters: HashMap::new(),
+            vocab_size: 1000,
+            hidden_size: 64,
+        };
+        assert!(model.parameters.is_empty());
+        assert_eq!(model.vocab_size, 1000);
+    }
+
+    #[test]
+    fn test_value_model_creation() {
+        let vm = ValueModel {
+            model_id: "value_net".to_string(),
+            parameters: HashMap::new(),
+            hidden_size: 256,
+        };
+        assert_eq!(vm.hidden_size, 256);
+    }
+
+    #[test]
+    fn test_ppo_statistics_default() {
+        let stats = PPOStatistics::default();
+        assert_eq!(stats.total_steps, 0);
+        assert!(stats.policy_losses.is_empty());
+        assert!(stats.value_losses.is_empty());
+        assert!(stats.kl_divergences.is_empty());
+    }
+
+    #[test]
+    fn test_advantage_calculation_single_step() {
+        let cfg = PPOConfig::default();
+        let trainer = PPOTrainer::new(cfg).unwrap_or_else(|_| panic!("trainer creation failed"));
+        let rewards = Array1::from_vec(vec![1.0]);
+        let values = Array1::from_vec(vec![0.0]);
+        let result = trainer.calculate_advantages(&rewards, &values, 0.99, 0.95);
+        assert!(result.is_ok());
+        let (adv, ret) = result.unwrap_or_else(|_| panic!("advantage calculation failed"));
+        assert_eq!(adv.len(), 1);
+        assert_eq!(ret.len(), 1);
+        // For single step: delta = 1.0 - 0.0, GAE = delta
+        assert!((adv[0] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_advantage_returns_are_sum_of_adv_and_value() {
+        let cfg = PPOConfig::default();
+        let trainer = PPOTrainer::new(cfg).unwrap_or_else(|_| panic!("trainer creation failed"));
+        let rewards = Array1::from_vec(vec![1.0, 1.0, 1.0]);
+        let values = Array1::from_vec(vec![0.5, 0.5, 0.5]);
+        let (adv, ret) = trainer
+            .calculate_advantages(&rewards, &values, 0.99, 0.95)
+            .unwrap_or_else(|_| panic!("advantage calculation failed"));
+        for i in 0..3 {
+            let expected_ret = adv[i] + values[i];
+            assert!(
+                (ret[i] - expected_ret).abs() < 1e-4,
+                "return[{}] should equal advantage+value",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_ppo_step_result_structure() {
+        let result = PPOStepResult {
+            policy_loss: 0.5,
+            value_loss: 0.3,
+            kl_divergence: 0.01,
+            entropy: 1.5,
+            clip_fraction: 0.1,
+            explained_variance: 0.8,
+        };
+        assert!(result.policy_loss >= 0.0);
+        assert!(result.clip_fraction >= 0.0 && result.clip_fraction <= 1.0);
+    }
+
+    #[test]
+    fn test_experience_batch_advantages_aligned_with_rewards() {
+        let n = 8;
+        let mut s = 42u64;
+        fn lcg(s: &mut u64) -> f32 {
+            *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (*s % 1000) as f32 / 1000.0
+        }
+        let rewards: Vec<f32> = (0..n).map(|_| lcg(&mut s)).collect();
+        let values: Vec<f32> = (0..n).map(|_| lcg(&mut s) * 0.5).collect();
+        let adv: Vec<f32> = (0..n).map(|_| lcg(&mut s) - 0.5).collect();
+        let ret: Vec<f32> = adv.iter().zip(values.iter()).map(|(a, v)| a + v).collect();
+
+        let batch = ExperienceBatch {
+            sequences: Array2::zeros((n, 5)),
+            action_probs: Array2::ones((n, 1)),
+            old_action_probs: Array2::ones((n, 1)),
+            rewards: Array1::from_vec(rewards),
+            values: Array1::from_vec(values),
+            advantages: Array1::from_vec(adv),
+            returns: Array1::from_vec(ret),
+        };
+        assert_eq!(batch.rewards.len(), n);
+        assert_eq!(batch.advantages.len(), n);
+    }
+
+    #[test]
+    fn test_ppo_trainer_training_step() {
+        let cfg = PPOConfig::default();
+        let mut trainer =
+            PPOTrainer::new(cfg).unwrap_or_else(|_| panic!("trainer creation failed"));
+        let batch = ExperienceBatch {
+            sequences: Array2::zeros((2, 5)),
+            action_probs: Array2::ones((2, 1)) * 0.6,
+            old_action_probs: Array2::ones((2, 1)) * 0.5,
+            rewards: Array1::from_vec(vec![1.0, 2.0]),
+            values: Array1::from_vec(vec![0.5, 1.5]),
+            advantages: Array1::from_vec(vec![0.5, 0.5]),
+            returns: Array1::from_vec(vec![1.0, 2.0]),
+        };
+        let result = trainer.training_step(&batch);
+        assert!(result.is_ok(), "training step should succeed");
+    }
+
+    #[test]
+    fn test_ppo_statistics_accumulate_after_step() {
+        let cfg = PPOConfig::default();
+        let mut trainer =
+            PPOTrainer::new(cfg).unwrap_or_else(|_| panic!("trainer creation failed"));
+        let batch = ExperienceBatch {
+            sequences: Array2::zeros((2, 5)),
+            action_probs: Array2::ones((2, 1)),
+            old_action_probs: Array2::ones((2, 1)),
+            rewards: Array1::from_vec(vec![1.0, 1.0]),
+            values: Array1::from_vec(vec![0.5, 0.5]),
+            advantages: Array1::from_vec(vec![0.5, 0.5]),
+            returns: Array1::from_vec(vec![1.0, 1.0]),
+        };
+        trainer.training_step(&batch).unwrap_or(PPOStepResult {
+            policy_loss: 0.0,
+            value_loss: 0.0,
+            kl_divergence: 0.0,
+            entropy: 0.0,
+            clip_fraction: 0.0,
+            explained_variance: 0.0,
+        });
+        assert_eq!(trainer.statistics.total_steps, 1);
+        assert!(!trainer.statistics.policy_losses.is_empty());
+    }
+
+    #[test]
+    fn test_advantage_high_gamma_larger_returns() {
+        let cfg = PPOConfig::default();
+        let trainer = PPOTrainer::new(cfg).unwrap_or_else(|_| panic!("trainer creation failed"));
+        let rewards = Array1::from_vec(vec![1.0, 1.0, 1.0]);
+        let values = Array1::from_vec(vec![0.0, 0.0, 0.0]);
+        let (_, ret_high) = trainer
+            .calculate_advantages(&rewards, &values, 0.99, 0.95)
+            .unwrap_or_else(|_| panic!("failed"));
+        let (_, ret_low) = trainer
+            .calculate_advantages(&rewards, &values, 0.1, 0.95)
+            .unwrap_or_else(|_| panic!("failed"));
+        // With high gamma, future rewards matter more so first return should be higher
+        assert!(
+            ret_high[0] > ret_low[0],
+            "higher gamma should give larger return at t=0"
+        );
+    }
+
+    #[test]
+    fn test_ppo_trainer_initialize_models() {
+        let cfg = PPOConfig::default();
+        let mut trainer =
+            PPOTrainer::new(cfg).unwrap_or_else(|_| panic!("trainer creation failed"));
+        let policy = PolicyModel {
+            model_id: "p".to_string(),
+            parameters: HashMap::new(),
+            vocab_size: 1000,
+            hidden_size: 64,
+        };
+        let value = ValueModel {
+            model_id: "v".to_string(),
+            parameters: HashMap::new(),
+            hidden_size: 64,
+        };
+        let result = trainer.initialize_models(policy, value, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ppo_trainer_generate_without_models_fails() {
+        let cfg = PPOConfig::default();
+        let trainer = PPOTrainer::new(cfg).unwrap_or_else(|_| panic!("trainer creation failed"));
+        let result = trainer.generate_responses(&["hello".to_string()], 10);
+        assert!(
+            result.is_err(),
+            "generate should fail without initialized models"
+        );
+    }
+
+    #[test]
+    fn test_ppo_optimizer_structure() {
+        let opt = PPOOptimizer {
+            policy_lr: 1e-4,
+            value_lr: 1e-4,
+            momentum: 0.9,
+            weight_decay: 0.01,
+        };
+        assert!(opt.policy_lr > 0.0);
+        assert!(opt.momentum > 0.0 && opt.momentum < 1.0);
+    }
+
+    #[test]
+    fn test_ppo_config_target_kl_positive() {
+        let cfg = PPOConfig::default();
+        assert!(cfg.target_kl > 0.0, "target_kl should be positive");
+    }
+
+    #[test]
+    fn test_experience_batch_returns_values_check() {
+        // returns should be >= values (when advantages >= 0) or <= values (when adv <= 0)
+        let batch = ExperienceBatch {
+            sequences: Array2::zeros((3, 4)),
+            action_probs: Array2::ones((3, 1)),
+            old_action_probs: Array2::ones((3, 1)),
+            rewards: Array1::from_vec(vec![1.0, 1.0, 1.0]),
+            values: Array1::from_vec(vec![0.5, 0.5, 0.5]),
+            advantages: Array1::from_vec(vec![0.5, 0.5, 0.5]), // all positive
+            returns: Array1::from_vec(vec![1.0, 1.0, 1.0]),
+        };
+        for i in 0..3 {
+            // returns = advantages + values = 0.5 + 0.5 = 1.0
+            assert!((batch.returns[i] - (batch.advantages[i] + batch.values[i])).abs() < 1e-5);
+        }
+    }
 }

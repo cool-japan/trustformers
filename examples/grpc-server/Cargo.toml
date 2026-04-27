@@ -2,6 +2,7 @@
 name = "trustformers-grpc-server"
 version.workspace = true
 edition.workspace = true
+publish = false
 
 [dependencies]
 # gRPC framework

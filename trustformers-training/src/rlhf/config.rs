@@ -327,4 +327,206 @@ mod tests {
         assert!(config.reward_model.batch_size > 0);
         assert!(config.ppo.mini_batch_size > 0);
     }
+
+    // -----------------------------------------------------------------------
+    // SFTConfig defaults
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sft_default_max_length() {
+        let cfg = SFTConfig::default();
+        assert_eq!(
+            cfg.max_length, 2048,
+            "SFT default max_length should be 2048"
+        );
+    }
+
+    #[test]
+    fn test_sft_default_gradient_accumulation() {
+        let cfg = SFTConfig::default();
+        assert_eq!(
+            cfg.gradient_accumulation_steps, 1,
+            "default accumulation steps should be 1"
+        );
+    }
+
+    #[test]
+    fn test_sft_response_template_present() {
+        let cfg = SFTConfig::default();
+        assert!(
+            cfg.response_template.is_some(),
+            "default SFT should include a response template"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RewardModelConfig defaults
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_reward_model_default_normalize() {
+        let cfg = RewardModelConfig::default();
+        assert!(
+            cfg.normalize_rewards,
+            "rewards should be normalized by default"
+        );
+    }
+
+    #[test]
+    fn test_reward_model_default_dropout_in_range() {
+        let cfg = RewardModelConfig::default();
+        assert!(
+            cfg.dropout >= 0.0 && cfg.dropout < 1.0,
+            "dropout must be in [0, 1)"
+        );
+    }
+
+    #[test]
+    fn test_reward_model_all_types_round_trip() {
+        for model_type in [
+            RewardModelType::Linear,
+            RewardModelType::MLP,
+            RewardModelType::Transformer,
+            RewardModelType::Ensemble,
+        ] {
+            let serialized =
+                serde_json::to_string(&model_type).expect("JSON serialization must succeed");
+            let deserialized: RewardModelType =
+                serde_json::from_str(&serialized).expect("JSON deserialization must succeed");
+            assert_eq!(
+                model_type, deserialized,
+                "round-trip for {:?} must be lossless",
+                model_type
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // PPOConfig defaults
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ppo_default_clip_param() {
+        let cfg = PPOConfig::default();
+        assert!(
+            cfg.clip_param > 0.0 && cfg.clip_param < 1.0,
+            "PPO clip_param should be a small positive value in (0, 1)"
+        );
+    }
+
+    #[test]
+    fn test_ppo_default_entropy_coef_non_negative() {
+        let cfg = PPOConfig::default();
+        assert!(
+            cfg.entropy_coef >= 0.0,
+            "entropy coefficient must be non-negative"
+        );
+    }
+
+    #[test]
+    fn test_ppo_default_value_lr_larger_than_policy_lr() {
+        let cfg = PPOConfig::default();
+        assert!(
+            cfg.value_lr >= cfg.policy_lr,
+            "value LR ({}) should be >= policy LR ({})",
+            cfg.value_lr,
+            cfg.policy_lr
+        );
+    }
+
+    #[test]
+    fn test_ppo_default_temperature_positive() {
+        let cfg = PPOConfig::default();
+        assert!(cfg.temperature > 0.0, "temperature must be positive");
+    }
+
+    // -----------------------------------------------------------------------
+    // DPOConfig defaults
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dpo_default_beta() {
+        let cfg = DPOConfig::default();
+        assert_eq!(cfg.beta, 0.1, "default DPO beta should be 0.1");
+    }
+
+    #[test]
+    fn test_dpo_default_not_reference_free() {
+        let cfg = DPOConfig::default();
+        assert!(
+            !cfg.reference_free,
+            "DPO should not be reference-free by default"
+        );
+    }
+
+    #[test]
+    fn test_dpo_default_label_smoothing_zero() {
+        let cfg = DPOConfig::default();
+        assert_eq!(
+            cfg.label_smoothing, 0.0,
+            "default label smoothing should be zero"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ConstitutionalConfig defaults
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_constitutional_default_num_iterations() {
+        let cfg = ConstitutionalConfig::default();
+        assert_eq!(
+            cfg.num_iterations, 3,
+            "default constitutional iterations should be 3"
+        );
+    }
+
+    #[test]
+    fn test_constitutional_default_critique_revision() {
+        let cfg = ConstitutionalConfig::default();
+        assert!(
+            cfg.use_critique_revision,
+            "critique-revision should be enabled by default"
+        );
+    }
+
+    #[test]
+    fn test_constitutional_default_violation_penalty_positive() {
+        let cfg = ConstitutionalConfig::default();
+        assert!(
+            cfg.violation_penalty > 0.0,
+            "violation penalty must be positive"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // GeneralConfig defaults
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_general_default_seed() {
+        let cfg = GeneralConfig::default();
+        assert_eq!(cfg.seed, 42, "default seed should be 42");
+    }
+
+    #[test]
+    fn test_general_default_num_devices() {
+        let cfg = GeneralConfig::default();
+        assert_eq!(cfg.num_devices, 1, "default should use 1 device");
+    }
+
+    #[test]
+    fn test_general_default_save_checkpoints() {
+        let cfg = GeneralConfig::default();
+        assert!(
+            cfg.save_checkpoints,
+            "checkpoints should be saved by default"
+        );
+    }
+
+    #[test]
+    fn test_general_no_wandb_by_default() {
+        let cfg = GeneralConfig::default();
+        assert!(!cfg.use_wandb, "wandb should be disabled by default");
+    }
 }

@@ -876,4 +876,315 @@ mod tests {
 
         profiler.end_session(&session_id).await.expect("async operation failed");
     }
+
+    // --- Additional tests to meet the 15+ test requirement ---
+
+    #[test]
+    fn test_profiler_config_default_values() {
+        let config = ProfilerConfig::default();
+        assert!(
+            config.sampling_interval_ms > 0,
+            "sampling_interval_ms should be positive"
+        );
+        assert!(config.max_samples > 0, "max_samples should be positive");
+        assert!(
+            !config.export_formats.is_empty(),
+            "at least one export format should be enabled by default"
+        );
+    }
+
+    #[test]
+    fn test_performance_thresholds_default_values() {
+        let thresholds = PerformanceThresholds::default();
+        assert!(
+            thresholds.max_latency_ms > 0.0,
+            "max_latency_ms should be positive"
+        );
+        assert!(
+            thresholds.min_throughput_ops_per_sec > 0.0,
+            "min_throughput_ops_per_sec should be positive"
+        );
+        assert!(
+            thresholds.max_memory_usage_mb > 0.0,
+            "max_memory_usage_mb should be positive"
+        );
+        assert!(
+            thresholds.max_cpu_usage_percent > 0.0 && thresholds.max_cpu_usage_percent <= 100.0,
+            "max_cpu_usage_percent should be in (0.0, 100.0]"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_profiler_start_increments_global_total_sessions() {
+        let config = ProfilerConfig::default();
+        let profiler = EnhancedProfiler::new(config);
+
+        // Use LCG-based suffix for unique session IDs
+        let seed: u64 = 0xABCDEF0123456789;
+        let session_id = format!(
+            "session_{}",
+            seed.wrapping_mul(1103515245).wrapping_add(12345)
+        );
+
+        let initial_metrics = profiler.get_global_metrics().await;
+        profiler
+            .start_session(session_id.clone(), "op1".to_string())
+            .await
+            .expect("start_session should succeed");
+
+        let after_start = profiler.get_global_metrics().await;
+        assert_eq!(
+            after_start.total_sessions,
+            initial_metrics.total_sessions + 1,
+            "total_sessions should increment after start_session"
+        );
+        assert_eq!(
+            after_start.active_sessions,
+            initial_metrics.active_sessions + 1,
+            "active_sessions should increment after start_session"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_profiler_end_session_decrements_active_sessions() {
+        let config = ProfilerConfig::default();
+        let profiler = EnhancedProfiler::new(config);
+        let session_id = "decrement_test".to_string();
+
+        profiler
+            .start_session(session_id.clone(), "op".to_string())
+            .await
+            .expect("start_session should succeed");
+        let after_start = profiler.get_global_metrics().await;
+        let active_before = after_start.active_sessions;
+
+        profiler.end_session(&session_id).await.expect("end_session should succeed");
+
+        let after_end = profiler.get_global_metrics().await;
+        assert_eq!(
+            after_end.active_sessions,
+            active_before - 1,
+            "active_sessions should decrement after end_session"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_profiler_end_session_returns_analysis() {
+        let config = ProfilerConfig::default();
+        let profiler = EnhancedProfiler::new(config);
+        let session_id = "analysis_test".to_string();
+
+        profiler
+            .start_session(session_id.clone(), "test_op".to_string())
+            .await
+            .expect("start_session should succeed");
+        profiler
+            .record_sample(&session_id, HashMap::new())
+            .await
+            .expect("record_sample should succeed");
+
+        let analysis = profiler
+            .end_session(&session_id)
+            .await
+            .expect("end_session should return analysis");
+
+        assert!(
+            analysis.session_summary.total_operations > 0,
+            "session_summary should have at least one operation"
+        );
+        assert!(
+            analysis.session_summary.total_duration_ms >= 0.0,
+            "total_duration_ms should be non-negative"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_profiler_total_duration_calculation() {
+        let config = ProfilerConfig::default();
+        let profiler = EnhancedProfiler::new(config);
+        let session_id = "duration_test".to_string();
+
+        profiler
+            .start_session(session_id.clone(), "duration_op".to_string())
+            .await
+            .expect("start_session should succeed");
+
+        // Record samples to build up duration
+        for i in 0..5 {
+            let mut metrics = HashMap::new();
+            metrics.insert("i".to_string(), i as f64);
+            profiler
+                .record_sample(&session_id, metrics)
+                .await
+                .expect("record_sample should succeed");
+        }
+
+        let analysis = profiler.end_session(&session_id).await.expect("end_session should succeed");
+        assert!(
+            analysis.session_summary.total_duration_ms >= 0.0,
+            "total_duration_ms should be non-negative"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_profiler_record_sample_stores_custom_metrics() {
+        let config = ProfilerConfig::default();
+        let profiler = EnhancedProfiler::new(config);
+        let session_id = "custom_metrics_test".to_string();
+
+        profiler
+            .start_session(session_id.clone(), "custom_op".to_string())
+            .await
+            .expect("start_session should succeed");
+
+        let mut custom = HashMap::new();
+        custom.insert("tokens_per_sec".to_string(), 42.5f64);
+        custom.insert("batch_size".to_string(), 32.0f64);
+
+        profiler
+            .record_sample(&session_id, custom)
+            .await
+            .expect("record_sample should succeed");
+
+        profiler.end_session(&session_id).await.expect("end_session should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_profiler_multiple_concurrent_sessions() {
+        let config = ProfilerConfig::default();
+        let profiler = EnhancedProfiler::new(config);
+
+        // Use LCG to generate unique session names
+        let seed: u64 = 0xFEEDFACECAFEBABE;
+        let s1 = format!(
+            "session_a_{}",
+            seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407)
+        );
+        let s2 = format!(
+            "session_b_{}",
+            seed.wrapping_mul(1103515245).wrapping_add(12345)
+        );
+
+        profiler
+            .start_session(s1.clone(), "op_a".to_string())
+            .await
+            .expect("start first session");
+        profiler
+            .start_session(s2.clone(), "op_b".to_string())
+            .await
+            .expect("start second session");
+
+        let metrics = profiler.get_global_metrics().await;
+        assert!(
+            metrics.active_sessions >= 2,
+            "should have at least 2 active sessions, got {}",
+            metrics.active_sessions
+        );
+
+        profiler.end_session(&s1).await.expect("end first session");
+        profiler.end_session(&s2).await.expect("end second session");
+    }
+
+    #[tokio::test]
+    async fn test_profiler_end_nonexistent_session_returns_err() {
+        let config = ProfilerConfig::default();
+        let profiler = EnhancedProfiler::new(config);
+        let result = profiler.end_session("nonexistent-session-xyz").await;
+        assert!(
+            result.is_err(),
+            "ending a non-existent session should return Err"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_profiler_record_sample_nonexistent_returns_err() {
+        let config = ProfilerConfig::default();
+        let profiler = EnhancedProfiler::new(config);
+        let result = profiler.record_sample("nonexistent-xyz", HashMap::new()).await;
+        assert!(
+            result.is_err(),
+            "recording sample for non-existent session should return Err"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_profiler_json_export_contains_session_id() {
+        let config = ProfilerConfig::default();
+        let profiler = EnhancedProfiler::new(config);
+        let session_id = "json_content_test".to_string();
+
+        profiler
+            .start_session(session_id.clone(), "test_op".to_string())
+            .await
+            .expect("start_session should succeed");
+        profiler
+            .record_sample(&session_id, HashMap::new())
+            .await
+            .expect("record_sample should succeed");
+
+        let json = profiler
+            .export_data(&session_id, ExportFormat::JSON)
+            .await
+            .expect("JSON export should succeed");
+        assert!(
+            json.contains(&session_id),
+            "JSON export should contain the session_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_profiler_prometheus_export_format() {
+        let config = ProfilerConfig::default();
+        let profiler = EnhancedProfiler::new(config);
+        let session_id = "prometheus_test".to_string();
+
+        profiler
+            .start_session(session_id.clone(), "prom_op".to_string())
+            .await
+            .expect("start_session should succeed");
+        profiler
+            .record_sample(&session_id, HashMap::new())
+            .await
+            .expect("record_sample should succeed");
+
+        let result = profiler.export_data(&session_id, ExportFormat::Prometheus).await;
+        assert!(result.is_ok(), "Prometheus export should succeed");
+        let content = result.expect("prometheus content");
+        assert!(
+            content.contains("trustformers_latency_ms"),
+            "Prometheus export should contain metric name"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_profiler_analysis_contains_optimization_recommendations() {
+        let config = ProfilerConfig::default();
+        let profiler = EnhancedProfiler::new(config);
+        let session_id = "opt_recs_test".to_string();
+
+        profiler
+            .start_session(session_id.clone(), "opt_op".to_string())
+            .await
+            .expect("start_session should succeed");
+
+        // Record multiple samples to give profiler data to analyze
+        for i in 0..20u64 {
+            let mut metrics = HashMap::new();
+            // Use LCG to vary the iteration value
+            let val = i.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            metrics.insert(
+                "iteration".to_string(),
+                (val >> 32) as f64 / u32::MAX as f64,
+            );
+            profiler
+                .record_sample(&session_id, metrics)
+                .await
+                .expect("record_sample should succeed");
+        }
+
+        let analysis = profiler.end_session(&session_id).await.expect("end_session should succeed");
+        // Recommendations may or may not be present depending on thresholds
+        // Just verify the field is accessible without panic
+        let _ = analysis.optimization_recommendations.len();
+    }
 }

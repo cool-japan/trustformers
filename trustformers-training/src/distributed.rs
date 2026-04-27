@@ -956,4 +956,147 @@ mod tests {
         assert_eq!(pg.rank(), 0);
         assert_eq!(pg.world_size(), 2);
     }
+
+    // ── Additional tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_distributed_config_simulated_backend() {
+        let cfg = DistributedConfig {
+            world_size: 1,
+            rank: 0,
+            backend: DistributedBackend::Simulated,
+            master_addr: "127.0.0.1".to_string(),
+            master_port: 12345,
+            gradient_compression: false,
+            bucket_size_mb: 16,
+        };
+        assert!(matches!(cfg.backend, DistributedBackend::Simulated));
+    }
+
+    #[test]
+    fn test_distributed_backend_variants() {
+        let _ = DistributedBackend::NCCL;
+        let _ = DistributedBackend::Gloo;
+        let _ = DistributedBackend::MPI;
+        let _ = DistributedBackend::Simulated;
+    }
+
+    #[test]
+    fn test_simulated_process_group_rank() {
+        let pg = SimulatedProcessGroup::new(2, 4);
+        assert_eq!(pg.rank(), 2);
+        assert_eq!(pg.world_size(), 4);
+    }
+
+    #[test]
+    fn test_simulated_process_group_barrier_ok() {
+        let pg = SimulatedProcessGroup::new(0, 1);
+        let result = pg.barrier();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_simulated_process_group_single_node_all_reduce_ok() {
+        let pg = SimulatedProcessGroup::new(0, 1);
+        let mut tensors = vec![Tensor::ones(&[2]).expect("tensor failed")];
+        let result = pg.all_reduce(&mut tensors);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_simulated_process_group_broadcast_ok() {
+        let pg = SimulatedProcessGroup::new(0, 1);
+        let mut tensor = Tensor::ones(&[3]).expect("tensor failed");
+        let result = pg.broadcast(&mut tensor, 0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_simulated_process_group_reduce_ok() {
+        let pg = SimulatedProcessGroup::new(0, 1);
+        let mut tensor = Tensor::ones(&[2]).expect("tensor failed");
+        let result = pg.reduce(&mut tensor, 0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_init_distributed_multi_node_returns_correct_rank() {
+        let cfg = DistributedConfig {
+            world_size: 3,
+            rank: 1,
+            backend: DistributedBackend::Simulated,
+            master_addr: "localhost".to_string(),
+            master_port: 29501,
+            gradient_compression: false,
+            bucket_size_mb: 32,
+        };
+        let pg = init_distributed_training(cfg).expect("init failed");
+        assert_eq!(pg.rank(), 1);
+        assert_eq!(pg.world_size(), 3);
+    }
+
+    #[test]
+    fn test_data_parallel_trainer_with_gradient_compression() {
+        let model = DummyModel::new();
+        let cfg = DistributedConfig {
+            world_size: 1,
+            rank: 0,
+            backend: DistributedBackend::Simulated,
+            master_addr: "localhost".to_string(),
+            master_port: 29502,
+            gradient_compression: true,
+            bucket_size_mb: 16,
+        };
+        let pg = Arc::new(SimulatedProcessGroup::new(0, 1));
+        let trainer = DataParallelTrainer::new(model, pg, cfg);
+        assert!(trainer.is_ok());
+    }
+
+    #[test]
+    fn test_distributed_config_gradient_compression_field() {
+        let cfg = DistributedConfig {
+            world_size: 2,
+            rank: 0,
+            backend: DistributedBackend::Gloo,
+            master_addr: "host".to_string(),
+            master_port: 8080,
+            gradient_compression: true,
+            bucket_size_mb: 64,
+        };
+        assert!(cfg.gradient_compression);
+        assert_eq!(cfg.bucket_size_mb, 64);
+    }
+
+    #[test]
+    fn test_distributed_config_world_size_rank_consistency() {
+        let cfg = DistributedConfig {
+            world_size: 8,
+            rank: 7,
+            backend: DistributedBackend::Simulated,
+            master_addr: "localhost".to_string(),
+            master_port: 29500,
+            gradient_compression: false,
+            bucket_size_mb: 25,
+        };
+        assert!(cfg.rank < cfg.world_size, "rank must be < world_size");
+    }
+
+    #[test]
+    fn test_empty_gradients_backward_ok() {
+        let model = DummyModel::new();
+        let cfg = DistributedConfig {
+            world_size: 1,
+            rank: 0,
+            backend: DistributedBackend::Simulated,
+            master_addr: "localhost".to_string(),
+            master_port: 29500,
+            gradient_compression: false,
+            bucket_size_mb: 25,
+        };
+        let pg = Arc::new(SimulatedProcessGroup::new(0, 1));
+        let trainer = DataParallelTrainer::new(model, pg, cfg).expect("trainer failed");
+        let mut gradients = HashMap::new();
+        let result = trainer.backward(&mut gradients);
+        assert!(result.is_ok(), "empty gradient map should be fine");
+    }
 }

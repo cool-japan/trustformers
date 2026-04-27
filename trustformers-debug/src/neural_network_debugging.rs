@@ -1108,3 +1108,364 @@ macro_rules! debug_transformer {
         debugger.analyze_transformer_attention($model_weights)
     }};
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scirs2_core::ndarray::{ArrayD, IxDyn};
+
+    fn make_attention_config() -> AttentionDebugConfig {
+        AttentionDebugConfig::default()
+    }
+
+    fn make_uniform_weights(seq_len: usize) -> ArrayD<f32> {
+        let val = 1.0 / seq_len as f32;
+        ArrayD::from_elem(IxDyn(&[seq_len, seq_len]), val)
+    }
+
+    fn make_diagonal_weights(seq_len: usize) -> ArrayD<f32> {
+        let mut weights = ArrayD::zeros(IxDyn(&[seq_len, seq_len]));
+        for i in 0..seq_len {
+            weights[[i, i]] = 1.0;
+        }
+        weights
+    }
+
+    fn make_sparse_weights(seq_len: usize) -> ArrayD<f32> {
+        let mut weights = ArrayD::zeros(IxDyn(&[seq_len, seq_len]));
+        // Put weight only on first column
+        for i in 0..seq_len {
+            weights[[i, 0]] = 1.0;
+        }
+        weights
+    }
+
+    #[test]
+    fn test_attention_debug_config_default() {
+        let config = make_attention_config();
+        assert!(config.enable_attention_visualization);
+        assert!(config.enable_head_analysis);
+        assert_eq!(config.max_heads_to_analyze, 16);
+    }
+
+    #[test]
+    fn test_attention_debugger_creation() {
+        let debugger = AttentionDebugger::new(make_attention_config());
+        assert!(debugger.attention_maps.is_empty());
+        assert!(debugger.head_analysis.is_empty());
+    }
+
+    #[test]
+    fn test_analyze_attention_layer_single_head() {
+        let mut debugger = AttentionDebugger::new(make_attention_config());
+        let weights = vec![make_uniform_weights(8)];
+        let result = debugger.analyze_attention_layer(0, &weights);
+        assert!(result.is_ok());
+        let analysis = result.expect("analysis should succeed");
+        assert_eq!(analysis.layer_index, 0);
+        assert_eq!(analysis.num_heads, 1);
+        assert_eq!(analysis.head_analyses.len(), 1);
+    }
+
+    #[test]
+    fn test_analyze_attention_layer_multiple_heads() {
+        let mut debugger = AttentionDebugger::new(make_attention_config());
+        let weights = vec![
+            make_uniform_weights(8),
+            make_diagonal_weights(8),
+            make_sparse_weights(8),
+        ];
+        let result = debugger.analyze_attention_layer(0, &weights);
+        assert!(result.is_ok());
+        let analysis = result.expect("analysis should succeed");
+        assert_eq!(analysis.num_heads, 3);
+        assert_eq!(analysis.head_analyses.len(), 3);
+    }
+
+    #[test]
+    fn test_detect_attention_pattern_uniform() {
+        let debugger = AttentionDebugger::new(make_attention_config());
+        let seq_len = 10;
+        let val = 1.0 / seq_len as f32;
+        let weights: Vec<Vec<f32>> = (0..seq_len).map(|_| vec![val; seq_len]).collect();
+        let pattern = debugger.detect_attention_pattern(&weights);
+        assert!(matches!(pattern, AttentionPattern::Uniform));
+    }
+
+    #[test]
+    fn test_detect_attention_pattern_diagonal() {
+        let debugger = AttentionDebugger::new(make_attention_config());
+        let seq_len = 10;
+        let weights: Vec<Vec<f32>> = (0..seq_len)
+            .map(|i| {
+                let mut row = vec![0.0; seq_len];
+                // Strong diagonal with small window
+                for j in 0..seq_len {
+                    if (i as i32 - j as i32).abs() <= 1 {
+                        row[j] = 1.0;
+                    }
+                }
+                row
+            })
+            .collect();
+        let pattern = debugger.detect_attention_pattern(&weights);
+        assert!(matches!(pattern, AttentionPattern::Diagonal));
+    }
+
+    #[test]
+    fn test_detect_attention_pattern_empty() {
+        let debugger = AttentionDebugger::new(make_attention_config());
+        let weights: Vec<Vec<f32>> = vec![];
+        let pattern = debugger.detect_attention_pattern(&weights);
+        assert!(matches!(pattern, AttentionPattern::Random));
+    }
+
+    #[test]
+    fn test_measure_diagonal_strength() {
+        let debugger = AttentionDebugger::new(make_attention_config());
+        let seq_len = 8;
+        let weights: Vec<Vec<f32>> = (0..seq_len)
+            .map(|i| {
+                let mut row = vec![0.01; seq_len];
+                row[i] = 10.0;
+                row
+            })
+            .collect();
+        let strength = debugger.measure_diagonal_strength(&weights);
+        assert!(strength > 0.5);
+    }
+
+    #[test]
+    fn test_measure_diagonal_strength_empty() {
+        let debugger = AttentionDebugger::new(make_attention_config());
+        let weights: Vec<Vec<f32>> = vec![];
+        assert!((debugger.measure_diagonal_strength(&weights) - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_measure_uniformity() {
+        let debugger = AttentionDebugger::new(make_attention_config());
+        let seq_len = 8;
+        let val = 1.0 / seq_len as f32;
+        let weights: Vec<Vec<f32>> = (0..seq_len).map(|_| vec![val; seq_len]).collect();
+        let uniformity = debugger.measure_uniformity(&weights);
+        assert!(uniformity > 0.9);
+    }
+
+    #[test]
+    fn test_measure_uniformity_empty() {
+        let debugger = AttentionDebugger::new(make_attention_config());
+        let weights: Vec<Vec<f32>> = vec![];
+        assert!((debugger.measure_uniformity(&weights) - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_has_block_structure_false() {
+        let debugger = AttentionDebugger::new(make_attention_config());
+        let seq_len = 8;
+        let val = 1.0 / seq_len as f32;
+        let weights: Vec<Vec<f32>> = (0..seq_len).map(|_| vec![val; seq_len]).collect();
+        assert!(!debugger.has_block_structure(&weights));
+    }
+
+    #[test]
+    fn test_has_block_structure_small() {
+        let debugger = AttentionDebugger::new(make_attention_config());
+        let weights: Vec<Vec<f32>> = vec![vec![1.0], vec![1.0]];
+        assert!(!debugger.has_block_structure(&weights));
+    }
+
+    #[test]
+    fn test_classify_head_specialization_local() {
+        let debugger = AttentionDebugger::new(make_attention_config());
+        let weights = make_diagonal_weights(10);
+        let result = debugger.classify_head_specialization(&weights);
+        assert!(result.is_ok());
+        let spec = result.expect("classification should succeed");
+        assert!(matches!(spec, HeadSpecializationType::LocalSyntax));
+    }
+
+    #[test]
+    fn test_compute_sparsity_ratio() {
+        let debugger = AttentionDebugger::new(make_attention_config());
+        let seq_len = 10;
+        let mut weights: Vec<Vec<f32>> = (0..seq_len).map(|_| vec![0.0; seq_len]).collect();
+        // Set only 10% of entries
+        for i in 0..seq_len {
+            weights[i][0] = 1.0;
+        }
+        let sparsity = debugger.compute_sparsity_ratio(&weights);
+        assert!(sparsity > 0.8);
+    }
+
+    #[test]
+    fn test_measure_long_range_attention() {
+        let debugger = AttentionDebugger::new(make_attention_config());
+        let seq_len = 20;
+        // All attention on last position (long range for most positions)
+        let weights: Vec<Vec<f32>> = (0..seq_len)
+            .map(|_| {
+                let mut row = vec![0.0; seq_len];
+                row[seq_len - 1] = 1.0;
+                row
+            })
+            .collect();
+        let long_range = debugger.measure_long_range_attention(&weights);
+        assert!(long_range > 0.3);
+    }
+
+    #[test]
+    fn test_measure_long_range_attention_small() {
+        let debugger = AttentionDebugger::new(make_attention_config());
+        let weights: Vec<Vec<f32>> = vec![vec![1.0]];
+        assert!((debugger.measure_long_range_attention(&weights) - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_model_attention_summary_default() {
+        let summary = ModelAttentionSummary::default();
+        assert_eq!(summary.total_layers, 0);
+        assert_eq!(summary.total_heads, 0);
+        assert!(matches!(
+            summary.model_attention_health,
+            AttentionHealthStatus::Poor
+        ));
+    }
+
+    #[test]
+    fn test_analyze_attention_layer_head_limit() {
+        let mut config = make_attention_config();
+        config.max_heads_to_analyze = 2;
+        let mut debugger = AttentionDebugger::new(config);
+        let weights = vec![
+            make_uniform_weights(4),
+            make_uniform_weights(4),
+            make_uniform_weights(4),
+            make_uniform_weights(4),
+        ];
+        let result = debugger.analyze_attention_layer(0, &weights);
+        assert!(result.is_ok());
+        let analysis = result.expect("analysis should succeed");
+        assert_eq!(analysis.head_analyses.len(), 2);
+    }
+
+    #[test]
+    fn test_create_attention_map_wrong_dimensions() {
+        let debugger = AttentionDebugger::new(make_attention_config());
+        let weights_3d = ArrayD::zeros(IxDyn(&[2, 3, 4]));
+        let result = debugger.create_attention_map(0, 0, &weights_3d);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_attention_entropy_computation() {
+        let mut debugger = AttentionDebugger::new(make_attention_config());
+        let weights = vec![make_uniform_weights(8)];
+        let analysis =
+            debugger.analyze_attention_layer(0, &weights).expect("analysis should succeed");
+        // Uniform distribution should have higher entropy
+        assert!(analysis.attention_maps[0].attention_entropy > 0.0);
+    }
+
+    #[test]
+    fn test_attention_pattern_variants() {
+        let patterns = [
+            AttentionPattern::Diagonal,
+            AttentionPattern::Block,
+            AttentionPattern::Sparse,
+            AttentionPattern::Uniform,
+            AttentionPattern::Concentrated,
+            AttentionPattern::Strided,
+            AttentionPattern::Random,
+        ];
+        assert_eq!(patterns.len(), 7);
+    }
+
+    #[test]
+    fn test_head_specialization_variants() {
+        let specs = [
+            HeadSpecializationType::LocalSyntax,
+            HeadSpecializationType::LongRange,
+            HeadSpecializationType::Positional,
+            HeadSpecializationType::ContentBased,
+            HeadSpecializationType::Copying,
+            HeadSpecializationType::Delimiter,
+            HeadSpecializationType::Mixed,
+            HeadSpecializationType::Redundant,
+        ];
+        assert_eq!(specs.len(), 8);
+    }
+
+    #[test]
+    fn test_attention_health_status_variants() {
+        let statuses = [
+            AttentionHealthStatus::Excellent,
+            AttentionHealthStatus::Good,
+            AttentionHealthStatus::Fair,
+            AttentionHealthStatus::Poor,
+        ];
+        assert_eq!(statuses.len(), 4);
+    }
+
+    #[test]
+    fn test_attention_distribution_creation() {
+        let dist = AttentionDistribution {
+            mean_attention: 0.125,
+            std_attention: 0.05,
+            max_attention: 0.5,
+            min_attention: 0.01,
+            entropy: 2.8,
+            effective_context_length: 6.5,
+        };
+        assert!(dist.mean_attention > 0.0);
+        assert!(dist.max_attention > dist.mean_attention);
+        assert!(dist.entropy > 0.0);
+    }
+
+    #[test]
+    fn test_attention_map_creation() {
+        let map = AttentionMap {
+            layer_index: 0,
+            head_index: 3,
+            sequence_length: 8,
+            attention_weights: vec![vec![0.125; 8]; 8],
+            attention_pattern: AttentionPattern::Uniform,
+            attention_entropy: 3.0,
+            sparsity_ratio: 0.0,
+        };
+        assert_eq!(map.layer_index, 0);
+        assert_eq!(map.head_index, 3);
+        assert_eq!(map.sequence_length, 8);
+    }
+
+    #[test]
+    fn test_attention_head_analysis_creation() {
+        let analysis = AttentionHeadAnalysis {
+            head_id: 0,
+            layer_id: 0,
+            specialization_type: HeadSpecializationType::ContentBased,
+            attention_distribution: AttentionDistribution {
+                mean_attention: 0.1,
+                std_attention: 0.02,
+                max_attention: 0.3,
+                min_attention: 0.01,
+                entropy: 2.5,
+                effective_context_length: 5.0,
+            },
+            redundancy_score: 0.1,
+            importance_score: 0.8,
+            patterns_detected: vec![AttentionPattern::Random],
+        };
+        assert_eq!(analysis.head_id, 0);
+        assert!(analysis.importance_score > analysis.redundancy_score);
+    }
+
+    #[test]
+    fn test_pattern_progression_creation() {
+        let progression = PatternProgression {
+            pattern_evolution: vec![HashMap::new()],
+            dominant_pattern_sequence: vec![AttentionPattern::Diagonal, AttentionPattern::Sparse],
+        };
+        assert_eq!(progression.dominant_pattern_sequence.len(), 2);
+    }
+}

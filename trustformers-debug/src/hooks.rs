@@ -411,7 +411,7 @@ impl HookManager {
         match &hook.trigger {
             HookTrigger::EveryForward => Some(context.is_forward),
             HookTrigger::EveryBackward => Some(!context.is_forward),
-            HookTrigger::EveryNSteps(n) => Some(context.step % n == 0),
+            HookTrigger::EveryNSteps(n) => Some(context.step.is_multiple_of(*n)),
             HookTrigger::Conditional(condition) => {
                 Some(self.evaluate_condition(condition, context))
             },
@@ -618,4 +618,346 @@ macro_rules! alert_hook {
             })
             .build()
     };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_hook_config(name: &str, trigger: HookTrigger) -> HookConfig {
+        HookConfig {
+            id: Uuid::new_v4(),
+            name: name.to_string(),
+            trigger,
+            actions: vec![HookAction::InspectTensor],
+            enabled: true,
+            max_executions: None,
+            layer_patterns: vec![],
+        }
+    }
+
+    // ── HookManager construction ────────────────────────────────────────────
+
+    #[test]
+    fn test_hook_manager_new_defaults() {
+        let mgr = HookManager::new();
+        assert!(mgr.enabled);
+        assert_eq!(mgr.global_step, 0);
+        assert!(mgr.get_all_hooks().is_empty());
+        assert!(mgr.get_all_stats().is_empty());
+    }
+
+    #[test]
+    fn test_hook_manager_default_equals_new() {
+        let mgr = HookManager::default();
+        assert!(mgr.enabled);
+    }
+
+    // ── register_hook ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_register_hook_returns_uuid() {
+        let mut mgr = HookManager::new();
+        let config = make_hook_config("test", HookTrigger::EveryForward);
+        let id = config.id;
+        let returned = mgr.register_hook(config).expect("register should succeed");
+        assert_eq!(returned, id);
+    }
+
+    #[test]
+    fn test_register_multiple_hooks() {
+        let mut mgr = HookManager::new();
+        for i in 0..5 {
+            let cfg = make_hook_config(&format!("h{}", i), HookTrigger::EveryForward);
+            mgr.register_hook(cfg).expect("register should succeed");
+        }
+        assert_eq!(mgr.get_all_hooks().len(), 5);
+    }
+
+    #[test]
+    fn test_hook_stats_initialized_on_register() {
+        let mut mgr = HookManager::new();
+        let cfg = make_hook_config("h0", HookTrigger::EveryForward);
+        let id = mgr.register_hook(cfg).expect("register should succeed");
+        let stats = mgr.get_hook_stats(id).expect("stats should exist");
+        assert_eq!(stats.total_executions, 0);
+        assert_eq!(stats.errors, 0);
+    }
+
+    // ── remove_hook ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_remove_hook_returns_config() {
+        let mut mgr = HookManager::new();
+        let cfg = make_hook_config("remove_me", HookTrigger::EveryBackward);
+        let id = mgr.register_hook(cfg).expect("register");
+        let removed = mgr.remove_hook(id);
+        assert!(removed.is_some());
+        assert_eq!(removed.expect("should be some").name, "remove_me");
+    }
+
+    #[test]
+    fn test_remove_nonexistent_hook_returns_none() {
+        let mut mgr = HookManager::new();
+        let id = Uuid::new_v4();
+        assert!(mgr.remove_hook(id).is_none());
+    }
+
+    // ── set_hook_enabled ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_set_hook_enabled_ok() {
+        let mut mgr = HookManager::new();
+        let cfg = make_hook_config("h", HookTrigger::EveryForward);
+        let id = mgr.register_hook(cfg).expect("register");
+        mgr.set_hook_enabled(id, false).expect("should succeed");
+        let hook = mgr.get_hook(id).expect("hook should exist");
+        assert!(!hook.enabled);
+        mgr.set_hook_enabled(id, true).expect("re-enable");
+        let hook = mgr.get_hook(id).expect("hook should exist");
+        assert!(hook.enabled);
+    }
+
+    #[test]
+    fn test_set_hook_enabled_nonexistent_errors() {
+        let mut mgr = HookManager::new();
+        let result = mgr.set_hook_enabled(Uuid::new_v4(), true);
+        assert!(result.is_err());
+    }
+
+    // ── set_enabled (global) ───────────────────────────────────────────────
+
+    #[test]
+    fn test_global_disable_stops_execution() {
+        let mut mgr = HookManager::new();
+        mgr.set_enabled(false);
+        mgr.register_hook(make_hook_config("h", HookTrigger::EveryForward))
+            .expect("register");
+        let results = mgr.execute_hooks("layer", &[1u8, 2u8], &[2], true, None);
+        assert!(
+            results.is_empty(),
+            "globally disabled manager should execute nothing"
+        );
+    }
+
+    // ── set_step ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_set_step_updates_counter() {
+        let mut mgr = HookManager::new();
+        mgr.set_step(42);
+        assert_eq!(mgr.global_step, 42);
+    }
+
+    // ── execute_hooks ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_execute_hooks_disabled_hook_skipped() {
+        let mut mgr = HookManager::new();
+        let mut cfg = make_hook_config("h", HookTrigger::EveryForward);
+        cfg.enabled = false;
+        mgr.register_hook(cfg).expect("register");
+        let results = mgr.execute_hooks("layer", &[0u8], &[1], true, None);
+        // Disabled hook → no results (the impl skips it without adding an entry)
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_execute_hooks_every_forward_fires_on_forward() {
+        let mut mgr = HookManager::new();
+        mgr.register_hook(make_hook_config("h", HookTrigger::EveryForward))
+            .expect("register");
+        let results = mgr.execute_hooks("layer", &[1u8], &[1], true, None);
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_execute_hooks_every_forward_skipped_on_backward() {
+        let mut mgr = HookManager::new();
+        // No layer_patterns → pattern check skipped, trigger decides.
+        let cfg = make_hook_config("h", HookTrigger::EveryForward);
+        mgr.register_hook(cfg).expect("register");
+        let results = mgr.execute_hooks("layer", &[1u8], &[1], false, None);
+        // is_forward=false → the hook's should_execute returns Some(false) → Skipped
+        assert_eq!(results.len(), 1);
+        let (_, ref outcome) = results[0];
+        assert!(matches!(outcome, HookResult::Skipped(_)));
+    }
+
+    #[test]
+    fn test_execute_hooks_max_executions_respected() {
+        let mut mgr = HookManager::new();
+        let mut cfg = make_hook_config("once", HookTrigger::EveryForward);
+        cfg.max_executions = Some(1);
+        mgr.register_hook(cfg).expect("register");
+
+        // First execution should succeed
+        let r1 = mgr.execute_hooks("layer", &[1u8], &[1], true, None);
+        assert_eq!(r1.len(), 1);
+        assert!(matches!(r1[0].1, HookResult::Success));
+
+        // Second execution should be Skipped
+        let r2 = mgr.execute_hooks("layer", &[1u8], &[1], true, None);
+        assert_eq!(r2.len(), 1);
+        assert!(matches!(r2[0].1, HookResult::Skipped(_)));
+    }
+
+    // ── clear_hooks ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_clear_hooks_empties_everything() {
+        let mut mgr = HookManager::new();
+        mgr.register_hook(make_hook_config("h0", HookTrigger::EveryForward))
+            .expect("register");
+        mgr.register_hook(make_hook_config("h1", HookTrigger::EveryBackward))
+            .expect("register");
+        mgr.clear_hooks();
+        assert!(mgr.get_all_hooks().is_empty());
+        assert!(mgr.get_all_stats().is_empty());
+    }
+
+    // ── convenience builders ────────────────────────────────────────────────
+
+    #[test]
+    fn test_create_tensor_inspection_hook() {
+        let mut mgr = HookManager::new();
+        let id = mgr
+            .create_tensor_inspection_hook(vec!["attention.*".to_string()])
+            .expect("should succeed");
+        assert!(mgr.get_hook(id).is_some());
+    }
+
+    #[test]
+    fn test_create_gradient_tracking_hook() {
+        let mut mgr = HookManager::new();
+        let id = mgr
+            .create_gradient_tracking_hook(vec!["fc.*".to_string()])
+            .expect("should succeed");
+        let hook = mgr.get_hook(id).expect("should exist");
+        assert!(matches!(hook.trigger, HookTrigger::EveryBackward));
+    }
+
+    #[test]
+    fn test_create_alert_hook() {
+        let mut mgr = HookManager::new();
+        let cond = HookCondition::StepRange { start: 0, end: 100 };
+        let id = mgr
+            .create_alert_hook(cond, "loss exploded".to_string(), AlertSeverity::Critical)
+            .expect("should succeed");
+        let hook = mgr.get_hook(id).expect("should exist");
+        assert!(matches!(hook.trigger, HookTrigger::Conditional(_)));
+    }
+
+    // ── HookBuilder ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_hook_builder_basic() {
+        let cfg = HookBuilder::new("my_hook")
+            .trigger(HookTrigger::EveryNSteps(10))
+            .action(HookAction::TrackGradients)
+            .max_executions(50)
+            .layer_patterns(vec!["norm".to_string()])
+            .enabled(true)
+            .build();
+
+        assert_eq!(cfg.name, "my_hook");
+        assert!(matches!(cfg.trigger, HookTrigger::EveryNSteps(10)));
+        assert_eq!(cfg.max_executions, Some(50));
+        assert!(cfg.enabled);
+    }
+
+    // ── enum variants ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_hook_trigger_variants() {
+        let triggers: Vec<String> = vec![
+            format!("{:?}", HookTrigger::EveryForward),
+            format!("{:?}", HookTrigger::EveryBackward),
+            format!("{:?}", HookTrigger::EveryNSteps(5)),
+            format!("{:?}", HookTrigger::Once),
+            format!("{:?}", HookTrigger::LayerSpecific(vec![])),
+        ];
+        for t in &triggers {
+            assert!(!t.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_hook_action_variants() {
+        let actions: Vec<String> = vec![
+            format!("{:?}", HookAction::InspectTensor),
+            format!("{:?}", HookAction::TrackGradients),
+            format!("{:?}", HookAction::RecordActivations),
+            format!(
+                "{:?}",
+                HookAction::SaveSnapshot {
+                    path: "/tmp".to_string()
+                }
+            ),
+            format!(
+                "{:?}",
+                HookAction::Alert {
+                    message: "x".to_string(),
+                    severity: AlertSeverity::Info
+                }
+            ),
+            format!(
+                "{:?}",
+                HookAction::CustomCallback {
+                    name: "cb".to_string()
+                }
+            ),
+            format!("{:?}", HookAction::PauseTraining),
+        ];
+        for a in &actions {
+            assert!(!a.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_alert_severity_variants() {
+        let severities = [
+            AlertSeverity::Info,
+            AlertSeverity::Warning,
+            AlertSeverity::Critical,
+        ];
+        for s in &severities {
+            assert!(!format!("{:?}", s).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_comparison_variants() {
+        let comps = [
+            Comparison::Greater,
+            Comparison::Less,
+            Comparison::Equal,
+            Comparison::GreaterEqual,
+            Comparison::LessEqual,
+        ];
+        for c in &comps {
+            assert!(!format!("{:?}", c).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_hook_stats_fields() {
+        let id = Uuid::new_v4();
+        let stats = HookStats {
+            hook_id: id,
+            hook_name: "perf_hook".to_string(),
+            total_executions: 100,
+            last_execution_step: Some(99),
+            total_execution_time_ms: 500.0,
+            avg_execution_time_ms: 5.0,
+            errors: 2,
+        };
+        assert_eq!(stats.total_executions, 100);
+        assert_eq!(stats.errors, 2);
+        assert_eq!(stats.last_execution_step, Some(99));
+    }
 }

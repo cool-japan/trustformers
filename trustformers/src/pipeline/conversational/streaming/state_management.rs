@@ -747,3 +747,295 @@ impl StreamError {
         self.recovery_strategy.is_some() && !matches!(self.severity, ErrorSeverity::Critical)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_config() -> AdvancedStreamingConfig {
+        AdvancedStreamingConfig::default()
+    }
+
+    // ---- StreamError tests ----
+
+    #[test]
+    fn test_stream_error_new_has_no_recovery_strategy() {
+        let err = StreamError::new(
+            StreamErrorType::TimeoutError,
+            "timed out".to_string(),
+            ErrorSeverity::Medium,
+        );
+        assert!(
+            err.recovery_strategy.is_none(),
+            "new error must have no recovery strategy"
+        );
+    }
+
+    #[test]
+    fn test_stream_error_with_recovery_strategy() {
+        let err = StreamError::new(
+            StreamErrorType::ConnectionLost,
+            "lost".to_string(),
+            ErrorSeverity::High,
+        )
+        .with_recovery_strategy(RecoveryStrategy::Reconnect);
+        assert!(
+            err.recovery_strategy.is_some(),
+            "error with recovery strategy must have Some strategy"
+        );
+    }
+
+    #[test]
+    fn test_stream_error_is_recoverable_with_strategy() {
+        let err = StreamError::new(
+            StreamErrorType::NetworkError,
+            "net err".to_string(),
+            ErrorSeverity::Medium,
+        )
+        .with_recovery_strategy(RecoveryStrategy::Retry);
+        assert!(
+            err.is_recoverable(),
+            "error with strategy and non-critical severity must be recoverable"
+        );
+    }
+
+    #[test]
+    fn test_stream_error_critical_not_recoverable() {
+        let err = StreamError::new(
+            StreamErrorType::SecurityViolation,
+            "critical".to_string(),
+            ErrorSeverity::Critical,
+        )
+        .with_recovery_strategy(RecoveryStrategy::GracefulShutdown);
+        assert!(
+            !err.is_recoverable(),
+            "critical error must not be considered recoverable"
+        );
+    }
+
+    #[test]
+    fn test_stream_error_with_context_stored() {
+        let err = StreamError::new(
+            StreamErrorType::BufferOverflow,
+            "overflow".to_string(),
+            ErrorSeverity::High,
+        )
+        .with_context("session_id".to_string(), "abc-123".to_string());
+        assert_eq!(
+            err.context.get("session_id").map(String::as_str),
+            Some("abc-123"),
+            "context key must be stored"
+        );
+    }
+
+    // ---- ErrorSeverity ordering ----
+
+    #[test]
+    fn test_error_severity_ordering() {
+        assert!(ErrorSeverity::Low < ErrorSeverity::Medium, "Low < Medium");
+        assert!(ErrorSeverity::Medium < ErrorSeverity::High, "Medium < High");
+        assert!(
+            ErrorSeverity::High < ErrorSeverity::Critical,
+            "High < Critical"
+        );
+    }
+
+    // ---- ErrorRecoveryManager tests ----
+
+    #[test]
+    fn test_error_recovery_manager_new_has_no_attempts() {
+        let mgr = ErrorRecoveryManager::new();
+        // No async test needed; can_recover is synchronous
+        assert!(
+            mgr.can_recover(&StreamErrorType::ConnectionLost),
+            "manager must have recovery strategies for ConnectionLost"
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_manager_strategies_for_unknown_type() {
+        let mgr = ErrorRecoveryManager::new();
+        assert!(
+            !mgr.can_recover(&StreamErrorType::ConfigurationError),
+            "ConfigurationError should not have a recovery strategy by default"
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_manager_get_strategies() {
+        let mgr = ErrorRecoveryManager::new();
+        let strategies = mgr.get_strategies(&StreamErrorType::BufferOverflow);
+        assert!(
+            strategies.is_some(),
+            "BufferOverflow must have recovery strategies"
+        );
+        assert!(
+            !strategies.expect("strategies must be Some").is_empty(),
+            "strategies list must not be empty"
+        );
+    }
+
+    // ---- HealthStatus tests ----
+
+    #[test]
+    fn test_health_status_healthy() {
+        let hs = HealthStatus {
+            overall_status: OverallHealthStatus::Healthy,
+            connection_status: StreamConnection::Streaming,
+            buffer_utilization: 0.2,
+            throughput: 10.0,
+            latency_ms: 50.0,
+            issues: vec![],
+            warnings: vec![],
+            last_update: Instant::now(),
+        };
+        assert!(
+            hs.is_healthy(),
+            "OverallHealthStatus::Healthy must return true from is_healthy"
+        );
+        assert!(!hs.is_degraded(), "Healthy must not be degraded");
+        assert!(!hs.is_unhealthy(), "Healthy must not be unhealthy");
+    }
+
+    #[test]
+    fn test_health_status_degraded() {
+        let hs = HealthStatus {
+            overall_status: OverallHealthStatus::Degraded,
+            connection_status: StreamConnection::Connected,
+            buffer_utilization: 0.8,
+            throughput: 3.0,
+            latency_ms: 300.0,
+            issues: vec![],
+            warnings: vec!["High latency".to_string()],
+            last_update: Instant::now(),
+        };
+        assert!(!hs.is_healthy(), "Degraded must not be healthy");
+        assert!(
+            hs.is_degraded(),
+            "Degraded must return true from is_degraded"
+        );
+    }
+
+    #[test]
+    fn test_health_status_unhealthy() {
+        let hs = HealthStatus {
+            overall_status: OverallHealthStatus::Unhealthy,
+            connection_status: StreamConnection::Disconnected,
+            buffer_utilization: 1.0,
+            throughput: 0.0,
+            latency_ms: 9999.0,
+            issues: vec!["Connection lost".to_string()],
+            warnings: vec![],
+            last_update: Instant::now(),
+        };
+        assert!(
+            hs.is_unhealthy(),
+            "Unhealthy must return true from is_unhealthy"
+        );
+    }
+
+    #[test]
+    fn test_health_status_summary_healthy() {
+        let hs = HealthStatus {
+            overall_status: OverallHealthStatus::Healthy,
+            connection_status: StreamConnection::Streaming,
+            buffer_utilization: 0.1,
+            throughput: 20.0,
+            latency_ms: 10.0,
+            issues: vec![],
+            warnings: vec![],
+            last_update: Instant::now(),
+        };
+        assert!(
+            hs.summary().contains("healthy"),
+            "healthy summary must mention 'healthy'"
+        );
+    }
+
+    // ---- StreamStateManager async tests ----
+
+    #[tokio::test]
+    async fn test_state_manager_initial_connection_is_connecting() {
+        let mgr = StreamStateManager::new(default_config());
+        let state = mgr.get_current_state().await;
+        assert_eq!(
+            state.connection,
+            StreamConnection::Connecting,
+            "initial connection state must be Connecting"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_state_manager_update_state_transition() {
+        let mgr = StreamStateManager::new(default_config());
+        mgr.update_state(StreamConnection::Connected, "test transition".to_string())
+            .await
+            .expect("update_state must succeed");
+        let state = mgr.get_current_state().await;
+        assert_eq!(
+            state.connection,
+            StreamConnection::Connected,
+            "state must be Connected after update"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_state_manager_history_records_transition() {
+        let mgr = StreamStateManager::new(default_config());
+        mgr.update_state(StreamConnection::Streaming, "started streaming".to_string())
+            .await
+            .expect("update_state must succeed");
+        let history = mgr.get_state_history().await;
+        assert_eq!(history.len(), 1, "one transition must be recorded");
+        assert_eq!(
+            history[0].to_state,
+            StreamConnection::Streaming,
+            "transition target must be Streaming"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_state_manager_update_buffer_state() {
+        let mgr = StreamStateManager::new(default_config());
+        let buf = BufferState {
+            current_size: 50,
+            max_size: 100,
+            utilization: 0.5,
+            pending_chunks: 3,
+        };
+        mgr.update_buffer_state(buf).await.expect("update_buffer_state must succeed");
+        let state = mgr.get_current_state().await;
+        assert_eq!(
+            state.buffer.current_size, 50,
+            "buffer current_size must be updated"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_state_manager_clear_error() {
+        let mgr = StreamStateManager::new(default_config());
+        // record a low-severity error first (won't change connection state)
+        let err = StreamError::new(
+            StreamErrorType::ProcessingError,
+            "minor error".to_string(),
+            ErrorSeverity::Low,
+        );
+        mgr.record_error(err).await.expect("record_error must succeed");
+        mgr.clear_error().await.expect("clear_error must succeed");
+        let state = mgr.get_current_state().await;
+        assert!(
+            state.error_info.is_none(),
+            "error_info must be None after clear_error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_state_manager_is_not_healthy_initially() {
+        let mgr = StreamStateManager::new(default_config());
+        // Initially Connecting with throughput 0 → not healthy
+        assert!(
+            !mgr.is_healthy().await,
+            "initial state should not be healthy"
+        );
+    }
+}

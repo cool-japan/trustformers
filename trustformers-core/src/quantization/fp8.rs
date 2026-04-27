@@ -272,6 +272,42 @@ impl QuantStats {
     }
 }
 
+/// Linear congruential generator for deterministic pseudo-random numbers.
+///
+/// Uses the constants from Knuth's MMIX:
+/// - `a = 6364136223846793005`
+/// - `c = 1442695040888963407`
+#[derive(Debug, Clone)]
+pub struct Lcg64 {
+    state: u64,
+}
+
+impl Lcg64 {
+    /// LCG multiplier (Knuth MMIX)
+    const A: u64 = 6_364_136_223_846_793_005;
+    /// LCG increment (Knuth MMIX)
+    const C: u64 = 1_442_695_040_888_963_407;
+
+    /// Create a new LCG with the given seed.
+    pub fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    /// Return the next pseudo-random `u64` and advance the state.
+    #[inline]
+    pub fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_mul(Self::A).wrapping_add(Self::C);
+        self.state
+    }
+
+    /// Return a pseudo-random `f32` in `[0, 1)`.
+    #[inline]
+    pub fn next_f32(&mut self) -> f32 {
+        // Use upper 24 bits for best quality, map to [0, 1).
+        (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32
+    }
+}
+
 /// FP8 quantizer with delayed scaling support
 pub struct FP8Quantizer {
     /// Configuration
@@ -279,14 +315,27 @@ pub struct FP8Quantizer {
 
     /// Statistics for delayed scaling (per channel or per tensor)
     stats: Option<Vec<QuantStats>>,
+
+    /// Pseudo-random number generator for stochastic rounding
+    rng: Lcg64,
 }
 
 impl FP8Quantizer {
-    /// Create a new FP8 quantizer
+    /// Create a new FP8 quantizer with a default seed of 42.
     pub fn new(config: FP8Config) -> Result<Self> {
         Ok(Self {
             config,
             stats: None,
+            rng: Lcg64::new(42),
+        })
+    }
+
+    /// Create a new FP8 quantizer with a specific seed for reproducibility.
+    pub fn with_seed(config: FP8Config, seed: u64) -> Result<Self> {
+        Ok(Self {
+            config,
+            stats: None,
+            rng: Lcg64::new(seed),
         })
     }
 
@@ -572,13 +621,22 @@ impl FP8Quantizer {
         let mant_shift = 23 - mant_bits;
         let mut mant = (mant_f32 >> mant_shift) as u8;
 
-        // Round to nearest even (stochastic rounding disabled for now)
-        // TODO: Implement stochastic rounding when scirs2_core Random API is clearer
         let remainder = mant_f32 & ((1 << mant_shift) - 1);
-        if remainder > (1 << (mant_shift - 1))
-            || (remainder == (1 << (mant_shift - 1)) && (mant & 1) == 1)
-        {
-            mant = mant.saturating_add(1);
+
+        if self.config.stochastic_rounding {
+            // Stochastic rounding: probability of rounding up = remainder / max_remainder
+            let max_remainder = (1u32 << mant_shift) as f32;
+            let probability = remainder as f32 / max_remainder;
+            if self.rng.next_f32() < probability {
+                mant = mant.saturating_add(1);
+            }
+        } else {
+            // Round to nearest even (RNE)
+            if remainder > (1 << (mant_shift - 1))
+                || (remainder == (1 << (mant_shift - 1)) && (mant & 1) == 1)
+            {
+                mant = mant.saturating_add(1);
+            }
         }
 
         // Combine sign, exponent, mantissa
@@ -862,6 +920,479 @@ mod tests {
         // Check that stats are being tracked
         assert!(quantizer.stats.is_some());
 
+        Ok(())
+    }
+
+    // ── Stochastic rounding tests ──────────────────────────────────────
+
+    #[test]
+    fn test_fp8_lcg64_deterministic() {
+        let mut rng_a = Lcg64::new(123);
+        let mut rng_b = Lcg64::new(123);
+        for _ in 0..100 {
+            assert_eq!(rng_a.next_u64(), rng_b.next_u64());
+        }
+    }
+
+    #[test]
+    fn test_fp8_lcg64_different_seeds() {
+        let mut rng_a = Lcg64::new(1);
+        let mut rng_b = Lcg64::new(2);
+        let mut any_different = false;
+        for _ in 0..20 {
+            if rng_a.next_u64() != rng_b.next_u64() {
+                any_different = true;
+                break;
+            }
+        }
+        assert!(
+            any_different,
+            "Different seeds should produce different sequences"
+        );
+    }
+
+    #[test]
+    fn test_fp8_lcg64_f32_range() {
+        let mut rng = Lcg64::new(0);
+        for _ in 0..1000 {
+            let v = rng.next_f32();
+            assert!(
+                (0.0..1.0).contains(&v),
+                "next_f32 must be in [0,1): got {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_fp8_sr_same_seed_same_output() -> Result<()> {
+        let data = vec![0.1, 0.2, 0.3, 0.4, 0.5, -0.1, -0.2, -0.3];
+        let tensor = Tensor::from_vec(data, &[8])?;
+
+        let config = FP8Config {
+            format: FP8Format::E4M3,
+            stochastic_rounding: true,
+            ..Default::default()
+        };
+
+        let mut q1 = FP8Quantizer::with_seed(config.clone(), 99)?;
+        let mut q2 = FP8Quantizer::with_seed(config, 99)?;
+
+        let r1 = q1.quantize(&tensor)?;
+        let r2 = q2.quantize(&tensor)?;
+
+        assert_eq!(
+            r1.data, r2.data,
+            "Same seed must produce identical quantized bytes"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_fp8_sr_different_seed_different_output() -> Result<()> {
+        // Use many elements to make collision astronomically unlikely.
+        let data: Vec<f32> = (0..256).map(|i| (i as f32 - 128.0) * 0.01).collect();
+        let tensor = Tensor::from_vec(data, &[256])?;
+
+        let config = FP8Config {
+            format: FP8Format::E4M3,
+            stochastic_rounding: true,
+            ..Default::default()
+        };
+
+        let mut q1 = FP8Quantizer::with_seed(config.clone(), 1)?;
+        let mut q2 = FP8Quantizer::with_seed(config, 9999)?;
+
+        let r1 = q1.quantize(&tensor)?;
+        let r2 = q2.quantize(&tensor)?;
+
+        assert_ne!(
+            r1.data, r2.data,
+            "Different seeds should produce different outputs"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_fp8_sr_unbiased_e4m3() -> Result<()> {
+        // Quantize/dequantize many times with different seeds. The mean of
+        // the dequantized values should converge to the original value.
+        let original_val = 1.23_f32;
+        let data = vec![original_val; 1];
+        let tensor = Tensor::from_vec(data, &[1])?;
+
+        let num_trials = 2000;
+        let mut sum = 0.0_f64;
+
+        for seed in 0..num_trials {
+            let config = FP8Config {
+                format: FP8Format::E4M3,
+                stochastic_rounding: true,
+                scaling: ScalingStrategy::PerTensor,
+                ..Default::default()
+            };
+            let mut q = FP8Quantizer::with_seed(config, seed)?;
+            let quantized = q.quantize(&tensor)?;
+            let deq = q.dequantize(&quantized)?;
+            let v = deq.to_vec_f32()?;
+            sum += v[0] as f64;
+        }
+
+        let mean = sum / num_trials as f64;
+        let rel_err = ((mean - original_val as f64) / original_val as f64).abs();
+        assert!(
+            rel_err < 0.05,
+            "SR mean should be close to original for E4M3: mean={mean}, expected={original_val}, rel_err={rel_err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_fp8_sr_unbiased_e5m2() -> Result<()> {
+        let original_val = 2.71_f32;
+        let data = vec![original_val; 1];
+        let tensor = Tensor::from_vec(data, &[1])?;
+
+        let num_trials = 2000;
+        let mut sum = 0.0_f64;
+
+        for seed in 0..num_trials {
+            let config = FP8Config {
+                format: FP8Format::E5M2,
+                stochastic_rounding: true,
+                scaling: ScalingStrategy::PerTensor,
+                ..Default::default()
+            };
+            let mut q = FP8Quantizer::with_seed(config, seed)?;
+            let quantized = q.quantize(&tensor)?;
+            let deq = q.dequantize(&quantized)?;
+            let v = deq.to_vec_f32()?;
+            sum += v[0] as f64;
+        }
+
+        let mean = sum / num_trials as f64;
+        let rel_err = ((mean - original_val as f64) / original_val as f64).abs();
+        assert!(
+            rel_err < 0.05,
+            "SR mean should be close to original for E5M2: mean={mean}, expected={original_val}, rel_err={rel_err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_fp8_sr_zero_exact() -> Result<()> {
+        let data = vec![0.0_f32; 4];
+        let tensor = Tensor::from_vec(data, &[4])?;
+
+        let config = FP8Config {
+            format: FP8Format::E4M3,
+            stochastic_rounding: true,
+            ..Default::default()
+        };
+
+        let mut q = FP8Quantizer::with_seed(config, 77)?;
+        let quantized = q.quantize(&tensor)?;
+        let deq = q.dequantize(&quantized)?;
+        let v = deq.to_vec_f32()?;
+
+        for val in &v {
+            assert!(
+                val.abs() < 1e-12,
+                "Zero should remain exactly zero, got {val}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_fp8_sr_nan_handled() -> Result<()> {
+        let data = vec![f32::NAN];
+        let tensor = Tensor::from_vec(data, &[1])?;
+
+        let config = FP8Config {
+            format: FP8Format::E4M3,
+            stochastic_rounding: true,
+            ..Default::default()
+        };
+
+        let mut q = FP8Quantizer::with_seed(config, 42)?;
+        let quantized = q.quantize(&tensor)?;
+        // NaN is mapped to max FP8 value; dequantization must not panic.
+        let deq = q.dequantize(&quantized)?;
+        let v = deq.to_vec_f32()?;
+        assert!(
+            v[0].is_finite(),
+            "NaN should be mapped to a finite FP8 value"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_fp8_sr_inf_handled() -> Result<()> {
+        let data = vec![f32::INFINITY, f32::NEG_INFINITY];
+        let tensor = Tensor::from_vec(data, &[2])?;
+
+        let config = FP8Config {
+            format: FP8Format::E4M3,
+            stochastic_rounding: true,
+            ..Default::default()
+        };
+
+        let mut q = FP8Quantizer::with_seed(config, 42)?;
+        let quantized = q.quantize(&tensor)?;
+        let deq = q.dequantize(&quantized)?;
+        let v = deq.to_vec_f32()?;
+        assert!(
+            v[0].is_finite(),
+            "Inf should be mapped to a finite FP8 value"
+        );
+        assert!(
+            v[1].is_finite(),
+            "Neg-Inf should be mapped to a finite FP8 value"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_fp8_sr_vs_rne_different_results() -> Result<()> {
+        // Many values: SR and RNE should sometimes disagree on rounding direction.
+        let data: Vec<f32> = (0..128).map(|i| (i as f32 - 64.0) * 0.013).collect();
+        let tensor = Tensor::from_vec(data, &[128])?;
+
+        let config_sr = FP8Config {
+            format: FP8Format::E4M3,
+            stochastic_rounding: true,
+            ..Default::default()
+        };
+        let config_rne = FP8Config {
+            format: FP8Format::E4M3,
+            stochastic_rounding: false,
+            ..Default::default()
+        };
+
+        let mut q_sr = FP8Quantizer::with_seed(config_sr, 7)?;
+        let mut q_rne = FP8Quantizer::new(config_rne)?;
+
+        let r_sr = q_sr.quantize(&tensor)?;
+        let r_rne = q_rne.quantize(&tensor)?;
+
+        // They should not be identical (SR introduces randomness).
+        let num_diff = r_sr.data.iter().zip(r_rne.data.iter()).filter(|(a, b)| a != b).count();
+        assert!(
+            num_diff > 0,
+            "Stochastic rounding should produce at least some different results vs RNE"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_fp8_sr_per_channel() -> Result<()> {
+        let data: Vec<f32> = (0..32).map(|i| (i as f32 - 16.0) * 0.05).collect();
+        let tensor = Tensor::from_vec(data, &[4, 8])?;
+
+        let config = FP8Config {
+            format: FP8Format::E4M3,
+            scaling: ScalingStrategy::PerChannel,
+            stochastic_rounding: true,
+            ..Default::default()
+        };
+
+        let mut q = FP8Quantizer::with_seed(config, 42)?;
+        let quantized = q.quantize(&tensor)?;
+
+        match &quantized.scales {
+            ScaleFactors::PerChannel(scales) => assert_eq!(scales.len(), 4),
+            _ => panic!("Expected PerChannel scales"),
+        }
+
+        // Dequantize should succeed without error.
+        let _deq = q.dequantize(&quantized)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_fp8_sr_blockwise() -> Result<()> {
+        let data: Vec<f32> = (0..64).map(|i| (i as f32 - 32.0) * 0.02).collect();
+        let tensor = Tensor::from_vec(data, &[64])?;
+
+        let config = FP8Config {
+            format: FP8Format::E4M3,
+            scaling: ScalingStrategy::BlockWise { block_size: 16 },
+            stochastic_rounding: true,
+            ..Default::default()
+        };
+
+        let mut q = FP8Quantizer::with_seed(config, 42)?;
+        let quantized = q.quantize(&tensor)?;
+
+        match &quantized.scales {
+            ScaleFactors::BlockWise { scales, block_size } => {
+                assert_eq!(scales.len(), 4);
+                assert_eq!(*block_size, 16);
+            },
+            _ => panic!("Expected BlockWise scales"),
+        }
+
+        let _deq = q.dequantize(&quantized)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_fp8_sr_per_token() -> Result<()> {
+        let data: Vec<f32> = (0..48).map(|i| (i as f32 - 24.0) * 0.03).collect();
+        // shape [2, 3, 8]: 2 batches, 3 tokens each, hidden=8
+        let tensor = Tensor::from_vec(data, &[2, 3, 8])?;
+
+        let config = FP8Config {
+            format: FP8Format::E4M3,
+            scaling: ScalingStrategy::PerToken,
+            stochastic_rounding: true,
+            ..Default::default()
+        };
+
+        let mut q = FP8Quantizer::with_seed(config, 42)?;
+        let quantized = q.quantize(&tensor)?;
+
+        match &quantized.scales {
+            ScaleFactors::PerToken(scales) => assert_eq!(scales.len(), 6), // 2*3 tokens
+            _ => panic!("Expected PerToken scales"),
+        }
+
+        let _deq = q.dequantize(&quantized)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_fp8_sr_e5m2_roundtrip() -> Result<()> {
+        let data = vec![0.0, 1.0, -1.0, 50.0, -50.0, 0.25, -0.25];
+        let tensor = Tensor::from_vec(data.clone(), &[7])?;
+
+        let config = FP8Config {
+            format: FP8Format::E5M2,
+            stochastic_rounding: true,
+            ..Default::default()
+        };
+
+        let mut q = FP8Quantizer::with_seed(config, 42)?;
+        let quantized = q.quantize(&tensor)?;
+        let deq = q.dequantize(&quantized)?;
+        let v = deq.to_vec_f32()?;
+
+        for (orig, rec) in data.iter().zip(v.iter()) {
+            let err = (orig - rec).abs() / (orig.abs() + 1e-6);
+            assert!(
+                err < 0.2,
+                "E5M2 SR roundtrip error too large: orig={orig}, rec={rec}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_fp8_with_seed_constructor() -> Result<()> {
+        let config = FP8Config {
+            format: FP8Format::E4M3,
+            stochastic_rounding: true,
+            ..Default::default()
+        };
+
+        let q = FP8Quantizer::with_seed(config, 12345)?;
+        // Verify the quantizer was created and the rng state is set.
+        assert_eq!(q.rng.state, 12345);
+        Ok(())
+    }
+
+    #[test]
+    fn test_fp8_default_seed_is_42() -> Result<()> {
+        let config = FP8Config::default();
+        let q = FP8Quantizer::new(config)?;
+        assert_eq!(q.rng.state, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn test_fp8_sr_variance_nonzero() -> Result<()> {
+        // With SR, repeated quantization with different seeds should produce variance.
+        // Use a value that is NOT exactly representable in E4M3 to ensure non-zero remainder.
+        let data = vec![1.23456_f32; 1];
+        let tensor = Tensor::from_vec(data, &[1])?;
+
+        let mut results = Vec::with_capacity(100);
+        for seed in 0..100_u64 {
+            let config = FP8Config {
+                format: FP8Format::E4M3,
+                stochastic_rounding: true,
+                ..Default::default()
+            };
+            let mut q = FP8Quantizer::with_seed(config, seed)?;
+            let quantized = q.quantize(&tensor)?;
+            results.push(quantized.data[0]);
+        }
+
+        // There should be at least 2 distinct quantized byte values.
+        results.sort();
+        results.dedup();
+        assert!(
+            results.len() >= 2,
+            "SR should produce variance across seeds, but got only {} distinct values",
+            results.len()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_fp8_rne_deterministic_without_seed() -> Result<()> {
+        // RNE (non-stochastic) should always produce the same result.
+        let data: Vec<f32> = (0..64).map(|i| (i as f32 - 32.0) * 0.01).collect();
+        let tensor = Tensor::from_vec(data, &[64])?;
+
+        let config = FP8Config {
+            format: FP8Format::E4M3,
+            stochastic_rounding: false,
+            ..Default::default()
+        };
+
+        let mut q1 = FP8Quantizer::new(config.clone())?;
+        let mut q2 = FP8Quantizer::with_seed(config, 9999)?;
+
+        let r1 = q1.quantize(&tensor)?;
+        let r2 = q2.quantize(&tensor)?;
+
+        assert_eq!(
+            r1.data, r2.data,
+            "RNE mode must be deterministic regardless of seed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_fp8_sr_negative_values_unbiased() -> Result<()> {
+        let original_val = -0.77_f32;
+        let data = vec![original_val; 1];
+        let tensor = Tensor::from_vec(data, &[1])?;
+
+        let num_trials = 2000;
+        let mut sum = 0.0_f64;
+
+        for seed in 0..num_trials {
+            let config = FP8Config {
+                format: FP8Format::E4M3,
+                stochastic_rounding: true,
+                scaling: ScalingStrategy::PerTensor,
+                ..Default::default()
+            };
+            let mut q = FP8Quantizer::with_seed(config, seed)?;
+            let quantized = q.quantize(&tensor)?;
+            let deq = q.dequantize(&quantized)?;
+            let v = deq.to_vec_f32()?;
+            sum += v[0] as f64;
+        }
+
+        let mean = sum / num_trials as f64;
+        let rel_err = ((mean - original_val as f64) / original_val as f64).abs();
+        assert!(
+            rel_err < 0.05,
+            "SR should be unbiased for negative values: mean={mean}, expected={original_val}, rel_err={rel_err}"
+        );
         Ok(())
     }
 }

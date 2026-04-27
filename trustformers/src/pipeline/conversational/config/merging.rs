@@ -119,3 +119,149 @@ impl ConfigurationMerger {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_base_config() -> ConversationalConfig {
+        ConversationalConfig::default()
+    }
+
+    fn make_override_config() -> ConversationalConfig {
+        let mut config = ConversationalConfig::default();
+        config.max_history_turns = 10;
+        config.max_context_tokens = 2048;
+        config.temperature = 0.5;
+        config.top_p = 0.8;
+        config.max_response_tokens = 256;
+        config
+    }
+
+    #[test]
+    fn test_merge_basic_parameters_override_wins() {
+        let base = make_base_config();
+        let override_cfg = make_override_config();
+        let result = ConfigurationMerger::merge(&base, &override_cfg);
+        if let Ok(merged) = result {
+            assert_eq!(merged.max_history_turns, 10);
+            assert_eq!(merged.max_context_tokens, 2048);
+            assert!((merged.temperature - 0.5).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_merge_preserves_base_when_override_is_same() {
+        let base = make_base_config();
+        let override_cfg = make_base_config();
+        let result = ConfigurationMerger::merge(&base, &override_cfg);
+        if let Ok(merged) = result {
+            assert_eq!(merged.max_history_turns, base.max_history_turns);
+        }
+    }
+
+    #[test]
+    fn test_merge_system_prompt_override_takes_effect() {
+        let base = make_base_config();
+        let mut override_cfg = make_base_config();
+        override_cfg.system_prompt = Some("New prompt".to_string());
+        let result = ConfigurationMerger::merge(&base, &override_cfg);
+        if let Ok(merged) = result {
+            assert_eq!(merged.system_prompt, Some("New prompt".to_string()));
+        }
+    }
+
+    #[test]
+    fn test_merge_system_prompt_base_kept_if_override_none() {
+        let mut base = make_base_config();
+        base.system_prompt = Some("Base prompt".to_string());
+        let mut override_cfg = make_base_config();
+        override_cfg.system_prompt = None;
+        let result = ConfigurationMerger::merge(&base, &override_cfg);
+        if let Ok(merged) = result {
+            // When override system_prompt is None, base is kept
+            assert_eq!(merged.system_prompt, Some("Base prompt".to_string()));
+        }
+    }
+
+    #[test]
+    fn test_merge_streaming_config_override_wins() {
+        let base = make_base_config();
+        let mut override_cfg = make_base_config();
+        override_cfg.streaming_config.enabled = true;
+        override_cfg.streaming_config.chunk_size = 20;
+        let result = ConfigurationMerger::merge(&base, &override_cfg);
+        if let Ok(merged) = result {
+            assert!(merged.streaming_config.enabled);
+            assert_eq!(merged.streaming_config.chunk_size, 20);
+        }
+    }
+
+    #[test]
+    fn test_merge_memory_config_override_wins() {
+        let base = make_base_config();
+        let mut override_cfg = make_base_config();
+        override_cfg.memory_config.max_memories = 50;
+        override_cfg.memory_config.decay_rate = 0.8;
+        let result = ConfigurationMerger::merge(&base, &override_cfg);
+        if let Ok(merged) = result {
+            assert_eq!(merged.memory_config.max_memories, 50);
+            assert!((merged.memory_config.decay_rate - 0.8).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_merge_repair_config_override_wins() {
+        let base = make_base_config();
+        let mut override_cfg = make_base_config();
+        override_cfg.repair_config.max_repair_attempts = 5;
+        override_cfg.repair_config.enabled = false;
+        let result = ConfigurationMerger::merge(&base, &override_cfg);
+        if let Ok(merged) = result {
+            assert_eq!(merged.repair_config.max_repair_attempts, 5);
+            assert!(!merged.repair_config.enabled);
+        }
+    }
+
+    #[test]
+    fn test_merge_conversation_mode_override() {
+        let base = make_base_config();
+        let mut override_cfg = make_base_config();
+        override_cfg.conversation_mode = ConversationMode::Educational;
+        let result = ConfigurationMerger::merge(&base, &override_cfg);
+        if let Ok(merged) = result {
+            assert_eq!(merged.conversation_mode, ConversationMode::Educational);
+        }
+    }
+
+    #[test]
+    fn test_merge_enable_safety_filter_override() {
+        let base = make_base_config();
+        let mut override_cfg = make_base_config();
+        override_cfg.enable_safety_filter = false;
+        let result = ConfigurationMerger::merge(&base, &override_cfg);
+        if let Ok(merged) = result {
+            assert!(!merged.enable_safety_filter);
+        }
+    }
+
+    #[test]
+    fn test_merge_summarization_config_override() {
+        let base = make_base_config();
+        let mut override_cfg = make_base_config();
+        override_cfg.summarization_config.target_length = 500;
+        let result = ConfigurationMerger::merge(&base, &override_cfg);
+        if let Ok(merged) = result {
+            assert_eq!(merged.summarization_config.target_length, 500);
+        }
+    }
+
+    #[test]
+    fn test_default_config_is_valid() {
+        let config = ConversationalConfig::default();
+        assert!(config.temperature >= 0.0);
+        assert!(config.temperature <= 2.0);
+        assert!(config.top_p >= 0.0);
+        assert!(config.top_p <= 1.0);
+    }
+}

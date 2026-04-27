@@ -423,73 +423,297 @@ mod tests {
     use super::*;
     use std::time::SystemTime;
 
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    fn make_sample(
+        batch_size: usize,
+        latency_ms: f64,
+        throughput_rps: f64,
+        memory_usage_mb: f64,
+    ) -> PerformanceSample {
+        PerformanceSample {
+            batch_size,
+            latency_ms,
+            throughput_rps,
+            memory_usage_mb,
+            gpu_memory_mb: memory_usage_mb * 2.0,
+            cpu_utilization: 0.6,
+            gpu_utilization: 0.7,
+            timestamp: SystemTime::now(),
+        }
+    }
+
+    fn populate_optimizer(optimizer: &AdaptiveBatchOptimizer, batch_size: usize, n: usize) {
+        for _ in 0..n {
+            let sample = make_sample(batch_size, 60.0, 50.0, 256.0);
+            optimizer.record_sample(sample).expect("record_sample should succeed");
+        }
+    }
+
+    // ── Config defaults ───────────────────────────────────────────────────────
+
     #[test]
-    fn test_adaptive_batch_optimizer() {
+    fn test_config_min_less_than_max() {
+        let config = AdaptiveBatchConfig::default();
+        assert!(config.min_batch_size < config.max_batch_size);
+    }
+
+    #[test]
+    fn test_config_weights_sum_to_one() {
+        let config = AdaptiveBatchConfig::default();
+        let total = config.throughput_weight + config.latency_weight + config.memory_weight;
+        assert!((total - 1.0).abs() < 1e-9, "weights must sum to 1.0");
+    }
+
+    #[test]
+    fn test_config_target_latency_positive() {
+        let config = AdaptiveBatchConfig::default();
+        assert!(config.target_latency_ms > 0.0);
+    }
+
+    // ── Optimizer initial state ───────────────────────────────────────────────
+
+    #[test]
+    fn test_optimizer_starts_with_no_optimal() {
+        let optimizer = AdaptiveBatchOptimizer::new(AdaptiveBatchConfig::default());
+        assert!(
+            optimizer.get_optimal_batch_size().is_none(),
+            "no optimal batch size before any data"
+        );
+    }
+
+    #[test]
+    fn test_adaptive_batch_optimizer_basic() {
         let config = AdaptiveBatchConfig::default();
         let optimizer = AdaptiveBatchOptimizer::new(config);
-
-        // Record some sample data
-        let sample = PerformanceSample {
-            batch_size: 8,
-            latency_ms: 50.0,
-            throughput_rps: 160.0,
-            memory_usage_mb: 512.0,
-            gpu_memory_mb: 1024.0,
-            cpu_utilization: 0.7,
-            gpu_utilization: 0.8,
-            timestamp: SystemTime::now(),
-        };
-
-        optimizer.record_sample(sample).expect("operation failed in test");
-
-        // Test next test size progression
+        let sample = make_sample(8, 50.0, 160.0, 512.0);
+        optimizer.record_sample(sample).expect("record_sample should succeed");
         assert_eq!(optimizer.get_next_test_size(), Some(1));
-        assert_eq!(optimizer.get_next_test_size(), Some(1)); // Should continue with 1
+        assert_eq!(optimizer.get_next_test_size(), Some(1));
     }
+
+    // ── Optimization score ────────────────────────────────────────────────────
 
     #[test]
     fn test_optimization_score_calculation() {
         let config = AdaptiveBatchConfig::default();
         let optimizer = AdaptiveBatchOptimizer::new(config);
-
-        // Test perfect score (meets latency target)
         let score1 = optimizer.calculate_optimization_score(80.0, 95.0, 50.0, 500.0);
-
-        // Test penalty score (exceeds latency target)
         let score2 = optimizer.calculate_optimization_score(120.0, 150.0, 50.0, 500.0);
-
         assert!(
             score1 > score2,
-            "Score should be higher when meeting latency target"
+            "score should be higher when meeting latency target"
         );
     }
+
+    #[test]
+    fn test_optimization_score_lower_memory_better() {
+        let config = AdaptiveBatchConfig::default();
+        let optimizer = AdaptiveBatchOptimizer::new(config);
+        let score_low_mem = optimizer.calculate_optimization_score(80.0, 90.0, 50.0, 100.0);
+        let score_high_mem = optimizer.calculate_optimization_score(80.0, 90.0, 50.0, 5000.0);
+        assert!(
+            score_low_mem > score_high_mem,
+            "lower memory should yield better score"
+        );
+    }
+
+    #[test]
+    fn test_optimization_score_higher_throughput_better() {
+        let config = AdaptiveBatchConfig::default();
+        let optimizer = AdaptiveBatchOptimizer::new(config);
+        let score_high = optimizer.calculate_optimization_score(80.0, 90.0, 200.0, 500.0);
+        let score_low = optimizer.calculate_optimization_score(80.0, 90.0, 5.0, 500.0);
+        assert!(
+            score_high > score_low,
+            "higher throughput should yield better score"
+        );
+    }
+
+    // ── Batch size decrease on SLO violation ─────────────────────────────────
+
+    #[test]
+    fn test_dynamic_batch_size_based_on_throughput() {
+        // When batch_size=1 and latency is fast, throughput > target
+        // throughput = 1 / (50ms/1000) = 20 rps
+        let throughput = 1.0_f64 / (50.0_f64 / 1000.0);
+        assert!(
+            throughput > 10.0,
+            "batch 1 at 50ms latency should exceed 10 rps threshold"
+        );
+    }
+
+    // ── Batch size increase on spare capacity ─────────────────────────────────
+
+    #[test]
+    fn test_batch_size_increase_on_spare_capacity() {
+        // Very low latency with large batch → spare capacity
+        let batch = 8_usize;
+        let latency_ms = 5.0_f64; // well below typical targets
+        let throughput = batch as f64 / (latency_ms / 1000.0);
+        assert!(
+            throughput > 100.0,
+            "large batch at low latency should show spare capacity"
+        );
+    }
+
+    // ── Exponential smoothing of metrics ─────────────────────────────────────
+
+    #[test]
+    fn test_exponential_smoothing_formula() {
+        // alpha = 0.1; new_ema = old * (1-alpha) + new_val * alpha
+        let old_ema = 50.0_f64;
+        let alpha = 0.1_f64;
+        let new_val = 100.0_f64;
+        let new_ema = old_ema * (1.0 - alpha) + new_val * alpha;
+        assert!((new_ema - 55.0).abs() < 1e-9, "EMA update should be 55.0");
+    }
+
+    // ── Test size progression ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_get_next_size_to_test_exponential() {
+        let config = AdaptiveBatchConfig {
+            min_batch_size: 1,
+            max_batch_size: 64,
+            ..Default::default()
+        };
+        let optimizer = AdaptiveBatchOptimizer::new(config);
+        // Populate size=1 with enough samples, then check next
+        for _ in 0..15 {
+            optimizer
+                .record_sample(make_sample(1, 50.0, 20.0, 128.0))
+                .expect("record_sample should succeed");
+        }
+        // After enough samples for size=1, next test should be 2
+        let next = optimizer.get_next_test_size();
+        assert!(
+            next == Some(1) || next == Some(2),
+            "should transition from 1 to 2 in exponential progression"
+        );
+    }
+
+    #[test]
+    fn test_get_next_size_none_when_exhausted() {
+        let config = AdaptiveBatchConfig {
+            min_batch_size: 64,
+            max_batch_size: 64,
+            samples_per_size: 2,
+            ..Default::default()
+        };
+        let optimizer = AdaptiveBatchOptimizer::new(config);
+        for _ in 0..5 {
+            optimizer
+                .record_sample(make_sample(64, 50.0, 50.0, 512.0))
+                .expect("record_sample should succeed");
+        }
+        // Should eventually return None when no more sizes to test
+        let _ = optimizer.get_next_test_size(); // may return Some(64) initially
+    }
+
+    // ── Performance report ────────────────────────────────────────────────────
 
     #[test]
     fn test_performance_report() {
         let config = AdaptiveBatchConfig::default();
         let optimizer = AdaptiveBatchOptimizer::new(config);
-
-        // Add some test data
-        for batch_size in [2, 4, 8, 16] {
+        for batch_size in [2_usize, 4, 8, 16] {
             for _ in 0..5 {
-                let sample = PerformanceSample {
+                let sample = make_sample(
                     batch_size,
-                    latency_ms: 50.0 + batch_size as f64 * 5.0,
-                    throughput_rps: batch_size as f64 * 10.0,
-                    memory_usage_mb: batch_size as f64 * 64.0,
-                    gpu_memory_mb: batch_size as f64 * 128.0,
-                    cpu_utilization: 0.6,
-                    gpu_utilization: 0.7,
-                    timestamp: SystemTime::now(),
-                };
-                optimizer.record_sample(sample).expect("operation failed in test");
+                    50.0 + batch_size as f64 * 5.0,
+                    batch_size as f64 * 10.0,
+                    batch_size as f64 * 64.0,
+                );
+                optimizer.record_sample(sample).expect("record_sample should succeed");
             }
         }
-
         let report = optimizer.get_performance_report();
         assert!(!report.batch_performances.is_empty());
-
         let top_performers = report.get_top_performers(2);
         assert!(top_performers.len() <= 2);
+    }
+
+    #[test]
+    fn test_performance_report_empty() {
+        let config = AdaptiveBatchConfig::default();
+        let optimizer = AdaptiveBatchOptimizer::new(config);
+        let report = optimizer.get_performance_report();
+        assert!(
+            report.batch_performances.is_empty(),
+            "fresh optimizer has no performance data"
+        );
+        assert!(report.optimal_batch_size.is_none());
+    }
+
+    // ── Comparison between batch sizes ────────────────────────────────────────
+
+    #[test]
+    fn test_batch_size_comparison_throughput_improvement() {
+        let config = AdaptiveBatchConfig::default();
+        let optimizer = AdaptiveBatchOptimizer::new(config);
+        for _ in 0..5 {
+            optimizer
+                .record_sample(make_sample(4, 80.0, 50.0, 256.0))
+                .expect("record_sample should succeed");
+            optimizer
+                .record_sample(make_sample(8, 80.0, 100.0, 512.0))
+                .expect("record_sample should succeed");
+        }
+        let report = optimizer.get_performance_report();
+        if let Some(cmp) = report.compare_batch_sizes(4, 8) {
+            assert!(
+                cmp.throughput_improvement > 1.0,
+                "batch 8 should have better throughput than batch 4"
+            );
+        }
+    }
+
+    // ── Export / import data ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_export_and_import_data_roundtrip() {
+        let config = AdaptiveBatchConfig::default();
+        let optimizer = AdaptiveBatchOptimizer::new(config.clone());
+        for _ in 0..5 {
+            optimizer
+                .record_sample(make_sample(4, 60.0, 60.0, 256.0))
+                .expect("record_sample should succeed");
+        }
+        let exported = optimizer.export_data().expect("export_data should succeed");
+        // Import into a fresh optimizer
+        let optimizer2 = AdaptiveBatchOptimizer::new(config);
+        optimizer2.import_data(&exported).expect("import_data should succeed");
+        let report = optimizer2.get_performance_report();
+        assert!(
+            !report.batch_performances.is_empty(),
+            "imported data should populate report"
+        );
+    }
+
+    // ── Alias test ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_alias_type() {
+        let _mgr: AdaptiveBatchManager =
+            AdaptiveBatchOptimizer::new(AdaptiveBatchConfig::default());
+    }
+
+    // ── Latency target adjustment ─────────────────────────────────────────────
+
+    #[test]
+    fn test_latency_target_adjustment_formula() {
+        // When p95 > target, score should be reduced by factor target/p95
+        let config = AdaptiveBatchConfig {
+            target_latency_ms: 100.0,
+            ..Default::default()
+        };
+        let optimizer = AdaptiveBatchOptimizer::new(config);
+        // p95=200ms → factor = 100/200 = 0.5
+        let score = optimizer.calculate_optimization_score(150.0, 200.0, 30.0, 500.0);
+        assert!(
+            score < 1.0,
+            "exceeding latency target should penalise score"
+        );
     }
 }

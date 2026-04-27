@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![allow(unused_imports)]
 
 use crate::albert::config::AlbertConfig;
 use crate::albert::model::AlbertModel;
@@ -447,5 +448,207 @@ impl Model for AlbertForMaskedLM {
             + config.embedding_size * config.vocab_size + config.vocab_size; // decoder + bias
 
         embedding_params + projection_params + encoder_params + pooler_params + mlm_head_params
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::albert::config::AlbertConfig;
+    use trustformers_core::traits::Config;
+
+    struct Lcg {
+        state: u64,
+    }
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Lcg { state: seed }
+        }
+        fn next(&mut self) -> u64 {
+            self.state = self
+                .state
+                .wrapping_mul(6364136223846793005u64)
+                .wrapping_add(1442695040888963407u64);
+            self.state
+        }
+        fn next_f32(&mut self) -> f32 {
+            (self.next() >> 11) as f32 / (1u64 << 53) as f32
+        }
+    }
+
+    fn make_small_config() -> AlbertConfig {
+        AlbertConfig {
+            vocab_size: 1000,
+            embedding_size: 64,
+            hidden_size: 128,
+            num_hidden_layers: 2,
+            num_hidden_groups: 1,
+            num_attention_heads: 4,
+            intermediate_size: 256,
+            inner_group_num: 1,
+            hidden_act: "gelu".to_string(),
+            hidden_dropout_prob: 0.0,
+            attention_probs_dropout_prob: 0.0,
+            max_position_embeddings: 64,
+            type_vocab_size: 2,
+            initializer_range: 0.02,
+            layer_norm_eps: 1e-12,
+            classifier_dropout_prob: None,
+            position_embedding_type: "absolute".to_string(),
+            pad_token_id: 0,
+            bos_token_id: 2,
+            eos_token_id: 3,
+        }
+    }
+
+    #[test]
+    fn test_albert_config_default_validates() {
+        let cfg = AlbertConfig::default();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_albert_config_base_v1() {
+        let cfg = AlbertConfig::albert_base_v1();
+        assert_eq!(cfg.vocab_size, 30000);
+        assert_eq!(cfg.hidden_size, 768);
+        assert_eq!(cfg.num_attention_heads, 12);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_albert_config_base_v2() {
+        let cfg = AlbertConfig::albert_base_v2();
+        assert_eq!(cfg.hidden_size, 768);
+        assert_eq!(cfg.embedding_size, 128);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_albert_config_large() {
+        let cfg = AlbertConfig::albert_large_v2();
+        assert_eq!(cfg.hidden_size, 1024);
+        assert_eq!(cfg.num_hidden_layers, 24);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_albert_config_xlarge() {
+        let cfg = AlbertConfig::albert_xlarge_v2();
+        assert_eq!(cfg.hidden_size, 2048);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_albert_config_xxlarge() {
+        let cfg = AlbertConfig::albert_xxlarge_v2();
+        assert_eq!(cfg.hidden_size, 4096);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_architecture_name() {
+        let cfg = AlbertConfig::default();
+        assert_eq!(cfg.architecture(), "albert");
+    }
+
+    #[test]
+    fn test_small_config_hidden_divisible_by_heads() {
+        let cfg = make_small_config();
+        assert_eq!(cfg.hidden_size % cfg.num_attention_heads, 0);
+    }
+
+    #[test]
+    fn test_small_config_validate_passes() {
+        let cfg = make_small_config();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_hidden_not_divisible_fails() {
+        let cfg = AlbertConfig {
+            hidden_size: 100,
+            num_attention_heads: 12,
+            ..AlbertConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_embedding_size_field_exists() {
+        let cfg = AlbertConfig::default();
+        assert!(cfg.embedding_size > 0);
+        assert!(cfg.embedding_size <= cfg.hidden_size);
+    }
+
+    #[test]
+    fn test_inner_group_num_field() {
+        let cfg = AlbertConfig::default();
+        assert!(cfg.inner_group_num >= 1);
+    }
+
+    #[test]
+    fn test_num_hidden_groups_default() {
+        let cfg = AlbertConfig::default();
+        assert_eq!(cfg.num_hidden_groups, 1);
+    }
+
+    #[test]
+    fn test_classifier_dropout_default_none() {
+        let cfg = AlbertConfig::default();
+        assert!(cfg.classifier_dropout_prob.is_none());
+    }
+
+    #[test]
+    fn test_from_pretrained_name_base_v2() {
+        // from_pretrained_name returns Self (not Option), just verify no panic
+        let cfg = AlbertConfig::from_pretrained_name("albert-base-v2");
+        assert_eq!(cfg.hidden_size, 768);
+    }
+
+    #[test]
+    fn test_from_pretrained_name_large_v2() {
+        let cfg = AlbertConfig::from_pretrained_name("albert-large-v2");
+        assert_eq!(cfg.hidden_size, 1024);
+    }
+
+    #[test]
+    fn test_num_parameters_increases_with_size() {
+        let base = AlbertConfig::albert_base_v2();
+        let large = AlbertConfig::albert_large_v2();
+        // Both use num_parameters via tasks, but we can check config properties
+        assert!(large.hidden_size > base.hidden_size);
+    }
+
+    #[test]
+    fn test_lcg_produces_range() {
+        let mut rng = Lcg::new(31415);
+        for _ in 0..100 {
+            let v = rng.next_f32();
+            assert!((0.0..1.0).contains(&v));
+        }
+    }
+
+    #[test]
+    fn test_position_embedding_type_default() {
+        let cfg = AlbertConfig::default();
+        assert_eq!(cfg.position_embedding_type, "absolute");
+    }
+
+    #[test]
+    fn test_max_position_embeddings_default() {
+        let cfg = AlbertConfig::default();
+        assert_eq!(cfg.max_position_embeddings, 512);
+    }
+
+    #[test]
+    fn test_type_vocab_size_default() {
+        let cfg = AlbertConfig::default();
+        assert_eq!(cfg.type_vocab_size, 2);
+    }
+
+    #[test]
+    fn test_pad_token_id_default() {
+        let cfg = AlbertConfig::default();
+        assert_eq!(cfg.pad_token_id, 0);
     }
 }

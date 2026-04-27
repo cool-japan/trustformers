@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![allow(unused_imports)]
 
 use crate::roberta::config::RobertaConfig;
 use crate::roberta::model::RobertaModel;
@@ -363,5 +364,191 @@ impl Model for RobertaForQuestionAnswering {
     fn num_parameters(&self) -> usize {
         // Delegate to underlying model or provide reasonable default
         self.roberta.num_parameters()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::roberta::config::RobertaConfig;
+    use trustformers_core::traits::Config;
+
+    struct Lcg {
+        state: u64,
+    }
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Lcg { state: seed }
+        }
+        fn next(&mut self) -> u64 {
+            self.state = self
+                .state
+                .wrapping_mul(6364136223846793005u64)
+                .wrapping_add(1442695040888963407u64);
+            self.state
+        }
+        fn next_f32(&mut self) -> f32 {
+            (self.next() >> 11) as f32 / (1u64 << 53) as f32
+        }
+    }
+
+    fn make_small_roberta_config() -> RobertaConfig {
+        RobertaConfig {
+            vocab_size: 1000,
+            hidden_size: 128,
+            num_hidden_layers: 2,
+            num_attention_heads: 4,
+            intermediate_size: 256,
+            hidden_act: "gelu".to_string(),
+            hidden_dropout_prob: 0.0,
+            attention_probs_dropout_prob: 0.0,
+            max_position_embeddings: 64,
+            type_vocab_size: 1,
+            initializer_range: 0.02,
+            layer_norm_eps: 1e-5,
+            pad_token_id: 1,
+            bos_token_id: 0,
+            eos_token_id: 2,
+            position_embedding_type: Some("absolute".to_string()),
+            use_cache: Some(true),
+            classifier_dropout: None,
+        }
+    }
+
+    #[test]
+    fn test_roberta_config_default_fields() {
+        let cfg = RobertaConfig::default();
+        assert_eq!(cfg.vocab_size, 50265);
+        assert_eq!(cfg.hidden_size, 768);
+        assert_eq!(cfg.num_attention_heads, 12);
+        assert_eq!(cfg.pad_token_id, 1);
+        assert_eq!(cfg.bos_token_id, 0);
+        assert_eq!(cfg.eos_token_id, 2);
+    }
+
+    #[test]
+    fn test_roberta_config_base_validates() {
+        let cfg = RobertaConfig::roberta_base();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_roberta_config_large_validates() {
+        let cfg = RobertaConfig::roberta_large();
+        assert_eq!(cfg.hidden_size, 1024);
+        assert_eq!(cfg.num_hidden_layers, 24);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_architecture_name() {
+        let cfg = RobertaConfig::default();
+        assert_eq!(cfg.architecture(), "RoBERTa");
+    }
+
+    #[test]
+    fn test_hidden_not_divisible_by_heads_fails() {
+        let cfg = RobertaConfig {
+            hidden_size: 100,
+            num_attention_heads: 12,
+            ..RobertaConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_small_config_validates() {
+        let cfg = make_small_roberta_config();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_small_config_hidden_divisible_by_heads() {
+        let cfg = make_small_roberta_config();
+        assert_eq!(cfg.hidden_size % cfg.num_attention_heads, 0);
+    }
+
+    #[test]
+    fn test_position_embedding_type_default() {
+        let cfg = RobertaConfig::default();
+        assert_eq!(cfg.position_embedding_type.as_deref(), Some("absolute"));
+    }
+
+    #[test]
+    fn test_use_cache_default() {
+        let cfg = RobertaConfig::default();
+        assert_eq!(cfg.use_cache, Some(true));
+    }
+
+    #[test]
+    fn test_classifier_dropout_default_none() {
+        let cfg = RobertaConfig::default();
+        assert!(cfg.classifier_dropout.is_none());
+    }
+
+    #[test]
+    fn test_type_vocab_size_default() {
+        let cfg = RobertaConfig::default();
+        assert_eq!(cfg.type_vocab_size, 1);
+    }
+
+    #[test]
+    fn test_large_has_more_layers_than_base() {
+        let base = RobertaConfig::roberta_base();
+        let large = RobertaConfig::roberta_large();
+        assert!(large.num_hidden_layers > base.num_hidden_layers);
+    }
+
+    #[test]
+    fn test_large_has_more_heads_than_base() {
+        let base = RobertaConfig::roberta_base();
+        let large = RobertaConfig::roberta_large();
+        assert!(large.num_attention_heads > base.num_attention_heads);
+    }
+
+    #[test]
+    fn test_large_has_larger_hidden_size() {
+        let base = RobertaConfig::roberta_base();
+        let large = RobertaConfig::roberta_large();
+        assert!(large.hidden_size > base.hidden_size);
+    }
+
+    #[test]
+    fn test_layer_norm_eps_default() {
+        let cfg = RobertaConfig::default();
+        assert!((cfg.layer_norm_eps - 1e-5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_initializer_range_default() {
+        let cfg = RobertaConfig::default();
+        assert!((cfg.initializer_range - 0.02).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_dropout_defaults() {
+        let cfg = RobertaConfig::default();
+        assert!((cfg.hidden_dropout_prob - 0.1).abs() < 1e-6);
+        assert!((cfg.attention_probs_dropout_prob - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_max_position_embeddings_default() {
+        let cfg = RobertaConfig::default();
+        assert_eq!(cfg.max_position_embeddings, 514);
+    }
+
+    #[test]
+    fn test_intermediate_size_base() {
+        let cfg = RobertaConfig::roberta_base();
+        assert_eq!(cfg.intermediate_size, 3072);
+    }
+
+    #[test]
+    fn test_lcg_values_in_range() {
+        let mut rng = Lcg::new(271828);
+        for _ in 0..100 {
+            let v = rng.next_f32();
+            assert!((0.0..1.0).contains(&v));
+        }
     }
 }

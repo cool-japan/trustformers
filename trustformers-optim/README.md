@@ -1,6 +1,6 @@
 # trustformers-optim
 
-**Version:** 0.1.0 | **Status:** Stable | **Tests:** 583 | **SLoC:** 43,888 | **Updated:** 2026-03-21
+**Version:** 0.1.1 | **Status:** Stable | **Tests:** 583 | **SLoC:** 43,888 | **Updated:** 2026-04-25
 
 Comprehensive optimization algorithms, learning rate schedulers, and distributed optimization techniques for training transformer models.
 

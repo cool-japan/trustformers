@@ -796,3 +796,207 @@ impl Default for UsagePredictor {
         Self::new()
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::super::types::NetworkAdaptationConfig;
+    use super::*;
+
+    // ── BandwidthOptimizer ────────────────────────────────────────────────
+
+    #[test]
+    fn test_bandwidth_optimizer_new() {
+        let config = NetworkAdaptationConfig::default();
+        let opt = BandwidthOptimizer::new(config).expect("optimizer should be created");
+        let stats = opt.get_compression_stats();
+        assert_eq!(stats.original_size_bytes, 0);
+        assert_eq!(stats.compressed_size_bytes, 0);
+    }
+
+    #[test]
+    fn test_optimize_transmission_unknown_type_passthrough() {
+        let config = NetworkAdaptationConfig::default();
+        let mut opt = BandwidthOptimizer::new(config).expect("optimizer should be created");
+        let data = vec![1u8, 2, 3, 4, 5];
+        let result = opt.optimize_transmission(data.clone(), "unknown").expect("should succeed");
+        // Unknown type should pass through (possibly with traffic shaping, may be empty if rate limited)
+        // Simply verify no error occurs.
+        let _ = result;
+    }
+
+    #[test]
+    fn test_bandwidth_optimizer_start_stop() {
+        let config = NetworkAdaptationConfig::default();
+        let mut opt = BandwidthOptimizer::new(config).expect("optimizer should be created");
+        opt.start().expect("start should succeed");
+        opt.stop().expect("stop should succeed");
+    }
+
+    #[test]
+    fn test_bandwidth_utilization_initial() {
+        let config = NetworkAdaptationConfig::default();
+        let opt = BandwidthOptimizer::new(config).expect("optimizer should be created");
+        let utilization = opt.get_bandwidth_utilization();
+        // Initially should be 0 / target = 0.0
+        assert_eq!(utilization, 0.0);
+    }
+
+    #[test]
+    fn test_recommended_compression_level_range() {
+        let config = NetworkAdaptationConfig::default();
+        let opt = BandwidthOptimizer::new(config).expect("optimizer should be created");
+        let level = opt.get_recommended_compression_level();
+        assert!(level >= 0.0);
+    }
+
+    // ── NetworkCompressionEngine ──────────────────────────────────────────
+
+    #[test]
+    fn test_compression_engine_gradient_compress_nonempty() {
+        let mut engine = NetworkCompressionEngine::new();
+        let data: Vec<u8> = (0u8..=20).collect();
+        let result = engine.compress_gradient(data.clone()).expect("should succeed");
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_compression_engine_model_compress() {
+        let mut engine = NetworkCompressionEngine::new();
+        let data: Vec<u8> = (0u8..=30).collect();
+        let result = engine.compress_model(data.clone()).expect("should succeed");
+        // Compressed data should not be larger than original (or at least not panic)
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_compression_engine_differential_compress() {
+        let mut engine = NetworkCompressionEngine::new();
+        let data: Vec<u8> = (0u8..=15).collect();
+        let result = engine.compress_differential(data.clone()).expect("should succeed");
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_compression_engine_stats_update_after_compress() {
+        let mut engine = NetworkCompressionEngine::new();
+        let data: Vec<u8> = (0u8..=99).collect();
+        let original_len = data.len();
+        engine.compress_gradient(data).expect("should succeed");
+        assert_eq!(engine.compression_stats.original_size_bytes, original_len);
+        assert!(engine.compression_stats.compressed_size_bytes > 0);
+    }
+
+    #[test]
+    fn test_compression_efficiency_range() {
+        let mut engine = NetworkCompressionEngine::new();
+        let data: Vec<u8> = (0u8..=50).collect();
+        engine.compress_gradient(data).expect("should succeed");
+        let eff = engine.get_compression_efficiency();
+        // Efficiency = 1.0 - ratio; may be 0 if no compression happens
+        assert!(eff >= 0.0);
+    }
+
+    // ── GradientCompressor ────────────────────────────────────────────────
+
+    #[test]
+    fn test_gradient_compressor_compress_empty() {
+        let mut c = GradientCompressor::new();
+        let result = c.compress(vec![]).expect("empty compress should succeed");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_gradient_compressor_update_parameters_clamps() {
+        let mut c = GradientCompressor::new();
+        c.update_parameters(1.5, 2.0); // Should clamp to [0.1,0.9] and [0.5,1.0]
+        assert!((0.1..=0.9).contains(&c.compression_ratio));
+        assert!((0.5..=1.0).contains(&c.quality_threshold));
+    }
+
+    // ── RateLimiter ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_rate_limiter_allows_small_data() {
+        let mut rl = RateLimiter::new();
+        // Small transfer should be allowed
+        let allowed = rl.check_rate_limit(100);
+        assert!(allowed);
+    }
+
+    #[test]
+    fn test_rate_limiter_blocks_massive_data() {
+        let mut rl = RateLimiter::new();
+        // Exhaust the budget
+        rl.check_rate_limit(10 * 1024 * 1024); // 10 MB already saturates 10 Mbps + 5 MB burst
+        let blocked = rl.check_rate_limit(10 * 1024 * 1024);
+        assert!(!blocked);
+    }
+
+    #[test]
+    fn test_rate_limiter_reset_clears_counter() {
+        let mut rl = RateLimiter::new();
+        rl.check_rate_limit(9 * 1024 * 1024);
+        rl.reset_counters();
+        assert_eq!(rl.current_rate_mbps, 0.0);
+    }
+
+    #[test]
+    fn test_rate_limiter_update_target_minimum() {
+        let mut rl = RateLimiter::new();
+        rl.update_target_rate(-5.0);
+        assert!(rl.target_rate_mbps >= 0.1);
+    }
+
+    // ── BandwidthAllocator ────────────────────────────────────────────────
+
+    #[test]
+    fn test_bandwidth_allocator_allocate_and_available() {
+        let mut alloc = BandwidthAllocator::new();
+        alloc.allocate_bandwidth("gradient", 2.0);
+        let avail = alloc.get_available_bandwidth();
+        assert!((avail - 8.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_bandwidth_allocator_reset() {
+        let mut alloc = BandwidthAllocator::new();
+        alloc.allocate_bandwidth("model", 5.0);
+        alloc.reset_allocations();
+        assert!((alloc.get_available_bandwidth() - 10.0).abs() < 0.01);
+    }
+
+    // ── DataUsageTracker ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_usage_tracker_tracks_bytes() {
+        let mut tracker = DataUsageTracker::new();
+        tracker.track_usage("gradient", 1024);
+        tracker.track_usage("gradient", 512);
+        let usage = tracker.get_current_usage();
+        assert_eq!(usage.get("gradient").copied().unwrap_or(0), 1536);
+    }
+
+    #[test]
+    fn test_usage_tracker_multiple_types() {
+        let mut tracker = DataUsageTracker::new();
+        tracker.track_usage("gradient", 100);
+        tracker.track_usage("model", 200);
+        let usage = tracker.get_current_usage();
+        assert_eq!(usage.get("gradient").copied().unwrap_or(0), 100);
+        assert_eq!(usage.get("model").copied().unwrap_or(0), 200);
+    }
+
+    // ── ErrorFeedbackBuffer ───────────────────────────────────────────────
+
+    #[test]
+    fn test_error_feedback_buffer_default() {
+        let buf = ErrorFeedbackBuffer::default();
+        assert_eq!(buf.error_count, 0);
+        assert!(buf.last_error_timestamp.is_none());
+        assert_eq!(buf.error_rate, 0.0);
+    }
+}

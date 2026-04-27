@@ -1099,4 +1099,355 @@ mod tests {
             memory_location: MemoryLocation::Device { device_id: 0 },
         }
     }
+
+    #[test]
+    fn test_default_config() {
+        let config = KernelFusionConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.max_fusion_size, 8);
+        assert!((config.fusion_threshold - 0.7).abs() < f32::EPSILON);
+        assert!(config.enable_adaptive_fusion);
+        assert_eq!(config.pattern_cache_size, 1000);
+        assert_eq!(config.analysis_window_size, 100);
+        assert!(config.enable_specialization);
+        assert_eq!(config.fusion_strategies.len(), 3);
+    }
+
+    #[test]
+    fn test_fusion_strategy_equality() {
+        let a = FusionStrategy::MemoryBandwidthOptimized;
+        let b = FusionStrategy::MemoryBandwidthOptimized;
+        assert_eq!(a, b);
+        let c = FusionStrategy::ComputeOptimized;
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn test_custom_fusion_strategy() {
+        let mut params = HashMap::new();
+        params.insert("alpha".to_string(), 0.5);
+        let strategy = FusionStrategy::Custom {
+            name: "my_strategy".to_string(),
+            parameters: params,
+        };
+        if let FusionStrategy::Custom { name, parameters } = &strategy {
+            assert_eq!(name, "my_strategy");
+            assert_eq!(parameters.len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_kernel_operation_types() {
+        let matmul = KernelOperationType::MatMul;
+        let debug_str = format!("{:?}", matmul);
+        assert!(debug_str.contains("MatMul"));
+
+        let conv = KernelOperationType::Convolution { dimensions: 2 };
+        let debug_str = format!("{:?}", conv);
+        assert!(debug_str.contains("Convolution"));
+    }
+
+    #[test]
+    fn test_element_wise_ops() {
+        let ops = vec![
+            ElementWiseOp::Add,
+            ElementWiseOp::Sub,
+            ElementWiseOp::Mul,
+            ElementWiseOp::Div,
+            ElementWiseOp::Pow,
+            ElementWiseOp::Sqrt,
+            ElementWiseOp::Exp,
+            ElementWiseOp::Log,
+        ];
+        for op in ops {
+            let debug_str = format!("{:?}", op);
+            assert!(!debug_str.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_reduction_ops() {
+        let ops = vec![
+            ReductionOp::Sum,
+            ReductionOp::Mean,
+            ReductionOp::Max,
+            ReductionOp::Min,
+            ReductionOp::ArgMax,
+            ReductionOp::ArgMin,
+        ];
+        for op in ops {
+            let debug_str = format!("{:?}", op);
+            assert!(!debug_str.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_activation_functions() {
+        let fns = vec![
+            ActivationFunction::ReLU,
+            ActivationFunction::GELU,
+            ActivationFunction::Sigmoid,
+            ActivationFunction::Tanh,
+            ActivationFunction::Swish,
+            ActivationFunction::Mish,
+        ];
+        for f in fns {
+            let debug_str = format!("{:?}", f);
+            assert!(!debug_str.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_normalization_types() {
+        let types = vec![
+            NormalizationType::LayerNorm,
+            NormalizationType::BatchNorm,
+            NormalizationType::GroupNorm,
+            NormalizationType::RMSNorm,
+        ];
+        for t in types {
+            let debug_str = format!("{:?}", t);
+            assert!(!debug_str.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_data_types() {
+        let types = vec![
+            DataType::Float32,
+            DataType::Float16,
+            DataType::BFloat16,
+            DataType::Int32,
+            DataType::Int16,
+            DataType::Int8,
+            DataType::UInt8,
+            DataType::Bool,
+        ];
+        assert_eq!(types.len(), 8);
+    }
+
+    #[test]
+    fn test_memory_layout_variants() {
+        let row = MemoryLayout::RowMajor;
+        let col = MemoryLayout::ColumnMajor;
+        let blocked = MemoryLayout::Blocked { block_size: 64 };
+        let custom = MemoryLayout::Custom {
+            layout: "tiled".to_string(),
+        };
+        assert_ne!(format!("{:?}", row), format!("{:?}", col));
+        assert!(format!("{:?}", blocked).contains("64"));
+        assert!(format!("{:?}", custom).contains("tiled"));
+    }
+
+    #[test]
+    fn test_memory_location_variants() {
+        let host = MemoryLocation::Host;
+        let device = MemoryLocation::Device { device_id: 3 };
+        let shared = MemoryLocation::Shared;
+        let constant = MemoryLocation::Constant;
+        assert!(format!("{:?}", host).contains("Host"));
+        assert!(format!("{:?}", device).contains("3"));
+        assert!(format!("{:?}", shared).contains("Shared"));
+        assert!(format!("{:?}", constant).contains("Constant"));
+    }
+
+    #[test]
+    fn test_access_type_variants() {
+        let ro = AccessType::ReadOnly;
+        let wo = AccessType::WriteOnly;
+        let rw = AccessType::ReadWrite;
+        assert_ne!(format!("{:?}", ro), format!("{:?}", wo));
+        assert_ne!(format!("{:?}", wo), format!("{:?}", rw));
+    }
+
+    #[test]
+    fn test_pattern_type_variants() {
+        let seq = PatternType::Sequential;
+        let rand = PatternType::Random;
+        let strided = PatternType::Strided { stride: 4 };
+        let blocked = PatternType::Blocked { block_size: 32 };
+        assert!(format!("{:?}", seq).contains("Sequential"));
+        assert!(format!("{:?}", rand).contains("Random"));
+        assert!(format!("{:?}", strided).contains("4"));
+        assert!(format!("{:?}", blocked).contains("32"));
+    }
+
+    #[tokio::test]
+    async fn test_register_multiple_kernels() {
+        let config = KernelFusionConfig::default();
+        let service = KernelFusionService::new(config).expect("creation ok");
+
+        for i in 0..10 {
+            let kernel = create_test_kernel(&format!("k_{}", i));
+            service.register_kernel(kernel).await.expect("register ok");
+        }
+
+        let stats = service.get_stats().await;
+        assert_eq!(stats.kernels_registered, 10);
+    }
+
+    #[tokio::test]
+    async fn test_disabled_fusion() {
+        let mut config = KernelFusionConfig::default();
+        config.enabled = false;
+        let service = KernelFusionService::new(config).expect("creation ok");
+
+        let opps = service.analyze_fusion_opportunities().await.expect("ok");
+        assert!(opps.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_fusion_with_single_kernel() {
+        let config = KernelFusionConfig::default();
+        let service = KernelFusionService::new(config).expect("creation ok");
+
+        service
+            .register_kernel(create_test_kernel("single"))
+            .await
+            .expect("register ok");
+
+        let opps = service.analyze_fusion_opportunities().await.expect("ok");
+        assert!(opps.is_empty()); // Need at least 2 kernels for fusion
+    }
+
+    #[test]
+    fn test_kernel_fusion_stats_default() {
+        let stats = KernelFusionStats::default();
+        assert_eq!(stats.kernels_registered.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.fusion_attempts.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.successful_fusions.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.cache_hits.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.cache_misses.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_compute_kernel_with_dependencies() {
+        let dep_id = Uuid::new_v4();
+        let mut kernel = create_test_kernel("dep_kernel");
+        kernel.dependencies.insert(dep_id);
+        assert!(kernel.dependencies.contains(&dep_id));
+        assert_eq!(kernel.dependencies.len(), 1);
+    }
+
+    #[test]
+    fn test_resource_savings_structure() {
+        let savings = ResourceSavings {
+            memory_bandwidth_savings: 1024 * 1024,
+            launch_overhead_reduction: Duration::from_micros(50),
+            register_savings: 128,
+            shared_memory_savings: 4096,
+        };
+        assert_eq!(savings.memory_bandwidth_savings, 1024 * 1024);
+        assert_eq!(savings.launch_overhead_reduction, Duration::from_micros(50));
+    }
+
+    #[test]
+    fn test_fused_kernel_performance_structure() {
+        let perf = FusedKernelPerformance {
+            execution_time: Duration::from_millis(5),
+            memory_bandwidth_utilization: 0.85,
+            compute_utilization: 0.92,
+            energy_efficiency: 0.78,
+            speedup_factor: 2.5,
+        };
+        assert!((perf.speedup_factor - 2.5).abs() < f32::EPSILON);
+        assert_eq!(perf.execution_time, Duration::from_millis(5));
+    }
+
+    #[test]
+    fn test_resource_utilization_structure() {
+        let util = ResourceUtilization {
+            memory_bandwidth: 0.7,
+            compute_utilization: 0.85,
+            cache_hit_rate: 0.95,
+            register_efficiency: 0.8,
+        };
+        assert!((util.memory_bandwidth - 0.7).abs() < f32::EPSILON);
+        assert!((util.cache_hit_rate - 0.95).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_device_type_variants() {
+        let cpu = DeviceType::Cpu { cores: 16 };
+        let cuda = DeviceType::Cuda {
+            compute_capability: "8.6".to_string(),
+        };
+        let metal = DeviceType::Metal;
+        assert!(format!("{:?}", cpu).contains("16"));
+        assert!(format!("{:?}", cuda).contains("8.6"));
+        assert!(format!("{:?}", metal).contains("Metal"));
+    }
+
+    #[test]
+    fn test_shared_memory_strategy_variants() {
+        let strats = vec![
+            SharedMemoryStrategy::Minimize,
+            SharedMemoryStrategy::Optimize,
+            SharedMemoryStrategy::Aggressive,
+        ];
+        for s in strats {
+            assert!(!format!("{:?}", s).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_kernel_fusion_error_display() {
+        let err = KernelFusionError::FusionNotPossible {
+            reason: "incompatible operations".to_string(),
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("incompatible operations"));
+
+        let err2 = KernelFusionError::ConfigurationError {
+            message: "bad threshold".to_string(),
+        };
+        let msg2 = format!("{}", err2);
+        assert!(msg2.contains("bad threshold"));
+    }
+
+    #[tokio::test]
+    async fn test_service_clone() {
+        let config = KernelFusionConfig::default();
+        let service = KernelFusionService::new(config).expect("creation ok");
+        let cloned = service.clone();
+
+        service
+            .register_kernel(create_test_kernel("original"))
+            .await
+            .expect("register ok");
+        // The cloned service should share state via Arc
+        let stats = cloned.get_stats().await;
+        assert_eq!(stats.kernels_registered, 1);
+    }
+
+    #[tokio::test]
+    async fn test_various_kernel_operation_types_registration() {
+        let config = KernelFusionConfig::default();
+        let service = KernelFusionService::new(config).expect("creation ok");
+
+        let ops = vec![
+            KernelOperationType::MatMul,
+            KernelOperationType::Reduction {
+                operation: ReductionOp::Sum,
+            },
+            KernelOperationType::Activation {
+                function: ActivationFunction::GELU,
+            },
+            KernelOperationType::Normalization {
+                norm_type: NormalizationType::LayerNorm,
+            },
+            KernelOperationType::Memory {
+                op_type: MemoryOpType::Transpose,
+            },
+        ];
+
+        for (i, op) in ops.into_iter().enumerate() {
+            let mut kernel = create_test_kernel(&format!("op_{}", i));
+            kernel.operation_type = op;
+            service.register_kernel(kernel).await.expect("register ok");
+        }
+
+        let stats = service.get_stats().await;
+        assert_eq!(stats.kernels_registered, 5);
+    }
 }

@@ -74,14 +74,7 @@ impl Timer {
 
 // Memory utilities - use main MemoryStats from lib.rs
 
-// Model format utilities
-#[wasm_bindgen]
-pub enum ModelFormat {
-    Onnx,
-    Gguf,
-    SafeTensors,
-    Json,
-}
+use super::model::ModelFormat;
 
 #[wasm_bindgen]
 pub struct ModelLoader;

@@ -138,7 +138,7 @@ extern "C" __global__ void matmul_tiled_kernel(
 
         // Launch kernel with 32x32 blocks
         let cfg = LaunchConfig {
-            grid_dim: ((n as u32 + 31) / 32, (m as u32 + 31) / 32, 1),
+            grid_dim: ((n as u32).div_ceil(32), (m as u32).div_ceil(32), 1),
             block_dim: (32, 32, 1),
             shared_mem_bytes: 0, // Shared memory declared statically in kernel
         };
@@ -257,6 +257,7 @@ extern "C" __global__ void matmul_wmma_kernel(
     /// Batch matrix multiplication with CUDA Streams for parallelization
     /// Processes multiple matmuls in parallel using CUDA streams
     /// Achieves near-linear scaling for batched operations
+    #[allow(clippy::type_complexity)]
     pub fn batched_matmul_streams(
         &self,
         batches: &[(Vec<f32>, Vec<f32>, usize, usize, usize)],
@@ -396,7 +397,7 @@ extern "C" __global__ void matmul_gelu_fused_kernel(
 
         // Launch kernel
         let cfg = LaunchConfig {
-            grid_dim: ((n as u32 + 15) / 16, (m as u32 + 15) / 16, 1),
+            grid_dim: ((n as u32).div_ceil(16), (m as u32).div_ceil(16), 1),
             block_dim: (16, 16, 1),
             shared_mem_bytes: 0,
         };

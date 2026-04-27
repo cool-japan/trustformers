@@ -112,7 +112,7 @@ impl KQuantType {
         match self {
             // Q2_K: d=2 + dmin=2 + scales=8 + mins=8 + qs=64 = 84 bytes
             KQuantType::Q2_K => 84,  // 256 weights @ 2.625 bpw
-            KQuantType::Q3_K => 110, // 256 weights @ 3.4375 bpw
+            KQuantType::Q3_K => 112, // 256 weights: hmask(2)+scales(12)+d(2)+qs(96)=112
             KQuantType::Q4_K => 144, // 256 weights @ 4.5 bpw
         }
     }
@@ -410,7 +410,7 @@ impl KQuantizer {
         }
 
         // Serialize to bytes
-        let mut bytes = Vec::with_capacity(110);
+        let mut bytes = Vec::with_capacity(112);
         bytes.extend(&hmask);
         bytes.extend(&scales);
         bytes.extend(&d.to_le_bytes());
@@ -566,7 +566,7 @@ impl KQuantizer {
 
     /// Dequantize Q3_K block
     fn dequantize_q3k(&self, bytes: &[u8]) -> Result<Vec<f32>> {
-        if bytes.len() < 110 {
+        if bytes.len() < 112 {
             return Err(TrustformersError::quantization_error(
                 "Invalid Q3_K block size".to_string(),
             ));
@@ -724,7 +724,7 @@ mod tests {
 
         let q3k = KQuantType::Q3_K;
         assert_eq!(q3k.weight_bits(), 3);
-        assert_eq!(q3k.bytes_per_superblock(), 110);
+        assert_eq!(q3k.bytes_per_superblock(), 112);
 
         let q4k = KQuantType::Q4_K;
         assert_eq!(q4k.weight_bits(), 4);
@@ -801,5 +801,281 @@ mod tests {
                 recovered
             );
         }
+    }
+
+    // ── KQuantType tests ──
+
+    #[test]
+    fn test_kquant_type_superblock_size_all() {
+        assert_eq!(KQuantType::Q2_K.superblock_size(), 256);
+        assert_eq!(KQuantType::Q3_K.superblock_size(), 256);
+        assert_eq!(KQuantType::Q4_K.superblock_size(), 256);
+    }
+
+    #[test]
+    fn test_kquant_type_subblock_sizes() {
+        assert_eq!(KQuantType::Q2_K.subblock_size(), 16);
+        assert_eq!(KQuantType::Q3_K.subblock_size(), 16);
+        assert_eq!(KQuantType::Q4_K.subblock_size(), 32);
+    }
+
+    #[test]
+    fn test_kquant_type_bits_per_weight() {
+        assert!((KQuantType::Q2_K.bits_per_weight() - 2.5625).abs() < 1e-4);
+        assert!((KQuantType::Q3_K.bits_per_weight() - 3.4375).abs() < 1e-4);
+        assert!((KQuantType::Q4_K.bits_per_weight() - 4.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_kquant_type_scale_bits() {
+        assert_eq!(KQuantType::Q2_K.scale_bits(), 4);
+        assert_eq!(KQuantType::Q3_K.scale_bits(), 6);
+        assert_eq!(KQuantType::Q4_K.scale_bits(), 6);
+    }
+
+    // ── KQuantConfig tests ──
+
+    #[test]
+    fn test_kquant_config_default() {
+        let config = KQuantConfig::default();
+        assert_eq!(config.quant_type, KQuantType::Q4_K);
+        assert!(config.importance_based);
+        assert!((config.outlier_percentile - 0.99).abs() < 1e-6);
+        assert_eq!(config.scale_optimization_iters, 10);
+    }
+
+    #[test]
+    fn test_kquant_config_clone() {
+        let config = KQuantConfig {
+            quant_type: KQuantType::Q2_K,
+            importance_based: false,
+            outlier_percentile: 0.95,
+            scale_optimization_iters: 5,
+        };
+        let cloned = config.clone();
+        assert_eq!(cloned.quant_type, KQuantType::Q2_K);
+        assert!(!cloned.importance_based);
+    }
+
+    // ── KQuantizer tests ──
+
+    #[test]
+    fn test_quantizer_creation() -> Result<()> {
+        let quantizer = KQuantizer::new(KQuantConfig::default())?;
+        // Just verify it creates without error
+        let _ = quantizer;
+        Ok(())
+    }
+
+    #[test]
+    fn test_q3k_quantization() -> Result<()> {
+        let config = KQuantConfig {
+            quant_type: KQuantType::Q3_K,
+            ..Default::default()
+        };
+        let quantizer = KQuantizer::new(config)?;
+
+        let data: Vec<f32> = (0..256).map(|i| (i as f32) * 0.01).collect();
+        let tensor = Tensor::from_vec(data, &[256])?;
+
+        let quantized = quantizer.quantize(&tensor)?;
+        assert_eq!(quantized.quant_type, KQuantType::Q3_K);
+        assert_eq!(quantized.num_blocks, 1);
+        assert_eq!(quantized.blocks.len(), 112);
+
+        let dequantized = quantizer.dequantize(&quantized)?;
+        assert_eq!(dequantized.shape(), &[256]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_q4k_multiple_blocks() -> Result<()> {
+        let config = KQuantConfig {
+            quant_type: KQuantType::Q4_K,
+            ..Default::default()
+        };
+        let quantizer = KQuantizer::new(config)?;
+
+        let data: Vec<f32> = (0..1024).map(|i| (i as f32) * 0.001).collect();
+        let tensor = Tensor::from_vec(data, &[1024])?;
+
+        let quantized = quantizer.quantize(&tensor)?;
+        assert_eq!(quantized.num_blocks, 4); // 1024 / 256 = 4
+        assert_eq!(quantized.blocks.len(), 4 * 144);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_q2k_all_zeros() -> Result<()> {
+        let config = KQuantConfig {
+            quant_type: KQuantType::Q2_K,
+            ..Default::default()
+        };
+        let quantizer = KQuantizer::new(config)?;
+
+        let data = vec![0.0f32; 256];
+        let tensor = Tensor::from_vec(data, &[256])?;
+
+        let quantized = quantizer.quantize(&tensor)?;
+        let dequantized = quantizer.dequantize(&quantized)?;
+        let deq_data = dequantized.to_vec_f32()?;
+
+        for val in &deq_data {
+            assert!(val.abs() < 1e-3, "Expected ~0.0, got {}", val);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_q4k_negative_values() -> Result<()> {
+        let config = KQuantConfig {
+            quant_type: KQuantType::Q4_K,
+            ..Default::default()
+        };
+        let quantizer = KQuantizer::new(config)?;
+
+        let data: Vec<f32> = (0..256).map(|i| (i as f32 - 128.0) * 0.01).collect();
+        let tensor = Tensor::from_vec(data, &[256])?;
+
+        let quantized = quantizer.quantize(&tensor)?;
+        let dequantized = quantizer.dequantize(&quantized)?;
+        assert_eq!(dequantized.shape(), &[256]);
+
+        Ok(())
+    }
+
+    // ── KQuantTensor tests ──
+
+    #[test]
+    fn test_kquant_tensor_clone() -> Result<()> {
+        let config = KQuantConfig::default();
+        let quantizer = KQuantizer::new(config)?;
+        let data: Vec<f32> = (0..256).map(|i| i as f32 * 0.01).collect();
+        let tensor = Tensor::from_vec(data, &[256])?;
+        let quantized = quantizer.quantize(&tensor)?;
+
+        let cloned = quantized.clone();
+        assert_eq!(cloned.quant_type, quantized.quant_type);
+        assert_eq!(cloned.num_blocks, quantized.num_blocks);
+        assert_eq!(cloned.blocks.len(), quantized.blocks.len());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_kquant_tensor_shape_preserved() -> Result<()> {
+        let config = KQuantConfig {
+            quant_type: KQuantType::Q4_K,
+            ..Default::default()
+        };
+        let quantizer = KQuantizer::new(config)?;
+        let data: Vec<f32> = (0..512).map(|i| i as f32 * 0.01).collect();
+        let tensor = Tensor::from_vec(data, &[512])?;
+        let quantized = quantizer.quantize(&tensor)?;
+
+        assert_eq!(quantized.shape, vec![512]);
+        assert_eq!(quantized.num_weights, 512);
+
+        Ok(())
+    }
+
+    // ── FP16 conversion edge cases ──
+
+    #[test]
+    fn test_f16_zero() {
+        let f16 = f32_to_f16(0.0);
+        let recovered = f16_to_f32(f16);
+        assert!((recovered).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_f16_small_values() {
+        let val = 0.001;
+        let f16 = f32_to_f16(val);
+        let recovered = f16_to_f32(f16);
+        assert!((val - recovered).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_f16_large_values() {
+        let val = 65000.0;
+        let f16 = f32_to_f16(val);
+        let recovered = f16_to_f32(f16);
+        // FP16 max ~ 65504, so large values should be close
+        let rel_error = (val - recovered).abs() / val;
+        assert!(rel_error < 0.01);
+    }
+
+    #[test]
+    fn test_f16_negative() {
+        let val = -42.5;
+        let f16 = f32_to_f16(val);
+        let recovered = f16_to_f32(f16);
+        assert!((val - recovered).abs() < 0.1);
+    }
+
+    // ── Compression ratio tests ──
+
+    #[test]
+    fn test_q2k_compression_ratio() -> Result<()> {
+        let config = KQuantConfig {
+            quant_type: KQuantType::Q2_K,
+            ..Default::default()
+        };
+        let quantizer = KQuantizer::new(config)?;
+
+        let data: Vec<f32> = (0..256).map(|i| i as f32 * 0.01).collect();
+        let tensor = Tensor::from_vec(data, &[256])?;
+        let quantized = quantizer.quantize(&tensor)?;
+
+        // Original: 256 * 4 bytes = 1024 bytes
+        // Quantized: 84 bytes per block, 1 block = 84 bytes
+        assert!(quantized.blocks.len() < 256 * 4);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_q4k_compression_ratio() -> Result<()> {
+        let config = KQuantConfig {
+            quant_type: KQuantType::Q4_K,
+            ..Default::default()
+        };
+        let quantizer = KQuantizer::new(config)?;
+
+        let data: Vec<f32> = (0..256).map(|i| i as f32 * 0.01).collect();
+        let tensor = Tensor::from_vec(data, &[256])?;
+        let quantized = quantizer.quantize(&tensor)?;
+
+        // Original: 256 * 4 = 1024 bytes
+        // Quantized: 144 bytes
+        assert!(quantized.blocks.len() < 256 * 4);
+        assert_eq!(quantized.blocks.len(), 144);
+
+        Ok(())
+    }
+
+    // ── Padding test ──
+
+    #[test]
+    fn test_quantize_non_multiple_of_superblock() -> Result<()> {
+        let config = KQuantConfig {
+            quant_type: KQuantType::Q4_K,
+            ..Default::default()
+        };
+        let quantizer = KQuantizer::new(config)?;
+
+        // 300 is not a multiple of 256
+        let data: Vec<f32> = (0..300).map(|i| i as f32 * 0.01).collect();
+        let tensor = Tensor::from_vec(data, &[300])?;
+        let quantized = quantizer.quantize(&tensor)?;
+
+        assert_eq!(quantized.num_blocks, 2); // ceil(300/256) = 2
+        assert_eq!(quantized.num_weights, 300);
+
+        Ok(())
     }
 }

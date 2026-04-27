@@ -640,3 +640,313 @@ impl Default for MessageQueueMiddlewareConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── LCG ──────────────────────────────────────────────────────────────────
+    struct Lcg {
+        state: u64,
+    }
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Lcg { state: seed }
+        }
+        fn next(&mut self) -> u64 {
+            self.state = self
+                .state
+                .wrapping_mul(6_364_136_223_846_793_005_u64)
+                .wrapping_add(1_442_695_040_888_963_407_u64);
+            self.state
+        }
+        fn next_f32(&mut self) -> f32 {
+            (self.next() >> 11) as f32 / (1_u64 << 53) as f32
+        }
+    }
+
+    // ── MessageQueueMiddlewareConfig default ──────────────────────────────────
+
+    #[test]
+    fn test_mq_middleware_config_default_enabled() {
+        let cfg = MessageQueueMiddlewareConfig::default();
+        assert!(cfg.enabled);
+        assert!(cfg.async_inference);
+        assert!(cfg.event_publishing);
+        assert!(cfg.request_logging);
+        assert!(cfg.metrics_collection);
+        assert!(cfg.dead_letter_queue);
+    }
+
+    #[test]
+    fn test_mq_middleware_config_default_topic_names() {
+        let cfg = MessageQueueMiddlewareConfig::default();
+        assert_eq!(cfg.async_topics.inference_requests, "inference-requests");
+        assert_eq!(cfg.async_topics.inference_responses, "inference-responses");
+        assert_eq!(cfg.async_topics.batch_requests, "batch-requests");
+        assert_eq!(cfg.async_topics.batch_responses, "batch-responses");
+        assert_eq!(cfg.async_topics.health_checks, "health-checks");
+    }
+
+    #[test]
+    fn test_mq_middleware_config_default_event_topic_names() {
+        let cfg = MessageQueueMiddlewareConfig::default();
+        assert_eq!(cfg.event_topics.model_events, "model-events");
+        assert_eq!(cfg.event_topics.system_events, "system-events");
+        assert_eq!(cfg.event_topics.user_events, "user-events");
+        assert_eq!(cfg.event_topics.error_events, "error-events");
+        assert_eq!(cfg.event_topics.audit_events, "audit-events");
+    }
+
+    // ── AsyncInferenceRequest ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_async_inference_request_construction() {
+        let req = AsyncInferenceRequest {
+            request_id: "req-001".to_string(),
+            model_name: "gpt-neo".to_string(),
+            input: "Hello, world!".to_string(),
+            parameters: HashMap::new(),
+            callback_url: None,
+            priority: Some(1),
+            timeout_seconds: Some(30),
+        };
+        assert_eq!(req.request_id, "req-001");
+        assert_eq!(req.model_name, "gpt-neo");
+        assert_eq!(req.priority, Some(1));
+        assert_eq!(req.timeout_seconds, Some(30));
+    }
+
+    #[test]
+    fn test_async_inference_request_optional_fields_default_none() {
+        let req = AsyncInferenceRequest {
+            request_id: "r".to_string(),
+            model_name: "m".to_string(),
+            input: "i".to_string(),
+            parameters: HashMap::new(),
+            callback_url: None,
+            priority: None,
+            timeout_seconds: None,
+        };
+        assert!(req.callback_url.is_none());
+        assert!(req.priority.is_none());
+        assert!(req.timeout_seconds.is_none());
+    }
+
+    // ── AsyncInferenceResponse ────────────────────────────────────────────────
+
+    #[test]
+    fn test_async_inference_response_construction() {
+        let resp = AsyncInferenceResponse {
+            request_id: "req-001".to_string(),
+            status: "completed".to_string(),
+            result: Some(serde_json::json!({"tokens": 42})),
+            error: None,
+            processing_time_ms: Some(150),
+            model_version: Some("v1.0".to_string()),
+        };
+        assert_eq!(resp.status, "completed");
+        assert!(resp.result.is_some());
+        assert!(resp.error.is_none());
+    }
+
+    // ── MessageQueueRequest ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_mq_request_minimal_construction() {
+        let req = MessageQueueRequest {
+            topic: "events".to_string(),
+            key: None,
+            payload: serde_json::json!({"action": "test"}),
+            headers: None,
+            correlation_id: None,
+            reply_to: None,
+        };
+        assert_eq!(req.topic, "events");
+        assert!(req.key.is_none());
+    }
+
+    #[test]
+    fn test_mq_request_with_headers_and_correlation() {
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "application/json".to_string());
+        let req = MessageQueueRequest {
+            topic: "t".to_string(),
+            key: Some("k".to_string()),
+            payload: serde_json::Value::Null,
+            headers: Some(headers),
+            correlation_id: Some("corr-123".to_string()),
+            reply_to: Some("reply-topic".to_string()),
+        };
+        assert_eq!(req.key.as_deref(), Some("k"));
+        assert_eq!(req.correlation_id.as_deref(), Some("corr-123"));
+        assert_eq!(req.reply_to.as_deref(), Some("reply-topic"));
+    }
+
+    // ── BatchMessageRequest ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_batch_message_request_empty_messages() {
+        let req = BatchMessageRequest {
+            topic: "batch-topic".to_string(),
+            messages: vec![],
+        };
+        assert_eq!(req.topic, "batch-topic");
+        assert!(req.messages.is_empty());
+    }
+
+    #[test]
+    fn test_batch_message_item_optional_fields() {
+        let item = BatchMessageItem {
+            key: None,
+            payload: serde_json::json!(42),
+            headers: None,
+        };
+        assert!(item.key.is_none());
+        assert!(item.headers.is_none());
+    }
+
+    // ── ConsumeRequest / ConsumeResponse ──────────────────────────────────────
+
+    #[test]
+    fn test_consume_request_construction() {
+        let req = ConsumeRequest {
+            topics: vec!["t1".to_string(), "t2".to_string()],
+            timeout_ms: Some(1000),
+            max_messages: Some(10),
+            auto_commit: Some(true),
+        };
+        assert_eq!(req.topics.len(), 2);
+        assert_eq!(req.timeout_ms, Some(1000));
+    }
+
+    #[test]
+    fn test_consume_response_empty() {
+        let resp = ConsumeResponse {
+            messages: vec![],
+            count: 0,
+        };
+        assert_eq!(resp.count, 0);
+        assert!(resp.messages.is_empty());
+    }
+
+    // ── SubscriptionRequest / CommitRequest ───────────────────────────────────
+
+    #[test]
+    fn test_subscription_request_construction() {
+        let req = SubscriptionRequest {
+            topics: vec!["inference-requests".to_string()],
+            consumer_group: Some("group-1".to_string()),
+        };
+        assert_eq!(req.topics.len(), 1);
+        assert_eq!(req.consumer_group.as_deref(), Some("group-1"));
+    }
+
+    #[test]
+    fn test_commit_request_multiple_ids() {
+        let mut lcg = Lcg::new(7);
+        let ids: Vec<String> = (0..5).map(|i| format!("msg_{}_{}", i, lcg.next())).collect();
+        let req = CommitRequest {
+            message_ids: ids.clone(),
+        };
+        assert_eq!(req.message_ids.len(), 5);
+        assert_eq!(req.message_ids, ids);
+    }
+
+    // ── AsyncTopicConfig / EventTopicConfig ───────────────────────────────────
+
+    #[test]
+    fn test_async_topic_config_all_topics_non_empty() {
+        let cfg = AsyncTopicConfig {
+            inference_requests: "ir".to_string(),
+            inference_responses: "iresp".to_string(),
+            batch_requests: "br".to_string(),
+            batch_responses: "bresp".to_string(),
+            health_checks: "hc".to_string(),
+        };
+        assert!(!cfg.inference_requests.is_empty());
+        assert!(!cfg.health_checks.is_empty());
+    }
+
+    #[test]
+    fn test_event_topic_config_all_topics_non_empty() {
+        let cfg = EventTopicConfig {
+            model_events: "me".to_string(),
+            system_events: "se".to_string(),
+            user_events: "ue".to_string(),
+            error_events: "ee".to_string(),
+            audit_events: "ae".to_string(),
+        };
+        assert!(!cfg.audit_events.is_empty());
+        assert!(!cfg.model_events.is_empty());
+    }
+
+    // ── MessageQueueResponse ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_mq_response_construction() {
+        let ts = chrono::Utc::now();
+        let resp = MessageQueueResponse {
+            message_id: "id-001".to_string(),
+            topic: "events".to_string(),
+            partition: 0,
+            offset: 42,
+            timestamp: ts,
+            size: 256,
+        };
+        assert_eq!(resp.message_id, "id-001");
+        assert_eq!(resp.offset, 42);
+        assert_eq!(resp.size, 256);
+    }
+
+    #[test]
+    fn test_batch_message_response_counts() {
+        let ts = chrono::Utc::now();
+        let resp = BatchMessageResponse {
+            batch_id: "batch-001".to_string(),
+            success_count: 8,
+            failure_count: 2,
+            total_size: 1024,
+            results: vec![MessageQueueResponse {
+                message_id: "m1".to_string(),
+                topic: "t".to_string(),
+                partition: 0,
+                offset: 0,
+                timestamp: ts,
+                size: 128,
+            }],
+        };
+        assert_eq!(resp.success_count + resp.failure_count, 10);
+        assert_eq!(resp.results.len(), 1);
+    }
+
+    // ── ConsumedMessage ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_consumed_message_construction() {
+        let msg = ConsumedMessage {
+            id: "msg-1".to_string(),
+            topic: "events".to_string(),
+            key: Some("k".to_string()),
+            payload: serde_json::json!({"value": 1}),
+            headers: HashMap::new(),
+            timestamp: chrono::Utc::now(),
+            partition: Some(0),
+            offset: Some(100),
+        };
+        assert_eq!(msg.id, "msg-1");
+        assert_eq!(msg.partition, Some(0));
+        assert_eq!(msg.offset, Some(100));
+    }
+
+    // ── LCG sanity ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_lcg_output_is_diverse() {
+        let mut lcg = Lcg::new(2024);
+        let vals: Vec<f32> = (0..20).map(|_| lcg.next_f32()).collect();
+        let first = vals[0];
+        let diff = vals.iter().filter(|&&v| (v - first).abs() > 1e-6).count();
+        assert!(diff >= 8, "LCG appears stuck: diff={}", diff);
+    }
+}

@@ -451,3 +451,279 @@ impl From<QuantumAnsatzConfig> for QuantumAnsatz {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trustformers_core::traits::Config;
+
+    struct Lcg {
+        state: u64,
+    }
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Lcg { state: seed }
+        }
+        fn next(&mut self) -> u64 {
+            self.state = self
+                .state
+                .wrapping_mul(6364136223846793005u64)
+                .wrapping_add(1442695040888963407u64);
+            self.state
+        }
+        fn next_f32(&mut self) -> f32 {
+            (self.next() >> 11) as f32 / (1u64 << 53) as f32
+        }
+    }
+
+    #[test]
+    fn test_default_config_fields() {
+        let cfg = QuantumClassicalConfig::default();
+        assert_eq!(cfg.d_model, 512);
+        assert_eq!(cfg.n_classical_layers, 6);
+        assert_eq!(cfg.n_quantum_layers, 2);
+        assert_eq!(cfg.num_qubits, 8);
+        assert_eq!(cfg.model_type, "quantum_classical_hybrid");
+        assert!(cfg.use_bias);
+        assert!(cfg.use_quantum_gradients);
+    }
+
+    #[test]
+    fn test_default_validate_passes() {
+        let cfg = QuantumClassicalConfig::default();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_architecture_quantum_transformer() {
+        let cfg = QuantumClassicalConfig::quantum_transformer();
+        assert_eq!(cfg.architecture(), "quantum_transformer");
+    }
+
+    #[test]
+    fn test_architecture_quantum_gnn() {
+        let cfg = QuantumClassicalConfig::quantum_gnn();
+        assert_eq!(cfg.architecture(), "quantum_gnn");
+    }
+
+    #[test]
+    fn test_zero_d_model_fails() {
+        let cfg = QuantumClassicalConfig {
+            d_model: 0,
+            ..QuantumClassicalConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_no_layers_fails() {
+        let cfg = QuantumClassicalConfig {
+            n_classical_layers: 0,
+            n_quantum_layers: 0,
+            ..QuantumClassicalConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_zero_vocab_size_fails() {
+        let cfg = QuantumClassicalConfig {
+            vocab_size: 0,
+            ..QuantumClassicalConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_zero_qubits_fails() {
+        let cfg = QuantumClassicalConfig {
+            num_qubits: 0,
+            ..QuantumClassicalConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_too_many_qubits_fails() {
+        let cfg = QuantumClassicalConfig {
+            num_qubits: 31,
+            ..QuantumClassicalConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_zero_circuit_depth_fails() {
+        let cfg = QuantumClassicalConfig {
+            circuit_depth: 0,
+            ..QuantumClassicalConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_zero_quantum_lr_fails() {
+        let cfg = QuantumClassicalConfig {
+            quantum_learning_rate: 0.0,
+            ..QuantumClassicalConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_zero_classical_lr_fails() {
+        let cfg = QuantumClassicalConfig {
+            classical_learning_rate: 0.0,
+            ..QuantumClassicalConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_zero_parameter_shift_fails() {
+        let cfg = QuantumClassicalConfig {
+            parameter_shift_stepsize: 0.0,
+            ..QuantumClassicalConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_zero_optimization_tolerance_fails() {
+        let cfg = QuantumClassicalConfig {
+            quantum_optimization_tolerance: 0.0,
+            ..QuantumClassicalConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_zero_quantum_iterations_fails() {
+        let cfg = QuantumClassicalConfig {
+            max_quantum_iterations: 0,
+            ..QuantumClassicalConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_zero_entanglement_depth_fails() {
+        let cfg = QuantumClassicalConfig {
+            entanglement_depth: 0,
+            ..QuantumClassicalConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_get_quantum_dimension() {
+        let cfg = QuantumClassicalConfig::default();
+        assert_eq!(
+            cfg.get_quantum_dimension(),
+            2_usize.pow(cfg.num_qubits as u32)
+        );
+    }
+
+    #[test]
+    fn test_get_total_layers() {
+        let cfg = QuantumClassicalConfig::default();
+        assert_eq!(
+            cfg.get_total_layers(),
+            cfg.n_classical_layers + cfg.n_quantum_layers
+        );
+    }
+
+    #[test]
+    fn test_get_quantum_parameters_hardware_efficient() {
+        let cfg = QuantumClassicalConfig {
+            quantum_ansatz: QuantumAnsatzConfig::HardwareEfficient { layers: 2 },
+            num_qubits: 8,
+            ..QuantumClassicalConfig::default()
+        };
+        let params = cfg.get_quantum_parameters_count();
+        // num_qubits * layers + (num_qubits - 1) * layers
+        let expected = 8 * 2 + 7 * 2;
+        assert_eq!(params, expected);
+    }
+
+    #[test]
+    fn test_get_quantum_parameters_real_amplitudes() {
+        let cfg = QuantumClassicalConfig {
+            quantum_ansatz: QuantumAnsatzConfig::RealAmplitudes { layers: 3 },
+            num_qubits: 8,
+            ..QuantumClassicalConfig::default()
+        };
+        let params = cfg.get_quantum_parameters_count();
+        assert_eq!(params, 8 * 3);
+    }
+
+    #[test]
+    fn test_quantum_advantage_factor_min_one() {
+        let cfg = QuantumClassicalConfig {
+            num_qubits: 2,
+            circuit_depth: 1,
+            n_classical_layers: 100,
+            d_model: 512,
+            ..QuantumClassicalConfig::default()
+        };
+        let factor = cfg.get_quantum_advantage_factor();
+        assert!((factor - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_quantum_transformer_config() {
+        let cfg = QuantumClassicalConfig::quantum_transformer();
+        assert_eq!(cfg.n_classical_layers, 8);
+        assert_eq!(cfg.num_qubits, 12);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_quantum_cnn_config() {
+        let cfg = QuantumClassicalConfig::quantum_cnn();
+        assert_eq!(cfg.n_quantum_layers, 4);
+        assert_eq!(cfg.num_qubits, 10);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_variational_quantum_circuit_config() {
+        let cfg = QuantumClassicalConfig::variational_quantum_circuit();
+        assert_eq!(cfg.num_qubits, 20);
+        if let QuantumMeasurementStrategy::Sampling { shots } = cfg.measurement_strategy {
+            assert_eq!(shots, 2048);
+        } else {
+            panic!("expected Sampling measurement strategy");
+        }
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_qaoa_config() {
+        let cfg = QuantumClassicalConfig::quantum_approximate_optimization();
+        assert_eq!(cfg.max_quantum_iterations, 5000);
+        assert_eq!(cfg.n_quantum_layers, 10);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_from_pretrained_name_known() {
+        let result = QuantumClassicalConfig::from_pretrained_name("quantum-gnn");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_from_pretrained_name_unknown() {
+        let result = QuantumClassicalConfig::from_pretrained_name("not-a-quantum-model");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_lcg_values_in_range() {
+        let mut rng = Lcg::new(161803);
+        for _ in 0..100 {
+            let v = rng.next_f32();
+            assert!((0.0..1.0).contains(&v));
+        }
+    }
+}

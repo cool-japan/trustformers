@@ -6,8 +6,12 @@ pub mod hopfield_networks;
 pub mod liquid_time_constant;
 pub mod model;
 pub mod neural_turing_machine;
+#[cfg(test)]
+mod neural_turing_machine_tests;
 pub mod reservoir_computing;
 pub mod spiking_networks;
+#[cfg(test)]
+mod spiking_networks_tests;
 
 pub use biological_memory::*;
 pub use capsule_networks::*;

@@ -1,6 +1,6 @@
 # TrustformeRS Serve
 
-**Version:** 0.1.0 | **Status:** Stable | **Tests:** 216 | **SLoC:** 206,636 | **Updated:** 2026-03-21
+**Version:** 0.1.1 | **Status:** Stable | **Tests:** 216 | **SLoC:** 206,636 | **Updated:** 2026-04-25
 
 High-performance inference server for TrustformeRS models with advanced batching, multi-protocol APIs, cloud-native deployment, and comprehensive observability.
 

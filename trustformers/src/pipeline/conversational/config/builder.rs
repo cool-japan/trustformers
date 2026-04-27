@@ -447,3 +447,214 @@ impl Default for RepairConfigBuilder {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- ConversationalConfigBuilder tests ----
+
+    #[test]
+    fn test_builder_new_produces_default_config() {
+        let config = ConversationalConfigBuilder::new()
+            .build()
+            .expect("default builder must produce valid config");
+        let default = ConversationalConfig::default();
+        assert_eq!(config.max_history_turns, default.max_history_turns);
+        assert_eq!(config.max_context_tokens, default.max_context_tokens);
+    }
+
+    #[test]
+    fn test_builder_temperature_method_chaining() {
+        let config = ConversationalConfigBuilder::new()
+            .temperature(1.0)
+            .build()
+            .expect("temperature 1.0 must produce valid config");
+        assert!(
+            (config.temperature - 1.0).abs() < f32::EPSILON,
+            "temperature must be 1.0"
+        );
+    }
+
+    #[test]
+    fn test_builder_max_history_turns() {
+        let config = ConversationalConfigBuilder::new()
+            .max_history_turns(10)
+            .build()
+            .expect("max_history_turns 10 must produce valid config");
+        assert_eq!(config.max_history_turns, 10, "max_history_turns must be 10");
+    }
+
+    #[test]
+    fn test_builder_top_k_none() {
+        let config = ConversationalConfigBuilder::new()
+            .top_k(None)
+            .build()
+            .expect("top_k None must produce valid config");
+        assert!(config.top_k.is_none(), "top_k must be None");
+    }
+
+    #[test]
+    fn test_builder_top_k_some() {
+        let config = ConversationalConfigBuilder::new()
+            .top_k(Some(100))
+            .build()
+            .expect("top_k Some(100) must produce valid config");
+        assert_eq!(config.top_k, Some(100), "top_k must be Some(100)");
+    }
+
+    #[test]
+    fn test_builder_system_prompt_set() {
+        let config = ConversationalConfigBuilder::new()
+            .system_prompt(Some("Custom prompt"))
+            .build()
+            .expect("custom system_prompt must produce valid config");
+        assert_eq!(
+            config.system_prompt.as_deref(),
+            Some("Custom prompt"),
+            "system_prompt must match the supplied value"
+        );
+    }
+
+    #[test]
+    fn test_builder_system_prompt_none() {
+        let config = ConversationalConfigBuilder::new()
+            .system_prompt(None::<String>)
+            .build()
+            .expect("None system_prompt must produce valid config");
+        assert!(config.system_prompt.is_none(), "system_prompt must be None");
+    }
+
+    #[test]
+    fn test_builder_conversation_mode() {
+        let config = ConversationalConfigBuilder::new()
+            .conversation_mode(ConversationMode::Assistant)
+            .build()
+            .expect("conversation mode change must produce valid config");
+        assert_eq!(config.conversation_mode, ConversationMode::Assistant);
+    }
+
+    #[test]
+    fn test_builder_enable_safety_filter_false() {
+        let config = ConversationalConfigBuilder::new()
+            .enable_safety_filter(false)
+            .build()
+            .expect("disabling safety filter must produce valid config");
+        assert!(
+            !config.enable_safety_filter,
+            "safety filter should be disabled"
+        );
+    }
+
+    #[test]
+    fn test_builder_max_response_tokens() {
+        let config = ConversationalConfigBuilder::new()
+            .max_response_tokens(256)
+            .build()
+            .expect("max_response_tokens 256 must produce valid config");
+        assert_eq!(
+            config.max_response_tokens, 256,
+            "max_response_tokens must be 256"
+        );
+    }
+
+    #[test]
+    fn test_builder_method_chaining_order_irrelevant() {
+        let c1 = ConversationalConfigBuilder::new()
+            .temperature(0.5)
+            .max_history_turns(5)
+            .build()
+            .expect("chained build must succeed");
+        let c2 = ConversationalConfigBuilder::new()
+            .max_history_turns(5)
+            .temperature(0.5)
+            .build()
+            .expect("reversed chain build must succeed");
+        assert!((c1.temperature - c2.temperature).abs() < f32::EPSILON);
+        assert_eq!(c1.max_history_turns, c2.max_history_turns);
+    }
+
+    #[test]
+    fn test_builder_build_validates_temperature_too_high() {
+        let result = ConversationalConfigBuilder::new()
+            .temperature(3.0) // out of range [0, 2]
+            .build();
+        assert!(result.is_err(), "temperature 3.0 should fail validation");
+    }
+
+    #[test]
+    fn test_builder_build_validates_temperature_negative() {
+        let result = ConversationalConfigBuilder::new().temperature(-0.1).build();
+        assert!(
+            result.is_err(),
+            "negative temperature should fail validation"
+        );
+    }
+
+    #[test]
+    fn test_two_builders_produce_independent_configs() {
+        let config_a = ConversationalConfigBuilder::new()
+            .max_history_turns(5)
+            .build()
+            .expect("config A must succeed");
+        let config_b = ConversationalConfigBuilder::new()
+            .max_history_turns(15)
+            .build()
+            .expect("config B must succeed");
+        assert_ne!(
+            config_a.max_history_turns, config_b.max_history_turns,
+            "two builder instances must produce independent configs"
+        );
+    }
+
+    // ---- PersonaConfigBuilder tests ----
+
+    #[test]
+    fn test_persona_builder_name() {
+        let persona = PersonaConfigBuilder::new().name("Alice").build();
+        assert_eq!(
+            persona.name, "Alice",
+            "persona name must match supplied value"
+        );
+    }
+
+    #[test]
+    fn test_persona_builder_expertise_accumulation() {
+        let persona = PersonaConfigBuilder::new().add_expertise("Rust").add_expertise("AI").build();
+        assert_eq!(
+            persona.expertise.len(),
+            2,
+            "two expertise areas must be stored"
+        );
+        assert!(persona.expertise.contains(&"Rust".to_string()));
+        assert!(persona.expertise.contains(&"AI".to_string()));
+    }
+
+    // ---- SummarizationConfigBuilder tests ----
+
+    #[test]
+    fn test_summarization_builder_disabled() {
+        let config = SummarizationConfigBuilder::new().enabled(false).build();
+        assert!(!config.enabled, "summarization must be disabled");
+    }
+
+    // ---- StreamingConfigBuilder tests ----
+
+    #[test]
+    fn test_streaming_builder_enabled() {
+        let config = StreamingConfigBuilder::new().enabled(true).build();
+        assert!(
+            config.enabled,
+            "streaming must be enabled after builder set"
+        );
+    }
+
+    #[test]
+    fn test_streaming_builder_chunk_size() {
+        let config = StreamingConfigBuilder::new().chunk_size(20).build();
+        assert_eq!(
+            config.chunk_size, 20,
+            "chunk_size must match supplied value"
+        );
+    }
+}

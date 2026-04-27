@@ -916,3 +916,429 @@ impl Default for GpuVendorOptimizations {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- CpuVendorDetector tests ---
+
+    #[test]
+    fn test_cpu_vendor_detector_default() {
+        let detector = CpuVendorDetector::default();
+        assert_eq!(detector.vendor, "Unknown");
+        assert_eq!(detector.model, "Unknown");
+        assert!(detector.features.is_empty());
+    }
+
+    #[test]
+    fn test_cpu_vendor_detector_new() {
+        let detector = CpuVendorDetector::new();
+        assert_eq!(detector.vendor, "Unknown");
+    }
+
+    #[test]
+    fn test_cpu_vendor_detector_detect_capabilities() {
+        let detector = CpuVendorDetector {
+            vendor: "Intel".to_string(),
+            model: "i9-13900K".to_string(),
+            features: vec!["avx2".to_string(), "sse4.2".to_string()],
+        };
+        let caps = detector.detect_cpu_capabilities();
+        assert!(caps.is_ok());
+        let features = caps.expect("should succeed");
+        assert_eq!(features.len(), 2);
+        assert_eq!(features[0], "avx2");
+    }
+
+    // --- CpuBenchmarkSuite tests ---
+
+    #[test]
+    fn test_cpu_benchmark_suite_default() {
+        let suite = CpuBenchmarkSuite::default();
+        assert!((suite.single_core_score - 0.0).abs() < 1e-9);
+        assert!((suite.multi_core_score - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_cpu_benchmark_suite_new() {
+        let suite = CpuBenchmarkSuite::new();
+        assert!((suite.integer_score - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_cpu_benchmark_suite_execute() {
+        let mut suite = CpuBenchmarkSuite::new();
+        let result = suite.execute_comprehensive_benchmarks();
+        assert!(result.is_ok());
+        assert!(suite.single_core_score > 0.0);
+        assert!(suite.multi_core_score > suite.single_core_score);
+    }
+
+    // --- CpuProfilingState tests ---
+
+    #[test]
+    fn test_cpu_profiling_state_default() {
+        let state = CpuProfilingState::default();
+        assert!(!state.active);
+        assert_eq!(state.samples_collected, 0);
+    }
+
+    // --- MemoryHierarchyAnalyzer tests ---
+
+    #[test]
+    fn test_memory_hierarchy_analyzer_default() {
+        let analyzer = MemoryHierarchyAnalyzer::default();
+        assert_eq!(analyzer.l1_size, 32768);
+        assert_eq!(analyzer.l2_size, 262144);
+        assert_eq!(analyzer.l3_size, 8388608);
+    }
+
+    #[test]
+    fn test_memory_hierarchy_analyzer_new() {
+        let analyzer = MemoryHierarchyAnalyzer::new();
+        assert!(analyzer.main_memory_size > 0);
+    }
+
+    #[test]
+    fn test_memory_hierarchy_analyze() {
+        let analyzer = MemoryHierarchyAnalyzer::new();
+        let result = analyzer.analyze_memory_hierarchy();
+        assert!(result.is_ok());
+        let (l1, l2, l3, main) = result.expect("should succeed");
+        assert!(l1 < l2);
+        assert!(l2 < l3);
+        assert!(l3 < main);
+    }
+
+    // --- MemoryBandwidthTester tests ---
+
+    #[test]
+    fn test_memory_bandwidth_tester_default() {
+        let tester = MemoryBandwidthTester::default();
+        assert!((tester.read_bandwidth - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_memory_bandwidth_tester_new() {
+        let tester = MemoryBandwidthTester::new();
+        assert!((tester.write_bandwidth - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_memory_bandwidth_test() {
+        let mut tester = MemoryBandwidthTester::new();
+        let result = tester.test_comprehensive_bandwidth();
+        assert!(result.is_ok());
+        let (read, write, copy) = result.expect("should succeed");
+        assert!(read > 0.0);
+        assert!(write > 0.0);
+        assert!(copy > 0.0);
+    }
+
+    // --- MemoryLatencyTester tests ---
+
+    #[test]
+    fn test_memory_latency_tester_default() {
+        let tester = MemoryLatencyTester::default();
+        assert!((tester.l1_latency - 1.0).abs() < 1e-9);
+        assert!(tester.l1_latency < tester.l2_latency);
+        assert!(tester.l2_latency < tester.l3_latency);
+        assert!(tester.l3_latency < tester.main_latency);
+    }
+
+    #[test]
+    fn test_memory_latency_tester_new() {
+        let tester = MemoryLatencyTester::new();
+        assert!(tester.main_latency > 0.0);
+    }
+
+    #[test]
+    fn test_memory_latency_measure() {
+        let mut tester = MemoryLatencyTester::new();
+        let result = tester.measure_comprehensive_latency();
+        assert!(result.is_ok());
+    }
+
+    // --- NumaTopologyAnalyzer tests ---
+
+    #[test]
+    fn test_numa_topology_default() {
+        let analyzer = NumaTopologyAnalyzer::default();
+        assert_eq!(analyzer.node_count, 1);
+        assert!(analyzer.cpus_per_node.is_empty());
+    }
+
+    #[test]
+    fn test_numa_topology_analyze() {
+        let analyzer = NumaTopologyAnalyzer {
+            node_count: 2,
+            cpus_per_node: vec![8, 8],
+            memory_per_node: vec![16384, 16384],
+        };
+        let result = analyzer.analyze_numa_performance();
+        assert!(result.is_ok());
+        let (count, cpus, mem) = result.expect("should succeed");
+        assert_eq!(count, 2);
+        assert_eq!(cpus.len(), 2);
+        assert_eq!(mem.len(), 2);
+    }
+
+    // --- StorageDeviceAnalyzer tests ---
+
+    #[test]
+    fn test_storage_device_analyzer_default() {
+        let analyzer = StorageDeviceAnalyzer::default();
+        assert_eq!(analyzer.device_type, "Unknown");
+        assert_eq!(analyzer.iops, 0);
+    }
+
+    #[test]
+    fn test_storage_device_analyzer_analyze() {
+        let mut analyzer = StorageDeviceAnalyzer::new();
+        let result = analyzer.analyze_storage_devices();
+        assert!(result.is_ok());
+        let (dev_type, read, write, iops) = result.expect("should succeed");
+        assert_eq!(dev_type, "NVMe");
+        assert!(read > 0.0);
+        assert!(write > 0.0);
+        assert!(iops > 0);
+    }
+
+    // --- IoPatternAnalyzer tests ---
+
+    #[test]
+    fn test_io_pattern_analyzer_default() {
+        let analyzer = IoPatternAnalyzer::default();
+        assert!((analyzer.sequential_ratio - 0.5).abs() < 1e-9);
+        assert!((analyzer.random_ratio - 0.5).abs() < 1e-9);
+        assert_eq!(analyzer.avg_request_size, 4096);
+    }
+
+    #[test]
+    fn test_io_pattern_analyzer_analyze() {
+        let mut analyzer = IoPatternAnalyzer::new();
+        let result = analyzer.analyze_io_patterns();
+        assert!(result.is_ok());
+        let (seq, rnd, size) = result.expect("should succeed");
+        assert!((seq + rnd - 1.0).abs() < 1e-9);
+        assert!(size > 0);
+    }
+
+    // --- QueueDepthOptimizer tests ---
+
+    #[test]
+    fn test_queue_depth_optimizer_default() {
+        let optimizer = QueueDepthOptimizer::default();
+        assert_eq!(optimizer.optimal_depth, 32);
+        assert_eq!(optimizer.current_depth, 1);
+    }
+
+    #[test]
+    fn test_queue_depth_optimize() {
+        let mut optimizer = QueueDepthOptimizer::new();
+        let result = optimizer.optimize_queue_depths();
+        assert!(result.is_ok());
+        let (depth, throughput) = result.expect("should succeed");
+        assert!(depth > 0);
+        assert!(throughput > 0.0);
+    }
+
+    // --- IoLatencyAnalyzer tests ---
+
+    #[test]
+    fn test_io_latency_analyzer_default() {
+        let analyzer = IoLatencyAnalyzer::default();
+        assert!((analyzer.avg_read_latency - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_io_latency_analyzer_analyze() {
+        let mut analyzer = IoLatencyAnalyzer::new();
+        let result = analyzer.analyze_comprehensive_latency();
+        assert!(result.is_ok());
+        let (read, write, p99) = result.expect("should succeed");
+        assert!(read > 0.0);
+        assert!(write > 0.0);
+        assert!(p99 > read);
+    }
+
+    // --- NetworkInterfaceAnalyzer tests ---
+
+    #[test]
+    fn test_network_interface_analyzer_default() {
+        let analyzer = NetworkInterfaceAnalyzer::default();
+        assert_eq!(analyzer.interface_name, "eth0");
+        assert_eq!(analyzer.link_speed, 1000);
+        assert_eq!(analyzer.mtu, 1500);
+    }
+
+    #[test]
+    fn test_network_interface_analyze() {
+        let mut analyzer = NetworkInterfaceAnalyzer::new();
+        let result = analyzer.analyze_network_interfaces();
+        assert!(result.is_ok());
+    }
+
+    // --- NetworkBandwidthTester tests ---
+
+    #[test]
+    fn test_network_bandwidth_tester_default() {
+        let tester = NetworkBandwidthTester::default();
+        assert!((tester.upload_bandwidth - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_network_bandwidth_test() {
+        let mut tester = NetworkBandwidthTester::new();
+        let result = tester.test_comprehensive_bandwidth();
+        assert!(result.is_ok());
+        let (upload, download) = result.expect("should succeed");
+        assert!(upload > 0.0);
+        assert!(download > 0.0);
+    }
+
+    // --- NetworkLatencyTester tests ---
+
+    #[test]
+    fn test_network_latency_tester_default() {
+        let tester = NetworkLatencyTester::default();
+        assert!((tester.avg_latency - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_network_latency_analyze() {
+        let mut tester = NetworkLatencyTester::new();
+        let result = tester.analyze_comprehensive_latency();
+        assert!(result.is_ok());
+        let (lat, jitter, loss) = result.expect("should succeed");
+        assert!(lat > 0.0);
+        assert!(jitter > 0.0);
+        assert!(loss > 0.0 && loss < 1.0);
+    }
+
+    // --- MtuOptimizer tests ---
+
+    #[test]
+    fn test_mtu_optimizer_default() {
+        let optimizer = MtuOptimizer::default();
+        assert_eq!(optimizer.optimal_mtu, 1500);
+        assert_eq!(optimizer.current_mtu, 1500);
+    }
+
+    // --- GpuVendorDetector tests ---
+
+    #[test]
+    fn test_gpu_vendor_detector_default() {
+        let detector = GpuVendorDetector::default();
+        assert!(matches!(detector.vendor, GpuVendor::Unknown));
+        assert_eq!(detector.model, "Unknown");
+    }
+
+    #[test]
+    fn test_gpu_vendor_detector_detect() {
+        let mut detector = GpuVendorDetector::new();
+        let result = detector.detect_gpu_capabilities();
+        assert!(result.is_ok());
+    }
+
+    // --- GpuVendor tests ---
+
+    #[test]
+    fn test_gpu_vendor_default() {
+        let vendor = GpuVendor::default();
+        assert!(matches!(vendor, GpuVendor::Unknown));
+    }
+
+    // --- GpuComputeBenchmarks tests ---
+
+    #[test]
+    fn test_gpu_compute_benchmarks_default() {
+        let bench = GpuComputeBenchmarks::default();
+        assert!((bench.compute_score - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_gpu_compute_benchmarks_new() {
+        let bench = GpuComputeBenchmarks::new();
+        assert!((bench.memory_bandwidth_score - 0.0).abs() < 1e-9);
+    }
+
+    // --- GpuMemoryTester tests ---
+
+    #[test]
+    fn test_gpu_memory_tester_default() {
+        let tester = GpuMemoryTester::default();
+        assert_eq!(tester.total_memory, 0);
+        assert_eq!(tester.available_memory, 0);
+    }
+
+    #[test]
+    fn test_gpu_memory_tester_test() {
+        let mut tester = GpuMemoryTester::new();
+        let result = tester.test_comprehensive_memory_performance();
+        assert!(result.is_ok());
+        let perf = result.expect("should succeed");
+        assert!(perf.bandwidth_gbps > 0.0);
+    }
+
+    // --- GpuKernelAnalyzer tests ---
+
+    #[test]
+    fn test_gpu_kernel_analyzer_default() {
+        let analyzer = GpuKernelAnalyzer::default();
+        assert!((analyzer.execution_time - 0.0).abs() < 1e-9);
+        assert!((analyzer.occupancy - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_gpu_kernel_analyzer_analyze() {
+        let mut analyzer = GpuKernelAnalyzer::new();
+        let result = analyzer.analyze_kernel_performance();
+        assert!(result.is_ok());
+        let analysis = result.expect("should succeed");
+        assert!(analysis.execution_time_ms > 0.0);
+        assert!(analysis.occupancy > 0.0);
+    }
+
+    // --- GpuVendorOptimizations tests ---
+
+    #[test]
+    fn test_gpu_vendor_optimizations_default() {
+        let opts = GpuVendorOptimizations::default();
+        assert!(matches!(opts.vendor, GpuVendor::Unknown));
+        assert!(opts.optimization_flags.is_empty());
+        assert!(!opts.tensor_core_optimization);
+        assert!(!opts.rt_core_optimization);
+    }
+
+    // --- Profiling state tests ---
+
+    #[test]
+    fn test_memory_profiling_state_default() {
+        let state = MemoryProfilingState::default();
+        assert!(!state.active);
+        assert_eq!(state.allocations_tracked, 0);
+    }
+
+    #[test]
+    fn test_io_profiling_state_default() {
+        let state = IoProfilingState::default();
+        assert!(!state.active);
+        assert_eq!(state.operations_tracked, 0);
+    }
+
+    #[test]
+    fn test_network_profiling_state_default() {
+        let state = NetworkProfilingState::default();
+        assert!(!state.active);
+        assert_eq!(state.packets_analyzed, 0);
+    }
+
+    #[test]
+    fn test_gpu_profiling_state_default() {
+        let state = GpuProfilingState::default();
+        assert!(!state.active);
+        assert_eq!(state.kernels_profiled, 0);
+    }
+}

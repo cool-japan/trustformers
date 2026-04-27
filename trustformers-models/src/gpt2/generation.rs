@@ -547,4 +547,166 @@ mod tests {
         assert!(matches!(top_k, GenerationMode::TopK { .. }));
         assert!(matches!(top_p, GenerationMode::TopP { .. }));
     }
+
+    #[test]
+    fn test_generation_config_default() {
+        let config = GenerationConfig::default();
+        assert!(config.max_length > 0);
+        assert!(config.temperature > 0.0);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_generation_config_validation_valid() {
+        let config = GenerationConfig {
+            max_length: 100,
+            temperature: 1.0,
+            repetition_penalty: 1.0,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_generation_config_custom_temperature() {
+        let config = GenerationConfig {
+            temperature: 0.5,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+        assert!((config.temperature - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_generation_config_with_repetition_penalty() {
+        let config = GenerationConfig {
+            repetition_penalty: 1.5,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+        assert!((config.repetition_penalty - 1.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_generation_mode_greedy_debug() {
+        let mode = GenerationMode::Greedy;
+        let dbg = format!("{:?}", mode);
+        assert!(dbg.contains("Greedy"));
+    }
+
+    #[test]
+    fn test_generation_mode_beam_search_params() {
+        let mode = GenerationMode::BeamSearch { num_beams: 5 };
+        match mode {
+            GenerationMode::BeamSearch { num_beams } => assert_eq!(num_beams, 5),
+            _ => panic!("Expected BeamSearch"),
+        }
+    }
+
+    #[test]
+    fn test_generation_mode_top_k_params() {
+        let mode = GenerationMode::TopK { k: 50 };
+        match mode {
+            GenerationMode::TopK { k } => assert_eq!(k, 50),
+            _ => panic!("Expected TopK"),
+        }
+    }
+
+    #[test]
+    fn test_generation_mode_top_p_params() {
+        let mode = GenerationMode::TopP { p: 0.95 };
+        match mode {
+            GenerationMode::TopP { p } => assert!((p - 0.95).abs() < f32::EPSILON),
+            _ => panic!("Expected TopP"),
+        }
+    }
+
+    #[test]
+    fn test_gpt2_small_config() {
+        let config = Gpt2Config::small();
+        assert!(config.vocab_size > 0);
+        assert!(config.n_embd > 0);
+        assert!(config.n_layer > 0);
+        assert!(config.n_head > 0);
+    }
+
+    #[test]
+    fn test_gpt2_model_creation_tiny() -> Result<()> {
+        let mut config = Gpt2Config::small();
+        config.vocab_size = 20;
+        config.n_positions = 16;
+        config.n_embd = 16;
+        config.n_layer = 1;
+        config.n_head = 2;
+        let model = Gpt2LMHeadModel::new(config)?;
+        assert!(model.num_parameters() > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_generation_config_max_new_tokens() {
+        let config = GenerationConfig {
+            max_new_tokens: Some(10),
+            ..Default::default()
+        };
+        assert_eq!(config.max_new_tokens, Some(10));
+    }
+
+    #[test]
+    fn test_greedy_generation_tiny_model() -> Result<()> {
+        let mut config = Gpt2Config::small();
+        config.vocab_size = 30;
+        config.n_positions = 16;
+        config.n_embd = 16;
+        config.n_layer = 1;
+        config.n_head = 2;
+        let model = Gpt2LMHeadModel::new(config)?;
+        let input_ids = vec![1, 2, 3];
+        let result = model.generate_greedy(input_ids, 5);
+        assert!(result.is_ok());
+        let generated = result?;
+        assert!(generated.len() <= 5);
+        drop(generated);
+        drop(model);
+        std::hint::black_box(());
+        Ok(())
+    }
+
+    #[test]
+    fn test_generation_config_clone() {
+        let config = GenerationConfig {
+            max_length: 200,
+            temperature: 0.7,
+            repetition_penalty: 1.3,
+            ..Default::default()
+        };
+        let cloned = config.clone();
+        assert_eq!(cloned.max_length, 200);
+        assert!((cloned.temperature - 0.7).abs() < f32::EPSILON);
+        assert!((cloned.repetition_penalty - 1.3).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_generation_mode_all_variants_constructable() {
+        let modes: Vec<GenerationMode> = vec![
+            GenerationMode::Greedy,
+            GenerationMode::BeamSearch { num_beams: 4 },
+            GenerationMode::TopK { k: 40 },
+            GenerationMode::TopP { p: 0.9 },
+        ];
+        assert_eq!(modes.len(), 4);
+    }
+
+    #[test]
+    fn test_generation_config_with_beam_search() {
+        let config = GenerationConfig {
+            mode: GenerationMode::BeamSearch { num_beams: 4 },
+            max_length: 50,
+            ..Default::default()
+        };
+        assert!(matches!(
+            config.mode,
+            GenerationMode::BeamSearch { num_beams: 4 }
+        ));
+    }
 }

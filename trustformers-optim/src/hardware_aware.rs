@@ -757,3 +757,7 @@ pub fn create_edge_optimizer(memory_mb: usize, power_budget_mw: f32) -> Result<E
     let base_optimizer = Box::new(SGD::new(1e-3, 0.5, 0.0, false));
     EdgeOptimizer::new(base_optimizer, config)
 }
+
+#[cfg(test)]
+#[path = "hardware_aware_tests.rs"]
+mod hardware_aware_tests;

@@ -335,3 +335,86 @@ impl Default for CompressedData {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_coordination_config_default() {
+        let config = CoordinationConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.protocol, "raft");
+        assert_eq!(config.sync_interval, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_compression_config_default() {
+        let config = CompressionConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.level, 6);
+    }
+
+    #[test]
+    fn test_compression_statistics_default() {
+        let stats = CompressionStatistics::default();
+        assert_eq!(stats.bytes_compressed, 0);
+        assert!((stats.compression_ratio - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_compression_statistics_new() {
+        let stats = CompressionStatistics::new();
+        assert_eq!(stats.original_size, 0);
+    }
+
+    #[test]
+    fn test_quality_criteria_default() {
+        let criteria = QualityCriteria::default();
+        assert!((criteria.completeness_threshold - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_outlier_result_default() {
+        let result = OutlierResult::default();
+        assert!(!result.is_outlier);
+        assert!((result.score - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_validation_rule_default() {
+        let rule = ValidationRule::default();
+        assert!(rule.rule_name.is_empty());
+        assert_eq!(rule.severity, "medium");
+    }
+
+    #[test]
+    fn test_histogram_bin_default() {
+        let bin = HistogramBin::default();
+        assert!((bin.lower_bound - 0.0).abs() < 1e-9);
+        assert_eq!(bin.count, 0);
+    }
+
+    #[test]
+    fn test_compressed_data_default() {
+        let data = CompressedData::default();
+        assert_eq!(data.algorithm, "none");
+        assert!(data.data.is_empty());
+        assert_eq!(data.original_size, 0);
+    }
+
+    #[test]
+    fn test_aggregator_performance_metrics_default() {
+        let m = AggregatorPerformanceMetrics::default();
+        assert!((m.throughput - 0.0).abs() < 1e-9);
+        assert_eq!(m.error_count, 0);
+        assert_eq!(m.window_count, 0);
+    }
+
+    #[test]
+    fn test_aggregation_metadata_default() {
+        let m = AggregationMetadata::default();
+        assert!(m.aggregation_id.is_empty());
+        assert_eq!(m.data_points, 0);
+    }
+}

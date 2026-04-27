@@ -44,6 +44,11 @@ pub mod memory;
 pub mod operation_types;
 pub mod performance;
 
+#[cfg(test)]
+mod graph_tests;
+#[cfg(test)]
+mod kernel_tests;
+
 // Re-export main types for convenience
 pub use engine::{FusionOpportunity, KernelFusionEngine};
 pub use graph::{

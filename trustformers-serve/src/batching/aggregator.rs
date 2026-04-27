@@ -1140,4 +1140,227 @@ mod tests {
         assert_eq!(batch.requests.len(), 1);
         assert!(batch.total_memory > 0);
     }
+
+    #[test]
+    fn test_request_id_new_is_unique() {
+        let id1 = RequestId::new();
+        let id2 = RequestId::new();
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_request_id_display() {
+        let id = RequestId::new();
+        let s = id.to_string();
+        assert_eq!(s.len(), 36); // UUID format
+    }
+
+    #[test]
+    fn test_request_input_text_sequence_length() {
+        let input = RequestInput::Text {
+            text: "Hello world test".to_string(),
+            max_length: None,
+        };
+        // 16 chars / 4 = 4 tokens approx
+        assert_eq!(input.sequence_length(), 4);
+    }
+
+    #[test]
+    fn test_request_input_token_ids_sequence_length() {
+        let input = RequestInput::TokenIds {
+            ids: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            attention_mask: None,
+        };
+        assert_eq!(input.sequence_length(), 8);
+    }
+
+    #[test]
+    fn test_request_input_image_sequence_length() {
+        let input = RequestInput::Image {
+            data: vec![0u8; 1024],
+            height: 32,
+            width: 32,
+        };
+        assert_eq!(input.sequence_length(), 1);
+    }
+
+    #[test]
+    fn test_request_input_multimodal_sequence_length_no_text() {
+        let input = RequestInput::Multimodal {
+            text: None,
+            image: Some(vec![0u8; 64]),
+            audio: None,
+        };
+        assert_eq!(input.sequence_length(), 1);
+    }
+
+    #[test]
+    fn test_request_input_multimodal_memory_estimate() {
+        let input = RequestInput::Multimodal {
+            text: Some("hello".to_string()), // 5 * 2 = 10
+            image: Some(vec![0u8; 100]),     // 100
+            audio: Some(vec![0.0f32; 50]),   // 50 * 4 = 200
+        };
+        assert_eq!(input.memory_estimate(), 10 + 100 + 200);
+    }
+
+    #[test]
+    fn test_request_input_token_ids_memory_estimate_with_mask() {
+        let input = RequestInput::TokenIds {
+            ids: vec![0u32; 10],                 // 10 * 4 = 40
+            attention_mask: Some(vec![1u8; 10]), // 10
+        };
+        assert_eq!(input.memory_estimate(), 50);
+    }
+
+    #[test]
+    fn test_request_input_token_ids_memory_estimate_no_mask() {
+        let input = RequestInput::TokenIds {
+            ids: vec![0u32; 8], // 8 * 4 = 32
+            attention_mask: None,
+        };
+        assert_eq!(input.memory_estimate(), 32);
+    }
+
+    #[test]
+    fn test_batch_with_multiple_requests() {
+        let mut requests = Vec::new();
+        for i in 0..5u32 {
+            requests.push(Request {
+                id: RequestId::new(),
+                input: RequestInput::TokenIds {
+                    ids: vec![i; 10],
+                    attention_mask: None,
+                },
+                priority: Priority::Normal,
+                submitted_at: Instant::now(),
+                deadline: None,
+                metadata: HashMap::new(),
+            });
+        }
+        let batch = RequestBatch::new(requests);
+        assert_eq!(batch.requests.len(), 5);
+        assert_eq!(batch.max_sequence_length, 10);
+        assert_eq!(batch.total_memory, 5 * 10 * 4); // 5 requests * 10 tokens * 4 bytes
+    }
+
+    #[test]
+    fn test_batch_max_sequence_length_from_largest() {
+        let requests = vec![
+            Request {
+                id: RequestId::new(),
+                input: RequestInput::TokenIds {
+                    ids: vec![0u32; 5],
+                    attention_mask: None,
+                },
+                priority: Priority::Normal,
+                submitted_at: Instant::now(),
+                deadline: None,
+                metadata: HashMap::new(),
+            },
+            Request {
+                id: RequestId::new(),
+                input: RequestInput::TokenIds {
+                    ids: vec![0u32; 20],
+                    attention_mask: None,
+                },
+                priority: Priority::High,
+                submitted_at: Instant::now(),
+                deadline: None,
+                metadata: HashMap::new(),
+            },
+        ];
+        let batch = RequestBatch::new(requests);
+        assert_eq!(batch.max_sequence_length, 20);
+        assert_eq!(batch.priority, Priority::High);
+    }
+
+    #[test]
+    fn test_request_default_has_no_deadline() {
+        let req = Request {
+            id: RequestId::new(),
+            input: RequestInput::Text {
+                text: "test".to_string(),
+                max_length: Some(512),
+            },
+            priority: Priority::Low,
+            submitted_at: Instant::now(),
+            deadline: None,
+            metadata: HashMap::new(),
+        };
+        assert!(req.deadline.is_none());
+    }
+
+    #[test]
+    fn test_processing_result_fields() {
+        let result = ProcessingResult {
+            request_id: RequestId::new(),
+            output: ProcessingOutput::Text("Hello response".to_string()),
+            latency_ms: 42,
+            batch_id: Uuid::new_v4(),
+        };
+        assert_eq!(result.latency_ms, 42);
+        if let ProcessingOutput::Text(ref text) = result.output {
+            assert_eq!(text, "Hello response");
+        } else {
+            panic!("wrong output variant");
+        }
+    }
+
+    #[test]
+    fn test_processing_output_error_variant() {
+        let output = ProcessingOutput::Error("GPU OOM".to_string());
+        if let ProcessingOutput::Error(msg) = output {
+            assert!(msg.contains("GPU OOM"));
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn test_processing_output_tokens_variant() {
+        let tokens = vec![101u32, 102, 103];
+        let output = ProcessingOutput::Tokens(tokens.clone());
+        if let ProcessingOutput::Tokens(t) = output {
+            assert_eq!(t, tokens);
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn test_processing_output_embeddings_variant() {
+        let embeddings = vec![0.1f32, 0.2, 0.3];
+        let output = ProcessingOutput::Embeddings(embeddings.clone());
+        if let ProcessingOutput::Embeddings(e) = output {
+            assert_eq!(e, embeddings);
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn test_optimization_suggestion_variants() {
+        let s1 = OptimizationSuggestion::IncreaseBatchSize(64);
+        let s2 = OptimizationSuggestion::DecreaseBatchSize(16);
+        let s3 = OptimizationSuggestion::EnableBucketing;
+        let s4 = OptimizationSuggestion::AdjustTimeout(Duration::from_millis(100));
+        assert!(matches!(s1, OptimizationSuggestion::IncreaseBatchSize(64)));
+        assert!(matches!(s2, OptimizationSuggestion::DecreaseBatchSize(16)));
+        assert!(matches!(s3, OptimizationSuggestion::EnableBucketing));
+        assert!(matches!(s4, OptimizationSuggestion::AdjustTimeout(_)));
+    }
+
+    #[test]
+    fn test_aggregator_stats_fields() {
+        let stats = AggregatorStats {
+            queue_depth: 5,
+            pending_requests: 10,
+            total_batches_formed: 100,
+            avg_batch_size: 8.5,
+        };
+        assert_eq!(stats.queue_depth, 5);
+        assert_eq!(stats.total_batches_formed, 100);
+        assert!((stats.avg_batch_size - 8.5).abs() < 1e-5);
+    }
 }

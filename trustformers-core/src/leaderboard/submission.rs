@@ -549,4 +549,201 @@ mod tests {
         let result = chain.validate(&submission).await.expect("async operation failed");
         assert!(result.is_valid);
     }
+
+    #[test]
+    fn test_default_validator_creation() {
+        let validator = DefaultValidator::new();
+        let default_validator = DefaultValidator::default();
+        // Both should create equivalent validators
+        assert_eq!(
+            validator.min_model_name_length,
+            default_validator.min_model_name_length
+        );
+    }
+
+    #[test]
+    fn test_metric_bounds_default() {
+        let bounds = MetricBounds::default();
+        assert!(bounds.min_latency > 0.0);
+        assert!(bounds.max_latency > bounds.min_latency);
+        assert!(bounds.min_accuracy.is_some());
+        assert!(bounds.max_accuracy.is_some());
+    }
+
+    #[test]
+    fn test_validator_with_required_tags() {
+        let validator = DefaultValidator::new()
+            .with_required_tags(vec!["production".to_string(), "v2".to_string()]);
+        assert_eq!(validator.required_tags.len(), 2);
+    }
+
+    #[test]
+    fn test_validator_with_allowed_benchmarks() {
+        let validator =
+            DefaultValidator::new().with_allowed_benchmarks(vec!["benchmark_a".to_string()]);
+        assert!(validator.allowed_benchmarks.is_some());
+    }
+
+    #[test]
+    fn test_validator_with_metric_bounds() {
+        let bounds = MetricBounds {
+            min_latency: 1.0,
+            max_latency: 1000.0,
+            min_throughput: Some(10.0),
+            max_throughput: Some(100000.0),
+            min_memory: Some(1.0),
+            max_memory: Some(10000.0),
+            min_accuracy: Some(0.5),
+            max_accuracy: Some(1.0),
+        };
+        let validator = DefaultValidator::new().with_metric_bounds(bounds);
+        assert!((validator.metric_bounds.min_latency - 1.0).abs() < 1e-10);
+    }
+
+    #[tokio::test]
+    async fn test_empty_submitter_name() {
+        let validator = DefaultValidator::new();
+        let mut submission = create_test_submission();
+        submission.submitter.name = "".to_string();
+
+        let result = validator.validate(&submission).await.expect("async operation failed");
+        assert!(!result.is_valid);
+        assert!(result.errors.iter().any(|e| e.field == "submitter.name"));
+    }
+
+    #[tokio::test]
+    async fn test_zero_cpu_cores() {
+        let validator = DefaultValidator::new();
+        let mut submission = create_test_submission();
+        submission.hardware.cpu_cores = 0;
+
+        let result = validator.validate(&submission).await.expect("async operation failed");
+        assert!(!result.is_valid);
+        assert!(result.errors.iter().any(|e| e.field == "hardware.cpu_cores"));
+    }
+
+    #[tokio::test]
+    async fn test_negative_memory() {
+        let validator = DefaultValidator::new();
+        let mut submission = create_test_submission();
+        submission.hardware.memory_gb = -1.0;
+
+        let result = validator.validate(&submission).await.expect("async operation failed");
+        assert!(!result.is_valid);
+        assert!(result.errors.iter().any(|e| e.field == "hardware.memory_gb"));
+    }
+
+    #[tokio::test]
+    async fn test_very_low_latency_warning() {
+        let validator = DefaultValidator::new();
+        let mut submission = create_test_submission();
+        submission.metrics.latency_ms = 0.05; // Very low
+
+        let result = validator.validate(&submission).await.expect("async operation failed");
+        assert!(result.warnings.iter().any(|w| w.field == "metrics.latency_ms"));
+    }
+
+    #[tokio::test]
+    async fn test_high_accuracy_warning() {
+        let validator = DefaultValidator::new();
+        let mut submission = create_test_submission();
+        submission.metrics.accuracy = Some(0.999);
+
+        let result = validator.validate(&submission).await.expect("async operation failed");
+        assert!(result.warnings.iter().any(|w| w.field == "metrics.accuracy"));
+    }
+
+    #[tokio::test]
+    async fn test_disallowed_benchmark() {
+        let validator =
+            DefaultValidator::new().with_allowed_benchmarks(vec!["allowed_bench".to_string()]);
+        let mut submission = create_test_submission();
+        submission.benchmark_name = "forbidden_bench".to_string();
+
+        let result = validator.validate(&submission).await.expect("async operation failed");
+        assert!(!result.is_valid);
+        assert!(result.errors.iter().any(|e| e.field == "benchmark_name"));
+    }
+
+    #[tokio::test]
+    async fn test_missing_required_tag_warning() {
+        let validator =
+            DefaultValidator::new().with_required_tags(vec!["required_tag".to_string()]);
+        let submission = create_test_submission();
+
+        let result = validator.validate(&submission).await.expect("async operation failed");
+        // Missing required tag produces a warning, not an error
+        assert!(result.warnings.iter().any(|w| w.field == "tags"));
+    }
+
+    #[test]
+    fn test_validation_result_fields() {
+        let result = ValidationResult {
+            is_valid: true,
+            errors: vec![],
+            warnings: vec![],
+        };
+        assert!(result.is_valid);
+        assert!(result.errors.is_empty());
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_validation_error_fields() {
+        let error = ValidationError {
+            field: "test_field".to_string(),
+            message: "test message".to_string(),
+        };
+        assert_eq!(error.field, "test_field");
+        assert_eq!(error.message, "test message");
+    }
+
+    #[test]
+    fn test_validation_warning_fields() {
+        let warning = ValidationWarning {
+            field: "test_field".to_string(),
+            message: "warning message".to_string(),
+        };
+        assert_eq!(warning.field, "test_field");
+        assert_eq!(warning.message, "warning message");
+    }
+
+    #[test]
+    fn test_leaderboard_submission_clone() {
+        let submission = create_test_submission();
+        let cloned = submission.clone();
+        assert_eq!(cloned.model_name, submission.model_name);
+        assert_eq!(cloned.model_version, submission.model_version);
+    }
+
+    #[tokio::test]
+    async fn test_model_name_max_length() {
+        let validator = DefaultValidator::new();
+        let mut submission = create_test_submission();
+        submission.model_name = "a".repeat(101); // Exceeds max length
+
+        let result = validator.validate(&submission).await.expect("async operation failed");
+        assert!(!result.is_valid);
+    }
+
+    #[tokio::test]
+    async fn test_valid_with_gpu() {
+        let validator = DefaultValidator::new();
+        let mut submission = create_test_submission();
+        submission.hardware.gpu = Some("NVIDIA A100".to_string());
+        submission.hardware.gpu_count = Some(4);
+
+        let result = validator.validate(&submission).await.expect("async operation failed");
+        assert!(result.is_valid);
+    }
+
+    #[tokio::test]
+    async fn test_valid_with_custom_category() {
+        let validator = DefaultValidator::new();
+        let mut submission = create_test_submission();
+        submission.category = LeaderboardCategory::Custom("special".to_string());
+
+        let result = validator.validate(&submission).await.expect("async operation failed");
+        assert!(result.is_valid);
+    }
 }

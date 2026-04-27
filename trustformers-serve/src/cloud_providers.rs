@@ -1121,3 +1121,233 @@ impl Default for CloudProviderConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_output_config() -> OutputConfig {
+        OutputConfig {
+            format: OutputFormat::Text,
+            max_tokens: Some(512),
+            temperature: Some(0.7),
+            top_p: Some(0.9),
+            top_k: Some(50),
+            stream: false,
+            include_probabilities: false,
+            return_metadata: false,
+        }
+    }
+
+    fn make_inference_request(model: &str, text: &str) -> CloudInferenceRequest {
+        CloudInferenceRequest {
+            request_id: format!("req-{}", model),
+            model_name: model.to_string(),
+            model_version: None,
+            input_data: InputData::Text(text.to_string()),
+            parameters: HashMap::new(),
+            output_config: make_output_config(),
+            priority: RequestPriority::Normal,
+            timeout_seconds: Some(30),
+            callback_url: None,
+            metadata: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_cloud_provider_config_default() {
+        let config = CloudProviderConfig::default();
+        assert!(config.failover_enabled);
+        assert_eq!(config.timeout_seconds, 60);
+        assert!(config.providers.is_empty());
+        assert!(config.default_provider.is_none());
+    }
+
+    #[test]
+    fn test_default_retry_policy() {
+        let config = CloudProviderConfig::default();
+        assert_eq!(config.retry_policy.max_retries, 3);
+        assert!(config.retry_policy.exponential_backoff);
+        assert!(config.retry_policy.jitter);
+        assert!(config.retry_policy.retry_on_timeout);
+        assert!(config.retry_policy.retry_on_rate_limit);
+    }
+
+    #[test]
+    fn test_default_cost_optimization() {
+        let config = CloudProviderConfig::default();
+        assert!(config.cost_optimization.enabled);
+        assert_eq!(config.cost_optimization.budget_limit_usd, Some(1000.0));
+        assert_eq!(config.cost_optimization.cost_per_request_limit, Some(10.0));
+    }
+
+    #[test]
+    fn test_default_monitoring_config() {
+        let config = CloudProviderConfig::default();
+        assert!(config.monitoring.enabled);
+        assert!(config.monitoring.performance_tracking);
+        assert!(config.monitoring.cost_tracking);
+        assert!(config.monitoring.error_tracking);
+    }
+
+    #[test]
+    fn test_alert_thresholds_defaults() {
+        let config = CloudProviderConfig::default();
+        let thresholds = &config.monitoring.alert_thresholds;
+        assert!((thresholds.error_rate_threshold - 0.05).abs() < 1e-10);
+        assert_eq!(thresholds.latency_threshold_ms, 5000);
+        assert!((thresholds.availability_threshold - 0.99).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_inference_request_construction() {
+        let req = make_inference_request("gpt4", "Hello world");
+        assert_eq!(req.model_name, "gpt4");
+        assert!(matches!(req.input_data, InputData::Text(_)));
+        assert_eq!(req.priority as u8, RequestPriority::Normal as u8);
+    }
+
+    #[test]
+    fn test_request_priority_variants() {
+        // Verify all variants are constructible
+        let _low = RequestPriority::Low;
+        let _normal = RequestPriority::Normal;
+        let _high = RequestPriority::High;
+        let _critical = RequestPriority::Critical;
+    }
+
+    #[test]
+    fn test_output_config_stream_false() {
+        let config = make_output_config();
+        assert!(!config.stream);
+        assert!(!config.include_probabilities);
+        assert!(!config.return_metadata);
+    }
+
+    #[test]
+    fn test_output_format_variants() {
+        let _text = OutputFormat::Text;
+        let _json = OutputFormat::Json;
+        let _structured = OutputFormat::Structured;
+        let _binary = OutputFormat::Binary;
+        let _stream = OutputFormat::Stream;
+    }
+
+    #[test]
+    fn test_cloud_provider_type_custom() {
+        let provider_type = CloudProviderType::Custom("my-custom-provider".to_string());
+        if let CloudProviderType::Custom(name) = provider_type {
+            assert_eq!(name, "my-custom-provider");
+        } else {
+            panic!("Expected Custom variant");
+        }
+    }
+
+    #[test]
+    fn test_deployment_status_variants() {
+        let _pending = DeploymentStatus::Pending;
+        let _in_progress = DeploymentStatus::InProgress;
+        let _completed = DeploymentStatus::Completed;
+        let _failed = DeploymentStatus::Failed;
+        let _updating = DeploymentStatus::Updating;
+        let _deleting = DeploymentStatus::Deleting;
+    }
+
+    #[test]
+    fn test_input_data_text_variant() {
+        let data = InputData::Text("test content".to_string());
+        if let InputData::Text(content) = data {
+            assert_eq!(content, "test content");
+        } else {
+            panic!("Expected Text variant");
+        }
+    }
+
+    #[test]
+    fn test_input_data_structured_variant() {
+        let value = serde_json::json!({"key": "value", "number": 42});
+        let data = InputData::Structured(value.clone());
+        if let InputData::Structured(v) = data {
+            assert_eq!(v["key"], "value");
+        } else {
+            panic!("Expected Structured variant");
+        }
+    }
+
+    #[test]
+    fn test_cost_metrics_construction() {
+        let cost = CostMetrics {
+            cost_usd: 0.05,
+            input_cost_usd: 0.02,
+            output_cost_usd: 0.03,
+            compute_cost_usd: 0.0,
+            storage_cost_usd: 0.0,
+            network_cost_usd: 0.0,
+            currency: "USD".to_string(),
+            billing_period: "per_request".to_string(),
+        };
+        // Input + output = total
+        assert!((cost.input_cost_usd + cost.output_cost_usd - cost.cost_usd).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_performance_estimate_construction() {
+        let estimate = PerformanceEstimate {
+            expected_latency_ms: 50,
+            expected_throughput_rps: 200.0,
+            max_concurrent_requests: 100,
+            memory_usage_estimate_mb: 512,
+        };
+        assert!(estimate.expected_latency_ms > 0);
+        assert!(estimate.expected_throughput_rps > 0.0);
+    }
+
+    #[test]
+    fn test_load_balancing_strategy_variants() {
+        let _rr = LoadBalancingStrategy::RoundRobin;
+        let _ll = LoadBalancingStrategy::LeastLatency;
+        let _lc = LoadBalancingStrategy::LowestCost;
+        let _ha = LoadBalancingStrategy::HighestAvailability;
+        let mut weights = HashMap::new();
+        weights.insert("provider-a".to_string(), 0.7f32);
+        weights.insert("provider-b".to_string(), 0.3f32);
+        let _wr = LoadBalancingStrategy::WeightedRoundRobin(weights);
+    }
+
+    #[test]
+    fn test_provider_stats_default() {
+        let stats = ProviderStats::default();
+        assert_eq!(stats.requests, 0);
+        assert_eq!(stats.successes, 0);
+        assert_eq!(stats.failures, 0);
+        assert!(stats.last_used.is_none());
+    }
+
+    #[test]
+    fn test_cloud_provider_stats_default() {
+        let stats = CloudProviderStats::default();
+        assert_eq!(stats.total_requests, 0);
+        assert_eq!(stats.successful_requests, 0);
+        assert_eq!(stats.failed_requests, 0);
+        assert!(stats.provider_stats.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_manager_creation_no_providers() {
+        let config = CloudProviderConfig::default();
+        let manager = CloudProviderManager::new(config).await;
+        assert!(
+            manager.is_ok(),
+            "Manager with no enabled providers should initialise"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_manager_stats_empty_initially() {
+        let config = CloudProviderConfig::default();
+        let manager = CloudProviderManager::new(config).await.expect("manager should initialise");
+        let stats = manager.get_stats().await;
+        assert_eq!(stats.total_requests, 0);
+        assert_eq!(stats.total_cost_usd, 0.0);
+    }
+}

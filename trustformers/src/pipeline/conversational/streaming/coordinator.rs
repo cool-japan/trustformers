@@ -766,3 +766,336 @@ impl BufferState {
         self.max_size.saturating_sub(self.current_size)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_coordinator() -> StreamingCoordinator {
+        StreamingCoordinator::new(AdvancedStreamingConfig::default())
+    }
+
+    // ---- BufferState tests ----
+
+    #[test]
+    fn test_buffer_state_new_empty() {
+        let buf = BufferState::new(1024);
+        assert_eq!(buf.current_size, 0, "new buffer should have current_size 0");
+        assert_eq!(
+            buf.max_size, 1024,
+            "new buffer max_size must match supplied value"
+        );
+        assert!(
+            (buf.utilization - 0.0).abs() < f32::EPSILON,
+            "new buffer utilization should be 0"
+        );
+    }
+
+    #[test]
+    fn test_buffer_state_is_not_near_capacity_when_empty() {
+        let buf = BufferState::new(100);
+        assert!(
+            !buf.is_near_capacity(0.5),
+            "empty buffer must not be near capacity at 50%"
+        );
+    }
+
+    #[test]
+    fn test_buffer_state_is_near_capacity_at_full_utilization() {
+        let mut buf = BufferState::new(100);
+        buf.current_size = 100;
+        buf.utilization = 1.0;
+        assert!(
+            buf.is_near_capacity(0.9),
+            "buffer at 100% utilization must be near capacity at 90% threshold"
+        );
+    }
+
+    #[test]
+    fn test_buffer_state_is_full_when_at_max() {
+        let mut buf = BufferState::new(50);
+        buf.current_size = 50;
+        assert!(buf.is_full(), "buffer at max_size must report is_full");
+    }
+
+    #[test]
+    fn test_buffer_state_is_not_full_when_below_max() {
+        let mut buf = BufferState::new(100);
+        buf.current_size = 50;
+        assert!(
+            !buf.is_full(),
+            "buffer below max_size must not report is_full"
+        );
+    }
+
+    #[test]
+    fn test_buffer_state_available_space() {
+        let mut buf = BufferState::new(200);
+        buf.current_size = 75;
+        assert_eq!(
+            buf.available_space(),
+            125,
+            "available_space must be max_size - current_size"
+        );
+    }
+
+    #[test]
+    fn test_buffer_state_available_space_saturating() {
+        let mut buf = BufferState::new(50);
+        buf.current_size = 100; // over-full (should not happen but must not panic)
+        assert_eq!(
+            buf.available_space(),
+            0,
+            "available_space must be 0 when current_size exceeds max"
+        );
+    }
+
+    // ---- StreamSession tests ----
+
+    #[test]
+    fn test_stream_session_new_initial_state() {
+        let session = StreamSession::new("s1".to_string(), "conv-1".to_string(), 1000);
+        assert_eq!(
+            session.session_id, "s1",
+            "session_id must match supplied value"
+        );
+        assert_eq!(
+            session.conversation_id, "conv-1",
+            "conversation_id must match supplied value"
+        );
+        assert_eq!(
+            session.state,
+            StreamConnection::Connecting,
+            "new session state must be Connecting"
+        );
+    }
+
+    #[test]
+    fn test_stream_session_touch_updates_activity() {
+        let mut session = StreamSession::new("s2".to_string(), "conv-2".to_string(), 500);
+        let before = session.last_activity;
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        session.touch();
+        assert!(
+            session.last_activity >= before,
+            "touch must update last_activity to current time"
+        );
+    }
+
+    #[test]
+    fn test_stream_session_not_expired_immediately() {
+        let session = StreamSession::new("s3".to_string(), "conv-3".to_string(), 500);
+        assert!(
+            !session.is_expired(60),
+            "freshly created session must not be expired after 60 min timeout"
+        );
+    }
+
+    #[test]
+    fn test_stream_session_update_buffer_utilization() {
+        let mut session = StreamSession::new("s4".to_string(), "conv-4".to_string(), 100);
+        session.update_buffer_utilization(50, 5);
+        assert_eq!(
+            session.buffer_state.current_size, 50,
+            "buffer current_size must be 50"
+        );
+        assert_eq!(
+            session.buffer_state.pending_chunks, 5,
+            "pending_chunks must be 5"
+        );
+        assert!(
+            (session.buffer_state.utilization - 0.5).abs() < 1e-5,
+            "utilization must be 0.5 for 50/100"
+        );
+    }
+
+    // ---- StreamingManager tests ----
+
+    #[test]
+    fn test_streaming_manager_initial_state_not_started() {
+        let manager = StreamingManager::default();
+        assert!(
+            matches!(manager.get_state(), StreamingState::NotStarted),
+            "default manager state must be NotStarted"
+        );
+    }
+
+    #[test]
+    fn test_streaming_manager_can_start_when_not_started() {
+        let manager = StreamingManager::default();
+        assert!(
+            manager.can_start_streaming(),
+            "should be able to start when NotStarted"
+        );
+    }
+
+    #[test]
+    fn test_streaming_manager_pause_and_resume() {
+        let mut manager = StreamingManager::new(StreamingConfig {
+            enabled: true,
+            ..StreamingConfig::default()
+        });
+        manager.state = StreamingState::Streaming;
+        manager.pause();
+        assert!(
+            matches!(manager.get_state(), StreamingState::Paused),
+            "state must be Paused after pause()"
+        );
+        manager.resume();
+        assert!(
+            matches!(manager.get_state(), StreamingState::Streaming),
+            "state must be Streaming after resume()"
+        );
+    }
+
+    #[test]
+    fn test_streaming_manager_stop_sets_completed() {
+        let mut manager = StreamingManager::new(StreamingConfig {
+            enabled: true,
+            ..StreamingConfig::default()
+        });
+        manager.stop();
+        assert!(
+            matches!(manager.get_state(), StreamingState::Completed),
+            "stop() must set Completed state"
+        );
+    }
+
+    #[test]
+    fn test_streaming_manager_reset() {
+        let mut manager = StreamingManager::default();
+        manager.stop();
+        manager.reset();
+        assert!(
+            matches!(manager.get_state(), StreamingState::NotStarted),
+            "reset() must restore NotStarted state"
+        );
+    }
+
+    #[test]
+    fn test_streaming_manager_calculate_stats_empty() {
+        let manager = StreamingManager::default();
+        let stats = manager.calculate_stream_stats(&[]);
+        assert_eq!(
+            stats.total_chunks, 0,
+            "empty responses should yield 0 total_chunks"
+        );
+    }
+
+    #[test]
+    fn test_streaming_manager_calculate_stats_with_responses() {
+        let manager = StreamingManager::default();
+        let responses = vec![
+            StreamingResponse {
+                chunk: "hello world".to_string(),
+                is_final: false,
+                chunk_index: 0,
+                total_chunks: None,
+                metadata: None,
+            },
+            StreamingResponse {
+                chunk: "goodbye".to_string(),
+                is_final: true,
+                chunk_index: 1,
+                total_chunks: Some(2),
+                metadata: None,
+            },
+        ];
+        let stats = manager.calculate_stream_stats(&responses);
+        assert_eq!(
+            stats.total_chunks, 2,
+            "two responses must yield total_chunks 2"
+        );
+        assert_eq!(stats.total_words, 3, "three words across two chunks");
+    }
+
+    // ---- StreamingCoordinator tests (async) ----
+
+    #[tokio::test]
+    async fn test_coordinator_initial_session_count_zero() {
+        let coord = default_coordinator();
+        assert_eq!(
+            coord.get_active_session_count().await,
+            0,
+            "new coordinator should have 0 active sessions"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_coordinator_create_session_increments_count() {
+        let coord = default_coordinator();
+        let _id = coord
+            .create_session("conv-1".to_string())
+            .await
+            .expect("create_session must succeed");
+        assert_eq!(
+            coord.get_active_session_count().await,
+            1,
+            "one created session should yield count 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_coordinator_create_session_returns_unique_ids() {
+        let coord = default_coordinator();
+        let id1 = coord.create_session("c1".to_string()).await.expect("session 1 must succeed");
+        let id2 = coord.create_session("c2".to_string()).await.expect("session 2 must succeed");
+        assert_ne!(id1, id2, "each session must have a unique id");
+    }
+
+    #[tokio::test]
+    async fn test_coordinator_close_session_decrements_count() {
+        let coord = default_coordinator();
+        let id = coord
+            .create_session("c1".to_string())
+            .await
+            .expect("create_session must succeed");
+        coord.close_session(&id).await.expect("close_session must succeed");
+        assert_eq!(
+            coord.get_active_session_count().await,
+            0,
+            "closed session count must be 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_coordinator_session_exists_true() {
+        let coord = default_coordinator();
+        let id = coord
+            .create_session("c1".to_string())
+            .await
+            .expect("create_session must succeed");
+        assert!(
+            coord.session_exists(&id).await,
+            "session must exist after creation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_coordinator_session_exists_false_for_unknown() {
+        let coord = default_coordinator();
+        assert!(
+            !coord.session_exists("not-a-real-id").await,
+            "unknown session must not exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_coordinator_update_session_state() {
+        let coord = default_coordinator();
+        let id = coord
+            .create_session("c1".to_string())
+            .await
+            .expect("create_session must succeed");
+        coord
+            .update_session_state(&id, StreamConnection::Connected)
+            .await
+            .expect("update_session_state must succeed");
+        let session = coord.get_session(&id).await.expect("session must be retrievable");
+        assert_eq!(
+            session.state,
+            StreamConnection::Connected,
+            "session state must be Connected"
+        );
+    }
+}

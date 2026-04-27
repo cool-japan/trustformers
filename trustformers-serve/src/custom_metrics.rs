@@ -1001,4 +1001,317 @@ mod tests {
             .expect("async operation should succeed in test");
         assert!(!analytics.averages.is_empty());
     }
+
+    #[test]
+    fn test_default_config() {
+        let config = CustomMetricsConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.collection_interval_seconds, 10);
+        assert!(config.enable_real_time_analytics);
+        assert!(config.enable_business_metrics);
+        assert!(config.enable_performance_profiling);
+        assert_eq!(config.retention_period_hours, 24);
+        assert_eq!(config.max_metric_series, 10000);
+    }
+
+    #[test]
+    fn test_default_alert_thresholds() {
+        let thresholds = AlertThresholds::default();
+        assert!((thresholds.cpu_usage_threshold - 0.8).abs() < f64::EPSILON);
+        assert!((thresholds.memory_usage_threshold - 0.9).abs() < f64::EPSILON);
+        assert!((thresholds.error_rate_threshold - 0.05).abs() < f64::EPSILON);
+        assert_eq!(thresholds.queue_depth_threshold, 100);
+    }
+
+    #[test]
+    fn test_default_export_config() {
+        let config = MetricsExportConfig::default();
+        assert!(config.prometheus_enabled);
+        assert!(!config.influxdb_enabled);
+        assert!(config.custom_endpoints.is_empty());
+        assert_eq!(config.export_interval_seconds, 60);
+    }
+
+    #[tokio::test]
+    async fn test_collect_disabled() {
+        let mut config = CustomMetricsConfig::default();
+        config.enabled = false;
+        let collector = CustomMetricsCollector::new(config).expect("creation ok");
+        let result = collector.collect_business_metric("rev", 100.0, HashMap::new()).await;
+        assert!(result.is_ok());
+        let summary = collector.get_metrics_summary().await;
+        assert_eq!(summary.total_metrics, 0);
+    }
+
+    #[tokio::test]
+    async fn test_collect_business_disabled() {
+        let mut config = CustomMetricsConfig::default();
+        config.enable_business_metrics = false;
+        let collector = CustomMetricsCollector::new(config).expect("creation ok");
+        let result = collector.collect_business_metric("rev", 100.0, HashMap::new()).await;
+        assert!(result.is_ok());
+        let summary = collector.get_metrics_summary().await;
+        assert_eq!(summary.total_metrics, 0);
+    }
+
+    #[tokio::test]
+    async fn test_collect_performance_disabled() {
+        let mut config = CustomMetricsConfig::default();
+        config.enable_performance_profiling = false;
+        let collector = CustomMetricsCollector::new(config).expect("creation ok");
+        let result = collector.collect_performance_metric("lat", 50.0, None, HashMap::new()).await;
+        assert!(result.is_ok());
+        let summary = collector.get_metrics_summary().await;
+        assert_eq!(summary.total_metrics, 0);
+    }
+
+    #[tokio::test]
+    async fn test_collect_system_metric() {
+        let config = CustomMetricsConfig::default();
+        let collector = CustomMetricsCollector::new(config).expect("creation ok");
+        let result = collector
+            .collect_system_metric("cpu", 0.5, SystemMetricType::CpuUsage, HashMap::new())
+            .await;
+        assert!(result.is_ok());
+        let summary = collector.get_metrics_summary().await;
+        assert_eq!(summary.total_metrics, 1);
+    }
+
+    #[tokio::test]
+    async fn test_collect_multiple_metrics() {
+        let config = CustomMetricsConfig::default();
+        let collector = CustomMetricsCollector::new(config).expect("creation ok");
+
+        // Use LCG for deterministic values
+        let mut lcg: u64 = 42;
+        for i in 0..10 {
+            lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let val = (lcg % 1000) as f64 / 10.0;
+            collector
+                .collect_business_metric(&format!("metric_{}", i), val, HashMap::new())
+                .await
+                .expect("collect ok");
+        }
+        let summary = collector.get_metrics_summary().await;
+        assert_eq!(summary.total_metrics, 10);
+    }
+
+    #[tokio::test]
+    async fn test_metric_name_business() {
+        let config = CustomMetricsConfig::default();
+        let collector = CustomMetricsCollector::new(config).expect("creation ok");
+        let metric = CustomMetric::Business {
+            name: "revenue".to_string(),
+            value: 100.0,
+            labels: HashMap::new(),
+            timestamp: SystemTime::now(),
+        };
+        let name = collector.get_metric_name(&metric);
+        assert_eq!(name, "business_revenue");
+    }
+
+    #[tokio::test]
+    async fn test_metric_name_performance() {
+        let config = CustomMetricsConfig::default();
+        let collector = CustomMetricsCollector::new(config).expect("creation ok");
+        let metric = CustomMetric::Performance {
+            name: "latency".to_string(),
+            value: 50.0,
+            percentile: Some(95.0),
+            labels: HashMap::new(),
+            timestamp: SystemTime::now(),
+        };
+        let name = collector.get_metric_name(&metric);
+        assert_eq!(name, "performance_latency");
+    }
+
+    #[tokio::test]
+    async fn test_metric_name_system() {
+        let config = CustomMetricsConfig::default();
+        let collector = CustomMetricsCollector::new(config).expect("creation ok");
+        let metric = CustomMetric::System {
+            name: "cpu_usage".to_string(),
+            value: 0.75,
+            metric_type: SystemMetricType::CpuUsage,
+            labels: HashMap::new(),
+            timestamp: SystemTime::now(),
+        };
+        let name = collector.get_metric_name(&metric);
+        assert_eq!(name, "system_cpu_usage");
+    }
+
+    #[tokio::test]
+    async fn test_metric_name_application() {
+        let config = CustomMetricsConfig::default();
+        let collector = CustomMetricsCollector::new(config).expect("creation ok");
+        let metric = CustomMetric::Application {
+            name: "accuracy".to_string(),
+            value: 0.95,
+            metric_type: ApplicationMetricType::ModelAccuracy,
+            labels: HashMap::new(),
+            timestamp: SystemTime::now(),
+        };
+        let name = collector.get_metric_name(&metric);
+        assert_eq!(name, "application_accuracy");
+    }
+
+    #[tokio::test]
+    async fn test_metric_name_custom() {
+        let config = CustomMetricsConfig::default();
+        let collector = CustomMetricsCollector::new(config).expect("creation ok");
+        let metric = CustomMetric::Custom {
+            name: "my_metric".to_string(),
+            value: 42.0,
+            metric_type: "gauge".to_string(),
+            labels: HashMap::new(),
+            timestamp: SystemTime::now(),
+        };
+        let name = collector.get_metric_name(&metric);
+        assert_eq!(name, "custom_my_metric");
+    }
+
+    #[tokio::test]
+    async fn test_get_metric_value_variants() {
+        let config = CustomMetricsConfig::default();
+        let collector = CustomMetricsCollector::new(config).expect("creation ok");
+
+        let business = CustomMetric::Business {
+            name: "a".to_string(),
+            value: 1.0,
+            labels: HashMap::new(),
+            timestamp: SystemTime::now(),
+        };
+        assert!((collector.get_metric_value(&business) - 1.0).abs() < f64::EPSILON);
+
+        let perf = CustomMetric::Performance {
+            name: "b".to_string(),
+            value: 2.0,
+            percentile: None,
+            labels: HashMap::new(),
+            timestamp: SystemTime::now(),
+        };
+        assert!((collector.get_metric_value(&perf) - 2.0).abs() < f64::EPSILON);
+
+        let sys = CustomMetric::System {
+            name: "c".to_string(),
+            value: 3.0,
+            metric_type: SystemMetricType::CpuUsage,
+            labels: HashMap::new(),
+            timestamp: SystemTime::now(),
+        };
+        assert!((collector.get_metric_value(&sys) - 3.0).abs() < f64::EPSILON);
+
+        let app = CustomMetric::Application {
+            name: "d".to_string(),
+            value: 4.0,
+            metric_type: ApplicationMetricType::CacheHitRate,
+            labels: HashMap::new(),
+            timestamp: SystemTime::now(),
+        };
+        assert!((collector.get_metric_value(&app) - 4.0).abs() < f64::EPSILON);
+
+        let custom = CustomMetric::Custom {
+            name: "e".to_string(),
+            value: 5.0,
+            metric_type: "counter".to_string(),
+            labels: HashMap::new(),
+            timestamp: SystemTime::now(),
+        };
+        assert!((collector.get_metric_value(&custom) - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn test_analyze_empty_metrics() {
+        let config = CustomMetricsConfig::default();
+        let collector = CustomMetricsCollector::new(config).expect("creation ok");
+        let result = collector.analyze_metrics().await;
+        assert!(result.is_ok());
+        if let Ok(analytics) = result {
+            assert!(analytics.averages.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_metrics_summary_initial() {
+        let config = CustomMetricsConfig::default();
+        let collector = CustomMetricsCollector::new(config).expect("creation ok");
+        let summary = collector.get_metrics_summary().await;
+        assert_eq!(summary.total_metrics, 0);
+        assert_eq!(summary.active_metric_series, 0);
+        assert_eq!(summary.alert_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_export_metrics_no_error() {
+        let config = CustomMetricsConfig::default();
+        let collector = CustomMetricsCollector::new(config).expect("creation ok");
+        let result = collector.export_metrics().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_collect_with_labels() {
+        let config = CustomMetricsConfig::default();
+        let collector = CustomMetricsCollector::new(config).expect("creation ok");
+
+        let mut labels = HashMap::new();
+        labels.insert("region".to_string(), "us-east".to_string());
+        labels.insert("env".to_string(), "prod".to_string());
+
+        let result = collector.collect_business_metric("requests", 500.0, labels).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_active_metrics_tracking() {
+        let config = CustomMetricsConfig::default();
+        let collector = CustomMetricsCollector::new(config).expect("creation ok");
+
+        collector.collect_business_metric("a", 1.0, HashMap::new()).await.expect("ok");
+        collector.collect_business_metric("b", 2.0, HashMap::new()).await.expect("ok");
+
+        let active = collector.active_metrics.read().await;
+        assert_eq!(active.len(), 2);
+        assert!(active.contains("business_a"));
+        assert!(active.contains("business_b"));
+    }
+
+    #[test]
+    fn test_custom_metrics_error_display() {
+        let err = CustomMetricsError::ConfigurationError {
+            message: "bad config".to_string(),
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("bad config"));
+    }
+
+    #[test]
+    fn test_collection_error_display() {
+        let err = CustomMetricsError::CollectionError {
+            message: "collection failed".to_string(),
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("collection failed"));
+    }
+
+    #[test]
+    fn test_trend_direction_debug() {
+        let direction = TrendDirection::Increasing;
+        let debug_str = format!("{:?}", direction);
+        assert_eq!(debug_str, "Increasing");
+    }
+
+    #[test]
+    fn test_anomaly_severity_debug() {
+        let sev = AnomalySeverity::Critical;
+        let debug_str = format!("{:?}", sev);
+        assert_eq!(debug_str, "Critical");
+    }
+
+    #[test]
+    fn test_bottleneck_type_debug() {
+        let bt = BottleneckType::GpuBound;
+        let debug_str = format!("{:?}", bt);
+        assert_eq!(debug_str, "GpuBound");
+    }
 }

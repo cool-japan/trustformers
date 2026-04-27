@@ -788,3 +788,300 @@ impl Default for OfflineModeConfig {
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── LifecycleConfig::default() ────────────────────────────────────────
+
+    #[test]
+    fn test_lifecycle_config_default_fields() {
+        let cfg = LifecycleConfig::default();
+        assert!(cfg.enable_background_execution);
+        assert!(cfg.background_execution_limit_seconds > 0);
+        assert!(cfg.enable_state_persistence);
+        assert!(cfg.state_save_interval_seconds > 0);
+    }
+
+    // ── MemoryPressureLevel ordering ──────────────────────────────────────
+
+    #[test]
+    fn test_memory_pressure_level_ordering() {
+        assert!(MemoryPressureLevel::Normal < MemoryPressureLevel::Warning);
+        assert!(MemoryPressureLevel::Warning < MemoryPressureLevel::Critical);
+        assert!(MemoryPressureLevel::Critical < MemoryPressureLevel::Emergency);
+    }
+
+    #[test]
+    fn test_memory_pressure_level_equality() {
+        assert_eq!(MemoryPressureLevel::Normal, MemoryPressureLevel::Normal);
+        assert_ne!(MemoryPressureLevel::Warning, MemoryPressureLevel::Critical);
+    }
+
+    // ── CleanupPriority ordering ──────────────────────────────────────────
+
+    #[test]
+    fn test_cleanup_priority_ordering() {
+        assert!(CleanupPriority::Low < CleanupPriority::Medium);
+        assert!(CleanupPriority::Medium < CleanupPriority::High);
+        assert!(CleanupPriority::High < CleanupPriority::Critical);
+    }
+
+    // ── ModelEvictionPolicy variants ──────────────────────────────────────
+
+    #[test]
+    fn test_model_eviction_policy_variants() {
+        let policies = [
+            ModelEvictionPolicy::LeastRecentlyUsed,
+            ModelEvictionPolicy::LeastFrequentlyUsed,
+            ModelEvictionPolicy::SizeBasedEviction,
+            ModelEvictionPolicy::PriorityBasedEviction,
+            ModelEvictionPolicy::AdaptiveEviction,
+        ];
+        for p in &policies {
+            assert!(!format!("{:?}", p).is_empty());
+        }
+    }
+
+    // ── ThermalLevel ordering ─────────────────────────────────────────────
+
+    #[test]
+    fn test_thermal_level_ordering() {
+        assert!(ThermalLevel::Normal < ThermalLevel::Light);
+        assert!(ThermalLevel::Light < ThermalLevel::Moderate);
+        assert!(ThermalLevel::Moderate < ThermalLevel::Heavy);
+        assert!(ThermalLevel::Heavy < ThermalLevel::Emergency);
+    }
+
+    // ── PerformanceScalingStrategy variants ──────────────────────────────
+
+    #[test]
+    fn test_performance_scaling_strategy_variants() {
+        let strats = [
+            PerformanceScalingStrategy::Linear,
+            PerformanceScalingStrategy::Exponential,
+            PerformanceScalingStrategy::Adaptive,
+            PerformanceScalingStrategy::UserDefined,
+        ];
+        for s in &strats {
+            assert!(!format!("{:?}", s).is_empty());
+        }
+    }
+
+    // ── TaskType / TaskPriority ───────────────────────────────────────────
+
+    #[test]
+    fn test_task_type_variants() {
+        let types = [
+            TaskType::ModelUpdate,
+            TaskType::FederatedLearning,
+            TaskType::DataSync,
+            TaskType::CacheCleanup,
+            TaskType::Analytics,
+            TaskType::Backup,
+            TaskType::Precomputation,
+            TaskType::HealthCheck,
+        ];
+        for t in &types {
+            assert!(!format!("{:?}", t).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_task_priority_ordering() {
+        assert!(TaskPriority::Low < TaskPriority::Normal);
+        assert!(TaskPriority::Normal < TaskPriority::High);
+        assert!(TaskPriority::High < TaskPriority::Critical);
+        assert!(TaskPriority::Critical < TaskPriority::Emergency);
+    }
+
+    // ── SchedulingStrategy variants ───────────────────────────────────────
+
+    #[test]
+    fn test_scheduling_strategy_variants() {
+        let strats = [
+            SchedulingStrategy::Immediate,
+            SchedulingStrategy::Deferred,
+            SchedulingStrategy::OpportunisticAgg,
+            SchedulingStrategy::UserIdle,
+            SchedulingStrategy::NetworkOptimal,
+            SchedulingStrategy::BatteryOptimal,
+            SchedulingStrategy::ThermalOptimal,
+        ];
+        for s in &strats {
+            assert!(!format!("{:?}", s).is_empty());
+        }
+    }
+
+    // ── NotificationType variants ─────────────────────────────────────────
+
+    #[test]
+    fn test_notification_type_variants() {
+        let types = [
+            NotificationType::ModelUpdateAvailable,
+            NotificationType::FederatedLearningTask,
+            NotificationType::SystemAlert,
+            NotificationType::PerformanceWarning,
+            NotificationType::MaintenanceRequired,
+            NotificationType::UserAction,
+        ];
+        for t in &types {
+            assert!(!format!("{:?}", t).is_empty());
+        }
+    }
+
+    // ── DeliveryStrategy variants ─────────────────────────────────────────
+
+    #[test]
+    fn test_delivery_strategy_variants() {
+        let strats = [
+            DeliveryStrategy::Immediate,
+            DeliveryStrategy::Batched,
+            DeliveryStrategy::Deferred,
+            DeliveryStrategy::OnForeground,
+            DeliveryStrategy::UserTriggered,
+        ];
+        for s in &strats {
+            assert!(!format!("{:?}", s).is_empty());
+        }
+    }
+
+    // ── MemoryWarningResponse variants ────────────────────────────────────
+
+    #[test]
+    fn test_memory_warning_response_variants() {
+        let responses = [
+            MemoryWarningResponse::ClearCaches,
+            MemoryWarningResponse::ReduceBatchSizes,
+            MemoryWarningResponse::OffloadModels,
+            MemoryWarningResponse::PauseBackgroundTasks,
+            MemoryWarningResponse::NotifyUser,
+            MemoryWarningResponse::ForceGarbageCollection,
+        ];
+        for r in &responses {
+            assert!(!format!("{:?}", r).is_empty());
+        }
+    }
+
+    // ── ThermalWarningResponse variants ──────────────────────────────────
+
+    #[test]
+    fn test_thermal_warning_response_variants() {
+        let responses = [
+            ThermalWarningResponse::ReduceInferenceFrequency,
+            ThermalWarningResponse::LowerModelPrecision,
+            ThermalWarningResponse::PauseComputeIntensiveTasks,
+            ThermalWarningResponse::SwitchToCpuOnly,
+            ThermalWarningResponse::NotifyUser,
+            ThermalWarningResponse::EnterCooldownMode,
+        ];
+        for r in &responses {
+            assert!(!format!("{:?}", r).is_empty());
+        }
+    }
+
+    // ── ReconnectionBackoffStrategy variants ─────────────────────────────
+
+    #[test]
+    fn test_reconnection_backoff_strategy_variants() {
+        let strats = [
+            ReconnectionBackoffStrategy::Linear,
+            ReconnectionBackoffStrategy::Exponential,
+            ReconnectionBackoffStrategy::Fibonacci,
+            ReconnectionBackoffStrategy::Custom,
+        ];
+        for s in &strats {
+            assert!(!format!("{:?}", s).is_empty());
+        }
+    }
+
+    // ── BackgroundResourceLimits::default() ──────────────────────────────
+
+    #[test]
+    fn test_background_resource_limits_default() {
+        let limits = BackgroundResourceLimits::default();
+        assert!(limits.max_cpu_percent > 0);
+        assert!(limits.max_memory_mb > 0);
+        assert!(limits.max_network_mbps > 0.0);
+        assert!(limits.max_execution_time_seconds > 0);
+    }
+
+    // ── ForegroundResourceAllocation::default() ──────────────────────────
+
+    #[test]
+    fn test_foreground_resource_allocation_default() {
+        let alloc = ForegroundResourceAllocation::default();
+        assert!(alloc.cpu_allocation_percent > 0);
+        assert!(alloc.memory_allocation_mb > 0);
+        assert!(alloc.gpu_allocation_percent.is_some());
+    }
+
+    // ── OfflineModeConfig::default() ─────────────────────────────────────
+
+    #[test]
+    fn test_offline_mode_config_default() {
+        let cfg = OfflineModeConfig::default();
+        assert!(cfg.enable_offline_mode);
+        assert!(cfg.local_model_fallback);
+        assert!(cfg.max_offline_cache_mb > 0);
+    }
+
+    // ── NetworkInterruptionConfig::default() ─────────────────────────────
+
+    #[test]
+    fn test_network_interruption_config_default() {
+        let cfg = NetworkInterruptionConfig::default();
+        assert!(cfg.enable_handling);
+        assert!(cfg.automatic_reconnection);
+        assert!(cfg.max_reconnection_attempts > 0);
+    }
+
+    // ── MemoryWarningConfig::default() ───────────────────────────────────
+
+    #[test]
+    fn test_memory_warning_config_default() {
+        let cfg = MemoryWarningConfig::default();
+        assert!(cfg.enable_handling);
+        assert!(cfg.automatic_cleanup);
+        assert!(!cfg.response_strategies.is_empty());
+    }
+
+    // ── NotificationThrottling::default() ────────────────────────────────
+
+    #[test]
+    fn test_notification_throttling_default() {
+        let throttle = NotificationThrottling::default();
+        assert!(throttle.enable_throttling);
+        assert!(throttle.max_per_hour > 0);
+        assert!(throttle.min_interval_seconds > 0);
+    }
+
+    // ── BackgroundTaskConfig::default() ──────────────────────────────────
+
+    #[test]
+    fn test_background_task_config_default() {
+        let cfg = BackgroundTaskConfig::default();
+        assert!(cfg.enable_model_updates);
+        assert!(cfg.max_concurrent_tasks > 0);
+        assert!(cfg.task_priorities.contains_key(&TaskType::HealthCheck));
+        assert_eq!(
+            cfg.task_priorities.get(&TaskType::HealthCheck).copied(),
+            Some(TaskPriority::High)
+        );
+    }
+
+    // ── MemoryPressureThresholds ──────────────────────────────────────────
+
+    #[test]
+    fn test_memory_pressure_thresholds_ordering() {
+        let cfg = LifecycleConfig::default();
+        let thresholds = &cfg.resource_management.memory_pressure_response.pressure_thresholds;
+        assert!(thresholds.warning_percent < thresholds.critical_percent);
+        assert!(thresholds.critical_percent < thresholds.emergency_percent);
+    }
+}

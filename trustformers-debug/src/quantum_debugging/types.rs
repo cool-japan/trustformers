@@ -321,7 +321,7 @@ pub struct ErrorPropagationAnalysis {
 /// Quantum-inspired neural network debugger
 #[derive(Debug)]
 pub struct QuantumDebugger {
-    pub(super) config: QuantumDebugConfig,
+    pub(crate) config: QuantumDebugConfig,
     analysis_results: HashMap<String, QuantumDebugAnalysis>,
     quantum_states: HashMap<String, QuantumState>,
 }
@@ -1898,3 +1898,6 @@ pub struct QuantumEntanglementAnalysis {
     /// Entanglement spectrum
     pub entanglement_spectrum: Vec<f64>,
 }
+
+#[path = "types_tests.rs"]
+mod types_tests;

@@ -1071,4 +1071,198 @@ mod tests {
         );
         assert_eq!(params.tags.len(), 1);
     }
+
+    #[test]
+    fn test_content_provider_config_default() {
+        let config = ContentProviderConfig::default();
+        assert!(!config.authority.is_empty());
+        assert!(config.enable_sharing);
+        assert!(config.max_cached_models > 0);
+        assert!(config.cache_size_limit_mb > 0);
+    }
+
+    #[test]
+    fn test_security_config_default() {
+        let config = SecurityConfig::default();
+        assert!(config.require_signature_verification);
+        assert!(config.per_model_permissions);
+    }
+
+    #[test]
+    fn test_encryption_config_default() {
+        let config = EncryptionConfig::default();
+        assert!(config.encrypt_at_rest);
+        assert!(config.encrypt_in_transit);
+    }
+
+    #[test]
+    fn test_key_management_config_default() {
+        let config = KeyManagementConfig::default();
+        assert!(config.use_android_keystore);
+        assert!(config.key_rotation_days > 0);
+    }
+
+    #[test]
+    fn test_performance_config_default() {
+        let config = PerformanceConfig::default();
+        assert!(config.background_loading);
+        assert!(config.worker_threads > 0);
+        assert!(config.connection_pool_size > 0);
+    }
+
+    #[test]
+    fn test_encryption_algorithm_variants() {
+        let algos = vec![
+            EncryptionAlgorithm::AES256GCM,
+            EncryptionAlgorithm::ChaCha20Poly1305,
+            EncryptionAlgorithm::AES128GCM,
+        ];
+        assert_eq!(algos.len(), 3);
+    }
+
+    #[test]
+    fn test_compression_algorithm_variants() {
+        let algos = vec![
+            CompressionAlgorithm::None,
+            CompressionAlgorithm::LZ4,
+            CompressionAlgorithm::ZSTD,
+        ];
+        assert_eq!(algos.len(), 3);
+    }
+
+    #[test]
+    fn test_model_type_variants() {
+        let types = vec![
+            ModelType::Transformer,
+            ModelType::CNN,
+            ModelType::RNN,
+            ModelType::Custom,
+        ];
+        assert_eq!(types.len(), 4);
+    }
+
+    #[test]
+    fn test_access_level_variants() {
+        let levels = vec![
+            AccessLevel::Public,
+            AccessLevel::Private,
+            AccessLevel::Shared,
+        ];
+        assert_eq!(levels.len(), 3);
+    }
+
+    #[test]
+    fn test_sort_order_variants() {
+        let orders = vec![SortOrder::Name, SortOrder::Size, SortOrder::Date];
+        assert_eq!(orders.len(), 3);
+    }
+
+    #[test]
+    fn test_model_info_with_valid_id() {
+        let config = ContentProviderConfig::default();
+        let provider = AndroidModelContentProvider::new(config).expect("Operation failed");
+
+        let model = ModelInfo {
+            id: "valid_model_id".to_string(),
+            name: "Test Model".to_string(),
+            version: "1.0".to_string(),
+            model_type: ModelType::Transformer,
+            file_path: PathBuf::from("/models/test.bin"),
+            size_bytes: 10000,
+            metadata: ModelMetadata {
+                description: "Test".to_string(),
+                architecture: "Transformer".to_string(),
+                dataset: None,
+                accuracy: Some(0.95),
+                latency_ms: Some(10.0),
+                memory_mb: Some(128),
+                tags: vec!["nlp".to_string()],
+            },
+            permissions: ModelPermissions {
+                public_access: true,
+                allowed_packages: vec![],
+                required_permissions: vec![],
+                access_level: AccessLevel::Public,
+            },
+            created_at: 1000,
+            modified_at: 1000,
+        };
+
+        assert!(provider.validate_model_info(&model).is_ok());
+    }
+
+    #[test]
+    fn test_query_params_with_no_filters() {
+        let params = QueryParams {
+            model_type: None,
+            name_filter: None,
+            version_filter: None,
+            tags: vec![],
+            limit: None,
+            offset: None,
+            sort_by: None,
+        };
+        assert!(params.model_type.is_none());
+        assert!(params.tags.is_empty());
+    }
+
+    #[test]
+    fn test_query_params_with_limit() {
+        let params = QueryParams {
+            model_type: None,
+            name_filter: None,
+            version_filter: None,
+            tags: vec![],
+            limit: Some(50),
+            offset: Some(10),
+            sort_by: Some(SortOrder::Date),
+        };
+        assert_eq!(params.limit, Some(50));
+        assert_eq!(params.offset, Some(10));
+    }
+
+    #[test]
+    fn test_model_metadata_optional_fields() {
+        let metadata = ModelMetadata {
+            description: "Minimal model".to_string(),
+            architecture: "CNN".to_string(),
+            dataset: None,
+            accuracy: None,
+            latency_ms: None,
+            memory_mb: None,
+            tags: vec![],
+        };
+        assert!(metadata.dataset.is_none());
+        assert!(metadata.accuracy.is_none());
+    }
+
+    #[test]
+    fn test_model_permissions_private() {
+        let perms = ModelPermissions {
+            public_access: false,
+            allowed_packages: vec!["com.example.app".to_string()],
+            required_permissions: vec!["READ_MODELS".to_string()],
+            access_level: AccessLevel::Private,
+        };
+        assert!(!perms.public_access);
+        assert_eq!(perms.allowed_packages.len(), 1);
+    }
+
+    #[test]
+    fn test_model_stream_progress() {
+        let stream = ModelStream {
+            data: vec![1, 2, 3, 4, 5],
+            chunk_size: 2,
+            position: 0,
+            total_size: 5,
+        };
+        assert_eq!(stream.progress(), 0.0);
+    }
+
+    #[test]
+    fn test_usage_stats_default() {
+        let stats = UsageStats::default();
+        assert_eq!(stats.total_queries, 0);
+        assert_eq!(stats.total_downloads, 0);
+    }
 }

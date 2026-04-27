@@ -843,3 +843,253 @@ impl Tensor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::errors::Result;
+    use crate::tensor::Tensor;
+
+    #[test]
+    fn test_std_f32() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0, 3.0, 4.0, 5.0], &[5])?;
+        let s = t.std()?;
+        let data = s.data()?;
+        // std of [1,2,3,4,5] = sqrt(2.0) ~= 1.4142
+        assert!((data[0] - std::f64::consts::SQRT_2 as f32).abs() < 0.01);
+        Ok(())
+    }
+
+    #[test]
+    fn test_std_constant() -> Result<()> {
+        let t = Tensor::full(5.0, vec![10])?;
+        let s = t.std()?;
+        let data = s.data()?;
+        assert!(data[0].abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_max_value() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 5.0, 3.0, 2.0], &[4])?;
+        let m = t.max_value()?;
+        let data = m.data()?;
+        assert!((data[0] - 5.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_max_elementwise() -> Result<()> {
+        let a = Tensor::from_data(vec![1.0, 5.0, 3.0], &[3])?;
+        let b = Tensor::from_data(vec![2.0, 4.0, 6.0], &[3])?;
+        let result = a.max(&b)?;
+        let data = result.data()?;
+        assert!((data[0] - 2.0).abs() < 1e-6);
+        assert!((data[1] - 5.0).abs() < 1e-6);
+        assert!((data[2] - 6.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_mean_f32() -> Result<()> {
+        let t = Tensor::from_data(vec![2.0, 4.0, 6.0, 8.0], &[4])?;
+        let m = t.mean()?;
+        let data = m.data()?;
+        assert!((data[0] - 5.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_mean_single_element() -> Result<()> {
+        let t = Tensor::from_data(vec![42.0], &[1])?;
+        let m = t.mean()?;
+        let data = m.data()?;
+        assert!((data[0] - 42.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_min_max() -> Result<()> {
+        let t = Tensor::from_data(vec![-3.0, 1.0, 7.0, -1.0, 5.0], &[5])?;
+        let (min_val, max_val) = t.min_max()?;
+        assert!((min_val - (-3.0)).abs() < 1e-6);
+        assert!((max_val - 7.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_sum_all() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0, 3.0, 4.0], &[2, 2])?;
+        let s = t.sum(None, false)?;
+        let data = s.data()?;
+        assert!((data[0] - 10.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_sum_axis_0() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0, 3.0, 4.0], &[2, 2])?;
+        let s = t.sum_axis(0)?;
+        assert_eq!(s.shape(), vec![2]);
+        let data = s.data()?;
+        assert!((data[0] - 4.0).abs() < 1e-5);
+        assert!((data[1] - 6.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_sum_axis_1() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0, 3.0, 4.0], &[2, 2])?;
+        let s = t.sum_axis(1)?;
+        assert_eq!(s.shape(), vec![2]);
+        let data = s.data()?;
+        assert!((data[0] - 3.0).abs() < 1e-5);
+        assert!((data[1] - 7.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_mean_axis() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 3.0, 5.0, 7.0], &[2, 2])?;
+        let m = t.mean_axis(0)?;
+        assert_eq!(m.shape(), vec![2]);
+        let data = m.data()?;
+        assert!((data[0] - 3.0).abs() < 1e-5);
+        assert!((data[1] - 5.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_variance() -> Result<()> {
+        let t = Tensor::from_data(vec![2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0], &[8])?;
+        let v = t.variance(None, false)?;
+        let data = v.data()?;
+        // variance = mean of (x - mean)^2
+        assert!(data[0] > 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_argmax_1d() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 5.0, 3.0, 2.0], &[4])?;
+        let idx = t.argmax(0)?;
+        // argmax returns indices - check shape is correct
+        assert_eq!(idx.shape(), Vec::<usize>::new());
+        Ok(())
+    }
+
+    #[test]
+    fn test_argmax_2d_axis0() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 5.0, 3.0, 2.0], &[2, 2])?;
+        let idx = t.argmax(0)?;
+        assert_eq!(idx.shape(), vec![2]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_sum_axes_multiple() -> Result<()> {
+        let t = Tensor::ones(&[2, 3, 4])?;
+        let s = t.sum_axes(&[0, 2])?;
+        // After summing axes 0 and 2 from [2,3,4]: result should have shape [3]
+        assert_eq!(s.shape(), vec![3]);
+        let data = s.data()?;
+        for val in &data {
+            assert!((val - 8.0).abs() < 1e-5); // 2*4 = 8
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_max_scalar() -> Result<()> {
+        let t = Tensor::from_data(vec![-1.0, 3.0, 2.0, 7.0, -5.0], &[5])?;
+        let m = t.max_scalar()?;
+        let data = m.data()?;
+        assert!((data[0] - 7.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_min_scalar() -> Result<()> {
+        let t = Tensor::from_data(vec![-1.0, 3.0, 2.0, 7.0, -5.0], &[5])?;
+        let m = t.min_scalar()?;
+        let data = m.data()?;
+        assert!((data[0] - (-5.0)).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_sum_dim_positive() -> Result<()> {
+        let t = Tensor::ones(&[2, 3])?;
+        let s = t.sum_dim(1, false)?;
+        assert_eq!(s.shape(), vec![2]);
+        let data = s.data()?;
+        for val in &data {
+            assert!((val - 3.0).abs() < 1e-5);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_sum_dim_negative() -> Result<()> {
+        let t = Tensor::ones(&[2, 3])?;
+        let s = t.sum_dim(-1, false)?;
+        assert_eq!(s.shape(), vec![2]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_mean_axes() -> Result<()> {
+        let t = Tensor::ones(&[2, 3, 4])?;
+        let m = t.mean_axes(&[1])?;
+        assert_eq!(m.shape(), vec![2, 4]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_max_axes() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 5.0, 3.0, 2.0, 4.0, 6.0], &[2, 3])?;
+        let m = t.max_axes(&[1])?;
+        assert_eq!(m.shape(), vec![2]);
+        let data = m.data()?;
+        assert!((data[0] - 5.0).abs() < 1e-6);
+        assert!((data[1] - 6.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_min_axes() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 5.0, 3.0, 2.0, 4.0, 6.0], &[2, 3])?;
+        let m = t.min_axes(&[1])?;
+        assert_eq!(m.shape(), vec![2]);
+        let data = m.data()?;
+        assert!((data[0] - 1.0).abs() < 1e-6);
+        assert!((data[1] - 2.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_std_dev_alias() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0, 3.0], &[3])?;
+        let s = t.std_dev(None, false)?;
+        let data = s.data()?;
+        assert!(data[0] > 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_all_ones() -> Result<()> {
+        let t = Tensor::ones(&[3])?;
+        let result = t.all()?;
+        let data = result.data()?;
+        assert!((data[0] - 1.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_all_with_zero() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 0.0, 1.0], &[3])?;
+        let result = t.all()?;
+        let data = result.data()?;
+        assert!(data[0].abs() < 1e-6);
+        Ok(())
+    }
+}

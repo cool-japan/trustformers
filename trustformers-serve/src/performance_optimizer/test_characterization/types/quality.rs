@@ -949,3 +949,70 @@ impl std::fmt::Display for ViolationSeverity {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_risk_level_ordering() {
+        assert!(RiskLevel::Negligible < RiskLevel::Low);
+        assert!(RiskLevel::Low < RiskLevel::Medium);
+        assert!(RiskLevel::Medium < RiskLevel::High);
+        assert!(RiskLevel::High < RiskLevel::Critical);
+        assert!(RiskLevel::Critical < RiskLevel::Extreme);
+    }
+
+    #[test]
+    fn test_risk_assessment_config_default() {
+        let config = RiskAssessmentConfig::default();
+        assert!(config.assessment_enabled);
+        assert!((config.risk_threshold - 0.5).abs() < 1e-9);
+        assert_eq!(config.max_risk_factors, 10);
+    }
+
+    #[test]
+    fn test_safety_validation_config_default() {
+        let config = SafetyValidationConfig::default();
+        assert!(config.validation_enabled);
+        assert!(!config.strict_mode);
+        assert_eq!(config.history_retention_limit, 1000);
+    }
+
+    #[test]
+    fn test_traced_operation_default() {
+        let op = TracedOperation::default();
+        assert!(op.operation_id.is_empty());
+        assert!(matches!(op.result, OperationResult::Success));
+        assert_eq!(op.memory_usage, 0);
+    }
+
+    #[test]
+    fn test_violation_severity_display() {
+        assert_eq!(format!("{}", ViolationSeverity::Low), "Low");
+        assert_eq!(format!("{}", ViolationSeverity::Medium), "Medium");
+        assert_eq!(format!("{}", ViolationSeverity::High), "High");
+        assert_eq!(format!("{}", ViolationSeverity::Critical), "Critical");
+    }
+
+    #[test]
+    fn test_compliance_status_equality() {
+        assert_eq!(ComplianceStatus::Compliant, ComplianceStatus::Compliant);
+        assert_ne!(ComplianceStatus::Compliant, ComplianceStatus::NonCompliant);
+    }
+
+    #[test]
+    fn test_risk_impact_equality() {
+        assert_eq!(RiskImpact::Low, RiskImpact::Low);
+        assert_ne!(RiskImpact::Low, RiskImpact::High);
+    }
+
+    #[test]
+    fn test_risk_level_hash() {
+        let mut set = std::collections::HashSet::new();
+        set.insert(RiskLevel::High);
+        set.insert(RiskLevel::Low);
+        assert_eq!(set.len(), 2);
+        assert!(set.contains(&RiskLevel::High));
+    }
+}

@@ -672,3 +672,292 @@ impl ConfigSummary {
         println!("==========================================\n");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+
+    // ── LCG ──────────────────────────────────────────────────────────────────
+    struct Lcg {
+        state: u64,
+    }
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Lcg { state: seed }
+        }
+        fn next(&mut self) -> u64 {
+            self.state = self
+                .state
+                .wrapping_mul(6_364_136_223_846_793_005_u64)
+                .wrapping_add(1_442_695_040_888_963_407_u64);
+            self.state
+        }
+        fn next_f32(&mut self) -> f32 {
+            (self.next() >> 11) as f32 / (1_u64 << 53) as f32
+        }
+    }
+
+    fn make_config_dir() -> std::path::PathBuf {
+        let mut tmp = env::temp_dir();
+        tmp.push(format!("tcm_test_{}", uuid_u64()));
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        tmp
+    }
+
+    fn uuid_u64() -> u64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(12345)
+    }
+
+    // ── TestConfigManager::new ────────────────────────────────────────────────
+
+    #[test]
+    fn test_config_manager_new_with_empty_dir_succeeds() {
+        let dir = make_config_dir();
+        let manager = TestConfigManager::new(&dir);
+        assert!(manager.is_ok(), "TestConfigManager::new failed");
+    }
+
+    #[test]
+    fn test_config_manager_get_config_returns_enabled() {
+        let dir = make_config_dir();
+        if let Ok(manager) = TestConfigManager::new(&dir) {
+            let cfg = manager.get_config();
+            // Default config has enabled = true
+            assert!(cfg.enabled);
+        }
+    }
+
+    #[test]
+    fn test_config_manager_get_environment_not_empty() {
+        let dir = make_config_dir();
+        if let Ok(manager) = TestConfigManager::new(&dir) {
+            let env_str = manager.get_environment();
+            assert!(!env_str.is_empty());
+        }
+    }
+
+    // ── validate_configuration ────────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_configuration_default_is_valid() {
+        let dir = make_config_dir();
+        if let Ok(manager) = TestConfigManager::new(&dir) {
+            let result = manager.validate_configuration();
+            assert!(result.is_valid, "errors={}", result.errors.join(", "));
+        }
+    }
+
+    #[test]
+    fn test_validate_configuration_result_has_no_errors_by_default() {
+        let dir = make_config_dir();
+        if let Ok(manager) = TestConfigManager::new(&dir) {
+            let result = manager.validate_configuration();
+            assert!(
+                result.errors.is_empty(),
+                "unexpected errors: {:?}",
+                result.errors
+            );
+        }
+    }
+
+    // ── create_environment_template ───────────────────────────────────────────
+
+    #[test]
+    fn test_create_environment_template_ci() {
+        let dir = make_config_dir();
+        if let Ok(manager) = TestConfigManager::new(&dir) {
+            let preset = manager.create_environment_template("ci");
+            assert_eq!(preset.name, "ci");
+            assert!(
+                preset.timeout_multiplier > 1.0,
+                "CI should multiply timeouts"
+            );
+        }
+    }
+
+    #[test]
+    fn test_create_environment_template_development() {
+        let dir = make_config_dir();
+        if let Ok(manager) = TestConfigManager::new(&dir) {
+            let preset = manager.create_environment_template("development");
+            assert_eq!(preset.name, "development");
+            // Dev timeouts should be shorter (multiplier < 1.0)
+            assert!(
+                preset.timeout_multiplier < 1.0,
+                "dev multiplier={} should be < 1.0",
+                preset.timeout_multiplier
+            );
+        }
+    }
+
+    #[test]
+    fn test_create_environment_template_performance() {
+        let dir = make_config_dir();
+        if let Ok(manager) = TestConfigManager::new(&dir) {
+            let preset = manager.create_environment_template("performance");
+            assert!(
+                preset.timeout_multiplier > 3.0,
+                "perf should have long timeouts"
+            );
+        }
+    }
+
+    #[test]
+    fn test_create_environment_template_unknown_defaults() {
+        let dir = make_config_dir();
+        if let Ok(manager) = TestConfigManager::new(&dir) {
+            let preset = manager.create_environment_template("totally_unknown_env");
+            assert!((preset.timeout_multiplier - 1.0).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn test_create_environment_template_github_same_as_ci() {
+        let dir = make_config_dir();
+        if let Ok(manager) = TestConfigManager::new(&dir) {
+            let ci_preset = manager.create_environment_template("ci");
+            let gh_preset = manager.create_environment_template("github");
+            // Both CI variants share the same multiplier
+            assert!((ci_preset.timeout_multiplier - gh_preset.timeout_multiplier).abs() < 0.01);
+        }
+    }
+
+    // ── OptimizationSettings field checks ────────────────────────────────────
+
+    #[test]
+    fn test_optimization_settings_ci_preset_adaptive_enabled() {
+        let dir = make_config_dir();
+        if let Ok(manager) = TestConfigManager::new(&dir) {
+            let preset = manager.create_environment_template("ci");
+            assert!(preset.optimization_settings.adaptive_timeouts);
+        }
+    }
+
+    #[test]
+    fn test_optimization_settings_perf_preset_non_adaptive() {
+        let dir = make_config_dir();
+        if let Ok(manager) = TestConfigManager::new(&dir) {
+            let preset = manager.create_environment_template("performance");
+            assert!(!preset.optimization_settings.adaptive_timeouts);
+            assert!(!preset.optimization_settings.parallel_execution);
+        }
+    }
+
+    // ── get_config_summary ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_config_summary_has_at_least_one_source() {
+        let dir = make_config_dir();
+        if let Ok(manager) = TestConfigManager::new(&dir) {
+            let summary = manager.get_config_summary();
+            assert!(!summary.sources.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_config_summary_environment_matches_manager() {
+        let dir = make_config_dir();
+        if let Ok(manager) = TestConfigManager::new(&dir) {
+            let env_from_manager = manager.get_environment().to_string();
+            let summary = manager.get_config_summary();
+            assert_eq!(summary.environment, env_from_manager);
+        }
+    }
+
+    #[test]
+    fn test_config_summary_print_summary_no_panic() {
+        let dir = make_config_dir();
+        if let Ok(manager) = TestConfigManager::new(&dir) {
+            // print_summary should not panic
+            manager.get_config_summary().print_summary();
+        }
+    }
+
+    // ── save_config_to_file ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_save_config_to_file_creates_file() {
+        let dir = make_config_dir();
+        if let Ok(manager) = TestConfigManager::new(&dir) {
+            let out = dir.join("saved_config.toml");
+            let result = manager.save_config_to_file(&out);
+            assert!(result.is_ok(), "save failed");
+            assert!(out.exists(), "file should exist after save");
+        }
+    }
+
+    #[test]
+    fn test_save_environment_template_creates_file() {
+        let dir = make_config_dir();
+        if let Ok(manager) = TestConfigManager::new(&dir) {
+            let out = dir.join("ci_template.toml");
+            let result = manager.save_environment_template("ci", &out);
+            assert!(result.is_ok(), "template save failed");
+            assert!(out.exists());
+        }
+    }
+
+    // ── ValidationResult fields ───────────────────────────────────────────────
+
+    #[test]
+    fn test_validation_result_suggested_fixes_can_be_populated() {
+        let dir = make_config_dir();
+        if let Ok(manager) = TestConfigManager::new(&dir) {
+            let result = manager.validate_configuration();
+            // suggested_fixes is a Vec — just confirm it's accessible
+            let _ = result.suggested_fixes.len();
+        }
+    }
+
+    // ── MonitoringSettings ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_monitoring_settings_ci_exports_metrics() {
+        let dir = make_config_dir();
+        if let Ok(manager) = TestConfigManager::new(&dir) {
+            let preset = manager.create_environment_template("ci");
+            assert!(preset.monitoring_settings.export_metrics);
+        }
+    }
+
+    #[test]
+    fn test_monitoring_settings_dev_no_export() {
+        let dir = make_config_dir();
+        if let Ok(manager) = TestConfigManager::new(&dir) {
+            let preset = manager.create_environment_template("development");
+            assert!(!preset.monitoring_settings.export_metrics);
+        }
+    }
+
+    #[test]
+    fn test_monitoring_settings_regression_threshold_positive() {
+        let dir = make_config_dir();
+        if let Ok(manager) = TestConfigManager::new(&dir) {
+            for env_name in &["ci", "development", "performance"] {
+                let preset = manager.create_environment_template(env_name);
+                assert!(
+                    preset.monitoring_settings.regression_threshold > 0.0,
+                    "env={} threshold={}",
+                    env_name,
+                    preset.monitoring_settings.regression_threshold
+                );
+            }
+        }
+    }
+
+    // ── LCG sanity ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_lcg_diverse_output() {
+        let mut lcg = Lcg::new(42);
+        let vals: Vec<f32> = (0..20).map(|_| lcg.next_f32()).collect();
+        let first = vals[0];
+        let diff = vals.iter().filter(|&&v| (v - first).abs() > 1e-6).count();
+        assert!(diff >= 8, "LCG appears stuck");
+    }
+}

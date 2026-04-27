@@ -73,7 +73,7 @@ impl Default for Phi3Config {
 
 impl Config for Phi3Config {
     fn validate(&self) -> trustformers_core::errors::Result<()> {
-        if self.hidden_size % self.num_attention_heads != 0 {
+        if !self.hidden_size.is_multiple_of(self.num_attention_heads) {
             return Err(invalid_config(
                 "config_field",
                 "hidden_size must be divisible by num_attention_heads".to_string(),
@@ -81,7 +81,7 @@ impl Config for Phi3Config {
         }
 
         if let Some(num_kv_heads) = self.num_key_value_heads {
-            if self.num_attention_heads % num_kv_heads != 0 {
+            if !self.num_attention_heads.is_multiple_of(num_kv_heads) {
                 return Err(invalid_config(
                     "config_field",
                     "num_attention_heads must be divisible by num_key_value_heads".to_string(),
@@ -370,5 +370,224 @@ impl Phi3Config {
         } else {
             self.max_position_embeddings
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trustformers_core::traits::Config;
+
+    struct Lcg {
+        state: u64,
+    }
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Lcg { state: seed }
+        }
+        fn next(&mut self) -> u64 {
+            self.state = self
+                .state
+                .wrapping_mul(6364136223846793005u64)
+                .wrapping_add(1442695040888963407u64);
+            self.state
+        }
+    }
+
+    #[test]
+    fn test_default_config_fields() {
+        let cfg = Phi3Config::default();
+        assert_eq!(cfg.vocab_size, 32064);
+        assert_eq!(cfg.hidden_size, 3072);
+        assert_eq!(cfg.num_attention_heads, 32);
+        assert_eq!(cfg.model_type, "phi3");
+        assert!(cfg.use_cache);
+        assert!(!cfg.attention_bias);
+        assert!(!cfg.mlp_bias);
+    }
+
+    #[test]
+    fn test_default_validate_passes() {
+        let cfg = Phi3Config::default();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_architecture_name() {
+        let cfg = Phi3Config::default();
+        assert_eq!(cfg.architecture(), "Phi-3");
+    }
+
+    #[test]
+    fn test_hidden_not_divisible_by_heads_fails() {
+        let cfg = Phi3Config {
+            hidden_size: 100,
+            num_attention_heads: 32,
+            ..Phi3Config::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_kv_heads_not_divisible_fails() {
+        let cfg = Phi3Config {
+            num_attention_heads: 32,
+            num_key_value_heads: Some(7),
+            ..Phi3Config::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_zero_vocab_size_fails() {
+        let cfg = Phi3Config {
+            vocab_size: 0,
+            ..Phi3Config::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_head_dim_computation() {
+        let cfg = Phi3Config::default();
+        assert_eq!(cfg.head_dim(), 3072 / 32);
+    }
+
+    #[test]
+    fn test_num_kv_heads_default() {
+        let cfg = Phi3Config::default();
+        assert_eq!(cfg.num_kv_heads(), cfg.num_attention_heads);
+    }
+
+    #[test]
+    fn test_num_kv_heads_gqa() {
+        let cfg = Phi3Config {
+            num_key_value_heads: Some(8),
+            ..Phi3Config::default()
+        };
+        assert_eq!(cfg.num_kv_heads(), 8);
+    }
+
+    #[test]
+    fn test_num_query_groups_mha() {
+        let cfg = Phi3Config::default();
+        assert_eq!(cfg.num_query_groups(), 1);
+    }
+
+    #[test]
+    fn test_num_query_groups_gqa() {
+        let cfg = Phi3Config {
+            num_attention_heads: 32,
+            num_key_value_heads: Some(8),
+            ..Phi3Config::default()
+        };
+        assert_eq!(cfg.num_query_groups(), 4);
+    }
+
+    #[test]
+    fn test_phi3_mini_3_8b_config() {
+        let cfg = Phi3Config::phi3_mini_3_8b();
+        assert_eq!(cfg.vocab_size, 32064);
+        assert_eq!(cfg.hidden_size, 3072);
+        assert_eq!(cfg.num_hidden_layers, 32);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_phi3_mini_4k_instruct_is_instruct() {
+        let cfg = Phi3Config::phi3_mini_4k_instruct();
+        assert!(cfg.is_instruct_model());
+    }
+
+    #[test]
+    fn test_phi3_mini_128k_is_long_context() {
+        let cfg = Phi3Config::phi3_mini_128k_instruct();
+        assert!(cfg.is_long_context());
+        assert_eq!(cfg.max_position_embeddings, 131072);
+    }
+
+    #[test]
+    fn test_phi3_mini_128k_has_longrope_scaling() {
+        let cfg = Phi3Config::phi3_mini_128k_instruct();
+        if let Some(scaling) = &cfg.rope_scaling {
+            assert_eq!(scaling.scaling_type, "longrope");
+            assert!(scaling.long_factor.is_some());
+            assert!(scaling.short_factor.is_some());
+        } else {
+            panic!("expected rope_scaling");
+        }
+    }
+
+    #[test]
+    fn test_phi3_small_7b_config() {
+        let cfg = Phi3Config::phi3_small_7b();
+        assert_eq!(cfg.vocab_size, 100352);
+        assert_eq!(cfg.hidden_size, 4096);
+        assert_eq!(cfg.max_position_embeddings, 8192);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_phi3_medium_14b_has_gqa() {
+        let cfg = Phi3Config::phi3_medium_14b();
+        assert_eq!(cfg.num_key_value_heads, Some(10));
+        assert_eq!(cfg.hidden_size, 5120);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_effective_context_longrope() {
+        let cfg = Phi3Config::phi3_mini_128k_instruct();
+        // longrope: returns max_position_embeddings directly
+        let eff = cfg.effective_context_length();
+        assert_eq!(eff, cfg.max_position_embeddings);
+    }
+
+    #[test]
+    fn test_effective_context_no_scaling() {
+        let cfg = Phi3Config::phi3_mini_3_8b();
+        assert_eq!(cfg.effective_context_length(), cfg.max_position_embeddings);
+    }
+
+    #[test]
+    fn test_from_pretrained_name_mini() {
+        let result = Phi3Config::from_pretrained_name("phi3-mini");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_from_pretrained_name_unknown() {
+        let result = Phi3Config::from_pretrained_name("unknown-phi-model");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_phi3_small_128k_instruct_config() {
+        let cfg = Phi3Config::phi3_small_128k_instruct();
+        assert!(cfg.is_long_context());
+        assert!(cfg.rope_scaling.is_some());
+    }
+
+    #[test]
+    fn test_phi3_medium_128k_instruct_config() {
+        let cfg = Phi3Config::phi3_medium_128k_instruct();
+        assert!(cfg.is_long_context());
+        assert_eq!(cfg.max_position_embeddings, 131072);
+    }
+
+    #[test]
+    fn test_lcg_deterministic() {
+        let mut rng1 = Lcg::new(42);
+        let mut rng2 = Lcg::new(42);
+        for _ in 0..50 {
+            assert_eq!(rng1.next(), rng2.next());
+        }
+    }
+
+    #[test]
+    fn test_medium_4k_instruct_is_instruct() {
+        let cfg = Phi3Config::phi3_medium_4k_instruct();
+        assert!(cfg.is_instruct_model());
+        assert!(!cfg.is_long_context());
     }
 }

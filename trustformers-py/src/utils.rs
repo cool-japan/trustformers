@@ -324,7 +324,7 @@ impl PyTimer {
 }
 
 /// Configuration utilities
-#[pyclass(name = "Config")]
+#[pyclass(name = "Config", from_py_object)]
 #[derive(Clone, Default)]
 pub struct PyConfig {
     data: HashMap<String, String>,

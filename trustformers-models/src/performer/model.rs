@@ -738,3 +738,437 @@ impl Model for PerformerForMaskedLM {
         self.performer.num_parameters() + self.mlm_head.parameter_count()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::performer::config::PerformerConfig;
+    use trustformers_core::traits::Model;
+
+    /// LCG deterministic pseudo-random: a=6364136223846793005, c=1442695040888963407
+    fn lcg_next(state: &mut u64) -> f32 {
+        *state = state.wrapping_mul(6364136223846793005u64).wrapping_add(1442695040888963407u64);
+        (*state as f32) / (u64::MAX as f32)
+    }
+
+    fn lcg_vec(n: usize, seed: u64) -> Vec<f32> {
+        let mut s = seed;
+        (0..n).map(|_| lcg_next(&mut s) * 2.0 - 1.0).collect()
+    }
+
+    fn small_config() -> PerformerConfig {
+        PerformerConfig {
+            vocab_size: 256,
+            hidden_size: 16,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            intermediate_size: 32,
+            hidden_act: "gelu".to_string(),
+            hidden_dropout_prob: 0.0,
+            attention_probs_dropout_prob: 0.0,
+            max_position_embeddings: 32,
+            type_vocab_size: 2,
+            initializer_range: 0.02,
+            layer_norm_eps: 1e-12,
+            pad_token_id: 0,
+            position_embedding_type: "absolute".to_string(),
+            num_random_features: 8,
+            redraw_features: false,
+            feature_redraw_interval: 1000,
+            use_favor_plus: true,
+            normalize_features: false,
+            causal_attention: false,
+            kernel_type: "relu".to_string(),
+            ortho_features: false,
+            numerical_stabilizer: 1e-6,
+        }
+    }
+
+    // ── config tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_config_head_dim() {
+        let cfg = small_config();
+        assert_eq!(
+            cfg.head_dim(),
+            8,
+            "head_dim should be hidden_size / num_attention_heads = 16/2 = 8"
+        );
+    }
+
+    #[test]
+    fn test_config_approximation_quality() {
+        let cfg = small_config();
+        let aq = cfg.approximation_quality();
+        // num_random_features=8, head_dim=8, so quality = 8/8 = 1.0
+        assert!(
+            (aq - 1.0).abs() < 1e-6,
+            "approximation quality should be 1.0"
+        );
+    }
+
+    #[test]
+    fn test_config_is_efficient() {
+        let cfg = small_config();
+        // num_random_features=8 < max_position_embeddings=32
+        assert!(
+            cfg.is_efficient(),
+            "should be efficient when random_features < max_pos_emb"
+        );
+    }
+
+    #[test]
+    fn test_config_validate_passes_for_small() {
+        let cfg = small_config();
+        cfg.validate().expect("small config should pass validation");
+    }
+
+    #[test]
+    fn test_config_validate_fails_hidden_not_divisible_by_heads() {
+        let mut cfg = small_config();
+        cfg.num_attention_heads = 3; // 16 % 3 != 0
+        assert!(
+            cfg.validate().is_err(),
+            "should fail if hidden_size not divisible by heads"
+        );
+    }
+
+    #[test]
+    fn test_config_validate_fails_invalid_kernel_type() {
+        let mut cfg = small_config();
+        cfg.kernel_type = "invalid_kernel".to_string();
+        assert!(
+            cfg.validate().is_err(),
+            "should fail for invalid kernel_type"
+        );
+    }
+
+    #[test]
+    fn test_config_performer_base_has_correct_architecture() {
+        let cfg = PerformerConfig::performer_base();
+        assert_eq!(
+            cfg.architecture(),
+            "Performer",
+            "architecture should be Performer"
+        );
+        // performer_base defaults use num_random_features=256, head_dim=64 (768/12)
+        // 256 > 2*64=128, so validation intentionally warns; just check the fields exist
+        assert_eq!(cfg.num_random_features, 256);
+        assert!(cfg.num_attention_heads > 0);
+    }
+
+    #[test]
+    fn test_config_performer_causal_flag() {
+        let cfg = PerformerConfig::performer_causal();
+        assert!(
+            cfg.causal_attention,
+            "causal config should have causal_attention=true"
+        );
+    }
+
+    // ── FavorPlusAttention tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_favor_attention_creation() {
+        let cfg = small_config();
+        let attn = FavorPlusAttention::new(&cfg).expect("should create FavorPlusAttention");
+        // num_heads=2, head_dim=8, so all_head_size=16
+        // each linear: in*out + out (bias)
+        // query: 16*16 + 16, same for key, value, output
+        let expected_params = 4 * (16 * 16 + 16);
+        assert_eq!(
+            attn.parameter_count(),
+            expected_params,
+            "parameter count mismatch"
+        );
+    }
+
+    #[test]
+    fn test_favor_attention_device_is_cpu() {
+        let cfg = small_config();
+        let attn = FavorPlusAttention::new(&cfg).expect("should create FavorPlusAttention");
+        assert_eq!(
+            format!("{:?}", attn.device()),
+            "CPU",
+            "default device should be CPU"
+        );
+    }
+
+    #[test]
+    fn test_favor_attention_relu_kernel_param_count() {
+        // FAVOR+ with relu kernel: verify parameter count (linear layers only, no random features)
+        let cfg = small_config();
+        let layer = FavorPlusAttention::new(&cfg).expect("should create FavorPlusAttention");
+        // 4 linear layers: query, key, value, output
+        // each: hidden*all_head + all_head (bias) = 16*16 + 16 = 272; 4 * 272 = 1088
+        let all_head = cfg.num_attention_heads * cfg.head_dim();
+        let per_linear = cfg.hidden_size * all_head + all_head;
+        let expected = 4 * per_linear;
+        assert_eq!(
+            layer.parameter_count(),
+            expected,
+            "FAVOR+ relu param count mismatch"
+        );
+    }
+
+    #[test]
+    fn test_favor_attention_exp_kernel_param_count() {
+        // FAVOR+ with exp kernel should have same parameter count as relu (only linear weights differ)
+        let mut cfg = small_config();
+        cfg.kernel_type = "exp".to_string();
+        let layer_exp =
+            FavorPlusAttention::new(&cfg).expect("should create FavorPlusAttention exp");
+        let cfg_relu = small_config();
+        let layer_relu =
+            FavorPlusAttention::new(&cfg_relu).expect("should create FavorPlusAttention relu");
+        assert_eq!(
+            layer_exp.parameter_count(),
+            layer_relu.parameter_count(),
+            "exp and relu kernels should have same learnable parameter count"
+        );
+    }
+
+    #[test]
+    fn test_favor_attention_softmax_plus_kernel_param_count() {
+        // softmax+ kernel should also have the same linear parameter count
+        let mut cfg = small_config();
+        cfg.kernel_type = "softmax+".to_string();
+        let layer =
+            FavorPlusAttention::new(&cfg).expect("should create FavorPlusAttention softmax+");
+        assert!(
+            layer.parameter_count() > 0,
+            "softmax+ kernel should have positive param count"
+        );
+    }
+
+    // ── PerformerFeedForward tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_feed_forward_parameter_count() {
+        let cfg = small_config();
+        let ff = PerformerFeedForward::new(&cfg).expect("should create PerformerFeedForward");
+        // dense1: 16*32 + 32 = 544, dense2: 32*16 + 16 = 528 → total 1072
+        let expected = (cfg.hidden_size * cfg.intermediate_size + cfg.intermediate_size)
+            + (cfg.intermediate_size * cfg.hidden_size + cfg.hidden_size);
+        assert_eq!(
+            ff.parameter_count(),
+            expected,
+            "parameter count should match"
+        );
+    }
+
+    #[test]
+    fn test_feed_forward_gelu_activation() {
+        let mut cfg = small_config();
+        cfg.hidden_act = "gelu".to_string();
+        let ff = PerformerFeedForward::new(&cfg).expect("should create PerformerFeedForward");
+        let input_data = lcg_vec(cfg.hidden_size, 99);
+        let input =
+            trustformers_core::tensor::Tensor::from_vec(input_data, &[1, 1, cfg.hidden_size])
+                .expect("should build input tensor");
+        let output = ff.forward(input).expect("feed_forward gelu forward should succeed");
+        let shape = output.shape();
+        assert_eq!(
+            shape[shape.len() - 1],
+            cfg.hidden_size,
+            "output dim matches"
+        );
+    }
+
+    #[test]
+    fn test_feed_forward_silu_activation() {
+        let mut cfg = small_config();
+        cfg.hidden_act = "silu".to_string();
+        let ff = PerformerFeedForward::new(&cfg).expect("should create PerformerFeedForward");
+        let input_data = lcg_vec(cfg.hidden_size, 17);
+        let input =
+            trustformers_core::tensor::Tensor::from_vec(input_data, &[1, 1, cfg.hidden_size])
+                .expect("should build input tensor");
+        let output = ff.forward(input).expect("feed_forward silu forward should succeed");
+        let shape = output.shape();
+        assert_eq!(
+            shape[shape.len() - 1],
+            cfg.hidden_size,
+            "output dim matches silu"
+        );
+    }
+
+    // ── PerformerLayer tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_performer_layer_parameter_count_positive() {
+        let cfg = small_config();
+        let layer = PerformerLayer::new(&cfg).expect("should create PerformerLayer");
+        assert!(
+            layer.parameter_count() > 0,
+            "PerformerLayer should have positive parameter count"
+        );
+    }
+
+    #[test]
+    fn test_performer_layer_parameter_count_nonzero() {
+        // PerformerLayer wraps FavorPlusAttention + FFN + 2xLayerNorm
+        let cfg = small_config();
+        let layer = PerformerLayer::new(&cfg).expect("should create PerformerLayer");
+        assert!(
+            layer.parameter_count() > 0,
+            "PerformerLayer should have positive parameter count"
+        );
+    }
+
+    #[test]
+    fn test_performer_layer_device_matches_construction() {
+        let cfg = small_config();
+        let layer = PerformerLayer::new_with_device(&cfg, trustformers_core::device::Device::CPU)
+            .expect("should create PerformerLayer on CPU");
+        assert_eq!(format!("{:?}", layer.device()), "CPU");
+    }
+
+    // ── PerformerModel tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_performer_model_creation() {
+        let cfg = small_config();
+        let model = PerformerModel::new(cfg).expect("should create PerformerModel");
+        assert!(
+            model.num_parameters() > 0,
+            "PerformerModel should have parameters"
+        );
+    }
+
+    #[test]
+    fn test_performer_model_num_parameters_positive() {
+        let cfg = small_config();
+        let model = PerformerModel::new(cfg.clone()).expect("should create PerformerModel");
+        assert!(
+            model.num_parameters() > 0,
+            "PerformerModel should have positive parameter count"
+        );
+    }
+
+    #[test]
+    fn test_performer_model_get_config() {
+        let cfg = small_config();
+        let hidden = cfg.hidden_size;
+        let model = PerformerModel::new(cfg).expect("should create PerformerModel");
+        assert_eq!(
+            model.get_config().hidden_size,
+            hidden,
+            "get_config should return matching hidden_size"
+        );
+    }
+
+    #[test]
+    fn test_performer_model_device_cpu() {
+        let cfg = small_config();
+        let model = PerformerModel::new(cfg).expect("should create PerformerModel");
+        assert_eq!(format!("{:?}", model.device()), "CPU");
+    }
+
+    // ── PerformerForSequenceClassification tests ───────────────────────────
+
+    #[test]
+    fn test_seq_cls_creation_and_num_parameters() {
+        let cfg = small_config();
+        let num_labels = 3;
+        let model = PerformerForSequenceClassification::new(cfg.clone(), num_labels)
+            .expect("should create PerformerForSequenceClassification");
+        assert!(
+            model.num_parameters() > 0,
+            "should have positive parameter count"
+        );
+    }
+
+    #[test]
+    fn test_seq_cls_parameter_count_includes_classifier() {
+        let cfg = small_config();
+        let num_labels = 5;
+        let model = PerformerForSequenceClassification::new(cfg.clone(), num_labels)
+            .expect("should create PerformerForSequenceClassification");
+        // classifier: hidden_size * num_labels + num_labels (bias)
+        let classifier_params = cfg.hidden_size * num_labels + num_labels;
+        let total = model.num_parameters();
+        assert!(
+            total > classifier_params,
+            "total params should exceed classifier alone"
+        );
+    }
+
+    #[test]
+    fn test_seq_cls_device_cpu() {
+        let cfg = small_config();
+        let model = PerformerForSequenceClassification::new(cfg, 2)
+            .expect("should create PerformerForSequenceClassification");
+        assert_eq!(format!("{:?}", model.device()), "CPU");
+    }
+
+    // ── PerformerForMaskedLM tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_masked_lm_creation_and_device() {
+        let cfg = small_config();
+        let model =
+            PerformerForMaskedLM::new(cfg.clone()).expect("should create PerformerForMaskedLM");
+        assert_eq!(format!("{:?}", model.device()), "CPU");
+    }
+
+    #[test]
+    fn test_masked_lm_num_parameters_includes_mlm_head() {
+        let cfg = small_config();
+        let model =
+            PerformerForMaskedLM::new(cfg.clone()).expect("should create PerformerForMaskedLM");
+        // mlm_head: hidden_size * vocab_size + vocab_size
+        let mlm_head_params = cfg.hidden_size * cfg.vocab_size + cfg.vocab_size;
+        assert!(
+            model.num_parameters() > mlm_head_params,
+            "total params should exceed mlm_head alone"
+        );
+    }
+
+    #[test]
+    fn test_masked_lm_get_config_vocab_size() {
+        let cfg = small_config();
+        let vocab = cfg.vocab_size;
+        let model = PerformerForMaskedLM::new(cfg).expect("should create PerformerForMaskedLM");
+        assert_eq!(
+            model.get_config().vocab_size,
+            vocab,
+            "get_config should return matching vocab_size"
+        );
+    }
+
+    // ── num_random_features (approximation quality) tests ─────────────────
+
+    #[test]
+    fn test_more_random_features_better_approximation_quality() {
+        let mut cfg_low = small_config();
+        cfg_low.num_random_features = 4;
+        let mut cfg_high = small_config();
+        cfg_high.num_random_features = 8;
+        assert!(
+            cfg_high.approximation_quality() > cfg_low.approximation_quality(),
+            "more features should yield higher approximation quality ratio"
+        );
+    }
+
+    #[test]
+    fn test_linear_complexity_claim_features_lt_sequence() {
+        // FAVOR+ is O(nd) when m << n; verify that our config is in that regime
+        let cfg = small_config();
+        assert!(
+            cfg.num_random_features < cfg.max_position_embeddings,
+            "random features should be fewer than max_position_embeddings for linear complexity"
+        );
+    }
+
+    #[test]
+    fn test_num_random_features_validate_exceeds_2x_head_dim_fails() {
+        let mut cfg = small_config();
+        // head_dim = 8; 2*head_dim = 16; set features = 17
+        cfg.num_random_features = 17;
+        assert!(
+            cfg.validate().is_err(),
+            "validation should fail when num_random_features > 2 * head_dim"
+        );
+    }
+}

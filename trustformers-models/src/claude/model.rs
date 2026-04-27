@@ -594,3 +594,187 @@ fn sample_from_distribution(_probs: &Tensor, _top_p: f32) -> Result<Tensor> {
     // In practice, this would involve proper probability sampling
     Tensor::zeros(&[1, 1])
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::claude::config::ClaudeConfig;
+    use trustformers_core::{
+        tensor::Tensor,
+        traits::{Config, Model},
+    };
+
+    // ── Config tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_default_config_vocab_size() {
+        let cfg = ClaudeConfig::default();
+        assert_eq!(
+            cfg.vocab_size, 100352,
+            "Claude default vocab_size should be 100352"
+        );
+    }
+
+    #[test]
+    fn test_default_config_constitutional_ai_enabled() {
+        let cfg = ClaudeConfig::default();
+        assert!(
+            cfg.constitutional_ai,
+            "Constitutional AI should be enabled by default"
+        );
+    }
+
+    #[test]
+    fn test_default_harmlessness_weight() {
+        let cfg = ClaudeConfig::default();
+        assert!(
+            (cfg.harmlessness_weight - 1.0).abs() < 1e-4,
+            "default harmlessness_weight = 1.0"
+        );
+    }
+
+    #[test]
+    fn test_default_helpfulness_weight() {
+        let cfg = ClaudeConfig::default();
+        assert!(
+            (cfg.helpfulness_weight - 1.0).abs() < 1e-4,
+            "default helpfulness_weight = 1.0"
+        );
+    }
+
+    #[test]
+    fn test_default_honesty_weight() {
+        let cfg = ClaudeConfig::default();
+        assert!(
+            (cfg.honesty_weight - 1.0).abs() < 1e-4,
+            "default honesty_weight = 1.0"
+        );
+    }
+
+    #[test]
+    fn test_small_test_config_valid() {
+        ClaudeConfig::small_test_config()
+            .validate()
+            .expect("small_test_config should be valid");
+    }
+
+    #[test]
+    fn test_config_validate_negative_weight_fails() {
+        let mut cfg = ClaudeConfig::small_test_config();
+        cfg.harmlessness_weight = -0.1;
+        assert!(
+            cfg.validate().is_err(),
+            "negative constitutional weight should fail validation"
+        );
+    }
+
+    #[test]
+    fn test_head_dim_computation() {
+        let cfg = ClaudeConfig::small_test_config();
+        assert_eq!(
+            cfg.head_dim(),
+            cfg.hidden_size / cfg.num_attention_heads,
+            "head_dim = hidden_size / num_attention_heads"
+        );
+    }
+
+    #[test]
+    fn test_num_kv_heads_defaults_to_num_attention_heads() {
+        let mut cfg = ClaudeConfig::small_test_config();
+        cfg.num_key_value_heads = None;
+        assert_eq!(
+            cfg.num_kv_heads(),
+            cfg.num_attention_heads,
+            "when num_kv_heads is None, num_kv_heads() == num_attention_heads"
+        );
+    }
+
+    #[test]
+    fn test_num_query_groups_with_gqa() {
+        let cfg = ClaudeConfig::claude_3_haiku(); // has num_kv_heads = Some(8)
+        let expected = cfg.num_attention_heads / cfg.num_kv_heads();
+        assert_eq!(
+            cfg.num_query_groups(),
+            expected,
+            "num_query_groups = heads / kv_heads"
+        );
+    }
+
+    // ── Model construction tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_model_creation() {
+        let cfg = ClaudeConfig::small_test_config();
+        ClaudeModel::new(cfg).expect("ClaudeModel creation should succeed");
+    }
+
+    #[test]
+    fn test_model_parameter_count_nonzero() {
+        let cfg = ClaudeConfig::small_test_config();
+        let model = ClaudeModel::new(cfg).expect("model creation should succeed");
+        assert!(
+            model.num_parameters() > 0,
+            "model must have non-zero parameters"
+        );
+    }
+
+    // ── Constitutional AI tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_constitutional_ai_apply_preserves_shape() {
+        let cfg = ClaudeConfig::small_test_config();
+        let model = ClaudeModel::new(cfg.clone()).expect("model creation should succeed");
+        let hidden = Tensor::from_vec(vec![0.5_f32; cfg.hidden_size], &[cfg.hidden_size])
+            .expect("tensor creation should succeed");
+        let result = model
+            .apply_constitutional_ai(&hidden)
+            .expect("constitutional AI should succeed");
+        assert_eq!(result.shape(), hidden.shape(), "shape must be preserved");
+    }
+
+    #[test]
+    fn test_constitutional_ai_disabled_returns_unchanged() {
+        let mut cfg = ClaudeConfig::small_test_config();
+        cfg.constitutional_ai = false;
+        let model = ClaudeModel::new(cfg.clone()).expect("model creation should succeed");
+        let hidden = Tensor::from_vec(vec![1.0_f32; cfg.hidden_size], &[cfg.hidden_size])
+            .expect("tensor creation should succeed");
+        let result = model.apply_constitutional_ai(&hidden).expect("should succeed");
+        let orig_vals = hidden.to_vec_f32().expect("to_vec_f32 should succeed");
+        let result_vals = result.to_vec_f32().expect("to_vec_f32 should succeed");
+        for (o, r) in orig_vals.iter().zip(result_vals.iter()) {
+            assert!(
+                (o - r).abs() < 1e-5,
+                "disabled CAI must return input unchanged"
+            );
+        }
+    }
+
+    // ── Claude variant configs ────────────────────────────────────────────────
+
+    #[test]
+    fn test_claude_3_haiku_smaller_than_opus() {
+        let haiku = ClaudeConfig::claude_3_haiku();
+        let opus = ClaudeConfig::claude_3_opus();
+        assert!(
+            haiku.hidden_size < opus.hidden_size,
+            "Haiku should have smaller hidden_size than Opus"
+        );
+    }
+
+    #[test]
+    fn test_from_pretrained_name_valid() {
+        let cfg = ClaudeConfig::from_pretrained_name("claude-2");
+        assert!(cfg.is_some(), "claude-2 should be a known pretrained name");
+    }
+
+    #[test]
+    fn test_from_pretrained_name_unknown_returns_none() {
+        let cfg = ClaudeConfig::from_pretrained_name("unknown-model-xyz");
+        assert!(cfg.is_none(), "unknown model name should return None");
+    }
+}

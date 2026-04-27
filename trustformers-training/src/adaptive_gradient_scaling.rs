@@ -594,4 +594,148 @@ mod tests {
         assert_eq!(config.history_window, 100);
         assert_eq!(config.target_norm, 1.0);
     }
+
+    // ── Additional tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_config_default_adaptation_rate_positive() {
+        let cfg = AdaptiveGradientScalingConfig::default();
+        assert!(cfg.adaptation_rate > 0.0);
+    }
+
+    #[test]
+    fn test_config_default_scale_bounds() {
+        let cfg = AdaptiveGradientScalingConfig::default();
+        assert!(cfg.min_scale < cfg.max_scale);
+        assert!(cfg.min_scale > 0.0);
+    }
+
+    #[test]
+    fn test_config_default_momentum_range() {
+        let cfg = AdaptiveGradientScalingConfig::default();
+        assert!(cfg.momentum > 0.0 && cfg.momentum < 1.0);
+    }
+
+    #[test]
+    fn test_layer_gradient_stats_initial_zero_norm() {
+        let stats = LayerGradientStats::new("init_layer".to_string(), 10);
+        assert!((stats.current_norm).abs() < 1e-6);
+        assert_eq!(stats.update_count, 0);
+    }
+
+    #[test]
+    fn test_layer_gradient_stats_scale_factor_starts_one() {
+        let stats = LayerGradientStats::new("layer".to_string(), 10);
+        assert!((stats.scale_factor - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_layer_gradient_stats_ema_update_monotone() {
+        let mut stats = LayerGradientStats::new("ema_test".to_string(), 10);
+        // First update: EMA = norm
+        stats.update(2.0, 0.9);
+        assert!((stats.ema_norm - 2.0).abs() < 1e-5);
+        // Second update: EMA moves toward new value
+        stats.update(1.0, 0.9);
+        // EMA = 0.9 * 2.0 + 0.1 * 1.0 = 1.9
+        assert!((stats.ema_norm - 1.9).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_layer_gradient_stats_no_outlier_for_normal_values() {
+        let mut stats = LayerGradientStats::new("no_outlier".to_string(), 20);
+        let mut s = 42u64;
+        for _ in 0..15 {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let norm = (s % 1000) as f32 / 1000.0 + 0.5; // 0.5 to 1.5
+            stats.update(norm, 0.9);
+        }
+        // All values close to 1.0, no outlier with low threshold
+        let is_out = stats.is_outlier(10.0);
+        assert!(
+            !is_out,
+            "values near 1.0 should not be outlier with threshold=10"
+        );
+    }
+
+    #[test]
+    fn test_scaler_step_count_increments() {
+        let cfg = AdaptiveGradientScalingConfig::default();
+        let mut scaler = AdaptiveGradientScaler::new(cfg);
+        let mut gradients = HashMap::new();
+        gradients.insert(
+            "l1".to_string(),
+            Tensor::from_data(vec![1.0, 2.0], &[2]).expect("tensor failed"),
+        );
+        scaler.process_gradients(&mut gradients).unwrap_or(GradientScalingResult {
+            global_scale: 1.0,
+            layer_scales: HashMap::new(),
+            outliers_detected: 0,
+            gradient_norm_before: 0.0,
+            gradient_norm_after: 0.0,
+            stability_score: 1.0,
+        });
+        assert_eq!(scaler.step_count, 1);
+    }
+
+    #[test]
+    fn test_stability_score_is_finite() {
+        let cfg = AdaptiveGradientScalingConfig::default();
+        let scaler = AdaptiveGradientScaler::new(cfg);
+        let score = scaler.compute_stability_score();
+        assert!(score.is_finite());
+    }
+
+    #[test]
+    fn test_stability_trend_variants() {
+        let _ = StabilityTrend::Improving;
+        let _ = StabilityTrend::Stable;
+        let _ = StabilityTrend::Deteriorating;
+        let _ = StabilityTrend::Unknown;
+    }
+
+    #[test]
+    fn test_gradient_scaling_result_structure() {
+        let result = GradientScalingResult {
+            global_scale: 1.5,
+            layer_scales: HashMap::new(),
+            outliers_detected: 0,
+            gradient_norm_before: 2.0,
+            gradient_norm_after: 1.5,
+            stability_score: 0.8,
+        };
+        assert!(result.global_scale > 0.0);
+        assert!(result.stability_score >= 0.0 && result.stability_score <= 1.0);
+    }
+
+    #[test]
+    fn test_adaptive_scaler_statistics_initial_step_count() {
+        let cfg = AdaptiveGradientScalingConfig::default();
+        let scaler = AdaptiveGradientScaler::new(cfg);
+        let stats = scaler.get_statistics();
+        assert_eq!(stats.step_count, 0);
+    }
+
+    #[test]
+    fn test_config_warmup_steps_non_negative() {
+        let cfg = AdaptiveGradientScalingConfig::default();
+        // warmup_steps should be sensible
+        assert!(cfg.warmup_steps > 0);
+    }
+
+    #[test]
+    fn test_outlier_detection_with_extreme_norm() {
+        let mut stats = LayerGradientStats::new("outlier_test".to_string(), 20);
+        // All normal values first
+        for _ in 0..15 {
+            stats.update(1.0, 0.9);
+        }
+        // Add an extreme outlier
+        stats.update(1000.0, 0.9);
+        // With std threshold, should be detected as outlier
+        assert!(
+            stats.is_outlier(2.0),
+            "1000.0 should be detected as outlier"
+        );
+    }
 }

@@ -84,6 +84,9 @@
 #![allow(clippy::vec_init_then_push)]
 #![allow(clippy::ptr_arg)]
 
+#[cfg(test)]
+mod trainer_tests;
+
 pub mod adaptive_gradient_scaling;
 pub mod adaptive_learning_rate;
 pub mod advanced_stability_monitor;

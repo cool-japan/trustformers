@@ -523,7 +523,9 @@ impl MemoryReplay {
         self.store_gradient(gradients)?;
 
         // Replay from memory
-        if self.step_count % self.config.replay_frequency == 0 && !self.memory_buffer.is_empty() {
+        if self.step_count.is_multiple_of(self.config.replay_frequency)
+            && !self.memory_buffer.is_empty()
+        {
             self.replay_step()?;
         }
 

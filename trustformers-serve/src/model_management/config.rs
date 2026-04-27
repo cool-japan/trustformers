@@ -248,3 +248,64 @@ impl Default for UnloadingStrategy {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_model_management_config_default() {
+        let config = ModelManagementConfig::default();
+        assert_eq!(config.max_loaded_models, 5);
+        assert_eq!(config.max_versions_per_model, 3);
+        assert_eq!(config.load_timeout, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn test_canary_config_default() {
+        let config = CanaryConfig::default();
+        assert!((config.default_percentage - 5.0).abs() < 1e-6);
+        assert!(config.min_percentage < config.max_percentage);
+        assert!(config.auto_rollback);
+        assert!((config.success_threshold - 0.95).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_blue_green_config_default() {
+        let config = BlueGreenConfig::default();
+        assert_eq!(config.warmup_requests, 10);
+        assert_eq!(config.validation_checks.len(), 2);
+        assert!(config.keep_old_version);
+        assert!(config.auto_rollback);
+    }
+
+    #[test]
+    fn test_ab_test_config_default() {
+        let config = ABTestConfig::default();
+        assert_eq!(config.max_variants, 4);
+        assert!((config.default_traffic_split - 0.5).abs() < 1e-6);
+        assert_eq!(config.min_sample_size, 1000);
+        assert_eq!(config.tracked_metrics.len(), 3);
+    }
+
+    #[test]
+    fn test_resource_limits_default() {
+        let limits = ResourceLimits::default();
+        assert!(limits.max_memory_bytes > 0);
+        assert!(limits.max_gpu_memory_bytes.is_some());
+        assert!(limits.max_cpu_cores.is_none());
+        assert!((limits.memory_safety_buffer - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_loading_strategy_default() {
+        let strategy = LoadingStrategy::default();
+        assert_eq!(strategy, LoadingStrategy::Lazy);
+    }
+
+    #[test]
+    fn test_unloading_strategy_default() {
+        let strategy = UnloadingStrategy::default();
+        assert!(matches!(strategy, UnloadingStrategy::Graceful { .. }));
+    }
+}

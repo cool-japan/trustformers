@@ -21,13 +21,17 @@ fn blas_sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize)
     use oxiblas_blas::level3::gemm;
     use oxiblas_matrix::{MatMut, MatRef};
 
-    // Create matrix views from slices (row-major layout)
-    let a_mat = MatRef::new(a.as_ptr(), m, k, k);
-    let b_mat = MatRef::new(b.as_ptr(), k, n, n);
-    let c_mat = MatMut::new(c.as_mut_ptr(), m, n, n);
+    // Bridge row-major → col-major via Cᵀ = Bᵀ·Aᵀ identity:
+    // Row-major A(m×k) reinterpreted as col-major is Aᵀ(k×m), lda=k.
+    // Row-major B(k×n) reinterpreted as col-major is Bᵀ(n×k), lda=n.
+    // Row-major C(m×n) reinterpreted as col-major is Cᵀ(n×m), lda=n.
+    // gemm(Bᵀ, Aᵀ) → Cᵀ = Bᵀ·Aᵀ = (A·B)ᵀ, so C buffer holds A·B. ✓
+    let a_t = MatRef::new(a.as_ptr(), k, m, k);
+    let b_t = MatRef::new(b.as_ptr(), n, k, n);
+    let c_t = MatMut::new(c.as_mut_ptr(), n, m, n);
 
-    // GEMM: C = 1.0 * A * B + 0.0 * C
-    gemm(1.0, a_mat, b_mat, 0.0, c_mat);
+    // GEMM: Cᵀ = 1.0 * Bᵀ * Aᵀ + 0.0 * Cᵀ
+    gemm(1.0, b_t, a_t, 0.0, c_t);
 }
 
 /// Direct BLAS GEMM using OxiBLAS for f64
@@ -37,13 +41,17 @@ fn blas_dgemm(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize, n: usize)
     use oxiblas_blas::level3::gemm;
     use oxiblas_matrix::{MatMut, MatRef};
 
-    // Create matrix views from slices (row-major layout)
-    let a_mat = MatRef::new(a.as_ptr(), m, k, k);
-    let b_mat = MatRef::new(b.as_ptr(), k, n, n);
-    let c_mat = MatMut::new(c.as_mut_ptr(), m, n, n);
+    // Bridge row-major → col-major via Cᵀ = Bᵀ·Aᵀ identity:
+    // Row-major A(m×k) reinterpreted as col-major is Aᵀ(k×m), lda=k.
+    // Row-major B(k×n) reinterpreted as col-major is Bᵀ(n×k), lda=n.
+    // Row-major C(m×n) reinterpreted as col-major is Cᵀ(n×m), lda=n.
+    // gemm(Bᵀ, Aᵀ) → Cᵀ = Bᵀ·Aᵀ = (A·B)ᵀ, so C buffer holds A·B. ✓
+    let a_t = MatRef::new(a.as_ptr(), k, m, k);
+    let b_t = MatRef::new(b.as_ptr(), n, k, n);
+    let c_t = MatMut::new(c.as_mut_ptr(), n, m, n);
 
-    // GEMM: C = 1.0 * A * B + 0.0 * C
-    gemm(1.0, a_mat, b_mat, 0.0, c_mat);
+    // GEMM: Cᵀ = 1.0 * Bᵀ * Aᵀ + 0.0 * Cᵀ
+    gemm(1.0, b_t, a_t, 0.0, c_t);
 }
 
 /// Fallback for non-macOS: use scirs2-core SIMD GEMM for f32
@@ -1059,5 +1067,174 @@ impl Layer for Linear {
         } else {
             Ok(output)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::errors::Result;
+
+    #[test]
+    fn test_linear_creation_with_bias() {
+        let linear = Linear::new(4, 3, true);
+        assert_eq!(linear.weight().shape(), vec![3, 4]);
+        assert!(linear.bias().is_some());
+    }
+
+    #[test]
+    fn test_linear_creation_without_bias() {
+        let linear = Linear::new(4, 3, false);
+        assert_eq!(linear.weight().shape(), vec![3, 4]);
+        assert!(linear.bias().is_none());
+    }
+
+    #[test]
+    fn test_linear_device_default_cpu() {
+        let linear = Linear::new(2, 2, true);
+        assert_eq!(linear.device(), Device::CPU);
+    }
+
+    #[test]
+    fn test_linear_to_device() {
+        let linear = Linear::new(2, 2, true);
+        let moved = linear.to_device(Device::CPU);
+        assert_eq!(moved.device(), Device::CPU);
+    }
+
+    #[test]
+    fn test_linear_parameter_count_with_bias() {
+        let linear = Linear::new(4, 3, true);
+        // 4*3 weights + 3 bias = 15
+        assert_eq!(linear.parameter_count(), 15);
+    }
+
+    #[test]
+    fn test_linear_parameter_count_without_bias() {
+        let linear = Linear::new(4, 3, false);
+        // 4*3 weights = 12
+        assert_eq!(linear.parameter_count(), 12);
+    }
+
+    #[test]
+    fn test_linear_set_weight() -> Result<()> {
+        let mut linear = Linear::new(3, 2, true);
+        let new_weight = Tensor::ones(&[2, 3])?;
+        linear.set_weight(new_weight)?;
+        assert_eq!(linear.weight().shape(), vec![2, 3]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_linear_set_bias() -> Result<()> {
+        let mut linear = Linear::new(3, 2, false);
+        assert!(linear.bias().is_none());
+        let new_bias = Tensor::zeros(&[2])?;
+        linear.set_bias(new_bias)?;
+        assert!(linear.bias().is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn test_linear_forward_2d() -> Result<()> {
+        let mut linear = Linear::new(3, 2, false);
+        // Set weight to ones for easy verification
+        let weight = Tensor::ones(&[2, 3])?;
+        linear.set_weight(weight)?;
+        let input = Tensor::ones(&[4, 3])?;
+        let output = linear.forward(input)?;
+        assert_eq!(output.shape(), vec![4, 2]);
+        // Each output should be sum of 3 ones = 3.0
+        let data = output.data()?;
+        for val in &data {
+            assert!((val - 3.0).abs() < 1e-3);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_linear_forward_with_bias() -> Result<()> {
+        let mut linear = Linear::new(3, 2, true);
+        let weight = Tensor::ones(&[2, 3])?;
+        let bias = Tensor::full_with_shape(&[2], 1.0)?;
+        linear.set_weight(weight)?;
+        linear.set_bias(bias)?;
+        let input = Tensor::ones(&[1, 3])?;
+        let output = linear.forward(input)?;
+        assert_eq!(output.shape(), vec![1, 2]);
+        // Each output = 3.0 (matmul) + 1.0 (bias) = 4.0
+        let data = output.data()?;
+        for val in &data {
+            assert!((val - 4.0).abs() < 1e-3);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_linear_forward_3d() -> Result<()> {
+        let mut linear = Linear::new(4, 2, false);
+        let weight = Tensor::ones(&[2, 4])?;
+        linear.set_weight(weight)?;
+        let input = Tensor::ones(&[2, 3, 4])?;
+        let output = linear.forward(input)?;
+        assert_eq!(output.shape(), vec![2, 3, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_linear_weight_ref() {
+        let linear = Linear::new(5, 3, true);
+        let weight = linear.weight();
+        assert_eq!(weight.shape(), vec![3, 5]);
+    }
+
+    #[test]
+    fn test_linear_bias_ref() {
+        let linear = Linear::new(5, 3, true);
+        if let Some(bias) = linear.bias() {
+            assert_eq!(bias.shape(), vec![3]);
+        }
+    }
+
+    #[test]
+    fn test_linear_new_with_device() {
+        let linear = Linear::new_with_device(4, 2, true, Device::CPU);
+        assert_eq!(linear.device(), Device::CPU);
+        assert_eq!(linear.weight().shape(), vec![2, 4]);
+    }
+
+    #[test]
+    fn test_linear_forward_zero_weight() -> Result<()> {
+        let mut linear = Linear::new(3, 2, false);
+        let weight = Tensor::zeros(&[2, 3])?;
+        linear.set_weight(weight)?;
+        let input = Tensor::from_data(vec![1.0, 2.0, 3.0], &[1, 3])?;
+        let output = linear.forward(input)?;
+        let data = output.data()?;
+        for val in &data {
+            assert!(val.abs() < 1e-5);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_linear_forward_identity_like() -> Result<()> {
+        let mut linear = Linear::new(2, 2, false);
+        let weight = Tensor::eye_f32(2)?;
+        linear.set_weight(weight)?;
+        let input = Tensor::from_data(vec![3.0, 7.0], &[1, 2])?;
+        let output = linear.forward(input)?;
+        let data = output.data()?;
+        assert!((data[0] - 3.0).abs() < 1e-3);
+        assert!((data[1] - 7.0).abs() < 1e-3);
+        Ok(())
+    }
+
+    #[test]
+    fn test_linear_large_layer() {
+        let linear = Linear::new(768, 3072, true);
+        assert_eq!(linear.weight().shape(), vec![3072, 768]);
+        // 768 * 3072 + 3072 = 2362368
+        assert_eq!(linear.parameter_count(), 768 * 3072 + 3072);
     }
 }

@@ -550,3 +550,225 @@ impl Default for ProcessorResource {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_cpu_resource(
+        utilization: f32,
+        available_mem: usize,
+        total_mem: usize,
+    ) -> ProcessorResource {
+        ProcessorResource {
+            processor_type: ProcessorType::CPU,
+            id: 0,
+            utilization,
+            available_memory: available_mem,
+            total_memory: total_mem,
+            power_efficiency_rating: 0.8,
+            status: ProcessorStatus::Available,
+            ..ProcessorResource::default()
+        }
+    }
+
+    // --- ComputeTask tests ---
+
+    #[test]
+    fn test_compute_task_new_defaults() {
+        let task = ComputeTask::new("task_1".to_string(), TaskType::Inference);
+        assert_eq!(task.id, "task_1");
+        assert_eq!(task.priority, TaskPriority::Normal);
+        assert!(task.preferred_processor.is_none());
+        assert!(task.deadline.is_none());
+        assert!(task.batch_size.is_none());
+    }
+
+    #[test]
+    fn test_compute_task_is_gpu_suitable_true_for_inference() {
+        let task = ComputeTask {
+            task_type: TaskType::Inference,
+            compute_operations: 5000,
+            parallelizability: 0.8,
+            ..ComputeTask::new("t".to_string(), TaskType::Inference)
+        };
+        assert!(task.is_gpu_suitable());
+    }
+
+    #[test]
+    fn test_compute_task_is_gpu_suitable_false_low_ops() {
+        let task = ComputeTask {
+            task_type: TaskType::Inference,
+            compute_operations: 100, // Below threshold
+            parallelizability: 0.9,
+            ..ComputeTask::new("t".to_string(), TaskType::Inference)
+        };
+        assert!(!task.is_gpu_suitable());
+    }
+
+    #[test]
+    fn test_compute_task_is_gpu_suitable_false_low_parallelizability() {
+        let task = ComputeTask {
+            task_type: TaskType::Inference,
+            compute_operations: 5000,
+            parallelizability: 0.1, // Below threshold of 0.3
+            ..ComputeTask::new("t".to_string(), TaskType::Inference)
+        };
+        assert!(!task.is_gpu_suitable());
+    }
+
+    #[test]
+    fn test_compute_task_is_gpu_suitable_false_text_processing() {
+        let task = ComputeTask {
+            task_type: TaskType::TextProcessing,
+            compute_operations: 5000,
+            parallelizability: 0.8,
+            ..ComputeTask::new("t".to_string(), TaskType::TextProcessing)
+        };
+        assert!(!task.is_gpu_suitable());
+    }
+
+    #[test]
+    fn test_compute_task_memory_efficiency_zero_input() {
+        let task = ComputeTask::new("t".to_string(), TaskType::DataProcessing);
+        let eff = task.memory_efficiency();
+        assert!((eff - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_compute_task_memory_efficiency_with_io() {
+        let task = ComputeTask {
+            input_size: 100,
+            output_size: 100,
+            memory_required: 200,
+            ..ComputeTask::new("t".to_string(), TaskType::DataProcessing)
+        };
+        let eff = task.memory_efficiency();
+        // ratio = 200/200 = 1.0, efficiency = 1/(1+1) = 0.5
+        assert!((eff - 0.5).abs() < 1e-5);
+    }
+
+    // --- ProcessorResource tests ---
+
+    #[test]
+    fn test_processor_resource_is_available_low_utilization() {
+        let res = make_cpu_resource(0.5, 4 * 1024 * 1024 * 1024, 8 * 1024 * 1024 * 1024);
+        assert!(res.is_available());
+    }
+
+    #[test]
+    fn test_processor_resource_not_available_high_utilization() {
+        let res = make_cpu_resource(0.95, 4 * 1024 * 1024 * 1024, 8 * 1024 * 1024 * 1024);
+        assert!(!res.is_available());
+    }
+
+    #[test]
+    fn test_processor_resource_not_available_when_busy() {
+        let res = ProcessorResource {
+            status: ProcessorStatus::Busy,
+            utilization: 0.5,
+            ..make_cpu_resource(0.5, 1024, 1024)
+        };
+        assert!(!res.is_available());
+    }
+
+    #[test]
+    fn test_processor_resource_efficiency_score_range() {
+        let res = ProcessorResource {
+            utilization: 0.4,
+            available_memory: 4 * 1024,
+            total_memory: 8 * 1024,
+            power_efficiency_rating: 0.8,
+            ..ProcessorResource::default()
+        };
+        let score = res.efficiency_score();
+        assert!((0.0..=1.0).contains(&score));
+    }
+
+    #[test]
+    fn test_processor_resource_default_is_cpu() {
+        let res = ProcessorResource::default();
+        assert_eq!(res.processor_type, ProcessorType::CPU);
+        assert_eq!(res.id, 0);
+        assert!((res.utilization - 0.0).abs() < 1e-6);
+    }
+
+    // --- TaskPriority tests ---
+
+    #[test]
+    fn test_task_priority_ordering() {
+        assert!(TaskPriority::Critical > TaskPriority::High);
+        assert!(TaskPriority::High > TaskPriority::Normal);
+        assert!(TaskPriority::Normal > TaskPriority::Low);
+    }
+
+    #[test]
+    fn test_task_priority_equality() {
+        assert_eq!(TaskPriority::Normal, TaskPriority::Normal);
+        assert_ne!(TaskPriority::High, TaskPriority::Low);
+    }
+
+    // --- ProcessorType tests ---
+
+    #[test]
+    fn test_processor_type_cpu_gpu_not_equal() {
+        assert_ne!(ProcessorType::CPU, ProcessorType::GPU);
+    }
+
+    #[test]
+    fn test_processor_type_copy() {
+        let pt = ProcessorType::GPU;
+        let pt2 = pt;
+        assert_eq!(pt, pt2);
+    }
+
+    // --- ExecutionStatus tests ---
+
+    #[test]
+    fn test_execution_status_variants_exist() {
+        let _ = ExecutionStatus::Pending;
+        let _ = ExecutionStatus::Running;
+        let _ = ExecutionStatus::Completed;
+        let _ = ExecutionStatus::Failed;
+        let _ = ExecutionStatus::Cancelled;
+        let _ = ExecutionStatus::TimedOut;
+    }
+
+    // --- MemoryPattern tests ---
+
+    #[test]
+    fn test_memory_pattern_strided_carries_value() {
+        let pattern = MemoryPattern::Strided(64);
+        match pattern {
+            MemoryPattern::Strided(stride) => assert_eq!(stride, 64),
+            _ => panic!("Expected Strided"),
+        }
+    }
+
+    // --- TaskType tests ---
+
+    #[test]
+    fn test_task_type_custom_carries_string() {
+        let t = TaskType::Custom("special_task".to_string());
+        match t {
+            TaskType::Custom(s) => assert_eq!(s, "special_task"),
+            _ => panic!("Expected Custom"),
+        }
+    }
+
+    // --- PerformanceCharacteristics tests ---
+
+    #[test]
+    fn test_performance_characteristics_construction() {
+        let perf = PerformanceCharacteristics {
+            ops_per_second: 1_000_000.0,
+            memory_bandwidth: 256.0,
+            latency_per_op: 0.001,
+            energy_efficiency: 50.0,
+            parallel_efficiency: 0.9,
+            cache_miss_rate: 0.02,
+        };
+        assert!((perf.ops_per_second - 1_000_000.0).abs() < 1.0);
+        assert!((perf.parallel_efficiency - 0.9).abs() < 1e-6);
+    }
+}

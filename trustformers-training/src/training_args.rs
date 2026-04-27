@@ -251,3 +251,230 @@ impl TrainingArguments {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn default_args() -> TrainingArguments {
+        TrainingArguments::new("/tmp/trustformers_test_output")
+    }
+
+    // ──────────────────── Default values ────────────────────
+
+    #[test]
+    fn test_default_learning_rate() {
+        let args = default_args();
+        assert!((args.learning_rate - 5e-5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_default_num_epochs() {
+        let args = default_args();
+        assert!((args.num_train_epochs - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_default_batch_size() {
+        let args = default_args();
+        assert_eq!(args.per_device_train_batch_size, 8);
+        assert_eq!(args.per_device_eval_batch_size, 8);
+    }
+
+    #[test]
+    fn test_default_gradient_accumulation() {
+        let args = default_args();
+        assert_eq!(args.gradient_accumulation_steps, 1);
+    }
+
+    #[test]
+    fn test_default_max_grad_norm() {
+        let args = default_args();
+        assert!((args.max_grad_norm - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_default_evaluation_strategy_is_no() {
+        let args = default_args();
+        assert_eq!(args.evaluation_strategy, EvaluationStrategy::No);
+    }
+
+    #[test]
+    fn test_default_save_strategy_is_steps() {
+        let args = default_args();
+        assert_eq!(args.save_strategy, SaveStrategy::Steps);
+    }
+
+    #[test]
+    fn test_new_sets_output_dir() {
+        let args = TrainingArguments::new("/tmp/my_output_dir");
+        assert_eq!(args.output_dir, PathBuf::from("/tmp/my_output_dir"));
+    }
+
+    // ──────────────────── get_total_steps ────────────────────
+
+    #[test]
+    fn test_get_total_steps_uses_max_steps_when_set() {
+        let mut args = default_args();
+        args.max_steps = Some(100);
+        let total = args.get_total_steps(1000);
+        assert_eq!(total, 100);
+    }
+
+    #[test]
+    fn test_get_total_steps_from_epochs() {
+        let args = default_args(); // 3 epochs, batch_size 8
+                                   // 100 examples / 8 = 13 steps/epoch (ceil), 13 * 3 = 39
+        let total = args.get_total_steps(100);
+        assert_eq!(total, 39, "expected 39 total steps, got {}", total);
+    }
+
+    #[test]
+    fn test_get_total_steps_exact_division() {
+        let args = default_args(); // 3 epochs, batch_size 8
+                                   // 16 examples / 8 = 2 steps/epoch; 2 * 3 = 6
+        let total = args.get_total_steps(16);
+        assert_eq!(total, 6);
+    }
+
+    // ──────────────────── get_effective_batch_size ────────────────────
+
+    #[test]
+    fn test_get_effective_batch_size_no_accumulation() {
+        let args = default_args();
+        assert_eq!(args.get_effective_batch_size(), 8);
+    }
+
+    #[test]
+    fn test_get_effective_batch_size_with_accumulation() {
+        let mut args = default_args();
+        args.gradient_accumulation_steps = 4;
+        assert_eq!(args.get_effective_batch_size(), 32);
+    }
+
+    // ──────────────────── get_warmup_steps ────────────────────
+
+    #[test]
+    fn test_get_warmup_steps_explicit_steps() {
+        let mut args = default_args();
+        args.warmup_steps = 50;
+        args.warmup_ratio = 0.1; // should be ignored
+        let ws = args.get_warmup_steps(1000);
+        assert_eq!(ws, 50);
+    }
+
+    #[test]
+    fn test_get_warmup_steps_from_ratio() {
+        let mut args = default_args();
+        args.warmup_steps = 0;
+        args.warmup_ratio = 0.1;
+        let ws = args.get_warmup_steps(1000);
+        assert_eq!(ws, 100);
+    }
+
+    #[test]
+    fn test_get_warmup_steps_zero_by_default() {
+        let args = default_args();
+        let ws = args.get_warmup_steps(500);
+        assert_eq!(ws, 0);
+    }
+
+    // ──────────────────── validate ────────────────────
+
+    #[test]
+    fn test_validate_valid_defaults() {
+        let args = default_args();
+        assert!(args.validate().is_ok(), "default args should be valid");
+    }
+
+    #[test]
+    fn test_validate_zero_batch_size_fails() {
+        let mut args = default_args();
+        args.per_device_train_batch_size = 0;
+        assert!(
+            args.validate().is_err(),
+            "zero batch size should be invalid"
+        );
+    }
+
+    #[test]
+    fn test_validate_zero_eval_batch_size_fails() {
+        let mut args = default_args();
+        args.per_device_eval_batch_size = 0;
+        assert!(
+            args.validate().is_err(),
+            "zero eval batch size should be invalid"
+        );
+    }
+
+    #[test]
+    fn test_validate_zero_gradient_accumulation_fails() {
+        let mut args = default_args();
+        args.gradient_accumulation_steps = 0;
+        assert!(
+            args.validate().is_err(),
+            "zero gradient_accumulation_steps should be invalid"
+        );
+    }
+
+    #[test]
+    fn test_validate_zero_learning_rate_fails() {
+        let mut args = default_args();
+        args.learning_rate = 0.0;
+        assert!(
+            args.validate().is_err(),
+            "zero learning rate should be invalid"
+        );
+    }
+
+    #[test]
+    fn test_validate_negative_learning_rate_fails() {
+        let mut args = default_args();
+        args.learning_rate = -0.001;
+        assert!(
+            args.validate().is_err(),
+            "negative learning rate should be invalid"
+        );
+    }
+
+    #[test]
+    fn test_validate_max_steps_overrides_zero_epochs() {
+        let mut args = default_args();
+        args.num_train_epochs = 0.0;
+        args.max_steps = Some(100);
+        assert!(
+            args.validate().is_ok(),
+            "max_steps should compensate for 0 epochs"
+        );
+    }
+
+    #[test]
+    fn test_validate_zero_epochs_no_max_steps_fails() {
+        let mut args = default_args();
+        args.num_train_epochs = 0.0;
+        args.max_steps = None;
+        assert!(
+            args.validate().is_err(),
+            "zero epochs without max_steps should fail"
+        );
+    }
+
+    // ──────────────────── Enums ────────────────────
+
+    #[test]
+    fn test_evaluation_strategy_equality() {
+        assert_eq!(EvaluationStrategy::No, EvaluationStrategy::No);
+        assert_eq!(EvaluationStrategy::Steps, EvaluationStrategy::Steps);
+        assert_eq!(EvaluationStrategy::Epoch, EvaluationStrategy::Epoch);
+        assert_ne!(EvaluationStrategy::No, EvaluationStrategy::Epoch);
+    }
+
+    #[test]
+    fn test_save_strategy_equality() {
+        assert_eq!(SaveStrategy::No, SaveStrategy::No);
+        assert_eq!(SaveStrategy::Steps, SaveStrategy::Steps);
+        assert_eq!(SaveStrategy::Epoch, SaveStrategy::Epoch);
+        assert_ne!(SaveStrategy::No, SaveStrategy::Steps);
+    }
+}

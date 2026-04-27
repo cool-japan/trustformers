@@ -747,7 +747,7 @@ impl TrainingOrchestrator {
         let filtered_jobs: Vec<_> = jobs
             .values()
             .filter(|job| {
-                status_filter.as_ref().map_or(true, |status| {
+                status_filter.as_ref().is_none_or(|status| {
                     std::mem::discriminant(&job.status) == std::mem::discriminant(status)
                 })
             })
@@ -1038,5 +1038,254 @@ mod tests {
 
         let retrieved_job = orchestrator.get_job(&job_id).expect("operation failed in test");
         assert_eq!(retrieved_job.status, JobStatus::Cancelled);
+    }
+
+    // ── Helper ────────────────────────────────────────────────────────────────
+
+    fn make_test_job(name: &str) -> TrainingJob {
+        TrainingJob {
+            job_id: String::new(),
+            job_name: name.to_string(),
+            model_config: ModelConfig {
+                model_type: "transformer".to_string(),
+                model_size: "tiny".to_string(),
+                architecture_params: HashMap::new(),
+                pretrained_model: None,
+            },
+            training_config: TrainingJobConfig {
+                dataset_path: "/data".to_string(),
+                validation_split: 0.1,
+                batch_size: 8,
+                learning_rate: 1e-4,
+                epochs: 1,
+                optimizer: "AdamW".to_string(),
+                loss_function: "CrossEntropy".to_string(),
+                regularization: HashMap::new(),
+                early_stopping: None,
+                checkpointing: CheckpointConfig {
+                    save_frequency: 1,
+                    keep_best_only: true,
+                    save_weights_only: false,
+                    monitor_metric: "loss".to_string(),
+                },
+            },
+            resource_requirements: ResourceRequirements {
+                cpu_cores: 2,
+                memory_gb: 4,
+                gpu_count: 0,
+                gpu_memory_gb: 0,
+                storage_gb: 10,
+                network_bandwidth_mbps: None,
+                node_requirements: vec![],
+            },
+            priority: JobPriority::Normal,
+            status: JobStatus::Pending,
+            created_at: 0,
+            started_at: None,
+            completed_at: None,
+            error_message: None,
+            progress: 0.0,
+            checkpoints: vec![],
+            metrics: TrainingMetrics {
+                current_epoch: 0,
+                loss: 0.0,
+                accuracy: 0.0,
+                validation_loss: 0.0,
+                validation_accuracy: 0.0,
+                learning_rate: 1e-4,
+                throughput: 0.0,
+                custom_metrics: HashMap::new(),
+            },
+            dependencies: vec![],
+            retry_count: 0,
+            max_retries: 2,
+        }
+    }
+
+    // ── Additional tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_orchestration_statistics_default_zeros() {
+        let stats = OrchestrationStatistics::default();
+        assert_eq!(stats.total_jobs_submitted, 0);
+        assert_eq!(stats.jobs_completed, 0);
+        assert_eq!(stats.jobs_failed, 0);
+        assert_eq!(stats.active_jobs, 0);
+    }
+
+    #[test]
+    fn test_job_priority_variants_exist() {
+        let _ = JobPriority::Low;
+        let _ = JobPriority::Normal;
+        let _ = JobPriority::High;
+        let _ = JobPriority::Critical;
+    }
+
+    #[test]
+    fn test_job_status_variants_exist() {
+        let statuses = [
+            JobStatus::Pending,
+            JobStatus::Queued,
+            JobStatus::Running,
+            JobStatus::Paused,
+            JobStatus::Completed,
+            JobStatus::Failed,
+            JobStatus::Cancelled,
+            JobStatus::Retrying,
+        ];
+        // Verify all variants can be compared
+        assert_eq!(statuses[0], JobStatus::Pending);
+        assert_ne!(statuses[0], JobStatus::Completed);
+    }
+
+    #[test]
+    fn test_job_submit_increments_statistics() {
+        let orchestrator =
+            TrainingOrchestrator::new(SchedulingStrategy::FIFO, AllocationStrategy::FirstFit);
+        let job = make_test_job("stats_test");
+        orchestrator.submit_job(job).expect("submit failed");
+        let stats = orchestrator.get_statistics().expect("get_statistics failed");
+        assert_eq!(stats.total_jobs_submitted, 1);
+    }
+
+    #[test]
+    fn test_job_submit_returns_nonempty_id() {
+        let orchestrator =
+            TrainingOrchestrator::new(SchedulingStrategy::Priority, AllocationStrategy::BestFit);
+        let job = make_test_job("id_test");
+        let id = orchestrator.submit_job(job).expect("submit failed");
+        assert!(!id.is_empty(), "job id should not be empty");
+    }
+
+    #[test]
+    fn test_job_submit_initial_status_pending() {
+        let orchestrator =
+            TrainingOrchestrator::new(SchedulingStrategy::FIFO, AllocationStrategy::FirstFit);
+        let job = make_test_job("pending_test");
+        let id = orchestrator.submit_job(job).expect("submit failed");
+        let retrieved = orchestrator.get_job(&id).expect("get_job failed");
+        assert_eq!(retrieved.status, JobStatus::Pending);
+    }
+
+    #[test]
+    fn test_job_get_nonexistent_returns_error() {
+        let orchestrator =
+            TrainingOrchestrator::new(SchedulingStrategy::FIFO, AllocationStrategy::FirstFit);
+        let result = orchestrator.get_job("nonexistent-id-12345");
+        assert!(result.is_err(), "getting nonexistent job should fail");
+    }
+
+    #[test]
+    fn test_scheduling_strategy_variants() {
+        let _ = SchedulingStrategy::FIFO;
+        let _ = SchedulingStrategy::Priority;
+        let _ = SchedulingStrategy::ShortestJobFirst;
+        let _ = SchedulingStrategy::FairShare;
+        let _ = SchedulingStrategy::BackfillAware;
+    }
+
+    #[test]
+    fn test_allocation_strategy_variants() {
+        let _ = AllocationStrategy::FirstFit;
+        let _ = AllocationStrategy::BestFit;
+        let _ = AllocationStrategy::WorstFit;
+        let _ = AllocationStrategy::LoadBalanced;
+    }
+
+    #[test]
+    fn test_training_job_config_validation_split_range() {
+        let job = make_test_job("validation_range");
+        let vs = job.training_config.validation_split;
+        assert!(
+            (0.0..=1.0).contains(&vs),
+            "validation_split must be in [0,1]"
+        );
+    }
+
+    #[test]
+    fn test_resource_requirements_all_non_negative() {
+        let job = make_test_job("resource_test");
+        let req = &job.resource_requirements;
+        assert!(req.cpu_cores > 0);
+        assert!(req.memory_gb > 0);
+        assert!(req.storage_gb > 0);
+    }
+
+    #[test]
+    fn test_job_event_variants_constructible() {
+        let e1 = JobEvent::JobSubmitted("id1".to_string());
+        let e2 = JobEvent::JobStarted("id2".to_string());
+        let e3 = JobEvent::JobCompleted("id3".to_string());
+        let e4 = JobEvent::JobFailed("id4".to_string(), "reason".to_string());
+        let e5 = JobEvent::JobCancelled("id5".to_string());
+        // Just ensure variants can be created without panicking
+        let _ = (e1, e2, e3, e4, e5);
+    }
+
+    #[test]
+    fn test_multiple_jobs_submit_and_retrieve() {
+        let orchestrator =
+            TrainingOrchestrator::new(SchedulingStrategy::FIFO, AllocationStrategy::FirstFit);
+        let mut ids = Vec::new();
+        for i in 0..3usize {
+            let job = make_test_job(&format!("multi_job_{}", i));
+            let id = orchestrator.submit_job(job).expect("submit failed");
+            ids.push(id);
+        }
+        // All 3 should be retrievable
+        for id in &ids {
+            let job = orchestrator.get_job(id).expect("get_job failed");
+            assert_eq!(job.status, JobStatus::Pending);
+        }
+        let stats = orchestrator.get_statistics().expect("stats failed");
+        assert_eq!(stats.total_jobs_submitted, 3);
+    }
+
+    #[test]
+    fn test_cancel_nonexistent_job_fails() {
+        let orchestrator =
+            TrainingOrchestrator::new(SchedulingStrategy::FIFO, AllocationStrategy::FirstFit);
+        let result = orchestrator.cancel_job("does-not-exist");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_checkpoint_config_defaults() {
+        let cfg = CheckpointConfig {
+            save_frequency: 5,
+            keep_best_only: true,
+            save_weights_only: false,
+            monitor_metric: "val_loss".to_string(),
+        };
+        assert_eq!(cfg.save_frequency, 5);
+        assert!(cfg.keep_best_only);
+    }
+
+    #[test]
+    fn test_training_metrics_initial_zero() {
+        let metrics = TrainingMetrics {
+            current_epoch: 0,
+            loss: 0.0,
+            accuracy: 0.0,
+            validation_loss: 0.0,
+            validation_accuracy: 0.0,
+            learning_rate: 0.0,
+            throughput: 0.0,
+            custom_metrics: HashMap::new(),
+        };
+        assert_eq!(metrics.current_epoch, 0);
+        assert!((metrics.loss).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_early_stopping_config_structure() {
+        let es = EarlyStoppingConfig {
+            monitor_metric: "val_loss".to_string(),
+            patience: 5,
+            min_delta: 1e-4,
+            mode: "min".to_string(),
+        };
+        assert!(es.patience > 0);
+        assert!(es.min_delta >= 0.0);
     }
 }

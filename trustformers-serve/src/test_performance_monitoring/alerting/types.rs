@@ -570,7 +570,7 @@ impl AlertRuleEngine {
                 .metric_selector
                 .test_id_pattern
                 .as_ref()
-                .map_or(true, |pattern| test_id.contains(pattern))
+                .is_none_or(|pattern| test_id.contains(pattern))
         })
     }
     async fn add_rule(&self, rule: AlertRule) -> Result<(), AlertError> {

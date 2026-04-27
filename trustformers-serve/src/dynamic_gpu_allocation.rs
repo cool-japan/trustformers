@@ -1040,6 +1040,279 @@ mod tests {
         assert_eq!(config.max_queue_size, 1000);
     }
 
+    fn make_gpu_resource(
+        device_id: u32,
+        total_gb: u64,
+        avail_gb: u64,
+        util: f32,
+        status: GpuStatus,
+    ) -> GpuResource {
+        GpuResource {
+            device_id,
+            total_memory: total_gb * 1024 * 1024 * 1024,
+            available_memory: avail_gb * 1024 * 1024 * 1024,
+            compute_capability: (8, 0),
+            utilization: util,
+            temperature: 65.0,
+            power_consumption: 150.0,
+            status,
+            active_allocations: Vec::new(),
+            reserved_memory: 0,
+            performance_profile: PerformanceProfile {
+                fp32_performance: 15.0,
+                fp16_performance: 30.0,
+                int8_performance: 120.0,
+                memory_bandwidth: 600.0,
+                tensor_cores: true,
+            },
+        }
+    }
+
+    fn make_request(
+        id: AllocationId,
+        mem_gb: u64,
+        strategy: AllocationStrategy,
+    ) -> AllocationRequest {
+        AllocationRequest {
+            id,
+            memory_required: mem_gb * 1024 * 1024 * 1024,
+            compute_required: 0.5,
+            priority: AllocationPriority::Normal,
+            preferred_devices: None,
+            strategy,
+            duration_hint: None,
+            requested_at: Utc::now(),
+            timeout: Duration::from_secs(30),
+            callback: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_best_fit_strategy_selects_tightest_fit() {
+        let strategy = BestFitStrategy;
+        let mut resources = HashMap::new();
+        resources.insert(0, make_gpu_resource(0, 8, 7, 0.2, GpuStatus::Available));
+        resources.insert(1, make_gpu_resource(1, 8, 2, 0.1, GpuStatus::Available));
+        // 1GB request: device 1 is tighter fit (2GB available vs 7GB)
+        let request = make_request(10, 1, AllocationStrategy::BestFit);
+        let selected = strategy.select_gpu(&request, &resources);
+        assert_eq!(selected, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_best_fit_returns_none_when_no_memory() {
+        let strategy = BestFitStrategy;
+        let mut resources = HashMap::new();
+        resources.insert(0, make_gpu_resource(0, 2, 0, 0.9, GpuStatus::Busy));
+        let request = make_request(11, 4, AllocationStrategy::BestFit);
+        let selected = strategy.select_gpu(&request, &resources);
+        assert!(selected.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_least_loaded_selects_lowest_utilization() {
+        let strategy = LeastLoadedStrategy;
+        let mut resources = HashMap::new();
+        resources.insert(0, make_gpu_resource(0, 8, 6, 0.9, GpuStatus::Available));
+        resources.insert(1, make_gpu_resource(1, 8, 6, 0.1, GpuStatus::Available));
+        let request = make_request(12, 1, AllocationStrategy::LeastLoaded);
+        let selected = strategy.select_gpu(&request, &resources);
+        assert_eq!(selected, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_first_available_ignores_busy_devices() {
+        let strategy = FirstAvailableStrategy;
+        let mut resources = HashMap::new();
+        resources.insert(0, make_gpu_resource(0, 8, 6, 0.5, GpuStatus::Busy));
+        resources.insert(1, make_gpu_resource(1, 8, 6, 0.3, GpuStatus::Available));
+        let request = make_request(13, 1, AllocationStrategy::FirstAvailable);
+        let selected = strategy.select_gpu(&request, &resources);
+        assert_eq!(selected, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_first_available_score_available() {
+        let strategy = FirstAvailableStrategy;
+        let resource = make_gpu_resource(0, 8, 6, 0.3, GpuStatus::Available);
+        let request = make_request(14, 1, AllocationStrategy::FirstAvailable);
+        assert!((strategy.calculate_score(&resource, &request) - 1.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn test_first_available_score_busy() {
+        let strategy = FirstAvailableStrategy;
+        let resource = make_gpu_resource(0, 8, 6, 0.9, GpuStatus::Busy);
+        let request = make_request(15, 1, AllocationStrategy::FirstAvailable);
+        assert!((strategy.calculate_score(&resource, &request) - 0.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn test_best_fit_score_zero_insufficient_memory() {
+        let strategy = BestFitStrategy;
+        let resource = make_gpu_resource(0, 2, 0, 0.5, GpuStatus::Available);
+        let request = make_request(16, 4, AllocationStrategy::BestFit);
+        assert!((strategy.calculate_score(&resource, &request) - 0.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn test_least_loaded_score_zero_insufficient_memory() {
+        let strategy = LeastLoadedStrategy;
+        let resource = make_gpu_resource(0, 2, 0, 0.5, GpuStatus::Available);
+        let request = make_request(17, 4, AllocationStrategy::LeastLoaded);
+        assert!((strategy.calculate_score(&resource, &request) - 0.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn test_least_loaded_score_low_utilization_is_high() {
+        let strategy = LeastLoadedStrategy;
+        let resource = make_gpu_resource(0, 8, 6, 0.1, GpuStatus::Available);
+        let request = make_request(18, 1, AllocationStrategy::LeastLoaded);
+        let score = strategy.calculate_score(&resource, &request);
+        assert!(
+            score > 0.8,
+            "low utilization should produce high score, got {}",
+            score
+        );
+    }
+
+    #[tokio::test]
+    async fn test_allocation_strategy_variants() {
+        let strategies = [
+            AllocationStrategy::FirstAvailable,
+            AllocationStrategy::BestFit,
+            AllocationStrategy::LeastLoaded,
+            AllocationStrategy::RoundRobin,
+            AllocationStrategy::Affinity,
+            AllocationStrategy::PerformanceBased,
+            AllocationStrategy::PowerEfficient,
+        ];
+        assert_eq!(strategies.len(), 7);
+    }
+
+    #[tokio::test]
+    async fn test_allocation_priority_ordering_all() {
+        assert!(AllocationPriority::Critical > AllocationPriority::High);
+        assert!(AllocationPriority::High > AllocationPriority::Normal);
+        assert!(AllocationPriority::Normal > AllocationPriority::Low);
+    }
+
+    #[tokio::test]
+    async fn test_gpu_status_error_variant() {
+        let status = GpuStatus::Error("CUDA out of memory".to_string());
+        if let GpuStatus::Error(msg) = status {
+            assert!(msg.contains("CUDA"));
+        } else {
+            panic!("expected Error variant");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_allocation_error_variants() {
+        let errs = [
+            AllocationError::NoAvailableGpu,
+            AllocationError::InsufficientMemory,
+            AllocationError::DeviceError("device broken".to_string()),
+            AllocationError::InvalidRequest("bad params".to_string()),
+            AllocationError::Timeout,
+            AllocationError::ResourceContention,
+        ];
+        assert_eq!(errs.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn test_allocation_type_variants() {
+        let types = [
+            AllocationType::Inference,
+            AllocationType::Training,
+            AllocationType::BatchProcessing,
+            AllocationType::Streaming,
+            AllocationType::Cache,
+            AllocationType::Temporary,
+        ];
+        assert_eq!(types.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn test_auto_scaling_strategy_variants() {
+        let strategies = [
+            AutoScalingStrategy::Reactive,
+            AutoScalingStrategy::Predictive,
+            AutoScalingStrategy::Scheduled,
+            AutoScalingStrategy::Manual,
+        ];
+        assert_eq!(strategies.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_allocation_config_preemption_enabled() {
+        let config = DynamicAllocationConfig::default();
+        assert!(config.enable_preemption);
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_allocation_config_auto_scaling_enabled() {
+        let config = DynamicAllocationConfig::default();
+        assert!(config.enable_auto_scaling);
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_allocation_config_overcommit_ratio() {
+        let config = DynamicAllocationConfig::default();
+        assert!((config.memory_overcommit_ratio - 1.2).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn test_allocation_metrics_default_zeroed() {
+        let metrics = AllocationMetrics::default();
+        assert_eq!(metrics.total_allocations, 0);
+        assert_eq!(metrics.successful_allocations, 0);
+        assert_eq!(metrics.failed_allocations, 0);
+        assert_eq!(metrics.queue_length, 0);
+        assert!((metrics.fragmentation_ratio - 0.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn test_gpu_resource_performance_profile() {
+        let resource = make_gpu_resource(0, 24, 20, 0.3, GpuStatus::Available);
+        assert!(resource.performance_profile.tensor_cores);
+        assert!(
+            resource.performance_profile.fp16_performance
+                > resource.performance_profile.fp32_performance
+        );
+    }
+
+    #[tokio::test]
+    async fn test_release_allocation_after_allocating() {
+        let scheduler = Arc::new(GpuScheduler::new(Default::default()));
+        let config = DynamicAllocationConfig::default();
+        let allocator = DynamicGpuAllocator::new(scheduler, config);
+        allocator.initialize_resources().await.expect("init ok");
+        let result = allocator
+            .request_allocation(
+                512 * 1024 * 1024,
+                0.3,
+                AllocationPriority::Normal,
+                AllocationStrategy::FirstAvailable,
+                None,
+            )
+            .await
+            .expect("request ok");
+        if let AllocationResult::Success(alloc) = result {
+            let release_result = allocator.release_allocation(alloc.id).await;
+            assert!(release_result.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_release_nonexistent_allocation() {
+        let scheduler = Arc::new(GpuScheduler::new(Default::default()));
+        let config = DynamicAllocationConfig::default();
+        let allocator = DynamicGpuAllocator::new(scheduler, config);
+        let result = allocator.release_allocation(999_999).await;
+        assert!(result.is_err());
+    }
+
     #[tokio::test]
     async fn test_performance_based_strategy() {
         let strategy = PerformanceBasedStrategy;

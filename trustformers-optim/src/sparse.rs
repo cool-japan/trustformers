@@ -280,7 +280,7 @@ impl SparseSGD {
 
     /// Cleanup old momentum states for all parameters.
     pub fn cleanup_momentum_states(&mut self) {
-        if self.current_step % self.config.cleanup_frequency == 0 {
+        if self.current_step.is_multiple_of(self.config.cleanup_frequency) {
             let max_age = self.config.cleanup_frequency * 2;
             for state in self.momentum_states.values_mut() {
                 state.cleanup(max_age, self.current_step);

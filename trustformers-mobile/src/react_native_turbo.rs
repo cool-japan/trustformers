@@ -1007,4 +1007,180 @@ mod tests {
         assert!(config.enable_hermes_optimizations);
         assert!(config.performance.enable_method_caching);
     }
+
+    #[test]
+    fn test_turbo_method_type_variants() {
+        let types = vec![
+            TurboMethodType::Sync,
+            TurboMethodType::Async,
+            TurboMethodType::Promise,
+        ];
+        assert_eq!(types.len(), 3);
+    }
+
+    #[test]
+    fn test_turbo_type_kind_variants() {
+        let kinds = vec![
+            TurboTypeKind::Object,
+            TurboTypeKind::Array,
+            TurboTypeKind::Primitive,
+            TurboTypeKind::Union,
+        ];
+        assert_eq!(kinds.len(), 4);
+    }
+
+    #[test]
+    fn test_turbo_module_spec_creation() {
+        let spec = TurboModuleSpec {
+            name: "TestModule".to_string(),
+            version: "1.0.0".to_string(),
+            methods: vec![],
+            types: HashMap::new(),
+        };
+        assert_eq!(spec.name, "TestModule");
+        assert!(spec.methods.is_empty());
+    }
+
+    #[test]
+    fn test_turbo_method_spec_creation() {
+        let method = TurboMethodSpec {
+            name: "doSomething".to_string(),
+            method_type: TurboMethodType::Promise,
+            parameters: vec![],
+            return_type: "void".to_string(),
+            optional: false,
+        };
+        assert_eq!(method.name, "doSomething");
+        assert!(!method.optional);
+    }
+
+    #[test]
+    fn test_turbo_parameter_creation() {
+        let param = TurboParameter {
+            name: "input".to_string(),
+            param_type: "string".to_string(),
+            optional: true,
+            default: None,
+        };
+        assert_eq!(param.name, "input");
+        assert!(param.optional);
+        assert!(param.default.is_none());
+    }
+
+    #[test]
+    fn test_turbo_type_spec_object() {
+        let type_spec = TurboTypeSpec {
+            name: "InferenceResult".to_string(),
+            kind: TurboTypeKind::Object,
+            properties: Some(HashMap::new()),
+            element_type: None,
+        };
+        assert!(matches!(type_spec.kind, TurboTypeKind::Object));
+        assert!(type_spec.properties.is_some());
+        assert!(type_spec.element_type.is_none());
+    }
+
+    #[test]
+    fn test_turbo_type_spec_array() {
+        let type_spec = TurboTypeSpec {
+            name: "FloatArray".to_string(),
+            kind: TurboTypeKind::Array,
+            properties: None,
+            element_type: Some("number".to_string()),
+        };
+        assert!(matches!(type_spec.kind, TurboTypeKind::Array));
+        assert!(type_spec.element_type.is_some());
+    }
+
+    #[test]
+    fn test_turbo_property_creation() {
+        let prop = TurboProperty {
+            prop_type: "number".to_string(),
+            optional: false,
+            description: Some("A numeric value".to_string()),
+        };
+        assert_eq!(prop.prop_type, "number");
+        assert!(!prop.optional);
+        assert!(prop.description.is_some());
+    }
+
+    #[test]
+    fn test_turbo_module_spec_methods_not_empty() {
+        let spec = TrustformersTurboModule::generate_turbo_spec();
+        assert!(!spec.methods.is_empty());
+        // Should have common methods like initialize, inference
+        let method_names: Vec<&str> = spec.methods.iter().map(|m| m.name.as_str()).collect();
+        assert!(method_names.contains(&"initialize"));
+    }
+
+    #[test]
+    fn test_turbo_module_spec_types_not_empty() {
+        let spec = TrustformersTurboModule::generate_turbo_spec();
+        assert!(!spec.types.is_empty());
+    }
+
+    #[test]
+    fn test_turbo_module_spec_version() {
+        let spec = TrustformersTurboModule::generate_turbo_spec();
+        assert!(!spec.version.is_empty());
+    }
+
+    #[test]
+    fn test_ts_definitions_contain_interface() {
+        let turbo_config = TurboModuleConfig::default();
+        let rn_config = ReactNativeConfig::default();
+        let mobile_config = MobileConfig::default();
+        let module = TrustformersTurboModule::new(turbo_config, rn_config, mobile_config)
+            .expect("Failed to get value");
+        let ts = module.generate_typescript_definitions().expect("Failed to generate");
+        assert!(ts.contains("interface") || ts.contains("export"));
+    }
+
+    #[test]
+    fn test_turbo_method_spec_with_params() {
+        let method = TurboMethodSpec {
+            name: "predict".to_string(),
+            method_type: TurboMethodType::Promise,
+            parameters: vec![
+                TurboParameter {
+                    name: "input".to_string(),
+                    param_type: "string".to_string(),
+                    optional: false,
+                    default: None,
+                },
+                TurboParameter {
+                    name: "options".to_string(),
+                    param_type: "object".to_string(),
+                    optional: true,
+                    default: None,
+                },
+            ],
+            return_type: "Promise<InferenceResult>".to_string(),
+            optional: false,
+        };
+        assert_eq!(method.parameters.len(), 2);
+        assert!(!method.parameters[0].optional);
+        assert!(method.parameters[1].optional);
+    }
+
+    #[test]
+    fn test_turbo_config_performance_defaults() {
+        let config = TurboModuleConfig::default();
+        assert!(config.performance.enable_method_caching);
+    }
+
+    #[test]
+    fn test_multiple_module_instances() {
+        let turbo_config1 = TurboModuleConfig::default();
+        let rn_config1 = ReactNativeConfig::default();
+        let mobile_config1 = MobileConfig::default();
+        let module1 = TrustformersTurboModule::new(turbo_config1, rn_config1, mobile_config1);
+        assert!(module1.is_ok());
+
+        let turbo_config2 = TurboModuleConfig::default();
+        let rn_config2 = ReactNativeConfig::default();
+        let mobile_config2 = MobileConfig::default();
+        let module2 = TrustformersTurboModule::new(turbo_config2, rn_config2, mobile_config2);
+        assert!(module2.is_ok());
+    }
 }

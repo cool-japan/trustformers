@@ -626,7 +626,7 @@ impl<M: Model<Input = Tensor, Output = Tensor>> MultiTaskLearningTrainer<M> {
     /// Check if auxiliary task should be trained this step
     fn should_train_auxiliary_task(&self, aux_config: &AuxiliaryTaskConfig) -> bool {
         match &aux_config.frequency {
-            AuxiliaryTaskFrequency::EveryNSteps(n) => self.step_counter % n == 0,
+            AuxiliaryTaskFrequency::EveryNSteps(n) => self.step_counter.is_multiple_of(*n),
             AuxiliaryTaskFrequency::WithProbability(p) => fastrand::f32() < *p,
             AuxiliaryTaskFrequency::Continuous => true,
             AuxiliaryTaskFrequency::EpochRange { start, end } => {

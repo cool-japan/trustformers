@@ -972,3 +972,313 @@ pub struct StreamingResponse {
     pub total_chunks: Option<usize>,
     pub metadata: Option<ConversationMetadata>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_turn(role: ConversationRole, content: &str, token_count: usize) -> ConversationTurn {
+        ConversationTurn {
+            role,
+            content: content.to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            token_count,
+        }
+    }
+
+    // ---- ConversationalConfig tests ----
+
+    #[test]
+    fn test_config_default_values() {
+        let config = ConversationalConfig::default();
+        assert_eq!(
+            config.max_history_turns, 20,
+            "default max_history_turns should be 20"
+        );
+        assert_eq!(
+            config.max_context_tokens, 4096,
+            "default max_context_tokens should be 4096"
+        );
+        assert!(
+            (config.temperature - 0.7).abs() < f32::EPSILON,
+            "default temperature should be 0.7"
+        );
+        assert!(
+            (config.top_p - 0.9).abs() < f32::EPSILON,
+            "default top_p should be 0.9"
+        );
+        assert_eq!(config.top_k, Some(50), "default top_k should be Some(50)");
+        assert_eq!(
+            config.max_response_tokens, 512,
+            "default max_response_tokens should be 512"
+        );
+        assert!(
+            config.enable_safety_filter,
+            "safety filter should be enabled by default"
+        );
+    }
+
+    #[test]
+    fn test_config_default_conversation_mode_is_chat() {
+        let config = ConversationalConfig::default();
+        assert_eq!(
+            config.conversation_mode,
+            ConversationMode::Chat,
+            "default mode should be Chat"
+        );
+    }
+
+    #[test]
+    fn test_config_system_prompt_present_by_default() {
+        let config = ConversationalConfig::default();
+        assert!(
+            config.system_prompt.is_some(),
+            "system_prompt should be present by default"
+        );
+        let prompt = config.system_prompt.as_ref().expect("system prompt must exist");
+        assert!(
+            !prompt.is_empty(),
+            "default system prompt must not be empty"
+        );
+    }
+
+    // ---- ConversationState tests ----
+
+    #[test]
+    fn test_conversation_state_new_empty_turns() {
+        let state = ConversationState::new("conv-001".to_string());
+        assert!(state.turns.is_empty(), "new state should have no turns");
+    }
+
+    #[test]
+    fn test_conversation_state_id_stored_correctly() {
+        let id = "my-conversation-id";
+        let state = ConversationState::new(id.to_string());
+        assert_eq!(
+            state.conversation_id, id,
+            "conversation_id must match supplied id"
+        );
+    }
+
+    #[test]
+    fn test_add_user_turn_increments_user_count() {
+        let mut state = ConversationState::new("c1".to_string());
+        let turn = make_turn(ConversationRole::User, "Hello!", 5);
+        state.add_turn(turn);
+        assert_eq!(
+            state.stats.user_turns, 1,
+            "user_turns should be 1 after adding one user turn"
+        );
+    }
+
+    #[test]
+    fn test_add_assistant_turn_increments_assistant_count() {
+        let mut state = ConversationState::new("c2".to_string());
+        let turn = make_turn(ConversationRole::Assistant, "Hi there.", 10);
+        state.add_turn(turn);
+        assert_eq!(
+            state.stats.assistant_turns, 1,
+            "assistant_turns should be 1 after adding one assistant turn"
+        );
+    }
+
+    #[test]
+    fn test_add_turn_updates_total_tokens() {
+        let mut state = ConversationState::new("c3".to_string());
+        state.add_turn(make_turn(ConversationRole::User, "hi", 3));
+        state.add_turn(make_turn(ConversationRole::Assistant, "hello", 7));
+        assert_eq!(
+            state.total_tokens, 10,
+            "total_tokens should be sum of token counts"
+        );
+    }
+
+    #[test]
+    fn test_get_recent_context_respects_token_limit() {
+        let mut state = ConversationState::new("c4".to_string());
+        for i in 0..5u32 {
+            state.add_turn(make_turn(ConversationRole::User, &format!("msg {i}"), 100));
+        }
+        let ctx = state.get_recent_context(250);
+        assert!(
+            ctx.len() <= 2,
+            "context limited to 250 tokens from 100-token turns, max 2"
+        );
+    }
+
+    #[test]
+    fn test_trim_history_removes_old_turns_beyond_max() {
+        let mut state = ConversationState::new("c5".to_string());
+        for i in 0..10u32 {
+            state.add_turn(make_turn(ConversationRole::User, &format!("msg {i}"), 1));
+        }
+        state.trim_history(5, usize::MAX);
+        assert_eq!(
+            state.turns.len(),
+            5,
+            "after trim_history(5) only 5 turns should remain"
+        );
+    }
+
+    #[test]
+    fn test_trim_history_removes_excess_tokens() {
+        let mut state = ConversationState::new("c6".to_string());
+        for i in 0..5u32 {
+            state.add_turn(make_turn(ConversationRole::User, &format!("msg {i}"), 10));
+        }
+        // total_tokens = 50; trim to 30 tokens
+        state.trim_history(usize::MAX, 30);
+        assert!(
+            state.total_tokens <= 30,
+            "after token trim, total_tokens must be <= 30"
+        );
+    }
+
+    #[test]
+    fn test_set_and_get_variable() {
+        let mut state = ConversationState::new("c7".to_string());
+        state.set_variable("key".to_string(), "value".to_string());
+        let val = state.get_variable("key").expect("variable should be present after set");
+        assert_eq!(val, "value", "retrieved variable must match stored value");
+    }
+
+    #[test]
+    fn test_get_variable_returns_none_for_missing_key() {
+        let state = ConversationState::new("c8".to_string());
+        assert!(
+            state.get_variable("missing").is_none(),
+            "missing key should return None"
+        );
+    }
+
+    #[test]
+    fn test_add_memory_stored_and_retrievable() {
+        let mut state = ConversationState::new("c9".to_string());
+        let memory = ConversationMemory {
+            id: "mem-1".to_string(),
+            content: "user likes cats".to_string(),
+            importance: 0.8,
+            last_accessed: chrono::Utc::now(),
+            access_count: 1,
+            memory_type: MemoryType::Preference,
+            tags: vec!["cats".to_string()],
+        };
+        state.add_memory(memory);
+        assert_eq!(state.memories.len(), 1, "one memory should be stored");
+    }
+
+    #[test]
+    fn test_update_health_scores() {
+        let mut state = ConversationState::new("c10".to_string());
+        state.update_health(0.8, 0.7, 0.9);
+        assert!((state.health.coherence_score - 0.8).abs() < f32::EPSILON);
+        assert!((state.health.engagement_score - 0.7).abs() < f32::EPSILON);
+        assert!((state.health.safety_score - 0.9).abs() < f32::EPSILON);
+        let expected_overall = (0.8 + 0.7 + 0.9) / 3.0;
+        assert!(
+            (state.health.overall_score - expected_overall).abs() < 1e-5,
+            "overall_score should be average of the three scores"
+        );
+    }
+
+    #[test]
+    fn test_needs_repair_when_low_scores() {
+        let mut state = ConversationState::new("c11".to_string());
+        state.update_health(0.3, 0.3, 0.3);
+        assert!(
+            state.needs_repair(),
+            "state with low scores should need repair"
+        );
+    }
+
+    #[test]
+    fn test_needs_repair_false_when_healthy() {
+        let mut state = ConversationState::new("c12".to_string());
+        state.update_health(0.9, 0.9, 0.9);
+        assert!(
+            !state.needs_repair(),
+            "state with high scores should not need repair"
+        );
+    }
+
+    #[test]
+    fn test_start_reasoning_creates_context() {
+        let mut state = ConversationState::new("c13".to_string());
+        state.start_reasoning(Some("solve problem".to_string()));
+        assert!(
+            state.reasoning_context.is_some(),
+            "reasoning context should exist after start"
+        );
+    }
+
+    #[test]
+    fn test_add_reasoning_step_appended_to_chain() {
+        let mut state = ConversationState::new("c14".to_string());
+        state.start_reasoning(None);
+        let step = ReasoningStep {
+            step_type: ReasoningType::Logical,
+            description: "premise".to_string(),
+            inputs: vec!["A".to_string()],
+            output: "B".to_string(),
+            confidence: 0.9,
+        };
+        state.add_reasoning_step(step);
+        let ctx = state.reasoning_context.as_ref().expect("context must exist");
+        assert_eq!(ctx.reasoning_chain.len(), 1, "one step should be in chain");
+    }
+
+    #[test]
+    fn test_conversation_role_equality() {
+        assert_eq!(ConversationRole::User, ConversationRole::User);
+        assert_ne!(ConversationRole::User, ConversationRole::Assistant);
+        assert_ne!(ConversationRole::User, ConversationRole::System);
+    }
+
+    #[test]
+    fn test_streaming_config_default_disabled() {
+        let config = StreamingConfig::default();
+        assert!(!config.enabled, "streaming should be disabled by default");
+    }
+
+    #[test]
+    fn test_conversation_mode_variants_are_distinct() {
+        let modes = [
+            ConversationMode::Chat,
+            ConversationMode::Assistant,
+            ConversationMode::InstructionFollowing,
+            ConversationMode::QuestionAnswering,
+            ConversationMode::RolePlay,
+            ConversationMode::Educational,
+        ];
+        // Each pair must be unequal
+        for (i, m1) in modes.iter().enumerate() {
+            for (j, m2) in modes.iter().enumerate() {
+                if i != j {
+                    assert_ne!(m1, m2, "Distinct mode variants must not be equal");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_relevant_memories_returns_subset() {
+        let mut state = ConversationState::new("c15".to_string());
+        for i in 0..5u32 {
+            state.add_memory(ConversationMemory {
+                id: format!("m{i}"),
+                content: format!("information about topic_{i}"),
+                importance: 0.5 + i as f32 * 0.1,
+                last_accessed: chrono::Utc::now(),
+                access_count: 1,
+                memory_type: MemoryType::Fact,
+                tags: vec![],
+            });
+        }
+        let relevant = state.get_relevant_memories("topic_2", 3);
+        assert!(
+            relevant.len() <= 3,
+            "should return at most the requested limit"
+        );
+    }
+}

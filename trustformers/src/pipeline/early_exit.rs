@@ -877,6 +877,26 @@ where
 mod tests {
     use super::*;
 
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    fn make_layer_output(
+        layer_index: usize,
+        logits: Option<Vec<f32>>,
+        hidden_states: Vec<f32>,
+    ) -> LayerOutput {
+        LayerOutput {
+            layer_index,
+            hidden_states,
+            attention_weights: None,
+            logits,
+            intermediate_prediction: None,
+            computation_time_ms: 10 + layer_index as u64,
+            memory_usage_mb: 100.0 + layer_index as f64 * 10.0,
+        }
+    }
+
+    // ── Config defaults ───────────────────────────────────────────────────────
+
     #[test]
     fn test_early_exit_config_default() {
         let config = EarlyExitConfig::default();
@@ -889,48 +909,324 @@ mod tests {
     }
 
     #[test]
-    fn test_exit_point_creation() {
-        let layer_output = LayerOutput {
-            layer_index: 5,
-            hidden_states: vec![0.1, 0.2, 0.3],
-            attention_weights: None,
-            logits: Some(vec![1.0, 2.0, 0.5]),
-            intermediate_prediction: None,
-            computation_time_ms: 10,
-            memory_usage_mb: 50.0,
-        };
+    fn test_config_min_layers_less_than_max() {
+        let config = EarlyExitConfig::default();
+        assert!(config.min_layers < config.max_layers);
+    }
 
+    #[test]
+    fn test_config_patience_threshold_positive() {
+        let config = EarlyExitConfig::default();
+        assert!(config.patience_threshold > 0);
+    }
+
+    // ── Exit threshold validation ─────────────────────────────────────────────
+
+    #[test]
+    fn test_confidence_threshold_strategy_validates_range() {
+        // A threshold of 0.9 should be in (0, 1)
+        if let ExitStrategy::ConfidenceThreshold(threshold) = ExitStrategy::ConfidenceThreshold(0.9)
+        {
+            assert!(threshold > 0.0 && threshold < 1.0);
+        }
+    }
+
+    // ── ExitPoint creation ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_exit_point_creation() {
+        let layer_output = make_layer_output(5, Some(vec![1.0, 2.0, 0.5]), vec![0.1, 0.2, 0.3]);
         let config = EarlyExitConfig::default();
         let predictor = EarlyExitPredictor::new(config);
         let exit_point = predictor
             .create_base_exit_point(&layer_output)
-            .expect("operation failed in test");
-
+            .expect("create_base_exit_point should succeed");
         assert_eq!(exit_point.layer_index, 5);
         assert!(exit_point.confidence_score > 0.0);
     }
 
     #[test]
+    fn test_exit_point_no_logits_uses_depth_proxy() {
+        let layer_output = make_layer_output(8, None, vec![0.1; 50]);
+        let config = EarlyExitConfig::default();
+        let predictor = EarlyExitPredictor::new(config);
+        let ep = predictor
+            .create_base_exit_point(&layer_output)
+            .expect("create_base_exit_point should succeed");
+        assert!(
+            ep.confidence_score > 0.0 && ep.confidence_score <= 1.0,
+            "depth-based confidence should be in (0,1]"
+        );
+    }
+
+    // ── Confidence-based stopping ─────────────────────────────────────────────
+
+    #[test]
     fn test_confidence_threshold_strategy() {
-        let mut config = EarlyExitConfig::default();
-        config.strategy = ExitStrategy::ConfidenceThreshold(0.9);
-        config.min_layers = 2;
-
-        let mut predictor = EarlyExitPredictor::new(config);
-
-        let high_confidence_output = LayerOutput {
-            layer_index: 3,
-            hidden_states: vec![0.1, 0.2, 0.3],
-            attention_weights: None,
-            logits: Some(vec![5.0, 1.0, 0.5]), // High confidence
-            intermediate_prediction: None,
-            computation_time_ms: 10,
-            memory_usage_mb: 50.0,
+        let config = EarlyExitConfig {
+            strategy: ExitStrategy::ConfidenceThreshold(0.9),
+            min_layers: 2,
+            ..Default::default()
         };
+        let mut predictor = EarlyExitPredictor::new(config);
+        // logits [5.0, 0.5] → very peaked → high confidence
+        let output = make_layer_output(3, Some(vec![5.0, 0.5]), vec![0.1, 0.2, 0.3]);
+        let ep = predictor.should_exit(&output).expect("should_exit should succeed");
+        assert!(
+            ep.should_exit,
+            "high-confidence output should trigger early exit"
+        );
+    }
 
-        let exit_point = predictor
-            .should_exit(&high_confidence_output)
-            .expect("operation failed in test");
-        assert!(exit_point.should_exit);
+    #[test]
+    fn test_no_exit_before_min_layers() {
+        let config = EarlyExitConfig {
+            strategy: ExitStrategy::ConfidenceThreshold(0.0), // trivially met
+            min_layers: 6,
+            max_layers: 12,
+            ..Default::default()
+        };
+        let mut predictor = EarlyExitPredictor::new(config);
+        let output = make_layer_output(2, Some(vec![10.0, 0.1]), vec![0.1; 10]);
+        let ep = predictor.should_exit(&output).expect("should_exit should succeed");
+        assert!(!ep.should_exit, "must not exit before min_layers");
+    }
+
+    #[test]
+    fn test_forced_exit_at_max_layers() {
+        let config = EarlyExitConfig {
+            strategy: ExitStrategy::ConfidenceThreshold(1.0), // never normally triggered
+            min_layers: 2,
+            max_layers: 6,
+            dynamic_threshold_adjustment: false,
+            ..Default::default()
+        };
+        let mut predictor = EarlyExitPredictor::new(config.clone());
+        let output = make_layer_output(config.max_layers, Some(vec![0.1; 10]), vec![0.0; 10]);
+        let ep = predictor.should_exit(&output).expect("should_exit should succeed");
+        assert!(ep.should_exit, "must exit when max_layers reached");
+    }
+
+    // ── Layer-wise confidence scores ─────────────────────────────────────────
+
+    #[test]
+    fn test_confidence_increases_with_layer_depth_no_logits() {
+        let config = EarlyExitConfig {
+            max_layers: 20,
+            min_layers: 0,
+            ..Default::default()
+        };
+        let predictor = EarlyExitPredictor::new(config);
+        let ep_early = predictor
+            .create_base_exit_point(&make_layer_output(0, None, vec![0.0; 5]))
+            .expect("early exit point should succeed");
+        let ep_late = predictor
+            .create_base_exit_point(&make_layer_output(18, None, vec![0.0; 5]))
+            .expect("late exit point should succeed");
+        assert!(
+            ep_late.confidence_score > ep_early.confidence_score,
+            "confidence should grow with layer depth"
+        );
+    }
+
+    // ── Entropy threshold ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_entropy_threshold_strategy_uniform_distribution() {
+        let config = EarlyExitConfig {
+            strategy: ExitStrategy::EntropyThreshold(0.5),
+            min_layers: 0,
+            max_layers: 10,
+            dynamic_threshold_adjustment: false,
+            ..Default::default()
+        };
+        let mut predictor = EarlyExitPredictor::new(config);
+        // Uniform logits → high entropy → low certainty (entropy_score near 0)
+        let output = make_layer_output(5, Some(vec![1.0_f32; 10]), vec![0.1; 5]);
+        let ep = predictor.should_exit(&output).expect("should_exit should succeed");
+        // entropy_score = 1 - H/H_max; for uniform dist H = H_max so score ≈ 0 < 0.5
+        assert!(
+            !ep.should_exit,
+            "uniform distribution should NOT meet entropy threshold"
+        );
+    }
+
+    // ── Variance threshold ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_variance_score_constant_hidden_states() {
+        let config = EarlyExitConfig::default();
+        let predictor = EarlyExitPredictor::new(config);
+        let layer_output = make_layer_output(8, None, vec![0.5_f32; 20]);
+        let ep = predictor
+            .create_base_exit_point(&layer_output)
+            .expect("create_base_exit_point should succeed");
+        // Variance = 0 → variance_score = 1/(1+0) = 1.0
+        assert!(
+            (ep.variance_score - 1.0).abs() < 1e-5,
+            "constant hidden states should yield variance_score = 1.0"
+        );
+    }
+
+    // ── Minimum layers enforcement ────────────────────────────────────────────
+
+    #[test]
+    fn test_minimum_layers_enforcement_respected() {
+        let config = EarlyExitConfig {
+            strategy: ExitStrategy::ConfidenceThreshold(0.001), // trivially met
+            min_layers: 5,
+            max_layers: 12,
+            dynamic_threshold_adjustment: false,
+            ..Default::default()
+        };
+        let mut predictor = EarlyExitPredictor::new(config);
+        for layer_idx in 0..5 {
+            let output = make_layer_output(layer_idx, Some(vec![10.0, 0.01]), vec![0.1; 5]);
+            let ep = predictor.should_exit(&output).expect("should_exit should succeed");
+            assert!(
+                !ep.should_exit,
+                "layer {} < min_layers=5 should not exit",
+                layer_idx
+            );
+        }
+    }
+
+    // ── Computational budget strategy ─────────────────────────────────────────
+
+    #[test]
+    fn test_computational_budget_strategy() {
+        let config = EarlyExitConfig {
+            strategy: ExitStrategy::ComputationalBudget(5), // 5ms budget
+            min_layers: 0,
+            max_layers: 12,
+            ..Default::default()
+        };
+        let mut predictor = EarlyExitPredictor::new(config);
+        // computation_time_ms = 10 + layer_index; at layer 0 it's 10ms > 5ms budget
+        let output = make_layer_output(0, None, vec![0.1; 5]);
+        let ep = predictor.should_exit(&output).expect("should_exit should succeed");
+        assert!(
+            ep.should_exit,
+            "should exit when computation_time exceeds budget"
+        );
+    }
+
+    // ── Patience strategy ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_patience_strategy_triggers_after_patience_exceeded() {
+        let config = EarlyExitConfig {
+            strategy: ExitStrategy::Patience(3),
+            min_layers: 0,
+            max_layers: 20,
+            dynamic_threshold_adjustment: false,
+            ..Default::default()
+        };
+        let mut predictor = EarlyExitPredictor::new(config);
+        // Run layers with low confidence to build up patience counter
+        for i in 0..4 {
+            let output = make_layer_output(i, Some(vec![1.0_f32; 5]), vec![0.1; 5]);
+            let _ = predictor.should_exit(&output);
+        }
+        // On the 5th call, patience=4 >= 3 → should exit
+        let output = make_layer_output(4, Some(vec![1.0_f32; 5]), vec![0.1; 5]);
+        let ep = predictor.should_exit(&output).expect("should_exit should succeed");
+        assert!(ep.should_exit, "patience counter should trigger exit");
+    }
+
+    // ── Depth reduction vs accuracy ───────────────────────────────────────────
+
+    #[test]
+    fn test_depth_reduction_computation_saved_percent() {
+        let config = EarlyExitConfig {
+            strategy: ExitStrategy::ConfidenceThreshold(0.0), // exit immediately after min_layers
+            min_layers: 3,
+            max_layers: 12,
+            dynamic_threshold_adjustment: false,
+            ..Default::default()
+        };
+        struct DummyPipeline;
+        impl crate::pipeline::Pipeline for DummyPipeline {
+            type Input = String;
+            type Output = crate::pipeline::PipelineOutput;
+            fn __call__(&self, _: Self::Input) -> Result<Self::Output> {
+                Ok(crate::pipeline::PipelineOutput::Text("x".to_string()))
+            }
+        }
+        let pipeline = create_early_exit_pipeline(DummyPipeline, config);
+        let result = pipeline
+            .__call__("test".to_string())
+            .expect("early exit pipeline should succeed");
+        assert!(result.computation_saved_percent >= 0.0);
+        assert!(result.total_layers_computed <= result.exit_point.layer_index + 1);
+    }
+
+    // ── EarlyExitPipeline factories ───────────────────────────────────────────
+
+    #[test]
+    fn test_confidence_based_factory() {
+        struct Dummy;
+        impl crate::pipeline::Pipeline for Dummy {
+            type Input = String;
+            type Output = crate::pipeline::PipelineOutput;
+            fn __call__(&self, _: Self::Input) -> Result<Self::Output> {
+                Ok(crate::pipeline::PipelineOutput::Text("x".to_string()))
+            }
+        }
+        let pipeline = create_confidence_based_early_exit(Dummy, 0.7_f32);
+        let config = pipeline.exit_predictor().config();
+        assert!(
+            matches!(config.strategy, ExitStrategy::ConfidenceThreshold(t) if (t - 0.7).abs() < 1e-5)
+        );
+    }
+
+    #[test]
+    fn test_adaptive_factory() {
+        struct Dummy;
+        impl crate::pipeline::Pipeline for Dummy {
+            type Input = String;
+            type Output = crate::pipeline::PipelineOutput;
+            fn __call__(&self, _: Self::Input) -> Result<Self::Output> {
+                Ok(crate::pipeline::PipelineOutput::Text("x".to_string()))
+            }
+        }
+        let pipeline = create_adaptive_early_exit(Dummy);
+        let config = pipeline.exit_predictor().config();
+        assert!(matches!(config.strategy, ExitStrategy::AdaptiveThreshold));
+        assert!(config.dynamic_threshold_adjustment);
+    }
+
+    #[test]
+    fn test_budget_constrained_factory() {
+        struct Dummy;
+        impl crate::pipeline::Pipeline for Dummy {
+            type Input = String;
+            type Output = crate::pipeline::PipelineOutput;
+            fn __call__(&self, _: Self::Input) -> Result<Self::Output> {
+                Ok(crate::pipeline::PipelineOutput::Text("x".to_string()))
+            }
+        }
+        let pipeline = create_budget_constrained_early_exit(Dummy, 100, 50.0);
+        let config = pipeline.exit_predictor().config();
+        assert!(matches!(config.strategy, ExitStrategy::Combined(_)));
+        assert!(config.energy_aware);
+    }
+
+    // ── Reset ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_predictor_reset_clears_history() {
+        let config = EarlyExitConfig {
+            min_layers: 0,
+            max_layers: 10,
+            ..Default::default()
+        };
+        let mut predictor = EarlyExitPredictor::new(config);
+        let output = make_layer_output(5, Some(vec![1.0, 2.0]), vec![0.1; 5]);
+        let _ = predictor.should_exit(&output);
+        predictor.reset();
+        // After reset, exit_history is empty so consistency falls back to 0.5
+        let ep2 = predictor.create_base_exit_point(&output).expect("create_base_exit_point ok");
+        assert!(ep2.consistency_score > 0.0);
     }
 }

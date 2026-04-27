@@ -214,3 +214,108 @@ pub async fn oauth2_providers_handler(
     let response = OAuth2ProvidersResponse { providers };
     Ok(axum::Json(response))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{hash_password, verify_password};
+
+    #[test]
+    fn test_hash_password_returns_hex_string() {
+        let hash = hash_password("testpassword");
+        // SHA-256 hex digest is always 64 characters
+        assert_eq!(hash.len(), 64);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_hash_password_is_deterministic() {
+        let hash1 = hash_password("mypassword");
+        let hash2 = hash_password("mypassword");
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_hash_different_passwords_produce_different_hashes() {
+        let h1 = hash_password("password1");
+        let h2 = hash_password("password2");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_hash_empty_password() {
+        let hash = hash_password("");
+        assert_eq!(hash.len(), 64);
+    }
+
+    #[test]
+    fn test_verify_password_correct() {
+        let hash = hash_password("secret123");
+        assert!(verify_password("secret123", &hash));
+    }
+
+    #[test]
+    fn test_verify_password_incorrect() {
+        let hash = hash_password("correct_password");
+        assert!(!verify_password("wrong_password", &hash));
+    }
+
+    #[test]
+    fn test_verify_password_empty_vs_nonempty() {
+        let hash = hash_password("nonempty");
+        assert!(!verify_password("", &hash));
+    }
+
+    #[test]
+    fn test_verify_password_case_sensitive() {
+        let hash = hash_password("MyPassword");
+        assert!(!verify_password("mypassword", &hash));
+        assert!(!verify_password("MYPASSWORD", &hash));
+        assert!(verify_password("MyPassword", &hash));
+    }
+
+    #[test]
+    fn test_hash_with_special_characters() {
+        let hash = hash_password("p@$$w0rd!#%^&*()");
+        assert_eq!(hash.len(), 64);
+        assert!(verify_password("p@$$w0rd!#%^&*()", &hash));
+    }
+
+    #[test]
+    fn test_hash_with_unicode_characters() {
+        let hash = hash_password("パスワード123");
+        assert_eq!(hash.len(), 64);
+        assert!(verify_password("パスワード123", &hash));
+    }
+
+    #[test]
+    fn test_hash_with_long_password() {
+        let long_pass = "a".repeat(1000);
+        let hash = hash_password(&long_pass);
+        assert_eq!(hash.len(), 64);
+        assert!(verify_password(&long_pass, &hash));
+    }
+
+    #[test]
+    fn test_verify_with_wrong_hash_format() {
+        // Should not panic on invalid hash
+        assert!(!verify_password("password", "not-a-real-hash"));
+    }
+
+    #[test]
+    fn test_multiple_hashes_are_consistent() {
+        let passwords = ["alpha", "beta", "gamma", "delta", "epsilon"];
+        for p in &passwords {
+            let hash = hash_password(p);
+            for other in &passwords {
+                if other == p {
+                    assert!(verify_password(other, &hash), "same password should verify");
+                } else {
+                    assert!(
+                        !verify_password(other, &hash),
+                        "different password should not verify"
+                    );
+                }
+            }
+        }
+    }
+}

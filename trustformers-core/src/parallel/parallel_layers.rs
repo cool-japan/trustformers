@@ -263,7 +263,7 @@ impl ParallelMultiHeadAttention {
     ) -> Result<Self> {
         let world_size = mp_context.world_size();
 
-        if num_heads % world_size != 0 {
+        if !num_heads.is_multiple_of(world_size) {
             return Err(tensor_op_error(
                 "ParallelMultiHeadAttention::new",
                 format!(
@@ -448,7 +448,7 @@ impl ParallelMLP {
                 // SwiGLU requires splitting the input tensor and applying activation
                 // For SwiGLU: SwiGLU(x) = Swish(Wx) ⊙ Vx where Swish(x) = x * sigmoid(x)
                 let shape = tensor.shape();
-                if shape[shape.len() - 1] % 2 != 0 {
+                if !shape[shape.len() - 1].is_multiple_of(2) {
                     return Err(tensor_op_error(
                         "ParallelMLP::apply_activation",
                         "SwiGLU requires even dimension for splitting",

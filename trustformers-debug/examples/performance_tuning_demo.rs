@@ -54,6 +54,7 @@ fn demo_gpu_underutilization() -> Result<()> {
             batch_size: 16,
             layer_timings: HashMap::new(),
             layer_memory: HashMap::new(),
+            ..Default::default()
         };
 
         tuner.record_snapshot(snapshot);
@@ -144,6 +145,7 @@ fn demo_memory_fragmentation() -> Result<()> {
             batch_size: 16,
             layer_timings: HashMap::new(),
             layer_memory: HashMap::new(),
+            ..Default::default()
         };
 
         tuner.record_snapshot(snapshot);
@@ -201,6 +203,7 @@ fn demo_batch_size_optimization() -> Result<()> {
         batch_size: 4, // Very small batch size!
         layer_timings: HashMap::new(),
         layer_memory: HashMap::new(),
+        ..Default::default()
     };
 
     tuner.record_snapshot(snapshot);
@@ -255,6 +258,7 @@ fn demo_comprehensive_analysis() -> Result<()> {
             batch_size: 8, // Small batch
             layer_timings,
             layer_memory: HashMap::new(),
+            ..Default::default()
         };
 
         tuner.record_snapshot(snapshot);

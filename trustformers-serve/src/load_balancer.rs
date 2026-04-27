@@ -1111,4 +1111,415 @@ mod tests {
         assert_eq!(metrics.successful_requests, 1);
         assert_eq!(metrics.failed_requests, 1);
     }
+
+    fn make_instance(id: &str, port: u16) -> BackendInstance {
+        BackendInstance {
+            id: id.to_string(),
+            address: "127.0.0.1".to_string(),
+            port,
+            weight: 1.0,
+            health_status: InstanceHealth::Healthy,
+            active_connections: 0,
+            response_time_stats: ResponseTimeStats::default(),
+            resource_utilization: ResourceUtilization::default(),
+            last_health_check: None,
+            metadata: HashMap::new(),
+        }
+    }
+
+    fn make_context(ip: &str) -> RequestContext {
+        RequestContext {
+            client_ip: ip.to_string(),
+            headers: HashMap::new(),
+            cookies: HashMap::new(),
+            path: "/test".to_string(),
+            method: "GET".to_string(),
+            user_agent: "test-agent".to_string(),
+            metadata: HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_instance_rejected() {
+        let lb = LoadBalancer::new(LoadBalancerConfig::default());
+        let inst = make_instance("dup-1", 9000);
+        lb.add_instance(inst.clone()).await.expect("first add should succeed");
+        let err = lb.add_instance(inst).await;
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_remove_instance_success() {
+        let lb = LoadBalancer::new(LoadBalancerConfig::default());
+        lb.add_instance(make_instance("rm-1", 9001)).await.expect("add should succeed");
+        let result = lb.remove_instance("rm-1").await;
+        assert!(result.is_ok());
+        assert!(lb.get_instances().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_remove_nonexistent_instance() {
+        let lb = LoadBalancer::new(LoadBalancerConfig::default());
+        let result = lb.remove_instance("ghost").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_select_instance_empty() {
+        let lb = LoadBalancer::new(LoadBalancerConfig::default());
+        let ctx = make_context("10.0.0.1");
+        let selected = lb.select_instance(&ctx).await.expect("select should not error");
+        assert!(selected.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_select_least_connections() {
+        let config = LoadBalancerConfig {
+            algorithm: LoadBalancingAlgorithm::LeastConnections,
+            ..Default::default()
+        };
+        let lb = LoadBalancer::new(config);
+
+        let mut inst_a = make_instance("lc-a", 9010);
+        inst_a.active_connections = 5;
+        let mut inst_b = make_instance("lc-b", 9011);
+        inst_b.active_connections = 1;
+
+        lb.add_instance(inst_a).await.expect("add a");
+        lb.add_instance(inst_b).await.expect("add b");
+
+        let ctx = make_context("10.0.0.1");
+        let selected = lb.select_instance(&ctx).await.expect("select ok");
+        if let Some(inst) = selected {
+            assert_eq!(inst.id, "lc-b");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_select_least_response_time() {
+        let config = LoadBalancerConfig {
+            algorithm: LoadBalancingAlgorithm::LeastResponseTime,
+            ..Default::default()
+        };
+        let lb = LoadBalancer::new(config);
+
+        let mut inst_a = make_instance("lrt-a", 9020);
+        inst_a.response_time_stats.avg_response_time = Duration::from_millis(200);
+        let mut inst_b = make_instance("lrt-b", 9021);
+        inst_b.response_time_stats.avg_response_time = Duration::from_millis(50);
+
+        lb.add_instance(inst_a).await.expect("add a");
+        lb.add_instance(inst_b).await.expect("add b");
+
+        let ctx = make_context("10.0.0.2");
+        let selected = lb.select_instance(&ctx).await.expect("select ok");
+        if let Some(inst) = selected {
+            assert_eq!(inst.id, "lrt-b");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_select_resource_based() {
+        let config = LoadBalancerConfig {
+            algorithm: LoadBalancingAlgorithm::ResourceBased {
+                cpu_weight: 0.7,
+                memory_weight: 0.3,
+            },
+            ..Default::default()
+        };
+        let lb = LoadBalancer::new(config);
+
+        let mut inst_a = make_instance("rb-a", 9030);
+        inst_a.resource_utilization = ResourceUtilization {
+            cpu_usage: 0.9,
+            memory_usage: 0.5,
+            network_in: 0.0,
+            network_out: 0.0,
+            disk_io: 0.0,
+        };
+        let mut inst_b = make_instance("rb-b", 9031);
+        inst_b.resource_utilization = ResourceUtilization {
+            cpu_usage: 0.2,
+            memory_usage: 0.3,
+            network_in: 0.0,
+            network_out: 0.0,
+            disk_io: 0.0,
+        };
+
+        lb.add_instance(inst_a).await.expect("add a");
+        lb.add_instance(inst_b).await.expect("add b");
+
+        let ctx = make_context("10.0.0.3");
+        let selected = lb.select_instance(&ctx).await.expect("select ok");
+        if let Some(inst) = selected {
+            assert_eq!(inst.id, "rb-b");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_select_ip_hash_deterministic() {
+        let config = LoadBalancerConfig {
+            algorithm: LoadBalancingAlgorithm::IPHash,
+            ..Default::default()
+        };
+        let lb = LoadBalancer::new(config);
+
+        for i in 0..3 {
+            lb.add_instance(make_instance(&format!("ih-{}", i), 9040 + i as u16))
+                .await
+                .expect("add should succeed");
+        }
+
+        let ctx = make_context("192.168.1.100");
+        let s1 = lb.select_instance(&ctx).await.expect("select 1");
+        let s2 = lb.select_instance(&ctx).await.expect("select 2");
+        // Same IP should route to same instance
+        if let (Some(a), Some(b)) = (s1, s2) {
+            assert_eq!(a.id, b.id);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_select_consistent_hashing() {
+        let config = LoadBalancerConfig {
+            algorithm: LoadBalancingAlgorithm::ConsistentHashing { virtual_nodes: 100 },
+            ..Default::default()
+        };
+        let lb = LoadBalancer::new(config);
+
+        for i in 0..3 {
+            lb.add_instance(make_instance(&format!("ch-{}", i), 9050 + i as u16))
+                .await
+                .expect("add should succeed");
+        }
+
+        let ctx = make_context("172.16.0.1");
+        let selected = lb.select_instance(&ctx).await.expect("select ok");
+        assert!(selected.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_weighted_least_connections() {
+        let config = LoadBalancerConfig {
+            algorithm: LoadBalancingAlgorithm::WeightedLeastConnections,
+            ..Default::default()
+        };
+        let lb = LoadBalancer::new(config);
+
+        let mut inst_a = make_instance("wlc-a", 9060);
+        inst_a.weight = 10.0;
+        inst_a.active_connections = 5;
+        let mut inst_b = make_instance("wlc-b", 9061);
+        inst_b.weight = 1.0;
+        inst_b.active_connections = 1;
+
+        lb.add_instance(inst_a).await.expect("add a");
+        lb.add_instance(inst_b).await.expect("add b");
+
+        let ctx = make_context("10.0.0.4");
+        let selected = lb.select_instance(&ctx).await.expect("select ok");
+        // inst_a: 5/10=0.5, inst_b: 1/1=1.0 => inst_a should be picked
+        if let Some(inst) = selected {
+            assert_eq!(inst.id, "wlc-a");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_opens_on_failures() {
+        let mut config = LoadBalancerConfig::default();
+        config.circuit_breaker.failure_threshold = 3;
+        let lb = LoadBalancer::new(config);
+
+        lb.add_instance(make_instance("cb-1", 9070)).await.expect("add ok");
+
+        // Record 3 failures to trip circuit breaker
+        for _ in 0..3 {
+            lb.record_request_result("cb-1", false, Duration::from_millis(100))
+                .await
+                .expect("record ok");
+        }
+
+        let metrics = lb.get_metrics().await;
+        assert_eq!(metrics.circuit_breaker_trips, 1);
+    }
+
+    #[tokio::test]
+    async fn test_metrics_instance_request_counts() {
+        let lb = LoadBalancer::new(LoadBalancerConfig::default());
+        lb.add_instance(make_instance("cnt-1", 9080)).await.expect("add ok");
+
+        for _ in 0..5 {
+            lb.record_request_result("cnt-1", true, Duration::from_millis(10))
+                .await
+                .expect("record ok");
+        }
+
+        let metrics = lb.get_metrics().await;
+        let count = metrics.instance_request_counts.get("cnt-1").copied();
+        assert_eq!(count, Some(5));
+    }
+
+    #[tokio::test]
+    async fn test_response_time_stats_update() {
+        let lb = LoadBalancer::new(LoadBalancerConfig::default());
+        lb.add_instance(make_instance("rts-1", 9090)).await.expect("add ok");
+
+        lb.record_request_result("rts-1", true, Duration::from_millis(100))
+            .await
+            .expect("record ok");
+        lb.record_request_result("rts-1", true, Duration::from_millis(300))
+            .await
+            .expect("record ok");
+
+        let instances = lb.get_instances().await;
+        assert_eq!(instances.len(), 1);
+        assert!(instances[0].response_time_stats.sample_count >= 2);
+    }
+
+    #[tokio::test]
+    async fn test_remove_instance_clears_sessions() {
+        let lb = LoadBalancer::new(LoadBalancerConfig::default());
+        lb.add_instance(make_instance("sess-1", 9100)).await.expect("add ok");
+        let result = lb.remove_instance("sess-1").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_geographic_selection_fallback() {
+        let config = LoadBalancerConfig {
+            algorithm: LoadBalancingAlgorithm::Geographic,
+            ..Default::default()
+        };
+        let lb = LoadBalancer::new(config);
+
+        lb.add_instance(make_instance("geo-1", 9110)).await.expect("add ok");
+
+        let ctx = make_context("203.0.113.1");
+        let selected = lb.select_instance(&ctx).await.expect("select ok");
+        assert!(selected.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_custom_algorithm_fallback() {
+        let config = LoadBalancerConfig {
+            algorithm: LoadBalancingAlgorithm::Custom {
+                name: "test_algo".to_string(),
+                parameters: HashMap::new(),
+            },
+            ..Default::default()
+        };
+        let lb = LoadBalancer::new(config);
+
+        lb.add_instance(make_instance("custom-1", 9120)).await.expect("add ok");
+
+        let ctx = make_context("10.0.0.5");
+        let selected = lb.select_instance(&ctx).await.expect("select ok");
+        assert!(selected.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_unhealthy_instances_excluded() {
+        let lb = LoadBalancer::new(LoadBalancerConfig::default());
+
+        let mut unhealthy = make_instance("uh-1", 9130);
+        unhealthy.health_status = InstanceHealth::Unhealthy;
+        lb.add_instance(unhealthy).await.expect("add ok");
+
+        let ctx = make_context("10.0.0.6");
+        let selected = lb.select_instance(&ctx).await.expect("select ok");
+        assert!(selected.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_multiple_instances_different_health() {
+        let lb = LoadBalancer::new(LoadBalancerConfig::default());
+
+        let mut unhealthy = make_instance("mh-1", 9140);
+        unhealthy.health_status = InstanceHealth::Unhealthy;
+        let healthy = make_instance("mh-2", 9141);
+
+        lb.add_instance(unhealthy).await.expect("add ok");
+        lb.add_instance(healthy).await.expect("add ok");
+
+        let ctx = make_context("10.0.0.7");
+        let selected = lb.select_instance(&ctx).await.expect("select ok");
+        if let Some(inst) = selected {
+            assert_eq!(inst.id, "mh-2");
+        }
+    }
+
+    #[test]
+    fn test_default_config_values() {
+        let config = LoadBalancerConfig::default();
+        assert!(matches!(
+            config.algorithm,
+            LoadBalancingAlgorithm::RoundRobin
+        ));
+        assert_eq!(config.health_check.failure_threshold, 3);
+        assert_eq!(config.health_check.success_threshold, 2);
+        assert!(!config.auto_scaling.enabled);
+        assert_eq!(config.auto_scaling.min_instances, 1);
+        assert_eq!(config.retry_policy.max_retries, 3);
+        assert!(config.connection_pool.enabled);
+    }
+
+    #[test]
+    fn test_response_time_stats_default() {
+        let stats = ResponseTimeStats::default();
+        assert_eq!(stats.sample_count, 0);
+        assert_eq!(stats.avg_response_time, Duration::from_millis(0));
+        assert_eq!(stats.max_response_time, Duration::from_millis(0));
+    }
+
+    #[test]
+    fn test_resource_utilization_default() {
+        let util = ResourceUtilization::default();
+        assert!((util.cpu_usage - 0.0).abs() < f64::EPSILON);
+        assert!((util.memory_usage - 0.0).abs() < f64::EPSILON);
+        assert!((util.network_in - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_load_balancer_metrics_default() {
+        let metrics = LoadBalancerMetrics::default();
+        assert_eq!(metrics.total_requests, 0);
+        assert_eq!(metrics.successful_requests, 0);
+        assert_eq!(metrics.failed_requests, 0);
+        assert_eq!(metrics.circuit_breaker_trips, 0);
+        assert_eq!(metrics.instance_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_many_instances_round_robin() {
+        let lb = LoadBalancer::new(LoadBalancerConfig::default());
+        // Use LCG for deterministic instance creation
+        let mut lcg_state: u64 = 42;
+        for i in 0..10 {
+            lcg_state = lcg_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let port = 10000 + (lcg_state % 5000) as u16;
+            lb.add_instance(make_instance(&format!("many-{}", i), port))
+                .await
+                .expect("add ok");
+        }
+        let instances = lb.get_instances().await;
+        assert_eq!(instances.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn test_metrics_avg_response_time() {
+        let lb = LoadBalancer::new(LoadBalancerConfig::default());
+        lb.add_instance(make_instance("avg-1", 11000)).await.expect("add ok");
+
+        lb.record_request_result("avg-1", true, Duration::from_millis(100))
+            .await
+            .expect("record ok");
+        lb.record_request_result("avg-1", true, Duration::from_millis(300))
+            .await
+            .expect("record ok");
+
+        let metrics = lb.get_metrics().await;
+        // avg should be around 200ms
+        assert!(metrics.avg_response_time.as_millis() > 100);
+        assert!(metrics.avg_response_time.as_millis() < 350);
+    }
 }

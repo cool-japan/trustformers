@@ -22,25 +22,35 @@ pub mod adaptive_batching;
 pub mod adaptive_inference;
 pub mod advanced_caching;
 pub mod advanced_rag;
+pub mod audio_classification;
+pub mod code_generation;
 pub mod composition;
 #[cfg(feature = "async")]
 pub mod conversational;
 pub mod coreml_backend;
 pub mod custom_backend;
+pub mod depth_estimation;
 pub mod document_understanding;
 pub mod dynamic_batching;
 pub mod early_exit;
 pub mod ensemble;
 pub mod fill_mask;
+pub mod image_classification;
 pub mod image_to_text;
 pub mod jit_compilation;
 pub mod mamba2_pipeline;
+pub mod mask_generation;
 pub mod metal_backend;
 pub mod mixture_of_depths;
+pub mod multi_doc_summarization;
 pub mod multimodal;
+pub mod object_detection;
 pub mod onnx_backend;
 pub mod openvino_backend;
+pub mod optical_flow;
+pub mod pose_estimation;
 pub mod question_answering;
+pub mod rag;
 pub mod speculative_decoding;
 pub mod speech_to_text;
 pub mod streaming;
@@ -51,6 +61,7 @@ pub mod text_generation;
 pub mod text_to_speech;
 pub mod token_classification;
 pub mod translation;
+pub mod translation_enhanced;
 pub mod visual_question_answering;
 
 pub use adaptive_batching::{
@@ -167,7 +178,29 @@ pub use tensorrt_backend::{
 // Export enhanced pipeline factory and backend types
 // Backend is defined in this module, so no need to import
 // pub use enhanced_pipeline; // Commented out to avoid duplicate definition with function below
+pub use code_generation::{
+    CodeGenerationConfig, CodeGenerationError, CodeGenerationInput, CodeGenerationOutput,
+    CodeGenerationPipeline, ExtractionInfo, IndentStyle, StopReason,
+};
+pub use mask_generation::{
+    BoxPrompt, GeneratedMask, MaskGenerationError, MaskGenerationPipeline, MaskGenerationResult,
+    MaskPrompt, PointLabel, PointPrompt,
+};
+pub use multi_doc_summarization::{
+    CitationFormat, DocumentMetadata as MultiDocDocumentMetadata, ExtractedKeyPoint, InputDocument,
+    KeyPointCategory, MultiDocConfig, MultiDocSummarizationPipeline, MultiDocSummaryOutput,
+    SummarizationError, SummarizationStrategy,
+};
+pub use optical_flow::{FlowError, FlowField, FlowPyramid, FlowVector, OpticalFlowPipeline};
+pub use pose_estimation::{
+    coco_skeleton, CocoKeypoint, Keypoint, PersonPose, PoseEstimationError, PoseEstimationPipeline,
+    PoseEstimationResult, SkeletonEdge,
+};
 pub use question_answering::QuestionAnsweringPipeline;
+pub use rag::{
+    Bm25Retriever, Document, DocumentChunk, RagConfig, RagError, RagPipeline, RagResult,
+    RetrievalResult, RetrievalStrategy, TfIdfRetriever,
+};
 #[cfg(feature = "audio")]
 pub use speech_to_text::{
     AudioInput, SpeechTask, SpeechToTextConfig, SpeechToTextOutput, SpeechToTextPipeline,
@@ -188,6 +221,10 @@ pub use text_to_speech::{
 };
 pub use token_classification::TokenClassificationPipeline;
 pub use translation::TranslationPipeline;
+pub use translation_enhanced::{
+    DetectionResult, EnhancedTranslationPipeline, Formality, Language, LanguageDetector, Script,
+    TranslationError, TranslationRequest, TranslationResult,
+};
 #[cfg(feature = "vision")]
 pub use visual_question_answering::{
     AnswerCandidate, AnswerGenerationStrategy, AttentionVisualization, BoundingBox, DetectedObject,

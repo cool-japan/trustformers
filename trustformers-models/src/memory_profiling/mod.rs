@@ -61,6 +61,10 @@ pub mod types;
 
 // Internal modules
 #[cfg(test)]
+mod analytics_tests;
+#[cfg(test)]
+mod reporting_tests;
+#[cfg(test)]
 mod tests;
 
 // Re-export main types for convenience

@@ -43,19 +43,24 @@ pub mod auto_classes;
 pub mod automodel;
 pub mod automodel_tasks;
 pub mod config_management;
+pub mod diagnostics;
 pub mod enhanced_profiler;
 pub mod error;
+pub mod evaluation;
 pub mod hub;
 pub mod hub_differential;
 pub mod hub_local_mirror;
+pub mod hub_model_card;
 pub mod hub_offline_packs;
 pub mod hub_p2p;
 #[cfg(feature = "async")]
 pub mod hub_ui;
+pub mod hub_upload;
 pub mod memory_pool;
 pub mod pipeline;
 pub mod processor;
 pub mod profiler;
+pub mod training_utils;
 pub mod validation;
 pub mod zero_copy;
 
@@ -151,6 +156,7 @@ pub use enhanced_profiler::{
     PerformanceSample, PerformanceThresholds, ProfilerConfig as EnhancedProfilerConfig,
     SessionSummary,
 };
+pub use evaluation::bridge::{NlpAdapter, TensorAdapter};
 pub use hub_local_mirror::{
     get_hub_mirror, get_model_from_mirror, init_hub_mirror, CachedModel, DownloadProgress,
     DownloadStatus, HubMirror, MirrorConfig, MirrorStats, ModelMetadata,
@@ -167,10 +173,66 @@ pub use memory_pool::{
     ThreadLocalMemoryPool,
 };
 pub use pipeline::{
-    compose_pipelines, pipeline, ComposedPipeline, DocumentUnderstandingPipeline, EnsemblePipeline,
-    FillMaskPipeline, MultiModalPipeline, OutputConverter, PipelineChain, PipelineComposer,
-    QuestionAnsweringPipeline, SummarizationPipeline, TextClassificationPipeline, TextConverter,
-    TextGenerationPipeline, TokenClassificationPipeline, TranslationPipeline,
+    coco_skeleton,
+    compose_pipelines,
+    pipeline,
+    Bm25Retriever,
+    // Mask generation
+    BoxPrompt,
+    // Pose estimation
+    CocoKeypoint,
+    ComposedPipeline,
+    DetectionResult,
+    Document,
+    DocumentChunk,
+    DocumentUnderstandingPipeline,
+    EnhancedTranslationPipeline,
+    EnsemblePipeline,
+    FillMaskPipeline,
+    // Optical flow
+    FlowError,
+    FlowField,
+    FlowPyramid,
+    FlowVector,
+    Formality,
+    GeneratedMask,
+    Keypoint,
+    Language,
+    LanguageDetector,
+    MaskGenerationError,
+    MaskGenerationPipeline,
+    MaskGenerationResult,
+    MaskPrompt,
+    MultiModalPipeline,
+    OpticalFlowPipeline,
+    OutputConverter,
+    PersonPose,
+    PipelineChain,
+    PipelineComposer,
+    PointLabel,
+    PointPrompt,
+    PoseEstimationError,
+    PoseEstimationPipeline,
+    PoseEstimationResult,
+    QuestionAnsweringPipeline,
+    RagConfig,
+    RagError,
+    RagPipeline,
+    RagResult,
+    RetrievalResult,
+    RetrievalStrategy,
+    Script,
+    SkeletonEdge,
+    SummarizationPipeline,
+    TextClassificationPipeline,
+    TextConverter,
+    TextGenerationPipeline,
+    TfIdfRetriever,
+    TokenClassificationPipeline,
+    TranslationError,
+    TranslationPipeline,
+    TranslationRequest,
+    TranslationResult,
 };
 
 #[cfg(feature = "async")]

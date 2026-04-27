@@ -27,6 +27,8 @@
 
 pub mod config;
 pub mod model;
+#[cfg(test)]
+mod model_tests;
 
 #[cfg(test)]
 mod tests;

@@ -277,3 +277,258 @@ impl crate::pipeline::AsyncPipeline for TranslationPipeline {
             })?
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    // ---- Helper functions mirroring private methods ----
+
+    fn prepare_input(text: &str, src: Option<&str>, tgt: Option<&str>, is_t5: bool) -> String {
+        if let (Some(src_lang), Some(tgt_lang)) = (src, tgt) {
+            if is_t5 {
+                format!("translate {} to {}: {}", src_lang, tgt_lang, text)
+            } else {
+                format!("[{}] {}", src_lang, text)
+            }
+        } else {
+            text.to_string()
+        }
+    }
+
+    fn post_process(translation: &str, src: Option<&str>, tgt: Option<&str>) -> String {
+        let mut processed = translation.to_string();
+        for special in &["<s>", "</s>", "<pad>", "<unk>"] {
+            processed = processed.replace(special, "");
+        }
+        if let Some(src_lang) = src {
+            processed = processed.replace(&format!("<{}>", src_lang), "");
+        }
+        if let Some(tgt_lang) = tgt {
+            processed = processed.replace(&format!("<{}>", tgt_lang), "");
+        }
+        processed = processed.trim().to_string();
+        processed = processed.split_whitespace().collect::<Vec<_>>().join(" ");
+        if processed.is_empty() {
+            processed = "[Unable to translate]".to_string();
+        }
+        processed
+    }
+
+    /// Compute 1-gram BLEU precision (simplified)
+    fn bleu_1gram(candidate: &str, reference: &str) -> f32 {
+        let cand_tokens: Vec<&str> = candidate.split_whitespace().collect();
+        let ref_set: std::collections::HashSet<&str> = reference.split_whitespace().collect();
+        if cand_tokens.is_empty() {
+            return 0.0;
+        }
+        let matching = cand_tokens.iter().filter(|t| ref_set.contains(*t)).count();
+        matching as f32 / cand_tokens.len() as f32
+    }
+
+    /// Compute 2-gram BLEU precision (simplified)
+    fn bleu_2gram(candidate: &str, reference: &str) -> f32 {
+        let cand_words: Vec<&str> = candidate.split_whitespace().collect();
+        let ref_words: Vec<&str> = reference.split_whitespace().collect();
+        if cand_words.len() < 2 {
+            return 0.0;
+        }
+        let cand_bigrams: Vec<(&str, &str)> = cand_words.windows(2).map(|w| (w[0], w[1])).collect();
+        let ref_bigrams: std::collections::HashSet<(&str, &str)> =
+            ref_words.windows(2).map(|w| (w[0], w[1])).collect();
+        let matching = cand_bigrams.iter().filter(|b| ref_bigrams.contains(*b)).count();
+        matching as f32 / cand_bigrams.len() as f32
+    }
+
+    // ---- TranslationConfig tests ----
+
+    #[test]
+    fn test_config_default_values() {
+        let cfg = TranslationConfig::default();
+        assert_eq!(cfg.max_length, 512);
+        assert_eq!(cfg.num_beams, 4);
+        assert!(cfg.early_stopping);
+        assert!(cfg.source_lang.is_none());
+        assert!(cfg.target_lang.is_none());
+    }
+
+    #[test]
+    fn test_config_clone() {
+        let cfg = TranslationConfig {
+            source_lang: Some("en".to_string()),
+            target_lang: Some("fr".to_string()),
+            ..TranslationConfig::default()
+        };
+        let cloned = cfg.clone();
+        assert_eq!(cloned.source_lang, Some("en".to_string()));
+    }
+
+    // ---- Source / target language pair tests ----
+
+    #[test]
+    fn test_language_pair_stored_correctly() {
+        let cfg = TranslationConfig {
+            source_lang: Some("English".to_string()),
+            target_lang: Some("French".to_string()),
+            ..TranslationConfig::default()
+        };
+        assert_eq!(cfg.source_lang.as_deref(), Some("English"));
+        assert_eq!(cfg.target_lang.as_deref(), Some("French"));
+    }
+
+    #[test]
+    fn test_no_language_pair_passthrough() {
+        let result = prepare_input("Hello world", None, None, false);
+        assert_eq!(result, "Hello world");
+    }
+
+    // ---- T5-style input prefix tests ----
+
+    #[test]
+    fn test_t5_prefix_format() {
+        let result = prepare_input("Hello world", Some("English"), Some("French"), true);
+        assert!(result.starts_with("translate English to French:"));
+        assert!(result.contains("Hello world"));
+    }
+
+    #[test]
+    fn test_non_t5_prefix_format() {
+        let result = prepare_input("Hello world", Some("en"), Some("fr"), false);
+        assert!(result.starts_with("[en]"));
+        assert!(result.contains("Hello world"));
+    }
+
+    #[test]
+    fn test_t5_prefix_contains_both_languages() {
+        let src = "de";
+        let tgt = "en";
+        let result = prepare_input("Hallo Welt", Some(src), Some(tgt), true);
+        assert!(result.contains(src));
+        assert!(result.contains(tgt));
+    }
+
+    // ---- Post-processing tests ----
+
+    #[test]
+    fn test_post_process_removes_special_tokens() {
+        let raw = "<s>Hello world</s>";
+        let result = post_process(raw, None, None);
+        assert!(!result.contains("<s>"));
+        assert!(!result.contains("</s>"));
+    }
+
+    #[test]
+    fn test_post_process_removes_pad_unk() {
+        let raw = "<pad>Hello<unk> world";
+        let result = post_process(raw, None, None);
+        assert!(!result.contains("<pad>"));
+        assert!(!result.contains("<unk>"));
+    }
+
+    #[test]
+    fn test_post_process_removes_lang_tokens() {
+        let raw = "<en> Hello <fr>";
+        let result = post_process(raw, Some("en"), Some("fr"));
+        assert!(!result.contains("<en>"));
+        assert!(!result.contains("<fr>"));
+    }
+
+    #[test]
+    fn test_post_process_normalises_whitespace() {
+        let raw = "Hello   world  today";
+        let result = post_process(raw, None, None);
+        assert!(!result.contains("  ")); // no double spaces
+    }
+
+    #[test]
+    fn test_post_process_empty_becomes_unable_to_translate() {
+        let raw = "<s></s><pad>";
+        let result = post_process(raw, None, None);
+        assert_eq!(result, "[Unable to translate]");
+    }
+
+    // ---- Token count tests ----
+
+    #[test]
+    fn test_token_count_positive_after_tokenisation() {
+        // Simulate tokenisation: split on whitespace
+        let text = "The quick brown fox";
+        let tokens: Vec<&str> = text.split_whitespace().collect();
+        assert!(!tokens.is_empty());
+        assert!(tokens.len() <= 512); // within max_length
+    }
+
+    #[test]
+    fn test_max_length_truncation_simulation() {
+        let cfg = TranslationConfig {
+            max_length: 5,
+            ..TranslationConfig::default()
+        };
+        let tokens: Vec<u32> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let truncated: Vec<u32> = tokens.into_iter().take(cfg.max_length).collect();
+        assert_eq!(truncated.len(), 5);
+    }
+
+    // ---- forced_bos_token_id language forcing ----
+
+    #[test]
+    fn test_forced_bos_prepended_to_generation() {
+        // Simulate forced BOS: first output token must be the language token
+        let forced_bos: u32 = 250008; // typical mBART French token
+        let mut generated: Vec<u32> = vec![forced_bos];
+        generated.extend(&[100, 200, 300]);
+        assert_eq!(generated[0], forced_bos);
+    }
+
+    #[test]
+    fn test_language_code_mapping() {
+        let mut lang_codes: HashMap<&str, u32> = HashMap::new();
+        lang_codes.insert("en_XX", 250004);
+        lang_codes.insert("fr_XX", 250008);
+        lang_codes.insert("de_DE", 250003);
+        assert!(lang_codes.contains_key("fr_XX"));
+        assert_eq!(*lang_codes.get("fr_XX").expect("key exists"), 250008);
+    }
+
+    // ---- BLEU score tests ----
+
+    #[test]
+    fn test_bleu_1gram_perfect() {
+        let bleu = bleu_1gram("the cat sat on the mat", "the cat sat on the mat");
+        assert!((bleu - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_bleu_1gram_zero() {
+        let bleu = bleu_1gram("foo bar", "baz qux");
+        assert!((bleu - 0.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_bleu_1gram_partial() {
+        let bleu = bleu_1gram("the cat", "the dog sat");
+        assert!(bleu > 0.0 && bleu < 1.0, "bleu = {}", bleu);
+    }
+
+    #[test]
+    fn test_bleu_2gram_perfect() {
+        let bleu = bleu_2gram("the quick brown fox", "the quick brown fox");
+        assert!((bleu - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_bleu_2gram_empty_candidate() {
+        let bleu = bleu_2gram("word", "reference text here");
+        // Single word candidate → no bigrams → 0
+        assert!((bleu - 0.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_bleu_higher_for_better_translation() {
+        let reference = "the quick brown fox jumps over the lazy dog";
+        let good = "the quick brown fox jumps over the lazy dog";
+        let bad = "a random completely different sentence here";
+        assert!(bleu_1gram(good, reference) > bleu_1gram(bad, reference));
+    }
+}

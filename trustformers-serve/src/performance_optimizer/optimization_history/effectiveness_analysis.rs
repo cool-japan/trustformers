@@ -1052,3 +1052,326 @@ impl Default for StatisticalSignificance {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::performance_optimizer::types::PerformanceMeasurement;
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    fn make_measurement(
+        throughput: f64,
+        latency_ms: u64,
+        cpu: f32,
+        mem: f32,
+    ) -> PerformanceMeasurement {
+        PerformanceMeasurement {
+            throughput,
+            average_latency: Duration::from_millis(latency_ms),
+            cpu_utilization: cpu,
+            memory_utilization: mem,
+            resource_efficiency: 0.8,
+            timestamp: chrono::Utc::now(),
+            measurement_duration: Duration::from_secs(30),
+            cpu_usage: cpu,
+            memory_usage: mem,
+            latency: Duration::from_millis(latency_ms),
+        }
+    }
+
+    // =========================================================================
+    // ANALYZER TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_effectiveness_analyzer_new() {
+        let analyzer = EffectivenessAnalyzer::new();
+        let stats = analyzer.get_analysis_statistics();
+        assert_eq!(stats.total_analyses, 0);
+    }
+
+    #[test]
+    fn test_effectiveness_analyzer_with_config() {
+        let config = EffectivenessAnalysisConfig {
+            enable_roi_calculation: true,
+            cost_calculation_method: CostCalculationMethod::Hybrid,
+            min_effectiveness_threshold: 0.2,
+            enable_significance_testing: false,
+            confidence_level: 0.90,
+        };
+        let analyzer = EffectivenessAnalyzer::with_config(config);
+        let stats = analyzer.get_analysis_statistics();
+        assert_eq!(stats.total_analyses, 0);
+    }
+
+    #[test]
+    fn test_effectiveness_analyzer_default() {
+        let analyzer = EffectivenessAnalyzer::default();
+        let stats = analyzer.get_analysis_statistics();
+        assert_eq!(stats.total_analyses, 0);
+    }
+
+    #[test]
+    fn test_analyzer_update_config() {
+        let analyzer = EffectivenessAnalyzer::new();
+        let config = EffectivenessAnalysisConfig {
+            enable_roi_calculation: false,
+            cost_calculation_method: CostCalculationMethod::TimeBased,
+            min_effectiveness_threshold: 0.5,
+            enable_significance_testing: true,
+            confidence_level: 0.99,
+        };
+        analyzer.update_config(config);
+    }
+
+    #[test]
+    fn test_analyzer_add_calculator() {
+        let analyzer = EffectivenessAnalyzer::new();
+        analyzer.add_calculator(Box::new(ThroughputEffectivenessCalculator::new()));
+    }
+
+    #[test]
+    fn test_analyzer_add_cost_calculator() {
+        let analyzer = EffectivenessAnalyzer::new();
+        analyzer.add_cost_calculator(Box::new(ResourceBasedCostCalculator::new()));
+    }
+
+    // =========================================================================
+    // CALCULATOR TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_throughput_calculator_new() {
+        let calc = ThroughputEffectivenessCalculator::new();
+        assert_eq!(calc.name(), "throughput_effectiveness");
+    }
+
+    #[test]
+    fn test_throughput_calculator_default() {
+        let calc = ThroughputEffectivenessCalculator;
+        assert_eq!(calc.name(), "throughput_effectiveness");
+    }
+
+    #[test]
+    fn test_throughput_calculator_improvement() {
+        let calc = ThroughputEffectivenessCalculator::new();
+        let before = make_measurement(100.0, 50, 0.5, 0.5);
+        let after = make_measurement(150.0, 40, 0.6, 0.55);
+        let result = calc.calculate_effectiveness(&before, &after);
+        assert!(result.is_ok());
+        let analysis = result.expect("effectiveness calc should succeed");
+        assert!(analysis.effectiveness_score > 0.0);
+    }
+
+    #[test]
+    fn test_latency_calculator_new() {
+        let calc = LatencyEffectivenessCalculator::new();
+        assert_eq!(calc.name(), "latency_effectiveness");
+    }
+
+    #[test]
+    fn test_latency_calculator_default() {
+        let calc = LatencyEffectivenessCalculator;
+        assert_eq!(calc.name(), "latency_effectiveness");
+    }
+
+    #[test]
+    fn test_latency_calculator_improvement() {
+        let calc = LatencyEffectivenessCalculator::new();
+        let before = make_measurement(100.0, 100, 0.5, 0.5);
+        let after = make_measurement(100.0, 50, 0.5, 0.5);
+        let result = calc.calculate_effectiveness(&before, &after);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_composite_calculator_new() {
+        let calc = CompositeEffectivenessCalculator::new();
+        assert_eq!(calc.name(), "composite_effectiveness");
+    }
+
+    #[test]
+    fn test_composite_calculator_with_weights() {
+        let calc = CompositeEffectivenessCalculator::with_weights(0.7, 0.3);
+        assert_eq!(calc.name(), "composite_effectiveness");
+    }
+
+    #[test]
+    fn test_composite_calculator_improvement() {
+        let calc = CompositeEffectivenessCalculator::new();
+        let before = make_measurement(100.0, 80, 0.5, 0.5);
+        let after = make_measurement(150.0, 50, 0.6, 0.55);
+        let result = calc.calculate_effectiveness(&before, &after);
+        assert!(result.is_ok());
+    }
+
+    // =========================================================================
+    // COST CALCULATOR TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_resource_based_cost_calculator_new() {
+        let calc = ResourceBasedCostCalculator::new();
+        assert_eq!(calc.name(), "resource_based_cost");
+    }
+
+    #[test]
+    fn test_resource_based_cost_calculator_with_costs() {
+        let calc = ResourceBasedCostCalculator::with_costs(0.5, 0.3, 0.2);
+        assert_eq!(calc.name(), "resource_based_cost");
+    }
+
+    #[test]
+    fn test_resource_based_cost_calculation() {
+        let calc = ResourceBasedCostCalculator::new();
+        let mut params = HashMap::new();
+        params.insert("cpu_hours".to_string(), "10".to_string());
+        let result = calc.calculate_cost(&params);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_time_based_cost_calculator_new() {
+        let calc = TimeBasedCostCalculator::new();
+        assert_eq!(calc.name(), "time_based_cost");
+    }
+
+    #[test]
+    fn test_time_based_cost_calculator_with_rate() {
+        let calc = TimeBasedCostCalculator::with_rate(50.0);
+        assert_eq!(calc.name(), "time_based_cost");
+    }
+
+    #[test]
+    fn test_complexity_based_cost_calculator_new() {
+        let calc = ComplexityBasedCostCalculator::new();
+        assert_eq!(calc.name(), "complexity_based_cost");
+    }
+
+    // =========================================================================
+    // UTILITY TYPE TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_cost_breakdown_construction() {
+        let breakdown = CostBreakdown {
+            total_cost: 150.0,
+            components: HashMap::new(),
+            calculation_timestamp: chrono::Utc::now(),
+        };
+        assert!(breakdown.total_cost > 0.0);
+    }
+
+    #[test]
+    fn test_effectiveness_trend_construction() {
+        let trend = EffectivenessTrend {
+            window_start: chrono::Utc::now(),
+            window_end: chrono::Utc::now(),
+            average_effectiveness: 0.75,
+            average_roi: 1.5,
+            trend_direction: EffectivenessTrendDirection::Improving,
+            sample_count: 10,
+        };
+        assert!(trend.average_effectiveness > 0.0);
+        assert!(trend.sample_count > 0);
+    }
+
+    #[test]
+    fn test_effectiveness_trend_direction_variants() {
+        let _improving = EffectivenessTrendDirection::Improving;
+        let _stable = EffectivenessTrendDirection::Stable;
+        let _declining = EffectivenessTrendDirection::Declining;
+    }
+
+    #[test]
+    fn test_analysis_statistics_construction() {
+        let stats = AnalysisStatistics {
+            total_analyses: 100,
+            average_effectiveness: 0.6,
+            average_roi: 2.0,
+            high_effectiveness_count: 40,
+            positive_roi_count: 60,
+            cache_memory_usage: 2048,
+        };
+        assert_eq!(stats.total_analyses, 100);
+        assert!(stats.high_effectiveness_count <= stats.total_analyses);
+    }
+
+    #[test]
+    fn test_cost_record_construction() {
+        let record = CostRecord {
+            cost: 25.5,
+            optimization_type: "parallelism_adjustment".to_string(),
+            timestamp: chrono::Utc::now(),
+            parameters: HashMap::new(),
+        };
+        assert!(record.cost > 0.0);
+        assert!(!record.optimization_type.is_empty());
+    }
+
+    // =========================================================================
+    // DEFAULT IMPLEMENTATION TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_cost_benefit_analysis_default() {
+        let cba = CostBenefitAnalysis::default();
+        assert!((cba.total_cost).abs() < 1e-10);
+        assert!((cba.net_benefit).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_performance_improvement_default() {
+        let improvement = PerformanceImprovement::default();
+        assert!((improvement.throughput_improvement).abs() < 1e-10);
+        assert!((improvement.overall_improvement).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_statistical_significance_default() {
+        let sig = StatisticalSignificance::default();
+        assert!(!sig.is_significant);
+        assert!((sig.p_value - 1.0).abs() < 1e-10);
+        assert_eq!(sig.test_method, "None");
+    }
+
+    // =========================================================================
+    // ASYNC TESTS
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_analyze_effectiveness_basic() {
+        let analyzer = EffectivenessAnalyzer::new();
+        let before = make_measurement(100.0, 50, 0.5, 0.5);
+        let after = make_measurement(150.0, 35, 0.6, 0.55);
+        let params = HashMap::new();
+        let result = analyzer.analyze_effectiveness(&before, &after, &params).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_calculate_roi_basic() {
+        let analyzer = EffectivenessAnalyzer::new();
+        let before = make_measurement(100.0, 50, 0.5, 0.5);
+        let after = make_measurement(200.0, 25, 0.7, 0.6);
+        let result = analyzer.calculate_roi(10.0, &before, &after, Duration::from_secs(3600)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_get_cost_breakdown() {
+        let analyzer = EffectivenessAnalyzer::new();
+        let params = HashMap::new();
+        let result = analyzer.get_cost_breakdown(&params).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_clear_cache() {
+        let analyzer = EffectivenessAnalyzer::new();
+        analyzer.clear_cache().await;
+        let stats = analyzer.get_analysis_statistics();
+        assert_eq!(stats.total_analyses, 0);
+    }
+}

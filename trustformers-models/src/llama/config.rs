@@ -60,7 +60,7 @@ impl Default for LlamaConfig {
 
 impl Config for LlamaConfig {
     fn validate(&self) -> trustformers_core::errors::Result<()> {
-        if self.hidden_size % self.num_attention_heads != 0 {
+        if !self.hidden_size.is_multiple_of(self.num_attention_heads) {
             return Err(
                 trustformers_core::errors::TrustformersError::invalid_config(
                     "hidden_size must be divisible by num_attention_heads".to_string(),
@@ -69,7 +69,7 @@ impl Config for LlamaConfig {
         }
 
         if let Some(num_kv_heads) = self.num_key_value_heads {
-            if self.num_attention_heads % num_kv_heads != 0 {
+            if !self.num_attention_heads.is_multiple_of(num_kv_heads) {
                 return Err(
                     trustformers_core::errors::TrustformersError::invalid_config(
                         "num_attention_heads must be divisible by num_key_value_heads".to_string(),
@@ -519,5 +519,286 @@ impl LlamaConfig {
 
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trustformers_core::traits::Config;
+
+    struct Lcg {
+        state: u64,
+    }
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Lcg { state: seed }
+        }
+        fn next(&mut self) -> u64 {
+            self.state = self
+                .state
+                .wrapping_mul(6364136223846793005u64)
+                .wrapping_add(1442695040888963407u64);
+            self.state
+        }
+        fn next_f32(&mut self) -> f32 {
+            (self.next() >> 11) as f32 / (1u64 << 53) as f32
+        }
+    }
+
+    #[test]
+    fn test_default_config_fields() {
+        let cfg = LlamaConfig::default();
+        assert_eq!(cfg.vocab_size, 32000);
+        assert_eq!(cfg.hidden_size, 4096);
+        assert_eq!(cfg.num_attention_heads, 32);
+        assert_eq!(cfg.model_type, "llama");
+        assert!(cfg.use_cache);
+        assert!(!cfg.attention_bias);
+        assert!(!cfg.mlp_bias);
+    }
+
+    #[test]
+    fn test_default_validate_passes() {
+        let cfg = LlamaConfig::default();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_architecture_name() {
+        let cfg = LlamaConfig::default();
+        assert_eq!(cfg.architecture(), "LLaMA");
+    }
+
+    #[test]
+    fn test_hidden_size_not_divisible_fails_validation() {
+        let cfg = LlamaConfig {
+            hidden_size: 100,
+            num_attention_heads: 32,
+            ..LlamaConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_kv_heads_not_divisible_fails_validation() {
+        let cfg = LlamaConfig {
+            num_attention_heads: 32,
+            num_key_value_heads: Some(7),
+            ..LlamaConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_valid_gqa_config() {
+        let cfg = LlamaConfig {
+            num_attention_heads: 32,
+            num_key_value_heads: Some(8),
+            ..LlamaConfig::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_head_dim_computation() {
+        let cfg = LlamaConfig::default();
+        assert_eq!(cfg.head_dim(), 4096 / 32);
+    }
+
+    #[test]
+    fn test_num_kv_heads_default() {
+        let cfg = LlamaConfig::default();
+        assert_eq!(cfg.num_kv_heads(), cfg.num_attention_heads);
+    }
+
+    #[test]
+    fn test_num_kv_heads_gqa() {
+        let cfg = LlamaConfig {
+            num_key_value_heads: Some(8),
+            ..LlamaConfig::default()
+        };
+        assert_eq!(cfg.num_kv_heads(), 8);
+    }
+
+    #[test]
+    fn test_num_query_groups() {
+        let cfg = LlamaConfig {
+            num_attention_heads: 32,
+            num_key_value_heads: Some(8),
+            ..LlamaConfig::default()
+        };
+        assert_eq!(cfg.num_query_groups(), 4);
+    }
+
+    #[test]
+    fn test_llama_7b_config() {
+        let cfg = LlamaConfig::llama_7b();
+        assert_eq!(cfg.vocab_size, 32000);
+        assert_eq!(cfg.hidden_size, 4096);
+        assert_eq!(cfg.num_hidden_layers, 32);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_llama_13b_config() {
+        let cfg = LlamaConfig::llama_13b();
+        assert_eq!(cfg.hidden_size, 5120);
+        assert_eq!(cfg.num_hidden_layers, 40);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_llama2_70b_has_gqa() {
+        let cfg = LlamaConfig::llama2_70b();
+        assert_eq!(cfg.num_key_value_heads, Some(8));
+        assert_eq!(cfg.max_position_embeddings, 4096);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_llama3_8b_config() {
+        let cfg = LlamaConfig::llama3_8b();
+        assert_eq!(cfg.vocab_size, 128256);
+        assert_eq!(cfg.num_key_value_heads, Some(8));
+        assert_eq!(cfg.rope_theta, 500000.0);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_llama3_1_8b_128k_has_rope_scaling() {
+        let cfg = LlamaConfig::llama3_1_8b_128k();
+        assert_eq!(cfg.max_position_embeddings, 131072);
+        if let Some(scaling) = &cfg.rope_scaling {
+            assert_eq!(scaling.scaling_type, "linear");
+            assert_eq!(scaling.scaling_factor, 16.0);
+        } else {
+            panic!("expected rope_scaling to be Some");
+        }
+    }
+
+    #[test]
+    fn test_code_llama_7b_config() {
+        let cfg = LlamaConfig::code_llama_7b();
+        assert_eq!(cfg.vocab_size, 32016);
+        assert_eq!(cfg.max_position_embeddings, 16384);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_from_pretrained_name_llama2_7b() {
+        let result = LlamaConfig::from_pretrained_name("llama2-7b");
+        assert!(result.is_some());
+        if let Some(cfg) = result {
+            assert_eq!(cfg.max_position_embeddings, 4096);
+        }
+    }
+
+    #[test]
+    fn test_from_pretrained_name_unknown_returns_none() {
+        let result = LlamaConfig::from_pretrained_name("nonexistent-model-xyz");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_from_pretrained_name_llama3_70b_instruct() {
+        let result = LlamaConfig::from_pretrained_name("llama3-70b-instruct");
+        assert!(result.is_some());
+        if let Some(cfg) = result {
+            assert!(cfg.model_type.contains("instruct"));
+        }
+    }
+
+    #[test]
+    fn test_llama_1b_config() {
+        let cfg = LlamaConfig::llama_1b();
+        assert_eq!(cfg.hidden_size, 2048);
+        assert_eq!(cfg.num_hidden_layers, 16);
+        assert_eq!(cfg.num_key_value_heads, Some(4));
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_llama_specialized_configs_validate() {
+        let configs = vec![
+            LlamaConfig::llama_multilingual_7b(),
+            LlamaConfig::llama_scientific_7b(),
+            LlamaConfig::llama_legal_7b(),
+            LlamaConfig::llama_medical_7b(),
+            LlamaConfig::llama_creative_7b(),
+        ];
+        for cfg in configs {
+            assert!(
+                cfg.validate().is_ok(),
+                "config {} failed validation",
+                cfg.model_type
+            );
+        }
+    }
+
+    #[test]
+    fn test_lcg_produces_values_in_range() {
+        let mut rng = Lcg::new(12345);
+        for _ in 0..100 {
+            let v = rng.next_f32();
+            assert!((0.0..1.0).contains(&v), "LCG value {} out of range", v);
+        }
+    }
+
+    #[test]
+    fn test_rope_scaling_fields() {
+        let scaling = RopeScaling {
+            scaling_type: "dynamic".to_string(),
+            scaling_factor: 4.0,
+        };
+        assert_eq!(scaling.scaling_type, "dynamic");
+        assert_eq!(scaling.scaling_factor, 4.0);
+    }
+
+    #[test]
+    fn test_llama3_405b_architecture() {
+        let cfg = LlamaConfig::llama3_405b();
+        assert_eq!(cfg.num_hidden_layers, 126);
+        assert_eq!(cfg.hidden_size, 16384);
+        assert_eq!(cfg.num_key_value_heads, Some(8));
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_llama_3b_config() {
+        let cfg = LlamaConfig::llama_3b();
+        assert_eq!(cfg.hidden_size, 2560);
+        assert_eq!(cfg.num_hidden_layers, 20);
+        assert_eq!(cfg.num_key_value_heads, Some(4));
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_head_dim_varies_by_model() {
+        let small = LlamaConfig::llama_1b();
+        let medium = LlamaConfig::llama3_8b();
+        let small_hd = small.head_dim();
+        let medium_hd = medium.head_dim();
+        assert!(small_hd > 0);
+        assert!(medium_hd > 0);
+    }
+
+    #[test]
+    fn test_llama3_instruct_model_type() {
+        let cfg = LlamaConfig::llama3_8b_instruct();
+        assert_eq!(cfg.model_type, "llama3-instruct");
+    }
+
+    #[test]
+    fn test_legal_config_has_rope_scaling() {
+        let cfg = LlamaConfig::llama_legal_7b();
+        assert!(cfg.rope_scaling.is_some());
+        assert_eq!(cfg.max_position_embeddings, 65536);
+    }
+
+    #[test]
+    fn test_query_groups_mha_equals_one() {
+        let cfg = LlamaConfig::default(); // no kv heads set
+        assert_eq!(cfg.num_query_groups(), 1);
     }
 }

@@ -788,7 +788,7 @@ impl PredictionModel {
         }
 
         // Retrain model periodically
-        if self.training_data.len() % 10 == 0 {
+        if self.training_data.len().is_multiple_of(10) {
             let _ = self.retrain();
         }
     }
@@ -989,5 +989,192 @@ impl Default for SeasonalPattern {
             holiday_adjustments: HashMap::new(),
             confidence: 0.1,
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::super::types::NetworkAdaptationConfig;
+    use super::*;
+
+    fn make_network_conditions(bandwidth: f32, latency: f32) -> NetworkConditions {
+        NetworkConditions {
+            bandwidth_mbps: bandwidth,
+            latency_ms: latency,
+            packet_loss_percent: 0.5,
+            jitter_ms: 5.0,
+            stability_score: 0.9,
+            connection_type: NetworkConnectionType::WiFi,
+            signal_strength_dbm: Some(-65),
+            quality_assessment: NetworkQuality::Good,
+            timestamp: std::time::Instant::now(),
+            available_data_mb: Some(500),
+        }
+    }
+
+    // ── NetworkPredictor construction ─────────────────────────────────────
+
+    #[test]
+    fn test_predictor_new() {
+        let config = NetworkAdaptationConfig::default();
+        let predictor = NetworkPredictor::new(config).expect("should create predictor");
+        assert!(predictor.historical_data.is_empty());
+    }
+
+    #[test]
+    fn test_predictor_start_stop() {
+        let config = NetworkAdaptationConfig::default();
+        let mut predictor = NetworkPredictor::new(config).expect("should create predictor");
+        predictor.start().expect("start should succeed");
+        predictor.stop().expect("stop should succeed");
+    }
+
+    // ── add_historical_data ───────────────────────────────────────────────
+
+    #[test]
+    fn test_add_historical_data_accumulates() {
+        let config = NetworkAdaptationConfig::default();
+        let mut predictor = NetworkPredictor::new(config).expect("should create predictor");
+        predictor
+            .add_historical_data(make_network_conditions(20.0, 30.0))
+            .expect("should add data");
+        predictor
+            .add_historical_data(make_network_conditions(15.0, 40.0))
+            .expect("should add data");
+        assert_eq!(predictor.historical_data.len(), 2);
+    }
+
+    #[test]
+    fn test_add_historical_data_limits_size() {
+        let mut config = NetworkAdaptationConfig::default();
+        // Very small historical window (1 hour = 60 data points max)
+        config.prediction_config.historical_window_hours = 1;
+        let mut predictor = NetworkPredictor::new(config).expect("should create predictor");
+        // Add more than 60 points
+        for i in 0..70 {
+            predictor
+                .add_historical_data(make_network_conditions(i as f32, 30.0))
+                .expect("should add data");
+        }
+        assert!(predictor.historical_data.len() <= 60);
+    }
+
+    // ── predict_conditions ────────────────────────────────────────────────
+
+    #[test]
+    fn test_predict_conditions_empty_history() {
+        let config = NetworkAdaptationConfig::default();
+        let predictor = NetworkPredictor::new(config).expect("should create predictor");
+        let result = predictor.predict_conditions(5).expect("should predict");
+        assert_eq!(result.predicted_conditions.len(), 5);
+    }
+
+    #[test]
+    fn test_predict_conditions_with_history() {
+        let config = NetworkAdaptationConfig::default();
+        let mut predictor = NetworkPredictor::new(config).expect("should create predictor");
+        predictor.start().expect("start");
+        for i in 0..10 {
+            predictor
+                .add_historical_data(make_network_conditions(10.0 + i as f32, 40.0))
+                .expect("add data");
+        }
+        let result = predictor.predict_conditions(3).expect("should predict");
+        assert_eq!(result.predicted_conditions.len(), 3);
+    }
+
+    #[test]
+    fn test_predict_conditions_zero_window() {
+        let config = NetworkAdaptationConfig::default();
+        let predictor = NetworkPredictor::new(config).expect("should create predictor");
+        let result = predictor.predict_conditions(0).expect("should predict");
+        assert_eq!(result.predicted_conditions.len(), 0);
+    }
+
+    // ── PredictionModelType variants ──────────────────────────────────────
+
+    #[test]
+    fn test_prediction_model_type_variants() {
+        let types = [
+            PredictionModelType::LinearRegression,
+            PredictionModelType::ExponentialSmoothing,
+            PredictionModelType::MovingAverage,
+            PredictionModelType::NeuralNetwork,
+            PredictionModelType::EnsembleMethod,
+        ];
+        for t in &types {
+            assert!(!format!("{:?}", t).is_empty());
+        }
+    }
+
+    // ── DailyPattern default ───────────────────────────────────────────────
+
+    #[test]
+    fn test_daily_pattern_default() {
+        let dp = DailyPattern::default();
+        assert_eq!(dp.hourly_bandwidth.len(), 24);
+        assert_eq!(dp.hourly_latency.len(), 24);
+        assert_eq!(dp.sample_count, 0);
+        assert!(dp.confidence >= 0.0 && dp.confidence <= 1.0);
+    }
+
+    // ── WeeklyPattern default ─────────────────────────────────────────────
+
+    #[test]
+    fn test_weekly_pattern_default() {
+        let wp = WeeklyPattern::default();
+        assert_eq!(wp.daily_trends.len(), 7);
+        assert!(!wp.peak_hours.is_empty());
+    }
+
+    // ── SeasonalPattern default ───────────────────────────────────────────
+
+    #[test]
+    fn test_seasonal_pattern_default() {
+        let sp = SeasonalPattern::default();
+        assert!(sp.monthly_averages.bandwidth_mbps > 0.0);
+        assert!(sp.monthly_averages.latency_ms > 0.0);
+    }
+
+    // ── MonthlyAverages construction ──────────────────────────────────────
+
+    #[test]
+    fn test_monthly_averages_construction() {
+        let ma = MonthlyAverages {
+            bandwidth_mbps: 50.0,
+            latency_ms: 20.0,
+            packet_loss_percent: 0.1,
+            quality_score: 4.5,
+        };
+        assert!((ma.bandwidth_mbps - 50.0).abs() < 1e-6);
+        assert!((ma.quality_score - 4.5).abs() < 1e-6);
+    }
+
+    // ── TrainingDataPoint ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_training_data_point_construction() {
+        let dp = TrainingDataPoint {
+            features: vec![1.0, 2.0, 3.0],
+            target: 42.0,
+            timestamp: std::time::Instant::now(),
+            weight: 1.0,
+        };
+        assert_eq!(dp.features.len(), 3);
+        assert!((dp.target - 42.0).abs() < 1e-6);
+    }
+
+    // ── PredictionResult.get_predicted_conditions ─────────────────────────
+
+    #[test]
+    fn test_prediction_result_get_predicted_conditions() {
+        let config = NetworkAdaptationConfig::default();
+        let predictor = NetworkPredictor::new(config).expect("should create predictor");
+        let result = predictor.predict_conditions(2).expect("should predict");
+        assert_eq!(result.get_predicted_conditions().len(), 2);
     }
 }

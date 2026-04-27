@@ -29,7 +29,7 @@ impl VectorizedRoPE {
         let inv_freq = Tensor::new(inv_freq_vec)?;
 
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        let use_simd = is_x86_feature_detected!("avx2") && dim >= 128 && dim % 8 == 0;
+        let use_simd = is_x86_feature_detected!("avx2") && dim >= 128 && dim.is_multiple_of(8);
         #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
         let use_simd = false;
 

@@ -257,7 +257,7 @@ impl PerformanceMonitor for DefaultPerformanceMonitor {
         self.stats.load_balance_efficiency = self.calculate_load_balance_efficiency();
 
         // Update efficiency trends every 5 tasks
-        if self.stats.total_tasks % 5 == 0 {
+        if self.stats.total_tasks.is_multiple_of(5) {
             self.update_efficiency_trends();
         }
     }
@@ -406,5 +406,171 @@ impl Default for PowerEfficiencyReport {
 impl Default for DefaultPerformanceMonitor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpu_gpu_load_balancer::types::ProcessorType;
+    use std::time::Duration;
+
+    // --- LoadBalancerStats tests ---
+
+    #[test]
+    fn test_stats_default_zero_tasks() {
+        let stats = LoadBalancerStats::default();
+        assert_eq!(stats.total_tasks, 0);
+        assert_eq!(stats.cpu_tasks, 0);
+        assert_eq!(stats.gpu_tasks, 0);
+    }
+
+    #[test]
+    fn test_stats_default_success_rate_one() {
+        let stats = LoadBalancerStats::default();
+        assert!((stats.success_rate - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_stats_default_load_balance_efficiency_one() {
+        let stats = LoadBalancerStats::default();
+        assert!((stats.load_balance_efficiency - 1.0).abs() < 1e-6);
+    }
+
+    // --- DefaultPerformanceMonitor tests ---
+
+    #[test]
+    fn test_monitor_update_cpu_task_stats_success() {
+        let mut monitor = DefaultPerformanceMonitor::new();
+        monitor.update_task_stats(ProcessorType::CPU, Duration::from_millis(100), true);
+        let stats = monitor.get_stats();
+        assert_eq!(stats.total_tasks, 1);
+        assert_eq!(stats.cpu_tasks, 1);
+        assert_eq!(stats.gpu_tasks, 0);
+    }
+
+    #[test]
+    fn test_monitor_update_gpu_task_stats_success() {
+        let mut monitor = DefaultPerformanceMonitor::new();
+        monitor.update_task_stats(ProcessorType::GPU, Duration::from_millis(50), true);
+        let stats = monitor.get_stats();
+        assert_eq!(stats.total_tasks, 1);
+        assert_eq!(stats.gpu_tasks, 1);
+        assert_eq!(stats.cpu_tasks, 0);
+    }
+
+    #[test]
+    fn test_monitor_multiple_tasks_count() {
+        let mut monitor = DefaultPerformanceMonitor::new();
+        for _ in 0..5 {
+            monitor.update_task_stats(ProcessorType::CPU, Duration::from_millis(10), true);
+        }
+        for _ in 0..3 {
+            monitor.update_task_stats(ProcessorType::GPU, Duration::from_millis(5), false);
+        }
+        let stats = monitor.get_stats();
+        assert_eq!(stats.total_tasks, 8);
+        assert_eq!(stats.cpu_tasks, 5);
+        assert_eq!(stats.gpu_tasks, 3);
+    }
+
+    #[test]
+    fn test_monitor_success_rate_with_failures() {
+        let mut monitor = DefaultPerformanceMonitor::new();
+        monitor.update_task_stats(ProcessorType::CPU, Duration::from_millis(10), true);
+        monitor.update_task_stats(ProcessorType::CPU, Duration::from_millis(10), false);
+        let stats = monitor.get_stats();
+        // 1 success out of 2 total
+        assert!((stats.success_rate - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_monitor_utilization_update_cpu() {
+        let mut monitor = DefaultPerformanceMonitor::new();
+        // Apply multiple updates to converge EMA
+        for _ in 0..50 {
+            monitor.update_utilization(ProcessorType::CPU, 0.8);
+        }
+        let stats = monitor.get_stats();
+        assert!(stats.avg_cpu_utilization > 0.0);
+        assert!(stats.avg_cpu_utilization <= 1.0);
+    }
+
+    #[test]
+    fn test_monitor_utilization_update_gpu() {
+        let mut monitor = DefaultPerformanceMonitor::new();
+        for _ in 0..50 {
+            monitor.update_utilization(ProcessorType::GPU, 0.6);
+        }
+        let stats = monitor.get_stats();
+        assert!(stats.avg_gpu_utilization > 0.0);
+    }
+
+    #[test]
+    fn test_monitor_power_consumption_update() {
+        let mut monitor = DefaultPerformanceMonitor::new();
+        monitor.update_power_consumption(ProcessorType::GPU, 200.0);
+        let stats = monitor.get_stats();
+        assert!(stats.power_efficiency_metrics.avg_power_consumption > 0.0);
+        assert!(stats.power_efficiency_metrics.peak_power_consumption > 0.0);
+    }
+
+    #[test]
+    fn test_monitor_reset_clears_stats() {
+        let mut monitor = DefaultPerformanceMonitor::new();
+        monitor.update_task_stats(ProcessorType::CPU, Duration::from_millis(100), true);
+        monitor.update_task_stats(ProcessorType::GPU, Duration::from_millis(50), true);
+        monitor.reset_stats();
+        let stats = monitor.get_stats();
+        assert_eq!(stats.total_tasks, 0);
+        assert_eq!(stats.cpu_tasks, 0);
+        assert_eq!(stats.gpu_tasks, 0);
+    }
+
+    #[test]
+    fn test_monitor_generate_efficiency_report() {
+        let monitor = DefaultPerformanceMonitor::new();
+        let report = monitor.generate_efficiency_report();
+        assert!(report.overall_score >= 0.0 && report.overall_score <= 1.0);
+    }
+
+    #[test]
+    fn test_monitor_efficiency_report_high_cpu_utilization_recommendation() {
+        let mut monitor = DefaultPerformanceMonitor::new();
+        // Drive CPU utilization high via EMA
+        for _ in 0..200 {
+            monitor.update_utilization(ProcessorType::CPU, 0.99);
+        }
+        let report = monitor.generate_efficiency_report();
+        let has_gpu_recommendation = report.recommendations.iter().any(|r| r.contains("GPU"));
+        assert!(has_gpu_recommendation);
+    }
+
+    #[test]
+    fn test_monitor_latency_tracked_in_avg() {
+        let mut monitor = DefaultPerformanceMonitor::new();
+        monitor.update_task_stats(ProcessorType::CPU, Duration::from_millis(100), true);
+        monitor.update_task_stats(ProcessorType::CPU, Duration::from_millis(200), true);
+        let stats = monitor.get_stats();
+        let avg_ms = stats.avg_task_latency.as_millis();
+        assert!((100..=200).contains(&avg_ms));
+    }
+
+    // --- ProcessorStats tests ---
+
+    #[test]
+    fn test_processor_stats_default_values() {
+        let stats = ProcessorStats::default();
+        assert_eq!(stats.tasks_executed, 0);
+        assert!((stats.success_rate - 1.0).abs() < 1e-6);
+    }
+
+    // --- PowerEfficiencyReport tests ---
+
+    #[test]
+    fn test_power_efficiency_report_default() {
+        let report = PowerEfficiencyReport::default();
+        assert!((report.overall_score - 0.0).abs() < 1e-6);
+        assert!(report.recommendations.is_empty());
     }
 }

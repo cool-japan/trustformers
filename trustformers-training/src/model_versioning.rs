@@ -272,25 +272,25 @@ impl ModelVersioningManager {
             .flatten()
             .filter(|version| {
                 if let Some(value) = version.performance_metrics.custom_metrics.get(metric_name) {
-                    *value >= min_value && max_value.map_or(true, |max| *value <= max)
+                    *value >= min_value && max_value.is_none_or(|max| *value <= max)
                 } else {
                     // Check standard metrics
                     match metric_name {
                         "accuracy" => {
                             let value = version.performance_metrics.accuracy;
-                            value >= min_value && max_value.map_or(true, |max| value <= max)
+                            value >= min_value && max_value.is_none_or(|max| value <= max)
                         },
                         "loss" => {
                             let value = version.performance_metrics.loss;
-                            value >= min_value && max_value.map_or(true, |max| value <= max)
+                            value >= min_value && max_value.is_none_or(|max| value <= max)
                         },
                         "validation_accuracy" => {
                             let value = version.performance_metrics.validation_accuracy;
-                            value >= min_value && max_value.map_or(true, |max| value <= max)
+                            value >= min_value && max_value.is_none_or(|max| value <= max)
                         },
                         "validation_loss" => {
                             let value = version.performance_metrics.validation_loss;
-                            value >= min_value && max_value.map_or(true, |max| value <= max)
+                            value >= min_value && max_value.is_none_or(|max| value <= max)
                         },
                         _ => false,
                     }

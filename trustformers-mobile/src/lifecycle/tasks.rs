@@ -607,3 +607,230 @@ impl Default for ExecutionConstraints {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lifecycle::config::{SchedulingStrategy, TaskPriority, TaskType, ThermalLevel};
+
+    fn make_background_task(
+        id: &str,
+        task_type: TaskType,
+        priority: TaskPriority,
+    ) -> BackgroundTask {
+        BackgroundTask {
+            task_id: id.to_string(),
+            task_type,
+            priority,
+            scheduling_strategy: SchedulingStrategy::Immediate,
+            resource_requirements: ResourceRequirements::default(),
+            execution_constraints: ExecutionConstraints::default(),
+            metadata: TaskMetadata {
+                name: format!("Task {}", id),
+                description: "test task".to_string(),
+                created_timestamp: 1000,
+                scheduled_timestamp: None,
+                last_execution_timestamp: None,
+                execution_count: 0,
+                success_count: 0,
+                failure_count: 0,
+                tags: vec!["test".to_string()],
+            },
+        }
+    }
+
+    #[test]
+    fn test_resource_requirements_default() {
+        let rr = ResourceRequirements::default();
+        assert!(rr.max_cpu_percent >= rr.min_cpu_percent);
+        assert!(rr.max_memory_mb >= rr.min_memory_mb);
+        assert!(!rr.requires_gpu);
+    }
+
+    #[test]
+    fn test_execution_constraints_default() {
+        let ec = ExecutionConstraints::default();
+        assert!(ec.max_execution_time_seconds > 0);
+        assert!(ec.min_battery_percent > 0);
+        assert!(ec.background_eligible);
+    }
+
+    #[test]
+    fn test_background_task_creation() {
+        let task = make_background_task("task_001", TaskType::ModelUpdate, TaskPriority::High);
+        assert_eq!(task.task_id, "task_001");
+        assert_eq!(task.task_type, TaskType::ModelUpdate);
+        assert_eq!(task.priority, TaskPriority::High);
+    }
+
+    #[test]
+    fn test_background_task_clone() {
+        let task = make_background_task("orig", TaskType::DataSync, TaskPriority::Normal);
+        let cloned = task.clone();
+        assert_eq!(cloned.task_id, "orig");
+    }
+
+    #[test]
+    fn test_task_status_variants() {
+        assert_eq!(TaskStatus::Pending, TaskStatus::Pending);
+        assert_ne!(TaskStatus::Completed, TaskStatus::Failed);
+        let statuses = [
+            TaskStatus::Pending,
+            TaskStatus::Scheduled,
+            TaskStatus::Running,
+            TaskStatus::Paused,
+            TaskStatus::Completed,
+            TaskStatus::Failed,
+            TaskStatus::Cancelled,
+            TaskStatus::TimedOut,
+            TaskStatus::Deferred,
+            TaskStatus::WaitingForResources,
+            TaskStatus::WaitingForConditions,
+        ];
+        assert_eq!(statuses.len(), 11);
+    }
+
+    #[test]
+    fn test_task_error_category_variants() {
+        let _ = TaskErrorCategory::ResourceUnavailable;
+        let _ = TaskErrorCategory::NetworkError;
+        let _ = TaskErrorCategory::InternalError;
+        let _ = TaskErrorCategory::ConfigurationError;
+        assert_ne!(
+            TaskErrorCategory::NetworkError,
+            TaskErrorCategory::SystemError
+        );
+    }
+
+    #[test]
+    fn test_task_error_creation() {
+        let err = TaskError {
+            error_code: 404,
+            error_message: "Resource not found".to_string(),
+            error_category: TaskErrorCategory::ResourceUnavailable,
+            recoverable: true,
+            retry_recommended: true,
+            details: HashMap::new(),
+        };
+        assert_eq!(err.error_code, 404);
+        assert!(err.recoverable);
+    }
+
+    #[test]
+    fn test_task_result_completed() {
+        let result = TaskResult {
+            task_id: "task_abc".to_string(),
+            status: TaskStatus::Completed,
+            start_timestamp: 1000,
+            end_timestamp: Some(3500),
+            execution_time_seconds: 2.5,
+            resource_usage: TaskResourceUsage {
+                peak_cpu_percent: 30.0,
+                avg_cpu_percent: 20.0,
+                peak_memory_mb: 128,
+                avg_memory_mb: 96,
+                network_data_mb: 1.5,
+                storage_io_mb: 0.5,
+                gpu_usage_percent: None,
+                battery_consumption_mah: 5.0,
+            },
+            output_data: None,
+            error_info: None,
+            performance_metrics: TaskPerformanceMetrics {
+                throughput_ops_per_second: 100.0,
+                latency_percentiles: LatencyPercentiles {
+                    p50_ms: 10.0,
+                    p90_ms: 20.0,
+                    p95_ms: 25.0,
+                    p99_ms: 50.0,
+                    max_ms: 100.0,
+                },
+                error_rate_percent: 0.0,
+                resource_efficiency_score: 85.0,
+                completion_rate_percent: 100.0,
+            },
+            quality_metrics: None,
+        };
+        assert_eq!(result.status, TaskStatus::Completed);
+        assert!(result.error_info.is_none());
+    }
+
+    #[test]
+    fn test_task_registry_new_empty() {
+        let registry = TaskRegistry::new();
+        assert_eq!(registry.registered_tasks.len(), 0);
+        assert_eq!(registry.task_templates.len(), 0);
+    }
+
+    #[test]
+    fn test_task_registry_register_and_create() {
+        let mut registry = TaskRegistry::new();
+        let template = make_background_task("tpl_backup", TaskType::Backup, TaskPriority::Normal);
+        registry.register_task_template(TaskType::Backup, template);
+        let created =
+            registry.create_task_from_template(TaskType::Backup, "backup_001".to_string());
+        assert!(created.is_some());
+        let task = created.expect("task should exist");
+        assert_eq!(task.task_id, "backup_001");
+    }
+
+    #[test]
+    fn test_task_registry_create_missing_template() {
+        let registry = TaskRegistry::new();
+        let created = registry.create_task_from_template(TaskType::Analytics, "a1".to_string());
+        assert!(created.is_none());
+    }
+
+    #[test]
+    fn test_scheduling_strategy_priority_immediate() {
+        assert_eq!(SchedulingStrategy::Immediate.priority_order(), 0);
+    }
+
+    #[test]
+    fn test_scheduling_strategy_priority_deferred() {
+        assert_eq!(SchedulingStrategy::Deferred.priority_order(), 6);
+    }
+
+    #[test]
+    fn test_scheduling_strategy_ordering() {
+        assert!(
+            SchedulingStrategy::Immediate.priority_order()
+                < SchedulingStrategy::NetworkOptimal.priority_order()
+        );
+    }
+
+    #[test]
+    fn test_background_execution_context_default() {
+        let ctx = BackgroundExecutionContext::default();
+        assert!(ctx.available_cpu_percent > 0);
+        assert!(ctx.available_memory_mb > 0);
+        assert!(ctx.network_connected);
+    }
+
+    #[test]
+    fn test_allocated_resources_creation() {
+        let alloc = AllocatedResources {
+            cpu_percent: 25,
+            memory_mb: 128,
+            network_mbps: Some(10.0),
+            gpu_allocation: None,
+            storage_io_mbps: None,
+        };
+        assert_eq!(alloc.cpu_percent, 25);
+        assert!(alloc.gpu_allocation.is_none());
+    }
+
+    #[test]
+    fn test_task_quality_metrics_creation() {
+        let qm = TaskQualityMetrics {
+            accuracy_score: 95.0,
+            precision_score: 92.0,
+            recall_score: 89.0,
+            f1_score: 90.5,
+            model_drift_score: None,
+            data_quality_score: Some(88.0),
+        };
+        assert!((qm.accuracy_score - 95.0).abs() < 1e-4);
+        assert!(qm.data_quality_score.is_some());
+    }
+}

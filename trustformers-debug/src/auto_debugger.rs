@@ -1143,3 +1143,176 @@ pub struct DataStrategy {
     pub sampling_strategy: String,
     pub preprocessing_optimizations: Vec<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_config() -> DebugConfig {
+        DebugConfig::default()
+    }
+
+    #[test]
+    fn test_knowledge_base_new() {
+        let kb = KnowledgeBase::new();
+        assert!(kb.issue_patterns.is_empty());
+        assert!(kb.hyperparameter_recommendations.is_empty());
+        assert!(kb.architecture_patterns.is_empty());
+        assert!(kb.best_practices.is_empty());
+    }
+
+    #[test]
+    fn test_knowledge_base_default() {
+        let kb = KnowledgeBase::default();
+        assert!(kb.issue_patterns.is_empty());
+    }
+
+    #[test]
+    fn test_auto_debugger_new() {
+        let config = make_config();
+        let debugger = AutoDebugger::new(&config);
+        assert!(!debugger.issue_detectors.is_empty());
+        assert!(!debugger.fix_suggestions.is_empty());
+        assert!(debugger.optimization_history.is_empty());
+    }
+
+    #[test]
+    fn test_auto_debugger_has_default_detectors() {
+        let config = make_config();
+        let debugger = AutoDebugger::new(&config);
+        assert_eq!(debugger.issue_detectors.len(), 6);
+    }
+
+    #[test]
+    fn test_auto_debugger_has_fix_suggestions() {
+        let config = make_config();
+        let debugger = AutoDebugger::new(&config);
+        assert!(debugger.fix_suggestions.contains_key(&IssueType::VanishingGradients));
+        assert!(debugger.fix_suggestions.contains_key(&IssueType::ExplodingGradients));
+    }
+
+    #[test]
+    fn test_gradient_issue_detector_name() {
+        let detector = GradientIssueDetector::new();
+        assert_eq!(detector.get_detector_name(), "GradientIssueDetector");
+    }
+
+    #[test]
+    fn test_gradient_issue_detector_supported_issues() {
+        let detector = GradientIssueDetector::new();
+        let issues = detector.get_supported_issues();
+        assert!(issues.contains(&IssueType::VanishingGradients));
+        assert!(issues.contains(&IssueType::ExplodingGradients));
+    }
+
+    #[test]
+    fn test_training_issue_detector_name() {
+        let detector = TrainingIssueDetector::new();
+        assert_eq!(detector.get_detector_name(), "TrainingIssueDetector");
+    }
+
+    #[test]
+    fn test_training_issue_detector_supported_issues() {
+        let detector = TrainingIssueDetector::new();
+        let issues = detector.get_supported_issues();
+        assert!(!issues.is_empty());
+    }
+
+    #[test]
+    fn test_performance_issue_detector_name() {
+        let detector = PerformanceIssueDetector::new();
+        assert_eq!(detector.get_detector_name(), "PerformanceIssueDetector");
+    }
+
+    #[test]
+    fn test_hyperparameter_issue_detector_name() {
+        let detector = HyperparameterIssueDetector::new();
+        assert_eq!(detector.get_detector_name(), "HyperparameterIssueDetector");
+    }
+
+    #[test]
+    fn test_architecture_issue_detector_name() {
+        let detector = ArchitectureIssueDetector::new();
+        assert_eq!(detector.get_detector_name(), "ArchitectureIssueDetector");
+    }
+
+    #[test]
+    fn test_data_issue_detector_name() {
+        let detector = DataIssueDetector::new();
+        assert_eq!(detector.get_detector_name(), "DataIssueDetector");
+    }
+
+    #[test]
+    fn test_issue_type_equality() {
+        assert_eq!(IssueType::VanishingGradients, IssueType::VanishingGradients);
+        assert_ne!(IssueType::VanishingGradients, IssueType::ExplodingGradients);
+    }
+
+    #[test]
+    fn test_issue_type_hash_compatible() {
+        let mut map = HashMap::new();
+        map.insert(IssueType::OverfittingDetected, "fix");
+        assert!(map.contains_key(&IssueType::OverfittingDetected));
+        assert!(!map.contains_key(&IssueType::UnderfittingDetected));
+    }
+
+    #[test]
+    fn test_evidence_construction() {
+        let evidence = Evidence {
+            metric_name: "gradient_norm".to_string(),
+            observed_value: 0.001,
+            expected_range: (0.01, 1.0),
+            explanation: "Gradient norm too low".to_string(),
+        };
+        assert_eq!(evidence.metric_name, "gradient_norm");
+        assert!(evidence.observed_value < evidence.expected_range.0);
+    }
+
+    #[test]
+    fn test_expected_impact_fields() {
+        let impact = ExpectedImpact {
+            performance_improvement: 0.15,
+            training_speed_improvement: 0.05,
+            stability_improvement: 0.25,
+            memory_usage_change: 0.02,
+        };
+        assert!(impact.performance_improvement > 0.0);
+        assert!(impact.stability_improvement > impact.performance_improvement);
+    }
+
+    #[test]
+    fn test_model_info_construction() {
+        let info = ModelInfo {
+            model_type: "transformer".to_string(),
+            parameter_count: 1_000_000,
+            layer_count: 12,
+            architecture_details: HashMap::new(),
+        };
+        assert_eq!(info.model_type, "transformer");
+        assert_eq!(info.parameter_count, 1_000_000);
+    }
+
+    #[test]
+    fn test_issue_pattern_construction() {
+        let pattern = IssuePattern {
+            symptoms: vec!["low gradient norm".to_string()],
+            common_causes: vec!["deep network".to_string()],
+            diagnostic_metrics: vec!["gradient_norm".to_string()],
+            typical_solutions: vec!["add skip connections".to_string()],
+        };
+        assert_eq!(pattern.symptoms.len(), 1);
+        assert_eq!(pattern.common_causes.len(), 1);
+    }
+
+    #[test]
+    fn test_hyperparameter_advice_construction() {
+        let advice = HyperparameterAdvice {
+            parameter_name: "learning_rate".to_string(),
+            recommended_range: (1e-5, 1e-2),
+            tuning_strategy: "grid_search".to_string(),
+            dependencies: vec!["batch_size".to_string()],
+            common_mistakes: vec!["too high initial lr".to_string()],
+        };
+        assert!(advice.recommended_range.0 < advice.recommended_range.1);
+    }
+}

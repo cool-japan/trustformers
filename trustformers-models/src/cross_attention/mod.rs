@@ -53,6 +53,8 @@
 
 pub mod config;
 pub mod layers;
+#[cfg(test)]
+mod layers_tests;
 pub mod utils;
 
 pub use config::CrossAttentionConfig;

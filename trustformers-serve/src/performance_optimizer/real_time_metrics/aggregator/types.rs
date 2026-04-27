@@ -893,7 +893,7 @@ impl AggregationWindow {
         let mean = values.iter().sum::<f64>() / values.len() as f64;
         let mut sorted_values = values.to_vec();
         sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median = if sorted_values.len() % 2 == 0 {
+        let median = if sorted_values.len().is_multiple_of(2) {
             (sorted_values[sorted_values.len() / 2 - 1] + sorted_values[sorted_values.len() / 2])
                 / 2.0
         } else {
@@ -930,7 +930,7 @@ impl AggregationWindow {
         let mean = Duration::from_secs_f64(mean_f64);
         let mut sorted_values = values.to_vec();
         sorted_values.sort();
-        let median = if sorted_values.len() % 2 == 0 {
+        let median = if sorted_values.len().is_multiple_of(2) {
             let mid1 = sorted_values[sorted_values.len() / 2 - 1];
             let mid2 = sorted_values[sorted_values.len() / 2];
             Duration::from_nanos(((mid1.as_nanos() + mid2.as_nanos()) / 2) as u64)
@@ -963,7 +963,7 @@ impl AggregationWindow {
         let mean = values.iter().sum::<f32>() / values.len() as f32;
         let mut sorted_values = values.to_vec();
         sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median = if sorted_values.len() % 2 == 0 {
+        let median = if sorted_values.len().is_multiple_of(2) {
             (sorted_values[sorted_values.len() / 2 - 1] + sorted_values[sorted_values.len() / 2])
                 / 2.0
         } else {

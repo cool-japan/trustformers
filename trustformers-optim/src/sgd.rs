@@ -263,3 +263,7 @@ impl StatefulOptimizer for SGD {
         self.state.momentum.values().map(|v| v.len()).sum()
     }
 }
+
+#[cfg(test)]
+#[path = "sgd_tests.rs"]
+mod sgd_tests;

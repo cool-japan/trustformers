@@ -714,3 +714,428 @@ impl BackendTensor {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    fn make_default_config(name: &str) -> BackendConfig {
+        BackendConfig {
+            name: name.to_string(),
+            ..BackendConfig::default()
+        }
+    }
+
+    // Mock backend for registration tests
+    #[derive(Debug)]
+    struct MockBackend {
+        name: String,
+    }
+
+    impl CustomBackend for MockBackend {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn version(&self) -> &str {
+            "1.0.0"
+        }
+        fn initialize(&mut self, _config: &BackendConfig) -> Result<()> {
+            Ok(())
+        }
+        fn load_model(&self, _path: &PathBuf) -> Result<Box<dyn BackendModel>> {
+            Ok(Box::new(MockModel::new()))
+        }
+        fn supported_devices(&self) -> Vec<Device> {
+            vec![Device::Cpu]
+        }
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities {
+                supported_dtypes: vec![DataType::Float32],
+                supported_ops: vec!["matmul".to_string()],
+                max_dimensions: 4,
+                max_batch_size: Some(16),
+                dynamic_shapes: true,
+                in_place_ops: false,
+                quantization: vec![QuantizationMode::None],
+                memory_mapping: false,
+            }
+        }
+        fn health_check(&self) -> Result<BackendHealth> {
+            Ok(BackendHealth {
+                status: HealthStatus::Healthy,
+                device_available: true,
+                memory_usage: MemoryUsage {
+                    total_mb: 8192,
+                    used_mb: 1024,
+                    available_mb: 7168,
+                    fragmentation_percent: 0.0,
+                },
+                last_error: None,
+                performance_indicators: PerformanceIndicators {
+                    latency_p50_ms: 10.0,
+                    latency_p95_ms: 20.0,
+                    latency_p99_ms: 30.0,
+                    queue_depth: 0,
+                    active_requests: 0,
+                },
+            })
+        }
+        fn get_metrics(&self) -> BackendMetrics {
+            BackendMetrics {
+                total_inferences: 42,
+                avg_latency_ms: 15.0,
+                throughput: 66.0,
+                memory_stats: MemoryStats {
+                    peak_usage_mb: 2048,
+                    current_usage_mb: 1024,
+                    allocations_count: 100,
+                    deallocations_count: 90,
+                },
+                error_rate: 0.0,
+                cache_hit_rate: 0.5,
+                utilization_percent: 60.0,
+            }
+        }
+        fn cleanup(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[derive(Debug)]
+    struct MockModel {
+        metadata: ModelMetadata,
+    }
+
+    impl MockModel {
+        fn new() -> Self {
+            let mut input_shapes = HashMap::new();
+            input_shapes.insert("input_ids".to_string(), vec![1, 128]);
+            let mut output_shapes = HashMap::new();
+            output_shapes.insert("logits".to_string(), vec![1, 128, 32000]);
+            Self {
+                metadata: ModelMetadata {
+                    name: "mock_model".to_string(),
+                    version: "1.0".to_string(),
+                    format: "onnx".to_string(),
+                    input_shapes,
+                    output_shapes,
+                    size_bytes: 1_000_000,
+                    num_parameters: 125_000_000,
+                    memory_required: 2_000_000,
+                },
+            }
+        }
+    }
+
+    impl BackendModel for MockModel {
+        fn predict(
+            &self,
+            inputs: &HashMap<String, BackendTensor>,
+        ) -> Result<HashMap<String, BackendTensor>> {
+            let mut outputs = HashMap::new();
+            for (key, tensor) in inputs {
+                outputs.insert(format!("out_{}", key), tensor.clone());
+            }
+            Ok(outputs)
+        }
+        fn metadata(&self) -> &ModelMetadata {
+            &self.metadata
+        }
+        fn input_specs(&self) -> &HashMap<String, TensorSpec> {
+            // Return empty for test simplicity
+            static EMPTY: std::sync::OnceLock<HashMap<String, TensorSpec>> =
+                std::sync::OnceLock::new();
+            EMPTY.get_or_init(HashMap::new)
+        }
+        fn output_specs(&self) -> &HashMap<String, TensorSpec> {
+            static EMPTY: std::sync::OnceLock<HashMap<String, TensorSpec>> =
+                std::sync::OnceLock::new();
+            EMPTY.get_or_init(HashMap::new)
+        }
+        fn warmup(&self) -> Result<()> {
+            Ok(())
+        }
+        fn performance_stats(&self) -> ModelPerformanceStats {
+            ModelPerformanceStats {
+                total_inferences: 10,
+                avg_latency_ms: 12.5,
+                min_latency_ms: 8.0,
+                max_latency_ms: 20.0,
+                throughput: 80.0,
+                memory_usage_mb: 512,
+            }
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[derive(Debug)]
+    struct MockFactory;
+
+    impl BackendFactory for MockFactory {
+        fn create_backend(&self, config: &BackendConfig) -> Result<Box<dyn CustomBackend>> {
+            Ok(Box::new(MockBackend {
+                name: config.name.clone(),
+            }))
+        }
+        fn factory_info(&self) -> FactoryInfo {
+            FactoryInfo {
+                name: "mock_factory".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Test factory".to_string(),
+                supported_formats: vec!["onnx".to_string()],
+                required_features: vec![],
+            }
+        }
+    }
+
+    // ── BackendRegistry tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_registry_starts_empty() {
+        let registry = BackendRegistry::new();
+        let backends = registry.list_backends().expect("list_backends should succeed");
+        assert!(backends.is_empty(), "new registry should have no backends");
+    }
+
+    #[test]
+    fn test_registry_register_factory() {
+        let registry = BackendRegistry::new();
+        registry
+            .register_factory("mock".to_string(), Box::new(MockFactory))
+            .expect("register_factory should succeed");
+        let factories = registry.list_factories().expect("list_factories should succeed");
+        assert!(factories.contains(&"mock".to_string()));
+    }
+
+    #[test]
+    fn test_registry_create_and_retrieve_backend() {
+        let registry = BackendRegistry::new();
+        registry
+            .register_factory("mock".to_string(), Box::new(MockFactory))
+            .expect("register_factory should succeed");
+        let config = make_default_config("mock");
+        registry.create_backend("mock", &config).expect("create_backend should succeed");
+        let backend = registry
+            .get_backend("mock")
+            .expect("get_backend should return the registered backend");
+        assert_eq!(backend.name(), "mock");
+    }
+
+    #[test]
+    fn test_registry_get_missing_backend_errors() {
+        let registry = BackendRegistry::new();
+        let result = registry.get_backend("nonexistent");
+        assert!(
+            result.is_err(),
+            "getting a non-existent backend should fail"
+        );
+    }
+
+    #[test]
+    fn test_registry_create_backend_missing_factory_errors() {
+        let registry = BackendRegistry::new();
+        let config = make_default_config("ghost");
+        let result = registry.create_backend("ghost", &config);
+        assert!(
+            result.is_err(),
+            "creating backend without factory should fail"
+        );
+    }
+
+    #[test]
+    fn test_registry_remove_backend() {
+        let registry = BackendRegistry::new();
+        registry
+            .register_factory("mock".to_string(), Box::new(MockFactory))
+            .expect("register_factory should succeed");
+        registry
+            .create_backend("mock", &make_default_config("mock"))
+            .expect("create_backend should succeed");
+        registry.remove_backend("mock").expect("remove_backend should succeed");
+        assert!(
+            registry.get_backend("mock").is_err(),
+            "removed backend should not be retrievable"
+        );
+    }
+
+    #[test]
+    fn test_registry_health_check_all_healthy() {
+        let registry = BackendRegistry::new();
+        registry
+            .register_factory("mock".to_string(), Box::new(MockFactory))
+            .expect("register_factory should succeed");
+        registry
+            .create_backend("mock", &make_default_config("mock"))
+            .expect("create_backend should succeed");
+        let health_map = registry.health_check_all().expect("health_check_all should succeed");
+        assert!(health_map.contains_key("mock"));
+        let health = &health_map["mock"];
+        assert!(matches!(health.status, HealthStatus::Healthy));
+    }
+
+    // ── Capability declaration tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_backend_capabilities_quantization() {
+        let backend = MockBackend {
+            name: "test".to_string(),
+        };
+        let caps = backend.capabilities();
+        assert!(
+            !caps.quantization.is_empty(),
+            "capabilities must declare quantization support"
+        );
+    }
+
+    #[test]
+    fn test_backend_capabilities_max_batch_size() {
+        let backend = MockBackend {
+            name: "test".to_string(),
+        };
+        let caps = backend.capabilities();
+        assert!(
+            caps.max_batch_size.is_some(),
+            "capabilities should declare max_batch_size"
+        );
+    }
+
+    #[test]
+    fn test_backend_capabilities_supported_dtypes() {
+        let backend = MockBackend {
+            name: "test".to_string(),
+        };
+        let caps = backend.capabilities();
+        assert!(
+            !caps.supported_dtypes.is_empty(),
+            "should declare at least one dtype"
+        );
+    }
+
+    // ── BackendTensor tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_tensor_element_count() {
+        let tensor = BackendTensor::new(
+            vec![0u8; 24],
+            vec![2, 3],
+            DataType::Float32,
+            MemoryLayout::RowMajor,
+        );
+        // 2*3=6 elements, 4 bytes each = 24 bytes
+        assert_eq!(tensor.element_count(), 6);
+    }
+
+    #[test]
+    fn test_tensor_element_size_f32() {
+        let tensor = BackendTensor::new(vec![], vec![], DataType::Float32, MemoryLayout::RowMajor);
+        assert_eq!(tensor.element_size(), 4);
+    }
+
+    #[test]
+    fn test_tensor_element_size_int8() {
+        let tensor = BackendTensor::new(vec![], vec![], DataType::Int8, MemoryLayout::RowMajor);
+        assert_eq!(tensor.element_size(), 1);
+    }
+
+    #[test]
+    fn test_tensor_element_size_float16() {
+        let tensor = BackendTensor::new(vec![], vec![], DataType::Float16, MemoryLayout::RowMajor);
+        assert_eq!(tensor.element_size(), 2);
+    }
+
+    #[test]
+    fn test_tensor_validate_correct() {
+        // 2x3 f32 = 24 bytes
+        let data = vec![0u8; 24];
+        let tensor =
+            BackendTensor::new(data, vec![2, 3], DataType::Float32, MemoryLayout::RowMajor);
+        assert!(
+            tensor.validate().is_ok(),
+            "valid tensor should pass validation"
+        );
+    }
+
+    #[test]
+    fn test_tensor_validate_incorrect_size() {
+        // 2x3 f32 = 24 bytes; give 20 → mismatch
+        let data = vec![0u8; 20];
+        let tensor =
+            BackendTensor::new(data, vec![2, 3], DataType::Float32, MemoryLayout::RowMajor);
+        assert!(
+            tensor.validate().is_err(),
+            "tensor with wrong data size should fail validation"
+        );
+    }
+
+    #[test]
+    fn test_tensor_size_bytes() {
+        let data = vec![0u8; 32];
+        let tensor =
+            BackendTensor::new(data, vec![4, 2], DataType::Float32, MemoryLayout::RowMajor);
+        assert_eq!(tensor.size_bytes(), 32);
+    }
+
+    // ── Config validation tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_backend_config_default_name() {
+        let config = BackendConfig::default();
+        assert!(
+            !config.name.is_empty(),
+            "default config should have a non-empty name"
+        );
+    }
+
+    #[test]
+    fn test_memory_config_default_prefetch() {
+        let config = MemoryConfig::default();
+        assert!(
+            config.prefetch_enabled,
+            "prefetch should be enabled by default"
+        );
+    }
+
+    #[test]
+    fn test_performance_config_default_warmup_runs() {
+        let config = PerformanceConfig::default();
+        assert!(
+            config.warmup_runs > 0,
+            "default should have at least one warmup run"
+        );
+    }
+
+    // ── Error propagation ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_backend_metrics_fields_non_negative() {
+        let backend = MockBackend {
+            name: "test".to_string(),
+        };
+        let metrics = backend.get_metrics();
+        assert!(metrics.avg_latency_ms >= 0.0);
+        assert!(metrics.throughput >= 0.0);
+        assert!(metrics.error_rate >= 0.0 && metrics.error_rate <= 1.0);
+    }
+
+    #[test]
+    fn test_model_performance_stats_consistency() {
+        let model = MockModel::new();
+        let stats = model.performance_stats();
+        assert!(
+            stats.min_latency_ms <= stats.avg_latency_ms,
+            "min latency must not exceed average"
+        );
+        assert!(
+            stats.avg_latency_ms <= stats.max_latency_ms,
+            "average latency must not exceed max"
+        );
+    }
+}

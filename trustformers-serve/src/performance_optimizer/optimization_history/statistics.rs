@@ -632,7 +632,7 @@ impl Default for AdvancedStatisticsComputer {
 /// Compute median of sorted values
 fn compute_median(sorted_values: &[f64]) -> f64 {
     let len = sorted_values.len();
-    if len % 2 == 0 {
+    if len.is_multiple_of(2) {
         (sorted_values[len / 2 - 1] + sorted_values[len / 2]) / 2.0
     } else {
         sorted_values[len / 2]
@@ -900,3 +900,7 @@ pub fn detect_outliers_zscore(values: &[f64], threshold: f64) -> Result<Vec<(usi
 
     Ok(outliers)
 }
+
+#[cfg(test)]
+#[path = "statistics_tests.rs"]
+mod statistics_tests;

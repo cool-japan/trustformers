@@ -983,7 +983,7 @@ impl NeuralArchitectureSearcher {
             let should_update = self
                 .best_architecture
                 .as_ref()
-                .map_or(true, |current| best.fitness > current.fitness);
+                .is_none_or(|current| best.fitness > current.fitness);
             if should_update {
                 self.best_architecture = Some(best.clone());
             }
@@ -1066,7 +1066,7 @@ impl NeuralArchitectureSearcher {
         let should_update = self
             .best_architecture
             .as_ref()
-            .map_or(true, |current| evaluation.fitness > current.fitness);
+            .is_none_or(|current| evaluation.fitness > current.fitness);
         if should_update {
             self.best_architecture = Some(evaluation.clone());
         }

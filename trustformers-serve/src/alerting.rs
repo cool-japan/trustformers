@@ -1246,4 +1246,442 @@ mod tests {
         assert!(AlertSeverity::Medium > AlertSeverity::Low);
         assert!(AlertSeverity::Low > AlertSeverity::Info);
     }
+
+    fn make_rule(id: &str, name: &str, query: &str, threshold: f64) -> AlertRule {
+        AlertRule {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: format!("Test rule: {}", name),
+            query: query.to_string(),
+            condition: AlertCondition::Threshold {
+                operator: ComparisonOperator::GreaterThan,
+                value: threshold,
+            },
+            severity: AlertSeverity::High,
+            evaluation_interval_secs: 60,
+            for_duration_secs: 0,
+            labels: HashMap::new(),
+            notification_channels: vec![],
+            enabled: true,
+            alert_template: None,
+            group: None,
+            dependencies: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_remove_rule() {
+        let service = AlertingService::new(AlertingConfig::default());
+        service.add_rule(make_rule("r1", "Rule1", "cpu", 80.0)).await.expect("add ok");
+        let result = service.remove_rule("r1").await;
+        assert!(result.is_ok());
+        let stats = service.get_stats().await;
+        assert_eq!(stats.total_rules, 0);
+    }
+
+    #[tokio::test]
+    async fn test_remove_nonexistent_rule() {
+        let service = AlertingService::new(AlertingConfig::default());
+        let result = service.remove_rule("nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_rule() {
+        let service = AlertingService::new(AlertingConfig::default());
+        service.add_rule(make_rule("r2", "Rule2", "mem", 90.0)).await.expect("add ok");
+        let rule = service.get_rule("r2").await;
+        assert!(rule.is_some());
+        if let Some(r) = rule {
+            assert_eq!(r.name, "Rule2");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_nonexistent_rule() {
+        let service = AlertingService::new(AlertingConfig::default());
+        let rule = service.get_rule("ghost").await;
+        assert!(rule.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_rules() {
+        let service = AlertingService::new(AlertingConfig::default());
+        service.add_rule(make_rule("r3", "Rule3", "cpu", 70.0)).await.expect("add ok");
+        service.add_rule(make_rule("r4", "Rule4", "mem", 85.0)).await.expect("add ok");
+        let rules = service.list_rules().await;
+        assert_eq!(rules.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_add_notification_channel() {
+        let service = AlertingService::new(AlertingConfig::default());
+        let channel = NotificationChannel {
+            id: "ch1".to_string(),
+            name: "Test Channel".to_string(),
+            channel_type: NotificationChannelType::Webhook,
+            config: HashMap::new(),
+            enabled: true,
+            severity_filter: vec![],
+            label_filters: HashMap::new(),
+        };
+        let result = service.add_notification_channel(channel).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_remove_notification_channel() {
+        let service = AlertingService::new(AlertingConfig::default());
+        let channel = NotificationChannel {
+            id: "ch2".to_string(),
+            name: "Test Channel 2".to_string(),
+            channel_type: NotificationChannelType::Email,
+            config: HashMap::new(),
+            enabled: true,
+            severity_filter: vec![],
+            label_filters: HashMap::new(),
+        };
+        service.add_notification_channel(channel).await.expect("add ok");
+        let result = service.remove_notification_channel("ch2").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_remove_nonexistent_channel() {
+        let service = AlertingService::new(AlertingConfig::default());
+        let result = service.remove_notification_channel("ghost").await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_empty_id_rule() {
+        let service = AlertingService::new(AlertingConfig::default());
+        let mut rule = make_rule("", "Test", "cpu", 80.0);
+        rule.id = String::new();
+        let result = service.validate_rule(&rule);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_empty_name_rule() {
+        let service = AlertingService::new(AlertingConfig::default());
+        let mut rule = make_rule("r5", "", "cpu", 80.0);
+        rule.name = String::new();
+        let result = service.validate_rule(&rule);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_empty_query_rule() {
+        let service = AlertingService::new(AlertingConfig::default());
+        let mut rule = make_rule("r6", "Rule6", "", 80.0);
+        rule.query = String::new();
+        let result = service.validate_rule(&rule);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_compare_less_than() {
+        let service = AlertingService::new(AlertingConfig::default());
+        assert!(service.compare_values(3.0, 5.0, ComparisonOperator::LessThan));
+        assert!(!service.compare_values(5.0, 3.0, ComparisonOperator::LessThan));
+    }
+
+    #[test]
+    fn test_compare_not_equal() {
+        let service = AlertingService::new(AlertingConfig::default());
+        assert!(service.compare_values(3.0, 5.0, ComparisonOperator::NotEqual));
+        assert!(!service.compare_values(5.0, 5.0, ComparisonOperator::NotEqual));
+    }
+
+    #[test]
+    fn test_compare_equal_epsilon() {
+        let service = AlertingService::new(AlertingConfig::default());
+        assert!(service.compare_values(1.0, 1.0, ComparisonOperator::Equal));
+        assert!(!service.compare_values(1.0, 1.1, ComparisonOperator::Equal));
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_disabled_service() {
+        let mut config = AlertingConfig::default();
+        config.enabled = false;
+        let service = AlertingService::new(config);
+        let metrics = HashMap::new();
+        let results = service.evaluate_rules(&metrics).await.expect("eval ok");
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_disabled_rule() {
+        let service = AlertingService::new(AlertingConfig::default());
+        let mut rule = make_rule("disabled", "Disabled", "cpu", 80.0);
+        rule.enabled = false;
+        service.add_rule(rule).await.expect("add ok");
+
+        let mut metrics = HashMap::new();
+        metrics.insert("cpu".to_string(), 95.0);
+        let results = service.evaluate_rules(&metrics).await.expect("eval ok");
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_condition_not_met() {
+        let service = AlertingService::new(AlertingConfig::default());
+        service
+            .add_rule(make_rule("low", "Low CPU", "cpu", 80.0))
+            .await
+            .expect("add ok");
+
+        let mut metrics = HashMap::new();
+        metrics.insert("cpu".to_string(), 50.0);
+        let results = service.evaluate_rules(&metrics).await.expect("eval ok");
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].condition_met);
+    }
+
+    #[tokio::test]
+    async fn test_alert_resolution_on_metric_drop() {
+        let service = AlertingService::new(AlertingConfig::default());
+        service
+            .add_rule(make_rule("res", "Resolution", "cpu", 80.0))
+            .await
+            .expect("add ok");
+
+        // Fire alert
+        let mut metrics = HashMap::new();
+        metrics.insert("cpu".to_string(), 95.0);
+        service.evaluate_rules(&metrics).await.expect("eval ok");
+        assert_eq!(service.list_active_alerts().await.len(), 1);
+
+        // Resolve alert
+        metrics.insert("cpu".to_string(), 50.0);
+        service.evaluate_rules(&metrics).await.expect("eval ok");
+        let active = service.list_active_alerts().await;
+        assert!(active.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_acknowledge_nonexistent_alert() {
+        let service = AlertingService::new(AlertingConfig::default());
+        let result = service.acknowledge_alert("ghost_alert", "admin").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_list_alerts_by_severity() {
+        let service = AlertingService::new(AlertingConfig::default());
+
+        let alert = Alert {
+            id: "sev_test".to_string(),
+            rule_id: "r".to_string(),
+            title: "Sev Test".to_string(),
+            message: "msg".to_string(),
+            severity: AlertSeverity::Critical,
+            state: AlertState::Firing,
+            labels: HashMap::new(),
+            annotations: HashMap::new(),
+            value: 99.0,
+            fired_at: SystemTime::now(),
+            resolved_at: None,
+            acknowledged: false,
+            acknowledged_by: None,
+            acknowledged_at: None,
+            notification_channels: vec![],
+            group_id: None,
+            parent_alert_id: None,
+        };
+        service.alerts.write().await.insert(alert.id.clone(), alert);
+
+        let critical = service.list_alerts_by_severity(AlertSeverity::Critical).await;
+        assert_eq!(critical.len(), 1);
+        let low = service.list_alerts_by_severity(AlertSeverity::Low).await;
+        assert!(low.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_format_template() {
+        let service = AlertingService::new(AlertingConfig::default());
+        let rule = make_rule("tpl", "My Rule", "cpu", 80.0);
+        let result = service.format_template("{rule_name} triggered at {value}", &rule, 95.5);
+        assert!(result.contains("My Rule"));
+        assert!(result.contains("95.5"));
+    }
+
+    #[test]
+    fn test_should_notify_channel_severity_filter() {
+        let service = AlertingService::new(AlertingConfig::default());
+        let channel = NotificationChannel {
+            id: "sf".to_string(),
+            name: "Sev Filter".to_string(),
+            channel_type: NotificationChannelType::Slack,
+            config: HashMap::new(),
+            enabled: true,
+            severity_filter: vec![AlertSeverity::Critical],
+            label_filters: HashMap::new(),
+        };
+        let alert = Alert {
+            id: "a".to_string(),
+            rule_id: "r".to_string(),
+            title: "t".to_string(),
+            message: "m".to_string(),
+            severity: AlertSeverity::Low,
+            state: AlertState::Firing,
+            labels: HashMap::new(),
+            annotations: HashMap::new(),
+            value: 1.0,
+            fired_at: SystemTime::now(),
+            resolved_at: None,
+            acknowledged: false,
+            acknowledged_by: None,
+            acknowledged_at: None,
+            notification_channels: vec![],
+            group_id: None,
+            parent_alert_id: None,
+        };
+        // Low severity should NOT be notified on a Critical-only channel
+        assert!(!service.should_notify_channel(&channel, &alert));
+    }
+
+    #[test]
+    fn test_should_notify_channel_label_filter() {
+        let service = AlertingService::new(AlertingConfig::default());
+        let mut label_filters = HashMap::new();
+        label_filters.insert("team".to_string(), "infra".to_string());
+        let channel = NotificationChannel {
+            id: "lf".to_string(),
+            name: "Label Filter".to_string(),
+            channel_type: NotificationChannelType::Webhook,
+            config: HashMap::new(),
+            enabled: true,
+            severity_filter: vec![],
+            label_filters,
+        };
+        let alert = Alert {
+            id: "b".to_string(),
+            rule_id: "r".to_string(),
+            title: "t".to_string(),
+            message: "m".to_string(),
+            severity: AlertSeverity::High,
+            state: AlertState::Firing,
+            labels: HashMap::new(), // No "team" label
+            annotations: HashMap::new(),
+            value: 1.0,
+            fired_at: SystemTime::now(),
+            resolved_at: None,
+            acknowledged: false,
+            acknowledged_by: None,
+            acknowledged_at: None,
+            notification_channels: vec![],
+            group_id: None,
+            parent_alert_id: None,
+        };
+        assert!(!service.should_notify_channel(&channel, &alert));
+    }
+
+    #[tokio::test]
+    async fn test_get_stats_summary() {
+        let service = AlertingService::new(AlertingConfig::default());
+        let summary = service.get_stats_summary().await;
+        assert_eq!(summary.total_rules, 0);
+        assert_eq!(summary.active_alerts, 0);
+        assert!(summary.most_common_severity.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_alert_history_empty() {
+        let service = AlertingService::new(AlertingConfig::default());
+        let history = service.get_alert_history(Some(10)).await;
+        assert!(history.is_empty());
+    }
+
+    #[test]
+    fn test_default_alerting_config() {
+        let config = AlertingConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.default_evaluation_interval_secs, 60);
+        assert_eq!(config.max_alert_history, 10000);
+        assert!(config.enable_alert_grouping);
+        assert!(config.enable_alert_suppression);
+        assert!(config.enable_alert_escalation);
+    }
+
+    #[test]
+    fn test_alert_state_variants() {
+        assert_eq!(AlertState::Firing, AlertState::Firing);
+        assert_ne!(AlertState::Firing, AlertState::Resolved);
+        assert_ne!(AlertState::Pending, AlertState::Suppressed);
+    }
+
+    #[tokio::test]
+    async fn test_execute_query_missing_metric() {
+        let service = AlertingService::new(AlertingConfig::default());
+        let metrics = HashMap::new();
+        let result = service.execute_query("nonexistent", &metrics);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_execute_query_found_metric() {
+        let service = AlertingService::new(AlertingConfig::default());
+        let mut metrics = HashMap::new();
+        metrics.insert("cpu_usage".to_string(), 75.0);
+        let result = service.execute_query("cpu_usage", &metrics);
+        assert!(result.is_ok());
+        if let Ok(val) = result {
+            assert!((val - 75.0).abs() < f64::EPSILON);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_range_condition_within() {
+        let service = AlertingService::new(AlertingConfig::default());
+        let condition = AlertCondition::Range {
+            min: Some(10.0),
+            max: Some(90.0),
+        };
+        let metrics = HashMap::new();
+        let result = service.evaluate_condition(&condition, 50.0, &metrics).await;
+        assert!(result.is_ok());
+        if let Ok(met) = result {
+            assert!(met);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_range_condition_outside() {
+        let service = AlertingService::new(AlertingConfig::default());
+        let condition = AlertCondition::Range {
+            min: Some(10.0),
+            max: Some(90.0),
+        };
+        let metrics = HashMap::new();
+        let result = service.evaluate_condition(&condition, 95.0, &metrics).await;
+        assert!(result.is_ok());
+        if let Ok(met) = result {
+            assert!(!met);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_multiple_rules_evaluation() {
+        let service = AlertingService::new(AlertingConfig::default());
+        service.add_rule(make_rule("m1", "CPU", "cpu", 80.0)).await.expect("add ok");
+        service.add_rule(make_rule("m2", "MEM", "mem", 90.0)).await.expect("add ok");
+
+        let mut metrics = HashMap::new();
+        metrics.insert("cpu".to_string(), 85.0);
+        metrics.insert("mem".to_string(), 70.0);
+
+        let results = service.evaluate_rules(&metrics).await.expect("eval ok");
+        assert_eq!(results.len(), 2);
+        // cpu > 80 => true, mem < 90 => false
+        let cpu_result = results.iter().find(|r| r.rule_id == "m1");
+        let mem_result = results.iter().find(|r| r.rule_id == "m2");
+        if let Some(cr) = cpu_result {
+            assert!(cr.condition_met);
+        }
+        if let Some(mr) = mem_result {
+            assert!(!mr.condition_met);
+        }
+    }
 }

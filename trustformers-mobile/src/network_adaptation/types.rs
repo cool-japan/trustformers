@@ -1267,3 +1267,6 @@ impl Default for NetworkRequirements {
         }
     }
 }
+
+#[path = "types_tests.rs"]
+mod types_tests;

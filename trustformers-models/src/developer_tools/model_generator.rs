@@ -507,3 +507,322 @@ impl ModelTemplates {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_model_generator_config_creation() {
+        let config = ModelGeneratorConfig {
+            model_name: "TestModel".to_string(),
+            model_type: ModelType::Encoder,
+            config_params: HashMap::new(),
+            layers: vec![],
+            task_heads: vec![],
+        };
+        assert_eq!(config.model_name, "TestModel");
+        assert!(config.config_params.is_empty());
+        assert!(config.layers.is_empty());
+        assert!(config.task_heads.is_empty());
+    }
+
+    #[test]
+    fn test_model_type_variants() {
+        let types = vec![
+            ModelType::Encoder,
+            ModelType::Decoder,
+            ModelType::EncoderDecoder,
+            ModelType::Multimodal,
+            ModelType::Custom,
+        ];
+        for t in &types {
+            let dbg = format!("{:?}", t);
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_config_param_creation() {
+        let param = ConfigParam {
+            name: "hidden_size".to_string(),
+            param_type: "usize".to_string(),
+            default_value: "768".to_string(),
+            description: "Hidden dimension size".to_string(),
+        };
+        assert_eq!(param.name, "hidden_size");
+        assert_eq!(param.param_type, "usize");
+        assert_eq!(param.default_value, "768");
+    }
+
+    #[test]
+    fn test_layer_definition_creation() {
+        let layer = LayerDefinition {
+            name: "self_attention".to_string(),
+            layer_type: "attention".to_string(),
+            parameters: HashMap::from([
+                ("num_heads".to_string(), "12".to_string()),
+                ("hidden_size".to_string(), "768".to_string()),
+            ]),
+        };
+        assert_eq!(layer.name, "self_attention");
+        assert_eq!(layer.layer_type, "attention");
+        assert_eq!(layer.parameters.len(), 2);
+    }
+
+    #[test]
+    fn test_task_head_creation() {
+        let head = TaskHead {
+            name: "classification".to_string(),
+            task_type: "sequence_classification".to_string(),
+            output_size: Some(10),
+        };
+        assert_eq!(head.name, "classification");
+        assert_eq!(head.output_size, Some(10));
+    }
+
+    #[test]
+    fn test_task_head_no_output_size() {
+        let head = TaskHead {
+            name: "lm_head".to_string(),
+            task_type: "language_modeling".to_string(),
+            output_size: None,
+        };
+        assert!(head.output_size.is_none());
+    }
+
+    #[test]
+    fn test_model_generator_new() {
+        let config = ModelGeneratorConfig {
+            model_name: "MyModel".to_string(),
+            model_type: ModelType::Decoder,
+            config_params: HashMap::new(),
+            layers: vec![],
+            task_heads: vec![],
+        };
+        let _generator = ModelGenerator::new(config);
+    }
+
+    #[test]
+    fn test_bert_encoder_template() {
+        let config = ModelTemplates::bert_encoder();
+        assert_eq!(config.model_name, "CustomBert");
+        assert!(matches!(config.model_type, ModelType::Encoder));
+        assert!(config.config_params.contains_key("vocab_size"));
+        assert!(config.config_params.contains_key("hidden_size"));
+    }
+
+    #[test]
+    fn test_gpt_decoder_template() {
+        let config = ModelTemplates::gpt_decoder();
+        assert_eq!(config.model_name, "CustomGPT");
+        assert!(matches!(config.model_type, ModelType::Decoder));
+        assert!(config.config_params.contains_key("vocab_size"));
+    }
+
+    #[test]
+    fn test_bert_template_defaults() {
+        let config = ModelTemplates::bert_encoder();
+        let vocab_param = config.config_params.get("vocab_size").expect("vocab_size not found");
+        assert_eq!(vocab_param.default_value, "30522");
+        let hidden_param = config.config_params.get("hidden_size").expect("hidden_size not found");
+        assert_eq!(hidden_param.default_value, "768");
+    }
+
+    #[test]
+    fn test_gpt_template_defaults() {
+        let config = ModelTemplates::gpt_decoder();
+        let vocab_param = config.config_params.get("vocab_size").expect("vocab_size not found");
+        assert_eq!(vocab_param.default_value, "50257");
+    }
+
+    #[test]
+    fn test_model_generator_generate_to_temp_dir() {
+        let config = ModelTemplates::bert_encoder();
+        let generator = ModelGenerator::new(config);
+        let temp_dir = std::env::temp_dir().join("test_model_gen");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let result = generator.generate_model(&temp_dir);
+        assert!(result.is_ok());
+        // Clean up
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_model_generator_creates_files() {
+        let config = ModelTemplates::gpt_decoder();
+        let generator = ModelGenerator::new(config);
+        let temp_dir = std::env::temp_dir().join("test_model_gen_files");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let result = generator.generate_model(&temp_dir);
+        assert!(result.is_ok());
+        // Check files were created
+        let model_dir = temp_dir.join("CustomGPT");
+        assert!(model_dir.exists());
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_config_with_layers() {
+        let config = ModelGeneratorConfig {
+            model_name: "LayeredModel".to_string(),
+            model_type: ModelType::Encoder,
+            config_params: HashMap::new(),
+            layers: vec![
+                LayerDefinition {
+                    name: "embedding".to_string(),
+                    layer_type: "embedding".to_string(),
+                    parameters: HashMap::from([
+                        ("vocab_size".to_string(), "30000".to_string()),
+                        ("hidden_size".to_string(), "512".to_string()),
+                    ]),
+                },
+                LayerDefinition {
+                    name: "encoder".to_string(),
+                    layer_type: "attention".to_string(),
+                    parameters: HashMap::from([
+                        ("num_heads".to_string(), "8".to_string()),
+                        ("hidden_size".to_string(), "512".to_string()),
+                    ]),
+                },
+            ],
+            task_heads: vec![],
+        };
+        assert_eq!(config.layers.len(), 2);
+        assert_eq!(config.layers[0].name, "embedding");
+        assert_eq!(config.layers[1].name, "encoder");
+    }
+
+    #[test]
+    fn test_config_with_task_heads() {
+        let config = ModelGeneratorConfig {
+            model_name: "MultiTask".to_string(),
+            model_type: ModelType::Encoder,
+            config_params: HashMap::new(),
+            layers: vec![],
+            task_heads: vec![
+                TaskHead {
+                    name: "cls".to_string(),
+                    task_type: "classification".to_string(),
+                    output_size: Some(10),
+                },
+                TaskHead {
+                    name: "ner".to_string(),
+                    task_type: "token_classification".to_string(),
+                    output_size: Some(9),
+                },
+            ],
+        };
+        assert_eq!(config.task_heads.len(), 2);
+    }
+
+    #[test]
+    fn test_generator_with_attention_layer() {
+        let mut params = HashMap::new();
+        params.insert("num_heads".to_string(), "8".to_string());
+        params.insert("hidden_size".to_string(), "512".to_string());
+        let layer = LayerDefinition {
+            name: "self_attn".to_string(),
+            layer_type: "attention".to_string(),
+            parameters: params,
+        };
+        assert_eq!(layer.parameters["num_heads"], "8");
+    }
+
+    #[test]
+    fn test_generator_with_feedforward_layer() {
+        let mut params = HashMap::new();
+        params.insert("input_size".to_string(), "512".to_string());
+        params.insert("hidden_size".to_string(), "2048".to_string());
+        let layer = LayerDefinition {
+            name: "ffn".to_string(),
+            layer_type: "feedforward".to_string(),
+            parameters: params,
+        };
+        assert_eq!(layer.parameters["hidden_size"], "2048");
+    }
+
+    #[test]
+    fn test_generator_with_linear_layer() {
+        let layer = LayerDefinition {
+            name: "linear".to_string(),
+            layer_type: "linear".to_string(),
+            parameters: HashMap::from([
+                ("input_size".to_string(), "768".to_string()),
+                ("output_size".to_string(), "3072".to_string()),
+            ]),
+        };
+        assert_eq!(layer.layer_type, "linear");
+    }
+
+    #[test]
+    fn test_generator_with_conv1d_layer() {
+        let layer = LayerDefinition {
+            name: "conv".to_string(),
+            layer_type: "conv1d".to_string(),
+            parameters: HashMap::from([
+                ("in_channels".to_string(), "768".to_string()),
+                ("out_channels".to_string(), "768".to_string()),
+            ]),
+        };
+        assert_eq!(layer.layer_type, "conv1d");
+    }
+
+    #[test]
+    fn test_config_param_types() {
+        let params = vec![
+            ConfigParam {
+                name: "int_param".to_string(),
+                param_type: "usize".to_string(),
+                default_value: "42".to_string(),
+                description: "An integer".to_string(),
+            },
+            ConfigParam {
+                name: "float_param".to_string(),
+                param_type: "f32".to_string(),
+                default_value: "0.1".to_string(),
+                description: "A float".to_string(),
+            },
+            ConfigParam {
+                name: "bool_param".to_string(),
+                param_type: "bool".to_string(),
+                default_value: "true".to_string(),
+                description: "A boolean".to_string(),
+            },
+            ConfigParam {
+                name: "str_param".to_string(),
+                param_type: "String".to_string(),
+                default_value: "hello".to_string(),
+                description: "A string".to_string(),
+            },
+        ];
+        assert_eq!(params.len(), 4);
+        for p in &params {
+            assert!(!p.name.is_empty());
+            assert!(!p.param_type.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_generate_test_code() {
+        let config = ModelTemplates::bert_encoder();
+        let generator = ModelGenerator::new(config);
+        let test_code = generator.generate_test_code();
+        assert!(test_code.contains("test_"));
+        assert!(test_code.contains("CustomBert"));
+    }
+
+    #[test]
+    fn test_model_name_in_generated_output() {
+        let config = ModelGeneratorConfig {
+            model_name: "UniqueTestModel".to_string(),
+            model_type: ModelType::Encoder,
+            config_params: HashMap::new(),
+            layers: vec![],
+            task_heads: vec![],
+        };
+        let generator = ModelGenerator::new(config);
+        let test_code = generator.generate_test_code();
+        assert!(test_code.contains("UniqueTestModel"));
+    }
+}

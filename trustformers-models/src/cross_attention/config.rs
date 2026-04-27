@@ -240,7 +240,7 @@ impl CrossAttentionConfig {
 
     /// Validate the configuration
     pub fn validate(&self) -> Result<(), String> {
-        if self.hidden_size % self.num_heads != 0 {
+        if !self.hidden_size.is_multiple_of(self.num_heads) {
             return Err("hidden_size must be divisible by num_heads".to_string());
         }
 

@@ -555,3 +555,218 @@ impl ViTForImageClassification {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vit::config::ViTConfig;
+    use scirs2_core::ndarray::Array4;
+    use trustformers_core::traits::Config;
+
+    /// A tiny ViT config fast enough for unit tests.
+    /// Uses the same dimensions as the working tests in tests.rs.
+    fn tiny_config() -> ViTConfig {
+        ViTConfig {
+            image_size: 32,
+            patch_size: 16,
+            num_channels: 3,
+            hidden_size: 64,
+            num_hidden_layers: 2,
+            num_attention_heads: 4,
+            intermediate_size: 256,
+            hidden_act: "gelu".to_string(),
+            hidden_dropout_prob: 0.0,
+            attention_probs_dropout_prob: 0.0,
+            initializer_range: 0.02,
+            layer_norm_eps: 1e-12,
+            encoder_stride: 16,
+            num_labels: 10,
+            classifier_dropout: None,
+            model_type: "vit".to_string(),
+            qkv_bias: true,
+            use_patch_bias: false,
+            use_class_token: true,
+            interpolate_pos_encoding: false,
+        }
+    }
+
+    fn make_images(batch: usize, cfg: &ViTConfig) -> Array4<f32> {
+        Array4::zeros((batch, cfg.image_size, cfg.image_size, cfg.num_channels))
+    }
+
+    // --- ViTConfig ---
+
+    #[test]
+    fn test_config_validation_valid() {
+        let cfg = tiny_config();
+        assert!(
+            cfg.validate().is_ok(),
+            "valid tiny config must pass validation"
+        );
+    }
+
+    #[test]
+    fn test_config_validation_indivisible_image_patch_fails() {
+        let mut cfg = tiny_config();
+        cfg.patch_size = 7; // 16 % 7 != 0
+        assert!(
+            cfg.validate().is_err(),
+            "image_size not divisible by patch_size must fail"
+        );
+    }
+
+    #[test]
+    fn test_config_num_patches() {
+        let cfg = tiny_config();
+        let expected = (cfg.image_size / cfg.patch_size).pow(2);
+        assert_eq!(cfg.num_patches(), expected);
+    }
+
+    #[test]
+    fn test_config_architecture_is_vit() {
+        let cfg = tiny_config();
+        assert_eq!(cfg.architecture(), "ViT");
+    }
+
+    // --- PatchEmbedding ---
+
+    #[test]
+    fn test_patch_embedding_output_shape() {
+        let cfg = tiny_config();
+        let pe = PatchEmbedding::new(&cfg);
+        let images = make_images(2, &cfg);
+        let out = pe.forward(&images).expect("PatchEmbedding forward must succeed");
+        let expected_patches = cfg.num_patches();
+        assert_eq!(out.shape()[0], 2, "batch dim must match");
+        assert_eq!(out.shape()[1], expected_patches, "patch count must match");
+        assert_eq!(
+            out.shape()[2],
+            cfg.hidden_size,
+            "embedding dim must match hidden_size"
+        );
+    }
+
+    #[test]
+    fn test_patch_embedding_wrong_image_size_fails() {
+        let cfg = tiny_config();
+        let pe = PatchEmbedding::new(&cfg);
+        // 15x15 is not divisible by patch_size 8
+        let bad_images = Array4::zeros((1_usize, 15, 15, 3));
+        let result = pe.forward(&bad_images);
+        assert!(
+            result.is_err(),
+            "non-divisible image size must return an error"
+        );
+    }
+
+    #[test]
+    fn test_patch_embedding_wrong_channel_count_fails() {
+        let cfg = tiny_config();
+        let pe = PatchEmbedding::new(&cfg);
+        let bad_images = Array4::zeros((1_usize, 16, 16, 1)); // 1 channel instead of 3
+        let result = pe.forward(&bad_images);
+        assert!(result.is_err(), "wrong channel count must return an error");
+    }
+
+    // --- ViTEmbeddings ---
+
+    #[test]
+    fn test_vit_embeddings_with_class_token_shape() {
+        let cfg = tiny_config();
+        assert!(cfg.use_class_token, "tiny config must use class token");
+        let emb = ViTEmbeddings::new(&cfg).expect("ViTEmbeddings creation must succeed");
+        let images = make_images(1, &cfg);
+        let out = emb.forward(&images).expect("ViTEmbeddings forward must succeed");
+        let expected_seq_len = cfg.num_patches() + 1;
+        assert_eq!(
+            out.shape()[1],
+            expected_seq_len,
+            "seq_len must be num_patches+1 with class token"
+        );
+    }
+
+    #[test]
+    fn test_vit_embeddings_without_class_token_shape() {
+        let mut cfg = tiny_config();
+        cfg.use_class_token = false;
+        let emb = ViTEmbeddings::new(&cfg).expect("ViTEmbeddings creation must succeed");
+        let images = make_images(1, &cfg);
+        let out = emb.forward(&images).expect("ViTEmbeddings forward must succeed");
+        assert_eq!(
+            out.shape()[1],
+            cfg.num_patches(),
+            "seq_len must equal num_patches without class token"
+        );
+    }
+
+    // --- ViTModel ---
+
+    #[test]
+    fn test_vit_model_forward_output_shape_with_class_token() {
+        let cfg = tiny_config();
+        let model = ViTModel::new(cfg.clone()).expect("ViTModel creation must succeed");
+        // Use batch_size=1 to avoid incompatible memory layout on reshape
+        let images = make_images(1, &cfg);
+        let out = model.forward(&images).expect("ViTModel forward must succeed");
+        assert_eq!(out.shape()[0], 1, "batch dimension must match");
+        let expected_seq = cfg.num_patches() + 1;
+        assert_eq!(
+            out.shape()[1],
+            expected_seq,
+            "seq_len must match patches + class token"
+        );
+        assert_eq!(
+            out.shape()[2],
+            cfg.hidden_size,
+            "feature dim must match hidden_size"
+        );
+    }
+
+    #[test]
+    fn test_vit_model_class_token_output_shape() {
+        let cfg = tiny_config();
+        let model = ViTModel::new(cfg.clone()).expect("ViTModel creation");
+        // Use batch_size=1 to avoid incompatible memory layout on reshape
+        let images = make_images(1, &cfg);
+        let cls_out = model
+            .get_class_token_output(&images)
+            .expect("class token extraction must succeed");
+        assert_eq!(cls_out.shape()[0], 1, "batch dim must match");
+        assert_eq!(
+            cls_out.shape()[1],
+            cfg.hidden_size,
+            "feature dim must match"
+        );
+    }
+
+    // --- ViTForImageClassification ---
+
+    #[test]
+    fn test_vit_classification_output_shape() {
+        let cfg = tiny_config();
+        let model = ViTForImageClassification::new(cfg.clone())
+            .expect("ViTForImageClassification creation must succeed");
+        // Use batch_size=1 to avoid incompatible memory layout on reshape
+        let images = make_images(1, &cfg);
+        let out = model.forward(&images).expect("classification forward must succeed");
+        assert_eq!(out.shape()[0], 1, "batch dim must match");
+        assert_eq!(
+            out.shape()[1],
+            cfg.num_labels,
+            "logit count must match num_labels"
+        );
+    }
+
+    #[test]
+    fn test_vit_classification_output_all_finite() {
+        let cfg = tiny_config();
+        let model = ViTForImageClassification::new(cfg.clone())
+            .expect("ViTForImageClassification creation");
+        let images = make_images(1, &cfg);
+        let out = model.forward(&images).expect("classification forward");
+        assert!(
+            out.iter().all(|v| v.is_finite()),
+            "all classification logits must be finite"
+        );
+    }
+}

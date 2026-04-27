@@ -358,7 +358,7 @@ impl VersionManager {
                 .compatibility
                 .max_version
                 .as_ref()
-                .map_or(true, |max| to_version <= max);
+                .is_none_or(|max| to_version <= max);
 
         Ok(compatible)
     }

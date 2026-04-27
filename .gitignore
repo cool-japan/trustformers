@@ -99,6 +99,9 @@ npm-debug.log
 # Debugging plots
 trustformers-debug/modern_debug_plots
 
+# Memory reports (generated)
+**/memory_reports/
+
 # miscs
 trustformers-py/test_results
 

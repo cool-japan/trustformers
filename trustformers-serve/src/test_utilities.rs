@@ -623,3 +623,275 @@ pub mod config {
         config
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_timeout_optimization::{TestCategory, TestComplexityHints};
+
+    // ── LCG ──────────────────────────────────────────────────────────────────
+    struct Lcg {
+        state: u64,
+    }
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Lcg { state: seed }
+        }
+        fn next(&mut self) -> u64 {
+            self.state = self
+                .state
+                .wrapping_mul(6_364_136_223_846_793_005_u64)
+                .wrapping_add(1_442_695_040_888_963_407_u64);
+            self.state
+        }
+        fn next_f32(&mut self) -> f32 {
+            (self.next() >> 11) as f32 / (1_u64 << 53) as f32
+        }
+    }
+
+    // ── get_test_environment ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_get_test_environment_returns_non_empty() {
+        let env = get_test_environment();
+        assert!(!env.is_empty());
+    }
+
+    #[test]
+    fn test_get_test_environment_respects_env_var() {
+        // Temporarily set the env var and verify it's picked up
+        std::env::set_var("TEST_ENV", "test_value_xyz");
+        let env = get_test_environment();
+        std::env::remove_var("TEST_ENV");
+        assert_eq!(env, "test_value_xyz");
+    }
+
+    // ── create_progress_tracker ──────────────────────────────────────────────
+
+    #[test]
+    fn test_create_progress_tracker_with_zero_steps() {
+        let tracker = create_progress_tracker(0);
+        // Should not panic
+        let _ = Arc::clone(&tracker);
+    }
+
+    #[test]
+    fn test_create_progress_tracker_with_positive_steps() {
+        let tracker = create_progress_tracker(100);
+        // total_progress is initialised to the passed value
+        let total = tracker.total_progress.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(total, 100);
+    }
+
+    #[test]
+    fn test_create_progress_tracker_is_arc() {
+        let t1 = create_progress_tracker(10);
+        let t2 = Arc::clone(&t1);
+        // Both arcs should point to the same underlying object
+        assert!(Arc::ptr_eq(&t1, &t2));
+    }
+
+    // ── TestComplexityHints ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_complexity_hints_default_has_no_concurrency() {
+        let hints = TestComplexityHints::default();
+        assert!(hints.concurrency_level.is_none());
+        assert!(hints.memory_usage.is_none());
+        assert!(!hints.network_operations);
+        assert!(!hints.file_operations);
+        assert!(!hints.gpu_operations);
+        assert!(!hints.database_operations);
+    }
+
+    #[test]
+    fn test_complexity_hints_partial_override() {
+        let hints = TestComplexityHints {
+            concurrency_level: Some(8),
+            network_operations: true,
+            ..Default::default()
+        };
+        assert_eq!(hints.concurrency_level, Some(8));
+        assert!(hints.network_operations);
+        assert!(!hints.gpu_operations);
+    }
+
+    // ── TestCategory variants ────────────────────────────────────────────────
+
+    #[test]
+    fn test_test_category_unit_constructible() {
+        let _c = TestCategory::Unit;
+    }
+
+    #[test]
+    fn test_test_category_integration_constructible() {
+        let _c = TestCategory::Integration;
+    }
+
+    #[test]
+    fn test_test_category_stress_constructible() {
+        let _c = TestCategory::Stress;
+    }
+
+    #[test]
+    fn test_test_category_chaos_constructible() {
+        let _c = TestCategory::Chaos;
+    }
+
+    #[test]
+    fn test_test_category_property_constructible() {
+        let _c = TestCategory::Property;
+    }
+
+    // ── preset_configs ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_ci_config_has_longer_unit_timeout() {
+        let ci = config::ci_config();
+        let dev = config::dev_config();
+        assert!(
+            ci.base_timeouts.unit_tests >= dev.base_timeouts.unit_tests,
+            "CI timeout ({:?}) should be >= dev timeout ({:?})",
+            ci.base_timeouts.unit_tests,
+            dev.base_timeouts.unit_tests
+        );
+    }
+
+    #[test]
+    fn test_dev_config_has_shorter_unit_timeout_than_default() {
+        let dev = config::dev_config();
+        let default = crate::test_timeout_optimization::TestTimeoutConfig::default();
+        assert!(
+            dev.base_timeouts.unit_tests <= default.base_timeouts.unit_tests,
+            "dev unit timeout ({:?}) should be <= default ({:?})",
+            dev.base_timeouts.unit_tests,
+            default.base_timeouts.unit_tests
+        );
+    }
+
+    #[test]
+    fn test_performance_config_disables_early_termination() {
+        let perf = config::performance_config();
+        assert!(!perf.early_termination.enabled);
+    }
+
+    #[test]
+    fn test_performance_config_has_long_stress_timeout() {
+        let perf = config::performance_config();
+        // Stress timeout should be >= 10 minutes
+        assert!(perf.base_timeouts.stress_tests >= Duration::from_secs(600));
+    }
+
+    #[test]
+    fn test_ci_config_has_environment_overrides() {
+        let ci = config::ci_config();
+        assert!(!ci.environment_overrides.is_empty());
+        assert!(ci.environment_overrides.contains_key("ci"));
+    }
+
+    // ── benchmarking::BenchmarkResult helpers ────────────────────────────────
+
+    #[test]
+    fn test_benchmark_result_std_deviation_empty_is_zero() {
+        let result = benchmarking::BenchmarkResult {
+            test_name: "test".to_string(),
+            iterations: 0,
+            total_time: Duration::ZERO,
+            average_time: Duration::ZERO,
+            min_time: Duration::ZERO,
+            max_time: Duration::ZERO,
+            execution_times: vec![],
+        };
+        assert_eq!(result.std_deviation(), Duration::ZERO);
+    }
+
+    #[test]
+    fn test_benchmark_result_percentile_empty_is_zero() {
+        let result = benchmarking::BenchmarkResult {
+            test_name: "t".to_string(),
+            iterations: 0,
+            total_time: Duration::ZERO,
+            average_time: Duration::ZERO,
+            min_time: Duration::ZERO,
+            max_time: Duration::ZERO,
+            execution_times: vec![],
+        };
+        assert_eq!(result.percentile(50.0), Duration::ZERO);
+    }
+
+    #[test]
+    fn test_benchmark_result_percentile_single_element() {
+        let dur = Duration::from_millis(42);
+        let result = benchmarking::BenchmarkResult {
+            test_name: "t".to_string(),
+            iterations: 1,
+            total_time: dur,
+            average_time: dur,
+            min_time: dur,
+            max_time: dur,
+            execution_times: vec![dur],
+        };
+        assert_eq!(result.percentile(50.0), dur);
+        assert_eq!(result.percentile(99.0), dur);
+    }
+
+    #[test]
+    fn test_benchmark_result_percentile_ordered() {
+        let mut lcg = Lcg::new(3);
+        let mut times: Vec<Duration> =
+            (0..10).map(|_| Duration::from_millis(lcg.next() % 1000)).collect();
+        let avg_ms: u64 =
+            times.iter().map(|d| d.as_millis() as u64).sum::<u64>() / times.len() as u64;
+        let avg = Duration::from_millis(avg_ms);
+        let result = benchmarking::BenchmarkResult {
+            test_name: "t".to_string(),
+            iterations: times.len(),
+            total_time: times.iter().sum(),
+            average_time: avg,
+            min_time: *times.iter().min().unwrap_or(&Duration::ZERO),
+            max_time: *times.iter().max().unwrap_or(&Duration::ZERO),
+            execution_times: times.clone(),
+        };
+        // p0 <= p50 <= p100
+        times.sort();
+        let p0 = result.percentile(0.0);
+        let p50 = result.percentile(50.0);
+        let p100 = result.percentile(100.0);
+        assert!(p0 <= p50, "p0={:?} p50={:?}", p0, p50);
+        assert!(p50 <= p100, "p50={:?} p100={:?}", p50, p100);
+    }
+
+    #[test]
+    fn test_benchmark_result_print_summary_no_panic() {
+        let dur = Duration::from_millis(10);
+        let result = benchmarking::BenchmarkResult {
+            test_name: "noop".to_string(),
+            iterations: 1,
+            total_time: dur,
+            average_time: dur,
+            min_time: dur,
+            max_time: dur,
+            execution_times: vec![dur],
+        };
+        result.print_summary();
+    }
+
+    #[test]
+    fn test_lcg_f32_in_unit_range() {
+        let mut lcg = Lcg::new(101);
+        for _ in 0..50 {
+            let v = lcg.next_f32();
+            assert!((0.0..1.0).contains(&v), "lcg value out of range: {}", v);
+        }
+    }
+
+    // ── grouping::TestGroup ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_test_group_new_starts_empty() {
+        let group = grouping::TestGroup::new("my_group");
+        assert_eq!(group.name, "my_group");
+        assert!(group.tests.is_empty());
+        assert!(group.parallel_execution);
+    }
+}

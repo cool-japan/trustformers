@@ -29,3 +29,10 @@ pub use streaming::{FinishReason, GenerationStream, GenerationStreamTrait, Gener
 pub use config::*;
 // pub use watermarking::*;
 // pub use assisted::*;
+
+#[cfg(test)]
+mod cache_tests;
+#[cfg(test)]
+mod constraints_tests;
+#[cfg(test)]
+mod streaming_tests;

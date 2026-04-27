@@ -267,7 +267,7 @@ impl ActivationStatsAnalyzer {
         // Calculate median
         let mut sorted_activations = activations.to_vec();
         sorted_activations.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median = if sorted_activations.len() % 2 == 0 {
+        let median = if sorted_activations.len().is_multiple_of(2) {
             let mid = sorted_activations.len() / 2;
             (sorted_activations[mid - 1] + sorted_activations[mid]) / 2.0
         } else {

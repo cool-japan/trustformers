@@ -1519,3 +1519,247 @@ pub struct RateAdjustment {
     pub system_load: f32,
     pub resource_availability: f32,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0
+        }
+        fn next_f64(&mut self) -> f64 {
+            (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+        }
+        fn next_f32(&mut self) -> f32 {
+            self.next_f64() as f32
+        }
+        fn next_usize(&mut self, bound: usize) -> usize {
+            (self.next_u64() as usize) % bound.max(1)
+        }
+    }
+
+    // ---- CircularBuffer tests ----
+    #[test]
+    fn test_circular_buffer_new() {
+        let buf: CircularBuffer<i32> = CircularBuffer::new(10);
+        assert_eq!(buf.capacity, 10);
+        assert!((buf.utilization() - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_circular_buffer_push_single() {
+        let mut buf = CircularBuffer::new(5);
+        buf.push(42);
+        assert!((buf.utilization() - 20.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_circular_buffer_push_to_capacity() {
+        let mut buf = CircularBuffer::new(3);
+        buf.push(1);
+        buf.push(2);
+        buf.push(3);
+        assert!((buf.utilization() - 100.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_circular_buffer_push_wraps_around() {
+        let mut buf = CircularBuffer::new(3);
+        buf.push(1);
+        buf.push(2);
+        buf.push(3);
+        buf.push(4); // wraps
+        assert!((buf.utilization() - 100.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_circular_buffer_get_recent_empty() {
+        let buf: CircularBuffer<i32> = CircularBuffer::new(5);
+        let recent = buf.get_recent(3);
+        assert!(recent.is_empty());
+    }
+
+    #[test]
+    fn test_circular_buffer_get_recent_some() {
+        let mut buf = CircularBuffer::new(5);
+        buf.push(10);
+        buf.push(20);
+        buf.push(30);
+        let recent = buf.get_recent(2);
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0], 30);
+        assert_eq!(recent[1], 20);
+    }
+
+    #[test]
+    fn test_circular_buffer_get_recent_more_than_available() {
+        let mut buf = CircularBuffer::new(5);
+        buf.push(1);
+        buf.push(2);
+        let recent = buf.get_recent(10);
+        assert_eq!(recent.len(), 2);
+    }
+
+    #[test]
+    fn test_circular_buffer_get_recent_after_wrap() {
+        let mut buf = CircularBuffer::new(3);
+        buf.push(1);
+        buf.push(2);
+        buf.push(3);
+        buf.push(4);
+        buf.push(5);
+        let recent = buf.get_recent(3);
+        assert_eq!(recent.len(), 3);
+        assert_eq!(recent[0], 5);
+        assert_eq!(recent[1], 4);
+        assert_eq!(recent[2], 3);
+    }
+
+    #[test]
+    fn test_circular_buffer_get_statistics() {
+        let mut buf = CircularBuffer::new(10);
+        buf.push(1);
+        buf.push(2);
+        let stats = buf.get_statistics();
+        assert_eq!(stats.items_written.load(Ordering::Relaxed), 2);
+        assert_eq!(stats.max_capacity, 10);
+    }
+
+    // ---- PidSampleRateAlgorithm tests ----
+    #[test]
+    fn test_pid_sample_rate_algorithm_new() {
+        let _alg = PidSampleRateAlgorithm::new();
+    }
+
+    // ---- ImpactTrendAnalyzer tests ----
+    #[test]
+    fn test_impact_trend_analyzer_new() {
+        let _analyzer = ImpactTrendAnalyzer::new();
+    }
+
+    // ---- DefaultCollectionErrorHandler tests ----
+    #[test]
+    fn test_default_collection_error_handler_new() {
+        let _h = DefaultCollectionErrorHandler::new();
+    }
+
+    // ---- PublishRateLimiter tests ----
+    #[test]
+    fn test_publish_rate_limiter_new() {
+        let _limiter = PublishRateLimiter::new();
+    }
+
+    // ---- DefaultPublishErrorHandler tests ----
+    #[test]
+    fn test_default_publish_error_handler_new() {
+        let _h = DefaultPublishErrorHandler::new();
+    }
+
+    // ---- ImpactRecommendationEngine tests ----
+    #[test]
+    fn test_impact_recommendation_engine_new() {
+        let _e = ImpactRecommendationEngine::new();
+    }
+
+    // ---- RateControllerStats tests ----
+    #[test]
+    fn test_rate_controller_stats_default() {
+        let s = RateControllerStats::default();
+        assert_eq!(s.adjustments_made.load(Ordering::Relaxed), 0);
+    }
+
+    // ---- PublisherType tests ----
+    #[test]
+    fn test_publisher_type_http() {
+        let p = PublisherType::Http {
+            endpoint: "http://localhost:9090".to_string(),
+        };
+        let formatted = format!("{:?}", p);
+        assert!(formatted.contains("localhost"));
+    }
+
+    #[test]
+    fn test_publisher_type_message_queue() {
+        let p = PublisherType::MessageQueue {
+            queue_name: "metrics".to_string(),
+        };
+        let formatted = format!("{:?}", p);
+        assert!(formatted.contains("metrics"));
+    }
+
+    #[test]
+    fn test_publisher_type_custom() {
+        let p = PublisherType::Custom("my_publisher".to_string());
+        let formatted = format!("{:?}", p);
+        assert!(formatted.contains("my_publisher"));
+    }
+
+    // ---- ErrorType tests ----
+    #[test]
+    fn test_error_type_variants() {
+        let types = [
+            ErrorType::Network,
+            ErrorType::Resource,
+            ErrorType::Configuration,
+        ];
+        assert_eq!(types.len(), 3);
+    }
+
+    // ---- RateAdjustmentResult construction ----
+    #[test]
+    fn test_rate_adjustment_result_construction() {
+        let r = RateAdjustmentResult {
+            old_rate: 50.0,
+            new_rate: 75.0,
+            rate_changed: true,
+            reason: AdjustmentReason::SystemLoad,
+        };
+        assert!(r.rate_changed);
+        assert!(r.new_rate > r.old_rate);
+    }
+
+    // ---- LCG-driven CircularBuffer tests ----
+    #[test]
+    fn test_lcg_circular_buffer_stress() {
+        let mut rng = Lcg::new(42);
+        let mut buf = CircularBuffer::new(100);
+        for _ in 0..500 {
+            let value = rng.next_f64();
+            buf.push(value);
+        }
+        assert!((buf.utilization() - 100.0).abs() < f32::EPSILON);
+        let recent = buf.get_recent(10);
+        assert_eq!(recent.len(), 10);
+    }
+
+    #[test]
+    fn test_lcg_circular_buffer_various_sizes() {
+        let mut rng = Lcg::new(999);
+        for _ in 0..10 {
+            let cap = rng.next_usize(100) + 1;
+            let mut buf: CircularBuffer<u64> = CircularBuffer::new(cap);
+            let num_items = rng.next_usize(200);
+            for _ in 0..num_items {
+                buf.push(rng.next_u64());
+            }
+            let expected_util =
+                if num_items >= cap { 100.0 } else { (num_items as f32 / cap as f32) * 100.0 };
+            assert!((buf.utilization() - expected_util).abs() < 1.0);
+        }
+    }
+
+    #[test]
+    fn test_lcg_generates_rate_values() {
+        let mut rng = Lcg::new(123);
+        for _ in 0..50 {
+            let rate = rng.next_f32() * 100.0;
+            assert!((0.0..100.0).contains(&rate));
+        }
+    }
+}

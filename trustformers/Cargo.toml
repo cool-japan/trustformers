@@ -45,7 +45,7 @@ uuid.workspace = true
 axum = { workspace = true, optional = true }
 num_cpus.workspace = true
 oxiarc-deflate.workspace = true
-tar.workspace = true
+oxiarc-archive.workspace = true
 tokio-stream.workspace = true
 url.workspace = true
 tower = { version = "0.5", optional = true }
@@ -61,6 +61,9 @@ rstest.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile.workspace = true
 proptest.workspace = true
+scirs2-core.workspace = true
+trustformers-core.workspace = true
+trustformers-training.workspace = true
 
 [features]
 default = ["bert", "async"]

@@ -726,4 +726,267 @@ mod tests {
             _ => panic!("Expected improving trend for latency"),
         }
     }
+
+    // ── LeaderboardStats additional tests ──
+
+    #[test]
+    fn test_empty_entries_stats() {
+        let entries: Vec<LeaderboardEntry> = Vec::new();
+        let stats = LeaderboardStats::from_entries(&entries).expect("operation failed in test");
+        assert_eq!(stats.total_entries, 0);
+        assert_eq!(stats.unique_models, 0);
+        assert_eq!(stats.unique_submitters, 0);
+    }
+
+    #[test]
+    fn test_stats_unique_submitters() {
+        let entries = create_test_entries();
+        let stats = LeaderboardStats::from_entries(&entries).expect("operation failed in test");
+        // Both entries from "User1"
+        assert_eq!(stats.unique_submitters, 1);
+    }
+
+    #[test]
+    fn test_stats_entries_by_precision() {
+        let entries = create_test_entries();
+        let stats = LeaderboardStats::from_entries(&entries).expect("operation failed in test");
+        // Both entries use FP16
+        assert!(stats.entries_by_precision.contains_key("FP16"));
+        assert_eq!(stats.entries_by_precision["FP16"], 2);
+    }
+
+    #[test]
+    fn test_stats_entries_by_platform() {
+        let entries = create_test_entries();
+        let stats = LeaderboardStats::from_entries(&entries).expect("operation failed in test");
+        assert!(stats.entries_by_platform.contains_key("x86_64"));
+        assert_eq!(stats.entries_by_platform["x86_64"], 2);
+    }
+
+    #[test]
+    fn test_stats_top_submitters() {
+        let entries = create_test_entries();
+        let stats = LeaderboardStats::from_entries(&entries).expect("operation failed in test");
+        assert!(!stats.top_submitters.is_empty());
+        assert_eq!(stats.top_submitters[0].0, "User1");
+        assert_eq!(stats.top_submitters[0].1, 2);
+    }
+
+    #[test]
+    fn test_stats_top_benchmarks() {
+        let entries = create_test_entries();
+        let stats = LeaderboardStats::from_entries(&entries).expect("operation failed in test");
+        assert!(!stats.top_benchmarks.is_empty());
+        assert_eq!(stats.top_benchmarks[0].0, "benchmark1");
+    }
+
+    #[test]
+    fn test_stats_date_range() {
+        let entries = create_test_entries();
+        let stats = LeaderboardStats::from_entries(&entries).expect("operation failed in test");
+        assert!(stats.date_range.start < stats.date_range.end);
+    }
+
+    #[test]
+    fn test_stats_average_latency() {
+        let entries = create_test_entries();
+        let stats = LeaderboardStats::from_entries(&entries).expect("operation failed in test");
+        // Average of 15.0 and 10.0
+        assert!((stats.average_metrics.latency_ms - 12.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_stats_average_throughput() {
+        let entries = create_test_entries();
+        let stats = LeaderboardStats::from_entries(&entries).expect("operation failed in test");
+        // Average of 66.7 and 100.0
+        assert!(stats.average_metrics.throughput.is_some());
+        let avg = stats.average_metrics.throughput.expect("throughput should exist");
+        assert!((avg - 83.35).abs() < 1e-1);
+    }
+
+    #[test]
+    fn test_stats_average_accuracy() {
+        let entries = create_test_entries();
+        let stats = LeaderboardStats::from_entries(&entries).expect("operation failed in test");
+        // Average of 0.90 and 0.95
+        assert!(stats.average_metrics.accuracy.is_some());
+        let avg = stats.average_metrics.accuracy.expect("accuracy should exist");
+        assert!((avg - 0.925).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_stats_best_lowest_latency() {
+        let entries = create_test_entries();
+        let stats = LeaderboardStats::from_entries(&entries).expect("operation failed in test");
+        assert!((stats.best_metrics.lowest_latency.value - 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_stats_best_highest_throughput() {
+        let entries = create_test_entries();
+        let stats = LeaderboardStats::from_entries(&entries).expect("operation failed in test");
+        assert!(stats.best_metrics.highest_throughput.is_some());
+        let best = stats.best_metrics.highest_throughput.as_ref().expect("should exist");
+        assert!((best.value - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_stats_best_highest_accuracy() {
+        let entries = create_test_entries();
+        let stats = LeaderboardStats::from_entries(&entries).expect("operation failed in test");
+        assert!(stats.best_metrics.highest_accuracy.is_some());
+        let best = stats.best_metrics.highest_accuracy.as_ref().expect("should exist");
+        assert!((best.value - 0.95).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_stats_best_lowest_memory() {
+        let entries = create_test_entries();
+        let stats = LeaderboardStats::from_entries(&entries).expect("operation failed in test");
+        assert!(stats.best_metrics.lowest_memory.is_some());
+        let best = stats.best_metrics.lowest_memory.as_ref().expect("should exist");
+        assert!((best.value - 1024.0).abs() < 1e-6);
+    }
+
+    // ── TrendAnalysis additional tests ──
+
+    #[test]
+    fn test_trend_analysis_empty_entries() {
+        let entries: Vec<LeaderboardEntry> = Vec::new();
+        let result = TrendAnalysis::analyze(&entries, "latency");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_trend_analysis_throughput() {
+        let entries = create_test_entries();
+        let trend =
+            TrendAnalysis::analyze(&entries, "throughput").expect("operation failed in test");
+        assert_eq!(trend.data_points.len(), 2);
+    }
+
+    #[test]
+    fn test_trend_analysis_accuracy() {
+        let entries = create_test_entries();
+        let trend = TrendAnalysis::analyze(&entries, "accuracy").expect("operation failed in test");
+        assert_eq!(trend.data_points.len(), 2);
+    }
+
+    #[test]
+    fn test_trend_analysis_unknown_metric() {
+        let entries = create_test_entries();
+        let trend = TrendAnalysis::analyze(&entries, "nonexistent_metric")
+            .expect("operation failed in test");
+        // No data points for unknown metric
+        assert!(
+            trend.data_points.is_empty() || matches!(trend.trend, PerformanceTrend::Insufficient)
+        );
+    }
+
+    #[test]
+    fn test_trend_analysis_period_days() {
+        let entries = create_test_entries();
+        let trend = TrendAnalysis::analyze(&entries, "latency").expect("operation failed in test");
+        assert!(trend.period_days >= 6); // entries are 7 days apart
+    }
+
+    #[test]
+    fn test_trend_analysis_daily_change() {
+        let entries = create_test_entries();
+        let trend = TrendAnalysis::analyze(&entries, "latency").expect("operation failed in test");
+        // Latency went from 15 -> 10 (improvement), daily change should be negative
+        assert!(trend.daily_change_percent < 0.0);
+    }
+
+    // ── AverageMetrics tests ──
+
+    #[test]
+    fn test_average_metrics_clone() {
+        let avg = AverageMetrics {
+            latency_ms: 10.0,
+            throughput: Some(100.0),
+            tokens_per_second: None,
+            memory_mb: Some(512.0),
+            gpu_utilization: None,
+            accuracy: Some(0.95),
+        };
+        let cloned = avg.clone();
+        assert!((cloned.latency_ms - 10.0).abs() < 1e-6);
+        assert_eq!(cloned.throughput, Some(100.0));
+    }
+
+    // ── MetricRecord tests ──
+
+    #[test]
+    fn test_metric_record_clone() {
+        let record = MetricRecord {
+            value: 42.0,
+            model_name: "test_model".to_string(),
+            model_version: "1.0".to_string(),
+            entry_id: uuid::Uuid::nil(),
+            timestamp: Utc::now(),
+        };
+        let cloned = record.clone();
+        assert!((cloned.value - 42.0).abs() < 1e-6);
+        assert_eq!(cloned.model_name, "test_model");
+    }
+
+    // ── PerformanceTrend tests ──
+
+    #[test]
+    fn test_performance_trend_variants() {
+        let _improving = PerformanceTrend::Improving;
+        let _degrading = PerformanceTrend::Degrading;
+        let _stable = PerformanceTrend::Stable;
+        let _insufficient = PerformanceTrend::Insufficient;
+    }
+
+    #[test]
+    fn test_performance_trend_clone() {
+        let trend = PerformanceTrend::Improving;
+        let cloned = trend;
+        assert!(matches!(cloned, PerformanceTrend::Improving));
+    }
+
+    // ── DateRange tests ──
+
+    #[test]
+    fn test_date_range_clone() {
+        let now = Utc::now();
+        let range = DateRange {
+            start: now - Duration::days(7),
+            end: now,
+        };
+        let cloned = range.clone();
+        assert_eq!(cloned.start, range.start);
+        assert_eq!(cloned.end, range.end);
+    }
+
+    // ── TrendDataPoint tests ──
+
+    #[test]
+    fn test_trend_data_point_clone() {
+        let point = TrendDataPoint {
+            timestamp: Utc::now(),
+            value: 42.0,
+            entry_id: uuid::Uuid::nil(),
+        };
+        let cloned = point.clone();
+        assert!((cloned.value - 42.0).abs() < 1e-6);
+    }
+
+    // ── Linear regression tests ──
+
+    #[test]
+    fn test_linear_regression_single_point() {
+        let points = vec![TrendDataPoint {
+            timestamp: Utc::now(),
+            value: 10.0,
+            entry_id: uuid::Uuid::nil(),
+        }];
+        let (slope, r_squared) = TrendAnalysis::linear_regression(&points);
+        assert!((slope).abs() < 1e-6);
+        assert!((r_squared).abs() < 1e-6);
+    }
 }

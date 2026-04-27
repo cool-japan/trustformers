@@ -501,3 +501,232 @@ impl Tensor {
         self.add(&scaled)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::errors::Result;
+    use crate::tensor::Tensor;
+
+    #[test]
+    fn test_add_f32() -> Result<()> {
+        let a = Tensor::from_data(vec![1.0, 2.0, 3.0], &[3])?;
+        let b = Tensor::from_data(vec![4.0, 5.0, 6.0], &[3])?;
+        let c = a.add(&b)?;
+        let data = c.data()?;
+        assert!((data[0] - 5.0).abs() < 1e-6);
+        assert!((data[1] - 7.0).abs() < 1e-6);
+        assert!((data[2] - 9.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_sub_f32() -> Result<()> {
+        let a = Tensor::from_data(vec![5.0, 10.0], &[2])?;
+        let b = Tensor::from_data(vec![3.0, 4.0], &[2])?;
+        let c = a.sub(&b)?;
+        let data = c.data()?;
+        assert!((data[0] - 2.0).abs() < 1e-6);
+        assert!((data[1] - 6.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_mul_f32() -> Result<()> {
+        let a = Tensor::from_data(vec![2.0, 3.0, 4.0], &[3])?;
+        let b = Tensor::from_data(vec![5.0, 6.0, 7.0], &[3])?;
+        let c = a.mul(&b)?;
+        let data = c.data()?;
+        assert!((data[0] - 10.0).abs() < 1e-5);
+        assert!((data[1] - 18.0).abs() < 1e-5);
+        assert!((data[2] - 28.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_div_f32() -> Result<()> {
+        let a = Tensor::from_data(vec![10.0, 20.0], &[2])?;
+        let b = Tensor::from_data(vec![2.0, 5.0], &[2])?;
+        let c = a.div(&b)?;
+        let data = c.data()?;
+        assert!((data[0] - 5.0).abs() < 1e-5);
+        assert!((data[1] - 4.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_add_shape_mismatch() {
+        let a = Tensor::from_data(vec![1.0, 2.0, 3.0], &[3]).expect("create failed");
+        let b = Tensor::from_data(vec![1.0, 2.0], &[2]).expect("create failed");
+        let result = a.add(&b);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_scalar_mul() -> Result<()> {
+        let a = Tensor::from_data(vec![1.0, 2.0, 3.0], &[3])?;
+        let c = a.scalar_mul(3.0)?;
+        let data = c.data()?;
+        assert!((data[0] - 3.0).abs() < 1e-6);
+        assert!((data[1] - 6.0).abs() < 1e-6);
+        assert!((data[2] - 9.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_scalar_div() -> Result<()> {
+        let a = Tensor::from_data(vec![6.0, 9.0], &[2])?;
+        let c = a.scalar_div(3.0)?;
+        let data = c.data()?;
+        assert!((data[0] - 2.0).abs() < 1e-5);
+        assert!((data[1] - 3.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_add_scalar() -> Result<()> {
+        let a = Tensor::from_data(vec![1.0, 2.0], &[2])?;
+        let c = a.add_scalar(10.0)?;
+        let data = c.data()?;
+        assert!((data[0] - 11.0).abs() < 1e-6);
+        assert!((data[1] - 12.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_sub_scalar() -> Result<()> {
+        let a = Tensor::from_data(vec![10.0, 20.0], &[2])?;
+        let c = a.sub_scalar(5.0)?;
+        let data = c.data()?;
+        assert!((data[0] - 5.0).abs() < 1e-6);
+        assert!((data[1] - 15.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_mul_scalar() -> Result<()> {
+        let a = Tensor::from_data(vec![2.0, 3.0], &[2])?;
+        let c = a.mul_scalar(4.0)?;
+        let data = c.data()?;
+        assert!((data[0] - 8.0).abs() < 1e-6);
+        assert!((data[1] - 12.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_div_scalar() -> Result<()> {
+        let a = Tensor::from_data(vec![8.0, 12.0], &[2])?;
+        let c = a.div_scalar(4.0)?;
+        let data = c.data()?;
+        assert!((data[0] - 2.0).abs() < 1e-5);
+        assert!((data[1] - 3.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_add_2d() -> Result<()> {
+        let a = Tensor::from_data(vec![1.0, 2.0, 3.0, 4.0], &[2, 2])?;
+        let b = Tensor::from_data(vec![10.0, 20.0, 30.0, 40.0], &[2, 2])?;
+        let c = a.add(&b)?;
+        assert_eq!(c.shape(), vec![2, 2]);
+        let data = c.data()?;
+        assert!((data[0] - 11.0).abs() < 1e-5);
+        assert!((data[3] - 44.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_sub_scaled() -> Result<()> {
+        let a = Tensor::from_data(vec![10.0, 20.0], &[2])?;
+        let b = Tensor::from_data(vec![1.0, 2.0], &[2])?;
+        let c = a.sub_scaled(&b, 3.0)?;
+        let data = c.data()?;
+        assert!((data[0] - 7.0).abs() < 1e-5);
+        assert!((data[1] - 14.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_add_scaled() -> Result<()> {
+        let a = Tensor::from_data(vec![10.0, 20.0], &[2])?;
+        let b = Tensor::from_data(vec![1.0, 2.0], &[2])?;
+        let c = a.add_scaled(&b, 5.0)?;
+        let data = c.data()?;
+        assert!((data[0] - 15.0).abs() < 1e-5);
+        assert!((data[1] - 30.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_add_i64() -> Result<()> {
+        let a = Tensor::from_vec_i64(vec![1, 2, 3], &[3])?;
+        let b = Tensor::from_vec_i64(vec![4, 5, 6], &[3])?;
+        let c = a.add(&b)?;
+        assert_eq!(c.shape(), vec![3]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_broadcast_add() -> Result<()> {
+        let a = Tensor::from_data(vec![1.0, 2.0, 3.0, 4.0], &[2, 2])?;
+        let b = Tensor::from_data(vec![10.0, 20.0], &[1, 2])?;
+        let c = a.broadcast_add(&b)?;
+        assert_eq!(c.shape(), vec![2, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_add_zeros_identity() -> Result<()> {
+        let a = Tensor::from_data(vec![1.0, 2.0, 3.0], &[3])?;
+        let z = Tensor::zeros(&[3])?;
+        let c = a.add(&z)?;
+        let data = c.data()?;
+        assert!((data[0] - 1.0).abs() < 1e-6);
+        assert!((data[1] - 2.0).abs() < 1e-6);
+        assert!((data[2] - 3.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_mul_ones_identity() -> Result<()> {
+        let a = Tensor::from_data(vec![5.0, 10.0], &[2])?;
+        let o = Tensor::ones(&[2])?;
+        let c = a.mul(&o)?;
+        let data = c.data()?;
+        assert!((data[0] - 5.0).abs() < 1e-6);
+        assert!((data[1] - 10.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_scalar_mul_zero() -> Result<()> {
+        let a = Tensor::from_data(vec![1.0, 2.0, 3.0], &[3])?;
+        let c = a.scalar_mul(0.0)?;
+        let data = c.data()?;
+        for val in &data {
+            assert!(val.abs() < 1e-6);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_sub_self_is_zero() -> Result<()> {
+        let a = Tensor::from_data(vec![5.0, 10.0, 15.0], &[3])?;
+        let c = a.sub(&a)?;
+        let data = c.data()?;
+        for val in &data {
+            assert!(val.abs() < 1e-5);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_add_negative() -> Result<()> {
+        let a = Tensor::from_data(vec![-1.0, -2.0], &[2])?;
+        let b = Tensor::from_data(vec![-3.0, -4.0], &[2])?;
+        let c = a.add(&b)?;
+        let data = c.data()?;
+        assert!((data[0] - (-4.0)).abs() < 1e-6);
+        assert!((data[1] - (-6.0)).abs() < 1e-6);
+        Ok(())
+    }
+}

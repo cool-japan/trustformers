@@ -322,3 +322,220 @@ impl MemoryUtils {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn make_turn(content: &str) -> ConversationTurn {
+        ConversationTurn {
+            role: ConversationRole::User,
+            content: content.to_string(),
+            timestamp: Utc::now(),
+            metadata: None,
+            token_count: content.len() / 4 + 1,
+        }
+    }
+
+    fn make_memory(content: &str, importance: f32) -> ConversationMemory {
+        ConversationMemory {
+            id: uuid::Uuid::new_v4().to_string(),
+            content: content.to_string(),
+            importance,
+            last_accessed: Utc::now(),
+            access_count: 1,
+            memory_type: MemoryType::Fact,
+            tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_calculate_importance_base() {
+        let turn = make_turn("hello world");
+        let importance = MemoryUtils::calculate_importance(&turn);
+        // base 0.5, no modifiers for this short but not too short content
+        assert!(importance >= 0.0);
+        assert!(importance <= 1.0);
+    }
+
+    #[test]
+    fn test_calculate_importance_with_question() {
+        let turn = make_turn("What is your name?");
+        let importance = MemoryUtils::calculate_importance(&turn);
+        // base 0.5 + question 0.2
+        assert!(importance >= 0.6);
+    }
+
+    #[test]
+    fn test_calculate_importance_personal_info() {
+        let turn = make_turn("My name is Alice and I like programming");
+        let importance = MemoryUtils::calculate_importance(&turn);
+        // personal info and preference keywords boost importance
+        assert!(importance >= 0.8);
+    }
+
+    #[test]
+    fn test_calculate_importance_clamped_to_one() {
+        let turn = make_turn("I am Alice. I like hiking. I want to be a programmer. I feel happy! What do you think?");
+        let importance = MemoryUtils::calculate_importance(&turn);
+        assert!(importance <= 1.0);
+        assert!(importance >= 0.0);
+    }
+
+    #[test]
+    fn test_calculate_importance_very_short_content() {
+        let turn = make_turn("Hi");
+        let importance = MemoryUtils::calculate_importance(&turn);
+        // short content gets penalty
+        assert!(importance <= 0.5);
+    }
+
+    #[test]
+    fn test_classify_memory_type_preference() {
+        let turn = make_turn("I prefer coffee over tea");
+        let mem_type = MemoryUtils::classify_memory_type(&turn);
+        assert_eq!(mem_type, MemoryType::Preference);
+    }
+
+    #[test]
+    fn test_classify_memory_type_goal() {
+        let turn = make_turn("I want to learn Rust programming");
+        let mem_type = MemoryUtils::classify_memory_type(&turn);
+        assert_eq!(mem_type, MemoryType::Goal);
+    }
+
+    #[test]
+    fn test_classify_memory_type_relationship() {
+        let turn = make_turn("My friend Alice is a doctor");
+        let mem_type = MemoryUtils::classify_memory_type(&turn);
+        assert_eq!(mem_type, MemoryType::Relationship);
+    }
+
+    #[test]
+    fn test_classify_memory_type_experience() {
+        let turn = make_turn("I remember when I went to Tokyo last year");
+        let mem_type = MemoryUtils::classify_memory_type(&turn);
+        assert_eq!(mem_type, MemoryType::Experience);
+    }
+
+    #[test]
+    fn test_classify_memory_type_fact() {
+        let turn = make_turn("The capital of France is Paris");
+        let mem_type = MemoryUtils::classify_memory_type(&turn);
+        assert_eq!(mem_type, MemoryType::Fact);
+    }
+
+    #[test]
+    fn test_extract_tags_keyword() {
+        let turn = make_turn("I work in technology and love music");
+        let tags = MemoryUtils::extract_tags(&turn);
+        assert!(tags.contains(&"work".to_string()));
+        assert!(tags.contains(&"technology".to_string()));
+        assert!(tags.contains(&"music".to_string()));
+    }
+
+    #[test]
+    fn test_extract_tags_role() {
+        let turn = make_turn("hello");
+        let tags = MemoryUtils::extract_tags(&turn);
+        let has_role_tag = tags.iter().any(|t| t.starts_with("role:"));
+        assert!(has_role_tag);
+    }
+
+    #[test]
+    fn test_calculate_memory_relevance_exact_match() {
+        let mut memory = make_memory("I like programming in Rust", 0.8);
+        memory.tags = vec!["technology".to_string()];
+        let relevance = MemoryUtils::calculate_memory_relevance(&memory, "programming in Rust");
+        assert!(relevance > 0.0);
+    }
+
+    #[test]
+    fn test_calculate_memory_relevance_no_match() {
+        let memory = make_memory("I enjoy hiking in the mountains", 0.5);
+        let relevance = MemoryUtils::calculate_memory_relevance(&memory, "quantum physics");
+        // Very low overlap
+        assert!(relevance < 0.5);
+    }
+
+    #[test]
+    fn test_prune_memories() {
+        let mut memories = vec![
+            make_memory("important", 0.9),
+            make_memory("medium", 0.5),
+            make_memory("low importance", 0.1),
+        ];
+        MemoryUtils::prune_memories(&mut memories, 0.4);
+        assert_eq!(memories.len(), 2);
+        assert!(memories.iter().all(|m| m.importance >= 0.4));
+    }
+
+    #[test]
+    fn test_sort_memories_by_priority() {
+        let mut memories = vec![
+            make_memory("low", 0.2),
+            make_memory("high", 0.9),
+            make_memory("medium", 0.5),
+        ];
+        MemoryUtils::sort_memories_by_priority(&mut memories);
+        assert!(memories[0].importance >= memories[1].importance);
+        assert!(memories[1].importance >= memories[2].importance);
+    }
+
+    #[test]
+    fn test_batch_decay_memories() {
+        let mut memories = vec![make_memory("test memory", 1.0)];
+        MemoryUtils::batch_decay_memories(&mut memories, 0.9);
+        // Decay should keep importance non-negative
+        assert!(memories[0].importance >= 0.0);
+        assert!(memories[0].importance <= 1.0);
+    }
+
+    #[test]
+    fn test_get_relevant_memories_for_context_empty() {
+        let state = ConversationState::new("test".to_string());
+        let memories = MemoryUtils::get_relevant_memories_for_context(&state, "some query", 5);
+        assert!(memories.is_empty());
+    }
+
+    #[test]
+    fn test_calculate_memory_relevance_enhanced_matching() {
+        let mut memory = make_memory("Rust programming language is fast", 0.8);
+        memory.tags = vec!["technology".to_string()];
+        let relevance =
+            MemoryUtils::calculate_memory_relevance_enhanced(&memory, "Rust programming");
+        assert!(relevance > 0.0);
+        assert!(relevance <= 1.0);
+    }
+
+    #[test]
+    fn test_calculate_memory_relevance_enhanced_goal_type() {
+        let mut memory = make_memory("Learn machine learning", 0.7);
+        memory.memory_type = MemoryType::Goal;
+        let relevance =
+            MemoryUtils::calculate_memory_relevance_enhanced(&memory, "machine learning");
+        assert!(relevance > 0.0);
+    }
+
+    #[test]
+    fn test_prune_memories_keeps_all_above_threshold() {
+        let mut memories = vec![
+            make_memory("a", 0.8),
+            make_memory("b", 0.7),
+            make_memory("c", 0.6),
+        ];
+        MemoryUtils::prune_memories(&mut memories, 0.5);
+        assert_eq!(memories.len(), 3);
+    }
+
+    #[test]
+    fn test_prune_memories_removes_all_below_threshold() {
+        let mut memories = vec![make_memory("a", 0.1), make_memory("b", 0.2)];
+        MemoryUtils::prune_memories(&mut memories, 0.5);
+        assert!(memories.is_empty());
+    }
+
+    use super::super::super::types::ConversationRole;
+    use super::super::super::types::ConversationState;
+}

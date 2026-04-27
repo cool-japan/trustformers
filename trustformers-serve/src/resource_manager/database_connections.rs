@@ -318,3 +318,217 @@ impl DatabaseConnectionManager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_parallelization::DatabasePoolConfig;
+
+    #[tokio::test]
+    async fn test_database_connection_manager_new() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config).await;
+        assert!(mgr.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_allocate_connections_returns_ids() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("failed"));
+        let conns = mgr.allocate_connections(2, "test-db-001").await.unwrap_or_default();
+        assert_eq!(conns.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_allocate_updates_stats() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("failed"));
+        mgr.allocate_connections(3, "test-db-002").await.unwrap_or_default();
+        let stats = mgr.get_statistics().await.unwrap_or_default();
+        assert_eq!(stats.total_allocated, 3);
+        assert_eq!(stats.currently_active, 3);
+    }
+
+    #[tokio::test]
+    async fn test_deallocate_connection() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("failed"));
+        let conns = mgr.allocate_connections(1, "test-dealloc").await.unwrap_or_default();
+        if let Some(conn_id) = conns.first() {
+            let r = mgr.deallocate_connection(conn_id).await;
+            assert!(r.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_deallocate_nonexistent_connection() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("failed"));
+        let r = mgr.deallocate_connection("nonexistent-conn").await;
+        assert!(r.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_deallocate_connections_for_test() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("failed"));
+        mgr.allocate_connections(2, "test-batch-dealloc").await.unwrap_or_default();
+        let r = mgr.deallocate_connections_for_test("test-batch-dealloc").await;
+        assert!(r.is_ok());
+        let stats = mgr.get_statistics().await.unwrap_or_default();
+        assert_eq!(stats.currently_active, 0);
+    }
+
+    #[tokio::test]
+    async fn test_check_availability_empty() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("failed"));
+        let avail = mgr.check_availability(5).await.unwrap_or(false);
+        assert!(avail);
+    }
+
+    #[tokio::test]
+    async fn test_check_availability_over_limit() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("failed"));
+        let avail = mgr.check_availability(1000).await.unwrap_or(true);
+        assert!(!avail);
+    }
+
+    #[tokio::test]
+    async fn test_get_active_connections_empty() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("failed"));
+        let conns = mgr.get_active_connections().await.unwrap_or_default();
+        assert!(conns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_active_connections_after_alloc() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("failed"));
+        mgr.allocate_connections(2, "t-active").await.unwrap_or_default();
+        let conns = mgr.get_active_connections().await.unwrap_or_default();
+        assert_eq!(conns.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_connections_for_test() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("failed"));
+        mgr.allocate_connections(2, "t-get-by-id").await.unwrap_or_default();
+        let conns = mgr.get_connections_for_test("t-get-by-id").await.unwrap_or_default();
+        assert_eq!(conns.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_test_connection_health_true() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("failed"));
+        let ids = mgr.allocate_connections(1, "t-health").await.unwrap_or_default();
+        if let Some(id) = ids.first() {
+            let healthy = mgr.test_connection_health(id).await.unwrap_or(false);
+            assert!(healthy);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_test_connection_health_nonexistent() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("failed"));
+        let healthy = mgr.test_connection_health("no-such-conn").await.unwrap_or(true);
+        assert!(!healthy);
+    }
+
+    #[tokio::test]
+    async fn test_force_close_all() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("failed"));
+        mgr.allocate_connections(3, "t-force-close").await.unwrap_or_default();
+        let count = mgr.force_close_all().await.unwrap_or(0);
+        assert!(count >= 3);
+        let stats = mgr.get_statistics().await.unwrap_or_default();
+        assert_eq!(stats.currently_active, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_idle_connections_none() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("failed"));
+        let count = mgr
+            .cleanup_idle_connections(std::time::Duration::from_secs(0))
+            .await
+            .unwrap_or(99);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_database_type_variants() {
+        let types = [
+            format!("{:?}", DatabaseType::PostgreSQL),
+            format!("{:?}", DatabaseType::MySQL),
+            format!("{:?}", DatabaseType::SQLite),
+            format!("{:?}", DatabaseType::MongoDB),
+            format!("{:?}", DatabaseType::Redis),
+            format!("{:?}", DatabaseType::Custom("custom-db".to_string())),
+        ];
+        assert_eq!(types[0], "PostgreSQL");
+        assert_eq!(types[4], "Redis");
+    }
+
+    #[test]
+    fn test_connection_status_variants() {
+        let s1 = format!("{:?}", ConnectionStatus::Active);
+        let s2 = format!("{:?}", ConnectionStatus::InUse);
+        let s3 = format!("{:?}", ConnectionStatus::Closed);
+        let s4 = format!("{:?}", ConnectionStatus::Maintenance);
+        assert_eq!(s1, "Active");
+        assert_eq!(s2, "InUse");
+        assert_eq!(s3, "Closed");
+        assert_eq!(s4, "Maintenance");
+    }
+
+    #[test]
+    fn test_database_connection_creation() {
+        let conn = DatabaseConnection {
+            connection_id: "c-1".to_string(),
+            database_type: DatabaseType::PostgreSQL,
+            connection_string: "postgres://localhost:5432/test".to_string(),
+            test_id: Some("t-1".to_string()),
+            connected_at: chrono::Utc::now(),
+            last_used: chrono::Utc::now(),
+            status: ConnectionStatus::Active,
+            metadata: HashMap::new(),
+        };
+        assert_eq!(conn.connection_id, "c-1");
+        assert!(conn.test_id.is_some());
+    }
+}

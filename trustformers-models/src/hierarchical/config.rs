@@ -350,7 +350,7 @@ impl HierarchicalConfig {
             return Err("num_heads must be greater than 0".to_string());
         }
 
-        if self.hidden_size % self.num_heads != 0 {
+        if !self.hidden_size.is_multiple_of(self.num_heads) {
             return Err("hidden_size must be divisible by num_heads".to_string());
         }
 
@@ -437,5 +437,230 @@ impl Config for HierarchicalConfig {
 
     fn architecture(&self) -> &'static str {
         "hierarchical"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trustformers_core::traits::Config;
+
+    struct Lcg {
+        state: u64,
+    }
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Lcg { state: seed }
+        }
+        fn next(&mut self) -> u64 {
+            self.state = self
+                .state
+                .wrapping_mul(6364136223846793005u64)
+                .wrapping_add(1442695040888963407u64);
+            self.state
+        }
+        fn next_f32(&mut self) -> f32 {
+            (self.next() >> 11) as f32 / (1u64 << 53) as f32
+        }
+    }
+
+    #[test]
+    fn test_default_config_fields() {
+        let cfg = HierarchicalConfig::default();
+        assert_eq!(cfg.hidden_size, 768);
+        assert_eq!(cfg.num_levels, 4);
+        assert_eq!(cfg.num_heads, 12);
+        assert_eq!(cfg.reduction_factor, 2);
+        assert!(cfg.cross_level_residual);
+        assert!(cfg.use_position_embeddings);
+    }
+
+    #[test]
+    fn test_default_validate_passes() {
+        let cfg = HierarchicalConfig::default();
+        let result = Config::validate(&cfg);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_architecture_name() {
+        let cfg = HierarchicalConfig::default();
+        assert_eq!(cfg.architecture(), "hierarchical");
+    }
+
+    #[test]
+    fn test_zero_num_levels_fails_trait_validate() {
+        let cfg = HierarchicalConfig {
+            num_levels: 0,
+            max_seq_lengths: vec![],
+            ..HierarchicalConfig::default()
+        };
+        assert!(Config::validate(&cfg).is_err());
+    }
+
+    #[test]
+    fn test_validate_method_zero_levels_fails() {
+        let cfg = HierarchicalConfig {
+            num_levels: 0,
+            max_seq_lengths: vec![],
+            ..HierarchicalConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_zero_reduction_factor_fails() {
+        let cfg = HierarchicalConfig {
+            reduction_factor: 0,
+            ..HierarchicalConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_hidden_not_divisible_fails() {
+        let cfg = HierarchicalConfig {
+            hidden_size: 100,
+            num_heads: 12,
+            ..HierarchicalConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_dropout_out_of_range_fails() {
+        let cfg = HierarchicalConfig {
+            dropout: 1.5,
+            ..HierarchicalConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_seq_lengths_mismatch_fails() {
+        let cfg = HierarchicalConfig {
+            num_levels: 4,
+            max_seq_lengths: vec![512, 256], // only 2, not 4
+            ..HierarchicalConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_get_hidden_size_non_pyramid() {
+        let cfg = HierarchicalConfig::default();
+        assert_eq!(cfg.get_hidden_size(0), cfg.hidden_size);
+        assert_eq!(cfg.get_hidden_size(2), cfg.hidden_size);
+    }
+
+    #[test]
+    fn test_get_hidden_size_pyramid() {
+        let cfg = HierarchicalConfig::pyramid(768, 4);
+        // level 0: 768 * 1.0 = 768
+        assert_eq!(cfg.get_hidden_size(0), 768);
+        // level 1: 768 * 0.5 = 384
+        assert_eq!(cfg.get_hidden_size(1), 384);
+    }
+
+    #[test]
+    fn test_get_seq_length_within_bounds() {
+        let cfg = HierarchicalConfig::default();
+        assert_eq!(cfg.get_seq_length(0), cfg.max_seq_lengths[0]);
+        assert_eq!(cfg.get_seq_length(1), cfg.max_seq_lengths[1]);
+    }
+
+    #[test]
+    fn test_get_seq_length_out_of_bounds_uses_formula() {
+        let cfg = HierarchicalConfig::default();
+        // beyond max_seq_lengths range
+        let lvl = cfg.max_seq_lengths.len() + 2;
+        let expected = 512 / (2_usize.pow(lvl as u32));
+        assert_eq!(cfg.get_seq_length(lvl), expected);
+    }
+
+    #[test]
+    fn test_get_reduction_factor_level_zero() {
+        let cfg = HierarchicalConfig::default();
+        assert_eq!(cfg.get_reduction_factor(0), 1); // reduction_factor^0 = 1
+    }
+
+    #[test]
+    fn test_get_reduction_factor_level_two() {
+        let cfg = HierarchicalConfig::default();
+        assert_eq!(cfg.get_reduction_factor(2), 4); // 2^2 = 4
+    }
+
+    #[test]
+    fn test_hierarchical_factory() {
+        let cfg = HierarchicalConfig::hierarchical(512, 3);
+        assert_eq!(cfg.hidden_size, 512);
+        assert_eq!(cfg.num_levels, 3);
+        assert_eq!(cfg.max_seq_lengths.len(), 3);
+    }
+
+    #[test]
+    fn test_pyramid_factory_sets_pyramid_config() {
+        let cfg = HierarchicalConfig::pyramid(768, 4);
+        assert!(cfg.pyramid_config.is_some());
+        assert_eq!(cfg.num_levels, 4);
+    }
+
+    #[test]
+    fn test_tree_factory_sets_tree_config() {
+        let cfg = HierarchicalConfig::tree(512, 2, 5);
+        assert!(cfg.tree_config.is_some());
+        if let Some(tc) = &cfg.tree_config {
+            assert_eq!(tc.branching_factor, 2);
+            assert_eq!(tc.max_depth, 5);
+        }
+    }
+
+    #[test]
+    fn test_nested_factory_sets_nested_config() {
+        let cfg = HierarchicalConfig::nested(768, 3);
+        assert!(cfg.nested_config.is_some());
+        if let Some(nc) = &cfg.nested_config {
+            assert_eq!(nc.num_nested_levels, 3);
+        }
+    }
+
+    #[test]
+    fn test_estimate_parameters_nonzero() {
+        let cfg = HierarchicalConfig::default();
+        let params = cfg.estimate_parameters();
+        assert!(params > 0);
+    }
+
+    #[test]
+    fn test_tree_config_default() {
+        let tc = TreeConfig::default();
+        assert_eq!(tc.branching_factor, 2);
+        assert_eq!(tc.max_depth, 8);
+        assert!(!tc.learnable_structure);
+    }
+
+    #[test]
+    fn test_pyramid_config_default() {
+        let pc = PyramidConfig::default();
+        assert!(!pc.scaling_factors.is_empty());
+        assert!(pc.skip_connections);
+        assert!(!pc.use_fpn);
+    }
+
+    #[test]
+    fn test_nested_config_default() {
+        let nc = NestedConfig::default();
+        assert_eq!(nc.num_nested_levels, 3);
+        assert!(!nc.share_parameters);
+        assert!(!nc.progressive_training);
+    }
+
+    #[test]
+    fn test_lcg_values_in_range() {
+        let mut rng = Lcg::new(314159);
+        for _ in 0..100 {
+            let v = rng.next_f32();
+            assert!((0.0..1.0).contains(&v));
+        }
     }
 }

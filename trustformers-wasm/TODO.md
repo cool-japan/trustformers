@@ -535,16 +535,20 @@ const optimized = await autoQuantize(model, {
 ## Future Enhancements
 
 ### High Priority
-- Enhanced WebGPU kernel optimizations as browser APIs stabilize
-- Additional model formats (TensorRT, ONNX export)
-- More advanced quantization methods (AutoGPTQ, BitsAndBytes)
-- WebNN maturity tracking (currently experimental)
+- [ ] Enhanced WebGPU kernel optimizations as browser APIs stabilize
+  - **Refinement needed:** which ops? target speedup % vs baseline? Specific WebGPU compute shader patterns.
+- [ ] TensorRT/ONNX export for edge optimization
+  - **Note:** ONNX export must use oxionnx per COOLJAPAN policy; TensorRT is NVIDIA-only.
+- [ ] AutoGPTQ/BitsAndBytes quantization
+  - **Note:** BitsAndBytes is Python-only. Consider: Pure Rust quantization equivalents already in trustformers-core.
+- [ ] WebNN maturity tracking (currently experimental)
+  - **Refinement needed:** this is a browser-spec tracking task, not implementation. Define: which WebNN API level (currently at CR status)? Target browsers?
 
 ### Performance
-- Multi-query attention (MQA) optimization
+- [ ] Multi-Query Attention optimization (MQA reduces KV memory in WASM context)
 - Memory compression techniques
 - Better network transfer strategies
-- Speculative decoding support
+- [ ] Speculative decoding in WASM (draft model + target model speculative decoding for faster WASM inference)
 
 ### Features
 - More framework integrations

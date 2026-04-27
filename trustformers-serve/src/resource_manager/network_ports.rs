@@ -316,3 +316,187 @@ impl NetworkPortManager {
         Ok(count)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_parallelization::PortPoolConfig;
+
+    #[tokio::test]
+    async fn test_network_port_manager_new() {
+        let config = PortPoolConfig::default();
+        let mgr = NetworkPortManager::new(config).await;
+        assert!(mgr.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_allocate_ports_returns_ports() {
+        let config = PortPoolConfig::default();
+        let mgr = NetworkPortManager::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        let ports = mgr.allocate_ports(1, "test-001").await.unwrap_or_default();
+        assert!(!ports.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_allocate_ports_updates_stats() {
+        let config = PortPoolConfig::default();
+        let mgr = NetworkPortManager::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        mgr.allocate_ports(1, "test-002").await.unwrap_or_default();
+        let stats = mgr.get_statistics().await.unwrap_or_default();
+        assert!(stats.total_allocated >= 1);
+        assert!(stats.currently_allocated >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_deallocate_port() {
+        let config = PortPoolConfig::default();
+        let mgr = NetworkPortManager::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        let ports = mgr.allocate_ports(1, "test-003").await.unwrap_or_default();
+        if let Some(&port) = ports.first() {
+            let r = mgr.deallocate_port(port).await;
+            assert!(r.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_deallocate_port_nonexistent() {
+        let config = PortPoolConfig::default();
+        let mgr = NetworkPortManager::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        let r = mgr.deallocate_port(9999).await;
+        assert!(r.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_deallocate_ports_for_test() {
+        let config = PortPoolConfig::default();
+        let mgr = NetworkPortManager::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        mgr.allocate_ports(1, "test-dealloc").await.unwrap_or_default();
+        let r = mgr.deallocate_ports_for_test("test-dealloc").await;
+        assert!(r.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_check_availability_empty() {
+        let config = PortPoolConfig::default();
+        let mgr = NetworkPortManager::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        let avail = mgr.check_availability(10).await.unwrap_or(false);
+        assert!(avail);
+    }
+
+    #[tokio::test]
+    async fn test_check_availability_over_limit() {
+        let config = PortPoolConfig::default();
+        let mgr = NetworkPortManager::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        let avail = mgr.check_availability(2000).await.unwrap_or(true);
+        assert!(!avail);
+    }
+
+    #[tokio::test]
+    async fn test_get_statistics_initial_state() {
+        let config = PortPoolConfig::default();
+        let mgr = NetworkPortManager::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        let stats = mgr.get_statistics().await.unwrap_or_default();
+        assert_eq!(stats.total_allocated, 0);
+        assert_eq!(stats.currently_allocated, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_allocations_empty() {
+        let config = PortPoolConfig::default();
+        let mgr = NetworkPortManager::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        let allocs = mgr.get_allocations().await.unwrap_or_default();
+        assert!(allocs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_allocations_after_alloc() {
+        let config = PortPoolConfig::default();
+        let mgr = NetworkPortManager::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        mgr.allocate_ports(1, "test-alloc").await.unwrap_or_default();
+        let allocs = mgr.get_allocations().await.unwrap_or_default();
+        assert!(!allocs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_allocations_for_test() {
+        let config = PortPoolConfig::default();
+        let mgr = NetworkPortManager::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        mgr.allocate_ports(1, "t-42").await.unwrap_or_default();
+        let allocs = mgr.get_allocations_for_test("t-42").await.unwrap_or_default();
+        assert!(!allocs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_expired_allocations_none() {
+        let config = PortPoolConfig::default();
+        let mgr = NetworkPortManager::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        let count = mgr.cleanup_expired_allocations().await.unwrap_or(99);
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_force_release_all() {
+        let config = PortPoolConfig::default();
+        let mgr = NetworkPortManager::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        mgr.allocate_ports(1, "t-force").await.unwrap_or_default();
+        let released = mgr.force_release_all().await.unwrap_or(0);
+        assert!(released >= 1);
+        let stats = mgr.get_statistics().await.unwrap_or_default();
+        assert_eq!(stats.currently_allocated, 0);
+    }
+
+    #[tokio::test]
+    async fn test_reserve_ports() {
+        let config = PortPoolConfig::default();
+        let mgr = NetworkPortManager::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        let req = PortReservationRequest {
+            test_id: "t-res".to_string(),
+            port_count: 1,
+            preferred_range: None,
+            usage_type: PortUsageType::HttpServer,
+            requested_at: chrono::Utc::now(),
+            priority: 1.0,
+            timeout: std::time::Duration::from_secs(30),
+        };
+        let reserved = mgr.reserve_ports(req).await.unwrap_or_default();
+        assert!(!reserved.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_release_reservations() {
+        let config = PortPoolConfig::default();
+        let mgr = NetworkPortManager::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        let r = mgr.release_reservations("t-nonexist").await;
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn test_port_allocation_creation() {
+        let alloc = PortAllocation {
+            port: 8080,
+            test_id: "t-1".to_string(),
+            allocated_at: chrono::Utc::now(),
+            expected_release: None,
+            usage_type: PortUsageType::HttpServer,
+            metadata: HashMap::new(),
+        };
+        assert_eq!(alloc.port, 8080);
+        assert_eq!(alloc.test_id, "t-1");
+        assert!(alloc.expected_release.is_none());
+    }
+
+    #[test]
+    fn test_port_reservation_request_creation() {
+        let req = PortReservationRequest {
+            test_id: "t-xyz".to_string(),
+            port_count: 3,
+            preferred_range: Some((9000, 9100)),
+            usage_type: PortUsageType::HttpServer,
+            requested_at: chrono::Utc::now(),
+            priority: 0.8,
+            timeout: std::time::Duration::from_secs(60),
+        };
+        assert_eq!(req.port_count, 3);
+        assert!(req.preferred_range.is_some());
+    }
+}

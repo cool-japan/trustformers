@@ -845,11 +845,10 @@ impl SequenceParallelism {
                 self.hierarchical_attention_communication(chunk_id, chunk_output)
             },
         }
-        .map(|result| {
+        .inspect(|_result| {
             // Update attention communication statistics
             let mut stats = self.communication_stats.lock().expect("lock should not be poisoned");
             stats.attention_communication_time += start_time.elapsed();
-            result
         })
     }
 

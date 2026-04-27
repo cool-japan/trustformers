@@ -120,6 +120,7 @@
 
 pub mod config;
 pub mod model;
+pub mod tasks;
 
 pub use config::FalconConfig;
 pub use model::{FalconAttention, FalconDecoderLayer, FalconForCausalLM, FalconMLP, FalconModel};

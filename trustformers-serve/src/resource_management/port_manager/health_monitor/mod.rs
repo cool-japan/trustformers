@@ -18,3 +18,8 @@ pub use healthtrendanalysis_traits::*;
 pub use porthealthconfig_traits::*;
 pub use types::*;
 pub use functions::*;
+
+#[cfg(test)]
+mod types_tests;
+#[cfg(test)]
+mod health_analysis_tests;

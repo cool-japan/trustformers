@@ -238,7 +238,7 @@ impl HardwareFilter {
         }
 
         if let Some(gpu) = &self.gpu {
-            if hardware.gpu.as_ref().map_or(true, |g| !g.contains(gpu)) {
+            if hardware.gpu.as_ref().is_none_or(|g| !g.contains(gpu)) {
                 return false;
             }
         }

@@ -367,3 +367,188 @@ impl InferenceService for InferenceServiceImpl {
         Ok(Response::new(response))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_memory_usage_returns_valid_ratio() {
+        let usage = get_memory_usage();
+        assert!(usage >= 0.0, "memory usage should be non-negative, got {}", usage);
+        assert!(usage <= 1.0, "memory usage should be <= 1.0, got {}", usage);
+    }
+
+    #[test]
+    fn test_get_memory_usage_is_finite() {
+        let usage = get_memory_usage();
+        assert!(usage.is_finite(), "memory usage should be a finite number");
+    }
+
+    #[test]
+    fn test_get_memory_usage_not_nan() {
+        let usage = get_memory_usage();
+        assert!(!usage.is_nan(), "memory usage should not be NaN");
+    }
+
+    #[test]
+    fn test_get_memory_usage_not_negative() {
+        let usage = get_memory_usage();
+        assert!(usage >= 0.0);
+    }
+
+    #[test]
+    fn test_get_memory_usage_not_greater_than_one() {
+        let usage = get_memory_usage();
+        assert!(usage <= 1.0);
+    }
+
+    #[test]
+    fn test_get_memory_usage_called_twice_returns_valid() {
+        // Two calls should both return valid values
+        let u1 = get_memory_usage();
+        let u2 = get_memory_usage();
+        assert!(u1 >= 0.0 && u1 <= 1.0);
+        assert!(u2 >= 0.0 && u2 <= 1.0);
+    }
+
+    #[test]
+    fn test_health_issue_message_format() {
+        // Verify the health message format logic
+        let health_issues: Vec<String> = vec![];
+        let message = if health_issues.is_empty() {
+            "Service is healthy and operating normally".to_string()
+        } else {
+            format!("Health issues detected: {}", health_issues.join(", "))
+        };
+        assert_eq!(message, "Service is healthy and operating normally");
+    }
+
+    #[test]
+    fn test_health_issue_message_with_issues() {
+        let health_issues = vec![
+            "High pending request count".to_string(),
+            "High memory usage".to_string(),
+        ];
+        let message = if health_issues.is_empty() {
+            "Service is healthy and operating normally".to_string()
+        } else {
+            format!("Health issues detected: {}", health_issues.join(", "))
+        };
+        assert!(message.starts_with("Health issues detected:"));
+        assert!(message.contains("High pending request count"));
+        assert!(message.contains("High memory usage"));
+    }
+
+    #[test]
+    fn test_health_status_serving_is_zero() {
+        // HealthStatus::Serving should correspond to i32 value 0 based on protobuf convention
+        let status = HealthStatus::Serving;
+        assert_eq!(status as i32, 0);
+    }
+
+    #[test]
+    fn test_health_status_not_serving_is_nonzero() {
+        let status = HealthStatus::NotServing;
+        assert_ne!(status as i32, 0);
+    }
+
+    #[test]
+    fn test_health_status_unknown_distinct_from_serving() {
+        let serving = HealthStatus::Serving as i32;
+        let unknown = HealthStatus::Unknown as i32;
+        assert_ne!(serving, unknown);
+    }
+
+    #[test]
+    fn test_memory_threshold_check_low_usage() {
+        // Usage below 0.9 should not add health issue
+        let usage = 0.5_f64;
+        let mut issues: Vec<String> = Vec::new();
+        if usage > 0.9 {
+            issues.push("High memory usage".to_string());
+        }
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn test_memory_threshold_check_high_usage() {
+        // Usage above 0.9 should add health issue
+        let usage = 0.95_f64;
+        let mut issues: Vec<String> = Vec::new();
+        if usage > 0.9 {
+            issues.push("High memory usage".to_string());
+        }
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0], "High memory usage");
+    }
+
+    #[test]
+    fn test_memory_threshold_at_exactly_09() {
+        // Usage at exactly 0.9 should NOT add the issue (condition is > 0.9)
+        let usage = 0.9_f64;
+        let mut issues: Vec<String> = Vec::new();
+        if usage > 0.9 {
+            issues.push("High memory usage".to_string());
+        }
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn test_pending_requests_threshold_check_below_1000() {
+        let pending: u64 = 999;
+        let mut issues: Vec<String> = Vec::new();
+        if pending > 1000 {
+            issues.push("High pending request count".to_string());
+        }
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn test_pending_requests_threshold_check_above_1000() {
+        let pending: u64 = 1001;
+        let mut issues: Vec<String> = Vec::new();
+        if pending > 1000 {
+            issues.push("High pending request count".to_string());
+        }
+        assert_eq!(issues.len(), 1);
+    }
+
+    #[test]
+    fn test_output_format_text_join() {
+        // Test how token outputs are joined (as done in predict handler)
+        let tokens: Vec<u32> = vec![1, 2, 3, 4, 5];
+        let text = tokens.iter().map(|t| t.to_string()).collect::<Vec<String>>().join(" ");
+        assert_eq!(text, "1 2 3 4 5");
+    }
+
+    #[test]
+    fn test_output_format_empty_tokens() {
+        let tokens: Vec<u32> = vec![];
+        let text = tokens.iter().map(|t| t.to_string()).collect::<Vec<String>>().join(" ");
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn test_inference_service_impl_construction() {
+        use crate::batching::DynamicBatchingService;
+        use crate::ServerConfig;
+
+        let config = ServerConfig::default();
+        let batching_service = DynamicBatchingService::new(config.batching_config.clone());
+        let _service = InferenceServiceImpl::new(batching_service, config);
+        // Construction should not panic
+    }
+
+    #[test]
+    fn test_inference_service_into_service() {
+        use crate::batching::DynamicBatchingService;
+        use crate::ServerConfig;
+
+        let config = ServerConfig::default();
+        let batching_service = DynamicBatchingService::new(config.batching_config.clone());
+        let service = InferenceServiceImpl::new(batching_service, config);
+        let _server = service.into_service();
+        // into_service should not panic
+    }
+}

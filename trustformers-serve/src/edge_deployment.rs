@@ -823,4 +823,322 @@ mod tests {
         assert_eq!(response.model_id, "test-model");
         assert!(response.result.contains("test input"));
     }
+
+    fn make_node(id: &str, loc: &str, status: EdgeNodeStatus) -> EdgeNode {
+        EdgeNode {
+            id: id.to_string(),
+            location: loc.to_string(),
+            status,
+            resources: EdgeResources {
+                storage_used_mb: 1000,
+                storage_available_mb: 9000,
+                memory_used_mb: 2000,
+                memory_available_mb: 6000,
+                cpu_usage_percent: 30.0,
+                gpu_usage_percent: 0.0,
+                network_usage_mbps: 5.0,
+            },
+            models: Vec::new(),
+            last_sync: SystemTime::now(),
+            metrics: EdgeMetrics::default(),
+        }
+    }
+
+    fn make_model(id: &str, size_mb: u64) -> EdgeModel {
+        EdgeModel {
+            id: id.to_string(),
+            name: format!("Model {}", id),
+            version: "1.0.0".to_string(),
+            size_mb,
+            format: ModelFormat::Quantized,
+            optimization_level: OptimizationLevel::Medium,
+            last_updated: SystemTime::now(),
+            usage_count: 0,
+            priority: ModelPriority::Medium,
+        }
+    }
+
+    #[test]
+    fn test_default_config() {
+        let config = EdgeConfig::default();
+        assert!(!config.node_id.is_empty());
+        assert!(config.storage_capacity_mb > 0);
+        assert!(config.memory_capacity_mb > 0);
+    }
+
+    #[tokio::test]
+    async fn test_register_multiple_nodes() {
+        let config = EdgeConfig::default();
+        let (orchestrator, _rx) = EdgeOrchestrator::new(config);
+
+        for i in 0..5 {
+            let node = make_node(
+                &format!("n-{}", i),
+                &format!("loc-{}", i),
+                EdgeNodeStatus::Online,
+            );
+            orchestrator.register_node(node).await.expect("register ok");
+        }
+
+        let stats = orchestrator.get_statistics().await;
+        assert_eq!(stats.total_nodes, 5);
+        assert_eq!(stats.online_nodes, 5);
+    }
+
+    #[tokio::test]
+    async fn test_register_offline_node() {
+        let config = EdgeConfig::default();
+        let (orchestrator, _rx) = EdgeOrchestrator::new(config);
+
+        let node = make_node("offline-1", "loc", EdgeNodeStatus::Offline);
+        orchestrator.register_node(node).await.expect("register ok");
+
+        let stats = orchestrator.get_statistics().await;
+        assert_eq!(stats.total_nodes, 1);
+    }
+
+    #[tokio::test]
+    async fn test_deploy_model_to_nonexistent_node() {
+        let config = EdgeConfig::default();
+        let (orchestrator, _rx) = EdgeOrchestrator::new(config);
+
+        let model = make_model("m1", 500);
+        let result = orchestrator.deploy_model(model, vec!["nonexistent".to_string()]).await;
+        assert!(result.is_ok());
+        if let Ok(r) = result {
+            // Node doesn't exist so it's skipped entirely
+            assert_eq!(r.total_deployments, 0);
+            assert_eq!(r.successful_deployments, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_deploy_model_to_multiple_nodes() {
+        let config = EdgeConfig::default();
+        let (orchestrator, _rx) = EdgeOrchestrator::new(config);
+
+        for i in 0..2 {
+            let node = make_node(&format!("mn-{}", i), "loc", EdgeNodeStatus::Online);
+            orchestrator.register_node(node).await.expect("register ok");
+        }
+
+        let model = make_model("m2", 1); // Tiny model for fast test
+        let nodes = vec!["mn-0".to_string(), "mn-1".to_string()];
+        let result = orchestrator.deploy_model(model, nodes).await.expect("deploy ok");
+        assert_eq!(result.total_deployments, 2);
+        assert_eq!(result.successful_deployments, 2);
+    }
+
+    #[test]
+    fn test_edge_node_status_debug() {
+        let statuses = vec![
+            EdgeNodeStatus::Online,
+            EdgeNodeStatus::Offline,
+            EdgeNodeStatus::Degraded,
+        ];
+        for s in statuses {
+            assert!(!format!("{:?}", s).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_model_format_debug() {
+        let formats = vec![
+            ModelFormat::Original,
+            ModelFormat::Quantized,
+            ModelFormat::Pruned,
+            ModelFormat::Distilled,
+        ];
+        for f in formats {
+            assert!(!format!("{:?}", f).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_optimization_level_debug() {
+        let levels = vec![
+            OptimizationLevel::None,
+            OptimizationLevel::Light,
+            OptimizationLevel::Medium,
+            OptimizationLevel::Aggressive,
+            OptimizationLevel::Custom(HashMap::new()),
+        ];
+        for l in levels {
+            assert!(!format!("{:?}", l).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_model_priority_debug() {
+        let priorities = vec![
+            ModelPriority::Low,
+            ModelPriority::Medium,
+            ModelPriority::High,
+            ModelPriority::Critical,
+        ];
+        for p in priorities {
+            assert!(!format!("{:?}", p).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_edge_metrics_default() {
+        let metrics = EdgeMetrics::default();
+        assert_eq!(metrics.requests_served, 0);
+        assert_eq!(metrics.offline_requests, 0);
+        assert!((metrics.cache_hit_rate - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_edge_resources_structure() {
+        let resources = EdgeResources {
+            storage_used_mb: 500,
+            storage_available_mb: 9500,
+            memory_used_mb: 1000,
+            memory_available_mb: 7000,
+            cpu_usage_percent: 25.0,
+            gpu_usage_percent: 50.0,
+            network_usage_mbps: 100.0,
+        };
+        assert_eq!(
+            resources.storage_used_mb + resources.storage_available_mb,
+            10000
+        );
+    }
+
+    #[tokio::test]
+    async fn test_offline_request_nonexistent_node() {
+        let config = EdgeConfig::default();
+        let (orchestrator, _rx) = EdgeOrchestrator::new(config);
+
+        let request = InferenceRequest {
+            request_id: "req-1".to_string(),
+            model_id: "m1".to_string(),
+            input: "test".to_string(),
+            parameters: HashMap::new(),
+        };
+
+        let result = orchestrator.handle_offline_request("ghost", request).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_statistics_initial() {
+        let config = EdgeConfig::default();
+        let (orchestrator, _rx) = EdgeOrchestrator::new(config);
+        let stats = orchestrator.get_statistics().await;
+        assert_eq!(stats.total_nodes, 0);
+        assert_eq!(stats.online_nodes, 0);
+    }
+
+    #[tokio::test]
+    async fn test_deploy_large_model_insufficient_storage() {
+        let config = EdgeConfig::default();
+        let (orchestrator, _rx) = EdgeOrchestrator::new(config);
+
+        let mut node = make_node("small-node", "loc", EdgeNodeStatus::Online);
+        node.resources.storage_available_mb = 10; // Very little storage
+        orchestrator.register_node(node).await.expect("register ok");
+
+        let model = make_model("big-model", 50000);
+        let result = orchestrator.deploy_model(model, vec!["small-node".to_string()]).await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_inference_request_structure() {
+        let mut params = HashMap::new();
+        params.insert("temperature".to_string(), serde_json::json!(0.7));
+        let req = InferenceRequest {
+            request_id: "req-42".to_string(),
+            model_id: "model-1".to_string(),
+            input: "Hello world".to_string(),
+            parameters: params,
+        };
+        assert_eq!(req.request_id, "req-42");
+        assert_eq!(req.parameters.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_list_nodes_empty() {
+        let config = EdgeConfig::default();
+        let (orchestrator, _rx) = EdgeOrchestrator::new(config);
+        let nodes = orchestrator.list_nodes().await;
+        assert!(nodes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_nodes_populated() {
+        let config = EdgeConfig::default();
+        let (orchestrator, _rx) = EdgeOrchestrator::new(config);
+
+        for i in 0..3 {
+            let node = make_node(
+                &format!("ln-{}", i),
+                &format!("loc-{}", i),
+                EdgeNodeStatus::Online,
+            );
+            orchestrator.register_node(node).await.expect("register ok");
+        }
+
+        let nodes = orchestrator.list_nodes().await;
+        assert_eq!(nodes.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_get_node() {
+        let config = EdgeConfig::default();
+        let (orchestrator, _rx) = EdgeOrchestrator::new(config);
+
+        let node = make_node("gn-1", "loc-1", EdgeNodeStatus::Online);
+        orchestrator.register_node(node).await.expect("register ok");
+
+        let found = orchestrator.get_node("gn-1").await;
+        assert!(found.is_some());
+        let not_found = orchestrator.get_node("ghost").await;
+        assert!(not_found.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_unregister_node() {
+        let config = EdgeConfig::default();
+        let (orchestrator, _rx) = EdgeOrchestrator::new(config);
+
+        let node = make_node("un-1", "loc", EdgeNodeStatus::Online);
+        orchestrator.register_node(node).await.expect("register ok");
+        orchestrator.unregister_node("un-1").await.expect("unregister ok");
+        let nodes = orchestrator.list_nodes().await;
+        assert!(nodes.is_empty());
+    }
+
+    #[test]
+    fn test_model_format_original() {
+        let fmt = ModelFormat::Original;
+        assert!(format!("{:?}", fmt).contains("Original"));
+    }
+
+    #[test]
+    fn test_sync_config_default() {
+        let config = SyncConfig::default();
+        assert_eq!(config.sync_interval_seconds, 3600);
+        assert!(config.delta_sync);
+        assert!(config.bandwidth_throttle_mbps.is_none());
+    }
+
+    #[test]
+    fn test_edge_optimization_default() {
+        let opt = EdgeOptimization::default();
+        assert!(opt.quantization);
+        assert!(!opt.pruning);
+        assert!(!opt.distillation);
+        assert!(opt.cache_optimization);
+    }
+
+    #[tokio::test]
+    async fn test_optimize_deployment_empty() {
+        let config = EdgeConfig::default();
+        let (orchestrator, _rx) = EdgeOrchestrator::new(config);
+        let result = orchestrator.optimize_deployment().await.expect("optimize ok");
+        assert!(result.optimizations.is_empty());
+    }
 }

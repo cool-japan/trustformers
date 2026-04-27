@@ -1230,3 +1230,498 @@ pub struct BaselineComparison {
     pub convergence_change: f64,
     pub improvement_percentage: f64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    fn make_metrics(loss: Option<f64>, accuracy: Option<f64>) -> DashboardMetrics {
+        DashboardMetrics {
+            timestamp: SystemTime::now(),
+            loss,
+            accuracy,
+            learning_rate: Some(0.001),
+            memory_usage_mb: 2048.0,
+            gpu_utilization: Some(0.75),
+            tokens_per_second: Some(200.0),
+            gradient_norm: Some(1.0),
+            epoch: Some(1),
+            step: Some(100),
+        }
+    }
+
+    fn make_config() -> DebugConfig {
+        DebugConfig::default()
+    }
+
+    // --- MetricStability tests ---
+
+    #[test]
+    fn test_metric_stability_new() {
+        let ms = MetricStability::new(0.1, 0.05);
+        assert!(ms.values.is_empty());
+        assert!((ms.variance_threshold - 0.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_metric_stability_update() {
+        let mut ms = MetricStability::new(0.1, 0.05);
+        ms.update(1.0);
+        ms.update(2.0);
+        assert_eq!(ms.values.len(), 2);
+    }
+
+    #[test]
+    fn test_metric_stability_update_overflow() {
+        let mut ms = MetricStability::new(0.1, 0.05);
+        for i in 0..60 {
+            ms.update(i as f64);
+        }
+        assert_eq!(ms.values.len(), 50);
+    }
+
+    #[test]
+    fn test_metric_stability_insufficient_data() {
+        let ms = MetricStability::new(0.1, 0.05);
+        let stability = ms.calculate_stability();
+        assert!((stability - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_metric_stability_perfect_stability() {
+        let mut ms = MetricStability::new(0.1, 0.05);
+        for _ in 0..20 {
+            ms.update(5.0);
+        }
+        let stability = ms.calculate_stability();
+        // Zero variance -> variance_score = 1.0
+        // All same values -> no slope changes -> trend_stability = 1.0 ideally
+        assert!(stability > 0.7);
+    }
+
+    #[test]
+    fn test_metric_stability_variance_calculation() {
+        let mut ms = MetricStability::new(0.1, 0.05);
+        ms.update(2.0);
+        ms.update(4.0);
+        let variance = ms.calculate_variance();
+        // variance = (2-3)^2 + (4-3)^2 / 1 = 2.0
+        assert!((variance - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_metric_stability_single_value_variance() {
+        let mut ms = MetricStability::new(0.1, 0.05);
+        ms.update(5.0);
+        let variance = ms.calculate_variance();
+        assert!((variance - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_metric_stability_trend_stability_insufficient() {
+        let mut ms = MetricStability::new(0.1, 0.05);
+        for i in 0..5 {
+            ms.update(i as f64);
+        }
+        let trend = ms.calculate_trend_stability();
+        assert!((trend - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_metric_stability_trend_stability_monotonic() {
+        let mut ms = MetricStability::new(0.1, 0.05);
+        for i in 0..20 {
+            ms.update(i as f64);
+        }
+        let trend = ms.calculate_trend_stability();
+        // Monotonically increasing -> no slope changes -> trend = 1.0
+        assert!((trend - 1.0).abs() < 1e-9);
+    }
+
+    // --- ConvergenceAnalyzer tests ---
+
+    #[test]
+    fn test_convergence_analyzer_new() {
+        let ca = ConvergenceAnalyzer::new();
+        assert_eq!(ca.convergence_window, 100);
+        assert!((ca.convergence_threshold - 0.01).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_convergence_analyzer_default() {
+        let ca = ConvergenceAnalyzer::default();
+        assert!(ca.loss_history.is_empty());
+    }
+
+    #[test]
+    fn test_convergence_analyzer_update_loss() {
+        let mut ca = ConvergenceAnalyzer::new();
+        ca.update(Some(1.5), None);
+        assert_eq!(ca.loss_history.len(), 1);
+        assert!(ca.accuracy_history.is_empty());
+    }
+
+    #[test]
+    fn test_convergence_analyzer_update_accuracy() {
+        let mut ca = ConvergenceAnalyzer::new();
+        ca.update(None, Some(0.85));
+        assert!(ca.loss_history.is_empty());
+        assert_eq!(ca.accuracy_history.len(), 1);
+    }
+
+    #[test]
+    fn test_convergence_analyzer_history_limit() {
+        let mut ca = ConvergenceAnalyzer::new();
+        for i in 0..250 {
+            ca.update(Some(i as f64), None);
+        }
+        assert!(ca.loss_history.len() <= 200);
+    }
+
+    #[test]
+    fn test_convergence_probability_insufficient_data() {
+        let ca = ConvergenceAnalyzer::new();
+        let prob = ca.calculate_convergence_probability();
+        // With no data: 0.7 * 0.3 + 0.3 * 0.5 = 0.21 + 0.15 = 0.36
+        assert!(prob > 0.0 && prob < 1.0);
+    }
+
+    #[test]
+    fn test_convergence_variance_empty() {
+        let ca = ConvergenceAnalyzer::new();
+        let var = ca.calculate_variance(&[]);
+        assert!((var - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_convergence_variance_single() {
+        let ca = ConvergenceAnalyzer::new();
+        let var = ca.calculate_variance(&[5.0]);
+        assert!((var - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_convergence_variance_values() {
+        let ca = ConvergenceAnalyzer::new();
+        let var = ca.calculate_variance(&[1.0, 3.0]);
+        // mean=2, variance = ((1-2)^2 + (3-2)^2)/(2-1) = 2.0
+        assert!((var - 2.0).abs() < 1e-9);
+    }
+
+    // --- OverfittingDetector tests ---
+
+    #[test]
+    fn test_overfitting_detector_new() {
+        let od = OverfittingDetector::new();
+        assert!(od.train_loss_history.is_empty());
+        assert!((od.overfitting_threshold - 0.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_overfitting_detector_default() {
+        let od = OverfittingDetector::default();
+        assert!(od.val_loss_history.is_empty());
+    }
+
+    #[test]
+    fn test_overfitting_detector_update_train_metrics() {
+        let mut od = OverfittingDetector::new();
+        od.update_train_metrics(Some(0.5), Some(0.9));
+        assert_eq!(od.train_loss_history.len(), 1);
+        assert_eq!(od.train_accuracy_history.len(), 1);
+    }
+
+    #[test]
+    fn test_overfitting_detector_update_validation_metrics() {
+        let mut od = OverfittingDetector::new();
+        od.update_validation_metrics(Some(0.6), Some(0.85));
+        assert_eq!(od.val_loss_history.len(), 1);
+        assert_eq!(od.val_accuracy_history.len(), 1);
+    }
+
+    #[test]
+    fn test_overfitting_detector_history_limit() {
+        let mut od = OverfittingDetector::new();
+        for i in 0..120 {
+            od.update_train_metrics(Some(i as f64), None);
+        }
+        assert_eq!(od.train_loss_history.len(), 100);
+    }
+
+    #[test]
+    fn test_overfitting_no_data() {
+        let od = OverfittingDetector::new();
+        let risk = od.detect_overfitting();
+        matches!(risk, OverfittingRisk::None);
+    }
+
+    #[test]
+    fn test_overfitting_loss_gap_insufficient() {
+        let od = OverfittingDetector::new();
+        let gap = od.calculate_loss_gap();
+        assert!((gap - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_overfitting_accuracy_gap_insufficient() {
+        let od = OverfittingDetector::new();
+        let gap = od.calculate_accuracy_gap();
+        assert!((gap - 0.0).abs() < 1e-9);
+    }
+
+    // --- GeneralizationMonitor tests ---
+
+    #[test]
+    fn test_generalization_monitor_new() {
+        let gm = GeneralizationMonitor::new();
+        assert!(gm.cross_validation_scores.is_empty());
+        assert!(gm.holdout_performance.is_none());
+        assert!(gm.train_performance.is_none());
+    }
+
+    #[test]
+    fn test_generalization_monitor_default() {
+        let gm = GeneralizationMonitor::default();
+        assert!(gm.holdout_performance.is_none());
+    }
+
+    #[test]
+    fn test_generalization_update_performance() {
+        let mut gm = GeneralizationMonitor::new();
+        gm.update_performance(0.95, Some(0.90));
+        assert!((gm.train_performance.expect("should be set") - 0.95).abs() < 1e-9);
+        assert!((gm.holdout_performance.expect("should be set") - 0.90).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_generalization_score_no_data() {
+        let gm = GeneralizationMonitor::new();
+        let score = gm.calculate_generalization_score();
+        // (0.5 + 0.5 + 1.0) / 3.0 = 0.667
+        assert!(score > 0.0 && score < 1.0);
+    }
+
+    #[test]
+    fn test_generalization_performance_consistency_perfect() {
+        let mut gm = GeneralizationMonitor::new();
+        gm.update_performance(0.9, Some(0.9));
+        let consistency = gm.calculate_performance_consistency();
+        assert!((consistency - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_generalization_performance_consistency_with_gap() {
+        let mut gm = GeneralizationMonitor::new();
+        gm.update_performance(0.9, Some(0.7));
+        let consistency = gm.calculate_performance_consistency();
+        // 1.0 - 0.2 = 0.8
+        assert!((consistency - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_generalization_complexity_penalty_no_data() {
+        let gm = GeneralizationMonitor::new();
+        let penalty = gm.calculate_complexity_penalty();
+        assert!((penalty - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_generalization_cv_consistency_insufficient() {
+        let gm = GeneralizationMonitor::new();
+        let cv = gm.calculate_cv_consistency();
+        assert!((cv - 0.5).abs() < 1e-9);
+    }
+
+    // --- HealthChecker tests ---
+
+    #[test]
+    fn test_health_checker_new() {
+        let config = make_config();
+        let hc = HealthChecker::new(&config);
+        assert!(hc.metrics_history.is_empty());
+        assert!(hc.health_assessments.is_empty());
+        assert!(hc.performance_baseline.is_none());
+    }
+
+    #[test]
+    fn test_health_checker_update() {
+        let config = make_config();
+        let mut hc = HealthChecker::new(&config);
+        hc.update(make_metrics(Some(0.5), Some(0.8)));
+        assert_eq!(hc.metrics_history.len(), 1);
+    }
+
+    #[test]
+    fn test_health_checker_update_limit() {
+        let config = make_config();
+        let mut hc = HealthChecker::new(&config);
+        for i in 0..1100 {
+            hc.update(make_metrics(Some(1.0 / (i as f64 + 1.0)), Some(0.5)));
+        }
+        assert!(hc.metrics_history.len() <= 1000);
+    }
+
+    #[test]
+    fn test_health_checker_determine_health_status() {
+        let config = make_config();
+        let hc = HealthChecker::new(&config);
+        assert!(matches!(
+            hc.determine_health_status(0.95),
+            HealthStatus::Excellent
+        ));
+        assert!(matches!(
+            hc.determine_health_status(0.80),
+            HealthStatus::Good
+        ));
+        assert!(matches!(
+            hc.determine_health_status(0.65),
+            HealthStatus::Fair
+        ));
+        assert!(matches!(
+            hc.determine_health_status(0.45),
+            HealthStatus::Poor
+        ));
+        assert!(matches!(
+            hc.determine_health_status(0.1),
+            HealthStatus::Critical
+        ));
+    }
+
+    #[test]
+    fn test_health_checker_set_baseline() {
+        let config = make_config();
+        let mut hc = HealthChecker::new(&config);
+        let baseline = PerformanceBaseline {
+            baseline_loss: 0.5,
+            baseline_accuracy: 0.9,
+            baseline_training_time: Duration::from_secs(3600),
+            baseline_memory_usage: 4096.0,
+            established_at: SystemTime::now(),
+        };
+        hc.set_baseline(baseline);
+        assert!(hc.performance_baseline.is_some());
+    }
+
+    #[test]
+    fn test_health_checker_get_health_history() {
+        let config = make_config();
+        let hc = HealthChecker::new(&config);
+        let history = hc.get_health_history();
+        assert!(history.is_empty());
+    }
+
+    #[test]
+    fn test_health_checker_assess_health() {
+        let config = make_config();
+        let mut hc = HealthChecker::new(&config);
+        for i in 0..20 {
+            hc.update(make_metrics(
+                Some(1.0 - i as f64 * 0.04),
+                Some(0.5 + i as f64 * 0.02),
+            ));
+        }
+        let result = hc.assess_health();
+        assert!(result.is_ok());
+        let assessment = result.expect("should succeed");
+        assert!(assessment.overall_health_score >= 0.0);
+        assert!(assessment.overall_health_score <= 1.0);
+    }
+
+    #[test]
+    fn test_health_checker_generate_health_summary_no_data() {
+        let config = make_config();
+        let hc = HealthChecker::new(&config);
+        let summary = hc.generate_health_summary();
+        assert!(summary.contains("Insufficient"));
+    }
+
+    #[test]
+    fn test_health_checker_loss_health_insufficient_data() {
+        let config = make_config();
+        let hc = HealthChecker::new(&config);
+        let health = hc.calculate_loss_health();
+        assert!((health - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_health_checker_accuracy_health_insufficient() {
+        let config = make_config();
+        let hc = HealthChecker::new(&config);
+        let health = hc.calculate_accuracy_health();
+        assert!((health - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_health_checker_performance_health_no_metrics() {
+        let config = make_config();
+        let hc = HealthChecker::new(&config);
+        let health = hc.calculate_performance_health();
+        assert!((health - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_health_checker_memory_health_no_metrics() {
+        let config = make_config();
+        let hc = HealthChecker::new(&config);
+        let health = hc.calculate_memory_health();
+        assert!((health - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_health_checker_memory_health_low_usage() {
+        let config = make_config();
+        let mut hc = HealthChecker::new(&config);
+        hc.update(make_metrics(Some(0.5), Some(0.8)));
+        let health = hc.calculate_memory_health();
+        assert!((health - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_health_checker_compare_with_baseline_none() {
+        let config = make_config();
+        let hc = HealthChecker::new(&config);
+        assert!(hc.compare_with_baseline().is_none());
+    }
+
+    #[test]
+    fn test_health_checker_health_trends_insufficient() {
+        let config = make_config();
+        let hc = HealthChecker::new(&config);
+        let trends = hc.analyze_health_trends();
+        assert!(matches!(trends.overall_trend, Trend::Stable));
+    }
+
+    #[test]
+    fn test_health_checker_assess_risks_empty() {
+        let config = make_config();
+        let hc = HealthChecker::new(&config);
+        let risks = hc.assess_risks();
+        assert!(risks.is_empty());
+    }
+
+    #[test]
+    fn test_health_checker_improvement_suggestions_empty() {
+        let config = make_config();
+        let hc = HealthChecker::new(&config);
+        let suggestions = hc.generate_improvement_suggestions();
+        assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn test_health_report_default() {
+        let report = HealthReport::default();
+        assert!((report.current_health.overall_health_score - 0.5).abs() < 1e-9);
+        assert!(matches!(
+            report.current_health.health_status,
+            HealthStatus::Fair
+        ));
+    }
+
+    #[test]
+    fn test_health_trends_default() {
+        let trends = HealthTrends::default();
+        assert!(matches!(trends.overall_trend, Trend::Stable));
+        assert!(matches!(trends.stability_trend, Trend::Stable));
+    }
+}

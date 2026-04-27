@@ -699,7 +699,7 @@ impl AutomatedHyperparameterTuner {
                         // Check if this result improves on the best so far
                         let is_improvement = match self.config.optimization_direction {
                             OptimizationDirection::Maximize => {
-                                self.tuner.get_best_configuration().map_or(true, |_| {
+                                self.tuner.get_best_configuration().is_none_or(|_| {
                                     trial_result.primary_metric
                                         > self
                                             .results
@@ -711,7 +711,7 @@ impl AutomatedHyperparameterTuner {
                                 })
                             },
                             OptimizationDirection::Minimize => {
-                                self.tuner.get_best_configuration().map_or(true, |_| {
+                                self.tuner.get_best_configuration().is_none_or(|_| {
                                     trial_result.primary_metric
                                         < self
                                             .results
@@ -946,5 +946,236 @@ mod tests {
 
         let history = automated_tuner.get_optimization_history();
         assert!(history.len() <= 5);
+    }
+
+    #[test]
+    fn test_parameter_value_as_f64() {
+        let float_val = ParameterValue::Float(std::f64::consts::PI);
+        assert_eq!(float_val.as_f64(), Some(std::f64::consts::PI));
+
+        let int_val = ParameterValue::Int(42);
+        assert_eq!(int_val.as_f64(), Some(42.0));
+
+        let str_val = ParameterValue::String("test".to_string());
+        assert_eq!(str_val.as_f64(), None);
+
+        let bool_val = ParameterValue::Bool(true);
+        assert_eq!(bool_val.as_f64(), None);
+    }
+
+    #[test]
+    fn test_parameter_value_as_i64() {
+        let int_val = ParameterValue::Int(42);
+        assert_eq!(int_val.as_i64(), Some(42));
+
+        let float_val = ParameterValue::Float(3.7);
+        assert_eq!(float_val.as_i64(), Some(3));
+
+        let str_val = ParameterValue::String("test".to_string());
+        assert_eq!(str_val.as_i64(), None);
+    }
+
+    #[test]
+    fn test_parameter_value_as_string() {
+        let str_val = ParameterValue::String("hello".to_string());
+        assert_eq!(str_val.as_string(), Some("hello".to_string()));
+
+        let int_val = ParameterValue::Int(42);
+        assert_eq!(int_val.as_string(), None);
+    }
+
+    #[test]
+    fn test_parameter_value_as_bool() {
+        let bool_val = ParameterValue::Bool(true);
+        assert_eq!(bool_val.as_bool(), Some(true));
+
+        let float_val = ParameterValue::Float(1.0);
+        assert_eq!(float_val.as_bool(), None);
+    }
+
+    #[test]
+    fn test_parameter_scale_variants() {
+        let scales = [
+            ParameterScale::Linear,
+            ParameterScale::Logarithmic,
+            ParameterScale::Exponential,
+        ];
+        assert_eq!(scales.len(), 3);
+    }
+
+    #[test]
+    fn test_constraint_type_variants() {
+        let constraints = [
+            ConstraintType::Sum,
+            ConstraintType::Product,
+            ConstraintType::Conditional,
+            ConstraintType::Ordering,
+        ];
+        assert_eq!(constraints.len(), 4);
+    }
+
+    #[test]
+    fn test_hyperparameter_space_with_boolean() {
+        let mut parameters = HashMap::new();
+        parameters.insert("use_warmup".to_string(), ParameterSpec::Boolean);
+        let space = HyperparameterSpace {
+            parameters,
+            constraints: Vec::new(),
+        };
+        assert!(space.parameters.contains_key("use_warmup"));
+    }
+
+    #[test]
+    fn test_hyperparameter_config_creation() {
+        let mut values = HashMap::new();
+        values.insert("lr".to_string(), ParameterValue::Float(0.001));
+        values.insert("epochs".to_string(), ParameterValue::Int(10));
+        let config = HyperparameterConfig { values };
+        assert_eq!(config.values.len(), 2);
+    }
+
+    #[test]
+    fn test_tuning_result_creation() {
+        let config = HyperparameterConfig {
+            values: HashMap::new(),
+        };
+        let mut metrics = HashMap::new();
+        metrics.insert("loss".to_string(), 0.5);
+        let result = TuningResult {
+            config,
+            metrics,
+            primary_metric: 0.5,
+            training_time: Duration::from_secs(120),
+            trial_id: "trial_001".to_string(),
+            iteration: 5,
+        };
+        assert_eq!(result.primary_metric, 0.5);
+        assert_eq!(result.iteration, 5);
+    }
+
+    #[test]
+    fn test_random_search_tuner_best_config() {
+        let mut tuner = RandomSearchTuner::new();
+        let space = create_test_space();
+
+        // First suggestion
+        let config1 = tuner.suggest_configuration(&space, &[]).expect("operation failed in test");
+
+        // Update with result
+        let result = TuningResult {
+            config: config1,
+            metrics: {
+                let mut m = HashMap::new();
+                m.insert("accuracy".to_string(), 0.9);
+                m
+            },
+            primary_metric: 0.9,
+            training_time: Duration::from_secs(30),
+            trial_id: "t1".to_string(),
+            iteration: 0,
+        };
+        tuner.update_with_result(&result).expect("operation failed in test");
+        let best = tuner.get_best_configuration();
+        assert!(best.is_some());
+    }
+
+    #[test]
+    fn test_config_to_vector_all_params() {
+        let space = create_test_space();
+        let mut values = HashMap::new();
+        values.insert("learning_rate".to_string(), ParameterValue::Float(0.01));
+        values.insert("batch_size".to_string(), ParameterValue::Int(64));
+        values.insert(
+            "optimizer".to_string(),
+            ParameterValue::String("sgd".to_string()),
+        );
+        let config = HyperparameterConfig { values };
+        let vector = config_to_vector(&config, &space).expect("operation failed in test");
+        assert_eq!(vector.len(), 3);
+        for v in &vector {
+            assert!(*v >= 0.0 && *v <= 1.0);
+        }
+    }
+
+    #[test]
+    fn test_bayesian_optimization_with_history() {
+        let mut tuner =
+            BayesianOptimizationTuner::new(AcquisitionFunction::ExpectedImprovement { xi: 0.01 });
+        let space = create_test_space();
+
+        // Get first config
+        let config = tuner.suggest_configuration(&space, &[]).expect("operation failed in test");
+        let result = TuningResult {
+            config,
+            metrics: {
+                let mut m = HashMap::new();
+                m.insert("accuracy".to_string(), 0.8);
+                m
+            },
+            primary_metric: 0.8,
+            training_time: Duration::from_secs(60),
+            trial_id: "t1".to_string(),
+            iteration: 0,
+        };
+        tuner.update_with_result(&result).expect("operation failed in test");
+
+        // Second config should take history into account
+        let config2 = tuner
+            .suggest_configuration(&space, std::slice::from_ref(&result))
+            .expect("operation failed in test");
+        assert!(!config2.values.is_empty());
+    }
+
+    #[test]
+    fn test_empty_hyperparameter_space() {
+        let space = HyperparameterSpace {
+            parameters: HashMap::new(),
+            constraints: Vec::new(),
+        };
+        assert!(space.parameters.is_empty());
+        assert!(space.constraints.is_empty());
+    }
+
+    #[test]
+    fn test_space_with_constraints() {
+        let space = HyperparameterSpace {
+            parameters: HashMap::new(),
+            constraints: vec![ParameterConstraint {
+                constraint_type: ConstraintType::Sum,
+                parameters: vec!["a".to_string(), "b".to_string()],
+                condition: "a + b <= 1.0".to_string(),
+            }],
+        };
+        assert_eq!(space.constraints.len(), 1);
+    }
+
+    #[test]
+    fn test_parameter_spec_float_range() {
+        let spec = ParameterSpec::Float {
+            min: 0.0,
+            max: 1.0,
+            scale: ParameterScale::Linear,
+        };
+        if let ParameterSpec::Float { min, max, .. } = spec {
+            assert!(min < max);
+        }
+    }
+
+    #[test]
+    fn test_parameter_spec_int_range() {
+        let spec = ParameterSpec::Int { min: 1, max: 100 };
+        if let ParameterSpec::Int { min, max } = spec {
+            assert!(min < max);
+        }
+    }
+
+    #[test]
+    fn test_parameter_spec_categorical() {
+        let spec = ParameterSpec::Categorical {
+            choices: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        };
+        if let ParameterSpec::Categorical { choices } = spec {
+            assert_eq!(choices.len(), 3);
+        }
     }
 }

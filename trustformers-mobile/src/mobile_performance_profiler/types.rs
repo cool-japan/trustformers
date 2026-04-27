@@ -1611,3 +1611,6 @@ impl Default for PlatformCapabilities {
         }
     }
 }
+
+#[path = "types_tests.rs"]
+mod types_tests;

@@ -622,6 +622,13 @@ impl ComputationGraph {
         &self.topological_order
     }
 
+    /// Zero all gradients in the graph
+    pub fn zero_gradients(&mut self) {
+        for node in self.nodes.values_mut() {
+            node.gradient = None;
+        }
+    }
+
     /// Export the graph structure for visualization
     pub fn export_graph(&self) -> GraphExport {
         let nodes: Vec<_> = self.nodes.values().cloned().collect();
@@ -739,7 +746,6 @@ mod tests {
     fn test_gradient_accumulation() {
         let mut graph = ComputationGraph::new();
 
-        // Create computation: d = a + a (gradient should accumulate)
         let a = Tensor::scalar(2.0).expect("tensor operation failed");
         let d = a.add(&a).expect("Addition failed");
 
@@ -754,16 +760,350 @@ mod tests {
             )
             .expect("operation failed in test");
 
-        // Backward pass
         graph.backward(node_d, None).expect("operation failed in test");
 
-        // Check gradient accumulation
         let grad_a = graph.get_gradient(node_a).expect("operation failed in test");
 
-        // Gradient should be 2.0 (1.0 + 1.0 from both uses)
         assert_eq!(
             grad_a.to_vec_f32().expect("operation failed in test")[0],
             2.0
         );
+    }
+
+    // ── ComputationGraph basic tests ──
+
+    #[test]
+    fn test_new_graph_is_empty() {
+        let graph = ComputationGraph::new();
+        assert_eq!(graph.num_nodes(), 0);
+    }
+
+    #[test]
+    fn test_add_single_node() {
+        let mut graph = ComputationGraph::new();
+        let tensor = Tensor::scalar(1.0).expect("tensor operation failed");
+        let id = graph.add_node(tensor, true, Some("x".to_string()));
+        assert_eq!(id, 0);
+        assert_eq!(graph.num_nodes(), 1);
+    }
+
+    #[test]
+    fn test_add_multiple_nodes() {
+        let mut graph = ComputationGraph::new();
+        for i in 0..5 {
+            let tensor = Tensor::scalar(i as f32).expect("tensor operation failed");
+            let id = graph.add_node(tensor, true, None);
+            assert_eq!(id, i);
+        }
+        assert_eq!(graph.num_nodes(), 5);
+    }
+
+    #[test]
+    fn test_get_node() {
+        let mut graph = ComputationGraph::new();
+        let tensor = Tensor::scalar(42.0).expect("tensor operation failed");
+        let id = graph.add_node(tensor, true, Some("test".to_string()));
+
+        let node = graph.get_node(id).expect("node should exist");
+        assert_eq!(node.id, id);
+        assert_eq!(node.name, Some("test".to_string()));
+        assert!(node.requires_grad);
+        assert!(node.is_leaf);
+    }
+
+    #[test]
+    fn test_get_node_nonexistent() {
+        let graph = ComputationGraph::new();
+        assert!(graph.get_node(999).is_none());
+    }
+
+    #[test]
+    fn test_get_node_mut() {
+        let mut graph = ComputationGraph::new();
+        let tensor = Tensor::scalar(1.0).expect("tensor operation failed");
+        let id = graph.add_node(tensor, true, None);
+
+        let node = graph.get_node_mut(id).expect("node should exist");
+        node.name = Some("modified".to_string());
+
+        assert_eq!(
+            graph.get_node(id).expect("node should exist").name,
+            Some("modified".to_string())
+        );
+    }
+
+    // ── Operation node tests ──
+
+    #[test]
+    fn test_add_operation_node() {
+        let mut graph = ComputationGraph::new();
+        let a = Tensor::scalar(1.0).expect("tensor operation failed");
+        let b = Tensor::scalar(2.0).expect("tensor operation failed");
+        let c = a.add(&b).expect("Addition failed");
+
+        let node_a = graph.add_node(a, true, None);
+        let node_b = graph.add_node(b, true, None);
+        let node_c = graph
+            .add_operation_node(c, OperationType::Add, vec![node_a, node_b], true, None)
+            .expect("operation failed in test");
+
+        let op_node = graph.get_node(node_c).expect("node should exist");
+        assert!(!op_node.is_leaf);
+        assert_eq!(op_node.operation, Some(OperationType::Add));
+        assert_eq!(op_node.parents, vec![node_a, node_b]);
+    }
+
+    #[test]
+    fn test_add_operation_node_nonexistent_parent() {
+        let mut graph = ComputationGraph::new();
+        let tensor = Tensor::scalar(1.0).expect("tensor operation failed");
+        let result = graph.add_operation_node(tensor, OperationType::Add, vec![999], true, None);
+        assert!(result.is_err());
+    }
+
+    // ── Topological ordering tests ──
+
+    #[test]
+    fn test_topological_order_linear_chain() {
+        let mut graph = ComputationGraph::new();
+        let a = Tensor::scalar(1.0).expect("tensor operation failed");
+        let b = a.add(&a).expect("Addition failed");
+        let c = b.add(&b).expect("Addition failed");
+
+        let node_a = graph.add_node(a.clone(), true, Some("a".to_string()));
+        let node_b = graph
+            .add_operation_node(
+                b,
+                OperationType::Add,
+                vec![node_a, node_a],
+                true,
+                Some("b".to_string()),
+            )
+            .expect("operation failed in test");
+        let node_c = graph
+            .add_operation_node(
+                c,
+                OperationType::Add,
+                vec![node_b, node_b],
+                true,
+                Some("c".to_string()),
+            )
+            .expect("operation failed in test");
+
+        graph.compute_topological_order().expect("operation failed in test");
+        let order = graph.get_topological_order();
+
+        let a_pos = order.iter().position(|&id| id == node_a).expect("a not found");
+        let b_pos = order.iter().position(|&id| id == node_b).expect("b not found");
+        let c_pos = order.iter().position(|&id| id == node_c).expect("c not found");
+
+        assert!(a_pos < b_pos);
+        assert!(b_pos < c_pos);
+    }
+
+    #[test]
+    fn test_topological_order_single_node() {
+        let mut graph = ComputationGraph::new();
+        let tensor = Tensor::scalar(1.0).expect("tensor operation failed");
+        graph.add_node(tensor, true, None);
+
+        graph.compute_topological_order().expect("operation failed in test");
+        assert_eq!(graph.get_topological_order().len(), 1);
+    }
+
+    #[test]
+    fn test_topological_order_idempotent() {
+        let mut graph = ComputationGraph::new();
+        let tensor = Tensor::scalar(1.0).expect("tensor operation failed");
+        graph.add_node(tensor, true, None);
+
+        graph.compute_topological_order().expect("operation failed in test");
+        let order1 = graph.get_topological_order().to_vec();
+        graph.compute_topological_order().expect("operation failed in test");
+        let order2 = graph.get_topological_order().to_vec();
+        assert_eq!(order1, order2);
+    }
+
+    // ── Backward pass additional tests ──
+
+    #[test]
+    fn test_backward_subtraction() {
+        let mut graph = ComputationGraph::new();
+        let a = Tensor::scalar(5.0).expect("tensor operation failed");
+        let b = Tensor::scalar(3.0).expect("tensor operation failed");
+        let c = a.sub(&b).expect("Subtraction failed");
+
+        let node_a = graph.add_node(a.clone(), true, Some("a".to_string()));
+        let node_b = graph.add_node(b.clone(), true, Some("b".to_string()));
+        let node_c = graph
+            .add_operation_node(c, OperationType::Subtract, vec![node_a, node_b], true, None)
+            .expect("operation failed in test");
+
+        graph.backward(node_c, None).expect("operation failed in test");
+
+        let grad_a = graph.get_gradient(node_a).expect("gradient should exist");
+        let grad_b = graph.get_gradient(node_b).expect("gradient should exist");
+
+        assert_eq!(
+            grad_a.to_vec_f32().expect("operation failed in test")[0],
+            1.0
+        );
+        assert_eq!(
+            grad_b.to_vec_f32().expect("operation failed in test")[0],
+            -1.0
+        );
+    }
+
+    #[test]
+    fn test_backward_nonexistent_output() {
+        let mut graph = ComputationGraph::new();
+        let tensor = Tensor::scalar(1.0).expect("tensor operation failed");
+        graph.add_node(tensor, true, None);
+
+        let result = graph.backward(999, None);
+        assert!(result.is_err());
+    }
+
+    // ── GraphNode tests ──
+
+    #[test]
+    fn test_graph_node_clone() {
+        let tensor = Tensor::scalar(std::f32::consts::PI).expect("tensor operation failed");
+        let node = GraphNode {
+            id: 0,
+            value: tensor,
+            gradient: None,
+            operation: Some(OperationType::Add),
+            parents: vec![1, 2],
+            children: vec![3],
+            requires_grad: true,
+            is_leaf: false,
+            name: Some("test".to_string()),
+            shape: vec![1],
+        };
+        let cloned = node.clone();
+        assert_eq!(cloned.id, 0);
+        assert_eq!(cloned.parents, vec![1, 2]);
+        assert_eq!(cloned.name, Some("test".to_string()));
+    }
+
+    // ── OperationType tests ──
+
+    #[test]
+    fn test_operation_type_eq() {
+        assert_eq!(OperationType::Add, OperationType::Add);
+        assert_ne!(OperationType::Add, OperationType::Subtract);
+    }
+
+    #[test]
+    fn test_operation_type_variants() {
+        let _add = OperationType::Add;
+        let _sub = OperationType::Subtract;
+        let _mul = OperationType::Multiply;
+        let _div = OperationType::Divide;
+        let _mm = OperationType::MatrixMultiply;
+        let _neg = OperationType::Negate;
+        let _rec = OperationType::Reciprocal;
+        let _sq = OperationType::Square;
+        let _sqrt = OperationType::Sqrt;
+        let _log = OperationType::Log;
+        let _exp = OperationType::Exp;
+        let _sig = OperationType::Sigmoid;
+        let _tnh = OperationType::Tanh;
+        let _relu = OperationType::ReLU;
+        let _lrelu = OperationType::LeakyReLU(0.01);
+        let _smax = OperationType::Softmax;
+        let _lsmax = OperationType::LogSoftmax;
+        let _resh = OperationType::Reshape(vec![2, 3]);
+        let _sum = OperationType::Sum(None);
+        let _mean = OperationType::Mean(Some(vec![0]));
+        let _ln = OperationType::LayerNorm(1e-5);
+        let _drop = OperationType::Dropout(0.1);
+        let _cust = OperationType::Custom("test".to_string());
+    }
+
+    #[test]
+    fn test_operation_type_clone() {
+        let op = OperationType::LeakyReLU(0.01);
+        let cloned = op.clone();
+        assert_eq!(op, cloned);
+    }
+
+    // ── No requires_grad tests ──
+
+    #[test]
+    fn test_no_grad_node_skipped_in_backward() {
+        let mut graph = ComputationGraph::new();
+        let a = Tensor::scalar(2.0).expect("tensor operation failed");
+        let b = Tensor::scalar(3.0).expect("tensor operation failed");
+        let c = a.mul(&b).expect("Multiplication failed");
+
+        let node_a = graph.add_node(a.clone(), true, Some("a".to_string()));
+        let node_b = graph.add_node(b.clone(), false, Some("b".to_string())); // no grad
+        let node_c = graph
+            .add_operation_node(c, OperationType::Multiply, vec![node_a, node_b], true, None)
+            .expect("operation failed in test");
+
+        graph.backward(node_c, None).expect("operation failed in test");
+
+        // a should have gradient (b=3)
+        let grad_a = graph.get_gradient(node_a).expect("gradient should exist");
+        assert_eq!(
+            grad_a.to_vec_f32().expect("operation failed in test")[0],
+            3.0
+        );
+
+        // b should NOT have gradient
+        assert!(graph.get_gradient(node_b).is_none());
+    }
+
+    // ── Graph reset tests ──
+
+    #[test]
+    fn test_reset_gradients() {
+        let mut graph = ComputationGraph::new();
+        let a = Tensor::scalar(2.0).expect("tensor operation failed");
+        let b = Tensor::scalar(3.0).expect("tensor operation failed");
+        let c = a.mul(&b).expect("Multiplication failed");
+
+        let node_a = graph.add_node(a.clone(), true, Some("a".to_string()));
+        let node_b = graph.add_node(b.clone(), true, Some("b".to_string()));
+        let node_c = graph
+            .add_operation_node(c, OperationType::Multiply, vec![node_a, node_b], true, None)
+            .expect("operation failed in test");
+
+        graph.backward(node_c, None).expect("operation failed in test");
+        assert!(graph.get_gradient(node_a).is_some());
+
+        graph.zero_gradients();
+        assert!(graph.get_gradient(node_a).is_none());
+    }
+
+    // ── Division backward test ──
+
+    #[test]
+    fn test_backward_division() {
+        let mut graph = ComputationGraph::new();
+        let a = Tensor::scalar(6.0).expect("tensor operation failed");
+        let b = Tensor::scalar(3.0).expect("tensor operation failed");
+        let c = a.div(&b).expect("Division failed");
+
+        let node_a = graph.add_node(a.clone(), true, Some("a".to_string()));
+        let node_b = graph.add_node(b.clone(), true, Some("b".to_string()));
+        let node_c = graph
+            .add_operation_node(c, OperationType::Divide, vec![node_a, node_b], true, None)
+            .expect("operation failed in test");
+
+        graph.backward(node_c, None).expect("operation failed in test");
+
+        // dc/da = 1/b = 1/3
+        let grad_a = graph.get_gradient(node_a).expect("gradient should exist");
+        let ga = grad_a.to_vec_f32().expect("operation failed in test")[0];
+        assert!((ga - 1.0 / 3.0).abs() < 1e-5);
+
+        // dc/db = -a/(b*b) = -6/9 = -2/3
+        let grad_b = graph.get_gradient(node_b).expect("gradient should exist");
+        let gb = grad_b.to_vec_f32().expect("operation failed in test")[0];
+        assert!((gb - (-2.0 / 3.0)).abs() < 1e-5);
     }
 }

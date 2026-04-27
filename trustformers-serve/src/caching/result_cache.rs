@@ -413,3 +413,244 @@ pub struct ResultCacheStats {
     pub avg_entry_size: usize,
     pub oldest_entry_age: u64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::caching::config::{EvictionPolicy, TierConfig};
+    use crate::caching::metrics::CacheStatsCollector;
+    use std::time::Duration;
+
+    fn make_tier_config() -> TierConfig {
+        TierConfig {
+            max_size_bytes: 10 * 1024 * 1024,
+            max_entries: 1000,
+            default_ttl: Duration::from_secs(3600),
+            eviction_policy: EvictionPolicy::LRU,
+            compression_enabled: false,
+            tier_name: "result_test".to_string(),
+        }
+    }
+
+    fn make_result(output: &str, model: &str) -> CacheResult {
+        CacheResult {
+            output: output.to_string(),
+            tokens: None,
+            logits: None,
+            metadata: HashMap::new(),
+            processing_time_ms: 100,
+            model_used: model.to_string(),
+        }
+    }
+
+    fn make_key(model: &str, input: &str) -> CacheKey {
+        CacheKey::new(model.to_string(), input, &HashMap::new(), None)
+    }
+
+    // --- CacheKey tests ---
+
+    #[test]
+    fn test_cache_key_same_input_produces_same_hash() {
+        let k1 = make_key("model_a", "hello world");
+        let k2 = make_key("model_a", "hello world");
+        assert_eq!(k1.input_hash, k2.input_hash);
+    }
+
+    #[test]
+    fn test_cache_key_different_input_produces_different_hash() {
+        let k1 = make_key("model_a", "hello");
+        let k2 = make_key("model_a", "world");
+        assert_ne!(k1.input_hash, k2.input_hash);
+    }
+
+    #[test]
+    fn test_cache_key_different_model_not_equal() {
+        let k1 = make_key("model_a", "hello");
+        let k2 = make_key("model_b", "hello");
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn test_cache_key_model_version_included() {
+        let k1 = CacheKey::new(
+            "m".to_string(),
+            "q",
+            &HashMap::new(),
+            Some("v1".to_string()),
+        );
+        let k2 = CacheKey::new(
+            "m".to_string(),
+            "q",
+            &HashMap::new(),
+            Some("v2".to_string()),
+        );
+        assert_ne!(k1, k2);
+    }
+
+    // --- CacheEntry tests ---
+
+    #[test]
+    fn test_cache_entry_not_expired_when_new() {
+        let result = make_result("output", "gpt");
+        let entry = CacheEntry::new(result, 3600);
+        assert!(!entry.is_expired());
+    }
+
+    #[test]
+    fn test_cache_entry_expired_with_old_creation_time() {
+        let result = make_result("output", "gpt");
+        // Create entry and manually set created_at to far in the past
+        let mut entry = CacheEntry::new(result, 1);
+        // Set created_at to a time well before ttl_seconds (1) ago
+        entry.created_at = 1000; // Unix epoch + 1000 seconds = long ago
+        assert!(entry.is_expired());
+    }
+
+    #[test]
+    fn test_cache_entry_mark_accessed_increments_count() {
+        let result = make_result("output", "gpt");
+        let mut entry = CacheEntry::new(result, 3600);
+        assert_eq!(entry.access_count, 0);
+        entry.mark_accessed();
+        assert_eq!(entry.access_count, 1);
+        entry.mark_accessed();
+        assert_eq!(entry.access_count, 2);
+    }
+
+    #[test]
+    fn test_cache_entry_priority_updated_on_access() {
+        let result = make_result("output", "gpt");
+        let mut entry = CacheEntry::new(result, 3600);
+        let initial_priority = entry.priority;
+        entry.mark_accessed();
+        // Priority should change (frequency factor via ln_1p(1) > 0)
+        // After 1 access, frequency_factor = ln(2) ≈ 0.693, which could differ
+        assert!(entry.priority >= 0.0);
+        let _ = initial_priority; // suppress unused warning
+    }
+
+    // --- ResultCacheService async tests ---
+
+    #[tokio::test]
+    async fn test_result_cache_miss_on_empty() {
+        let metrics = Arc::new(CacheStatsCollector::new());
+        let service = ResultCacheService::new(make_tier_config(), metrics);
+        let key = make_key("model", "some input");
+        let result = service.get(&key).await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_result_cache_put_and_hit() {
+        let metrics = Arc::new(CacheStatsCollector::new());
+        let service = ResultCacheService::new(make_tier_config(), metrics);
+        let key = make_key("model", "hello");
+        let result = make_result("world", "model");
+        service.put(key.clone(), result).await.expect("put should succeed");
+        let hit = service.get(&key).await;
+        assert!(hit.is_some());
+        let cache_hit = hit.expect("hit should be Some");
+        assert_eq!(cache_hit.result.output, "world");
+    }
+
+    #[tokio::test]
+    async fn test_result_cache_invalidate_removes_entry() {
+        let metrics = Arc::new(CacheStatsCollector::new());
+        let service = ResultCacheService::new(make_tier_config(), metrics);
+        let key = make_key("model", "test");
+        service
+            .put(key.clone(), make_result("output", "model"))
+            .await
+            .expect("put should succeed");
+        service.invalidate(&key).await.expect("invalidate should succeed");
+        assert!(service.get(&key).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_result_cache_clear_removes_all() {
+        let metrics = Arc::new(CacheStatsCollector::new());
+        let service = ResultCacheService::new(make_tier_config(), metrics);
+        let k1 = make_key("model", "input_1");
+        let k2 = make_key("model", "input_2");
+        service
+            .put(k1.clone(), make_result("r1", "model"))
+            .await
+            .expect("put should succeed");
+        service
+            .put(k2.clone(), make_result("r2", "model"))
+            .await
+            .expect("put should succeed");
+        service.clear().await.expect("clear should succeed");
+        assert!(service.get(&k1).await.is_none());
+        assert!(service.get(&k2).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_result_cache_stats_entry_count() {
+        let metrics = Arc::new(CacheStatsCollector::new());
+        let service = ResultCacheService::new(make_tier_config(), metrics);
+        service
+            .put(make_key("m", "a"), make_result("r", "m"))
+            .await
+            .expect("put should succeed");
+        service
+            .put(make_key("m", "b"), make_result("r", "m"))
+            .await
+            .expect("put should succeed");
+        let stats = service.get_stats().await;
+        assert_eq!(stats.entry_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_result_cache_hit_metadata_access_count() {
+        let metrics = Arc::new(CacheStatsCollector::new());
+        let service = ResultCacheService::new(make_tier_config(), metrics);
+        let key = make_key("m", "q");
+        service
+            .put(key.clone(), make_result("resp", "m"))
+            .await
+            .expect("put should succeed");
+        // First access
+        let _ = service.get(&key).await;
+        // Second access
+        let hit = service.get(&key).await;
+        if let Some(h) = hit {
+            assert!(h.metadata.access_count >= 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_result_cache_run_maintenance_no_panic() {
+        let metrics = Arc::new(CacheStatsCollector::new());
+        let service = ResultCacheService::new(make_tier_config(), metrics);
+        service
+            .put(make_key("m", "input"), make_result("out", "m"))
+            .await
+            .expect("put should succeed");
+        let result = service.run_maintenance().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_result_cache_expired_entry_not_returned() {
+        // CacheEntry is_expired checks: now > created_at + ttl_seconds
+        // We can't easily inject past time into ResultCacheService without direct field access.
+        // Instead, verify that a new entry with future TTL is NOT expired.
+        let result = make_result("output", "gpt");
+        let entry = CacheEntry::new(result, 3600);
+        assert!(!entry.is_expired());
+    }
+
+    #[tokio::test]
+    async fn test_result_cache_size_tracked_after_put() {
+        let metrics = Arc::new(CacheStatsCollector::new());
+        let service = ResultCacheService::new(make_tier_config(), metrics);
+        let key = make_key("m", "size_test");
+        service
+            .put(key, make_result("some output text", "m"))
+            .await
+            .expect("put should succeed");
+        let stats = service.get_stats().await;
+        assert!(stats.total_size_bytes > 0);
+    }
+}

@@ -10,6 +10,8 @@ pub mod notificationconfig_traits;
 pub mod replicationconfig_traits;
 pub mod siteconfig_traits;
 pub mod types;
+#[cfg(test)]
+mod types_tests;
 
 // Re-export all types
 pub use types::*;

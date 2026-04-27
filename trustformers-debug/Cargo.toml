@@ -77,3 +77,6 @@ gif = ["dep:gif", "image"]
 wasm = ["wasm-bindgen", "wasm-bindgen-futures", "js-sys", "web-sys"]
 atomics = []  # WebAssembly atomic operations and threading support
 headless = []
+cuda = []      # NVIDIA CUDA GPU support
+rocm = []      # AMD ROCm GPU support
+tpu = []       # Google TPU support

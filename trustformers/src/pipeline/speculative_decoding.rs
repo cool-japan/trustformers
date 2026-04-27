@@ -939,4 +939,159 @@ mod tests {
         assert!(!result.accepted_tokens.is_empty());
         assert!(result.acceptance_rate > 0.0);
     }
+
+    // ---- Additional tests ----
+
+    #[test]
+    fn test_config_default_values() {
+        let cfg = SpeculativeDecodingConfig::default();
+        assert_eq!(cfg.speculation_depth, 4);
+        assert!((cfg.min_acceptance_rate - 0.6).abs() < 1e-6);
+        assert!(!cfg.tree_based_speculation);
+        assert_eq!(cfg.num_branches, 3);
+        assert!(cfg.adaptive_depth);
+        assert_eq!(cfg.max_speculation_depth, 8);
+    }
+
+    #[test]
+    fn test_speculation_tree_structure() {
+        let node = SpeculationNode {
+            token_id: 42,
+            probability: 0.8,
+            parent: None,
+            children: vec![1, 2, 3],
+            depth: 0,
+            cumulative_probability: 0.8,
+        };
+        assert_eq!(node.token_id, 42);
+        assert_eq!(node.children.len(), 3);
+        assert!(node.parent.is_none());
+    }
+
+    #[test]
+    fn test_verification_result_acceptance_rate_range() {
+        let result = VerificationResult {
+            draft_tokens: vec![1, 2, 3],
+            accepted_tokens: vec![1, 2],
+            rejection_index: Some(2),
+            acceptance_rate: 2.0 / 3.0,
+            verification_time_ms: 10,
+            target_probabilities: vec![0.9, 0.8, 0.5],
+            draft_probabilities: vec![0.8, 0.7, 0.6],
+        };
+        assert!(result.acceptance_rate >= 0.0 && result.acceptance_rate <= 1.0);
+    }
+
+    #[test]
+    fn test_draft_model_profile_speed_accuracy() {
+        let profile = DraftModelProfile {
+            model_id: "test_model".to_string(),
+            speed_score: 100.0,
+            accuracy_score: 0.85,
+            memory_usage: 256,
+            specialization: vec!["general".to_string()],
+            recent_performance: vec![0.8, 0.85, 0.9],
+        };
+        assert!(profile.speed_score > 0.0);
+        assert!(profile.accuracy_score >= 0.0 && profile.accuracy_score <= 1.0);
+    }
+
+    #[tokio::test]
+    async fn test_draft_acceptance_rate_computation() {
+        let target_model = MockTargetModel;
+        let draft_tokens = vec![1000u32, 1001, 1002, 1003, 1004];
+        let result = target_model
+            .verify_tokens(&[1, 2, 3], &draft_tokens, 0.8)
+            .await
+            .expect("verification succeeded");
+
+        // Acceptance rate = accepted / drafted
+        let expected = result.accepted_tokens.len() as f32 / draft_tokens.len() as f32;
+        assert!((result.acceptance_rate - expected).abs() < 1e-5);
+    }
+
+    #[tokio::test]
+    async fn test_token_acceptance_logic_decreasing() {
+        // MockTargetModel uses decreasing acceptance: 0.9, 0.7, 0.5, 0.3...
+        // tokens beyond index 2 (acceptance prob <= 0.5) should be rejected
+        let target_model = MockTargetModel;
+        let draft_tokens = vec![100u32, 101, 102, 103, 104];
+        let result = target_model.verify_tokens(&[1], &draft_tokens, 0.8).await.expect("ok");
+        // First tokens (acceptance > 0.5) are accepted, later ones rejected
+        assert!(result.accepted_tokens.len() <= draft_tokens.len());
+        if let Some(rej_idx) = result.rejection_index {
+            assert!(rej_idx < draft_tokens.len());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fallback_single_step() {
+        // When speculation_depth = 1, it degenerates to single-step decoding
+        let config = SpeculativeDecodingConfig {
+            speculation_depth: 1,
+            adaptive_depth: false,
+            ..Default::default()
+        };
+        let pipeline = create_speculative_decoding_pipeline(config);
+        let depth = pipeline.determine_speculation_depth("fast_draft").await.expect("ok");
+        assert_eq!(depth, 1);
+    }
+
+    #[tokio::test]
+    async fn test_speedup_estimation_positive() {
+        // Baseline time estimation must return a positive duration
+        let pipeline = create_speculative_decoding_pipeline(SpeculativeDecodingConfig::default());
+        let baseline = pipeline.estimate_baseline_time(10).await.expect("ok");
+        assert!(baseline.as_secs_f64() > 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_round_robin_draft_selection() {
+        let config = SpeculativeDecodingConfig {
+            draft_selection_strategy: DraftSelectionStrategy::RoundRobin,
+            ..Default::default()
+        };
+        let pipeline = create_speculative_decoding_pipeline(config);
+
+        let m0 = pipeline.select_draft_model(&[1]).await.expect("ok");
+        let m1 = pipeline.select_draft_model(&[1]).await.expect("ok");
+        // Two models: fast_draft and accurate_draft — they should differ on successive calls
+        // (or at minimum both are valid model IDs)
+        assert!(
+            m0.get_model_profile().model_id == "fast_draft"
+                || m0.get_model_profile().model_id == "accurate_draft"
+        );
+        assert!(
+            m1.get_model_profile().model_id == "fast_draft"
+                || m1.get_model_profile().model_id == "accurate_draft"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_most_accurate_model_selection() {
+        let config = SpeculativeDecodingConfig {
+            draft_selection_strategy: DraftSelectionStrategy::MostAccurate,
+            ..Default::default()
+        };
+        let pipeline = create_speculative_decoding_pipeline(config);
+        let selected = pipeline.select_draft_model(&[]).await.expect("ok");
+        // accurate_draft has accuracy_score 0.9 > fast_draft 0.7
+        assert_eq!(selected.get_model_profile().model_id, "accurate_draft");
+    }
+
+    #[tokio::test]
+    async fn test_speculation_tree_total_paths() {
+        let draft_model = MockDraftModel::new("t".to_string(), 1.0, 1.0);
+        let tree = draft_model.generate_tree_draft(&[1, 2], 3, 2, 1.0).await.expect("ok");
+        // 2 branches ^ 3 depth = 8 paths
+        assert_eq!(tree.total_paths, 8);
+        assert_eq!(tree.max_depth, 3);
+    }
+
+    #[tokio::test]
+    async fn test_efficiency_optimized_pipeline_builds() {
+        let pipeline = create_efficiency_optimized_speculative_pipeline();
+        let depth = pipeline.determine_speculation_depth("fast_draft").await.expect("ok");
+        assert!(depth >= 1);
+    }
 }

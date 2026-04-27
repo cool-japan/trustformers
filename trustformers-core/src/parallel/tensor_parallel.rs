@@ -742,4 +742,239 @@ mod tests {
 
         assert_eq!(weight.shape(), &[512, 512]); // 2048 / 4 = 512
     }
+
+    // ── TensorParallelShapes column parallel tests ──
+
+    #[test]
+    fn test_column_parallel_shape_simple() {
+        let shape = vec![32, 768];
+        let result = TensorParallelShapes::column_parallel_shape(&shape, 4, 0);
+        assert_eq!(result, vec![32, 192]); // 768 / 4 = 192
+    }
+
+    #[test]
+    fn test_column_parallel_shape_world_size_1() {
+        let shape = vec![32, 768];
+        let result = TensorParallelShapes::column_parallel_shape(&shape, 1, 0);
+        assert_eq!(result, vec![32, 768]);
+    }
+
+    #[test]
+    fn test_column_parallel_shape_3d() {
+        let shape = vec![4, 32, 128];
+        let result = TensorParallelShapes::column_parallel_shape(&shape, 2, 0);
+        assert_eq!(result, vec![4, 32, 64]); // 128 / 2 = 64
+    }
+
+    // ── TensorParallelShapes row parallel tests ──
+
+    #[test]
+    fn test_row_parallel_shape_simple() {
+        let shape = vec![768, 256];
+        let result = TensorParallelShapes::row_parallel_shape(&shape, 4, 0);
+        // splits second-to-last dim: 768 / 4 = 192
+        assert_eq!(result, vec![192, 256]);
+    }
+
+    #[test]
+    fn test_row_parallel_shape_3d() {
+        let shape = vec![4, 64, 128];
+        let result = TensorParallelShapes::row_parallel_shape(&shape, 2, 0);
+        assert_eq!(result, vec![4, 32, 128]); // 64 / 2 = 32
+    }
+
+    // ── split_sizes tests ──
+
+    #[test]
+    fn test_split_sizes_even() {
+        assert_eq!(
+            TensorParallelShapes::split_sizes(100, 4),
+            vec![25, 25, 25, 25]
+        );
+    }
+
+    #[test]
+    fn test_split_sizes_uneven() {
+        assert_eq!(
+            TensorParallelShapes::split_sizes(101, 4),
+            vec![26, 25, 25, 25]
+        );
+    }
+
+    #[test]
+    fn test_split_sizes_one_process() {
+        assert_eq!(TensorParallelShapes::split_sizes(50, 1), vec![50]);
+    }
+
+    #[test]
+    fn test_split_sizes_more_procs_than_size() {
+        let sizes = TensorParallelShapes::split_sizes(3, 5);
+        assert_eq!(sizes.len(), 5);
+        let total: usize = sizes.iter().sum();
+        assert_eq!(total, 3);
+    }
+
+    // ── Weight initialization tests ──
+
+    #[test]
+    fn test_column_parallel_weight_rank_0() {
+        let weight =
+            TensorParallelInit::column_parallel_weight(256, 1024, 4, 0, InitMethod::Xavier)
+                .expect("operation failed in test");
+        assert_eq!(weight.shape(), &[256, 256]);
+    }
+
+    #[test]
+    fn test_column_parallel_weight_last_rank() {
+        let weight =
+            TensorParallelInit::column_parallel_weight(256, 1024, 4, 3, InitMethod::Xavier)
+                .expect("operation failed in test");
+        assert_eq!(weight.shape(), &[256, 256]); // 1024 / 4 = 256
+    }
+
+    #[test]
+    fn test_row_parallel_weight() {
+        let weight = TensorParallelInit::row_parallel_weight(1024, 256, 4, 0, InitMethod::Xavier)
+            .expect("operation failed in test");
+        assert_eq!(weight.shape(), &[256, 256]); // 1024 / 4 = 256
+    }
+
+    #[test]
+    fn test_normal_init() {
+        let weight = TensorParallelInit::column_parallel_weight(
+            64,
+            64,
+            1,
+            0,
+            InitMethod::Normal {
+                mean: 0.0,
+                std: 0.02,
+            },
+        )
+        .expect("operation failed in test");
+        assert_eq!(weight.shape(), &[64, 64]);
+    }
+
+    #[test]
+    fn test_uniform_init() {
+        let weight = TensorParallelInit::column_parallel_weight(
+            64,
+            64,
+            1,
+            0,
+            InitMethod::Uniform {
+                low: -1.0,
+                high: 1.0,
+            },
+        )
+        .expect("operation failed in test");
+        assert_eq!(weight.shape(), &[64, 64]);
+
+        // Verify values are in range
+        let data = weight.data().expect("data extraction failed");
+        for &val in data.iter() {
+            assert!((-1.0..=1.0).contains(&val), "Value out of range: {}", val);
+        }
+    }
+
+    #[test]
+    fn test_kaiming_init() {
+        let weight = TensorParallelInit::column_parallel_weight(64, 128, 2, 0, InitMethod::Kaiming)
+            .expect("operation failed in test");
+        assert_eq!(weight.shape(), &[64, 64]); // 128 / 2 = 64
+    }
+
+    // ── ShardingStrategy tests ──
+
+    #[test]
+    fn test_sharding_strategy_variants() {
+        let _col = ShardingStrategy::ColumnWise(1);
+        let _row = ShardingStrategy::RowWise(0);
+        let _rep = ShardingStrategy::Replicated;
+        let _block = ShardingStrategy::Block2D {
+            row_dim: 0,
+            col_dim: 1,
+        };
+    }
+
+    // ── InitMethod tests ──
+
+    #[test]
+    fn test_init_method_variants() {
+        let _normal = InitMethod::Normal {
+            mean: 0.0,
+            std: 1.0,
+        };
+        let _uniform = InitMethod::Uniform {
+            low: -1.0,
+            high: 1.0,
+        };
+        let _xavier = InitMethod::Xavier;
+        let _kaiming = InitMethod::Kaiming;
+    }
+
+    // ── Gradient norm tests ──
+
+    #[test]
+    fn test_compute_gradient_norm_single() {
+        let data = vec![3.0, 4.0]; // norm = 5
+        let tensor = Tensor::from_vec(data, &[2]).expect("tensor creation failed");
+        let norm =
+            TensorParallelOps::compute_gradient_norm(&[tensor]).expect("norm computation failed");
+        assert!((norm - 5.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_compute_gradient_norm_multiple() {
+        let t1 = Tensor::from_data(vec![1.0, 0.0], &[2]).expect("tensor creation failed");
+        let t2 = Tensor::from_data(vec![0.0, 1.0], &[2]).expect("tensor creation failed");
+        let norm =
+            TensorParallelOps::compute_gradient_norm(&[t1, t2]).expect("norm computation failed");
+        // sqrt(1 + 1) = sqrt(2)
+        assert!((norm - std::f32::consts::SQRT_2).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_compute_gradient_norm_zero() {
+        let tensor = Tensor::zeros(&[4]).expect("tensor creation failed");
+        let norm =
+            TensorParallelOps::compute_gradient_norm(&[tensor]).expect("norm computation failed");
+        assert!(norm.abs() < 1e-6);
+    }
+
+    // ── AllReduceHandle tests ──
+
+    #[test]
+    fn test_all_reduce_handle_not_complete() {
+        let tensor = Tensor::ones(&[2]).expect("tensor creation failed");
+        let handle = AllReduceHandle {
+            tensor,
+            completed: false,
+        };
+        assert!(!handle.is_complete());
+    }
+
+    // ── AllGatherHandle tests ──
+
+    #[test]
+    fn test_all_gather_handle_creation() {
+        let local = Tensor::ones(&[2]).expect("tensor creation failed");
+        let dist = DistributedTensor {
+            local_shard: local,
+            global_shape: vec![4],
+            partition: TensorPartition {
+                split_dim: 0,
+                start_idx: 0,
+                end_idx: 2,
+                num_partitions: 2,
+                partition_rank: 0,
+            },
+            device_id: 0,
+        };
+        let handle = AllGatherHandle {
+            distributed: dist,
+            completed: false,
+        };
+        assert!(!handle.completed);
+    }
 }

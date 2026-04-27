@@ -1648,3 +1648,329 @@ pub enum SideEffectSeverity {
     /// Critical impact
     Critical,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0
+        }
+        fn next_f64(&mut self) -> f64 {
+            (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+        }
+        fn next_usize(&mut self, bound: usize) -> usize {
+            (self.next_u64() as usize) % bound.max(1)
+        }
+    }
+
+    // ---- ConflictConditionType tests ----
+    #[test]
+    fn test_conflict_condition_type_resource_usage() {
+        let ct = ConflictConditionType::ResourceUsage("cpu".to_string());
+        let formatted = format!("{:?}", ct);
+        assert!(formatted.contains("ResourceUsage"));
+    }
+
+    #[test]
+    fn test_conflict_condition_type_custom() {
+        let ct = ConflictConditionType::Custom("my_cond".to_string());
+        let formatted = format!("{:?}", ct);
+        assert!(formatted.contains("my_cond"));
+    }
+
+    #[test]
+    fn test_conflict_condition_type_all_variants() {
+        let variants = [
+            ConflictConditionType::TestCategory,
+            ConflictConditionType::TestDuration,
+            ConflictConditionType::ConcurrencyLevel,
+        ];
+        assert_eq!(variants.len(), 3);
+    }
+
+    // ---- ConflictPattern tests ----
+    #[test]
+    fn test_conflict_pattern_port_range_overlap() {
+        let p = ConflictPattern::PortRangeOverlap {
+            min_overlap: 8000,
+            max_overlap: 9000,
+        };
+        let formatted = format!("{:?}", p);
+        assert!(formatted.contains("8000"));
+    }
+
+    #[test]
+    fn test_conflict_pattern_file_path_overlap() {
+        let p = ConflictPattern::FilePathOverlap {
+            path_pattern: "/tmp/test_*".to_string(),
+            case_sensitive: true,
+        };
+        let formatted = format!("{:?}", p);
+        assert!(formatted.contains("tmp"));
+    }
+
+    #[test]
+    fn test_conflict_pattern_memory_contention() {
+        let p = ConflictPattern::MemoryContention {
+            memory_threshold: 0.85,
+            sustained_duration: Duration::from_secs(10),
+        };
+        let formatted = format!("{:?}", p);
+        assert!(formatted.contains("MemoryContention"));
+    }
+
+    #[test]
+    fn test_conflict_pattern_gpu_conflict() {
+        let p = ConflictPattern::GpuConflict {
+            gpu_ids: vec![0, 1],
+            exclusive_access: true,
+        };
+        let formatted = format!("{:?}", p);
+        assert!(formatted.contains("GpuConflict"));
+    }
+
+    #[test]
+    fn test_conflict_pattern_custom() {
+        let p = ConflictPattern::Custom {
+            pattern_name: "custom_pat".to_string(),
+            pattern_data: HashMap::new(),
+        };
+        let formatted = format!("{:?}", p);
+        assert!(formatted.contains("custom_pat"));
+    }
+
+    // ---- ConflictDetectionMethod tests ----
+    #[test]
+    fn test_conflict_detection_method_variants() {
+        let methods = [
+            ConflictDetectionMethod::RuleBased,
+            ConflictDetectionMethod::MachineLearning,
+            ConflictDetectionMethod::PatternRecognition,
+            ConflictDetectionMethod::StatisticalAnalysis,
+            ConflictDetectionMethod::Hybrid,
+        ];
+        assert_eq!(methods.len(), 5);
+    }
+
+    // ---- ResolutionComplexity tests ----
+    #[test]
+    fn test_resolution_complexity_variants() {
+        let complexities = [
+            ResolutionComplexity::Simple,
+            ResolutionComplexity::Moderate,
+            ResolutionComplexity::Complex,
+            ResolutionComplexity::VeryComplex,
+        ];
+        assert_eq!(complexities.len(), 4);
+    }
+
+    // ---- ComparisonOperator tests ----
+    #[test]
+    fn test_comparison_operator_all_variants() {
+        let ops = [
+            ComparisonOperator::Equals,
+            ComparisonOperator::NotEquals,
+            ComparisonOperator::GreaterThan,
+            ComparisonOperator::GreaterThanOrEqual,
+            ComparisonOperator::LessThan,
+            ComparisonOperator::LessThanOrEqual,
+            ComparisonOperator::Contains,
+            ComparisonOperator::Matches,
+        ];
+        assert_eq!(ops.len(), 8);
+    }
+
+    // ---- ConflictSensitivity tests ----
+    #[test]
+    fn test_conflict_sensitivity_variants() {
+        let sensitivities = [
+            ConflictSensitivity::Conservative,
+            ConflictSensitivity::Moderate,
+            ConflictSensitivity::Aggressive,
+            ConflictSensitivity::Ultra,
+        ];
+        assert_eq!(sensitivities.len(), 4);
+    }
+
+    // ---- ConflictDetectionAction tests ----
+    #[test]
+    fn test_conflict_detection_action_variants() {
+        let actions = [
+            ConflictDetectionAction::Block,
+            ConflictDetectionAction::Queue,
+            ConflictDetectionAction::Warn,
+            ConflictDetectionAction::Log,
+        ];
+        assert_eq!(actions.len(), 4);
+    }
+
+    // ---- TimingPatternType tests ----
+    #[test]
+    fn test_timing_pattern_type_variants() {
+        let types = [
+            TimingPatternType::PeakUsage,
+            TimingPatternType::DurationOverlap,
+            TimingPatternType::StartTimeDifference,
+            TimingPatternType::Seasonal,
+            TimingPatternType::Custom("my_pattern".to_string()),
+        ];
+        assert_eq!(types.len(), 5);
+    }
+
+    // ---- SideEffectSeverity tests ----
+    #[test]
+    fn test_side_effect_severity_variants() {
+        let sevs = [
+            SideEffectSeverity::Low,
+            SideEffectSeverity::Medium,
+            SideEffectSeverity::High,
+            SideEffectSeverity::Critical,
+        ];
+        assert_eq!(sevs.len(), 4);
+    }
+
+    // ---- NetworkConflictType tests ----
+    #[test]
+    fn test_network_conflict_type_variants() {
+        let types = [
+            NetworkConflictType::PortConflict,
+            NetworkConflictType::BandwidthContention,
+            NetworkConflictType::ConnectionLimit,
+            NetworkConflictType::ProtocolConflict,
+        ];
+        assert_eq!(types.len(), 4);
+    }
+
+    // ---- Struct construction tests ----
+    #[test]
+    fn test_expected_outcome_construction() {
+        let outcome = ExpectedOutcome {
+            description: "test outcome".to_string(),
+            probability: 0.85,
+            metrics: HashMap::new(),
+        };
+        assert!((outcome.probability - 0.85).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_detection_performance_metrics_default() {
+        let m = DetectionPerformanceMetrics::default();
+        assert_eq!(m.average_detection_time, Duration::default());
+        assert!((m.detection_throughput - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_detection_accuracy_metrics_default() {
+        let m = DetectionAccuracyMetrics::default();
+        assert!((m.overall_accuracy - 0.0).abs() < f32::EPSILON);
+        assert!((m.precision - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_applicability_condition_construction() {
+        let cond = ApplicabilityCondition {
+            description: "applies to all".to_string(),
+            required_characteristics: HashMap::new(),
+            exclusions: vec!["gpu_tests".to_string()],
+        };
+        assert_eq!(cond.exclusions.len(), 1);
+    }
+
+    #[test]
+    fn test_resolution_cost_construction() {
+        let cost = ResolutionCost {
+            development_time: Duration::from_secs(3600),
+            performance_cost: 0.1,
+            resource_cost_multiplier: 1.5,
+            maintenance_overhead: 0.05,
+        };
+        assert!((cost.resource_cost_multiplier - 1.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_resource_conflict_thresholds_construction() {
+        let thresholds = ResourceConflictThresholds {
+            cpu_threshold: 0.8,
+            memory_threshold: 0.9,
+            network_threshold: 0.7,
+            disk_io_threshold: 0.85,
+            gpu_threshold: 0.95,
+            custom_thresholds: HashMap::new(),
+        };
+        assert!(thresholds.gpu_threshold > thresholds.cpu_threshold);
+    }
+
+    #[test]
+    fn test_efficiency_impact_construction() {
+        let impact = EfficiencyImpact {
+            utilization_efficiency_loss: 0.1,
+            time_efficiency_loss: 0.2,
+            cost_efficiency_impact: 0.15,
+            overall_efficiency_loss: 0.15,
+        };
+        assert!(impact.time_efficiency_loss > impact.utilization_efficiency_loss);
+    }
+
+    #[test]
+    fn test_timing_pattern_construction() {
+        let pattern = TimingPattern {
+            pattern_type: TimingPatternType::PeakUsage,
+            parameters: HashMap::new(),
+            strength: 0.9,
+        };
+        assert!((pattern.strength - 0.9).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_conflict_condition_construction() {
+        let cond = ConflictCondition {
+            condition_type: ConflictConditionType::TestCategory,
+            operator: ComparisonOperator::Equals,
+            value: "integration".to_string(),
+            description: "Must be integration test".to_string(),
+        };
+        assert_eq!(cond.value, "integration");
+    }
+
+    // ---- ConflictDetector tests ----
+    #[test]
+    fn test_conflict_detector_new() {
+        let detector = ConflictDetector::new();
+        let stats = detector.get_statistics();
+        assert_eq!(stats.total_conflicts_detected, 0);
+    }
+
+    #[test]
+    fn test_conflict_detector_with_config() {
+        let config = ConflictDetectionConfig::default();
+        let detector = ConflictDetector::with_config(config);
+        let stats = detector.get_statistics();
+        assert_eq!(stats.total_conflicts_detected, 0);
+    }
+
+    // ---- LCG-driven tests ----
+    #[test]
+    fn test_lcg_generates_conflict_patterns() {
+        let mut rng = Lcg::new(42);
+        for _ in 0..20 {
+            let threshold = rng.next_f64() as f32;
+            assert!((0.0..1.0).contains(&threshold));
+        }
+    }
+
+    #[test]
+    fn test_lcg_generates_port_ranges() {
+        let mut rng = Lcg::new(123);
+        for _ in 0..30 {
+            let port = (rng.next_usize(60000) + 1024) as u16;
+            assert!(port >= 1024);
+        }
+    }
+}

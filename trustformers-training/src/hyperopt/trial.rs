@@ -519,4 +519,184 @@ mod tests {
         // For minimization, 0.1 should be better than 0.3
         assert_eq!(history.best_value(), Some(0.1));
     }
+
+    // -----------------------------------------------------------------------
+    // TrialMetrics
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_trial_metrics_new() {
+        let metrics = TrialMetrics::new(0.75);
+        assert_eq!(metrics.objective_value, 0.75);
+        assert!(metrics.metrics.is_empty());
+        assert!(metrics.intermediate_values.is_empty());
+    }
+
+    #[test]
+    fn test_trial_metrics_builder_pattern() {
+        let metrics =
+            TrialMetrics::new(0.9).add_metric("accuracy", 0.92).add_metric("f1_score", 0.88);
+        assert_eq!(metrics.metrics.len(), 2);
+        assert_eq!(metrics.metrics.get("accuracy"), Some(&0.92));
+    }
+
+    #[test]
+    fn test_trial_metrics_latest_intermediate_empty() {
+        let metrics = TrialMetrics::new(0.5);
+        assert_eq!(metrics.latest_intermediate_value(), None);
+    }
+
+    #[test]
+    fn test_trial_metrics_intermediate_at_step_missing() {
+        let metrics = TrialMetrics::new(0.5);
+        assert_eq!(metrics.intermediate_value_at_step(100), None);
+    }
+
+    #[test]
+    fn test_trial_metrics_intermediate_multiple_steps() {
+        let mut metrics = TrialMetrics::new(0.95);
+        metrics.add_intermediate_value(5, 0.5);
+        metrics.add_intermediate_value(10, 0.7);
+        metrics.add_intermediate_value(15, 0.95);
+        assert_eq!(metrics.intermediate_value_at_step(5), Some(0.5));
+        assert_eq!(metrics.intermediate_value_at_step(10), Some(0.7));
+        assert_eq!(metrics.latest_intermediate_value(), Some(0.95));
+    }
+
+    // -----------------------------------------------------------------------
+    // TrialResult
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_trial_result_success_no_error() {
+        let result = TrialResult::success(TrialMetrics::new(0.8));
+        assert!(result.error_message.is_none());
+        assert!((result.metrics.objective_value - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_trial_result_failure_has_error_message() {
+        let result = TrialResult::failure("CUDA out of memory");
+        assert!(result.error_message.is_some());
+        assert!(result.error_message.as_ref().unwrap_or(&String::new()).contains("CUDA"));
+        assert!(result.metrics.objective_value.is_nan());
+    }
+
+    // -----------------------------------------------------------------------
+    // Trial lifecycle
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_trial_starts_in_pending_state() {
+        let trial = Trial::new(0, HashMap::new());
+        assert_eq!(trial.state, TrialState::Pending);
+        assert!(!trial.is_finished());
+    }
+
+    #[test]
+    fn test_trial_complete_with_failure_marks_finished() {
+        let mut trial = Trial::new(1, HashMap::new());
+        trial.start();
+        trial.complete(TrialResult::failure("error"));
+        // After completing with failure result, trial is finished
+        assert!(trial.is_finished());
+    }
+
+    #[test]
+    fn test_trial_objective_value_none_when_not_complete() {
+        let trial = Trial::new(2, HashMap::new());
+        assert_eq!(trial.objective_value(), None);
+    }
+
+    #[test]
+    fn test_trial_get_param_present() {
+        let mut params = HashMap::new();
+        params.insert("dropout".to_string(), ParameterValue::Float(0.1));
+        let trial = Trial::new(3, params);
+        assert_eq!(
+            trial.get_param("dropout"),
+            Some(&ParameterValue::Float(0.1))
+        );
+    }
+
+    #[test]
+    fn test_trial_get_param_absent() {
+        let trial = Trial::new(4, HashMap::new());
+        assert_eq!(trial.get_param("missing"), None);
+    }
+
+    #[test]
+    fn test_trial_set_user_attr() {
+        let mut trial = Trial::new(5, HashMap::new());
+        trial.set_user_attr("experiment", "run_1");
+        assert_eq!(trial.get_user_attr("experiment"), Some("run_1"));
+    }
+
+    #[test]
+    fn test_trial_set_system_attr() {
+        let mut trial = Trial::new(6, HashMap::new());
+        trial.set_system_attr("node_id", "gpu-01");
+        assert_eq!(trial.get_system_attr("node_id"), Some("gpu-01"));
+    }
+
+    // -----------------------------------------------------------------------
+    // TrialHistory
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_trial_history_empty_initially() {
+        let history = TrialHistory::new(Direction::Maximize);
+        assert!(history.trials.is_empty());
+        assert_eq!(history.best_value(), None);
+    }
+
+    #[test]
+    fn test_trial_history_best_trial_by_max() {
+        let mut history = TrialHistory::new(Direction::Maximize);
+        for (i, val) in [0.5f64, 0.9, 0.7].iter().enumerate() {
+            let mut t = Trial::new(i, HashMap::new());
+            t.complete(TrialResult::success(TrialMetrics::new(*val)));
+            history.add_trial(t);
+        }
+        assert_eq!(history.best_value(), Some(0.9));
+    }
+
+    #[test]
+    fn test_trial_history_statistics_pruned_count() {
+        let mut history = TrialHistory::new(Direction::Maximize);
+        let mut pruned = Trial::new(0, HashMap::new());
+        pruned.start();
+        pruned.prune("too slow");
+        history.add_trial(pruned);
+        let stats = history.statistics();
+        assert_eq!(stats.pruned_trials, 1);
+    }
+
+    #[test]
+    fn test_trial_history_statistics_success_rate_all_complete() {
+        let mut history = TrialHistory::new(Direction::Maximize);
+        for i in 0..4_usize {
+            let mut t = Trial::new(i, HashMap::new());
+            t.complete(TrialResult::success(TrialMetrics::new(i as f64 * 0.1)));
+            history.add_trial(t);
+        }
+        let stats = history.statistics();
+        // success_rate returns (completed / total) * 100
+        assert!((stats.success_rate() - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_trial_history_statistics_pruning_rate_with_no_trials() {
+        let history = TrialHistory::new(Direction::Minimize);
+        let stats = history.statistics();
+        assert_eq!(stats.pruning_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_trial_duration_set_on_complete() {
+        let mut trial = Trial::new(0, HashMap::new());
+        trial.start();
+        trial.complete(TrialResult::success(TrialMetrics::new(1.0)));
+        assert!(trial.duration.is_some());
+    }
 }

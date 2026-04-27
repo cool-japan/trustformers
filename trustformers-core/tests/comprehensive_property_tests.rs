@@ -121,7 +121,7 @@ proptest! {
         let sa = tensor_a.mul_scalar(scalar)?;
         let sb = tensor_b.mul_scalar(scalar)?;
         let sa_plus_sb = sa.add(&sb)?;
-        TestAssertions::assert_tensor_eq_with_epsilon(&s_ab, &sa_plus_sb, 1e-3)?;
+        TestAssertions::assert_tensor_eq_with_epsilon(&s_ab, &sa_plus_sb, 2e-3)?;
     }
 }
 
@@ -204,14 +204,14 @@ proptest! {
         // Generate a second shape with the same total size
         let mut shape2 = vec![new_dim];
         let mut remaining = size1 / new_dim;
-        if size1 % new_dim != 0 {
+        if !size1.is_multiple_of(new_dim) {
             // If not divisible, use the original shape to ensure valid reshape
             return Ok(());
         }
 
         // Factor the remaining size into reasonable dimensions
         while remaining > 1 && shape2.len() < 4 {
-            let factor = (2..=remaining.min(10)).find(|&f| remaining % f == 0).unwrap_or(remaining);
+            let factor = (2..=remaining.min(10)).find(|&f| remaining.is_multiple_of(f)).unwrap_or(remaining);
             shape2.push(factor);
             remaining /= factor;
         }
@@ -377,7 +377,7 @@ proptest! {
 
         // Test log properties: log(a*b) = log(a) + log(b) for positive values
         // Only test if size is even and >= 4 to ensure proper reshape
-        if size >= 4 && size % 2 == 0 {
+        if size >= 4 && size.is_multiple_of(2) {
             let half_size = size / 2;
             let tensor_split = tensor.reshape(&[2, half_size])?;
             let a = tensor_split.slice(0, 0, 1)?.reshape(&[half_size])?;

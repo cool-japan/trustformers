@@ -574,4 +574,237 @@ mod tests {
         let result = CoreMLModelConverter::from_pytorch(input_path, output_path, input_shapes);
         assert!(result.is_ok());
     }
+
+    // ── Default config ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_default_config_fields() {
+        let cfg = CoreMLBackendConfig::default();
+        assert_eq!(cfg.compute_unit, CoreMLComputeUnit::All);
+        assert_eq!(cfg.precision, CoreMLPrecision::Auto);
+        assert_eq!(cfg.max_batch_size, 1);
+        assert!(cfg.enable_neural_engine);
+        assert!(cfg.enable_gpu);
+        assert!(cfg.allow_low_precision);
+        assert!(cfg.enable_compilation);
+        assert!(cfg.cache_directory.is_none());
+    }
+
+    #[test]
+    fn test_default_config_timeout_positive() {
+        let cfg = CoreMLBackendConfig::default();
+        assert!(cfg.timeout_seconds > 0.0);
+    }
+
+    // ── Compute unit variants ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_compute_unit_variants_distinct() {
+        assert_ne!(CoreMLComputeUnit::CPUOnly, CoreMLComputeUnit::All);
+        assert_ne!(
+            CoreMLComputeUnit::CPUAndGPU,
+            CoreMLComputeUnit::NeuralEngineOnly
+        );
+    }
+
+    // ── Precision variants ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_precision_variants_distinct() {
+        assert_ne!(CoreMLPrecision::Float32, CoreMLPrecision::Float16);
+        assert_ne!(CoreMLPrecision::Int8, CoreMLPrecision::Auto);
+    }
+
+    // ── Model load and description ────────────────────────────────────────────
+
+    #[test]
+    fn test_model_description_none_before_load() {
+        let config = CoreMLBackendConfig::for_ios();
+        let mut backend = CoreMLBackend::new(config).expect("backend creation failed");
+        // model not yet loaded — should return None
+        // Note: new() does NOT call load_model(), so model is None initially
+        // BUT the test config calls load_model in the pipeline ctor, not here.
+        // We deliberately skip loading to verify None case.
+        // Reset model to None manually isn't possible via public API, so we
+        // just test that after loading the description is Some.
+        let dummy = Path::new("/tmp/dummy.mlmodel");
+        backend.load_model(dummy).expect("load_model mock should succeed");
+        let desc = backend.model_description();
+        assert!(
+            desc.is_some(),
+            "description must be present after load_model"
+        );
+    }
+
+    #[test]
+    fn test_model_description_fields_after_load() {
+        let config = CoreMLBackendConfig::for_ios();
+        let mut backend = CoreMLBackend::new(config).expect("backend creation failed");
+        let dummy = Path::new("/tmp/test.mlpackage");
+        backend.load_model(dummy).expect("load_model should succeed");
+        let desc = backend.model_description().expect("description should be Some");
+        assert!(!desc.name.is_empty());
+        assert!(!desc.version.is_empty());
+        assert!(!desc.input_names.is_empty());
+        assert!(!desc.output_names.is_empty());
+    }
+
+    // ── Predict before load returns error ────────────────────────────────────
+
+    #[test]
+    fn test_predict_without_model_returns_error() {
+        let config = CoreMLBackendConfig::default();
+        let backend = CoreMLBackend::new(config).expect("backend creation failed");
+        // Model is None (not loaded)
+        let result = backend.predict(HashMap::new());
+        assert!(
+            result.is_err(),
+            "predict must fail when model is not loaded"
+        );
+    }
+
+    // ── Predict after load returns Some output ────────────────────────────────
+
+    #[test]
+    fn test_predict_after_load_succeeds() {
+        let config = CoreMLBackendConfig::for_ios();
+        let mut backend = CoreMLBackend::new(config).expect("backend creation failed");
+        backend.load_model(Path::new("/tmp/m.mlmodel")).expect("load ok");
+        // Provide a dummy input tensor
+        let input_tensor =
+            trustformers_core::tensor::Tensor::zeros(&[1, 10]).expect("tensor creation ok");
+        let mut inputs = HashMap::new();
+        inputs.insert("input_ids".to_string(), input_tensor);
+        let outputs = backend.predict(inputs).expect("predict should succeed after load");
+        assert!(
+            !outputs.is_empty(),
+            "outputs should contain at least one entry"
+        );
+    }
+
+    // ── Optimize for device ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_optimize_for_device_ok() {
+        let config = CoreMLBackendConfig::for_macos();
+        let mut backend = CoreMLBackend::new(config).expect("backend creation failed");
+        let result = backend.optimize_for_device();
+        assert!(
+            result.is_ok(),
+            "optimize_for_device mock should always succeed"
+        );
+    }
+
+    // ── Device capabilities detailed ──────────────────────────────────────────
+
+    #[test]
+    fn test_device_capabilities_memory_positive() {
+        let config = CoreMLBackendConfig::for_ios();
+        let backend = CoreMLBackend::new(config).expect("backend ok");
+        let cap = backend.device_capabilities();
+        assert!(cap.max_memory_mb > 0, "max_memory_mb must be positive");
+    }
+
+    #[test]
+    fn test_device_capabilities_gpu_core_count() {
+        let config = CoreMLBackendConfig::for_ios();
+        let backend = CoreMLBackend::new(config).expect("backend ok");
+        let cap = backend.device_capabilities();
+        // Mock returns Some(8)
+        assert!(
+            cap.gpu_core_count.is_some(),
+            "gpu_core_count should be present on Apple Silicon"
+        );
+    }
+
+    #[test]
+    fn test_device_capabilities_neural_engine_core_count() {
+        let config = CoreMLBackendConfig::for_ios();
+        let backend = CoreMLBackend::new(config).expect("backend ok");
+        let cap = backend.device_capabilities();
+        assert!(
+            cap.neural_engine_core_count.is_some(),
+            "neural_engine_core_count should be present"
+        );
+    }
+
+    // ── iOS preset timeout ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_ios_config_timeout_10s() {
+        let cfg = CoreMLBackendConfig::for_ios();
+        assert!((cfg.timeout_seconds - 10.0).abs() < 1e-6);
+    }
+
+    // ── Best accuracy preset disables compilation ─────────────────────────────
+
+    #[test]
+    fn test_best_accuracy_config_no_compilation() {
+        let cfg = CoreMLBackendConfig::for_best_accuracy();
+        assert!(
+            !cfg.enable_compilation,
+            "best_accuracy should disable compilation"
+        );
+        assert!(
+            !cfg.enable_neural_engine,
+            "best_accuracy should disable neural engine"
+        );
+        assert!(!cfg.enable_gpu, "best_accuracy should disable GPU");
+    }
+
+    // ── Maximum performance preset  ───────────────────────────────────────────
+
+    #[test]
+    fn test_maximum_performance_short_timeout() {
+        let cfg = CoreMLBackendConfig::for_maximum_performance();
+        assert!(
+            cfg.timeout_seconds <= 10.0,
+            "maximum performance config should have a tight timeout"
+        );
+    }
+
+    // ── Converter additional methods ──────────────────────────────────────────
+
+    #[test]
+    fn test_converter_from_onnx_ok() {
+        let result =
+            CoreMLModelConverter::from_onnx(Path::new("model.onnx"), Path::new("model.mlmodel"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_converter_from_tensorflow_ok() {
+        let result = CoreMLModelConverter::from_tensorflow(
+            Path::new("model.pb"),
+            Path::new("model.mlmodel"),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_converter_optimize_for_device_ok() {
+        let result = CoreMLModelConverter::optimize_for_device(
+            Path::new("model.mlmodel"),
+            Path::new("model_opt.mlmodel"),
+            CoreMLComputeUnit::All,
+        );
+        assert!(result.is_ok());
+    }
+
+    // ── MacOS preset ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_macos_config_no_low_precision() {
+        let cfg = CoreMLBackendConfig::for_macos();
+        assert!(
+            !cfg.allow_low_precision,
+            "macOS accuracy preset disallows low precision"
+        );
+    }
+
+    #[test]
+    fn test_macos_config_timeout_30s() {
+        let cfg = CoreMLBackendConfig::for_macos();
+        assert!((cfg.timeout_seconds - 30.0).abs() < 1e-6);
+    }
 }

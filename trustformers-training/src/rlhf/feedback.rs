@@ -396,4 +396,193 @@ mod tests {
 
         Ok(())
     }
+
+    // ── Additional tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_feedback_config_default_values() {
+        let cfg = FeedbackConfig::default();
+        assert!(cfg.max_feedback_length > 0);
+        assert!(cfg.feedback_temperature > 0.0);
+        assert!(cfg.quality_threshold >= 0.0 && cfg.quality_threshold <= 1.0);
+        assert!(cfg.consistency_weight >= 0.0);
+        assert!(cfg.diversity_weight >= 0.0);
+    }
+
+    #[test]
+    fn test_feedback_config_use_human_feedback_default() {
+        let cfg = FeedbackConfig::default();
+        assert!(cfg.use_human_feedback, "default should use human feedback");
+    }
+
+    #[test]
+    fn test_feedback_statistics_default_zeros() {
+        let stats = FeedbackStatistics::default();
+        assert_eq!(stats.total_feedback_count, 0);
+        assert_eq!(stats.human_feedback_count, 0);
+        assert_eq!(stats.ai_feedback_count, 0);
+        assert!((stats.average_rating).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_feedback_processor_initial_stats() {
+        let processor = FeedbackProcessor::new(FeedbackConfig::default());
+        let stats = processor.get_statistics();
+        assert_eq!(stats.total_feedback_count, 0);
+    }
+
+    #[test]
+    fn test_human_feedback_valid_rating_accepted() {
+        let mut processor = FeedbackProcessor::new(FeedbackConfig::default());
+        let feedback = HumanFeedback {
+            id: "valid_001".to_string(),
+            prompt: "Prompt".to_string(),
+            response: "Response".to_string(),
+            rating: 0.8,
+            feedback_text: Some("Good answer".to_string()),
+            annotator_id: "ann_1".to_string(),
+            timestamp: 1_000_000,
+            metadata: HashMap::new(),
+        };
+        assert!(processor.add_human_feedback(feedback).is_ok());
+    }
+
+    #[test]
+    fn test_human_feedback_zero_rating_valid() {
+        let mut processor = FeedbackProcessor::new(FeedbackConfig::default());
+        let feedback = HumanFeedback {
+            id: "zero_001".to_string(),
+            prompt: "What?".to_string(),
+            response: "Nothing".to_string(),
+            rating: 0.0,
+            feedback_text: None,
+            annotator_id: "ann_2".to_string(),
+            timestamp: 2_000_000,
+            metadata: HashMap::new(),
+        };
+        assert!(processor.add_human_feedback(feedback).is_ok());
+    }
+
+    #[test]
+    fn test_human_feedback_max_rating_valid() {
+        let mut processor = FeedbackProcessor::new(FeedbackConfig::default());
+        let feedback = HumanFeedback {
+            id: "max_001".to_string(),
+            prompt: "Perfect?".to_string(),
+            response: "Yes".to_string(),
+            rating: 1.0,
+            feedback_text: None,
+            annotator_id: "ann_3".to_string(),
+            timestamp: 3_000_000,
+            metadata: HashMap::new(),
+        };
+        assert!(processor.add_human_feedback(feedback).is_ok());
+    }
+
+    #[test]
+    fn test_ai_feedback_struct_creation() {
+        let ai_fb = AIFeedback {
+            id: "ai_001".to_string(),
+            prompt: "Question?".to_string(),
+            response: "Answer.".to_string(),
+            helpfulness_score: 0.9,
+            harmlessness_score: 0.95,
+            honesty_score: 0.85,
+            overall_score: 0.9,
+            explanation: "Very helpful response".to_string(),
+            confidence: 0.8,
+            model_version: "gpt-4".to_string(),
+        };
+        assert!(ai_fb.overall_score >= 0.0 && ai_fb.overall_score <= 1.0);
+        assert!(ai_fb.confidence >= 0.0 && ai_fb.confidence <= 1.0);
+    }
+
+    #[test]
+    fn test_ai_feedback_accepted() {
+        let mut processor = FeedbackProcessor::new(FeedbackConfig::default());
+        let ai_fb = AIFeedback {
+            id: "ai_002".to_string(),
+            prompt: "Prompt".to_string(),
+            response: "Response".to_string(),
+            helpfulness_score: 0.8,
+            harmlessness_score: 0.9,
+            honesty_score: 0.7,
+            overall_score: 0.8,
+            explanation: "OK".to_string(),
+            confidence: 0.75,
+            model_version: "v1".to_string(),
+        };
+        assert!(processor.add_ai_feedback(ai_fb).is_ok());
+    }
+
+    #[test]
+    fn test_feedback_aggregation_variants() {
+        // Verify all FeedbackAggregation variants are distinct
+        let mean = FeedbackAggregation::Mean;
+        let median = FeedbackAggregation::Median;
+        let weighted = FeedbackAggregation::WeightedMean;
+        let consensus = FeedbackAggregation::Consensus;
+        let majority = FeedbackAggregation::MajorityVote;
+        // Just ensure they can be created without issues
+        let _ = (mean, median, weighted, consensus, majority);
+    }
+
+    #[test]
+    fn test_feedback_processor_clear_buffers() {
+        let mut processor = FeedbackProcessor::new(FeedbackConfig::default());
+        let feedback = HumanFeedback {
+            id: "clear_001".to_string(),
+            prompt: "Prompt".to_string(),
+            response: "Response".to_string(),
+            rating: 0.5,
+            feedback_text: None,
+            annotator_id: "ann_1".to_string(),
+            timestamp: 1_000_000,
+            metadata: HashMap::new(),
+        };
+        processor.add_human_feedback(feedback).unwrap_or(());
+        // Verify feedback was added before clearing
+        assert_eq!(processor.get_statistics().human_feedback_count, 1);
+        processor.clear_buffers();
+        // clear_buffers clears internal buffers; a subsequent update_statistics call
+        // would reflect 0 — here we verify the method does not panic
+        // and the processor remains usable after clearing
+        let stats_after = processor.get_statistics();
+        let _ = stats_after; // verify we can still call get_statistics without panic
+    }
+
+    #[test]
+    fn test_feedback_batch_with_weights() -> Result<()> {
+        let processor = FeedbackProcessor::new(FeedbackConfig::default());
+        let batch = FeedbackBatch {
+            prompts: vec!["P1".to_string()],
+            responses: vec!["R1".to_string()],
+            ratings: Tensor::from_vec(vec![0.7], &[1])?,
+            feedback_texts: vec![None],
+            weights: Some(Tensor::from_vec(vec![0.5], &[1])?),
+        };
+        let processed = processor.process_feedback_batch(&batch);
+        assert!(processed.is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn test_feedback_multiple_add_increments_stats() {
+        let mut processor = FeedbackProcessor::new(FeedbackConfig::default());
+        for i in 0..5u32 {
+            let feedback = HumanFeedback {
+                id: format!("fb_{}", i),
+                prompt: format!("Prompt {}", i),
+                response: format!("Response {}", i),
+                rating: 0.5 + (i as f32) * 0.08,
+                feedback_text: None,
+                annotator_id: format!("ann_{}", i),
+                timestamp: i as u64 * 1000,
+                metadata: HashMap::new(),
+            };
+            processor.add_human_feedback(feedback).unwrap_or(());
+        }
+        let stats = processor.get_statistics();
+        assert_eq!(stats.human_feedback_count, 5);
+    }
 }

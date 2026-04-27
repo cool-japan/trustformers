@@ -366,7 +366,7 @@ impl OptimizerMonitor {
 
     /// Check if we should log detailed metrics this step.
     pub fn should_log(&self) -> bool {
-        self.metrics.step % self.config.log_frequency == 0
+        self.metrics.step.is_multiple_of(self.config.log_frequency)
     }
 
     /// Get a summary report of current optimizer status.
@@ -754,7 +754,7 @@ impl HyperparameterSensitivity {
     /// Check if sensitivity analysis should be performed this step.
     pub fn should_analyze(&self) -> bool {
         self.config.enabled
-            && self.step_count % self.config.analysis_frequency == 0
+            && self.step_count.is_multiple_of(self.config.analysis_frequency)
             && self.step_count >= self.config.min_samples
     }
 

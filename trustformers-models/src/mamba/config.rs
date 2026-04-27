@@ -255,4 +255,241 @@ mod tests {
         assert_eq!(config.architecture(), "mamba");
         assert!(config.validate().is_ok());
     }
+
+    // ---- Mamba-2.8B specific defaults ----
+
+    #[test]
+    fn test_mamba_2_8b_d_model() {
+        let config = MambaConfig::mamba_2_8b();
+        assert_eq!(config.d_model, 2560, "Mamba-2.8B d_model must be 2560");
+    }
+
+    #[test]
+    fn test_mamba_2_8b_n_layers() {
+        let config = MambaConfig::mamba_2_8b();
+        assert_eq!(config.n_layer, 64, "Mamba-2.8B must have 64 layers");
+    }
+
+    #[test]
+    fn test_mamba_2_8b_d_state() {
+        let config = MambaConfig::mamba_2_8b();
+        assert_eq!(config.d_state, 16, "Mamba-2.8B d_state must be 16");
+    }
+
+    #[test]
+    fn test_mamba_2_8b_expand() {
+        let config = MambaConfig::mamba_2_8b();
+        assert_eq!(config.expand, 2, "Mamba-2.8B expand must be 2");
+    }
+
+    // ---- dt_rank "auto" = ceil(d_model/16) ----
+
+    #[test]
+    fn test_dt_rank_auto_130m() {
+        let config = MambaConfig::mamba_130m();
+        // ceil(768 / 16) = 48
+        assert_eq!(config.get_dt_rank(), 48);
+    }
+
+    #[test]
+    fn test_dt_rank_auto_370m() {
+        let config = MambaConfig::mamba_370m();
+        // ceil(1024 / 16) = 64
+        assert_eq!(config.get_dt_rank(), 64);
+    }
+
+    #[test]
+    fn test_dt_rank_auto_790m() {
+        let config = MambaConfig::mamba_790m();
+        // ceil(1536 / 16) = 96
+        assert_eq!(config.get_dt_rank(), 96);
+    }
+
+    #[test]
+    fn test_dt_rank_auto_1_4b() {
+        let config = MambaConfig::mamba_1_4b();
+        // ceil(2048 / 16) = 128
+        assert_eq!(config.get_dt_rank(), 128);
+    }
+
+    #[test]
+    fn test_dt_rank_auto_2_8b() {
+        let config = MambaConfig::mamba_2_8b();
+        // ceil(2560 / 16) = 160
+        assert_eq!(config.get_dt_rank(), 160);
+    }
+
+    #[test]
+    fn test_dt_rank_explicit_overrides_auto() {
+        let config = MambaConfig {
+            d_model: 768,
+            dt_rank: Some(100),
+            ..Default::default()
+        };
+        assert_eq!(
+            config.get_dt_rank(),
+            100,
+            "Explicit dt_rank should override auto"
+        );
+    }
+
+    // ---- d_inner = expand * d_model ----
+
+    #[test]
+    fn test_d_inner_2_8b() {
+        let config = MambaConfig::mamba_2_8b();
+        assert_eq!(
+            config.get_d_inner(),
+            config.expand * config.d_model,
+            "d_inner = expand * d_model"
+        );
+    }
+
+    #[test]
+    fn test_d_inner_370m() {
+        let config = MambaConfig::mamba_370m();
+        // 1024 * 2 = 2048
+        assert_eq!(config.get_d_inner(), 2048);
+    }
+
+    // ---- d_conv = 4 (default SSM conv width) ----
+
+    #[test]
+    fn test_d_conv_default_is_4() {
+        let config = MambaConfig::default();
+        assert_eq!(config.d_conv, 4);
+    }
+
+    #[test]
+    fn test_d_conv_preserved_in_presets() {
+        for d_model in [768_usize, 1024, 1536, 2048, 2560] {
+            let config = MambaConfig {
+                d_model,
+                ..Default::default()
+            };
+            assert_eq!(config.d_conv, 4, "d_conv must be 4 for d_model={}", d_model);
+        }
+    }
+
+    // ---- conv_bias ----
+
+    #[test]
+    fn test_use_conv_bias_default_true() {
+        let config = MambaConfig::default();
+        assert!(
+            config.use_conv_bias,
+            "use_conv_bias must be true by default"
+        );
+    }
+
+    #[test]
+    fn test_use_bias_default_false() {
+        let config = MambaConfig::default();
+        assert!(
+            !config.use_bias,
+            "use_bias must be false by default (no linear bias)"
+        );
+    }
+
+    // ---- Validation ----
+
+    #[test]
+    fn test_validation_fails_zero_d_model() {
+        let config = MambaConfig {
+            d_model: 0,
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validation_fails_zero_n_layer() {
+        let config = MambaConfig {
+            n_layer: 0,
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validation_fails_zero_vocab_size() {
+        let config = MambaConfig {
+            vocab_size: 0,
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_all_presets_validate() {
+        for config in [
+            MambaConfig::mamba_130m(),
+            MambaConfig::mamba_370m(),
+            MambaConfig::mamba_790m(),
+            MambaConfig::mamba_1_4b(),
+            MambaConfig::mamba_2_8b(),
+        ] {
+            assert!(
+                config.validate().is_ok(),
+                "Preset with d_model={} failed validation",
+                config.d_model
+            );
+        }
+    }
+
+    // ---- from_pretrained short names ----
+
+    #[test]
+    fn test_from_pretrained_short_name_2_8b() {
+        let config = MambaConfig::from_pretrained_name("mamba-2.8b");
+        assert!(config.is_some());
+        assert_eq!(config.expect("mamba-2.8b config").d_model, 2560);
+    }
+
+    #[test]
+    fn test_from_pretrained_short_name_790m() {
+        let config = MambaConfig::from_pretrained_name("mamba-790m");
+        assert!(config.is_some());
+        assert_eq!(config.expect("mamba-790m config").d_model, 1536);
+    }
+
+    // ---- Parameter ordering: larger model → larger d_model ----
+
+    #[test]
+    fn test_d_model_increases_with_model_size() {
+        let configs = [
+            MambaConfig::mamba_130m(),
+            MambaConfig::mamba_370m(),
+            MambaConfig::mamba_790m(),
+            MambaConfig::mamba_1_4b(),
+            MambaConfig::mamba_2_8b(),
+        ];
+        for i in 1..configs.len() {
+            assert!(
+                configs[i].d_model >= configs[i - 1].d_model,
+                "d_model must be non-decreasing with model size"
+            );
+        }
+    }
+
+    // ---- Serialization ----
+
+    #[test]
+    fn test_config_serialization_roundtrip() {
+        let config = MambaConfig::mamba_2_8b();
+        let json = serde_json::to_string(&config).expect("serialize MambaConfig");
+        let restored: MambaConfig = serde_json::from_str(&json).expect("deserialize MambaConfig");
+        assert_eq!(config.d_model, restored.d_model);
+        assert_eq!(config.n_layer, restored.n_layer);
+        assert_eq!(config.d_state, restored.d_state);
+    }
+
+    #[test]
+    fn test_config_clone_preserves_fields() {
+        let config = MambaConfig::mamba_2_8b();
+        let cloned = config.clone();
+        assert_eq!(config.d_model, cloned.d_model);
+        assert_eq!(config.expand, cloned.expand);
+        assert_eq!(config.d_conv, cloned.d_conv);
+    }
 }

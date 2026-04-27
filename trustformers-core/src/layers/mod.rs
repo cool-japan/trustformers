@@ -62,6 +62,10 @@ pub mod paged_attention;
 pub mod sdpa;
 
 #[cfg(test)]
+mod layernorm_tests;
+#[cfg(test)]
+mod linear_tests;
+#[cfg(test)]
 mod tests;
 
 pub use attention::{

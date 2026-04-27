@@ -761,7 +761,6 @@ mod tests {
     fn test_watchpoint() -> Result<()> {
         let debugger = TensorDebugger::new();
 
-        // Add watchpoint for NaN
         let wp = Watchpoint {
             tensor_pattern: "watched".to_string(),
             condition: WatchCondition::HasNaN,
@@ -770,15 +769,400 @@ mod tests {
         };
         debugger.add_watchpoint(wp);
 
-        // Create tensor with NaN
         let data = vec![1.0, f32::NAN];
         let tensor = Tensor::from_slice(&data, &[2])?;
 
         debugger.register_tensor("watched".to_string(), tensor)?;
 
-        // Breakpoint should be hit
         assert!(debugger.is_breakpoint_hit());
 
         Ok(())
+    }
+
+    // ── TensorDebuggerConfig tests ──
+
+    #[test]
+    fn test_debugger_config_default() {
+        let config = TensorDebuggerConfig::default();
+        assert!(config.auto_detect_issues);
+        assert!(config.enable_tracing);
+        assert_eq!(config.max_trace_entries, 1000);
+        assert!(config.enable_watchpoints);
+        assert!(config.break_on_error);
+        assert!(!config.break_on_warning);
+        assert_eq!(config.max_issues, 100);
+    }
+
+    #[test]
+    fn test_debugger_with_custom_config() {
+        let config = TensorDebuggerConfig {
+            auto_detect_issues: false,
+            enable_tracing: false,
+            max_trace_entries: 10,
+            enable_watchpoints: false,
+            break_on_error: false,
+            break_on_warning: true,
+            max_issues: 5,
+        };
+        let debugger = TensorDebugger::with_config(config);
+        assert!(!debugger.is_breakpoint_hit());
+    }
+
+    #[test]
+    fn test_debugger_default_impl() {
+        let debugger = TensorDebugger::default();
+        assert_eq!(debugger.get_issues().len(), 0);
+    }
+
+    // ── DebugTensorStats tests ──
+
+    #[test]
+    fn test_tensor_stats_normal() -> Result<()> {
+        let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let tensor = Tensor::from_slice(&data, &[5])?;
+        let stats = DebugTensorStats::from_tensor(&tensor)?;
+
+        assert_eq!(stats.shape, vec![5]);
+        assert_eq!(stats.total_elements, 5);
+        assert_eq!(stats.nan_count, 0);
+        assert_eq!(stats.inf_count, 0);
+        assert_eq!(stats.zero_count, 0);
+        assert!(stats.min.is_some());
+        assert!((stats.min.expect("min should exist") - 1.0).abs() < 1e-6);
+        assert!((stats.max.expect("max should exist") - 5.0).abs() < 1e-6);
+        assert!((stats.mean.expect("mean should exist") - 3.0).abs() < 1e-6);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_tensor_stats_all_zeros() -> Result<()> {
+        let tensor = Tensor::zeros(&[4])?;
+        let stats = DebugTensorStats::from_tensor(&tensor)?;
+        assert_eq!(stats.zero_count, 4);
+
+        let issues = stats.detect_issues();
+        let has_all_zeros = issues.iter().any(|i| i.issue_type == TensorIssueType::AllZeros);
+        assert!(has_all_zeros);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_tensor_stats_with_inf() -> Result<()> {
+        let data = vec![1.0, f32::INFINITY, -f32::INFINITY, 2.0];
+        let tensor = Tensor::from_slice(&data, &[4])?;
+        let stats = DebugTensorStats::from_tensor(&tensor)?;
+        assert_eq!(stats.inf_count, 2);
+
+        let issues = stats.detect_issues();
+        let has_inf = issues.iter().any(|i| i.issue_type == TensorIssueType::Infinity);
+        assert!(has_inf);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_tensor_stats_vanishing() -> Result<()> {
+        let data = vec![1e-10, 2e-10, 3e-10];
+        let tensor = Tensor::from_slice(&data, &[3])?;
+        let stats = DebugTensorStats::from_tensor(&tensor)?;
+
+        let issues = stats.detect_issues();
+        let has_vanishing =
+            issues.iter().any(|i| i.issue_type == TensorIssueType::VanishingGradient);
+        assert!(has_vanishing);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_tensor_stats_exploding() -> Result<()> {
+        let data = vec![1e7, 2e7];
+        let tensor = Tensor::from_slice(&data, &[2])?;
+        let stats = DebugTensorStats::from_tensor(&tensor)?;
+
+        let issues = stats.detect_issues();
+        let has_exploding =
+            issues.iter().any(|i| i.issue_type == TensorIssueType::ExplodingGradient);
+        assert!(has_exploding);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_tensor_stats_memory_bytes() -> Result<()> {
+        let tensor = Tensor::ones(&[10, 20])?;
+        let stats = DebugTensorStats::from_tensor(&tensor)?;
+        // F32 = 4 bytes per element, 200 elements
+        assert_eq!(stats.memory_bytes, 200 * 4);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_tensor_stats_std_dev() -> Result<()> {
+        // All same value => std_dev should be 0
+        let data = vec![5.0, 5.0, 5.0, 5.0];
+        let tensor = Tensor::from_slice(&data, &[4])?;
+        let stats = DebugTensorStats::from_tensor(&tensor)?;
+        assert!((stats.std_dev.expect("std_dev should exist")).abs() < 1e-6);
+
+        Ok(())
+    }
+
+    // ── Severity tests ──
+
+    #[test]
+    fn test_severity_ordering() {
+        assert!(Severity::Info < Severity::Warning);
+        assert!(Severity::Warning < Severity::Error);
+        assert!(Severity::Error < Severity::Critical);
+    }
+
+    // ── TensorIssueType tests ──
+
+    #[test]
+    fn test_tensor_issue_type_display() {
+        assert_eq!(format!("{}", TensorIssueType::NaN), "NaN Values");
+        assert_eq!(format!("{}", TensorIssueType::Infinity), "Infinite Values");
+        assert_eq!(
+            format!("{}", TensorIssueType::VanishingGradient),
+            "Vanishing Gradient"
+        );
+        assert_eq!(
+            format!("{}", TensorIssueType::ExplodingGradient),
+            "Exploding Gradient"
+        );
+        assert_eq!(format!("{}", TensorIssueType::AllZeros), "All Zeros");
+    }
+
+    // ── TensorDebugIssue builder tests ──
+
+    #[test]
+    fn test_debug_issue_builder() {
+        let issue = TensorDebugIssue::new(
+            TensorIssueType::NaN,
+            Severity::Error,
+            "Test issue".to_string(),
+        )
+        .with_tensor_name("test_tensor".to_string())
+        .with_operation("matmul".to_string())
+        .with_location("src/test.rs:42".to_string())
+        .with_metadata("key".to_string(), "value".to_string());
+
+        assert_eq!(issue.issue_type, TensorIssueType::NaN);
+        assert_eq!(issue.severity, Severity::Error);
+        assert_eq!(issue.tensor_name, Some("test_tensor".to_string()));
+        assert_eq!(issue.operation, Some("matmul".to_string()));
+        assert_eq!(issue.location, Some("src/test.rs:42".to_string()));
+        assert_eq!(issue.metadata.get("key"), Some(&"value".to_string()));
+    }
+
+    // ── Debugger functional tests ──
+
+    #[test]
+    fn test_clear_issues() -> Result<()> {
+        let debugger = TensorDebugger::new();
+        let data = vec![1.0, f32::NAN];
+        let tensor = Tensor::from_slice(&data, &[2])?;
+        debugger.register_tensor("nan_tensor".to_string(), tensor)?;
+
+        assert!(!debugger.get_issues().is_empty());
+        debugger.clear_issues();
+        assert!(debugger.get_issues().is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_clear_breakpoint() -> Result<()> {
+        let debugger = TensorDebugger::new();
+        let data = vec![1.0, f32::NAN];
+        let tensor = Tensor::from_slice(&data, &[2])?;
+        debugger.register_tensor("nan".to_string(), tensor)?;
+
+        assert!(debugger.is_breakpoint_hit());
+        debugger.clear_breakpoint();
+        assert!(!debugger.is_breakpoint_hit());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_tensor_not_found() {
+        let debugger = TensorDebugger::new();
+        assert!(debugger.get_tensor("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_get_stats_not_found() {
+        let debugger = TensorDebugger::new();
+        assert!(debugger.get_stats("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_remove_watchpoint() {
+        let debugger = TensorDebugger::new();
+        debugger.add_watchpoint(Watchpoint {
+            tensor_pattern: "test_pattern".to_string(),
+            condition: WatchCondition::HasNaN,
+            break_on_trigger: false,
+            trigger_count: 0,
+        });
+        debugger.remove_watchpoint("test_pattern");
+        // After removal, registering a NaN tensor should not trigger watchpoint
+        // (but auto-detect may still fire)
+    }
+
+    #[test]
+    fn test_watchpoint_value_exceeds() -> Result<()> {
+        let debugger = TensorDebugger::new();
+        debugger.add_watchpoint(Watchpoint {
+            tensor_pattern: "big".to_string(),
+            condition: WatchCondition::ValueExceeds(100.0),
+            break_on_trigger: true,
+            trigger_count: 0,
+        });
+
+        let data = vec![200.0, 300.0];
+        let tensor = Tensor::from_slice(&data, &[2])?;
+        debugger.register_tensor("big".to_string(), tensor)?;
+
+        assert!(debugger.is_breakpoint_hit());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_watchpoint_value_below() -> Result<()> {
+        let debugger = TensorDebugger::new();
+        debugger.add_watchpoint(Watchpoint {
+            tensor_pattern: "small".to_string(),
+            condition: WatchCondition::ValueBelow(0.001),
+            break_on_trigger: true,
+            trigger_count: 0,
+        });
+
+        let data = vec![0.0001, 0.0002];
+        let tensor = Tensor::from_slice(&data, &[2])?;
+        debugger.register_tensor("small".to_string(), tensor)?;
+
+        assert!(debugger.is_breakpoint_hit());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_watchpoint_shape_equals() -> Result<()> {
+        let debugger = TensorDebugger::with_config(TensorDebuggerConfig {
+            auto_detect_issues: false,
+            break_on_error: false,
+            ..TensorDebuggerConfig::default()
+        });
+        debugger.add_watchpoint(Watchpoint {
+            tensor_pattern: "shaped".to_string(),
+            condition: WatchCondition::ShapeEquals(vec![3, 4]),
+            break_on_trigger: true,
+            trigger_count: 0,
+        });
+
+        let tensor = Tensor::ones(&[3, 4])?;
+        debugger.register_tensor("shaped".to_string(), tensor)?;
+
+        assert!(debugger.is_breakpoint_hit());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_watchpoint_wildcard() -> Result<()> {
+        let debugger = TensorDebugger::with_config(TensorDebuggerConfig {
+            auto_detect_issues: false,
+            break_on_error: false,
+            ..TensorDebuggerConfig::default()
+        });
+        debugger.add_watchpoint(Watchpoint {
+            tensor_pattern: "*".to_string(),
+            condition: WatchCondition::ShapeEquals(vec![2]),
+            break_on_trigger: true,
+            trigger_count: 0,
+        });
+
+        let tensor = Tensor::ones(&[2])?;
+        debugger.register_tensor("any_name".to_string(), tensor)?;
+
+        assert!(debugger.is_breakpoint_hit());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_watch_condition_custom_does_not_trigger() -> Result<()> {
+        let debugger = TensorDebugger::with_config(TensorDebuggerConfig {
+            auto_detect_issues: false,
+            break_on_error: false,
+            ..TensorDebuggerConfig::default()
+        });
+        debugger.add_watchpoint(Watchpoint {
+            tensor_pattern: "custom".to_string(),
+            condition: WatchCondition::Custom("custom check".to_string()),
+            break_on_trigger: true,
+            trigger_count: 0,
+        });
+
+        let tensor = Tensor::ones(&[2])?;
+        debugger.register_tensor("custom".to_string(), tensor)?;
+
+        assert!(!debugger.is_breakpoint_hit());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_no_autodetect_no_issues() -> Result<()> {
+        let debugger = TensorDebugger::with_config(TensorDebuggerConfig {
+            auto_detect_issues: false,
+            enable_watchpoints: false,
+            break_on_error: false,
+            ..TensorDebuggerConfig::default()
+        });
+
+        let data = vec![1.0, f32::NAN];
+        let tensor = Tensor::from_slice(&data, &[2])?;
+        debugger.register_tensor("nan_tensor".to_string(), tensor)?;
+
+        assert!(debugger.get_issues().is_empty());
+        assert!(!debugger.is_breakpoint_hit());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_multiple_tensor_registration() -> Result<()> {
+        let debugger = TensorDebugger::new();
+        for i in 0..10 {
+            let tensor = Tensor::ones(&[i + 1])?;
+            debugger.register_tensor(format!("tensor_{}", i), tensor)?;
+        }
+        for i in 0..10 {
+            assert!(debugger.get_tensor(&format!("tensor_{}", i)).is_some());
+            assert!(debugger.get_stats(&format!("tensor_{}", i)).is_some());
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_traces_empty_initially() {
+        let debugger = TensorDebugger::new();
+        assert!(debugger.get_traces().is_empty());
+    }
+
+    #[test]
+    fn test_clear_traces() {
+        let debugger = TensorDebugger::new();
+        debugger.clear_traces();
+        assert!(debugger.get_traces().is_empty());
     }
 }

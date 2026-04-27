@@ -507,3 +507,237 @@ impl Tensor {
         self.silu()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::errors::Result;
+    use crate::tensor::Tensor;
+
+    #[test]
+    fn test_relu_positive() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0, 3.0], &[3])?;
+        let r = t.relu()?;
+        let data = r.data()?;
+        assert!((data[0] - 1.0).abs() < 1e-6);
+        assert!((data[1] - 2.0).abs() < 1e-6);
+        assert!((data[2] - 3.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_relu_negative() -> Result<()> {
+        let t = Tensor::from_data(vec![-1.0, -2.0, -3.0], &[3])?;
+        let r = t.relu()?;
+        let data = r.data()?;
+        for val in &data {
+            assert!(val.abs() < 1e-6);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_relu_mixed() -> Result<()> {
+        let t = Tensor::from_data(vec![-2.0, 0.0, 3.0], &[3])?;
+        let r = t.relu()?;
+        let data = r.data()?;
+        assert!(data[0].abs() < 1e-6);
+        assert!(data[1].abs() < 1e-6);
+        assert!((data[2] - 3.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_sigmoid_zero() -> Result<()> {
+        let t = Tensor::from_data(vec![0.0], &[1])?;
+        let r = t.sigmoid()?;
+        let data = r.data()?;
+        assert!((data[0] - 0.5).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_sigmoid_large_positive() -> Result<()> {
+        let t = Tensor::from_data(vec![10.0], &[1])?;
+        let r = t.sigmoid()?;
+        let data = r.data()?;
+        assert!((data[0] - 1.0).abs() < 1e-3);
+        Ok(())
+    }
+
+    #[test]
+    fn test_sigmoid_large_negative() -> Result<()> {
+        let t = Tensor::from_data(vec![-10.0], &[1])?;
+        let r = t.sigmoid()?;
+        let data = r.data()?;
+        assert!(data[0] < 1e-3);
+        Ok(())
+    }
+
+    #[test]
+    fn test_sigmoid_range() -> Result<()> {
+        let t = Tensor::from_data(vec![-5.0, -1.0, 0.0, 1.0, 5.0], &[5])?;
+        let r = t.sigmoid()?;
+        let data = r.data()?;
+        for val in &data {
+            assert!(*val >= 0.0 && *val <= 1.0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_tanh_zero() -> Result<()> {
+        let t = Tensor::from_data(vec![0.0], &[1])?;
+        let r = t.tanh()?;
+        let data = r.data()?;
+        assert!(data[0].abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_tanh_range() -> Result<()> {
+        let t = Tensor::from_data(vec![-10.0, -1.0, 0.0, 1.0, 10.0], &[5])?;
+        let r = t.tanh()?;
+        let data = r.data()?;
+        for val in &data {
+            assert!(*val >= -1.0 && *val <= 1.0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_softmax_sums_to_one() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0, 3.0], &[3])?;
+        let r = t.softmax(0)?;
+        let data = r.data()?;
+        let sum: f32 = data.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_softmax_positive() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0, 3.0], &[3])?;
+        let r = t.softmax(0)?;
+        let data = r.data()?;
+        for val in &data {
+            assert!(*val > 0.0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_softmax_ordering() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0, 3.0], &[3])?;
+        let r = t.softmax(0)?;
+        let data = r.data()?;
+        assert!(data[0] < data[1]);
+        assert!(data[1] < data[2]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_gelu() -> Result<()> {
+        let t = Tensor::from_data(vec![0.0, 1.0, -1.0], &[3])?;
+        let r = t.gelu()?;
+        let data = r.data()?;
+        // GELU(0) = 0
+        assert!(data[0].abs() < 1e-4);
+        // GELU(1) ~ 0.8413
+        assert!((data[1] - 0.8413).abs() < 0.02);
+        // GELU(-1) ~ -0.1587
+        assert!((data[2] - (-0.1587)).abs() < 0.02);
+        Ok(())
+    }
+
+    #[test]
+    fn test_leaky_relu_positive() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0], &[2])?;
+        let r = t.leaky_relu(0.01)?;
+        let data = r.data()?;
+        assert!((data[0] - 1.0).abs() < 1e-6);
+        assert!((data[1] - 2.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_leaky_relu_negative() -> Result<()> {
+        let t = Tensor::from_data(vec![-1.0, -2.0], &[2])?;
+        let r = t.leaky_relu(0.1)?;
+        let data = r.data()?;
+        assert!((data[0] - (-0.1)).abs() < 1e-5);
+        assert!((data[1] - (-0.2)).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_silu_zero() -> Result<()> {
+        let t = Tensor::from_data(vec![0.0], &[1])?;
+        let r = t.silu()?;
+        let data = r.data()?;
+        // SiLU(0) = 0 * sigmoid(0) = 0 * 0.5 = 0
+        assert!(data[0].abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_silu_positive() -> Result<()> {
+        let t = Tensor::from_data(vec![2.0], &[1])?;
+        let r = t.silu()?;
+        let data = r.data()?;
+        // SiLU(2) = 2 * sigmoid(2) ~ 2 * 0.88 ~ 1.76
+        assert!(data[0] > 1.5 && data[0] < 2.0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_swish_is_silu() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0, -1.0], &[3])?;
+        let silu = t.silu()?;
+        let swish = t.swish()?;
+        let silu_data = silu.data()?;
+        let swish_data = swish.data()?;
+        for i in 0..3 {
+            assert!((silu_data[i] - swish_data[i]).abs() < 1e-6);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_softmax_2d() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0], &[2, 3])?;
+        let r = t.softmax(-1)?;
+        assert_eq!(r.shape(), vec![2, 3]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_relu_2d() -> Result<()> {
+        let t = Tensor::from_data(vec![-1.0, 2.0, -3.0, 4.0], &[2, 2])?;
+        let r = t.relu()?;
+        let data = r.data()?;
+        assert!(data[0].abs() < 1e-6);
+        assert!((data[1] - 2.0).abs() < 1e-6);
+        assert!(data[2].abs() < 1e-6);
+        assert!((data[3] - 4.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_dropout_zero_prob() -> Result<()> {
+        let t = Tensor::from_data(vec![1.0, 2.0, 3.0], &[3])?;
+        let r = t.dropout(0.0)?;
+        let data = r.data()?;
+        assert!((data[0] - 1.0).abs() < 1e-5);
+        assert!((data[1] - 2.0).abs() < 1e-5);
+        assert!((data[2] - 3.0).abs() < 1e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_gelu_2d() -> Result<()> {
+        let t = Tensor::from_data(vec![0.0, 1.0, -1.0, 2.0], &[2, 2])?;
+        let r = t.gelu()?;
+        assert_eq!(r.shape(), vec![2, 2]);
+        Ok(())
+    }
+}

@@ -1137,6 +1137,236 @@ impl ReasoningEngine {
     }
 }
 
+// ---------------------------------------------------------------------------
+// VQA simplified types and processor (standalone, no Model trait required)
+// ---------------------------------------------------------------------------
+
+/// Simplified VQA image input
+#[derive(Clone, Debug)]
+pub struct VqaImageInput {
+    /// Raw pixel bytes (RGB, row-major)
+    pub pixels: Vec<u8>,
+    /// Image width
+    pub width: usize,
+    /// Image height
+    pub height: usize,
+}
+
+/// Simplified VQA input pairing an image with a question
+#[derive(Clone, Debug)]
+pub struct VqaInput {
+    pub image: VqaImageInput,
+    pub question: String,
+}
+
+/// A single VQA answer with its confidence and vocabulary index
+#[derive(Clone, Debug)]
+pub struct VqaResult {
+    pub answer: String,
+    pub score: f32,
+    pub answer_id: usize,
+}
+
+/// Configuration for the simplified VQA processor
+#[derive(Clone, Debug)]
+pub struct VqaConfig {
+    pub model_id: String,
+    pub max_answer_length: usize,
+    pub top_k: usize,
+    pub image_size: usize,
+}
+
+impl Default for VqaConfig {
+    fn default() -> Self {
+        Self {
+            model_id: "dandelin/vilt-b32-finetuned-vqa".to_string(),
+            max_answer_length: 30,
+            top_k: 5,
+            image_size: 384,
+        }
+    }
+}
+
+/// Errors emitted by the simplified VQA components
+#[derive(Debug, thiserror::Error)]
+pub enum PipelineError {
+    #[error("Empty question")]
+    EmptyQuestion,
+    #[error("Empty image")]
+    EmptyImage,
+    #[error("Empty answer vocabulary")]
+    EmptyVocabulary,
+}
+
+/// Lightweight VQA processor (no model backend required)
+pub struct VqaProcessor {
+    /// Simple word-to-id vocabulary built on first use
+    vocab: std::collections::HashMap<String, u32>,
+}
+
+impl VqaProcessor {
+    /// Construct a processor with an empty vocabulary
+    pub fn new() -> Self {
+        Self {
+            vocab: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Word-level tokenization via vocabulary lookup.
+    ///
+    /// Unknown words receive a deterministic hash-based id.
+    pub fn encode_question(&self, question: &str) -> Vec<u32> {
+        question
+            .split_whitespace()
+            .map(|word| {
+                let lower = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+                if let Some(&id) = self.vocab.get(&lower) {
+                    id
+                } else {
+                    // djb2 fallback for unknown words, clamped to u32
+                    let mut h: u64 = 5381;
+                    for b in lower.bytes() {
+                        h = h.wrapping_mul(33).wrapping_add(b as u64);
+                    }
+                    (h % 30_000) as u32 + 1
+                }
+            })
+            .collect()
+    }
+
+    /// Flatten pixel bytes to f32, then channel-wise normalise to [0, 1].
+    ///
+    /// Returns a flat `Vec<f32>` of length `pixels.len()`.
+    pub fn encode_image_features(image: &VqaImageInput) -> Vec<f32> {
+        if image.pixels.is_empty() {
+            return Vec::new();
+        }
+        // Channel-wise min/max normalisation (per-image)
+        let as_f32: Vec<f32> = image.pixels.iter().map(|&b| b as f32 / 255.0).collect();
+        // Compute per-channel mean and std for normalization (ImageNet stats)
+        let means = [0.485_f32, 0.456, 0.406];
+        let stds = [0.229_f32, 0.224, 0.225];
+        let num_channels = 3;
+        as_f32
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| {
+                let ch = i % num_channels;
+                (v - means[ch]) / stds[ch]
+            })
+            .collect()
+    }
+
+    /// Concatenate text and image feature vectors, then L2-normalise the result.
+    pub fn combine_modalities(text_features: &[f32], image_features: &[f32]) -> Vec<f32> {
+        let mut combined: Vec<f32> =
+            text_features.iter().chain(image_features.iter()).copied().collect();
+        let norm: f32 = combined.iter().map(|v| v * v).sum::<f32>().sqrt();
+        if norm > 1e-8 {
+            for v in &mut combined {
+                *v /= norm;
+            }
+        }
+        combined
+    }
+}
+
+impl Default for VqaProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Standalone VQA pipeline that works without a model backend.
+pub struct VisualQaPipeline {
+    pub config: VqaConfig,
+    processor: VqaProcessor,
+}
+
+impl VisualQaPipeline {
+    pub fn new(config: VqaConfig) -> std::result::Result<Self, PipelineError> {
+        Ok(Self {
+            config,
+            processor: VqaProcessor::new(),
+        })
+    }
+
+    /// Score logits against an answer vocabulary and return ranked `VqaResult`s.
+    pub fn score_answers(logits: &[f32], answer_vocab: &[String]) -> Vec<VqaResult> {
+        // Softmax over logits
+        let max_l = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let exps: Vec<f32> = logits.iter().map(|&l| (l - max_l).exp()).collect();
+        let sum_exp: f32 = exps.iter().sum();
+        let probs: Vec<f32> = if sum_exp > 1e-8 {
+            exps.iter().map(|e| e / sum_exp).collect()
+        } else {
+            vec![1.0 / logits.len() as f32; logits.len()]
+        };
+
+        let mut results: Vec<VqaResult> = probs
+            .iter()
+            .enumerate()
+            .zip(answer_vocab.iter())
+            .map(|((id, &score), answer)| VqaResult {
+                answer: answer.clone(),
+                score,
+                answer_id: id,
+            })
+            .collect();
+
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results
+    }
+
+    /// Answer a single VQA query (stub: uses feature hashing for deterministic answers).
+    pub fn answer(
+        &self,
+        input: VqaInput,
+        answer_vocab: &[String],
+    ) -> std::result::Result<Vec<VqaResult>, PipelineError> {
+        if input.question.trim().is_empty() {
+            return Err(PipelineError::EmptyQuestion);
+        }
+        if input.image.pixels.is_empty() {
+            return Err(PipelineError::EmptyImage);
+        }
+        if answer_vocab.is_empty() {
+            return Err(PipelineError::EmptyVocabulary);
+        }
+
+        let q_tokens = self.processor.encode_question(&input.question);
+        let img_feats = VqaProcessor::encode_image_features(&input.image);
+
+        // Derive pseudo-logits from feature hashes to produce deterministic scores
+        let q_text_feats: Vec<f32> = q_tokens.iter().map(|&t| t as f32 / 30_000.0).collect();
+        let combined = VqaProcessor::combine_modalities(&q_text_feats, &img_feats);
+
+        let logits: Vec<f32> = answer_vocab
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                let seed = combined.get(i % combined.len().max(1)).copied().unwrap_or(0.0);
+                seed + (i as f32 * 0.01)
+            })
+            .collect();
+
+        let mut results = Self::score_answers(&logits, answer_vocab);
+        results.truncate(self.config.top_k);
+        Ok(results)
+    }
+
+    /// Answer a batch of VQA queries.
+    pub fn answer_batch(
+        &self,
+        inputs: Vec<VqaInput>,
+        answer_vocab: &[String],
+    ) -> std::result::Result<Vec<Vec<VqaResult>>, PipelineError> {
+        inputs.into_iter().map(|inp| self.answer(inp, answer_vocab)).collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1423,5 +1653,298 @@ mod tests {
         ));
         assert_eq!(pipeline.config.confidence_threshold, 0.5);
         assert_eq!(pipeline.config.top_k_answers, 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // VqaProcessor / VisualQaPipeline tests (15+)
+    // -----------------------------------------------------------------------
+
+    fn dummy_image(width: usize, height: usize) -> VqaImageInput {
+        VqaImageInput {
+            pixels: (0..(width * height * 3)).map(|i| (i % 256) as u8).collect(),
+            width,
+            height,
+        }
+    }
+
+    fn default_vocab() -> Vec<String> {
+        vec![
+            "yes".to_string(),
+            "no".to_string(),
+            "dog".to_string(),
+            "cat".to_string(),
+            "2".to_string(),
+            "3".to_string(),
+            "red".to_string(),
+            "blue".to_string(),
+        ]
+    }
+
+    fn default_vqa_pipeline() -> VisualQaPipeline {
+        VisualQaPipeline::new(VqaConfig::default()).expect("pipeline creation ok")
+    }
+
+    // 1. VqaInput construction
+    #[test]
+    fn test_vqa_input_construction() {
+        let img = dummy_image(4, 4);
+        let input = VqaInput {
+            image: img.clone(),
+            question: "What color is the object?".to_string(),
+        };
+        assert_eq!(input.question, "What color is the object?");
+        assert_eq!(input.image.width, 4);
+        assert_eq!(input.image.height, 4);
+        assert_eq!(input.image.pixels.len(), 4 * 4 * 3);
+    }
+
+    // 2. VqaConfig defaults
+    #[test]
+    fn test_vqa_config_defaults() {
+        let cfg = VqaConfig::default();
+        assert_eq!(cfg.top_k, 5);
+        assert_eq!(cfg.image_size, 384);
+        assert!(cfg.max_answer_length > 0);
+        assert!(!cfg.model_id.is_empty());
+    }
+
+    // 3. encode_question returns non-empty tokens for a non-empty question
+    #[test]
+    fn test_encode_question_nonempty() {
+        let proc = VqaProcessor::new();
+        let tokens = proc.encode_question("What is in the image?");
+        assert!(!tokens.is_empty());
+    }
+
+    // 4. encode_question: token count == word count
+    #[test]
+    fn test_encode_question_token_count() {
+        let proc = VqaProcessor::new();
+        let question = "how many cats are there";
+        let tokens = proc.encode_question(question);
+        // Every whitespace-separated word should yield one token
+        assert_eq!(tokens.len(), question.split_whitespace().count());
+    }
+
+    // 5. encode_question: empty string yields empty tokens
+    #[test]
+    fn test_encode_question_empty() {
+        let proc = VqaProcessor::new();
+        let tokens = proc.encode_question("");
+        assert!(tokens.is_empty());
+    }
+
+    // 6. encode_image_features: correct output length
+    #[test]
+    fn test_encode_image_features_length() {
+        let img = dummy_image(8, 8);
+        let feats = VqaProcessor::encode_image_features(&img);
+        assert_eq!(feats.len(), 8 * 8 * 3);
+    }
+
+    // 7. encode_image_features: empty image yields empty output
+    #[test]
+    fn test_encode_image_features_empty() {
+        let empty = VqaImageInput {
+            pixels: vec![],
+            width: 0,
+            height: 0,
+        };
+        let feats = VqaProcessor::encode_image_features(&empty);
+        assert!(feats.is_empty());
+    }
+
+    // 8. encode_image_features: all-zero image gives normalised values
+    #[test]
+    fn test_encode_image_features_normalised() {
+        let img = VqaImageInput {
+            pixels: vec![128u8; 6 * 3],
+            width: 6,
+            height: 1,
+        };
+        let feats = VqaProcessor::encode_image_features(&img);
+        // None should be NaN or infinite
+        for &v in &feats {
+            assert!(v.is_finite(), "feature value {v} is not finite");
+        }
+    }
+
+    // 9. combine_modalities: output length equals sum of input lengths
+    #[test]
+    fn test_combine_modalities_length() {
+        let text = vec![0.1_f32, 0.2, 0.3];
+        let image = vec![0.4_f32, 0.5, 0.6, 0.7];
+        let combined = VqaProcessor::combine_modalities(&text, &image);
+        assert_eq!(combined.len(), text.len() + image.len());
+    }
+
+    // 10. combine_modalities: result is L2-normalised
+    #[test]
+    fn test_combine_modalities_normalised() {
+        let text = vec![1.0_f32, 2.0, 3.0];
+        let image = vec![4.0_f32, 5.0];
+        let combined = VqaProcessor::combine_modalities(&text, &image);
+        let norm: f32 = combined.iter().map(|v| v * v).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-5, "norm was {norm}, expected ~1.0");
+    }
+
+    // 11. combine_modalities: all-zero inputs don't panic
+    #[test]
+    fn test_combine_modalities_zeros() {
+        let combined = VqaProcessor::combine_modalities(&[0.0; 4], &[0.0; 3]);
+        assert_eq!(combined.len(), 7);
+        // All should remain zero (no division)
+        for &v in &combined {
+            assert_eq!(v, 0.0);
+        }
+    }
+
+    // 12. score_answers: softmax sums to ~1
+    #[test]
+    fn test_score_answers_probability_sum() {
+        let logits = vec![1.0_f32, 2.0, 0.5, 3.0];
+        let vocab: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
+        let results = VisualQaPipeline::score_answers(&logits, &vocab);
+        let total: f32 = results.iter().map(|r| r.score).sum();
+        assert!(
+            (total - 1.0).abs() < 1e-5,
+            "scores sum to {total}, expected 1.0"
+        );
+    }
+
+    // 13. score_answers: results are sorted descending by score
+    #[test]
+    fn test_score_answers_sorted() {
+        let logits = vec![0.1_f32, 5.0, 2.0, 0.5];
+        let vocab: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
+        let results = VisualQaPipeline::score_answers(&logits, &vocab);
+        for i in 1..results.len() {
+            assert!(
+                results[i - 1].score >= results[i].score,
+                "scores not sorted at index {i}: {} < {}",
+                results[i - 1].score,
+                results[i].score
+            );
+        }
+    }
+
+    // 14. score_answers: answer_id matches vocabulary index
+    #[test]
+    fn test_score_answers_answer_id() {
+        let logits = vec![1.0_f32, 2.0, 3.0];
+        let vocab: Vec<String> = ["cat", "dog", "bird"].iter().map(|s| s.to_string()).collect();
+        let results = VisualQaPipeline::score_answers(&logits, &vocab);
+        // The highest logit is at index 2 ("bird") — it should be first
+        assert_eq!(results[0].answer, "bird");
+        assert_eq!(results[0].answer_id, 2);
+    }
+
+    // 15. answer: returns Ok with correct number of results
+    #[test]
+    fn test_vqa_pipeline_answer_ok() {
+        let pipeline = default_vqa_pipeline();
+        let input = VqaInput {
+            image: dummy_image(16, 16),
+            question: "What is this?".to_string(),
+        };
+        let vocab = default_vocab();
+        let results = pipeline.answer(input, &vocab).expect("answer failed");
+        assert!(!results.is_empty());
+        assert!(results.len() <= pipeline.config.top_k);
+    }
+
+    // 16. answer: empty question returns error
+    #[test]
+    fn test_vqa_pipeline_empty_question_error() {
+        let pipeline = default_vqa_pipeline();
+        let input = VqaInput {
+            image: dummy_image(8, 8),
+            question: "   ".to_string(),
+        };
+        let err = pipeline.answer(input, &default_vocab()).unwrap_err();
+        assert!(matches!(err, PipelineError::EmptyQuestion));
+    }
+
+    // 17. answer: empty image returns error
+    #[test]
+    fn test_vqa_pipeline_empty_image_error() {
+        let pipeline = default_vqa_pipeline();
+        let input = VqaInput {
+            image: VqaImageInput {
+                pixels: vec![],
+                width: 0,
+                height: 0,
+            },
+            question: "Is there anything?".to_string(),
+        };
+        let err = pipeline.answer(input, &default_vocab()).unwrap_err();
+        assert!(matches!(err, PipelineError::EmptyImage));
+    }
+
+    // 18. answer: empty vocabulary returns error
+    #[test]
+    fn test_vqa_pipeline_empty_vocab_error() {
+        let pipeline = default_vqa_pipeline();
+        let input = VqaInput {
+            image: dummy_image(4, 4),
+            question: "What is this?".to_string(),
+        };
+        let err = pipeline.answer(input, &[]).unwrap_err();
+        assert!(matches!(err, PipelineError::EmptyVocabulary));
+    }
+
+    // 19. answer_batch: returns one Vec<VqaResult> per input
+    #[test]
+    fn test_vqa_pipeline_answer_batch_count() {
+        let pipeline = default_vqa_pipeline();
+        let vocab = default_vocab();
+        let inputs: Vec<VqaInput> = (0..3)
+            .map(|i| VqaInput {
+                image: dummy_image(4 + i, 4 + i),
+                question: format!("Question {i}?"),
+            })
+            .collect();
+        let batch_results = pipeline.answer_batch(inputs, &vocab).expect("batch failed");
+        assert_eq!(batch_results.len(), 3);
+        for results in &batch_results {
+            assert!(!results.is_empty());
+        }
+    }
+
+    // 20. score_answers: single-answer vocabulary scores to 1.0
+    #[test]
+    fn test_score_answers_single_vocab() {
+        let logits = vec![0.5_f32];
+        let vocab = vec!["yes".to_string()];
+        let results = VisualQaPipeline::score_answers(&logits, &vocab);
+        assert_eq!(results.len(), 1);
+        assert!((results[0].score - 1.0).abs() < 1e-5);
+    }
+
+    // 21. top_k config is respected
+    #[test]
+    fn test_vqa_pipeline_top_k_respected() {
+        let pipeline = VisualQaPipeline::new(VqaConfig {
+            top_k: 2,
+            ..Default::default()
+        })
+        .expect("ok");
+        let vocab = default_vocab(); // 8 entries
+        let input = VqaInput {
+            image: dummy_image(4, 4),
+            question: "What animal?".to_string(),
+        };
+        let results = pipeline.answer(input, &vocab).expect("answer ok");
+        assert!(results.len() <= 2);
+    }
+
+    // 22. encode_image_features: larger images give proportionally larger feature vectors
+    #[test]
+    fn test_encode_image_features_scale_with_size() {
+        let small = dummy_image(4, 4);
+        let large = dummy_image(8, 8);
+        let f_small = VqaProcessor::encode_image_features(&small);
+        let f_large = VqaProcessor::encode_image_features(&large);
+        assert_eq!(f_large.len(), 4 * f_small.len());
     }
 }

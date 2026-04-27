@@ -62,7 +62,7 @@ impl Config for GemmaConfig {
             ));
         }
 
-        if self.num_attention_heads % self.num_key_value_heads != 0 {
+        if !self.num_attention_heads.is_multiple_of(self.num_key_value_heads) {
             return Err(invalid_config(
                 "config_field",
                 "num_attention_heads must be divisible by num_key_value_heads".to_string(),

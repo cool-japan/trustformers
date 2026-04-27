@@ -276,3 +276,147 @@ impl DatabaseConnectionManager {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resource_management::types::DatabasePoolConfig;
+
+    #[tokio::test]
+    async fn test_database_connection_manager_creation() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config).await;
+        assert!(mgr.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_initial_available_connections() {
+        let config = DatabasePoolConfig::default();
+        let max = config.max_connections;
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("creation failed"));
+        assert_eq!(mgr.get_available_connection_count().await, max);
+    }
+
+    #[tokio::test]
+    async fn test_allocate_connections() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("creation failed"));
+        let conns = mgr.allocate_connections(3, "test-001").await;
+        assert!(conns.is_ok());
+        assert_eq!(conns.unwrap_or_default().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_allocate_zero_connections() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("creation failed"));
+        let conns = mgr.allocate_connections(0, "test-zero").await;
+        assert!(conns.is_ok());
+        assert!(conns.unwrap_or_default().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_active_count_after_allocation() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("creation failed"));
+        mgr.allocate_connections(4, "test-active").await.unwrap_or_default();
+        assert_eq!(mgr.get_active_connection_count().await, 4);
+    }
+
+    #[tokio::test]
+    async fn test_deallocate_connection() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("creation failed"));
+        let conns = mgr.allocate_connections(1, "test-dealloc").await.unwrap_or_default();
+        if let Some(conn_id) = conns.first() {
+            let result = mgr.deallocate_connection(conn_id).await;
+            assert!(result.is_ok());
+            assert_eq!(mgr.get_active_connection_count().await, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_deallocate_nonexistent() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("creation failed"));
+        let result = mgr.deallocate_connection("nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_deallocate_connections_for_test() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("creation failed"));
+        mgr.allocate_connections(3, "my-test").await.unwrap_or_default();
+        let result = mgr.deallocate_connections_for_test("my-test").await;
+        assert!(result.is_ok());
+        assert_eq!(mgr.get_active_connection_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_check_availability() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("creation failed"));
+        assert!(mgr.check_availability(5).await.unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn test_utilization_zero_initially() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("creation failed"));
+        assert_eq!(mgr.get_utilization().await, 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_utilization_after_allocation() {
+        let mut config = DatabasePoolConfig::default();
+        config.max_connections = 10;
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("creation failed"));
+        mgr.allocate_connections(5, "test-util").await.unwrap_or_default();
+        assert_eq!(mgr.get_utilization().await, 0.5);
+    }
+
+    #[tokio::test]
+    async fn test_generate_connection_report() {
+        let config = DatabasePoolConfig::default();
+        let mgr = DatabaseConnectionManager::new(config)
+            .await
+            .unwrap_or_else(|_| panic!("creation failed"));
+        let report = mgr.generate_connection_report().await;
+        assert!(report.contains("Database Connection Report"));
+    }
+
+    #[test]
+    fn test_database_type_variants() {
+        assert_eq!(format!("{:?}", DatabaseType::PostgreSQL), "PostgreSQL");
+        assert_eq!(format!("{:?}", DatabaseType::MySQL), "MySQL");
+        assert_eq!(format!("{:?}", DatabaseType::SQLite), "SQLite");
+        assert_eq!(format!("{:?}", DatabaseType::MongoDB), "MongoDB");
+        assert_eq!(format!("{:?}", DatabaseType::Redis), "Redis");
+        let custom = DatabaseType::Custom("cassandra".to_string());
+        match custom {
+            DatabaseType::Custom(name) => assert_eq!(name, "cassandra"),
+            _ => panic!("wrong variant"),
+        }
+    }
+}

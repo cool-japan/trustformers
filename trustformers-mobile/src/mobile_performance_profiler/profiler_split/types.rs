@@ -1575,3 +1575,6 @@ impl ProfilingSession {
         }
     }
 }
+
+#[path = "types_tests.rs"]
+mod types_tests;

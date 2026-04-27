@@ -718,4 +718,234 @@ mod tests {
         let output = result.expect("operation failed in test");
         assert_eq!(output.len(), batch_size * output_features);
     }
+
+    // Non-feature-gated tests for reference computations
+
+    #[test]
+    fn test_softmax_cpu_reference() {
+        let input = vec![1.0f32, 2.0, 3.0, 4.0];
+        let max_val = input.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let exp_sum: f32 = input.iter().map(|&x| (x - max_val).exp()).sum();
+        let softmax: Vec<f32> = input.iter().map(|&x| (x - max_val).exp() / exp_sum).collect();
+        let sum: f32 = softmax.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-5);
+        for i in 1..softmax.len() {
+            assert!(softmax[i] >= softmax[i - 1]);
+        }
+    }
+
+    #[test]
+    fn test_softmax_with_mask_cpu() {
+        let input = vec![1.0f32, 2.0, f32::NEG_INFINITY, 4.0];
+        let max_val = input.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let exp_sum: f32 = input.iter().map(|&x| (x - max_val).exp()).sum();
+        let softmax: Vec<f32> = input.iter().map(|&x| (x - max_val).exp() / exp_sum).collect();
+        assert!(softmax[2] < 1e-6);
+        let sum: f32 = softmax.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_layernorm_cpu_reference() {
+        let input = vec![1.0f32, 2.0, 3.0, 4.0];
+        let n = input.len() as f32;
+        let mean = input.iter().sum::<f32>() / n;
+        let variance = input.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / n;
+        let eps = 1e-5f32;
+        let std_dev = (variance + eps).sqrt();
+        let normalized: Vec<f32> = input.iter().map(|&x| (x - mean) / std_dev).collect();
+        let norm_mean = normalized.iter().sum::<f32>() / n;
+        assert!(norm_mean.abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_gelu_cpu_reference() {
+        let test_values = vec![-2.0f32, -1.0, 0.0, 1.0, 2.0];
+        let gelu_results: Vec<f32> = test_values
+            .iter()
+            .map(|&x| {
+                let cdf = 0.5 * (1.0 + (x / std::f32::consts::SQRT_2).tanh());
+                x * cdf
+            })
+            .collect();
+        assert!(gelu_results[2].abs() < 0.01);
+        for i in 1..gelu_results.len() {
+            assert!(gelu_results[i] >= gelu_results[i - 1]);
+        }
+    }
+
+    #[test]
+    fn test_fused_bias_addition_cpu() {
+        let input = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let bias = vec![0.1f32, 0.2, 0.3];
+        let batch_size = 2;
+        let features = 3;
+        let mut output = vec![0.0f32; batch_size * features];
+        for b in 0..batch_size {
+            for f in 0..features {
+                output[b * features + f] = input[b * features + f] + bias[f];
+            }
+        }
+        assert!((output[0] - 1.1).abs() < 1e-5);
+        assert!((output[3] - 4.1).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_kernel_grid_computation() {
+        let total_elements = 1024;
+        let block_size = 256;
+        let grid_size = (total_elements + block_size - 1) / block_size;
+        assert_eq!(grid_size, 4);
+    }
+
+    #[test]
+    fn test_attention_score_scaling() {
+        let d_k = 64.0f32;
+        let scale = 1.0 / d_k.sqrt();
+        assert!((scale - 0.125).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_shared_memory_sizing() {
+        let block_size = 256;
+        let float_size = 4;
+        let shared_mem = block_size * float_size * 2;
+        assert_eq!(shared_mem, 2048);
+    }
+
+    #[test]
+    fn test_relu_cpu_reference() {
+        let input = vec![-2.0f32, -1.0, 0.0, 1.0, 2.0];
+        let relu: Vec<f32> = input.iter().map(|&x| x.max(0.0)).collect();
+        assert!((relu[0] - 0.0).abs() < f32::EPSILON);
+        assert!((relu[3] - 1.0).abs() < f32::EPSILON);
+        assert!((relu[4] - 2.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_silu_cpu_reference() {
+        let input = vec![-2.0f32, -1.0, 0.0, 1.0, 2.0];
+        let silu: Vec<f32> = input.iter().map(|&x| x / (1.0 + (-x).exp())).collect();
+        assert!(silu[2].abs() < 1e-5);
+        assert!(silu[3] > 0.0);
+        assert!(silu[4] > 0.0);
+    }
+
+    #[test]
+    fn test_flash_attention_block_sizes() {
+        let block_sizes = [64, 128, 256];
+        let head_dim = 64;
+        for &block_size in &block_sizes {
+            let num_blocks = (head_dim + block_size - 1) / block_size;
+            assert!(num_blocks >= 1);
+        }
+    }
+
+    #[test]
+    fn test_attention_output_shape_calculation() {
+        let batch_size = 2;
+        let num_heads = 8;
+        let seq_len = 32;
+        let head_dim = 64;
+        let output_size = batch_size * num_heads * seq_len * head_dim;
+        assert_eq!(output_size, 32768);
+    }
+
+    #[test]
+    fn test_causal_mask_creation() {
+        let seq_length = 4;
+        let mut mask = vec![0.0f32; seq_length * seq_length];
+        for i in 0..seq_length {
+            for j in (i + 1)..seq_length {
+                mask[i * seq_length + j] = f32::NEG_INFINITY;
+            }
+        }
+        for i in 0..seq_length {
+            for j in 0..=i {
+                assert!((mask[i * seq_length + j] - 0.0).abs() < f32::EPSILON);
+            }
+        }
+        for i in 0..seq_length {
+            for j in (i + 1)..seq_length {
+                assert!(mask[i * seq_length + j].is_infinite());
+            }
+        }
+    }
+
+    #[test]
+    fn test_variance_numerical_stability() {
+        let input = vec![1000000.0f32, 1000001.0, 1000002.0, 1000003.0];
+        let n = input.len() as f32;
+        let mean = input.iter().sum::<f32>() / n;
+        let variance = input.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / n;
+        assert!((variance - 1.25).abs() < 0.5);
+    }
+
+    #[test]
+    fn test_layernorm_with_gamma_beta() {
+        let input = vec![1.0f32, 2.0, 3.0, 4.0];
+        let gamma = vec![2.0f32; 4];
+        let beta = vec![1.0f32; 4];
+        let n = input.len() as f32;
+        let mean = input.iter().sum::<f32>() / n;
+        let variance = input.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / n;
+        let eps = 1e-5f32;
+        let std_dev = (variance + eps).sqrt();
+        let result: Vec<f32> = input.iter().enumerate().map(|(i, &x)| {
+            ((x - mean) / std_dev) * gamma[i] + beta[i]
+        }).collect();
+        let result_mean = result.iter().sum::<f32>() / n;
+        // Should be approximately 1.0 (beta shifts mean)
+        assert!((result_mean - 1.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_softmax_uniform_input() {
+        let n = 4;
+        let input = vec![1.0f32; n];
+        let max_val = 1.0f32;
+        let exp_sum: f32 = input.iter().map(|&x| (x - max_val).exp()).sum();
+        let softmax: Vec<f32> = input.iter().map(|&x| (x - max_val).exp() / exp_sum).collect();
+        for val in &softmax {
+            assert!((val - 0.25).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn test_linear_layer_cpu_reference() {
+        // y = Wx + b
+        let input = vec![1.0f32, 2.0]; // [1, 2]
+        let weight = vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0]; // [3, 2]
+        let bias = vec![0.0f32, 0.0, 0.0]; // [3]
+        let in_features = 2;
+        let out_features = 3;
+        let mut output = vec![0.0f32; out_features];
+        for o in 0..out_features {
+            for i in 0..in_features {
+                output[o] += weight[o * in_features + i] * input[i];
+            }
+            output[o] += bias[o];
+        }
+        assert!((output[0] - 1.0).abs() < 1e-5); // 1*1 + 0*2
+        assert!((output[1] - 2.0).abs() < 1e-5); // 0*1 + 1*2
+        assert!((output[2] - 3.0).abs() < 1e-5); // 1*1 + 1*2
+    }
+
+    #[test]
+    fn test_kernel_launch_config_params() {
+        let batch = 4u32;
+        let seq_len = 128u32;
+        let grid_dim = (batch, seq_len, 1u32);
+        let block_dim = (256u32, 1u32, 1u32);
+        assert_eq!(grid_dim.0 * grid_dim.1 * grid_dim.2 * block_dim.0, 4 * 128 * 256);
+    }
+
+    #[test]
+    fn test_eps_values_for_layernorm() {
+        let eps_values = [1e-5f32, 1e-6, 1e-8, 1e-12];
+        for &eps in &eps_values {
+            assert!(eps > 0.0);
+            assert!(eps < 1.0);
+        }
+    }
 }

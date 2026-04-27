@@ -817,7 +817,7 @@ impl SearchStrategy for PopulationBasedTraining {
         }
 
         // Check if it's time to exploit
-        if self.current_step % self.config.exploit_interval == 0 && self.current_step > 0 {
+        if self.current_step.is_multiple_of(self.config.exploit_interval) && self.current_step > 0 {
             let new_suggestions = self.exploit(search_space);
             self.pending_suggestions.extend(new_suggestions);
 

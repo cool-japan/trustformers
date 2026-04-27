@@ -651,6 +651,328 @@ mod tests {
         assert!(markdown.contains("Passed: 1"));
         assert!(markdown.contains("Failed: 1"));
     }
+
+    #[test]
+    fn test_detector_default() {
+        let detector = MemoryLeakDetector::default();
+        assert!(!detector.has_leaks());
+        let report = detector.generate_report("default_test");
+        assert_eq!(report.total_allocations, 0);
+        assert_eq!(report.total_deallocations, 0);
+        assert_eq!(report.active_allocations, 0);
+        assert_eq!(report.leaked_bytes, 0);
+    }
+
+    #[test]
+    fn test_detector_allocation_ids_increment() {
+        let detector = MemoryLeakDetector::new();
+        let id1 = detector.record_allocation(100);
+        let id2 = detector.record_allocation(200);
+        let id3 = detector.record_allocation(300);
+        assert_eq!(id2, id1 + 1);
+        assert_eq!(id3, id2 + 1);
+    }
+
+    #[test]
+    fn test_deallocation_nonexistent_id() {
+        let detector = MemoryLeakDetector::new();
+        let result = detector.record_deallocation(99999);
+        assert!(!result, "Should return false for nonexistent allocation");
+    }
+
+    #[test]
+    fn test_double_deallocation() {
+        let detector = MemoryLeakDetector::new();
+        let id = detector.record_allocation(1024);
+        assert!(detector.record_deallocation(id));
+        assert!(
+            !detector.record_deallocation(id),
+            "Second deallocation should return false"
+        );
+    }
+
+    #[test]
+    fn test_peak_memory_tracking() {
+        let detector = MemoryLeakDetector::new();
+        let id1 = detector.record_allocation(1000);
+        let id2 = detector.record_allocation(2000);
+        // Peak should be 3000 at this point
+        detector.record_deallocation(id1);
+        detector.record_deallocation(id2);
+        let report = detector.generate_report("peak_test");
+        assert!(report.peak_memory_usage >= 3000);
+    }
+
+    #[test]
+    fn test_no_leaks_when_all_deallocated() {
+        let config = MemoryLeakConfig {
+            max_leaked_bytes: 100,
+            max_leaked_allocations: 1,
+            ..Default::default()
+        };
+        let detector = MemoryLeakDetector::with_config(config);
+        let id1 = detector.record_allocation(500);
+        let id2 = detector.record_allocation(500);
+        detector.record_deallocation(id1);
+        detector.record_deallocation(id2);
+        assert!(!detector.has_leaks());
+    }
+
+    #[test]
+    fn test_leak_detection_by_allocation_count() {
+        let config = MemoryLeakConfig {
+            max_leaked_bytes: 1_000_000,
+            max_leaked_allocations: 2,
+            ..Default::default()
+        };
+        let detector = MemoryLeakDetector::with_config(config);
+        detector.record_allocation(1);
+        detector.record_allocation(1);
+        assert!(!detector.has_leaks());
+        detector.record_allocation(1);
+        assert!(detector.has_leaks());
+    }
+
+    #[test]
+    fn test_report_average_allocation_size() {
+        let detector = MemoryLeakDetector::new();
+        detector.record_allocation(100);
+        detector.record_allocation(200);
+        detector.record_allocation(300);
+        let report = detector.generate_report("avg_test");
+        assert!((report.average_allocation_size - 200.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_report_empty_average_allocation() {
+        let detector = MemoryLeakDetector::new();
+        let report = detector.generate_report("empty_avg");
+        assert!((report.average_allocation_size - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_report_test_name() {
+        let detector = MemoryLeakDetector::new();
+        let report = detector.generate_report("my_custom_test");
+        assert_eq!(report.test_name, "my_custom_test");
+    }
+
+    #[test]
+    fn test_report_detection_duration() {
+        let detector = MemoryLeakDetector::new();
+        std::thread::sleep(Duration::from_millis(10));
+        let report = detector.generate_report("duration_test");
+        assert!(report.detection_duration >= Duration::from_millis(10));
+    }
+
+    #[test]
+    fn test_reset_detector() {
+        let detector = MemoryLeakDetector::new();
+        detector.record_allocation(1024);
+        detector.record_allocation(2048);
+        detector.reset();
+        let report = detector.generate_report("reset_test");
+        assert_eq!(report.total_allocations, 0);
+        assert_eq!(report.total_deallocations, 0);
+        assert_eq!(report.active_allocations, 0);
+        assert_eq!(report.leaked_bytes, 0);
+        assert_eq!(report.peak_memory_usage, 0);
+    }
+
+    #[test]
+    fn test_config_default_values() {
+        let config = MemoryLeakConfig::default();
+        assert_eq!(config.max_leaked_bytes, 1024 * 1024);
+        assert_eq!(config.max_leaked_allocations, 1000);
+        assert_eq!(config.detection_interval, Duration::from_millis(100));
+        assert_eq!(config.stack_trace_depth, 10);
+        assert!(config.enable_detailed_tracking);
+        assert!(config.fail_on_leak);
+    }
+
+    #[test]
+    fn test_leak_report_leaked_allocations_detail() {
+        let detector = MemoryLeakDetector::new();
+        detector.record_allocation(512);
+        detector.record_allocation(1024);
+        let report = detector.generate_report("leak_detail_test");
+        assert_eq!(report.leaked_allocations.len(), 2);
+        let sizes: Vec<usize> = report.leaked_allocations.iter().map(|a| a.size).collect();
+        assert!(sizes.contains(&512));
+        assert!(sizes.contains(&1024));
+    }
+
+    #[test]
+    fn test_many_allocations_deallocations() {
+        let detector = MemoryLeakDetector::new();
+        let mut ids = Vec::new();
+        for i in 0..100 {
+            ids.push(detector.record_allocation((i + 1) * 10));
+        }
+        // Deallocate every other one
+        for (idx, id) in ids.iter().enumerate() {
+            if idx % 2 == 0 {
+                detector.record_deallocation(*id);
+            }
+        }
+        let report = detector.generate_report("many_allocs_test");
+        assert_eq!(report.total_allocations, 100);
+        assert_eq!(report.total_deallocations, 50);
+        assert_eq!(report.active_allocations, 50);
+    }
+
+    #[test]
+    fn test_concurrent_allocations() {
+        let detector = Arc::new(MemoryLeakDetector::new());
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let d = Arc::clone(&detector);
+            handles.push(thread::spawn(move || {
+                let mut ids = Vec::new();
+                for _ in 0..25 {
+                    ids.push(d.record_allocation(64));
+                }
+                ids
+            }));
+        }
+        let all_ids: Vec<Vec<u64>> =
+            handles.into_iter().map(|h| h.join().expect("Thread panicked")).collect();
+        let total: usize = all_ids.iter().map(|v| v.len()).sum();
+        assert_eq!(total, 100);
+        let report = detector.generate_report("concurrent_test");
+        assert_eq!(report.total_allocations, 100);
+    }
+
+    #[test]
+    fn test_monitoring_handle_stop() {
+        let detector = MemoryLeakDetector::with_config(MemoryLeakConfig {
+            detection_interval: Duration::from_millis(10),
+            ..Default::default()
+        });
+        let handle = detector.start_monitoring();
+        detector.record_allocation(1024);
+        std::thread::sleep(Duration::from_millis(30));
+        drop(handle);
+        // After drop, the monitoring thread should have stopped
+        let report = detector.generate_report("monitoring_test");
+        assert_eq!(report.total_allocations, 1);
+    }
+
+    #[test]
+    fn test_ci_integration_junit_empty() {
+        let reports: Vec<MemoryLeakReport> = vec![];
+        let junit = CIIntegration::generate_junit_report(&reports);
+        assert!(junit.contains("memory_leak_tests"));
+    }
+
+    #[test]
+    fn test_ci_integration_annotations_passing() {
+        let reports = vec![MemoryLeakReport {
+            test_name: "clean_test".to_string(),
+            total_allocations: 10,
+            total_deallocations: 10,
+            active_allocations: 0,
+            leaked_bytes: 0,
+            leaked_allocations: vec![],
+            peak_memory_usage: 500,
+            average_allocation_size: 0.0,
+            detection_duration: Duration::from_millis(50),
+        }];
+        let annotations = CIIntegration::generate_github_annotations(&reports);
+        assert_eq!(annotations.len(), 1);
+        assert!(annotations[0].contains("notice"));
+    }
+
+    #[test]
+    fn test_tensor_memory_report_no_issues() {
+        let report = TensorMemoryReport {
+            operations: vec![],
+            total_operations: 5,
+            total_calls: 50,
+            total_memory_allocated: 10000,
+            memory_efficiency: 0.95,
+            suspected_leaks: vec![],
+        };
+        assert!(!report.has_memory_issues());
+        let summary = report.generate_summary();
+        assert!(summary.contains("No memory issues detected"));
+    }
+
+    #[test]
+    fn test_tensor_memory_report_with_leaks() {
+        let report = TensorMemoryReport {
+            operations: vec![],
+            total_operations: 3,
+            total_calls: 30,
+            total_memory_allocated: 5000,
+            memory_efficiency: 0.95,
+            suspected_leaks: vec!["matmul_op".to_string()],
+        };
+        assert!(report.has_memory_issues());
+        let summary = report.generate_summary();
+        assert!(summary.contains("matmul_op"));
+        assert!(summary.contains("Memory issues detected"));
+    }
+
+    #[test]
+    fn test_tensor_memory_report_low_efficiency() {
+        let report = TensorMemoryReport {
+            operations: vec![],
+            total_operations: 2,
+            total_calls: 20,
+            total_memory_allocated: 8000,
+            memory_efficiency: 0.5,
+            suspected_leaks: vec![],
+        };
+        assert!(report.has_memory_issues());
+    }
+
+    #[test]
+    fn test_tensor_memory_report_summary_format() {
+        let report = TensorMemoryReport {
+            operations: vec![],
+            total_operations: 10,
+            total_calls: 100,
+            total_memory_allocated: 50000,
+            memory_efficiency: 0.85,
+            suspected_leaks: vec![],
+        };
+        let summary = report.generate_summary();
+        assert!(summary.contains("Total operations tracked: 10"));
+        assert!(summary.contains("Total function calls: 100"));
+        assert!(summary.contains("Total memory allocated: 50000 bytes"));
+        assert!(summary.contains("85.0%"));
+    }
+
+    #[test]
+    fn test_allocation_info_fields() {
+        let info = AllocationInfo {
+            size: 4096,
+            timestamp: Instant::now(),
+            call_stack: vec!["frame_0".to_string(), "frame_1".to_string()],
+            allocation_id: 42,
+        };
+        assert_eq!(info.size, 4096);
+        assert_eq!(info.allocation_id, 42);
+        assert_eq!(info.call_stack.len(), 2);
+    }
+
+    #[test]
+    fn test_detector_with_disabled_tracking() {
+        let config = MemoryLeakConfig {
+            enable_detailed_tracking: false,
+            ..Default::default()
+        };
+        let detector = MemoryLeakDetector::with_config(config);
+        let id = detector.record_allocation(1024);
+        let report = detector.generate_report("no_tracking_test");
+        assert_eq!(report.total_allocations, 1);
+        // Stack traces should be minimal when tracking disabled
+        for alloc in &report.leaked_allocations {
+            assert!(alloc.call_stack.is_empty() || alloc.call_stack.len() <= 1);
+        }
+        detector.record_deallocation(id);
+    }
 }
 
 /// Advanced memory pattern analysis

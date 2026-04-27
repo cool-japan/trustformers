@@ -760,7 +760,7 @@ impl WeightedConfidenceAggregationStrategy {
             AggregationStrategyType::Median => {
                 let mut values: Vec<f64> = feedbacks.iter().map(|f| f.processed_value).collect();
                 values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                if values.len() % 2 == 0 {
+                if values.len().is_multiple_of(2) {
                     (values[values.len() / 2 - 1] + values[values.len() / 2]) / 2.0
                 } else {
                     values[values.len() / 2]

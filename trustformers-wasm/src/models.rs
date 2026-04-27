@@ -130,7 +130,7 @@ impl MultiHeadAttention {
         num_heads: usize,
         dropout_prob: f32,
     ) -> Result<MultiHeadAttention, JsValue> {
-        if hidden_size % num_heads != 0 {
+        if !hidden_size.is_multiple_of(num_heads) {
             return Err(JsValue::from_str(
                 "Hidden size must be divisible by number of heads",
             ));

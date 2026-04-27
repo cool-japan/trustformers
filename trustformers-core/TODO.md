@@ -516,6 +516,7 @@ let predicted = pool.get_predicted_shapes(Duration::from_secs(60));
 
 - ✅ **Position Encodings**
   - Rotary Position Embeddings (RoPE): Relative positional encoding
+  - **RoPE Scaling Variants** (NEW - 2026-03-23): Linear, NTK-aware, Dynamic NTK, YaRN, LongRoPE
   - Absolute Position Embeddings: Learned or sinusoidal
   - ALiBi: Attention with Linear Biases
   - Relative Position Bias: T5-style bias terms
@@ -607,6 +608,16 @@ let predicted = pool.get_predicted_shapes(Duration::from_secs(60));
   - Cross-validation support
   - Quality thresholds and recommendations
   - Trade-off analysis tools
+
+- ✅ **Tensor Quantization Utilities** (NEW - 2026-03-23)
+  - **QuantDtype:** INT4, INT8, Uint8, FP16, FP32 with compression ratio helpers
+  - **QuantScheme:** Symmetric, Asymmetric, PerChannel, PerGroup (GPTQ-style)
+  - **QuantParams::calibrate:** Auto-compute scale/zero-point from data
+  - **quantize/dequantize:** Fast round-trip with clipping
+  - **QuantizationMetrics:** MAE, RMSE, SNR (dB), clipped element count
+  - **Fp16:** Pure-Rust IEEE 754 binary16 software encode/decode (subnormals, NaN, Inf)
+  - **quantize_fp16/dequantize_fp16:** Batch FP16 conversion helpers
+  - Module: `trustformers_core::quantization::utils`
 
 ---
 
@@ -851,28 +862,32 @@ if debugger.is_breakpoint_hit() {
 
 ## Future Enhancements
 
-### High Priority (Updated 2026-03-21)
-- Additional fused kernel patterns
+### High Priority (Updated 2026-03-23)
+- [ ] Additional fused kernel patterns
 - ~~Enhanced sparse tensor operations~~ ✅ COMPLETED (2025-11-10)
 - ~~More quantization methods~~ ✅ COMPLETED (FP8, GGUF K-quants - 2025-11-10)
-- INT2 and sub-byte quantization for extreme compression
-- MX (Microscaling) formats for future hardware
+- ~~RoPE scaling variants (Linear, NTK, Dynamic NTK, YaRN, LongRoPE)~~ ✅ COMPLETED (2026-03-23)
+- ~~Tensor quantization utilities (INT4/INT8/FP16 with scale/zero-point calibration)~~ ✅ COMPLETED (2026-03-23)
+- [ ] INT2 and sub-byte quantization for extreme compression
+- [ ] MX (Microscaling) formats for future hardware
 
 ### Performance
-- Further SIMD optimizations via SciRS2
-- Advanced kernel fusion strategies
+- [ ] Further SIMD optimizations via SciRS2
+- [ ] Advanced kernel fusion strategies
 - ~~Enhanced memory pooling with adaptive strategies~~ ✅ COMPLETED (2025-11-10)
 - ~~Automatic kernel tuning for new hardware~~ ✅ COMPLETED (2025-11-10)
 
 ### Hardware Support
-- WebGPU backend for browser deployment
-- Additional mobile GPU backends
-- Enhanced FPGA support
+- [ ] WebGPU backend for browser deployment
+  - **Refinement needed:** API surface? Which GPU compute API — wgpu crate?
+- [ ] Mobile GPU: Android Vulkan compute optimizations
+- [ ] Mobile GPU: iOS Metal optimizations
+- [ ] Enhanced FPGA support
 
 ### Developer Tools
 - ~~Interactive tensor debugger~~ ✅ COMPLETED (2025-11-10)
-- Enhanced profiling visualizations
-- Performance regression dashboard
+- [ ] Enhanced profiling visualizations
+- [ ] Performance regression dashboard
 
 ---
 

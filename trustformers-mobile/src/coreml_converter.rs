@@ -1056,4 +1056,199 @@ mod tests {
         assert_eq!(config.target_sparsity, 0.5);
         assert!(config.exclude_layers.contains(&"output".to_string()));
     }
+
+    #[test]
+    fn test_default_converter_config() {
+        let config = CoreMLConverterConfig::default();
+        assert!(!config.target_ios_version.is_empty());
+        assert!(matches!(
+            config.optimization_level,
+            OptimizationLevel::Basic
+        ));
+        assert!(matches!(config.output_format, CoreMLFormat::MLModel));
+    }
+
+    #[test]
+    fn test_optimization_level_variants() {
+        let levels = vec![
+            OptimizationLevel::None,
+            OptimizationLevel::Basic,
+            OptimizationLevel::Aggressive,
+            OptimizationLevel::Maximum,
+        ];
+        assert_eq!(levels.len(), 4);
+    }
+
+    #[test]
+    fn test_coreml_format_variants() {
+        let formats = vec![
+            CoreMLFormat::MLModel,
+            CoreMLFormat::MLModelC,
+            CoreMLFormat::MLPackage,
+        ];
+        assert_eq!(formats.len(), 3);
+    }
+
+    #[test]
+    fn test_hardware_target_variants() {
+        let targets = vec![
+            HardwareTarget::All,
+            HardwareTarget::NeuralEngine,
+            HardwareTarget::GPU,
+            HardwareTarget::CPU,
+        ];
+        assert_eq!(targets.len(), 4);
+    }
+
+    #[test]
+    fn test_quantization_bits_variants() {
+        let bits = vec![
+            QuantizationBits::Bit1,
+            QuantizationBits::Bit2,
+            QuantizationBits::Bit4,
+            QuantizationBits::Bit8,
+            QuantizationBits::Bit16,
+        ];
+        assert_eq!(bits.len(), 5);
+    }
+
+    #[test]
+    fn test_quantization_method_variants() {
+        let methods = vec![QuantizationMethod::Linear, QuantizationMethod::KMeans];
+        assert_eq!(methods.len(), 2);
+    }
+
+    #[test]
+    fn test_pruning_method_variants() {
+        let methods = vec![
+            PruningMethod::Magnitude,
+            PruningMethod::Gradient,
+            PruningMethod::Random,
+            PruningMethod::Structured,
+        ];
+        assert_eq!(methods.len(), 4);
+    }
+
+    #[test]
+    fn test_converter_has_optimization_passes() {
+        let config = CoreMLConverterConfig::default();
+        let converter = CoreMLModelConverter::new(config);
+        assert!(!converter.optimization_passes.is_empty());
+    }
+
+    #[test]
+    fn test_converter_has_validation_rules() {
+        let config = CoreMLConverterConfig::default();
+        let converter = CoreMLModelConverter::new(config);
+        assert!(converter.validation_rules.len() >= 3);
+    }
+
+    #[test]
+    fn test_quantization_config_4bit() {
+        let config = CoreMLQuantizationConfig {
+            weight_bits: QuantizationBits::Bit4,
+            activation_bits: None,
+            method: QuantizationMethod::KMeans,
+            calibration_size: 500,
+            per_channel: false,
+        };
+        assert_eq!(config.weight_bits, QuantizationBits::Bit4);
+        assert!(config.activation_bits.is_none());
+        assert!(!config.per_channel);
+    }
+
+    #[test]
+    fn test_pruning_config_structured() {
+        let config = PruningConfig {
+            target_sparsity: 0.9,
+            method: PruningMethod::Structured,
+            structured: true,
+            exclude_layers: vec![],
+        };
+        assert_eq!(config.target_sparsity, 0.9);
+        assert!(config.structured);
+        assert!(config.exclude_layers.is_empty());
+    }
+
+    #[test]
+    fn test_pruning_config_sparsity_bounds() {
+        let config = PruningConfig {
+            target_sparsity: 0.5,
+            method: PruningMethod::Magnitude,
+            structured: false,
+            exclude_layers: vec!["output".to_string()],
+        };
+        assert!(config.target_sparsity >= 0.0);
+        assert!(config.target_sparsity <= 1.0);
+    }
+
+    #[test]
+    fn test_converter_config_with_compression() {
+        let mut config = CoreMLConverterConfig::default();
+        config.enable_compression = true;
+        assert!(config.enable_compression);
+    }
+
+    #[test]
+    fn test_converter_config_hardware_target_gpu() {
+        let mut config = CoreMLConverterConfig::default();
+        config.hardware_target = HardwareTarget::GPU;
+        assert_eq!(config.hardware_target, HardwareTarget::GPU);
+    }
+
+    #[test]
+    fn test_converter_config_aggressive_optimization() {
+        let mut config = CoreMLConverterConfig::default();
+        config.optimization_level = OptimizationLevel::Aggressive;
+        assert_eq!(config.optimization_level, OptimizationLevel::Aggressive);
+    }
+
+    #[test]
+    fn test_coreml_version_constant() {
+        assert_eq!(COREML_VERSION, 5);
+    }
+
+    #[test]
+    fn test_quantization_bits_equality() {
+        assert_eq!(QuantizationBits::Bit8, QuantizationBits::Bit8);
+        assert_ne!(QuantizationBits::Bit4, QuantizationBits::Bit8);
+    }
+
+    #[test]
+    fn test_optimization_level_equality() {
+        assert_eq!(OptimizationLevel::None, OptimizationLevel::None);
+        assert_ne!(OptimizationLevel::None, OptimizationLevel::Maximum);
+    }
+
+    #[test]
+    fn test_hardware_target_equality() {
+        assert_eq!(HardwareTarget::All, HardwareTarget::All);
+        assert_ne!(HardwareTarget::CPU, HardwareTarget::GPU);
+    }
+
+    #[test]
+    fn test_converter_config_with_quantization_and_pruning() {
+        let config = CoreMLConverterConfig {
+            target_ios_version: "17.0".to_string(),
+            optimization_level: OptimizationLevel::Maximum,
+            enable_compression: true,
+            quantization: Some(CoreMLQuantizationConfig {
+                weight_bits: QuantizationBits::Bit4,
+                activation_bits: Some(QuantizationBits::Bit8),
+                method: QuantizationMethod::Linear,
+                calibration_size: 2000,
+                per_channel: true,
+            }),
+            pruning: Some(PruningConfig {
+                target_sparsity: 0.7,
+                method: PruningMethod::Magnitude,
+                structured: false,
+                exclude_layers: vec!["embed".to_string()],
+            }),
+            output_format: CoreMLFormat::MLPackage,
+            hardware_target: HardwareTarget::NeuralEngine,
+        };
+        assert!(config.quantization.is_some());
+        assert!(config.pruning.is_some());
+    }
 }

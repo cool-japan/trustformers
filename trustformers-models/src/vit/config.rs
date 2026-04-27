@@ -65,14 +65,14 @@ impl Config for ViTConfig {
             ));
         }
 
-        if self.hidden_size % self.num_attention_heads != 0 {
+        if !self.hidden_size.is_multiple_of(self.num_attention_heads) {
             return Err(trustformers_core::errors::invalid_config(
                 "hidden_size",
                 "hidden_size must be divisible by num_attention_heads",
             ));
         }
 
-        if self.image_size % self.patch_size != 0 {
+        if !self.image_size.is_multiple_of(self.patch_size) {
             return Err(trustformers_core::errors::invalid_config(
                 "image_size",
                 "image_size must be divisible by patch_size",

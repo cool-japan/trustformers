@@ -1495,3 +1495,395 @@ impl Default for AlertThreshold {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    // ---- LCG helper for deterministic pseudo-random values ----
+    struct Lcg(u64);
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0
+        }
+        fn next_f64(&mut self) -> f64 {
+            (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+        }
+        fn next_u16(&mut self) -> u16 {
+            (self.next_u64() & 0xFFFF) as u16
+        }
+        fn next_usize(&mut self, bound: usize) -> usize {
+            (self.next_u64() as usize) % bound.max(1)
+        }
+    }
+
+    // ---- PortUsageType tests ----
+    #[test]
+    fn test_port_usage_type_http_server_exclusive() {
+        assert!(PortUsageType::HttpServer.requires_exclusive_access());
+    }
+
+    #[test]
+    fn test_port_usage_type_https_server_exclusive() {
+        assert!(PortUsageType::HttpsServer.requires_exclusive_access());
+    }
+
+    #[test]
+    fn test_port_usage_type_database_exclusive() {
+        assert!(PortUsageType::Database.requires_exclusive_access());
+    }
+
+    #[test]
+    fn test_port_usage_type_tcp_not_exclusive() {
+        assert!(!PortUsageType::TcpSocket.requires_exclusive_access());
+    }
+
+    #[test]
+    fn test_port_usage_type_custom_not_exclusive() {
+        assert!(!PortUsageType::Custom("test".to_string()).requires_exclusive_access());
+    }
+
+    #[test]
+    fn test_port_usage_type_http_default_range() {
+        let range = PortUsageType::HttpServer.default_port_range();
+        assert_eq!(range, Some((8000, 8999)));
+    }
+
+    #[test]
+    fn test_port_usage_type_https_default_range() {
+        let range = PortUsageType::HttpsServer.default_port_range();
+        assert_eq!(range, Some((8443, 8499)));
+    }
+
+    #[test]
+    fn test_port_usage_type_database_default_range() {
+        let range = PortUsageType::Database.default_port_range();
+        assert_eq!(range, Some((5432, 5499)));
+    }
+
+    #[test]
+    fn test_port_usage_type_tcp_no_default_range() {
+        assert!(PortUsageType::TcpSocket.default_port_range().is_none());
+    }
+
+    // ---- GpuCapability tests ----
+    #[test]
+    fn test_gpu_capability_cuda_supports_cuda() {
+        let cap = GpuCapability::Cuda("11.0".to_string());
+        assert!(cap.supports_framework("cuda"));
+        assert!(cap.supports_framework("CUDA"));
+    }
+
+    #[test]
+    fn test_gpu_capability_cuda_rejects_opencl() {
+        let cap = GpuCapability::Cuda("11.0".to_string());
+        assert!(!cap.supports_framework("opencl"));
+    }
+
+    #[test]
+    fn test_gpu_capability_opencl_supports_opencl() {
+        let cap = GpuCapability::OpenCl("3.0".to_string());
+        assert!(cap.supports_framework("opencl"));
+        assert!(cap.supports_framework("OpenCL"));
+    }
+
+    #[test]
+    fn test_gpu_capability_vulkan_supports_vulkan() {
+        let cap = GpuCapability::Vulkan("1.3".to_string());
+        assert!(cap.supports_framework("vulkan"));
+    }
+
+    #[test]
+    fn test_gpu_capability_ml_supports_listed_framework() {
+        let cap =
+            GpuCapability::MachineLearning(vec!["pytorch".to_string(), "tensorflow".to_string()]);
+        assert!(cap.supports_framework("pytorch"));
+        assert!(!cap.supports_framework("jax"));
+    }
+
+    #[test]
+    fn test_gpu_capability_custom_supports_matching_name() {
+        let cap = GpuCapability::Custom("metal".to_string(), "2.0".to_string());
+        assert!(cap.supports_framework("Metal"));
+        assert!(!cap.supports_framework("vulkan"));
+    }
+
+    // ---- AlertSeverity tests ----
+    #[test]
+    fn test_alert_severity_priority_ordering() {
+        assert_eq!(AlertSeverity::Info.priority(), 0);
+        assert_eq!(AlertSeverity::Warning.priority(), 1);
+        assert_eq!(AlertSeverity::Error.priority(), 2);
+        assert_eq!(AlertSeverity::Critical.priority(), 3);
+    }
+
+    #[test]
+    fn test_alert_severity_priority_increases() {
+        assert!(AlertSeverity::Critical.priority() > AlertSeverity::Error.priority());
+        assert!(AlertSeverity::Error.priority() > AlertSeverity::Warning.priority());
+        assert!(AlertSeverity::Warning.priority() > AlertSeverity::Info.priority());
+    }
+
+    #[test]
+    fn test_alert_severity_immediate_attention_error() {
+        assert!(AlertSeverity::Error.requires_immediate_attention());
+    }
+
+    #[test]
+    fn test_alert_severity_immediate_attention_critical() {
+        assert!(AlertSeverity::Critical.requires_immediate_attention());
+    }
+
+    #[test]
+    fn test_alert_severity_no_immediate_attention_info() {
+        assert!(!AlertSeverity::Info.requires_immediate_attention());
+    }
+
+    #[test]
+    fn test_alert_severity_no_immediate_attention_warning() {
+        assert!(!AlertSeverity::Warning.requires_immediate_attention());
+    }
+
+    // ---- ExecutionStatus tests ----
+    #[test]
+    fn test_execution_status_terminal_completed() {
+        assert!(ExecutionStatus::Completed.is_terminal());
+    }
+
+    #[test]
+    fn test_execution_status_terminal_failed() {
+        assert!(ExecutionStatus::Failed.is_terminal());
+    }
+
+    #[test]
+    fn test_execution_status_terminal_cancelled() {
+        assert!(ExecutionStatus::Cancelled.is_terminal());
+    }
+
+    #[test]
+    fn test_execution_status_not_terminal_running() {
+        assert!(!ExecutionStatus::Running.is_terminal());
+    }
+
+    #[test]
+    fn test_execution_status_active_running() {
+        assert!(ExecutionStatus::Running.is_active());
+    }
+
+    #[test]
+    fn test_execution_status_not_active_completed() {
+        assert!(!ExecutionStatus::Completed.is_active());
+    }
+
+    // ---- Default impls tests ----
+    #[test]
+    fn test_directory_permissions_default() {
+        let perms = DirectoryPermissions::default();
+        assert!(perms.owner_read);
+        assert!(perms.owner_write);
+        assert!(perms.owner_execute);
+    }
+
+    #[test]
+    fn test_gpu_alert_thresholds_default() {
+        let t = GpuAlertThresholds::default();
+        assert!((t.high_memory_usage - 0.9).abs() < f32::EPSILON);
+        assert!((t.high_utilization - 0.95).abs() < f32::EPSILON);
+        assert!((t.high_temperature - 85.0).abs() < f32::EPSILON);
+        assert!((t.error_rate - 0.05).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_load_metrics_default() {
+        let m = LoadMetrics::default();
+        assert!((m.cpu_usage - 0.0).abs() < f64::EPSILON);
+        assert!((m.memory_usage - 0.0).abs() < f64::EPSILON);
+        assert_eq!(m.active_tasks, 0);
+        assert_eq!(m.queue_length, 0);
+    }
+
+    #[test]
+    fn test_execution_performance_metrics_default() {
+        let m = ExecutionPerformanceMetrics::default();
+        assert_eq!(m.total_executions, 0);
+        assert_eq!(m.successful_executions, 0);
+        assert_eq!(m.failed_executions, 0);
+        assert_eq!(m.average_duration, Duration::from_secs(0));
+    }
+
+    #[test]
+    fn test_worker_pool_default() {
+        let pool = WorkerPool::default();
+        assert_eq!(pool.capacity, 4);
+        assert_eq!(pool.workers.lock().len(), 0);
+    }
+
+    #[test]
+    fn test_gpu_alert_statistics_default() {
+        let stats = GpuAlertStatistics::default();
+        assert_eq!(stats.total_alerts, 0);
+        assert_eq!(stats.active_alerts, 0);
+        assert!(stats.alerts_by_severity.is_empty());
+        assert!(stats.last_alert_time.is_none());
+    }
+
+    #[test]
+    fn test_resource_statistics_default() {
+        let stats = ResourceStatistics::default();
+        assert_eq!(stats.allocation_count, 0);
+        assert_eq!(stats.total_duration, Duration::from_secs(0));
+    }
+
+    #[test]
+    fn test_directory_purpose_default() {
+        assert_eq!(DirectoryPurpose::default(), DirectoryPurpose::General);
+    }
+
+    #[test]
+    fn test_cleanup_schedule_default() {
+        let s = CleanupSchedule::default();
+        assert!(s.enabled);
+        assert_eq!(s.interval, Duration::from_secs(3600));
+        assert!(s.cleanup_types.is_empty());
+        assert_eq!(s.priority, "medium");
+    }
+
+    #[test]
+    fn test_alert_threshold_default() {
+        let t = AlertThreshold::default();
+        assert!(t.metric_name.is_empty());
+        assert!((t.warning_threshold - 0.8).abs() < f64::EPSILON);
+        assert!((t.critical_threshold - 0.95).abs() < f64::EPSILON);
+        assert_eq!(t.evaluation_window, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn test_gpu_alert_escalation_default() {
+        let e = GpuAlertEscalation::default();
+        assert_eq!(e.escalation_level, 0);
+        assert!(e.notification_channels.is_empty());
+        assert_eq!(e.escalation_delay, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn test_gpu_performance_analysis_default() {
+        let a = GpuPerformanceAnalysis::default();
+        assert!(a.trends.is_empty());
+    }
+
+    #[test]
+    fn test_system_resource_model_default() {
+        let m = SystemResourceModel::default();
+        assert!(m.cpu_model.is_empty());
+        assert!(m.memory_model.is_empty());
+    }
+
+    #[test]
+    fn test_performance_baseline_default() {
+        let b = PerformanceBaseline::default();
+        assert!((b.baseline_cpu - 0.0).abs() < f64::EPSILON);
+    }
+
+    // ---- Enum variant tests ----
+    #[test]
+    fn test_allocation_event_type_variants() {
+        let variants = [
+            AllocationEventType::Allocated,
+            AllocationEventType::Deallocated,
+            AllocationEventType::Failed,
+        ];
+        for v in &variants {
+            let formatted = format!("{:?}", v);
+            assert!(!formatted.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_worker_state_variants() {
+        let variants = [
+            WorkerState::Idle,
+            WorkerState::Busy,
+            WorkerState::Starting,
+            WorkerState::Stopping,
+        ];
+        assert_eq!(variants.len(), 4);
+    }
+
+    #[test]
+    fn test_cleanup_type_variants() {
+        let ct = CleanupType::DeleteOldFiles(Duration::from_secs(3600));
+        let formatted = format!("{:?}", ct);
+        assert!(formatted.contains("DeleteOldFiles"));
+    }
+
+    #[test]
+    fn test_resource_lifecycle_stage_variants() {
+        let stages = [
+            ResourceLifecycleStage::Creating,
+            ResourceLifecycleStage::Created,
+            ResourceLifecycleStage::Active,
+            ResourceLifecycleStage::Idle,
+            ResourceLifecycleStage::Cleaning,
+            ResourceLifecycleStage::Destroying,
+            ResourceLifecycleStage::Destroyed,
+        ];
+        assert_eq!(stages.len(), 7);
+    }
+
+    #[test]
+    fn test_port_usage_statistics_default_values() {
+        let stats = PortUsageStatistics::default();
+        assert_eq!(stats.total_allocated, 0);
+        assert_eq!(stats.currently_allocated, 0);
+        assert_eq!(stats.peak_usage, 0);
+        assert_eq!(stats.allocation_failures, 0);
+    }
+
+    #[test]
+    fn test_directory_usage_info_default() {
+        let info = DirectoryUsageInfo::default();
+        assert!(info.path.is_empty());
+        assert_eq!(info.size_bytes, 0);
+        assert_eq!(info.file_count, 0);
+    }
+
+    #[test]
+    fn test_lcg_deterministic_sequence() {
+        let mut rng1 = Lcg::new(42);
+        let mut rng2 = Lcg::new(42);
+        for _ in 0..10 {
+            assert_eq!(rng1.next_u64(), rng2.next_u64());
+        }
+    }
+
+    #[test]
+    fn test_lcg_f64_range() {
+        let mut rng = Lcg::new(12345);
+        for _ in 0..100 {
+            let v = rng.next_f64();
+            assert!((0.0..1.0).contains(&v));
+        }
+    }
+
+    #[test]
+    fn test_lcg_u16_range() {
+        let mut rng = Lcg::new(99);
+        for _ in 0..100 {
+            let _v = rng.next_u16(); // just verify it produces values without panic
+        }
+    }
+
+    #[test]
+    fn test_lcg_next_usize_bound() {
+        let mut rng = Lcg::new(777);
+        for _ in 0..100 {
+            let v = rng.next_usize(10);
+            assert!(v < 10);
+        }
+    }
+}

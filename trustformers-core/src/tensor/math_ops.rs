@@ -25,6 +25,8 @@ pub mod linear_algebra;
 pub mod mathematical;
 pub mod stability;
 pub mod statistical;
+#[cfg(test)]
+mod statistical_tests;
 pub mod utilities;
 
 // Re-export essential utilities and SIMD functions

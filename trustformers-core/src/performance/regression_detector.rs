@@ -487,7 +487,7 @@ impl RegressionDetector {
                             {
                                 return Some(
                                     line.split(':')
-                                        .last()
+                                        .next_back()
                                         .unwrap_or("Unknown GPU")
                                         .trim()
                                         .to_string(),
@@ -565,10 +565,10 @@ impl RegressionDetector {
                 let mut version = None;
 
                 for line in os_release.lines() {
-                    if line.starts_with("NAME=") {
-                        name = Some(line[5..].trim_matches('"').to_string());
-                    } else if line.starts_with("VERSION=") {
-                        version = Some(line[8..].trim_matches('"').to_string());
+                    if let Some(rest) = line.strip_prefix("NAME=") {
+                        name = Some(rest.trim_matches('"').to_string());
+                    } else if let Some(rest) = line.strip_prefix("VERSION=") {
+                        version = Some(rest.trim_matches('"').to_string());
                     }
                 }
 
@@ -723,5 +723,450 @@ mod tests {
         let regression = result.expect("operation failed in test");
         assert!(regression.is_regression);
         assert!(regression.severity > 0.0);
+    }
+
+    // ── RegressionConfig tests ──
+
+    #[test]
+    fn test_regression_config_default() {
+        let config = RegressionConfig::default();
+        assert!((config.regression_threshold - 0.05).abs() < 1e-6);
+        assert!((config.std_dev_threshold - 2.0).abs() < 1e-6);
+        assert!(config.check_memory_regression);
+        assert!(config.check_throughput_regression);
+        assert_eq!(config.min_measurements, 5);
+    }
+
+    #[test]
+    fn test_regression_config_custom() {
+        let config = RegressionConfig {
+            regression_threshold: 0.1,
+            std_dev_threshold: 3.0,
+            check_memory_regression: false,
+            check_throughput_regression: false,
+            min_measurements: 10,
+        };
+        assert!((config.regression_threshold - 0.1).abs() < 1e-6);
+        assert!(!config.check_memory_regression);
+    }
+
+    // ── HardwareConfig tests ──
+
+    #[test]
+    fn test_hardware_config_clone() {
+        let config = HardwareConfig {
+            cpu_model: Some("TestCPU".to_string()),
+            cpu_cores: 8,
+            system_memory_bytes: 16_000_000_000,
+            gpu_info: None,
+            os: "TestOS".to_string(),
+        };
+        let cloned = config.clone();
+        assert_eq!(cloned.cpu_cores, 8);
+        assert_eq!(cloned.os, "TestOS");
+    }
+
+    // ── PerformanceBaseline tests ──
+
+    #[test]
+    fn test_performance_baseline_clone() {
+        let baseline = PerformanceBaseline {
+            benchmark_name: "test_bench".to_string(),
+            mean_time_ns: 1_000_000,
+            std_dev_ns: 50_000,
+            throughput_ops_per_sec: Some(1000.0),
+            memory_usage_bytes: Some(1024),
+            timestamp: 0,
+            commit_hash: Some("abc123".to_string()),
+            hardware_config: HardwareConfig {
+                cpu_model: None,
+                cpu_cores: 4,
+                system_memory_bytes: 8_000_000_000,
+                gpu_info: None,
+                os: "test".to_string(),
+            },
+        };
+        let cloned = baseline.clone();
+        assert_eq!(cloned.benchmark_name, "test_bench");
+        assert_eq!(cloned.mean_time_ns, 1_000_000);
+    }
+
+    // ── PerformanceMeasurement tests ──
+
+    #[test]
+    fn test_performance_measurement_clone() {
+        let measurement = PerformanceMeasurement {
+            time_ns: 500_000,
+            throughput_ops_per_sec: Some(2000.0),
+            memory_usage_bytes: Some(2048),
+        };
+        let cloned = measurement.clone();
+        assert_eq!(cloned.time_ns, 500_000);
+        assert_eq!(cloned.throughput_ops_per_sec, Some(2000.0));
+    }
+
+    // ── Regression detection edge cases ──
+
+    #[test]
+    fn test_check_regression_no_baseline() {
+        let temp_dir = TempDir::new().expect("temp file creation failed");
+        let storage_path = temp_dir.path().join("baselines.json");
+
+        let detector = RegressionDetector::new(storage_path, RegressionConfig::default())
+            .expect("operation failed in test");
+
+        let measurement = PerformanceMeasurement {
+            time_ns: 1_000_000,
+            throughput_ops_per_sec: None,
+            memory_usage_bytes: None,
+        };
+
+        let result = detector
+            .check_regression("nonexistent_benchmark", measurement)
+            .expect("operation failed in test");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_regression_identical_performance() {
+        let temp_dir = TempDir::new().expect("temp file creation failed");
+        let storage_path = temp_dir.path().join("baselines.json");
+
+        let mut detector = RegressionDetector::new(storage_path, RegressionConfig::default())
+            .expect("operation failed in test");
+
+        let measurement = PerformanceMeasurement {
+            time_ns: 1_000_000,
+            throughput_ops_per_sec: Some(1000.0),
+            memory_usage_bytes: Some(1024),
+        };
+
+        detector
+            .record_baseline("test", measurement.clone())
+            .expect("operation failed in test");
+
+        let result = detector
+            .check_regression("test", measurement)
+            .expect("operation failed in test");
+        assert!(result.is_some());
+        assert!(!result.expect("should be present").is_regression);
+    }
+
+    #[test]
+    fn test_check_regression_memory_increase() {
+        let temp_dir = TempDir::new().expect("temp file creation failed");
+        let storage_path = temp_dir.path().join("baselines.json");
+
+        let mut detector = RegressionDetector::new(storage_path, RegressionConfig::default())
+            .expect("operation failed in test");
+
+        let baseline = PerformanceMeasurement {
+            time_ns: 1_000_000,
+            throughput_ops_per_sec: None,
+            memory_usage_bytes: Some(1024),
+        };
+        detector.record_baseline("test", baseline).expect("operation failed in test");
+
+        // 50% memory increase
+        let current = PerformanceMeasurement {
+            time_ns: 1_000_000, // Same time
+            throughput_ops_per_sec: None,
+            memory_usage_bytes: Some(1536),
+        };
+
+        let result = detector.check_regression("test", current).expect("operation failed in test");
+        assert!(result.is_some());
+        let r = result.expect("should be present");
+        assert!(r.is_regression);
+        assert!(r.analysis.contains("Memory"));
+    }
+
+    #[test]
+    fn test_check_regression_throughput_decrease() {
+        let temp_dir = TempDir::new().expect("temp file creation failed");
+        let storage_path = temp_dir.path().join("baselines.json");
+
+        let mut detector = RegressionDetector::new(storage_path, RegressionConfig::default())
+            .expect("operation failed in test");
+
+        let baseline = PerformanceMeasurement {
+            time_ns: 1_000_000,
+            throughput_ops_per_sec: Some(1000.0),
+            memory_usage_bytes: None,
+        };
+        detector.record_baseline("test", baseline).expect("operation failed in test");
+
+        // 50% throughput decrease
+        let current = PerformanceMeasurement {
+            time_ns: 1_000_000,
+            throughput_ops_per_sec: Some(500.0),
+            memory_usage_bytes: None,
+        };
+
+        let result = detector.check_regression("test", current).expect("operation failed in test");
+        assert!(result.is_some());
+        let r = result.expect("should be present");
+        assert!(r.is_regression);
+        assert!(r.analysis.contains("Throughput"));
+    }
+
+    // ── Baseline update tests ──
+
+    #[test]
+    fn test_update_baseline() {
+        let temp_dir = TempDir::new().expect("temp file creation failed");
+        let storage_path = temp_dir.path().join("baselines.json");
+
+        let mut detector = RegressionDetector::new(storage_path, RegressionConfig::default())
+            .expect("operation failed in test");
+
+        let measurement1 = PerformanceMeasurement {
+            time_ns: 1_000_000,
+            throughput_ops_per_sec: Some(1000.0),
+            memory_usage_bytes: Some(1024),
+        };
+        detector
+            .record_baseline("test", measurement1)
+            .expect("operation failed in test");
+
+        let measurement2 = PerformanceMeasurement {
+            time_ns: 2_000_000,
+            throughput_ops_per_sec: Some(500.0),
+            memory_usage_bytes: Some(2048),
+        };
+        detector
+            .update_baseline("test", measurement2)
+            .expect("operation failed in test");
+
+        let baselines = detector.get_baselines();
+        let baseline = baselines.get("test").expect("baseline should exist");
+        // Moving average: (1_000_000 + 2_000_000) / 2 = 1_500_000
+        assert_eq!(baseline.mean_time_ns, 1_500_000);
+    }
+
+    #[test]
+    fn test_update_nonexistent_baseline() {
+        let temp_dir = TempDir::new().expect("temp file creation failed");
+        let storage_path = temp_dir.path().join("baselines.json");
+
+        let mut detector = RegressionDetector::new(storage_path, RegressionConfig::default())
+            .expect("operation failed in test");
+
+        let measurement = PerformanceMeasurement {
+            time_ns: 1_000_000,
+            throughput_ops_per_sec: None,
+            memory_usage_bytes: None,
+        };
+        // Should not fail, just do nothing
+        assert!(detector.update_baseline("nonexistent", measurement).is_ok());
+    }
+
+    #[test]
+    fn test_get_baselines_empty() {
+        let temp_dir = TempDir::new().expect("temp file creation failed");
+        let storage_path = temp_dir.path().join("baselines.json");
+
+        let detector = RegressionDetector::new(storage_path, RegressionConfig::default())
+            .expect("operation failed in test");
+
+        assert!(detector.get_baselines().is_empty());
+    }
+
+    #[test]
+    fn test_multiple_baselines() {
+        let temp_dir = TempDir::new().expect("temp file creation failed");
+        let storage_path = temp_dir.path().join("baselines.json");
+
+        let mut detector = RegressionDetector::new(storage_path, RegressionConfig::default())
+            .expect("operation failed in test");
+
+        for i in 0..5 {
+            let measurement = PerformanceMeasurement {
+                time_ns: (i + 1) * 1_000_000,
+                throughput_ops_per_sec: None,
+                memory_usage_bytes: None,
+            };
+            detector
+                .record_baseline(format!("bench_{}", i), measurement)
+                .expect("operation failed in test");
+        }
+
+        assert_eq!(detector.get_baselines().len(), 5);
+    }
+
+    #[test]
+    fn test_regression_severity_scaling() {
+        let temp_dir = TempDir::new().expect("temp file creation failed");
+        let storage_path = temp_dir.path().join("baselines.json");
+
+        let mut detector = RegressionDetector::new(
+            storage_path,
+            RegressionConfig {
+                regression_threshold: 0.1, // 10% threshold
+                ..RegressionConfig::default()
+            },
+        )
+        .expect("operation failed in test");
+
+        let baseline = PerformanceMeasurement {
+            time_ns: 1_000_000,
+            throughput_ops_per_sec: None,
+            memory_usage_bytes: None,
+        };
+        detector.record_baseline("test", baseline).expect("operation failed in test");
+
+        // 50% slower => severity should be capped at 1.0
+        let current = PerformanceMeasurement {
+            time_ns: 1_500_000,
+            throughput_ops_per_sec: None,
+            memory_usage_bytes: None,
+        };
+
+        let result = detector.check_regression("test", current).expect("operation failed in test");
+        let r = result.expect("should be present");
+        assert!(r.severity <= 1.0);
+        assert!(r.severity > 0.0);
+    }
+
+    #[test]
+    fn test_regression_result_analysis_text() {
+        let temp_dir = TempDir::new().expect("temp file creation failed");
+        let storage_path = temp_dir.path().join("baselines.json");
+
+        let mut detector = RegressionDetector::new(storage_path, RegressionConfig::default())
+            .expect("operation failed in test");
+
+        let baseline = PerformanceMeasurement {
+            time_ns: 1_000_000,
+            throughput_ops_per_sec: None,
+            memory_usage_bytes: None,
+        };
+        detector.record_baseline("test", baseline).expect("operation failed in test");
+
+        // No regression
+        let current = PerformanceMeasurement {
+            time_ns: 900_000,
+            throughput_ops_per_sec: None,
+            memory_usage_bytes: None,
+        };
+
+        let result = detector.check_regression("test", current).expect("operation failed in test");
+        let r = result.expect("should be present");
+        assert!(r.analysis.contains("No performance regression detected"));
+    }
+
+    #[test]
+    fn test_regression_with_disabled_checks() {
+        let temp_dir = TempDir::new().expect("temp file creation failed");
+        let storage_path = temp_dir.path().join("baselines.json");
+
+        let mut detector = RegressionDetector::new(
+            storage_path,
+            RegressionConfig {
+                check_memory_regression: false,
+                check_throughput_regression: false,
+                ..RegressionConfig::default()
+            },
+        )
+        .expect("operation failed in test");
+
+        let baseline = PerformanceMeasurement {
+            time_ns: 1_000_000,
+            throughput_ops_per_sec: Some(1000.0),
+            memory_usage_bytes: Some(1024),
+        };
+        detector.record_baseline("test", baseline).expect("operation failed in test");
+
+        // Bad throughput and memory but checks disabled
+        let current = PerformanceMeasurement {
+            time_ns: 1_000_000,
+            throughput_ops_per_sec: Some(100.0), // 90% drop
+            memory_usage_bytes: Some(10240),     // 10x increase
+        };
+
+        let result = detector.check_regression("test", current).expect("operation failed in test");
+        let r = result.expect("should be present");
+        // Only time check active, which shows no regression
+        assert!(!r.is_regression);
+    }
+
+    // ── Persistence tests ──
+
+    #[test]
+    fn test_baselines_persist_and_reload() {
+        let temp_dir = TempDir::new().expect("temp file creation failed");
+        let storage_path = temp_dir.path().join("baselines.json");
+
+        {
+            let mut detector =
+                RegressionDetector::new(storage_path.clone(), RegressionConfig::default())
+                    .expect("operation failed in test");
+
+            let measurement = PerformanceMeasurement {
+                time_ns: 1_000_000,
+                throughput_ops_per_sec: Some(1000.0),
+                memory_usage_bytes: None,
+            };
+            detector
+                .record_baseline("persisted_bench", measurement)
+                .expect("operation failed in test");
+        }
+
+        // Reload
+        let detector2 = RegressionDetector::new(storage_path, RegressionConfig::default())
+            .expect("operation failed in test");
+        assert!(detector2.get_baselines().contains_key("persisted_bench"));
+    }
+
+    #[test]
+    fn test_performance_change_percent_positive() {
+        let temp_dir = TempDir::new().expect("temp file creation failed");
+        let storage_path = temp_dir.path().join("baselines.json");
+
+        let mut detector = RegressionDetector::new(storage_path, RegressionConfig::default())
+            .expect("operation failed in test");
+
+        let baseline = PerformanceMeasurement {
+            time_ns: 1_000_000,
+            throughput_ops_per_sec: None,
+            memory_usage_bytes: None,
+        };
+        detector.record_baseline("test", baseline).expect("operation failed in test");
+
+        let slower = PerformanceMeasurement {
+            time_ns: 1_200_000,
+            throughput_ops_per_sec: None,
+            memory_usage_bytes: None,
+        };
+
+        let result = detector.check_regression("test", slower).expect("operation failed in test");
+        let r = result.expect("should be present");
+        assert!(r.performance_change_percent > 0.0);
+    }
+
+    #[test]
+    fn test_performance_change_percent_negative() {
+        let temp_dir = TempDir::new().expect("temp file creation failed");
+        let storage_path = temp_dir.path().join("baselines.json");
+
+        let mut detector = RegressionDetector::new(storage_path, RegressionConfig::default())
+            .expect("operation failed in test");
+
+        let baseline = PerformanceMeasurement {
+            time_ns: 1_000_000,
+            throughput_ops_per_sec: None,
+            memory_usage_bytes: None,
+        };
+        detector.record_baseline("test", baseline).expect("operation failed in test");
+
+        let faster = PerformanceMeasurement {
+            time_ns: 800_000,
+            throughput_ops_per_sec: None,
+            memory_usage_bytes: None,
+        };
+
+        let result = detector.check_regression("test", faster).expect("operation failed in test");
+        let r = result.expect("should be present");
+        assert!(r.performance_change_percent < 0.0);
     }
 }

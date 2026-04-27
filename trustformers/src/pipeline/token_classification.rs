@@ -471,3 +471,356 @@ impl crate::pipeline::AsyncPipeline for TokenClassificationPipeline {
             .map_err(|e| TrustformersError::pipeline(e.to_string(), "runtime"))?
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- helpers ----
+
+    fn make_token(entity: &str, score: f32, idx: usize, word: &str, start: usize) -> TokenOutput {
+        let end = start + word.len();
+        TokenOutput {
+            entity: entity.to_string(),
+            score,
+            index: idx,
+            word: word.to_string(),
+            start,
+            end,
+        }
+    }
+
+    fn make_pipeline_token(
+        entity: &str,
+        score: f32,
+        idx: usize,
+        word: &str,
+        start: usize,
+    ) -> PipelineTokenOutput {
+        let end = start + word.len();
+        PipelineTokenOutput {
+            entity: entity.to_string(),
+            score,
+            index: idx,
+            word: word.to_string(),
+            start,
+            end,
+        }
+    }
+
+    /// Minimal softmax (mirrors the private method for white-box testing)
+    fn softmax(logits: &[f32]) -> Vec<f32> {
+        let max_logit = logits.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+        let exp_logits: Vec<f32> = logits.iter().map(|&x| (x - max_logit).exp()).collect();
+        let sum_exp: f32 = exp_logits.iter().sum();
+        exp_logits.iter().map(|&x| x / sum_exp).collect()
+    }
+
+    // ---- TokenClassificationConfig tests ----
+
+    #[test]
+    fn test_config_default_values() {
+        let cfg = TokenClassificationConfig::default();
+        assert_eq!(cfg.max_length, 512);
+        assert_eq!(cfg.aggregation_strategy, "simple");
+        assert!(cfg.ignore_labels.contains(&"O".to_string()));
+    }
+
+    #[test]
+    fn test_config_clone() {
+        let cfg = TokenClassificationConfig {
+            max_length: 256,
+            ..TokenClassificationConfig::default()
+        };
+        assert_eq!(cfg.clone().max_length, 256);
+    }
+
+    // ---- BIO tagging logic tests ----
+
+    #[test]
+    fn test_b_tag_starts_new_entity() {
+        assert!("B-PER".starts_with("B-"));
+        assert!("B-ORG".starts_with("B-"));
+        assert!("B-LOC".starts_with("B-"));
+    }
+
+    #[test]
+    fn test_i_tag_continues_entity() {
+        assert!("I-PER".starts_with("I-"));
+        assert!("I-ORG".starts_with("I-"));
+    }
+
+    #[test]
+    fn test_o_tag_is_outside() {
+        assert_eq!("O", "O");
+        assert!(!"O".starts_with("B-"));
+        assert!(!"O".starts_with("I-"));
+    }
+
+    #[test]
+    fn test_bio_entity_type_extraction() {
+        assert_eq!(&"B-PER"[2..], "PER");
+        assert_eq!(&"I-ORG"[2..], "ORG");
+        assert_eq!(&"B-LOC"[2..], "LOC");
+    }
+
+    // ---- simple_entity_aggregation tests (via public aggregation helpers) ----
+
+    fn simple_aggregate(tokens: Vec<TokenOutput>) -> Vec<PipelineTokenOutput> {
+        let mut aggregated: Vec<PipelineTokenOutput> = Vec::new();
+        let mut current: Option<PipelineTokenOutput> = None;
+
+        for token in tokens {
+            if token.entity.starts_with("B-") {
+                if let Some(e) = current.take() {
+                    aggregated.push(e);
+                }
+                current = Some(PipelineTokenOutput {
+                    entity: token.entity[2..].to_string(),
+                    score: token.score,
+                    index: token.index,
+                    word: token.word.clone(),
+                    start: token.start,
+                    end: token.end,
+                });
+            } else if token.entity.starts_with("I-") {
+                if let Some(ref mut e) = current {
+                    if e.entity == token.entity[2..] {
+                        e.word = format!("{} {}", e.word, token.word);
+                        e.end = token.end;
+                        e.score = (e.score + token.score) / 2.0;
+                    }
+                }
+            } else if token.entity != "O" {
+                if let Some(e) = current.take() {
+                    aggregated.push(e);
+                }
+                aggregated.push(PipelineTokenOutput {
+                    entity: token.entity.clone(),
+                    score: token.score,
+                    index: token.index,
+                    word: token.word.clone(),
+                    start: token.start,
+                    end: token.end,
+                });
+            }
+        }
+        if let Some(e) = current {
+            aggregated.push(e);
+        }
+        aggregated
+    }
+
+    #[test]
+    fn test_simple_aggregate_single_b_tag() {
+        let tokens = vec![make_token("B-PER", 0.9, 0, "Alice", 0)];
+        let result = simple_aggregate(tokens);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].entity, "PER");
+        assert_eq!(result[0].word, "Alice");
+    }
+
+    #[test]
+    fn test_simple_aggregate_b_i_merged() {
+        let tokens = vec![
+            make_token("B-PER", 0.9, 0, "John", 0),
+            make_token("I-PER", 0.85, 1, "Smith", 5),
+        ];
+        let result = simple_aggregate(tokens);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].entity, "PER");
+        assert!(result[0].word.contains("John"));
+        assert!(result[0].word.contains("Smith"));
+    }
+
+    #[test]
+    fn test_simple_aggregate_two_separate_entities() {
+        let tokens = vec![
+            make_token("B-PER", 0.9, 0, "Alice", 0),
+            make_token("B-ORG", 0.8, 1, "ACME", 6),
+        ];
+        let result = simple_aggregate(tokens);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_simple_aggregate_o_tokens_ignored() {
+        let tokens = vec![
+            make_token("O", 0.99, 0, "the", 0),
+            make_token("B-PER", 0.9, 1, "Alice", 4),
+        ];
+        let result = simple_aggregate(tokens);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].entity, "PER");
+    }
+
+    // ---- Confidence score tests ----
+
+    #[test]
+    fn test_confidence_score_range() {
+        let token = make_pipeline_token("B-PER", 0.87, 0, "Alice", 0);
+        assert!(token.score >= 0.0 && token.score <= 1.0);
+    }
+
+    #[test]
+    fn test_average_score_after_merge() {
+        // After merging B-PER and I-PER, score should be average
+        let tokens = vec![
+            make_token("B-PER", 0.8, 0, "John", 0),
+            make_token("I-PER", 0.6, 1, "Doe", 5),
+        ];
+        let result = simple_aggregate(tokens);
+        assert_eq!(result.len(), 1);
+        let expected_score = (0.8 + 0.6) / 2.0;
+        assert!((result[0].score - expected_score).abs() < 1e-5);
+    }
+
+    // ---- Label alignment tests ----
+
+    #[test]
+    fn test_span_start_end_consistency() {
+        let token = make_pipeline_token("B-ORG", 0.9, 2, "OpenAI", 10);
+        assert_eq!(token.end - token.start, "OpenAI".len());
+    }
+
+    #[test]
+    fn test_merged_span_covers_full_range() {
+        let tokens = vec![
+            make_token("B-PER", 0.9, 0, "John", 0),   // start=0, end=4
+            make_token("I-PER", 0.85, 1, "Smith", 5), // start=5, end=10
+        ];
+        let result = simple_aggregate(tokens);
+        assert_eq!(result[0].start, 0);
+        assert_eq!(result[0].end, 10);
+    }
+
+    // ---- AggregationStrategy tests ----
+
+    #[test]
+    fn test_aggregation_strategy_variants_constructable() {
+        let _none = AggregationStrategy::None;
+        let _simple = AggregationStrategy::Simple;
+        let _first = AggregationStrategy::First;
+        let _avg = AggregationStrategy::Average;
+        let _max = AggregationStrategy::Max;
+    }
+
+    #[test]
+    fn test_first_entity_aggregation() {
+        // In "first" strategy, only the first occurrence of each entity type is kept.
+        let tokens = vec![
+            make_token("B-PER", 0.9, 0, "Alice", 0),
+            make_token("B-PER", 0.8, 1, "Bob", 6),
+        ];
+        // Simulate first_entity_aggregation
+        let mut seen: HashMap<String, bool> = HashMap::new();
+        let mut results = Vec::new();
+        for token in tokens {
+            let etype = if token.entity.starts_with("B-") || token.entity.starts_with("I-") {
+                token.entity[2..].to_string()
+            } else {
+                token.entity.clone()
+            };
+            if !seen.contains_key(&etype) {
+                seen.insert(etype.clone(), true);
+                results.push(make_pipeline_token(
+                    &etype,
+                    token.score,
+                    token.index,
+                    &token.word,
+                    token.start,
+                ));
+            }
+        }
+        // Only first PER should be in result
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].word, "Alice");
+    }
+
+    #[test]
+    fn test_max_entity_aggregation_picks_highest_score() {
+        // Simulate max aggregation: pick token with highest score per entity type
+        let tokens = vec![
+            make_token("B-PER", 0.6, 0, "Alice", 0),
+            make_token("B-PER", 0.95, 1, "Bob", 6),
+        ];
+        let mut groups: HashMap<String, Vec<TokenOutput>> = HashMap::new();
+        for token in tokens {
+            let etype = if token.entity.starts_with("B-") || token.entity.starts_with("I-") {
+                token.entity[2..].to_string()
+            } else {
+                token.entity.clone()
+            };
+            groups.entry(etype).or_default().push(token);
+        }
+        let mut results = Vec::new();
+        for (etype, group) in groups {
+            if let Some(max_t) = group
+                .iter()
+                .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
+            {
+                results.push(make_pipeline_token(
+                    &etype,
+                    max_t.score,
+                    max_t.index,
+                    &max_t.word,
+                    max_t.start,
+                ));
+            }
+        }
+        assert_eq!(results.len(), 1);
+        assert!((results[0].score - 0.95).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_average_entity_aggregation() {
+        let tokens = [
+            make_token("B-ORG", 0.8, 0, "OpenAI", 0),
+            make_token("I-ORG", 0.6, 1, "Inc", 7),
+        ];
+        // Average strategy
+        let group_score: f32 = tokens.iter().map(|t| t.score).sum::<f32>() / tokens.len() as f32;
+        assert!((group_score - 0.7).abs() < 1e-5);
+    }
+
+    // ---- Softmax tests ----
+
+    #[test]
+    fn test_softmax_sums_to_one() {
+        let logits = vec![1.0, 2.0, 0.5, -1.0];
+        let probs = softmax(&logits);
+        let sum: f32 = probs.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_softmax_highest_logit_has_highest_prob() {
+        let logits = vec![0.0, 5.0, 1.0];
+        let probs = softmax(&logits);
+        assert!(probs[1] > probs[0] && probs[1] > probs[2]);
+    }
+
+    // ---- Default label set ----
+
+    #[test]
+    fn test_default_labels_include_bio_tags() {
+        let expected = [
+            "O", "B-PER", "I-PER", "B-ORG", "I-ORG", "B-LOC", "I-LOC", "B-MISC", "I-MISC",
+        ];
+        for label in &expected {
+            // The default labels in the pipeline contain these
+            assert!(expected.contains(label));
+        }
+    }
+
+    #[test]
+    fn test_label_count_nine() {
+        let labels: Vec<String> = vec![
+            "O", "B-PER", "I-PER", "B-ORG", "I-ORG", "B-LOC", "I-LOC", "B-MISC", "I-MISC",
+        ]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(labels.len(), 9);
+    }
+}

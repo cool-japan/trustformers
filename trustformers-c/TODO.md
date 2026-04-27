@@ -309,21 +309,22 @@ void* inference_thread(void* arg) {
 ## Future Enhancements
 
 ### High Priority
-- Enhanced error messages
-- More tensor operations
-- Streaming inference support
-- Async C API
+- [ ] Enhanced error messages for C FFI
+  - **Refinement needed:** What additional context is missing? Stack traces? Structured error fields?
+- [ ] More tensor operations exposed via C API
+- [ ] Streaming inference support
+- [ ] Async C API
 
 ### Performance
-- Zero-copy operations where possible
-- Better memory pooling
-- Reduced allocations
+- [ ] Zero-copy memory operations where possible
+- [ ] Better memory pooling
+- [ ] Reduced allocations
 
 ### Features
-- More hardware backends
-- Plugin system
-- Configuration API
-- Profiling hooks
+- [ ] More hardware backends
+- [ ] Plugin system for C extensions
+- [ ] Configuration API
+- [ ] Profiling hooks
 
 ---
 

@@ -1,8 +1,8 @@
 # trustformers-tokenizers
 
-High-performance tokenization library for transformer models with support for 50+ tokenization algorithms. Version 0.1.0 — Stable.
+High-performance tokenization library for transformer models with support for 50+ tokenization algorithms. Version 0.1.1 — Stable.
 
-**Version:** 0.1.0 | **Status:** Stable | **Tests:** 500 | **SLoC:** 51,211 | **Last Updated:** 2026-03-21
+**Version:** 0.1.1 | **Status:** Stable | **Tests:** 500 | **SLoC:** 51,211 | **Last Updated:** 2026-04-25
 
 ## Current State
 

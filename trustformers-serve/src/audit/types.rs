@@ -1003,3 +1003,322 @@ pub enum AuditOutcome {
     Partial,
     Error,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    // ── LCG ──────────────────────────────────────────────────────────────────
+    struct Lcg {
+        state: u64,
+    }
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Lcg { state: seed }
+        }
+        fn next(&mut self) -> u64 {
+            self.state = self
+                .state
+                .wrapping_mul(6_364_136_223_846_793_005_u64)
+                .wrapping_add(1_442_695_040_888_963_407_u64);
+            self.state
+        }
+        fn next_f32(&mut self) -> f32 {
+            (self.next() >> 11) as f32 / (1_u64 << 53) as f32
+        }
+    }
+
+    fn make_default_config() -> AuditConfig {
+        AuditConfig {
+            enabled: true,
+            log_level: AuditSeverity::Low,
+            include_request_body: false,
+            include_response_body: false,
+            retention_days: 30,
+            max_file_size_mb: 100,
+            file_path: None,
+            enable_database_storage: false,
+            database_url: None,
+            enable_encryption: false,
+            encryption_key: None,
+            enable_real_time_alerts: false,
+            alert_webhook_url: None,
+            enable_compliance_mode: false,
+            compliance_standard: None,
+            enable_log_forwarding: false,
+            log_forwarding_url: None,
+            batch_size: 50,
+            flush_interval_seconds: 5,
+        }
+    }
+
+    // ── AuditEvent builder ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_audit_event_new_has_expected_defaults() {
+        let evt = AuditEvent::new(AuditEventType::LoginAttempt, "login".to_string());
+        assert_eq!(evt.event_type, AuditEventType::LoginAttempt);
+        assert_eq!(evt.action, "login");
+        assert_eq!(evt.severity, AuditSeverity::Medium);
+        assert_eq!(evt.outcome, AuditOutcome::Success);
+        assert!(evt.user_id.is_none());
+        assert!(evt.ip_address.is_none());
+        assert!(!evt.id.is_empty());
+    }
+
+    #[test]
+    fn test_audit_event_with_severity() {
+        let evt = AuditEvent::new(AuditEventType::SecurityViolation, "violation".to_string())
+            .with_severity(AuditSeverity::Critical);
+        assert_eq!(evt.severity, AuditSeverity::Critical);
+    }
+
+    #[test]
+    fn test_audit_event_with_user() {
+        let evt = AuditEvent::new(AuditEventType::LoginSuccess, "ok".to_string())
+            .with_user("user_42".to_string());
+        assert_eq!(evt.user_id.as_deref(), Some("user_42"));
+    }
+
+    #[test]
+    fn test_audit_event_with_session() {
+        let evt = AuditEvent::new(AuditEventType::TokenRefresh, "refresh".to_string())
+            .with_session("sess_abc".to_string());
+        assert_eq!(evt.session_id.as_deref(), Some("sess_abc"));
+    }
+
+    #[test]
+    fn test_audit_event_with_ip_address() {
+        let evt = AuditEvent::new(AuditEventType::LoginFailure, "fail".to_string())
+            .with_ip_address("10.0.0.1".to_string());
+        assert_eq!(evt.ip_address.as_deref(), Some("10.0.0.1"));
+    }
+
+    #[test]
+    fn test_audit_event_with_user_agent() {
+        let evt = AuditEvent::new(AuditEventType::ApiKeyUsed, "used".to_string())
+            .with_user_agent("Mozilla/5.0".to_string());
+        assert_eq!(evt.user_agent.as_deref(), Some("Mozilla/5.0"));
+    }
+
+    #[test]
+    fn test_audit_event_with_resource() {
+        let evt = AuditEvent::new(AuditEventType::DataAccessed, "read".to_string())
+            .with_resource("model:llm".to_string());
+        assert_eq!(evt.resource.as_deref(), Some("model:llm"));
+    }
+
+    #[test]
+    fn test_audit_event_with_outcome() {
+        let evt = AuditEvent::new(AuditEventType::AccessDenied, "denied".to_string())
+            .with_outcome(AuditOutcome::Failure);
+        assert_eq!(evt.outcome, AuditOutcome::Failure);
+    }
+
+    #[test]
+    fn test_audit_event_with_request_id() {
+        let evt = AuditEvent::new(AuditEventType::InferenceRequest, "infer".to_string())
+            .with_request_id("req-001".to_string());
+        assert_eq!(evt.request_id.as_deref(), Some("req-001"));
+    }
+
+    #[test]
+    fn test_audit_event_with_duration() {
+        let evt = AuditEvent::new(AuditEventType::InferenceRequest, "infer".to_string())
+            .with_duration(150);
+        assert_eq!(evt.duration_ms, Some(150));
+    }
+
+    #[test]
+    fn test_audit_event_with_detail() {
+        let evt = AuditEvent::new(AuditEventType::ModelLoaded, "loaded".to_string())
+            .with_detail("model_size".to_string(), "7B".to_string());
+        assert_eq!(
+            evt.details.get("model_size").map(|s| s.as_str()),
+            Some("7B")
+        );
+    }
+
+    #[test]
+    fn test_audit_event_with_details_merges() {
+        let mut extra = HashMap::new();
+        extra.insert("key1".to_string(), "val1".to_string());
+        extra.insert("key2".to_string(), "val2".to_string());
+        let evt = AuditEvent::new(AuditEventType::ConfigurationChanged, "cfg".to_string())
+            .with_details(extra);
+        assert_eq!(evt.details.len(), 2);
+        assert_eq!(evt.details.get("key1").map(|s| s.as_str()), Some("val1"));
+    }
+
+    #[test]
+    fn test_audit_event_builder_chaining_all_fields() {
+        let mut lcg = Lcg::new(7);
+        let seed = lcg.next();
+        let evt = AuditEvent::new(AuditEventType::RateLimitHit, format!("rate_limit_{}", seed))
+            .with_severity(AuditSeverity::High)
+            .with_user("u1".to_string())
+            .with_session("s1".to_string())
+            .with_ip_address("192.168.1.1".to_string())
+            .with_user_agent("curl/7.0".to_string())
+            .with_resource("endpoint:/infer".to_string())
+            .with_outcome(AuditOutcome::Failure)
+            .with_request_id("r1".to_string())
+            .with_duration(42)
+            .with_detail("attempt".to_string(), "3".to_string());
+        assert_eq!(evt.severity, AuditSeverity::High);
+        assert_eq!(evt.user_id.as_deref(), Some("u1"));
+        assert_eq!(evt.duration_ms, Some(42));
+        assert_eq!(evt.details.get("attempt").map(|s| s.as_str()), Some("3"));
+    }
+
+    // ── AuditSeverity ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_audit_severity_equality() {
+        assert_eq!(AuditSeverity::Critical, AuditSeverity::Critical);
+        assert_ne!(AuditSeverity::Low, AuditSeverity::High);
+    }
+
+    #[test]
+    fn test_audit_severity_hash_uniqueness() {
+        let mut map: HashMap<AuditSeverity, u32> = HashMap::new();
+        map.insert(AuditSeverity::Low, 1);
+        map.insert(AuditSeverity::Medium, 2);
+        map.insert(AuditSeverity::High, 3);
+        map.insert(AuditSeverity::Critical, 4);
+        assert_eq!(map.len(), 4);
+    }
+
+    // ── AuditOutcome ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_audit_outcome_equality() {
+        assert_eq!(AuditOutcome::Success, AuditOutcome::Success);
+        assert_ne!(AuditOutcome::Success, AuditOutcome::Failure);
+        assert_ne!(AuditOutcome::Partial, AuditOutcome::Error);
+    }
+
+    // ── AuditEventType uniqueness ────────────────────────────────────────────
+
+    #[test]
+    fn test_audit_event_type_hash_uniqueness() {
+        let mut map: HashMap<AuditEventType, usize> = HashMap::new();
+        let types = vec![
+            AuditEventType::LoginAttempt,
+            AuditEventType::LoginSuccess,
+            AuditEventType::LoginFailure,
+            AuditEventType::ApiKeyCreated,
+            AuditEventType::SecurityViolation,
+        ];
+        for (i, t) in types.into_iter().enumerate() {
+            map.insert(t, i);
+        }
+        assert_eq!(map.len(), 5);
+    }
+
+    // ── AuditQuery defaults ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_audit_query_default_is_all_none() {
+        let q = AuditQuery::default();
+        assert!(q.start_time.is_none());
+        assert!(q.end_time.is_none());
+        assert!(q.event_types.is_none());
+        assert!(q.user_ids.is_none());
+        assert!(q.severity.is_none());
+        assert!(q.outcome.is_none());
+        assert!(q.limit.is_none());
+        assert!(q.offset.is_none());
+    }
+
+    // ── AuditLogger construction and log_event ───────────────────────────────
+
+    #[tokio::test]
+    async fn test_audit_logger_disabled_skips_log() {
+        let mut cfg = make_default_config();
+        cfg.enabled = false;
+        let logger = AuditLogger::new(cfg);
+        let evt = AuditEvent::new(AuditEventType::LoginAttempt, "attempt".to_string());
+        // Should silently succeed when disabled
+        let result = logger.log_event(evt);
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_audit_logger_enabled_low_severity_logs() {
+        let cfg = make_default_config(); // log_level = Low → logs all
+        let logger = AuditLogger::new(cfg);
+        let evt = AuditEvent::new(AuditEventType::LoginSuccess, "ok".to_string())
+            .with_severity(AuditSeverity::Low);
+        let result = logger.log_event(evt);
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_audit_logger_high_level_filters_low_severity() {
+        let mut cfg = make_default_config();
+        cfg.log_level = AuditSeverity::High; // only High/Critical pass
+        let logger = AuditLogger::new(cfg);
+        let evt = AuditEvent::new(AuditEventType::ApiKeyUsed, "used".to_string())
+            .with_severity(AuditSeverity::Low);
+        // Should succeed but silently skip (filtered)
+        let result = logger.log_event(evt);
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_audit_logger_subscribe_to_alerts_returns_receiver() {
+        let cfg = make_default_config();
+        let logger = AuditLogger::new(cfg);
+        // Just verify we can subscribe without panic
+        let _rx = logger.subscribe_to_alerts();
+    }
+
+    #[test]
+    fn test_audit_event_id_is_unique_lcg() {
+        let mut lcg = Lcg::new(13);
+        let ids: Vec<String> = (0..10)
+            .map(|_| {
+                let seed = lcg.next();
+                let evt =
+                    AuditEvent::new(AuditEventType::InferenceRequest, format!("req_{}", seed));
+                evt.id.clone()
+            })
+            .collect();
+        // All IDs should be unique UUIDs
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len());
+    }
+
+    #[test]
+    fn test_export_format_variants_exist() {
+        // Ensure both ExportFormat variants can be constructed
+        let _j = ExportFormat::Json;
+        let _c = ExportFormat::Csv;
+    }
+
+    #[test]
+    fn test_audit_config_defaults_are_reasonable() {
+        let cfg = make_default_config();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.retention_days, 30);
+        assert_eq!(cfg.batch_size, 50);
+        assert!(!cfg.enable_database_storage);
+        assert!(!cfg.enable_encryption);
+    }
+
+    #[test]
+    fn test_lcg_produces_diverse_values() {
+        let mut lcg = Lcg::new(1);
+        let vals: Vec<f32> = (0..20).map(|_| lcg.next_f32()).collect();
+        // At least half should differ from the first value
+        let first = vals[0];
+        let diff_count = vals.iter().filter(|&&v| (v - first).abs() > 1e-6).count();
+        assert!(
+            diff_count >= 8,
+            "LCG seems stuck: diff_count={}",
+            diff_count
+        );
+    }
+}

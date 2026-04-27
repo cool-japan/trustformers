@@ -1435,4 +1435,174 @@ mod tests {
         assert!(config.enable_conversation_analysis);
         assert_eq!(config.analysis_sampling_rate, 0.1);
     }
+
+    #[test]
+    fn test_default_llm_debug_config() {
+        let config = LLMDebugConfig::default();
+        assert!(config.enable_safety_analysis);
+        assert!(config.enable_factuality_checking);
+        assert!(config.enable_alignment_monitoring);
+        assert!(config.enable_hallucination_detection);
+        assert!(config.enable_bias_detection);
+        assert!(config.enable_llm_performance_profiling);
+        assert!(config.enable_conversation_analysis);
+        assert!((config.safety_threshold - 0.8).abs() < 1e-9);
+        assert!((config.factuality_threshold - 0.7).abs() < 1e-9);
+        assert_eq!(config.max_conversation_length, 100);
+        assert!((config.analysis_sampling_rate - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_llm_performance_profiler_new() {
+        let profiler = LLMPerformanceProfiler::new();
+        assert!(profiler.generation_metrics.tokens_per_second > 0.0);
+        assert!(profiler.efficiency_metrics.memory_efficiency > 0.0);
+        assert!(profiler.quality_metrics.coherence_score > 0.0);
+        assert!(profiler.scalability_metrics.concurrent_user_capacity > 0);
+    }
+
+    #[test]
+    fn test_llm_performance_profiler_default() {
+        let profiler = LLMPerformanceProfiler::default();
+        assert!((profiler.generation_metrics.tokens_per_second - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_llm_performance_profiler_health_summary() {
+        let profiler = LLMPerformanceProfiler::new();
+        let summary = profiler.get_health_summary();
+        assert!(summary.score > 0.0 && summary.score <= 1.0);
+        assert!(matches!(summary.status, HealthStatus::Good));
+    }
+
+    #[test]
+    fn test_generation_metrics_values() {
+        let profiler = LLMPerformanceProfiler::new();
+        let gm = &profiler.generation_metrics;
+        assert!(gm.average_response_length > 0.0);
+        assert!(gm.generation_latency_p50 < gm.generation_latency_p95);
+        assert!(gm.generation_latency_p95 < gm.generation_latency_p99);
+        assert!(gm.completion_rate > 0.0 && gm.completion_rate <= 1.0);
+        assert!(gm.timeout_rate >= 0.0 && gm.timeout_rate < 1.0);
+    }
+
+    #[test]
+    fn test_efficiency_metrics_values() {
+        let profiler = LLMPerformanceProfiler::new();
+        let em = &profiler.efficiency_metrics;
+        assert!(em.memory_efficiency > 0.0 && em.memory_efficiency <= 1.0);
+        assert!(em.compute_utilization > 0.0 && em.compute_utilization <= 1.0);
+        assert!(em.cache_hit_rate > 0.0 && em.cache_hit_rate <= 1.0);
+        assert!(em.cost_per_token > 0.0);
+    }
+
+    #[test]
+    fn test_quality_metrics_values() {
+        let profiler = LLMPerformanceProfiler::new();
+        let qm = &profiler.quality_metrics;
+        assert!(qm.coherence_score > 0.0 && qm.coherence_score <= 1.0);
+        assert!(qm.relevance_score > 0.0 && qm.relevance_score <= 1.0);
+        assert!(qm.fluency_score > 0.0 && qm.fluency_score <= 1.0);
+        assert!(qm.factual_accuracy > 0.0 && qm.factual_accuracy <= 1.0);
+    }
+
+    #[test]
+    fn test_conversation_analyzer_new() {
+        let config = LLMDebugConfig::default();
+        let analyzer = ConversationAnalyzer::new(&config);
+        assert!(analyzer.conversation_history.is_empty());
+        assert!(analyzer.dialog_metrics.conversation_coherence > 0.0);
+    }
+
+    #[test]
+    fn test_conversation_analyzer_health_summary() {
+        let config = LLMDebugConfig::default();
+        let analyzer = ConversationAnalyzer::new(&config);
+        let summary = analyzer.get_health_summary();
+        assert!(summary.score > 0.0);
+    }
+
+    #[test]
+    fn test_context_tracker_update() {
+        let mut tracker = ContextTracker {
+            active_topics: HashSet::new(),
+            entity_mentions: HashMap::new(),
+            context_window: Vec::new(),
+            attention_weights: Vec::new(),
+        };
+        let turn = ConversationTurn {
+            user_input: "Hello".to_string(),
+            model_response: "Hi there!".to_string(),
+            timestamp: chrono::Utc::now(),
+            turn_id: 0,
+            context_length: 10,
+            response_time: Duration::from_millis(100),
+        };
+        tracker.update_from_turn(&turn);
+        assert_eq!(tracker.context_window.len(), 1);
+        assert_eq!(tracker.context_window[0], "Hi there!");
+    }
+
+    #[test]
+    fn test_context_tracker_window_limit() {
+        let mut tracker = ContextTracker {
+            active_topics: HashSet::new(),
+            entity_mentions: HashMap::new(),
+            context_window: Vec::new(),
+            attention_weights: Vec::new(),
+        };
+        for i in 0..15 {
+            let turn = ConversationTurn {
+                user_input: format!("q{}", i),
+                model_response: format!("a{}", i),
+                timestamp: chrono::Utc::now(),
+                turn_id: 0,
+                context_length: 10,
+                response_time: Duration::from_millis(100),
+            };
+            tracker.update_from_turn(&turn);
+        }
+        assert_eq!(tracker.context_window.len(), 10);
+    }
+
+    #[test]
+    fn test_llm_debugger_factory_fn() {
+        let debugger = llm_debugger();
+        assert!(debugger.config.enable_safety_analysis);
+    }
+
+    #[test]
+    fn test_llm_debugger_with_config_factory() {
+        let config = LLMDebugConfig {
+            enable_safety_analysis: false,
+            ..LLMDebugConfig::default()
+        };
+        let debugger = llm_debugger_with_config(config);
+        assert!(!debugger.config.enable_safety_analysis);
+    }
+
+    #[test]
+    fn test_safety_focused_config_values() {
+        let config = safety_focused_config();
+        assert!(config.enable_hallucination_detection);
+        assert!(!config.enable_conversation_analysis);
+        assert_eq!(config.max_conversation_length, 50);
+    }
+
+    #[test]
+    fn test_performance_focused_config_values() {
+        let config = performance_focused_config();
+        assert!(!config.enable_hallucination_detection);
+        assert!(!config.enable_bias_detection);
+        assert_eq!(config.max_conversation_length, 200);
+    }
+
+    #[test]
+    fn test_scalability_metrics() {
+        let profiler = LLMPerformanceProfiler::new();
+        let sm = &profiler.scalability_metrics;
+        assert!(sm.concurrent_user_capacity > 0);
+        assert!(sm.throughput_scaling > 0.0 && sm.throughput_scaling <= 1.0);
+        assert!(!sm.bottleneck_analysis.is_empty());
+    }
 }

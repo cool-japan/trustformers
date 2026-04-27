@@ -924,3 +924,180 @@ pub enum BackoffStrategy {
     /// Custom backoff with specific delays
     Custom(Vec<Duration>),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_port_pool_config_defaults() {
+        let cfg = PortPoolConfig::default();
+        assert_eq!(cfg.port_range, (8000, 9000));
+        assert_eq!(cfg.max_allocation, 100);
+        assert!(cfg.enable_reservation);
+    }
+
+    #[test]
+    fn test_temp_dir_pool_config_defaults() {
+        let cfg = TempDirPoolConfig::default();
+        assert_eq!(cfg.max_directories, 50);
+        assert!(cfg.enable_auto_cleanup);
+    }
+
+    #[test]
+    fn test_gpu_pool_config_defaults() {
+        let cfg = GpuPoolConfig::default();
+        assert_eq!(cfg.max_devices, 8);
+        assert!(cfg.enable_monitoring);
+        assert_eq!(cfg.memory_threshold, 0.9);
+    }
+
+    #[test]
+    fn test_database_pool_config_defaults() {
+        let cfg = DatabasePoolConfig::default();
+        assert_eq!(cfg.max_connections, 20);
+        assert_eq!(cfg.min_connections, 5);
+    }
+
+    #[test]
+    fn test_resource_monitoring_config_defaults() {
+        let cfg = ResourceMonitoringConfig::default();
+        assert!(cfg.enable_real_time);
+        assert!(cfg.enable_alerts);
+        assert!(cfg.alert_thresholds.contains_key("cpu_usage"));
+    }
+
+    #[test]
+    fn test_conflict_resolution_config_defaults() {
+        let cfg = ConflictResolutionConfig::default();
+        assert!(cfg.enable_auto_resolution);
+        assert_eq!(cfg.max_retry_attempts, 3);
+        assert_eq!(cfg.backoff_strategy, BackoffStrategy::Exponential);
+    }
+
+    #[test]
+    fn test_resource_cleanup_config_defaults() {
+        let cfg = ResourceCleanupConfig::default();
+        assert!(cfg.enable_auto_cleanup);
+        assert_eq!(cfg.max_cleanup_retries, 3);
+    }
+
+    #[test]
+    fn test_gpu_alert_config_defaults() {
+        let cfg = GpuAlertConfig::default();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.max_escalation_level, 3);
+    }
+
+    #[test]
+    fn test_resource_pool_configs_defaults() {
+        let cfg = ResourcePoolConfigs::default();
+        assert_eq!(cfg.network_port_pool.max_allocation, 100);
+        assert_eq!(cfg.database_pool.max_connections, 20);
+    }
+
+    #[test]
+    fn test_resource_management_config_defaults() {
+        let cfg = ResourceManagementConfig::default();
+        assert!(cfg.enable_parallel_execution);
+        assert_eq!(cfg.max_concurrent_tests, 4);
+    }
+
+    #[test]
+    fn test_port_usage_type_equality() {
+        let http = PortUsageType::HttpServer;
+        let https = PortUsageType::HttpsServer;
+        assert_ne!(http, https);
+        assert_eq!(http, PortUsageType::HttpServer);
+    }
+
+    #[test]
+    fn test_directory_status_equality() {
+        assert_eq!(DirectoryStatus::Available, DirectoryStatus::Available);
+        assert_ne!(DirectoryStatus::Available, DirectoryStatus::Allocated);
+    }
+
+    #[test]
+    fn test_cleanup_event_type_equality() {
+        assert_eq!(CleanupEventType::Started, CleanupEventType::Started);
+        assert_ne!(CleanupEventType::Completed, CleanupEventType::Failed);
+    }
+
+    #[test]
+    fn test_worker_status_equality() {
+        assert_eq!(WorkerStatus::Idle, WorkerStatus::Idle);
+        assert_ne!(WorkerStatus::Idle, WorkerStatus::Busy);
+    }
+
+    #[test]
+    fn test_execution_status_equality() {
+        assert_eq!(ExecutionStatus::Running, ExecutionStatus::Running);
+        assert_ne!(ExecutionStatus::Running, ExecutionStatus::Completed);
+    }
+
+    #[test]
+    fn test_health_status_equality() {
+        assert_eq!(HealthStatus::Healthy, HealthStatus::Healthy);
+        assert_ne!(HealthStatus::Healthy, HealthStatus::Warning);
+    }
+
+    #[test]
+    fn test_backoff_strategy_equality() {
+        assert_eq!(BackoffStrategy::Linear, BackoffStrategy::Linear);
+        assert_ne!(BackoffStrategy::Linear, BackoffStrategy::Exponential);
+    }
+
+    #[test]
+    fn test_regression_severity_ordering() {
+        assert!(RegressionSeverity::Minor < RegressionSeverity::Moderate);
+        assert!(RegressionSeverity::Moderate < RegressionSeverity::Major);
+        assert!(RegressionSeverity::Major < RegressionSeverity::Critical);
+    }
+
+    #[test]
+    fn test_recommendation_difficulty_ordering() {
+        assert!(RecommendationDifficulty::Easy < RecommendationDifficulty::Medium);
+        assert!(RecommendationDifficulty::Medium < RecommendationDifficulty::Hard);
+        assert!(RecommendationDifficulty::Hard < RecommendationDifficulty::VeryHard);
+    }
+
+    #[test]
+    fn test_recommendation_priority_ordering() {
+        assert!(RecommendationPriority::Low < RecommendationPriority::Medium);
+        assert!(RecommendationPriority::Medium < RecommendationPriority::High);
+        assert!(RecommendationPriority::High < RecommendationPriority::Critical);
+    }
+
+    #[test]
+    fn test_cleanup_result_success() {
+        let result = CleanupResult::Success {
+            files_removed: 5,
+            bytes_freed: 1024,
+        };
+        match result {
+            CleanupResult::Success {
+                files_removed,
+                bytes_freed,
+            } => {
+                assert_eq!(files_removed, 5);
+                assert_eq!(bytes_freed, 1024);
+            },
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_gpu_monitoring_config_default() {
+        let cfg = GpuMonitoringConfig::default();
+        assert!(!cfg.real_time_monitoring);
+        assert!(cfg.enable_alerts);
+        assert!(cfg.enable_performance_tracking);
+    }
+
+    #[test]
+    fn test_port_range_validity() {
+        let cfg = PortPoolConfig::default();
+        let (start, end) = cfg.port_range;
+        assert!(start < end);
+    }
+}

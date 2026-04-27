@@ -2,6 +2,7 @@
 name = "trustformers-server"
 version.workspace = true
 edition.workspace = true
+publish = false
 
 [dependencies]
 # Web framework

@@ -342,6 +342,15 @@ pub enum MetricInput {
     ///
     /// Example: `[0.8, 0.3, 0.9, 0.1]` for regression outputs
     Scores(Vec<f32>),
+
+    /// Raw tensor pair for tensor-native metrics (e.g. TensorAdapter).
+    ///
+    /// `predictions` holds model outputs (logits or class indices);
+    /// `targets` holds ground-truth integer class labels.
+    Tensors {
+        predictions: trustformers_core::Tensor,
+        targets: trustformers_core::Tensor,
+    },
 }
 
 /// Metric computation result

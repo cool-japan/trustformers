@@ -943,4 +943,373 @@ mod tests {
             serde_json::from_str(&serialized).expect("JSON deserialization failed");
         assert_eq!(method, deserialized);
     }
+
+    // ── CalibrationMethod variants ──
+
+    #[test]
+    fn test_all_calibration_methods() {
+        let methods = [
+            CalibrationMethod::Entropy,
+            CalibrationMethod::Percentile,
+            CalibrationMethod::MSE,
+            CalibrationMethod::SQNR,
+            CalibrationMethod::CrossEntropy,
+            CalibrationMethod::Hessian,
+            CalibrationMethod::ActivationAware,
+            CalibrationMethod::Smooth,
+            CalibrationMethod::SensitivityBased,
+            CalibrationMethod::Learned,
+        ];
+        // Each method should be distinct
+        for (i, a) in methods.iter().enumerate() {
+            for (j, b) in methods.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b);
+                } else {
+                    assert_ne!(a, b);
+                }
+            }
+        }
+    }
+
+    // ── DistributionType tests ──
+
+    #[test]
+    fn test_distribution_type_variants() {
+        let _types = [
+            DistributionType::Normal,
+            DistributionType::Uniform,
+            DistributionType::Exponential,
+            DistributionType::Laplace,
+            DistributionType::Gamma,
+            DistributionType::Beta,
+            DistributionType::Multimodal,
+            DistributionType::Unknown,
+        ];
+    }
+
+    #[test]
+    fn test_distribution_type_eq() {
+        assert_eq!(DistributionType::Normal, DistributionType::Normal);
+        assert_ne!(DistributionType::Normal, DistributionType::Uniform);
+    }
+
+    // ── CalibrationParameter tests ──
+
+    #[test]
+    fn test_calibration_parameter_float() {
+        let param = CalibrationParameter::Float(std::f32::consts::PI);
+        let debug = format!("{:?}", param);
+        assert!(debug.contains("3.14"));
+    }
+
+    #[test]
+    fn test_calibration_parameter_int() {
+        let param = CalibrationParameter::Int(42);
+        let debug = format!("{:?}", param);
+        assert!(debug.contains("42"));
+    }
+
+    #[test]
+    fn test_calibration_parameter_bool() {
+        let param = CalibrationParameter::Bool(true);
+        let debug = format!("{:?}", param);
+        assert!(debug.contains("true"));
+    }
+
+    #[test]
+    fn test_calibration_parameter_string() {
+        let param = CalibrationParameter::String("test".to_string());
+        let debug = format!("{:?}", param);
+        assert!(debug.contains("test"));
+    }
+
+    #[test]
+    fn test_calibration_parameter_float_array() {
+        let param = CalibrationParameter::FloatArray(vec![1.0, 2.0, 3.0]);
+        let debug = format!("{:?}", param);
+        assert!(debug.contains("FloatArray"));
+    }
+
+    #[test]
+    fn test_calibration_parameter_int_array() {
+        let param = CalibrationParameter::IntArray(vec![1, 2, 3]);
+        let debug = format!("{:?}", param);
+        assert!(debug.contains("IntArray"));
+    }
+
+    // ── QualityThresholds tests ──
+
+    #[test]
+    fn test_quality_thresholds_clone() {
+        let thresholds = QualityThresholds::default();
+        let cloned = thresholds.clone();
+        assert_eq!(
+            cloned.min_accuracy_retention,
+            thresholds.min_accuracy_retention
+        );
+        assert_eq!(cloned.max_sqnr_degradation, thresholds.max_sqnr_degradation);
+    }
+
+    #[test]
+    fn test_quality_thresholds_custom() {
+        let thresholds = QualityThresholds {
+            min_accuracy_retention: 0.99,
+            max_sqnr_degradation: 1.0,
+            max_kl_divergence: 0.01,
+            max_latency_increase: 0.05,
+            min_compression_ratio: 4.0,
+        };
+        assert!((thresholds.min_accuracy_retention - 0.99).abs() < 1e-6);
+        assert!((thresholds.min_compression_ratio - 4.0).abs() < 1e-6);
+    }
+
+    // ── CrossValidationConfig tests ──
+
+    #[test]
+    fn test_cross_validation_config_default() {
+        let config = CrossValidationConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.folds, 5);
+        assert!((config.validation_split - 0.2).abs() < 1e-6);
+        assert_eq!(config.random_seed, 42);
+        assert!(!config.stratified);
+    }
+
+    #[test]
+    fn test_cross_validation_config_clone() {
+        let config = CrossValidationConfig::default();
+        let cloned = config.clone();
+        assert_eq!(cloned.folds, config.folds);
+        assert_eq!(cloned.random_seed, config.random_seed);
+    }
+
+    // ── CalibrationToolkit tests ──
+
+    #[test]
+    fn test_toolkit_default() {
+        let toolkit = CalibrationToolkit::default();
+        assert!(toolkit.datasets.is_empty());
+    }
+
+    #[test]
+    fn test_toolkit_non_empty_dataset_validation() {
+        let toolkit = CalibrationToolkit::new();
+        let tensor = Tensor::ones(&[2, 3]).expect("Tensor creation failed");
+        let dataset = CalibrationDataset {
+            name: "valid".to_string(),
+            samples: vec![tensor],
+            targets: None,
+            metadata: CalibrationMetadata {
+                description: "Test dataset".to_string(),
+                source: "test".to_string(),
+                version: "1.0".to_string(),
+                created_at: 0,
+                tags: Vec::new(),
+                model_type: "test".to_string(),
+                recommended_methods: vec![CalibrationMethod::Entropy],
+            },
+            statistics: DatasetStatistics {
+                sample_count: 1,
+                input_shapes: vec![vec![2, 3]],
+                statistics: TensorStatistics {
+                    mean: vec![1.0],
+                    std: vec![0.0],
+                    min: vec![1.0],
+                    max: vec![1.0],
+                    percentiles: Vec::new(),
+                    skewness: vec![0.0],
+                    kurtosis: vec![0.0],
+                },
+                dynamic_range: DynamicRange {
+                    overall_range: 0.0,
+                    channel_ranges: Vec::new(),
+                    outlier_ratio: 0.0,
+                    suggested_clip_min: 1.0,
+                    suggested_clip_max: 1.0,
+                },
+                distribution: DistributionAnalysis {
+                    distribution_type: DistributionType::Normal,
+                    normality_p_value: 0.5,
+                    entropy: 0.0,
+                    concentration: 1.0,
+                    is_multimodal: false,
+                    mode_count: Some(1),
+                },
+            },
+        };
+        assert!(toolkit.validate_dataset(&dataset).is_ok());
+    }
+
+    // ── DynamicRange tests ──
+
+    #[test]
+    fn test_dynamic_range_clone() {
+        let range = DynamicRange {
+            overall_range: 10.0,
+            channel_ranges: vec![5.0, 8.0],
+            outlier_ratio: 0.01,
+            suggested_clip_min: -5.0,
+            suggested_clip_max: 5.0,
+        };
+        let cloned = range.clone();
+        assert!((cloned.overall_range - 10.0).abs() < 1e-6);
+        assert_eq!(cloned.channel_ranges.len(), 2);
+    }
+
+    // ── DistributionAnalysis tests ──
+
+    #[test]
+    fn test_distribution_analysis_clone() {
+        let analysis = DistributionAnalysis {
+            distribution_type: DistributionType::Normal,
+            normality_p_value: 0.95,
+            entropy: 2.5,
+            concentration: 0.8,
+            is_multimodal: false,
+            mode_count: Some(1),
+        };
+        let cloned = analysis.clone();
+        assert_eq!(cloned.distribution_type, DistributionType::Normal);
+        assert!((cloned.entropy - 2.5).abs() < 1e-6);
+    }
+
+    // ── TensorStatistics tests ──
+
+    #[test]
+    fn test_tensor_statistics_clone() {
+        let stats = TensorStatistics {
+            mean: vec![0.0, 1.0],
+            std: vec![1.0, 0.5],
+            min: vec![-3.0, -1.0],
+            max: vec![3.0, 2.0],
+            percentiles: vec![vec![0.1, 0.5, 0.9]],
+            skewness: vec![0.0],
+            kurtosis: vec![3.0],
+        };
+        let cloned = stats.clone();
+        assert_eq!(cloned.mean, vec![0.0, 1.0]);
+        assert_eq!(cloned.std, vec![1.0, 0.5]);
+    }
+
+    // ── CalibrationMetadata tests ──
+
+    #[test]
+    fn test_calibration_metadata_clone() {
+        let metadata = CalibrationMetadata {
+            description: "Test".to_string(),
+            source: "test_source".to_string(),
+            version: "1.0".to_string(),
+            created_at: 12345,
+            tags: vec!["tag1".to_string()],
+            model_type: "transformer".to_string(),
+            recommended_methods: vec![CalibrationMethod::MSE],
+        };
+        let cloned = metadata.clone();
+        assert_eq!(cloned.description, "Test");
+        assert_eq!(cloned.recommended_methods, vec![CalibrationMethod::MSE]);
+    }
+
+    // ── QualityMetrics tests ──
+
+    #[test]
+    fn test_quality_metrics_clone() {
+        let metrics = QualityMetrics {
+            accuracy_retention: 0.98,
+            sqnr_db: 30.0,
+            kl_divergence: 0.01,
+            compression_ratio: 4.0,
+            speedup_factor: 2.0,
+            memory_reduction: 0.75,
+            layer_metrics: HashMap::new(),
+        };
+        let cloned = metrics.clone();
+        assert!((cloned.accuracy_retention - 0.98).abs() < 1e-6);
+        assert!((cloned.compression_ratio - 4.0).abs() < 1e-6);
+    }
+
+    // ── LayerQualityMetrics tests ──
+
+    #[test]
+    fn test_layer_quality_metrics() {
+        let metrics = LayerQualityMetrics {
+            layer_name: "linear_0".to_string(),
+            layer_type: "Linear".to_string(),
+            quantization_error: 0.001,
+            distribution_similarity: 0.99,
+            gradient_preservation: 0.95,
+            activation_preservation: 0.98,
+        };
+        let cloned = metrics.clone();
+        assert_eq!(cloned.layer_name, "linear_0");
+        assert!((cloned.quantization_error - 0.001).abs() < 1e-6);
+    }
+
+    // ── CalibrationParameters tests ──
+
+    #[test]
+    fn test_calibration_parameters_empty() {
+        let params = CalibrationParameters {
+            scales: HashMap::new(),
+            zero_points: HashMap::new(),
+            clip_ranges: HashMap::new(),
+            bit_allocations: HashMap::new(),
+            extra_params: HashMap::new(),
+        };
+        assert!(params.scales.is_empty());
+        assert!(params.zero_points.is_empty());
+    }
+
+    #[test]
+    fn test_calibration_parameters_with_data() {
+        let mut params = CalibrationParameters {
+            scales: HashMap::new(),
+            zero_points: HashMap::new(),
+            clip_ranges: HashMap::new(),
+            bit_allocations: HashMap::new(),
+            extra_params: HashMap::new(),
+        };
+        params.scales.insert("layer_0".to_string(), vec![0.1, 0.2]);
+        params.zero_points.insert("layer_0".to_string(), vec![0, 1]);
+        params.clip_ranges.insert("layer_0".to_string(), (-1.0, 1.0));
+        params.bit_allocations.insert("layer_0".to_string(), vec![4, 8]);
+
+        assert_eq!(params.scales.get("layer_0").expect("should exist").len(), 2);
+        assert_eq!(
+            params.clip_ranges.get("layer_0").expect("should exist"),
+            &(-1.0, 1.0)
+        );
+    }
+
+    // ── CalibrationResult tests ──
+
+    #[test]
+    fn test_calibration_result_clone() {
+        let result = CalibrationResult {
+            method: CalibrationMethod::Entropy,
+            primary_success: true,
+            parameters: CalibrationParameters {
+                scales: HashMap::new(),
+                zero_points: HashMap::new(),
+                clip_ranges: HashMap::new(),
+                bit_allocations: HashMap::new(),
+                extra_params: HashMap::new(),
+            },
+            quality_metrics: QualityMetrics {
+                accuracy_retention: 0.99,
+                sqnr_db: 35.0,
+                kl_divergence: 0.001,
+                compression_ratio: 4.0,
+                speedup_factor: 2.5,
+                memory_reduction: 0.75,
+                layer_metrics: HashMap::new(),
+            },
+            cross_validation: None,
+            method_comparison: None,
+            recommendations: Vec::new(),
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.method, CalibrationMethod::Entropy);
+        assert!(cloned.primary_success);
+    }
 }

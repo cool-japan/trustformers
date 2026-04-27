@@ -244,3 +244,147 @@ pub struct ConsentEvidence {
     /// Additional metadata
     pub metadata: std::collections::HashMap<String, String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_consent_management_config_default() {
+        let cfg = ConsentManagementConfig::default();
+        assert!(cfg.enabled);
+        assert!(cfg.granular_consent);
+        assert!(cfg.withdrawal.enabled);
+        assert!(cfg.verification.enabled);
+    }
+
+    #[test]
+    fn test_consent_storage_config_default() {
+        let cfg = ConsentStorageConfig::default();
+        assert!(cfg.encryption);
+        assert!(cfg.audit_trail);
+        assert!(cfg.tamper_protection);
+        assert!(matches!(cfg.backend, ConsentStorageBackend::Database));
+    }
+
+    #[test]
+    fn test_consent_storage_backend_filesystem() {
+        let fs = ConsentStorageBackend::FileSystem {
+            path: "/tmp/consent".to_string(),
+        };
+        match fs {
+            ConsentStorageBackend::FileSystem { path } => assert_eq!(path, "/tmp/consent"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_consent_storage_backend_external() {
+        let ext = ConsentStorageBackend::External {
+            endpoint: "https://consent.example.com".to_string(),
+            api_key: "key123".to_string(),
+        };
+        match ext {
+            ConsentStorageBackend::External { endpoint, api_key } => {
+                assert!(endpoint.starts_with("https://"));
+                assert!(!api_key.is_empty());
+            },
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_consent_verification_config_default() {
+        let cfg = ConsentVerificationConfig::default();
+        assert!(cfg.enabled);
+        assert!(!cfg.multi_factor);
+        assert_eq!(cfg.methods.len(), 2);
+    }
+
+    #[test]
+    fn test_verification_method_variants() {
+        assert_eq!(format!("{:?}", VerificationMethod::Email), "Email");
+        assert_eq!(format!("{:?}", VerificationMethod::SMS), "SMS");
+        assert_eq!(
+            format!("{:?}", VerificationMethod::DigitalSignature),
+            "DigitalSignature"
+        );
+        assert_eq!(format!("{:?}", VerificationMethod::Biometric), "Biometric");
+        assert_eq!(format!("{:?}", VerificationMethod::TwoFactor), "TwoFactor");
+    }
+
+    #[test]
+    fn test_consent_withdrawal_config_default() {
+        let cfg = ConsentWithdrawalConfig::default();
+        assert!(cfg.enabled);
+        assert!(cfg.immediate_effect);
+        assert!(cfg.confirmation_required);
+        assert!(cfg.grace_period.is_none());
+        assert_eq!(cfg.methods.len(), 3);
+    }
+
+    #[test]
+    fn test_withdrawal_method_variants() {
+        assert_eq!(format!("{:?}", WithdrawalMethod::WebPortal), "WebPortal");
+        assert_eq!(format!("{:?}", WithdrawalMethod::Email), "Email");
+        assert_eq!(format!("{:?}", WithdrawalMethod::API), "API");
+        assert_eq!(format!("{:?}", WithdrawalMethod::Phone), "Phone");
+        assert_eq!(format!("{:?}", WithdrawalMethod::Mail), "Mail");
+    }
+
+    #[test]
+    fn test_consent_renewal_config_default() {
+        let cfg = ConsentRenewalConfig::default();
+        assert!(cfg.enabled);
+        assert!(cfg.auto_expiry);
+        assert!(cfg.notice_period < cfg.renewal_period);
+    }
+
+    #[test]
+    fn test_consent_mechanism_variants() {
+        assert_eq!(format!("{:?}", ConsentMechanism::WebForm), "WebForm");
+        assert_eq!(format!("{:?}", ConsentMechanism::EmailOptIn), "EmailOptIn");
+        assert_eq!(format!("{:?}", ConsentMechanism::API), "API");
+        assert_eq!(format!("{:?}", ConsentMechanism::MobileApp), "MobileApp");
+    }
+
+    #[test]
+    fn test_consent_evidence_creation() {
+        let evidence = ConsentEvidence {
+            ip_address: Some("192.168.1.1".to_string()),
+            user_agent: Some("Mozilla/5.0".to_string()),
+            timestamp: std::time::SystemTime::now(),
+            digital_signature: None,
+            witness: None,
+            metadata: std::collections::HashMap::new(),
+        };
+        assert!(evidence.ip_address.is_some());
+        assert!(evidence.digital_signature.is_none());
+    }
+
+    #[test]
+    fn test_consent_record_creation() {
+        use crate::gdpr_compliance_modules::types::ConsentStatus;
+        let record = ConsentRecord {
+            id: "consent-001".to_string(),
+            subject_id: "user-001".to_string(),
+            purpose: "analytics".to_string(),
+            status: ConsentStatus::Given,
+            mechanism: ConsentMechanism::WebForm,
+            given_at: std::time::SystemTime::now(),
+            withdrawn_at: None,
+            expires_at: None,
+            evidence: ConsentEvidence {
+                ip_address: Some("10.0.0.1".to_string()),
+                user_agent: None,
+                timestamp: std::time::SystemTime::now(),
+                digital_signature: None,
+                witness: None,
+                metadata: std::collections::HashMap::new(),
+            },
+            version: "1.0".to_string(),
+        };
+        assert_eq!(record.id, "consent-001");
+        assert!(record.withdrawn_at.is_none());
+    }
+}

@@ -986,3 +986,351 @@ macro_rules! log_structured_error {
         $logger.log_error($error_context)
     };
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_logging_config() {
+        let config = LoggingConfig::default();
+        assert!(matches!(config.level, LogLevel::Info));
+        assert!(matches!(config.format, LogFormat::Json));
+        assert!(!config.enable_colors);
+        assert!(config.enable_spans);
+        assert!(config.enable_targets);
+        assert!(config.enable_timestamps);
+        assert!(!config.enable_thread_ids);
+        assert!(config.file_output.is_none());
+        assert_eq!(config.max_file_size_mb, 100);
+        assert_eq!(config.max_files, 10);
+        assert!(config.enable_correlation_ids);
+        assert_eq!(config.environment, "development");
+    }
+
+    #[test]
+    fn test_log_level_conversion_trace() {
+        let level: tracing::Level = LogLevel::Trace.into();
+        assert_eq!(level, tracing::Level::TRACE);
+    }
+
+    #[test]
+    fn test_log_level_conversion_debug() {
+        let level: tracing::Level = LogLevel::Debug.into();
+        assert_eq!(level, tracing::Level::DEBUG);
+    }
+
+    #[test]
+    fn test_log_level_conversion_info() {
+        let level: tracing::Level = LogLevel::Info.into();
+        assert_eq!(level, tracing::Level::INFO);
+    }
+
+    #[test]
+    fn test_log_level_conversion_warn() {
+        let level: tracing::Level = LogLevel::Warn.into();
+        assert_eq!(level, tracing::Level::WARN);
+    }
+
+    #[test]
+    fn test_log_level_conversion_error() {
+        let level: tracing::Level = LogLevel::Error.into();
+        assert_eq!(level, tracing::Level::ERROR);
+    }
+
+    #[test]
+    fn test_request_context_creation() {
+        let ctx = RequestContext::new(
+            "req-123".to_string(),
+            "GET".to_string(),
+            "/api/test".to_string(),
+        );
+        assert_eq!(ctx.request_id, "req-123");
+        assert_eq!(ctx.method, "GET");
+        assert_eq!(ctx.path, "/api/test");
+        assert!(ctx.user_id.is_none());
+        assert!(ctx.ip_address.is_none());
+        assert!(ctx.user_agent.is_none());
+        assert!(ctx.query_params.is_empty());
+    }
+
+    #[test]
+    fn test_request_context_with_user() {
+        let ctx = RequestContext::new("req-1".to_string(), "POST".to_string(), "/".to_string())
+            .with_user("alice".to_string());
+        assert_eq!(ctx.user_id, Some("alice".to_string()));
+    }
+
+    #[test]
+    fn test_request_context_with_ip() {
+        let ctx = RequestContext::new("req-2".to_string(), "GET".to_string(), "/".to_string())
+            .with_ip_address("10.0.0.1".to_string());
+        assert_eq!(ctx.ip_address, Some("10.0.0.1".to_string()));
+    }
+
+    #[test]
+    fn test_request_context_with_user_agent() {
+        let ctx = RequestContext::new("req-3".to_string(), "GET".to_string(), "/".to_string())
+            .with_user_agent("TestAgent/1.0".to_string());
+        assert_eq!(ctx.user_agent, Some("TestAgent/1.0".to_string()));
+    }
+
+    #[test]
+    fn test_request_context_with_query_params() {
+        let mut params = HashMap::new();
+        params.insert("page".to_string(), "1".to_string());
+        params.insert("limit".to_string(), "20".to_string());
+        let ctx = RequestContext::new("req-4".to_string(), "GET".to_string(), "/".to_string())
+            .with_query_params(params);
+        assert_eq!(ctx.query_params.len(), 2);
+        assert_eq!(ctx.query_params.get("page"), Some(&"1".to_string()));
+    }
+
+    #[test]
+    fn test_request_context_elapsed_ms() {
+        let ctx = RequestContext::new("req-5".to_string(), "GET".to_string(), "/".to_string());
+        // Elapsed time should be very small
+        let elapsed = ctx.elapsed_ms();
+        assert!(elapsed < 1000); // Less than 1 second
+    }
+
+    #[test]
+    fn test_request_context_chaining() {
+        let ctx = RequestContext::new("req-6".to_string(), "POST".to_string(), "/api".to_string())
+            .with_user("bob".to_string())
+            .with_ip_address("192.168.1.1".to_string())
+            .with_user_agent("MyApp/2.0".to_string());
+        assert_eq!(ctx.user_id, Some("bob".to_string()));
+        assert_eq!(ctx.ip_address, Some("192.168.1.1".to_string()));
+        assert_eq!(ctx.user_agent, Some("MyApp/2.0".to_string()));
+    }
+
+    #[test]
+    fn test_performance_metrics_creation() {
+        let metrics = PerformanceMetrics::new("req-1".to_string(), "inference".to_string(), 150);
+        assert_eq!(metrics.request_id, "req-1");
+        assert_eq!(metrics.operation, "inference");
+        assert_eq!(metrics.duration_ms, 150);
+        assert!(metrics.cpu_usage_percent.is_none());
+        assert!(metrics.memory_usage_bytes.is_none());
+        assert!(metrics.model_name.is_none());
+    }
+
+    #[test]
+    fn test_performance_metrics_with_resource_usage() {
+        let metrics = PerformanceMetrics::new("req-2".to_string(), "batch".to_string(), 200)
+            .with_resource_usage(Some(75.0), Some(1024 * 1024), Some(512 * 1024));
+        assert_eq!(metrics.cpu_usage_percent, Some(75.0));
+        assert_eq!(metrics.memory_usage_bytes, Some(1024 * 1024));
+        assert_eq!(metrics.gpu_memory_usage_bytes, Some(512 * 1024));
+    }
+
+    #[test]
+    fn test_performance_metrics_with_model_info() {
+        let metrics = PerformanceMetrics::new("req-3".to_string(), "generate".to_string(), 300)
+            .with_model_info("gpt2".to_string(), Some(8), Some(512));
+        assert_eq!(metrics.model_name, Some("gpt2".to_string()));
+        assert_eq!(metrics.batch_size, Some(8));
+        assert_eq!(metrics.sequence_length, Some(512));
+    }
+
+    #[test]
+    fn test_performance_metrics_with_throughput() {
+        let metrics = PerformanceMetrics::new("req-4".to_string(), "decode".to_string(), 100)
+            .with_throughput(1500.0);
+        assert_eq!(metrics.tokens_per_second, Some(1500.0));
+    }
+
+    #[test]
+    fn test_error_context_creation() {
+        let ctx = ErrorContext::new(
+            "InferenceError".to_string(),
+            "Model failed to load".to_string(),
+            "model_loading".to_string(),
+        );
+        assert_eq!(ctx.error_type, "InferenceError");
+        assert_eq!(ctx.error_message, "Model failed to load");
+        assert_eq!(ctx.operation, "model_loading");
+        assert_eq!(ctx.severity, "error");
+        assert!(!ctx.recoverable);
+        assert!(ctx.request_id.is_none());
+        assert!(ctx.stack_trace.is_none());
+    }
+
+    #[test]
+    fn test_error_context_with_request_id() {
+        let ctx = ErrorContext::new("E".to_string(), "msg".to_string(), "op".to_string())
+            .with_request_id("req-123".to_string());
+        assert_eq!(ctx.request_id, Some("req-123".to_string()));
+    }
+
+    #[test]
+    fn test_error_context_with_user_id() {
+        let ctx = ErrorContext::new("E".to_string(), "msg".to_string(), "op".to_string())
+            .with_user_id("user-42".to_string());
+        assert_eq!(ctx.user_id, Some("user-42".to_string()));
+    }
+
+    #[test]
+    fn test_error_context_with_stack_trace() {
+        let ctx = ErrorContext::new("E".to_string(), "msg".to_string(), "op".to_string())
+            .with_stack_trace("at line 42".to_string());
+        assert_eq!(ctx.stack_trace, Some("at line 42".to_string()));
+    }
+
+    #[test]
+    fn test_error_context_with_severity() {
+        let ctx = ErrorContext::new("E".to_string(), "msg".to_string(), "op".to_string())
+            .with_severity("critical".to_string());
+        assert_eq!(ctx.severity, "critical");
+    }
+
+    #[test]
+    fn test_error_context_with_recoverable() {
+        let ctx = ErrorContext::new("E".to_string(), "msg".to_string(), "op".to_string())
+            .with_recoverable(true);
+        assert!(ctx.recoverable);
+    }
+
+    #[test]
+    fn test_error_context_with_metadata() {
+        let mut meta = HashMap::new();
+        meta.insert("key".to_string(), "value".to_string());
+        let ctx = ErrorContext::new("E".to_string(), "msg".to_string(), "op".to_string())
+            .with_metadata(meta);
+        assert_eq!(ctx.metadata.get("key"), Some(&"value".to_string()));
+    }
+
+    #[test]
+    fn test_error_context_chaining() {
+        let ctx = ErrorContext::new("E".to_string(), "msg".to_string(), "op".to_string())
+            .with_request_id("r1".to_string())
+            .with_user_id("u1".to_string())
+            .with_severity("warn".to_string())
+            .with_recoverable(true);
+        assert_eq!(ctx.request_id, Some("r1".to_string()));
+        assert_eq!(ctx.user_id, Some("u1".to_string()));
+        assert_eq!(ctx.severity, "warn");
+        assert!(ctx.recoverable);
+    }
+
+    #[test]
+    fn test_logging_error_display() {
+        let err = LoggingError::InitializationError("init failed".to_string());
+        let msg = format!("{}", err);
+        assert!(msg.contains("init failed"));
+    }
+
+    #[test]
+    fn test_logging_error_config_display() {
+        let err = LoggingError::ConfigurationError("bad format".to_string());
+        let msg = format!("{}", err);
+        assert!(msg.contains("bad format"));
+    }
+
+    #[test]
+    fn test_logging_error_forwarding_display() {
+        let err = LoggingError::ForwardingError("connection refused".to_string());
+        let msg = format!("{}", err);
+        assert!(msg.contains("connection refused"));
+    }
+
+    #[test]
+    fn test_should_alert_security_error() {
+        let entry = LogEntry {
+            timestamp: chrono::Utc::now(),
+            level: "ERROR".to_string(),
+            target: "security.auth".to_string(),
+            message: "Unauthorized access".to_string(),
+            fields: HashMap::new(),
+            span_id: None,
+            trace_id: None,
+            correlation_id: None,
+            environment: "test".to_string(),
+        };
+        assert!(StructuredLogger::should_alert(&entry));
+    }
+
+    #[test]
+    fn test_should_not_alert_info() {
+        let entry = LogEntry {
+            timestamp: chrono::Utc::now(),
+            level: "INFO".to_string(),
+            target: "security.auth".to_string(),
+            message: "Login successful".to_string(),
+            fields: HashMap::new(),
+            span_id: None,
+            trace_id: None,
+            correlation_id: None,
+            environment: "test".to_string(),
+        };
+        assert!(!StructuredLogger::should_alert(&entry));
+    }
+
+    #[test]
+    fn test_should_not_alert_non_security() {
+        let entry = LogEntry {
+            timestamp: chrono::Utc::now(),
+            level: "ERROR".to_string(),
+            target: "application.model".to_string(),
+            message: "Model load failed".to_string(),
+            fields: HashMap::new(),
+            span_id: None,
+            trace_id: None,
+            correlation_id: None,
+            environment: "test".to_string(),
+        };
+        assert!(!StructuredLogger::should_alert(&entry));
+    }
+
+    #[test]
+    fn test_log_entry_serialization() {
+        let entry = LogEntry {
+            timestamp: chrono::Utc::now(),
+            level: "INFO".to_string(),
+            target: "test".to_string(),
+            message: "hello".to_string(),
+            fields: HashMap::new(),
+            span_id: None,
+            trace_id: None,
+            correlation_id: Some("corr-1".to_string()),
+            environment: "testing".to_string(),
+        };
+        let json = serde_json::to_string(&entry);
+        assert!(json.is_ok());
+    }
+
+    #[test]
+    fn test_log_alert_serialization() {
+        let alert = LogAlert {
+            alert_id: "alert-1".to_string(),
+            severity: "ERROR".to_string(),
+            message: "Security breach".to_string(),
+            source: "security".to_string(),
+            timestamp: chrono::Utc::now(),
+            context: HashMap::new(),
+        };
+        let json = serde_json::to_string(&alert);
+        assert!(json.is_ok());
+    }
+
+    #[test]
+    fn test_log_metrics_serialization() {
+        let metrics = LogMetrics {
+            total_logs: 1000,
+            logs_by_level: {
+                let mut m = HashMap::new();
+                m.insert("INFO".to_string(), 800);
+                m.insert("ERROR".to_string(), 200);
+                m
+            },
+            logs_by_target: HashMap::new(),
+            errors_per_minute: 3.33,
+            warnings_per_minute: 1.0,
+            average_log_size_bytes: 256.0,
+            buffer_usage_percent: 50.0,
+        };
+        let json = serde_json::to_string(&metrics);
+        assert!(json.is_ok());
+    }
+}

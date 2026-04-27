@@ -18,13 +18,17 @@ fn blas_sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize)
     use oxiblas_blas::level3::gemm;
     use oxiblas_matrix::{MatMut, MatRef};
 
-    // Create matrix views from slices (row-major layout)
-    let a_mat = MatRef::new(a.as_ptr(), m, k, k);
-    let b_mat = MatRef::new(b.as_ptr(), k, n, n);
-    let c_mat = MatMut::new(c.as_mut_ptr(), m, n, n);
+    // Bridge row-major → col-major via Cᵀ = Bᵀ·Aᵀ identity:
+    // Row-major A(m×k) reinterpreted as col-major is Aᵀ(k×m), lda=k.
+    // Row-major B(k×n) reinterpreted as col-major is Bᵀ(n×k), lda=n.
+    // Row-major C(m×n) reinterpreted as col-major is Cᵀ(n×m), lda=n.
+    // gemm(Bᵀ, Aᵀ) → Cᵀ = Bᵀ·Aᵀ = (A·B)ᵀ, so C buffer holds A·B. ✓
+    let a_t = MatRef::new(a.as_ptr(), k, m, k);
+    let b_t = MatRef::new(b.as_ptr(), n, k, n);
+    let c_t = MatMut::new(c.as_mut_ptr(), n, m, n);
 
-    // GEMM: C = 1.0 * A * B + 0.0 * C
-    gemm(1.0, a_mat, b_mat, 0.0, c_mat);
+    // GEMM: Cᵀ = 1.0 * Bᵀ * Aᵀ + 0.0 * Cᵀ
+    gemm(1.0, b_t, a_t, 0.0, c_t);
 }
 
 /// Fallback for non-macOS: use scirs2-core SIMD GEMM
@@ -99,7 +103,7 @@ impl FlashAttention {
         causal: bool,
         use_flash_attention_2: bool,
     ) -> Result<Self> {
-        if hidden_size % num_heads != 0 {
+        if !hidden_size.is_multiple_of(num_heads) {
             return Err(TrustformersError::invalid_config(format!(
                 "hidden_size {} must be divisible by num_heads {}",
                 hidden_size, num_heads
@@ -751,7 +755,7 @@ impl MultiQueryAttention {
         dropout_prob: f32,
         bias: bool,
     ) -> Result<Self> {
-        if hidden_size % num_heads != 0 {
+        if !hidden_size.is_multiple_of(num_heads) {
             return Err(TrustformersError::invalid_config(format!(
                 "hidden_size {} must be divisible by num_heads {}",
                 hidden_size, num_heads
@@ -805,14 +809,14 @@ impl GroupedQueryAttention {
         dropout_prob: f32,
         bias: bool,
     ) -> Result<Self> {
-        if hidden_size % num_query_heads != 0 {
+        if !hidden_size.is_multiple_of(num_query_heads) {
             return Err(TrustformersError::invalid_config(format!(
                 "hidden_size {} must be divisible by num_query_heads {}",
                 hidden_size, num_query_heads
             )));
         }
 
-        if num_query_heads % num_key_value_heads != 0 {
+        if !num_query_heads.is_multiple_of(num_key_value_heads) {
             return Err(TrustformersError::invalid_config(format!(
                 "num_query_heads {} must be divisible by num_key_value_heads {}",
                 num_query_heads, num_key_value_heads

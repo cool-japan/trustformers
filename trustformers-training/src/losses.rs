@@ -337,3 +337,351 @@ impl Loss for MSELoss {
         "MSELoss"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scirs2_core::ndarray::{ArrayD, IxDyn};
+    use trustformers_core::Tensor;
+
+    // Simple LCG for deterministic values without rand crate
+    struct Lcg {
+        state: u64,
+    }
+
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Lcg { state: seed }
+        }
+
+        fn next(&mut self) -> u64 {
+            self.state = self
+                .state
+                .wrapping_mul(6364136223846793005u64)
+                .wrapping_add(1442695040888963407u64);
+            self.state
+        }
+
+        fn next_f32(&mut self) -> f32 {
+            (self.next() >> 11) as f32 / (1u64 << 53) as f32
+        }
+    }
+
+    fn make_f32_tensor(data: Vec<f32>, shape: &[usize]) -> Tensor {
+        let arr =
+            ArrayD::from_shape_vec(IxDyn(shape), data).expect("shape mismatch in test helper");
+        Tensor::F32(arr)
+    }
+
+    fn make_i64_tensor(data: Vec<i64>, shape: &[usize]) -> Tensor {
+        let arr =
+            ArrayD::from_shape_vec(IxDyn(shape), data).expect("shape mismatch in test helper");
+        Tensor::I64(arr)
+    }
+
+    // ──────────────────── CrossEntropyLoss ────────────────────
+
+    #[test]
+    fn test_cross_entropy_name() {
+        let loss = CrossEntropyLoss::new();
+        assert_eq!(loss.name(), "CrossEntropyLoss");
+    }
+
+    #[test]
+    fn test_cross_entropy_default_fields() {
+        let loss = CrossEntropyLoss::default();
+        assert!(loss.ignore_index.is_none());
+        assert_eq!(loss.label_smoothing, 0.0);
+        assert_eq!(loss.reduction, "mean");
+    }
+
+    #[test]
+    fn test_cross_entropy_with_ignore_index() {
+        let loss = CrossEntropyLoss::new().with_ignore_index(255);
+        assert_eq!(loss.ignore_index, Some(255));
+    }
+
+    #[test]
+    fn test_cross_entropy_with_label_smoothing() {
+        let loss = CrossEntropyLoss::new().with_label_smoothing(0.1);
+        assert!((loss.label_smoothing - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cross_entropy_perfect_prediction() {
+        // Perfect prediction: logits heavily favour correct class
+        // batch=2, num_classes=3
+        let logits = make_f32_tensor(vec![10.0, 0.0, 0.0, 0.0, 10.0, 0.0], &[2, 3]);
+        let targets = make_i64_tensor(vec![0, 1], &[2]);
+        let loss = CrossEntropyLoss::new();
+        let result = loss.compute(&logits, &targets);
+        assert!(result.is_ok(), "compute should succeed");
+        let val = result.expect("loss value must be present");
+        assert!(
+            val < 0.01,
+            "loss for perfect prediction should be near 0, got {}",
+            val
+        );
+    }
+
+    #[test]
+    fn test_cross_entropy_uniform_prediction() {
+        // Uniform logits → loss ≈ ln(num_classes)
+        let logits = make_f32_tensor(vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0], &[2, 3]);
+        let targets = make_i64_tensor(vec![0, 1], &[2]);
+        let loss = CrossEntropyLoss::new();
+        let result = loss.compute(&logits, &targets);
+        assert!(result.is_ok());
+        let val = result.expect("loss value must be present");
+        let expected = (3.0_f32).ln();
+        assert!(
+            (val - expected).abs() < 0.01,
+            "uniform loss expected ~{:.3}, got {:.3}",
+            expected,
+            val
+        );
+    }
+
+    #[test]
+    fn test_cross_entropy_with_gradients_returns_same_loss() {
+        let logits = make_f32_tensor(vec![2.0, 0.5, 0.5, 0.5, 2.0, 0.5], &[2, 3]);
+        let targets = make_i64_tensor(vec![0, 1], &[2]);
+        let loss = CrossEntropyLoss::new();
+        let loss_only = loss.compute(&logits, &targets).expect("compute failed");
+        let (loss_with_grad, _grad) = loss
+            .compute_with_gradients(&logits, &targets)
+            .expect("compute_with_gradients failed");
+        assert!(
+            (loss_only - loss_with_grad).abs() < 1e-5,
+            "losses should match"
+        );
+    }
+
+    #[test]
+    fn test_cross_entropy_gradient_shape_matches_predictions() {
+        let logits = make_f32_tensor(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        let targets = make_i64_tensor(vec![2, 0], &[2]);
+        let loss = CrossEntropyLoss::new();
+        let (_, grad) = loss
+            .compute_with_gradients(&logits, &targets)
+            .expect("compute_with_gradients failed");
+        match grad {
+            Tensor::F32(arr) => {
+                assert_eq!(arr.shape(), &[2, 3], "gradient shape must match logits");
+            },
+            _ => panic!("expected F32 gradient tensor"),
+        }
+    }
+
+    #[test]
+    fn test_cross_entropy_ignore_index_skips_sample() {
+        // Only 1 valid sample out of 2; ignored sample has target == 99
+        let logits = make_f32_tensor(vec![0.0, 10.0, 0.0, 0.0, 10.0, 0.0], &[2, 3]);
+        // second target is ignored
+        let targets = make_i64_tensor(vec![1, 99], &[2]);
+        let loss_with_ignore = CrossEntropyLoss::new().with_ignore_index(99);
+        let result = loss_with_ignore.compute(&logits, &targets);
+        assert!(result.is_ok());
+        let val = result.expect("loss value must be present");
+        // With only the first sample (near-perfect), loss should be very small
+        assert!(
+            val < 0.1,
+            "ignored sample should not contribute to loss, got {}",
+            val
+        );
+    }
+
+    #[test]
+    fn test_cross_entropy_label_smoothing_increases_loss() {
+        let logits = make_f32_tensor(vec![5.0, 0.0, 0.0, 5.0, 0.0, 0.0], &[2, 3]);
+        let targets = make_i64_tensor(vec![0, 0], &[2]);
+        let loss_no_smooth = CrossEntropyLoss::new();
+        let loss_smooth = CrossEntropyLoss::new().with_label_smoothing(0.1);
+        let val_no_smooth = loss_no_smooth.compute(&logits, &targets).expect("no-smooth failed");
+        let val_smooth = loss_smooth.compute(&logits, &targets).expect("smooth failed");
+        assert!(
+            val_smooth > val_no_smooth,
+            "label smoothing should increase loss for near-perfect predictions"
+        );
+    }
+
+    #[test]
+    fn test_cross_entropy_sum_reduction() {
+        let logits = make_f32_tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let targets = make_i64_tensor(vec![0, 0], &[2]);
+        let loss_mean = CrossEntropyLoss::new();
+        let loss_sum = CrossEntropyLoss {
+            reduction: "sum".to_string(),
+            ..CrossEntropyLoss::default()
+        };
+        let val_mean = loss_mean.compute(&logits, &targets).expect("mean failed");
+        let val_sum = loss_sum.compute(&logits, &targets).expect("sum failed");
+        // sum should be approximately 2 × mean for 2 equal samples
+        assert!(
+            (val_sum - val_mean * 2.0).abs() < 1e-4,
+            "sum should be 2x mean for equal samples"
+        );
+    }
+
+    #[test]
+    fn test_cross_entropy_wrong_tensor_types_returns_err() {
+        let pred = make_f32_tensor(vec![1.0, 0.0], &[2]);
+        let target = make_f32_tensor(vec![0.0, 1.0], &[2]);
+        let loss = CrossEntropyLoss::new();
+        let result = loss.compute(&pred, &target);
+        assert!(result.is_err(), "should fail for F32 targets");
+    }
+
+    #[test]
+    fn test_cross_entropy_large_batch_stable() {
+        let mut lcg = Lcg::new(42);
+        let batch = 32;
+        let classes = 10;
+        let data: Vec<f32> = (0..batch * classes).map(|_| lcg.next_f32() * 4.0 - 2.0).collect();
+        let logits = make_f32_tensor(data, &[batch, classes]);
+        let labels: Vec<i64> = (0..batch).map(|i| (i % classes) as i64).collect();
+        let targets = make_i64_tensor(labels, &[batch]);
+        let loss = CrossEntropyLoss::new();
+        let result = loss.compute(&logits, &targets);
+        assert!(result.is_ok(), "large batch cross-entropy should succeed");
+        let val = result.expect("loss value must be present");
+        assert!(val.is_finite(), "loss must be finite");
+        assert!(val > 0.0, "loss must be positive");
+    }
+
+    // ──────────────────── MSELoss ────────────────────
+
+    #[test]
+    fn test_mse_name() {
+        let loss = MSELoss::new();
+        assert_eq!(loss.name(), "MSELoss");
+    }
+
+    #[test]
+    fn test_mse_default_reduction_is_mean() {
+        let loss = MSELoss::default();
+        assert_eq!(loss.reduction, "mean");
+    }
+
+    #[test]
+    fn test_mse_zero_loss_identical_tensors() {
+        let pred = make_f32_tensor(vec![1.0, 2.0, 3.0, 4.0], &[4]);
+        let target = make_f32_tensor(vec![1.0, 2.0, 3.0, 4.0], &[4]);
+        let loss = MSELoss::new();
+        let result = loss.compute(&pred, &target);
+        assert!(result.is_ok());
+        let val = result.expect("loss value must be present");
+        assert!(
+            val.abs() < 1e-6,
+            "identical tensors should have zero MSE, got {}",
+            val
+        );
+    }
+
+    #[test]
+    fn test_mse_known_value() {
+        // MSE([1,2], [3,4]) = ((1-3)^2 + (2-4)^2) / 2 = (4+4)/2 = 4.0
+        let pred = make_f32_tensor(vec![1.0, 2.0], &[2]);
+        let target = make_f32_tensor(vec![3.0, 4.0], &[2]);
+        let loss = MSELoss::new();
+        let val = loss.compute(&pred, &target).expect("MSE compute failed");
+        assert!((val - 4.0).abs() < 1e-5, "expected 4.0, got {}", val);
+    }
+
+    #[test]
+    fn test_mse_sum_reduction() {
+        let pred = make_f32_tensor(vec![1.0, 2.0], &[2]);
+        let target = make_f32_tensor(vec![3.0, 4.0], &[2]);
+        let loss = MSELoss {
+            reduction: "sum".to_string(),
+        };
+        let val = loss.compute(&pred, &target).expect("MSE sum failed");
+        // sum = 4 + 4 = 8.0
+        assert!(
+            (val - 8.0).abs() < 1e-5,
+            "expected 8.0 for sum reduction, got {}",
+            val
+        );
+    }
+
+    #[test]
+    fn test_mse_shape_mismatch_returns_err() {
+        let pred = make_f32_tensor(vec![1.0, 2.0, 3.0], &[3]);
+        let target = make_f32_tensor(vec![1.0, 2.0], &[2]);
+        let loss = MSELoss::new();
+        let result = loss.compute(&pred, &target);
+        assert!(result.is_err(), "shape mismatch should return an error");
+    }
+
+    #[test]
+    fn test_mse_wrong_tensor_types_returns_err() {
+        let pred = make_f32_tensor(vec![1.0, 2.0], &[2]);
+        let target = make_i64_tensor(vec![1, 2], &[2]);
+        let loss = MSELoss::new();
+        let result = loss.compute(&pred, &target);
+        assert!(result.is_err(), "MSE should fail for I64 target");
+    }
+
+    #[test]
+    fn test_mse_gradient_matches_formula() {
+        // grad = 2 * (pred - target) / n
+        let pred = make_f32_tensor(vec![2.0, 4.0], &[2]);
+        let target = make_f32_tensor(vec![0.0, 0.0], &[2]);
+        let loss = MSELoss::new();
+        let (_, grad) = loss.compute_with_gradients(&pred, &target).expect("mse grad failed");
+        match grad {
+            Tensor::F32(arr) => {
+                // expected: [2*(2-0)/2, 2*(4-0)/2] = [2.0, 4.0]
+                assert!(
+                    (arr[IxDyn(&[0])] - 2.0).abs() < 1e-5,
+                    "grad[0] expected 2.0"
+                );
+                assert!(
+                    (arr[IxDyn(&[1])] - 4.0).abs() < 1e-5,
+                    "grad[1] expected 4.0"
+                );
+            },
+            _ => panic!("expected F32 gradient"),
+        }
+    }
+
+    #[test]
+    fn test_mse_gradient_shape_matches_input() {
+        let pred = make_f32_tensor(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        let target = make_f32_tensor(vec![0.0; 6], &[2, 3]);
+        let loss = MSELoss::new();
+        let (_, grad) = loss.compute_with_gradients(&pred, &target).expect("mse grad failed");
+        match grad {
+            Tensor::F32(arr) => {
+                assert_eq!(arr.shape(), &[2, 3], "gradient shape must match input");
+            },
+            _ => panic!("expected F32 gradient"),
+        }
+    }
+
+    #[test]
+    fn test_mse_2d_batch() {
+        let mut lcg = Lcg::new(17);
+        let data_pred: Vec<f32> = (0..20).map(|_| lcg.next_f32()).collect();
+        let data_tgt: Vec<f32> = (0..20).map(|_| lcg.next_f32()).collect();
+        let pred = make_f32_tensor(data_pred.clone(), &[4, 5]);
+        let target = make_f32_tensor(data_tgt.clone(), &[4, 5]);
+        let loss = MSELoss::new();
+        let result = loss.compute(&pred, &target);
+        assert!(result.is_ok(), "2D batch MSE should succeed");
+        let val = result.expect("loss value must be present");
+        // Verify by hand: mean squared diff
+        let manual: f32 = data_pred
+            .iter()
+            .zip(data_tgt.iter())
+            .map(|(p, t)| (p - t) * (p - t))
+            .sum::<f32>()
+            / 20.0;
+        assert!(
+            (val - manual).abs() < 1e-4,
+            "2D batch MSE mismatch: {} vs {}",
+            val,
+            manual
+        );
+    }
+}

@@ -497,4 +497,155 @@ mod tests {
         tracker.track_deallocation(batch_id).await;
         assert_eq!(tracker.get_current_usage().await, 0);
     }
+
+    #[test]
+    fn test_batching_metrics_default() {
+        let m = BatchingMetrics::default();
+        assert_eq!(m.total_batches, 0);
+        assert_eq!(m.total_requests, 0);
+        assert!((m.avg_batch_size - 0.0).abs() < 1e-9);
+        assert_eq!(m.max_batch_size, 0);
+        assert!(m.batch_size_history.is_empty());
+    }
+
+    #[test]
+    fn test_batching_metrics_clean_old_data_empty() {
+        let mut m = BatchingMetrics::default();
+        m.clean_old_data(Duration::from_secs(60));
+        assert!(m.batch_size_history.is_empty());
+    }
+
+    #[test]
+    fn test_batching_metrics_clean_old_data_with_recent() {
+        let mut m = BatchingMetrics::default();
+        m.batch_size_history.push_back((Instant::now(), 32));
+        m.latency_history.push_back((Instant::now(), 10.0));
+        m.throughput_history.push_back((Instant::now(), 100.0));
+        m.clean_old_data(Duration::from_secs(60));
+        assert_eq!(m.batch_size_history.len(), 1);
+        assert_eq!(m.latency_history.len(), 1);
+        assert_eq!(m.throughput_history.len(), 1);
+    }
+
+    #[test]
+    fn test_metrics_collector_new() {
+        let collector = MetricsCollector::new();
+        assert_eq!(collector.history_window, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn test_metrics_collector_default() {
+        let collector = MetricsCollector::default();
+        assert_eq!(collector.history_window, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn test_metrics_collector_get_summary() {
+        let collector = MetricsCollector::new();
+        let summary = collector.get_summary();
+        assert_eq!(summary.total_batches, 0);
+        assert!((summary.avg_batch_size - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_latency_tracker_new() {
+        let tracker = LatencyTracker::new();
+        assert_eq!(tracker.window_size, 1000);
+    }
+
+    #[test]
+    fn test_latency_tracker_default() {
+        let tracker = LatencyTracker::default();
+        assert_eq!(tracker.window_size, 1000);
+    }
+
+    #[tokio::test]
+    async fn test_latency_tracker_empty() {
+        let tracker = LatencyTracker::new();
+        let p50 = tracker.get_percentile(0.5).await;
+        assert!((p50 - 0.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn test_latency_tracker_average_empty() {
+        let tracker = LatencyTracker::new();
+        let avg = tracker.get_average().await;
+        assert!((avg - 0.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn test_latency_tracker_average() {
+        let tracker = LatencyTracker::new();
+        tracker.record(10.0).await;
+        tracker.record(20.0).await;
+        let avg = tracker.get_average().await;
+        assert!((avg - 15.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_throughput_monitor_new() {
+        let monitor = ThroughputMonitor::new();
+        assert_eq!(monitor.window, Duration::from_secs(60));
+    }
+
+    #[tokio::test]
+    async fn test_throughput_monitor_empty() {
+        let monitor = ThroughputMonitor::new();
+        let rps = monitor.get_current_rps().await;
+        assert!((rps - 0.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn test_throughput_monitor_requests_in_window() {
+        let monitor = ThroughputMonitor::new();
+        monitor.record_request().await;
+        let count = monitor.get_requests_in_window(Duration::from_secs(10)).await;
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_batch_size_optimizer_new() {
+        let optimizer = BatchSizeOptimizer::new();
+        assert!(matches!(
+            optimizer.optimization_target,
+            OptimizationTarget::Balanced
+        ));
+    }
+
+    #[test]
+    fn test_batch_size_optimizer_default() {
+        let optimizer = BatchSizeOptimizer::default();
+        assert!(matches!(
+            optimizer.optimization_target,
+            OptimizationTarget::Balanced
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_batch_size_optimizer_insufficient_data() {
+        let optimizer = BatchSizeOptimizer::new();
+        let metrics = BatchingMetrics::default();
+        let result = optimizer.get_optimal_size(&metrics).await;
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_memory_tracker_new() {
+        let tracker = MemoryTracker::new();
+        // Just verify construction
+        assert!(matches!(tracker, MemoryTracker { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_memory_tracker_peak() {
+        let tracker = MemoryTracker::new();
+        let id1 = uuid::Uuid::new_v4();
+        let id2 = uuid::Uuid::new_v4();
+        tracker.track_allocation(id1, 500).await;
+        tracker.track_allocation(id2, 500).await;
+        assert_eq!(tracker.get_peak_usage().await, 1000);
+        tracker.track_deallocation(id1).await;
+        assert_eq!(tracker.get_peak_usage().await, 1000); // Peak stays
+        assert_eq!(tracker.get_current_usage().await, 500);
+    }
 }

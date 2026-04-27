@@ -34,7 +34,11 @@
 
 pub mod config;
 pub mod fairness;
+#[cfg(test)]
+mod fairness_tests;
 pub mod model_test_suite;
+#[cfg(test)]
+mod model_test_suite_tests;
 pub mod performance;
 pub mod reference_comparison;
 pub mod reporting;

@@ -119,7 +119,7 @@ impl QuantumTrainingManager {
         quantum_gradients: &[f64],
     ) -> Result<()> {
         // Alternate between classical and quantum updates
-        if self.current_epoch % 2 == 0 {
+        if self.current_epoch.is_multiple_of(2) {
             self.update_classical_parameters(classical_gradients)?;
         } else {
             self.update_quantum_parameters(quantum_gradients)?;

@@ -278,7 +278,7 @@ Installation:
 For more information, visit: https://github.com/trustformers/trustformers
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # Import the Rust extension module
 try:

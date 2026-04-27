@@ -1466,4 +1466,219 @@ mod tests {
         assert_eq!(tensor.data.len(), 4);
         assert_eq!(tensor.shape, vec![2, 2]);
     }
+
+    #[test]
+    fn test_tpu_device_config_default() {
+        let config = TPUDeviceConfig::default();
+        assert_eq!(config.preferred_device, TPUDeviceType::AutoDetect);
+        assert!(config.fallback_enabled);
+        assert!(config.init_timeout_ms > 0);
+    }
+
+    #[test]
+    fn test_compilation_config_default() {
+        let config = CompilationConfig::default();
+        assert_eq!(config.optimization_level, OptimizationLevel::Standard);
+    }
+
+    #[test]
+    fn test_cache_settings_default() {
+        let config = CacheSettings::default();
+        assert!(config.max_cache_size_mb > 0);
+    }
+
+    #[test]
+    fn test_tpu_performance_config_default() {
+        let config = TPUPerformanceConfig::default();
+        assert!(config.enable_operator_fusion);
+    }
+
+    #[test]
+    fn test_batch_optimization_config_default() {
+        let config = BatchOptimizationConfig::default();
+        assert!(config.max_batch_size > 0);
+    }
+
+    #[test]
+    fn test_pipeline_config_default() {
+        let config = PipelineConfig::default();
+        assert!(config.enabled);
+        assert!(config.stages > 0);
+    }
+
+    #[test]
+    fn test_concurrency_config_default() {
+        let config = ConcurrencyConfig::default();
+        assert!(config.max_concurrent_inferences > 0);
+    }
+
+    #[test]
+    fn test_latency_optimization_config_default() {
+        let config = LatencyOptimizationConfig::default();
+        assert!(config.enable_fast_path);
+    }
+
+    #[test]
+    fn test_tpu_memory_config_default() {
+        let config = TPUMemoryConfig::default();
+        assert!(config.max_memory_usage_percent > 0.0);
+        assert!(config.max_memory_usage_percent <= 100.0);
+    }
+
+    #[test]
+    fn test_defragmentation_config_default() {
+        let config = DefragmentationConfig::default();
+        assert!(config.threshold > 0.0);
+    }
+
+    #[test]
+    fn test_tpu_thermal_config_default() {
+        let config = TPUThermalConfig::default();
+        assert!(config.enable_thermal_monitoring);
+    }
+
+    #[test]
+    fn test_tpu_power_config_default() {
+        let config = TPUPowerConfig::default();
+        assert!(config.enable_power_management);
+    }
+
+    #[test]
+    fn test_tpu_debug_config_default() {
+        let config = TPUDebugConfig::default();
+        assert!(!config.enable_profiling);
+    }
+
+    #[test]
+    fn test_device_type_display() {
+        assert_eq!(format!("{}", TPUDeviceType::EdgeTPU), "Edge TPU");
+        assert_eq!(format!("{}", TPUDeviceType::NPU), "NPU");
+        assert_eq!(format!("{}", TPUDeviceType::AutoDetect), "Auto-Detect");
+    }
+
+    #[test]
+    fn test_tpu_device_status_variants() {
+        let available = DeviceStatus::Available;
+        let busy = DeviceStatus::Busy;
+        let error = DeviceStatus::Error;
+        assert_eq!(available, DeviceStatus::Available);
+        assert_eq!(busy, DeviceStatus::Busy);
+        assert_eq!(error, DeviceStatus::Error);
+    }
+
+    #[test]
+    fn test_tpu_precision_variants() {
+        let precisions = vec![TPUPrecision::INT8, TPUPrecision::FP16, TPUPrecision::FP32];
+        assert_eq!(precisions.len(), 3);
+    }
+
+    #[test]
+    fn test_compute_capability_creation() {
+        let cap = ComputeCapability {
+            peak_ops_per_sec: 8_000_000_000,
+            memory_bandwidth_gbps: 64.0,
+            supported_operators: vec!["Conv2D".to_string(), "MatMul".to_string()],
+            max_batch_size: 16,
+        };
+        assert_eq!(cap.supported_operators.len(), 2);
+        assert_eq!(cap.max_batch_size, 16);
+    }
+
+    #[test]
+    fn test_tensor_row_major_layout() {
+        let tensor = Tensor {
+            data: vec![1, 2, 3, 4, 5, 6],
+            dtype: DataType::Float32,
+            shape: vec![2, 3],
+            layout: MemoryLayout::RowMajor,
+        };
+        assert_eq!(tensor.shape[0] * tensor.shape[1], 6);
+        assert_eq!(tensor.layout, MemoryLayout::RowMajor);
+    }
+
+    #[test]
+    fn test_tensor_column_major_layout() {
+        let tensor = Tensor {
+            data: vec![1, 2, 3, 4],
+            dtype: DataType::Int8,
+            shape: vec![2, 2],
+            layout: MemoryLayout::ColumnMajor,
+        };
+        assert_eq!(tensor.layout, MemoryLayout::ColumnMajor);
+    }
+
+    #[test]
+    fn test_device_selection_strategy_variants() {
+        let strategies = vec![
+            DeviceSelectionStrategy::Fastest,
+            DeviceSelectionStrategy::PowerEfficient,
+            DeviceSelectionStrategy::Balanced,
+            DeviceSelectionStrategy::RoundRobin,
+            DeviceSelectionStrategy::LoadBalanced,
+        ];
+        assert_eq!(strategies.len(), 5);
+    }
+
+    #[test]
+    fn test_edge_tpu_engine_creation() {
+        let config = EdgeTPUConfig::default();
+        let result = EdgeTPUEngine::new(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_tpu_stats_default_values() {
+        let stats = TPUStats {
+            total_inferences: 0,
+            average_latency_ms: 0.0,
+            peak_memory_usage_mb: 0,
+            thermal_state: ThermalState::Nominal,
+            power_consumption_mw: 0.0,
+            utilization_percent: 0.0,
+            loaded_models: 0,
+            cache_hit_rate: 0.0,
+            errors: 0,
+        };
+        assert_eq!(stats.total_inferences, 0);
+        assert_eq!(stats.errors, 0);
+    }
+
+    #[test]
+    fn test_memory_requirements_creation() {
+        let reqs = MemoryRequirements {
+            weight_memory_bytes: 1024 * 1024,
+            activation_memory_bytes: 512 * 1024,
+            workspace_memory_bytes: 256 * 1024,
+            total_memory_bytes: 1792 * 1024,
+        };
+        assert_eq!(
+            reqs.weight_memory_bytes + reqs.activation_memory_bytes + reqs.workspace_memory_bytes,
+            reqs.total_memory_bytes
+        );
+    }
+
+    #[test]
+    fn test_tpu_device_multiple_precisions() {
+        let device = TPUDevice {
+            id: "multi_prec".to_string(),
+            device_type: TPUDeviceType::NPU,
+            name: "Multi Precision TPU".to_string(),
+            version: "2.0".to_string(),
+            vendor: "Test".to_string(),
+            max_memory_mb: 512,
+            compute_capability: ComputeCapability {
+                peak_ops_per_sec: 10_000_000_000,
+                memory_bandwidth_gbps: 100.0,
+                supported_operators: vec!["Conv2D".to_string()],
+                max_batch_size: 32,
+            },
+            supported_precisions: vec![TPUPrecision::INT8, TPUPrecision::FP16, TPUPrecision::FP32],
+            status: DeviceStatus::Available,
+            thermal_state: ThermalState::Nominal,
+            power_consumption_mw: 3000.0,
+            utilization_percent: 50.0,
+        };
+        assert_eq!(device.supported_precisions.len(), 3);
+        assert_eq!(device.utilization_percent, 50.0);
+    }
 }

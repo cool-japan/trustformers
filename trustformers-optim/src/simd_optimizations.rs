@@ -76,6 +76,12 @@ impl SIMDOptimizer {
     }
 
     /// SIMD-optimized Adam update with AVX2
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure the CPU supports AVX2 instructions. This is guaranteed
+    /// when the function is invoked via the `#[target_feature(enable = "avx2")]`
+    /// dispatch path only on hardware where the feature is available.
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[target_feature(enable = "avx2")]
     pub unsafe fn adam_update_avx2(
@@ -160,6 +166,12 @@ impl SIMDOptimizer {
     }
 
     /// SIMD-optimized AdamW update with AVX2 (decoupled weight decay)
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure the CPU supports AVX2 instructions. This is guaranteed
+    /// when the function is invoked via the `#[target_feature(enable = "avx2")]`
+    /// dispatch path only on hardware where the feature is available.
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[target_feature(enable = "avx2")]
     pub unsafe fn adamw_update_avx2(
@@ -245,6 +257,12 @@ impl SIMDOptimizer {
     }
 
     /// SIMD-optimized SGD with momentum update
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure the CPU supports AVX2 instructions. This is guaranteed
+    /// when the function is invoked via the `#[target_feature(enable = "avx2")]`
+    /// dispatch path only on hardware where the feature is available.
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[target_feature(enable = "avx2")]
     pub unsafe fn sgd_momentum_update_avx2(
@@ -316,6 +334,12 @@ impl SIMDOptimizer {
     }
 
     /// SIMD-optimized gradient clipping
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure the CPU supports AVX2 instructions. This is guaranteed
+    /// when the function is invoked via the `#[target_feature(enable = "avx2")]`
+    /// dispatch path only on hardware where the feature is available.
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[target_feature(enable = "avx2")]
     pub unsafe fn clip_gradients_avx2(&self, gradients: &mut [f32], max_norm: f32) -> Result<f32> {
@@ -368,6 +392,12 @@ impl SIMDOptimizer {
     }
 
     /// SIMD-optimized vector addition (for gradient accumulation)
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure the CPU supports AVX2 instructions. This is guaranteed
+    /// when the function is invoked via the `#[target_feature(enable = "avx2")]`
+    /// dispatch path only on hardware where the feature is available.
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[target_feature(enable = "avx2")]
     pub unsafe fn vector_add_avx2(&self, a: &mut [f32], b: &[f32], scale: f32) -> Result<()> {
@@ -396,6 +426,12 @@ impl SIMDOptimizer {
     }
 
     /// SIMD-optimized dot product
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure the CPU supports AVX2 instructions. This is guaranteed
+    /// when the function is invoked via the `#[target_feature(enable = "avx2")]`
+    /// dispatch path only on hardware where the feature is available.
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[target_feature(enable = "avx2")]
     pub unsafe fn dot_product_avx2(&self, a: &[f32], b: &[f32]) -> Result<f32> {

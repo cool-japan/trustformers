@@ -1509,3 +1509,360 @@ impl Default for LockAnalysisConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0
+        }
+        fn next_f64(&mut self) -> f64 {
+            (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+        }
+        fn next_usize(&mut self, bound: usize) -> usize {
+            (self.next_u64() as usize) % bound.max(1)
+        }
+    }
+
+    // ---- ConflictSeverity tests ----
+    #[test]
+    fn test_conflict_severity_all_variants_exist() {
+        let variants = [
+            ConflictSeverity::Minor,
+            ConflictSeverity::Moderate,
+            ConflictSeverity::Major,
+            ConflictSeverity::Severe,
+            ConflictSeverity::Critical,
+            ConflictSeverity::Blocking,
+            ConflictSeverity::Fatal,
+            ConflictSeverity::Low,
+            ConflictSeverity::Medium,
+            ConflictSeverity::High,
+        ];
+        assert_eq!(variants.len(), 10);
+    }
+
+    #[test]
+    fn test_conflict_severity_equality() {
+        assert_eq!(ConflictSeverity::Minor, ConflictSeverity::Minor);
+        assert_ne!(ConflictSeverity::Minor, ConflictSeverity::Major);
+    }
+
+    #[test]
+    fn test_conflict_severity_hash_consistency() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(ConflictSeverity::Critical);
+        set.insert(ConflictSeverity::Critical);
+        assert_eq!(set.len(), 1);
+    }
+
+    // ---- ConflictType tests ----
+    #[test]
+    fn test_conflict_type_all_variants() {
+        let types = [
+            ConflictType::ResourceAccess,
+            ConflictType::Data,
+            ConflictType::Lock,
+            ConflictType::Timing,
+            ConflictType::Configuration,
+            ConflictType::Memory,
+            ConflictType::Io,
+            ConflictType::Network,
+            ConflictType::Database,
+            ConflictType::Process,
+            ConflictType::ReadWrite,
+        ];
+        assert_eq!(types.len(), 11);
+    }
+
+    #[test]
+    fn test_conflict_type_equality() {
+        assert_eq!(ConflictType::Lock, ConflictType::Lock);
+        assert_ne!(ConflictType::Lock, ConflictType::Data);
+    }
+
+    // ---- ContentionSeverity tests ----
+    #[test]
+    fn test_contention_severity_variants() {
+        let sev = [
+            ContentionSeverity::Low,
+            ContentionSeverity::Medium,
+            ContentionSeverity::High,
+            ContentionSeverity::Critical,
+            ContentionSeverity::Severe,
+            ContentionSeverity::Minimal,
+            ContentionSeverity::Moderate,
+            ContentionSeverity::Extreme,
+        ];
+        assert_eq!(sev.len(), 8);
+    }
+
+    // ---- DeadlockType tests ----
+    #[test]
+    fn test_deadlock_type_variants() {
+        let types = [
+            DeadlockType::CircularWait,
+            DeadlockType::ResourceOrdering,
+            DeadlockType::HoldAndWait,
+            DeadlockType::NoPreemption,
+            DeadlockType::MutualExclusion,
+        ];
+        assert_eq!(types.len(), 5);
+    }
+
+    #[test]
+    fn test_deadlock_type_debug_format() {
+        let t = DeadlockType::CircularWait;
+        assert_eq!(format!("{:?}", t), "CircularWait");
+    }
+
+    // ---- LockType tests ----
+    #[test]
+    fn test_lock_type_mutex() {
+        assert_eq!(LockType::Mutex, LockType::Mutex);
+    }
+
+    #[test]
+    fn test_lock_type_custom() {
+        let custom = LockType::Custom("custom_lock".to_string());
+        assert_ne!(custom, LockType::Mutex);
+    }
+
+    #[test]
+    fn test_lock_type_custom_equality() {
+        let a = LockType::Custom("my_lock".to_string());
+        let b = LockType::Custom("my_lock".to_string());
+        assert_eq!(a, b);
+    }
+
+    // ---- Default impls ----
+    #[test]
+    fn test_contention_event_default() {
+        let event = ContentionEvent::default();
+        assert!(event.resource_id.is_empty());
+        assert!(event.competing_threads.is_empty());
+        assert_eq!(event.duration, Duration::from_secs(0));
+    }
+
+    #[test]
+    fn test_deadlock_potential_analysis_new() {
+        let analysis = DeadlockPotentialAnalysis::new();
+        assert!((analysis.risk_score - 0.0).abs() < f64::EPSILON);
+        assert!(analysis.scenarios.is_empty());
+    }
+
+    #[test]
+    fn test_deadlock_potential_analysis_default() {
+        let analysis = DeadlockPotentialAnalysis::default();
+        assert!((analysis.risk_score - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_deadlock_risk_default() {
+        let risk = DeadlockRisk::default();
+        assert!(risk.risk_factors.is_empty());
+        assert!(risk.lock_cycles.is_empty());
+    }
+
+    #[test]
+    fn test_deadlock_safety_rule_new() {
+        let rule = DeadlockSafetyRule::new();
+        assert!(rule.enabled);
+        assert_eq!(rule.detection_algorithm, "wait-for-graph");
+    }
+
+    #[test]
+    fn test_lock_contention_metrics_new() {
+        let metrics = LockContentionMetrics::new();
+        assert_eq!(metrics.total_contentions, 0);
+        assert!(metrics.contention_by_lock.is_empty());
+    }
+
+    #[test]
+    fn test_lock_event_default() {
+        let event = LockEvent::default();
+        let formatted = format!("{:?}", event);
+        assert!(formatted.contains("LockEvent"));
+    }
+
+    #[test]
+    fn test_lock_usage_pattern_database_new() {
+        let db = LockUsagePatternDatabase::new();
+        assert!(db.patterns.is_empty());
+        assert!(db.pattern_frequency.is_empty());
+    }
+
+    // ---- Algorithm constructors ----
+    #[test]
+    fn test_cycle_detection_algorithm_new() {
+        let alg = CycleDetectionAlgorithm::new(true, "tarjan".to_string());
+        assert!(alg.enabled);
+        assert_eq!(alg.method, "tarjan");
+    }
+
+    #[test]
+    fn test_predictive_deadlock_algorithm_new() {
+        let alg = PredictiveDeadlockAlgorithm::new(true, 0.95);
+        assert!(alg.enabled);
+        assert!((alg.accuracy - 0.95).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_ordered_locking_strategy_new() {
+        let strat =
+            OrderedLockingStrategy::new(true, vec!["lock_a".to_string(), "lock_b".to_string()]);
+        assert!(strat.enabled);
+        assert_eq!(strat.hierarchy.len(), 2);
+    }
+
+    // ---- History types ----
+    #[test]
+    fn test_conflict_history_new() {
+        let result = ConflictHistory::new();
+        assert!(result.is_ok());
+        let h = result.expect("should succeed");
+        assert!(h.conflicts.is_empty());
+        assert_eq!(h.total_conflicts, 0);
+    }
+
+    #[test]
+    fn test_deadlock_incident_history_new() {
+        let result = DeadlockIncidentHistory::new();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_deadlock_monitoring_data_new() {
+        let result = DeadlockMonitoringData::new();
+        assert!(result.is_ok());
+    }
+
+    // ---- LockDependencyGraph ----
+    #[test]
+    fn test_lock_dependency_graph_new() {
+        let result = LockDependencyGraph::new();
+        assert!(result.is_ok());
+        let g = result.expect("should succeed");
+        assert!(g.nodes.is_empty());
+    }
+
+    #[test]
+    fn test_lock_dependency_graph_add_lock() {
+        let mut g = LockDependencyGraph::new().expect("should succeed");
+        g.add_lock("lock_1".to_string());
+        assert!(g.nodes.contains(&"lock_1".to_string()));
+    }
+
+    #[test]
+    fn test_lock_dependency_graph_add_lock_acquisition() {
+        let mut g = LockDependencyGraph::new().expect("should succeed");
+        g.add_lock("lock_a".to_string());
+        g.add_lock("lock_b".to_string());
+        g.add_lock_acquisition(1, "lock_b".to_string(), vec!["lock_a".to_string()]);
+        assert!(!g.edges.is_empty());
+    }
+
+    #[test]
+    fn test_lock_dependency_graph_add_lock_release() {
+        let mut g = LockDependencyGraph::new().expect("should succeed");
+        g.add_lock("lock_a".to_string());
+        g.add_lock_release(1, "lock_a".to_string());
+        // Should not panic
+    }
+
+    // ---- WaitForGraph ----
+    #[test]
+    fn test_wait_for_graph_algorithm_new() {
+        let result = WaitForGraphAlgorithm::new();
+        assert!(result.is_ok());
+    }
+
+    // ---- Analysis types ----
+    #[test]
+    fn test_contention_frequency_analysis_new() {
+        let analysis = ContentionFrequencyAnalysis::new(10.5, vec!["lock_x".to_string()]);
+        assert!((analysis.frequency - 10.5).abs() < f64::EPSILON);
+        assert_eq!(analysis.hotspots.len(), 1);
+    }
+
+    #[test]
+    fn test_wait_time_analysis_new() {
+        let analysis = WaitTimeAnalysis::new(500, 2000);
+        assert_eq!(analysis.avg_wait_time_us, 500);
+        assert_eq!(analysis.max_wait_time_us, 2000);
+    }
+
+    // ---- Config defaults ----
+    #[test]
+    fn test_conflict_detection_config_default() {
+        let c = ConflictDetectionConfig::default();
+        assert!(c.detection_enabled);
+    }
+
+    #[test]
+    fn test_deadlock_analysis_config_default() {
+        let c = DeadlockAnalysisConfig::default();
+        assert!(c.detection_enabled);
+        assert_eq!(c.timeout_seconds, 10);
+        assert_eq!(c.max_detection_depth, 20);
+    }
+
+    #[test]
+    fn test_lock_analysis_config_default() {
+        let c = LockAnalysisConfig::default();
+        assert!(c.enable_contention_analysis);
+        assert!(c.enable_dependency_analysis);
+        assert_eq!(c.max_analysis_duration, std::time::Duration::from_secs(30));
+    }
+
+    // ---- LCG-based tests ----
+    #[test]
+    fn test_lcg_generates_conflict_severities() {
+        let mut rng = Lcg::new(42);
+        let variants = [
+            ConflictSeverity::Minor,
+            ConflictSeverity::Moderate,
+            ConflictSeverity::Major,
+            ConflictSeverity::Severe,
+            ConflictSeverity::Critical,
+        ];
+        for _ in 0..20 {
+            let idx = rng.next_usize(variants.len());
+            let _sev = variants[idx];
+        }
+    }
+
+    #[test]
+    fn test_lcg_generates_lock_types() {
+        let mut rng = Lcg::new(999);
+        let types = [
+            LockType::Mutex,
+            LockType::RwLock,
+            LockType::Semaphore,
+            LockType::SpinLock,
+            LockType::Atomic,
+        ];
+        for _ in 0..20 {
+            let idx = rng.next_usize(types.len());
+            let formatted = format!("{:?}", types[idx]);
+            assert!(!formatted.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_lcg_f64_for_deadlock_probability() {
+        let mut rng = Lcg::new(55);
+        for _ in 0..50 {
+            let prob = rng.next_f64();
+            assert!((0.0..1.0).contains(&prob));
+        }
+    }
+}

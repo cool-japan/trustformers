@@ -7,6 +7,34 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Performance model defining how improvement estimates are computed.
+#[derive(Debug, Clone)]
+pub enum PerformanceModel {
+    /// Rule-based estimation using configurable per-category multipliers.
+    ///
+    /// Each multiplier scales the contribution of a recommendation's speedup
+    /// to the total estimated improvement. Default multipliers are all `1.0`,
+    /// which reproduces the original additive behaviour.
+    RuleBased {
+        /// Multiplier for each recommendation category (defaults to 1.0 if absent).
+        multipliers: HashMap<RecommendationCategory, f64>,
+    },
+}
+
+impl Default for PerformanceModel {
+    fn default() -> Self {
+        let mut multipliers = HashMap::new();
+        multipliers.insert(RecommendationCategory::Memory, 1.0);
+        multipliers.insert(RecommendationCategory::Compute, 1.0);
+        multipliers.insert(RecommendationCategory::BatchSize, 1.0);
+        multipliers.insert(RecommendationCategory::Layer, 1.0);
+        multipliers.insert(RecommendationCategory::Hardware, 1.0);
+        multipliers.insert(RecommendationCategory::DataLoading, 1.0);
+        multipliers.insert(RecommendationCategory::Architecture, 1.0);
+        PerformanceModel::RuleBased { multipliers }
+    }
+}
+
 /// Performance tuning analyzer
 #[derive(Debug)]
 pub struct PerformanceTuner {
@@ -31,6 +59,11 @@ pub struct TunerConfig {
     pub confidence_threshold: f64,
     /// Target hardware type
     pub target_hardware: HardwareType,
+    /// Number of recent snapshots to consider for data-loading analysis
+    pub data_loading_window: usize,
+    /// Performance model used for improved-performance estimation
+    #[serde(skip)]
+    pub performance_model: PerformanceModel,
 }
 
 impl Default for TunerConfig {
@@ -42,6 +75,8 @@ impl Default for TunerConfig {
             enable_layer_tuning: true,
             confidence_threshold: 0.7,
             target_hardware: HardwareType::Auto,
+            data_loading_window: 10,
+            performance_model: PerformanceModel::default(),
         }
     }
 }
@@ -64,7 +99,7 @@ pub enum HardwareType {
 }
 
 /// Performance snapshot for analysis
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PerformanceSnapshot {
     /// Timestamp
     pub timestamp: u64,
@@ -84,6 +119,22 @@ pub struct PerformanceSnapshot {
     pub layer_timings: HashMap<String, f64>,
     /// Memory per layer (layer name -> memory in MB)
     pub layer_memory: HashMap<String, f64>,
+    /// Override hardware type for this snapshot (overrides TunerConfig::target_hardware)
+    pub hardware_type: Option<HardwareType>,
+    /// Fraction of time (0.0-1.0) spent waiting on I/O during this snapshot
+    pub io_wait_pct: Option<f32>,
+    /// Samples processed per second during this snapshot
+    pub batch_throughput_per_sec: Option<f32>,
+    /// Theoretical peak GPU throughput (samples/sec) for the detected GPU
+    pub gpu_peak_throughput: Option<f32>,
+    /// Number of transformer layers in the model
+    pub model_depth: Option<usize>,
+    /// Number of attention heads
+    pub num_heads: Option<usize>,
+    /// Current KV-cache size in bytes
+    pub kv_cache_bytes: Option<u64>,
+    /// Sequence length for this batch
+    pub seq_len: Option<usize>,
 }
 
 /// Tuning recommendation
@@ -110,7 +161,7 @@ pub struct Recommendation {
 }
 
 /// Recommendation category
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RecommendationCategory {
     /// Memory optimization
     Memory,
@@ -210,6 +261,43 @@ impl PerformanceTuner {
         }
     }
 
+    /// Detect the effective hardware type at runtime using cfg flags.
+    ///
+    /// Each branch is guarded by a disjoint cfg predicate so that exactly one
+    /// branch is compiled on any given target, eliminating unreachable-code
+    /// and unexpected-cfg warnings.
+    fn detect_hardware(&self) -> HardwareType {
+        #[cfg(target_os = "macos")]
+        return HardwareType::AppleSilicon;
+
+        #[cfg(all(not(target_os = "macos"), feature = "cuda"))]
+        return HardwareType::NvidiaGpu;
+
+        #[cfg(all(not(target_os = "macos"), not(feature = "cuda"), feature = "rocm"))]
+        return HardwareType::AmdGpu;
+
+        #[cfg(all(
+            not(target_os = "macos"),
+            not(feature = "cuda"),
+            not(feature = "rocm"),
+            feature = "tpu"
+        ))]
+        return HardwareType::Tpu;
+
+        #[cfg(all(
+            not(target_os = "macos"),
+            not(feature = "cuda"),
+            not(feature = "rocm"),
+            not(feature = "tpu")
+        ))]
+        HardwareType::Cpu
+    }
+
+    /// Return the detected hardware type (public API for `detect_hardware`).
+    pub fn detected_hardware(&self) -> HardwareType {
+        self.detect_hardware()
+    }
+
     /// Analyze performance and generate recommendations
     pub fn analyze(&self) -> Result<TuningReport> {
         let mut recommendations = Vec::new();
@@ -233,6 +321,19 @@ impl PerformanceTuner {
 
         if self.config.enable_layer_tuning {
             recommendations.extend(self.analyze_layers());
+        }
+
+        // Hardware analysis is always relevant regardless of other flags.
+        recommendations.extend(self.analyze_hardware(&self.history));
+
+        // Data-loading analysis only when any snapshot carries io_wait_pct data.
+        if self.history.iter().any(|s| s.io_wait_pct.is_some()) {
+            recommendations.extend(self.analyze_data_loading(&self.history));
+        }
+
+        // Architecture analysis only when any snapshot carries seq_len data.
+        if self.history.iter().any(|s| s.seq_len.is_some()) {
+            recommendations.extend(self.analyze_architecture(&self.history));
         }
 
         // Filter by confidence threshold
@@ -470,6 +571,343 @@ impl PerformanceTuner {
         recommendations
     }
 
+    /// Analyze hardware-specific optimisation opportunities.
+    ///
+    /// Determines the effective hardware type from the latest snapshot's
+    /// `hardware_type` field (if set), then falls back to the config value
+    /// (resolving `Auto` via `detect_hardware`).
+    fn analyze_hardware(&self, snapshots: &[PerformanceSnapshot]) -> Vec<Recommendation> {
+        let mut recommendations = Vec::new();
+
+        let effective_hw = snapshots.last().and_then(|s| s.hardware_type).unwrap_or_else(|| {
+            if self.config.target_hardware == HardwareType::Auto {
+                self.detect_hardware()
+            } else {
+                self.config.target_hardware
+            }
+        });
+
+        let hw_recs: &[(&str, &str)] = match effective_hw {
+            HardwareType::NvidiaGpu => &[
+                (
+                    "Enable TF32 matmul for Ampere+ GPUs",
+                    "Enable TF32 matmul for Ampere+ GPUs (torch.backends.cuda.matmul.allow_tf32)",
+                ),
+                (
+                    "cuDNN deterministic algorithms",
+                    "Consider cuDNN deterministic algorithms for reproducibility (may reduce throughput)",
+                ),
+            ],
+            HardwareType::AmdGpu => &[
+                (
+                    "ROCm hipBLAS strided-batched GEMM",
+                    "Enable ROCm hipBLAS strided-batched GEMM for batch inference",
+                ),
+                (
+                    "bf16 precision with ROCm MI200+",
+                    "Use bf16 precision with ROCm MI200+ for 2x throughput",
+                ),
+            ],
+            HardwareType::AppleSilicon => &[
+                (
+                    "Metal Performance Shaders fused kernels",
+                    "Enable Metal Performance Shaders fused kernels via trustformers metal backend",
+                ),
+                (
+                    "f16 precision on Apple Silicon",
+                    "Use f16 precision on Apple Silicon where model accuracy permits",
+                ),
+            ],
+            HardwareType::Cpu => &[
+                (
+                    "Enable AVX-512 via scirs2-core SIMD",
+                    "Enable AVX-512 via scirs2-core SIMD features if not already active",
+                ),
+                (
+                    "AMX acceleration on Apple M-series",
+                    "Use AMX acceleration on Apple M-series CPUs for matrix operations",
+                ),
+            ],
+            HardwareType::Tpu => &[
+                (
+                    "bf16 precision for TPU v4+",
+                    "Use bf16 precision with matmul_precision=highest for TPU v4+",
+                ),
+                (
+                    "XLA sharding for tensor parallelism",
+                    "Enable XLA sharding for tensor parallelism across TPU cores",
+                ),
+            ],
+            HardwareType::Auto => {
+                // Resolve Auto by detecting actual hardware and re-running.
+                let resolved = self.detect_hardware();
+                let resolved_snap: Vec<PerformanceSnapshot> = snapshots
+                    .iter()
+                    .cloned()
+                    .map(|mut s| {
+                        s.hardware_type = Some(resolved);
+                        s
+                    })
+                    .collect();
+                return self.analyze_hardware(&resolved_snap);
+            }
+        };
+
+        for (title, description) in hw_recs {
+            recommendations.push(Recommendation {
+                category: RecommendationCategory::Hardware,
+                priority: Priority::Medium,
+                confidence: 0.8,
+                title: (*title).to_string(),
+                description: (*description).to_string(),
+                expected_impact: ImpactEstimate {
+                    speedup: 1.15,
+                    memory_reduction_mb: 0.0,
+                    throughput_improvement: 10.0,
+                },
+                difficulty: Difficulty::Easy,
+                actions: vec![(*description).to_string()],
+                code_example: None,
+            });
+        }
+
+        recommendations
+    }
+
+    /// Analyse data-loading bottlenecks from recent snapshots.
+    fn analyze_data_loading(&self, snapshots: &[PerformanceSnapshot]) -> Vec<Recommendation> {
+        let mut recommendations = Vec::new();
+
+        let window = self.config.data_loading_window.min(snapshots.len());
+        if window == 0 {
+            return recommendations;
+        }
+        let recent = &snapshots[snapshots.len() - window..];
+
+        // Average io_wait_pct over the window (ignoring None entries).
+        let (io_sum, io_count) = recent.iter().fold((0.0_f64, 0_usize), |(acc, n), s| {
+            if let Some(pct) = s.io_wait_pct {
+                (acc + pct as f64, n + 1)
+            } else {
+                (acc, n)
+            }
+        });
+
+        if io_count > 0 {
+            let avg_io_wait = io_sum / io_count as f64;
+
+            if avg_io_wait > 0.15 {
+                recommendations.push(Recommendation {
+                    category: RecommendationCategory::DataLoading,
+                    priority: Priority::High,
+                    confidence: 0.82,
+                    title: "Increase data-loader worker count".to_string(),
+                    description: format!(
+                        "Increase data-loader worker count (current I/O wait {:.1}% suggests bottleneck)",
+                        avg_io_wait * 100.0
+                    ),
+                    expected_impact: ImpactEstimate {
+                        speedup: 1.2,
+                        memory_reduction_mb: 0.0,
+                        throughput_improvement: 20.0,
+                    },
+                    difficulty: Difficulty::Easy,
+                    actions: vec![
+                        format!(
+                            "Increase data-loader worker count (current I/O wait {:.1}% suggests bottleneck)",
+                            avg_io_wait * 100.0
+                        ),
+                        "Enable dataset prefetch to overlap data loading with model computation"
+                            .to_string(),
+                        "Memory-map large weight files to reduce I/O overhead".to_string(),
+                    ],
+                    code_example: None,
+                });
+            }
+        }
+
+        // Check compute/GPU utilisation ratio.
+        let last = snapshots.last();
+        if let Some(snap) = last {
+            if let (Some(bt), Some(gpt)) = (snap.batch_throughput_per_sec, snap.gpu_peak_throughput)
+            {
+                if gpt > 0.0 && (bt / gpt) < 0.5 {
+                    recommendations.push(Recommendation {
+                        category: RecommendationCategory::DataLoading,
+                        priority: Priority::Medium,
+                        confidence: 0.75,
+                        title: "Parallelise tokenization across CPU workers".to_string(),
+                        description:
+                            "Parallelise tokenization across CPU workers to reduce preprocessing bottleneck"
+                                .to_string(),
+                        expected_impact: ImpactEstimate {
+                            speedup: 1.25,
+                            memory_reduction_mb: 0.0,
+                            throughput_improvement: 25.0,
+                        },
+                        difficulty: Difficulty::Moderate,
+                        actions: vec![
+                            "Parallelise tokenization across CPU workers to reduce preprocessing bottleneck"
+                                .to_string(),
+                            "Move data preprocessing to CPU worker pool to better utilise GPU"
+                                .to_string(),
+                        ],
+                        code_example: None,
+                    });
+                }
+            }
+        }
+
+        recommendations
+    }
+
+    /// Analyse model architecture for structural optimisation opportunities.
+    fn analyze_architecture(&self, snapshots: &[PerformanceSnapshot]) -> Vec<Recommendation> {
+        let mut recommendations = Vec::new();
+
+        // Use the latest snapshot that carries seq_len.
+        let seq_snap = snapshots.iter().rev().find(|s| s.seq_len.is_some());
+
+        if let Some(snap) = seq_snap {
+            let seq_len = snap.seq_len.unwrap_or(0);
+
+            if seq_len > 1024 {
+                recommendations.push(Recommendation {
+                    category: RecommendationCategory::Architecture,
+                    priority: Priority::High,
+                    confidence: 0.88,
+                    title: "Enable Flash Attention for long sequences".to_string(),
+                    description: format!(
+                        "Enable Flash Attention for seq_len={} (reduces memory O(n^2) to O(n))",
+                        seq_len
+                    ),
+                    expected_impact: ImpactEstimate {
+                        speedup: 1.6,
+                        memory_reduction_mb: 0.0,
+                        throughput_improvement: 30.0,
+                    },
+                    difficulty: Difficulty::Moderate,
+                    actions: vec![format!(
+                        "Enable Flash Attention for seq_len={} (reduces memory O(n^2) to O(n))",
+                        seq_len
+                    )],
+                    code_example: None,
+                });
+            }
+
+            if let (Some(kv_bytes), Some(gpu_peak)) =
+                (snap.kv_cache_bytes, snap.gpu_peak_throughput)
+            {
+                let kv_mb = kv_bytes as f64 / (1024.0 * 1024.0);
+                // Heuristic: KV cache > 50% of the GPU memory budget (proxy via peak throughput).
+                if kv_bytes as f64 > gpu_peak as f64 * 0.5 {
+                    recommendations.push(Recommendation {
+                        category: RecommendationCategory::Architecture,
+                        priority: Priority::High,
+                        confidence: 0.78,
+                        title: "Reduce KV heads using Grouped-Query Attention".to_string(),
+                        description: format!(
+                            "Reduce KV heads using Grouped-Query Attention (GQA) — current KV cache {:.0} MB exceeds 50% of GPU memory budget",
+                            kv_mb
+                        ),
+                        expected_impact: ImpactEstimate {
+                            speedup: 1.3,
+                            memory_reduction_mb: kv_mb * 0.5,
+                            throughput_improvement: 20.0,
+                        },
+                        difficulty: Difficulty::Hard,
+                        actions: vec![format!(
+                            "Reduce KV heads using Grouped-Query Attention (GQA) — current KV cache {:.0} MB exceeds 50% of GPU memory budget",
+                            kv_mb
+                        )],
+                        code_example: None,
+                    });
+                }
+            }
+
+            if seq_len > 4096 {
+                recommendations.push(Recommendation {
+                    category: RecommendationCategory::Architecture,
+                    priority: Priority::Medium,
+                    confidence: 0.82,
+                    title: "Consider sliding-window attention".to_string(),
+                    description:
+                        "Consider sliding-window attention (Mistral-style) to reduce quadratic memory growth at very long contexts"
+                            .to_string(),
+                    expected_impact: ImpactEstimate {
+                        speedup: 1.4,
+                        memory_reduction_mb: 0.0,
+                        throughput_improvement: 25.0,
+                    },
+                    difficulty: Difficulty::Hard,
+                    actions: vec![
+                        "Consider sliding-window attention (Mistral-style) to reduce quadratic memory growth at very long contexts"
+                            .to_string(),
+                    ],
+                    code_example: None,
+                });
+            }
+
+            if let Some(num_heads) = snap.num_heads {
+                if num_heads > 32 {
+                    recommendations.push(Recommendation {
+                        category: RecommendationCategory::Architecture,
+                        priority: Priority::Medium,
+                        confidence: 0.76,
+                        title: "Multi-Query Attention to reduce KV memory".to_string(),
+                        description: format!(
+                            "Multi-Query Attention (single KV head) could reduce memory by {}x while retaining most accuracy",
+                            num_heads
+                        ),
+                        expected_impact: ImpactEstimate {
+                            speedup: 1.2,
+                            memory_reduction_mb: 0.0,
+                            throughput_improvement: 15.0,
+                        },
+                        difficulty: Difficulty::Hard,
+                        actions: vec![format!(
+                            "Multi-Query Attention (single KV head) could reduce memory by {}x while retaining most accuracy",
+                            num_heads
+                        )],
+                        code_example: None,
+                    });
+                }
+            }
+        }
+
+        // model_depth-based recommendations (use latest snapshot with depth set).
+        let depth_snap = snapshots.iter().rev().find(|s| s.model_depth.is_some());
+        if let Some(snap) = depth_snap {
+            if let Some(depth) = snap.model_depth {
+                if depth > 48 {
+                    recommendations.push(Recommendation {
+                        category: RecommendationCategory::Architecture,
+                        priority: Priority::Medium,
+                        confidence: 0.84,
+                        title: "Enable gradient checkpointing for deep models".to_string(),
+                        description: format!(
+                            "Enable gradient checkpointing for models with >48 layers — reduces activation memory at ~33% compute overhead (current depth: {})",
+                            depth
+                        ),
+                        expected_impact: ImpactEstimate {
+                            speedup: 0.85, // slight slowdown due to recomputation
+                            memory_reduction_mb: 0.0,
+                            throughput_improvement: 0.0,
+                        },
+                        difficulty: Difficulty::Easy,
+                        actions: vec![
+                            "Enable gradient checkpointing for models with >48 layers — reduces activation memory at ~33% compute overhead"
+                                .to_string(),
+                        ],
+                        code_example: None,
+                    });
+                }
+            }
+        }
+
+        recommendations
+    }
+
     /// Compute current performance summary
     fn compute_current_performance(&self) -> PerformanceSummary {
         let count = self.history.len() as f64;
@@ -494,16 +932,29 @@ impl PerformanceTuner {
         }
     }
 
-    /// Estimate performance after applying recommendations
+    /// Estimate performance after applying recommendations.
+    ///
+    /// Uses `TunerConfig::performance_model` to scale each recommendation's
+    /// speedup contribution, replacing hard-coded magic numbers with
+    /// user-configurable multipliers.
     fn estimate_improved_performance(
         &self,
         recommendations: &[Recommendation],
     ) -> PerformanceSummary {
         let current = self.compute_current_performance();
 
-        // Aggregate expected improvements
-        let total_speedup: f64 =
-            recommendations.iter().map(|r| r.expected_impact.speedup - 1.0).sum::<f64>() + 1.0;
+        let total_speedup: f64 = match &self.config.performance_model {
+            PerformanceModel::RuleBased { multipliers } => {
+                recommendations
+                    .iter()
+                    .map(|r| {
+                        let m = multipliers.get(&r.category).copied().unwrap_or(1.0);
+                        m * (r.expected_impact.speedup - 1.0)
+                    })
+                    .sum::<f64>()
+                    + 1.0
+            },
+        };
 
         let total_memory_reduction: f64 =
             recommendations.iter().map(|r| r.expected_impact.memory_reduction_mb).sum();
@@ -525,6 +976,26 @@ impl PerformanceTuner {
 mod tests {
     use super::*;
 
+    fn base_snapshot() -> PerformanceSnapshot {
+        PerformanceSnapshot {
+            timestamp: 0,
+            total_time_ms: 100.0,
+            memory_usage_mb: 1000.0,
+            peak_memory_mb: 2000.0,
+            gpu_utilization: 40.0,
+            throughput: 20.0,
+            batch_size: 8,
+            layer_timings: {
+                let mut t = HashMap::new();
+                t.insert("attention".to_string(), 60.0);
+                t.insert("ffn".to_string(), 30.0);
+                t.insert("other".to_string(), 10.0);
+                t
+            },
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn test_tuner_creation() {
         let config = TunerConfig::default();
@@ -545,6 +1016,7 @@ mod tests {
             batch_size: 16,
             layer_timings: HashMap::new(),
             layer_memory: HashMap::new(),
+            ..Default::default()
         };
 
         tuner.record_snapshot(snapshot);
@@ -559,20 +1031,7 @@ mod tests {
         for i in 0..10 {
             let snapshot = PerformanceSnapshot {
                 timestamp: i,
-                total_time_ms: 100.0,
-                memory_usage_mb: 1000.0,
-                peak_memory_mb: 2000.0, // High fragmentation
-                gpu_utilization: 40.0,  // Low utilization
-                throughput: 20.0,
-                batch_size: 8, // Small batch
-                layer_timings: {
-                    let mut timings = HashMap::new();
-                    timings.insert("attention".to_string(), 60.0);
-                    timings.insert("ffn".to_string(), 30.0);
-                    timings.insert("other".to_string(), 10.0);
-                    timings
-                },
-                layer_memory: HashMap::new(),
+                ..base_snapshot()
             };
 
             tuner.record_snapshot(snapshot);
@@ -586,6 +1045,181 @@ mod tests {
         // Should have current and estimated performance
         assert!(report.current_performance.avg_time_ms > 0.0);
         assert!(report.estimated_performance.avg_time_ms > 0.0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_analyze_hardware_nvidia_produces_hardware_recommendation() -> Result<()> {
+        let mut tuner = PerformanceTuner::new(TunerConfig::default());
+
+        let snapshot = PerformanceSnapshot {
+            hardware_type: Some(HardwareType::NvidiaGpu),
+            ..base_snapshot()
+        };
+        tuner.record_snapshot(snapshot);
+
+        let report = tuner.analyze()?;
+        let hw_recs: Vec<_> = report
+            .recommendations
+            .iter()
+            .filter(|r| r.category == RecommendationCategory::Hardware)
+            .collect();
+
+        assert!(
+            !hw_recs.is_empty(),
+            "Expected at least one Hardware recommendation for NvidiaGpu"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_analyze_hardware_apple_silicon() -> Result<()> {
+        let mut tuner = PerformanceTuner::new(TunerConfig::default());
+
+        let snapshot = PerformanceSnapshot {
+            hardware_type: Some(HardwareType::AppleSilicon),
+            ..base_snapshot()
+        };
+        tuner.record_snapshot(snapshot);
+
+        let report = tuner.analyze()?;
+        let hw_recs: Vec<_> = report
+            .recommendations
+            .iter()
+            .filter(|r| r.category == RecommendationCategory::Hardware)
+            .collect();
+
+        assert!(
+            !hw_recs.is_empty(),
+            "Expected at least one Hardware recommendation for AppleSilicon"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_analyze_data_loading_high_io_wait() -> Result<()> {
+        let mut tuner = PerformanceTuner::new(TunerConfig::default());
+
+        let snapshot = PerformanceSnapshot {
+            io_wait_pct: Some(0.3),
+            gpu_peak_throughput: Some(100.0),
+            batch_throughput_per_sec: Some(20.0),
+            ..base_snapshot()
+        };
+        tuner.record_snapshot(snapshot);
+
+        let report = tuner.analyze()?;
+        let dl_recs: Vec<_> = report
+            .recommendations
+            .iter()
+            .filter(|r| r.category == RecommendationCategory::DataLoading)
+            .collect();
+
+        assert!(
+            !dl_recs.is_empty(),
+            "Expected at least one DataLoading recommendation for high I/O wait"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_analyze_architecture_long_context() -> Result<()> {
+        let mut tuner = PerformanceTuner::new(TunerConfig::default());
+
+        let snapshot = PerformanceSnapshot {
+            seq_len: Some(4096),
+            ..base_snapshot()
+        };
+        tuner.record_snapshot(snapshot);
+
+        let report = tuner.analyze()?;
+        let arch_recs: Vec<_> = report
+            .recommendations
+            .iter()
+            .filter(|r| {
+                r.category == RecommendationCategory::Architecture
+                    && r.description.contains("Flash Attention")
+            })
+            .collect();
+
+        assert!(
+            !arch_recs.is_empty(),
+            "Expected at least one Architecture recommendation mentioning Flash Attention"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_detected_hardware_returns_non_auto() {
+        let tuner = PerformanceTuner::new(TunerConfig::default());
+        let hw = tuner.detected_hardware();
+        assert_ne!(
+            hw,
+            HardwareType::Auto,
+            "detected_hardware should never return Auto"
+        );
+    }
+
+    #[test]
+    fn test_performance_model_rule_based_configurable() -> Result<()> {
+        // Build a custom model where Memory multiplier is 2.0 (doubles each Memory rec's contribution).
+        let mut multipliers = HashMap::new();
+        for cat in &[
+            RecommendationCategory::Memory,
+            RecommendationCategory::Compute,
+            RecommendationCategory::BatchSize,
+            RecommendationCategory::Layer,
+            RecommendationCategory::Hardware,
+            RecommendationCategory::DataLoading,
+            RecommendationCategory::Architecture,
+        ] {
+            multipliers.insert(*cat, 1.0);
+        }
+        multipliers.insert(RecommendationCategory::Memory, 2.0);
+
+        let config = TunerConfig {
+            performance_model: PerformanceModel::RuleBased { multipliers },
+            ..TunerConfig::default()
+        };
+
+        let mut tuner = PerformanceTuner::new(config);
+
+        // Add snapshots that trigger a Memory recommendation (fragmentation).
+        for i in 0..5 {
+            let snapshot = PerformanceSnapshot {
+                timestamp: i,
+                memory_usage_mb: 1000.0,
+                peak_memory_mb: 3000.0, // >1.5x average triggers memory rec
+                ..base_snapshot()
+            };
+            tuner.record_snapshot(snapshot);
+        }
+
+        let report = tuner.analyze()?;
+
+        // With a 2x multiplier on Memory, the speedup contribution of Memory recommendations
+        // is doubled. The estimated throughput should exceed that of the default model.
+        let default_config = TunerConfig::default();
+        let mut default_tuner = PerformanceTuner::new(default_config);
+        for i in 0..5 {
+            let snapshot = PerformanceSnapshot {
+                timestamp: i,
+                memory_usage_mb: 1000.0,
+                peak_memory_mb: 3000.0,
+                ..base_snapshot()
+            };
+            default_tuner.record_snapshot(snapshot);
+        }
+        let default_report = default_tuner.analyze()?;
+
+        // Custom model with multiplier=2 should estimate at least as well as default (multiplier=1).
+        // Both have the same recs, but the custom model scales Memory speedup by 2x.
+        assert!(
+            report.estimated_performance.avg_time_ms
+                <= default_report.estimated_performance.avg_time_ms + 1e-6,
+            "Custom multiplier=2.0 should produce at least as optimistic a time estimate as default"
+        );
 
         Ok(())
     }

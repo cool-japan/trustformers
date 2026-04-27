@@ -1504,6 +1504,8 @@ pub struct CachedArchitecture {
 mod tests {
     use super::*;
 
+    // ── ComputationBudget tests ──
+
     #[test]
     fn test_computation_budget() {
         let mut budget = ComputationBudget::new(1000, 100, 50);
@@ -1517,6 +1519,68 @@ mod tests {
 
         assert!(!budget.can_afford(600, 60, 30));
     }
+
+    #[test]
+    fn test_budget_saturating_consume() {
+        let mut budget = ComputationBudget::new(100, 10, 5);
+        budget.consume(200, 20, 10);
+        assert_eq!(budget.remaining_flops, 0);
+        assert_eq!(budget.remaining_memory_mb, 0);
+        assert_eq!(budget.remaining_time_ms, 0);
+    }
+
+    #[test]
+    fn test_budget_can_afford_exact() {
+        let budget = ComputationBudget::new(100, 10, 5);
+        assert!(budget.can_afford(100, 10, 5));
+    }
+
+    #[test]
+    fn test_budget_can_afford_fails_on_flops() {
+        let budget = ComputationBudget::new(100, 10, 5);
+        assert!(!budget.can_afford(101, 10, 5));
+    }
+
+    #[test]
+    fn test_budget_can_afford_fails_on_memory() {
+        let budget = ComputationBudget::new(100, 10, 5);
+        assert!(!budget.can_afford(100, 11, 5));
+    }
+
+    #[test]
+    fn test_budget_can_afford_fails_on_time() {
+        let budget = ComputationBudget::new(100, 10, 5);
+        assert!(!budget.can_afford(100, 10, 6));
+    }
+
+    #[test]
+    fn test_budget_zero_budget() {
+        let budget = ComputationBudget::new(0, 0, 0);
+        assert!(budget.can_afford(0, 0, 0));
+        assert!(!budget.can_afford(1, 0, 0));
+    }
+
+    // ── AdaptiveComputationConfig tests ──
+
+    #[test]
+    fn test_adaptive_config_default() {
+        let config = AdaptiveComputationConfig::default();
+        assert_eq!(config.max_layers, 12);
+        assert_eq!(config.min_layers, 2);
+        assert!((config.halt_threshold - 0.99).abs() < 1e-6);
+        assert!((config.time_penalty - 0.01).abs() < 1e-6);
+        assert!((config.early_exit_threshold - 0.95).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_adaptive_config_clone() {
+        let config = AdaptiveComputationConfig::default();
+        let cloned = config.clone();
+        assert_eq!(config.max_layers, cloned.max_layers);
+        assert_eq!(config.min_layers, cloned.min_layers);
+    }
+
+    // ── ConfidenceBasedStrategy tests ──
 
     #[test]
     fn test_confidence_based_strategy() {
@@ -1534,7 +1598,6 @@ mod tests {
             output_entropy: 1.0,
         };
 
-        // Should continue with low confidence and within limits
         assert!(strategy.should_continue(0, &metrics, &budget, &config));
 
         let high_confidence_metrics = LayerMetrics {
@@ -1542,9 +1605,180 @@ mod tests {
             ..metrics
         };
 
-        // Should stop with high confidence
         assert!(!strategy.should_continue(5, &high_confidence_metrics, &budget, &config));
     }
+
+    #[test]
+    fn test_confidence_strategy_respects_min_layers() {
+        let strategy = ConfidenceBasedStrategy::new();
+        let config = AdaptiveComputationConfig {
+            min_layers: 5,
+            ..AdaptiveComputationConfig::default()
+        };
+        let budget = ComputationBudget::new(10000, 1000, 100);
+
+        let metrics = LayerMetrics {
+            layer_id: 0,
+            flops_estimate: 100,
+            memory_usage_mb: 10,
+            execution_time_ms: 5,
+            confidence_score: 0.8,
+            uncertainty_score: 0.2,
+            output_entropy: 0.5,
+        };
+
+        // Below min_layers, must continue
+        assert!(strategy.should_continue(2, &metrics, &budget, &config));
+    }
+
+    #[test]
+    fn test_confidence_strategy_stops_at_max_layers() {
+        let strategy = ConfidenceBasedStrategy::new();
+        let config = AdaptiveComputationConfig {
+            max_layers: 6,
+            ..AdaptiveComputationConfig::default()
+        };
+        let budget = ComputationBudget::new(10000, 1000, 100);
+
+        let metrics = LayerMetrics {
+            layer_id: 6,
+            flops_estimate: 100,
+            memory_usage_mb: 10,
+            execution_time_ms: 5,
+            confidence_score: 0.5,
+            uncertainty_score: 0.5,
+            output_entropy: 1.0,
+        };
+
+        assert!(!strategy.should_continue(6, &metrics, &budget, &config));
+    }
+
+    #[test]
+    fn test_confidence_strategy_stops_on_budget_exhaustion() {
+        let strategy = ConfidenceBasedStrategy::new();
+        let config = AdaptiveComputationConfig::default();
+        let budget = ComputationBudget::new(10, 1, 1); // Very tight budget
+
+        let metrics = LayerMetrics {
+            layer_id: 5,
+            flops_estimate: 100,
+            memory_usage_mb: 10,
+            execution_time_ms: 5,
+            confidence_score: 0.5,
+            uncertainty_score: 0.5,
+            output_entropy: 1.0,
+        };
+
+        assert!(!strategy.should_continue(5, &metrics, &budget, &config));
+    }
+
+    #[test]
+    fn test_confidence_strategy_estimate_remaining_cost() {
+        let strategy = ConfidenceBasedStrategy::new();
+        let metrics = LayerMetrics {
+            layer_id: 3,
+            flops_estimate: 100,
+            memory_usage_mb: 10,
+            execution_time_ms: 5,
+            confidence_score: 0.5,
+            uncertainty_score: 0.5,
+            output_entropy: 1.0,
+        };
+
+        let (flops, mem, time) = strategy.estimate_remaining_cost(3, 10, &metrics);
+        assert_eq!(flops, 700); // 7 remaining * 100
+        assert_eq!(mem, 70); // 7 * 10
+        assert_eq!(time, 35); // 7 * 5
+    }
+
+    #[test]
+    fn test_confidence_strategy_adjust_computation_path_low_complexity() {
+        let strategy = ConfidenceBasedStrategy::new();
+        let config = AdaptiveComputationConfig {
+            min_layers: 2,
+            max_layers: 12,
+            ..AdaptiveComputationConfig::default()
+        };
+        let budget = ComputationBudget::new(100000, 10000, 1000);
+
+        let path = strategy.adjust_computation_path(0.1, &budget, &config);
+        // Low complexity => min_layers
+        assert_eq!(path.layers_to_execute.len(), config.min_layers);
+    }
+
+    #[test]
+    fn test_confidence_strategy_adjust_computation_path_high_complexity() {
+        let strategy = ConfidenceBasedStrategy::new();
+        let config = AdaptiveComputationConfig {
+            min_layers: 2,
+            max_layers: 12,
+            ..AdaptiveComputationConfig::default()
+        };
+        let budget = ComputationBudget::new(100000, 10000, 1000);
+
+        let path = strategy.adjust_computation_path(0.9, &budget, &config);
+        assert_eq!(path.layers_to_execute.len(), config.max_layers);
+    }
+
+    // ── UncertaintyBasedStrategy tests ──
+
+    #[test]
+    fn test_uncertainty_strategy_continues_on_high_uncertainty() {
+        let strategy = UncertaintyBasedStrategy::new();
+        let config = AdaptiveComputationConfig::default();
+        let budget = ComputationBudget::new(100000, 10000, 1000);
+
+        let metrics = LayerMetrics {
+            layer_id: 5,
+            flops_estimate: 100,
+            memory_usage_mb: 10,
+            execution_time_ms: 5,
+            confidence_score: 0.3,
+            uncertainty_score: 0.7,
+            output_entropy: 1.0,
+        };
+
+        assert!(strategy.should_continue(5, &metrics, &budget, &config));
+    }
+
+    #[test]
+    fn test_uncertainty_strategy_stops_on_low_uncertainty() {
+        let strategy = UncertaintyBasedStrategy::new();
+        let config = AdaptiveComputationConfig {
+            min_layers: 2,
+            ..AdaptiveComputationConfig::default()
+        };
+        let budget = ComputationBudget::new(100000, 10000, 1000);
+
+        let metrics = LayerMetrics {
+            layer_id: 5,
+            flops_estimate: 100,
+            memory_usage_mb: 10,
+            execution_time_ms: 5,
+            confidence_score: 0.95,
+            uncertainty_score: 0.05,
+            output_entropy: 0.1,
+        };
+
+        assert!(!strategy.should_continue(5, &metrics, &budget, &config));
+    }
+
+    #[test]
+    fn test_uncertainty_strategy_adjust_path() {
+        let strategy = UncertaintyBasedStrategy::new();
+        let config = AdaptiveComputationConfig {
+            min_layers: 2,
+            max_layers: 10,
+            ..AdaptiveComputationConfig::default()
+        };
+        let budget = ComputationBudget::new(100000, 10000, 1000);
+
+        let path = strategy.adjust_computation_path(0.5, &budget, &config);
+        assert!(path.layers_to_execute.len() >= config.min_layers);
+        assert!(path.layers_to_execute.len() <= config.max_layers);
+    }
+
+    // ── PerformanceTracker tests ──
 
     #[test]
     fn test_performance_tracker() {
@@ -1560,14 +1794,49 @@ mod tests {
     }
 
     #[test]
+    fn test_performance_tracker_no_data() {
+        let tracker = PerformanceTracker::new();
+        assert_eq!(tracker.get_average_execution_time(0), None);
+        assert_eq!(tracker.get_accuracy_trend(0), None);
+    }
+
+    #[test]
+    fn test_performance_tracker_record_resource_usage() {
+        let mut tracker = PerformanceTracker::new();
+        tracker.record_resource_usage(1000, 50, 10);
+        tracker.record_resource_usage(2000, 100, 20);
+        assert_eq!(tracker.resource_usage_history.len(), 2);
+    }
+
+    #[test]
+    fn test_performance_tracker_multiple_layers() {
+        let mut tracker = PerformanceTracker::new();
+        tracker.record_layer_execution(0, 10);
+        tracker.record_layer_execution(1, 20);
+        tracker.record_layer_execution(2, 30);
+
+        assert_eq!(tracker.get_average_execution_time(0), Some(10.0));
+        assert_eq!(tracker.get_average_execution_time(1), Some(20.0));
+        assert_eq!(tracker.get_average_execution_time(2), Some(30.0));
+    }
+
+    #[test]
+    fn test_performance_tracker_default() {
+        let tracker = PerformanceTracker::default();
+        assert!(tracker.layer_execution_times.is_empty());
+        assert!(tracker.accuracy_by_layers.is_empty());
+        assert!(tracker.resource_usage_history.is_empty());
+    }
+
+    // ── EntropyBasedComplexityEstimator tests ──
+
+    #[test]
     fn test_entropy_complexity_estimator() {
         let estimator = EntropyBasedComplexityEstimator;
 
-        // Create a low-entropy input (concentrated distribution after softmax)
         let low_entropy_input = Tensor::from_vec(vec![10.0, 0.0, 0.0, 0.0, 0.0], &[1, 5])
             .expect("Tensor from_vec failed");
 
-        // Create a high-entropy input (uniform distribution after softmax)
         let high_entropy_input = Tensor::ones(&[1, 5]).expect("Failed to create ones tensor");
 
         let low_complexity = estimator
@@ -1577,11 +1846,152 @@ mod tests {
             .estimate_complexity(&high_entropy_input)
             .expect("operation failed in test");
 
-        // Uniform distribution should have higher entropy than concentrated distribution
         assert!(high_complexity > low_complexity);
-
-        // Test that complexity is in valid range [0, 1]
         assert!((0.0..=1.0).contains(&low_complexity));
         assert!((0.0..=1.0).contains(&high_complexity));
+    }
+
+    // ── ComputationPath tests ──
+
+    #[test]
+    fn test_computation_path_structure() {
+        let path = ComputationPath {
+            layers_to_execute: vec![0, 1, 2, 3],
+            skip_patterns: vec![LayerSkipPattern::Approximate],
+            early_exit_points: vec![2],
+            resource_allocation: ResourceAllocation {
+                memory_per_layer: HashMap::new(),
+                compute_intensity: HashMap::new(),
+                parallelism_factor: HashMap::new(),
+            },
+        };
+        assert_eq!(path.layers_to_execute.len(), 4);
+        assert_eq!(path.skip_patterns.len(), 1);
+        assert_eq!(path.early_exit_points, vec![2]);
+    }
+
+    // ── DynamicArchitectureConfig tests ──
+
+    #[test]
+    fn test_dynamic_architecture_config_default() {
+        let config = DynamicArchitectureConfig::default();
+        assert!(config.enable_dynamic_topology);
+        assert_eq!(config.max_concurrent_paths, 4);
+        assert!((config.layer_insertion_threshold - 0.3).abs() < 1e-6);
+        assert!((config.layer_removal_threshold - 0.8).abs() < 1e-6);
+        assert!((config.branching_confidence_threshold - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_dynamic_architecture_config_clone() {
+        let config = DynamicArchitectureConfig::default();
+        let cloned = config.clone();
+        assert_eq!(config.max_concurrent_paths, cloned.max_concurrent_paths);
+        assert_eq!(
+            config.enable_dynamic_topology,
+            cloned.enable_dynamic_topology
+        );
+    }
+
+    // ── LayerSkipPattern tests ──
+
+    #[test]
+    fn test_layer_skip_pattern_variants() {
+        let skip = LayerSkipPattern::Skip;
+        let approx = LayerSkipPattern::Approximate;
+        let cached = LayerSkipPattern::Cached;
+        let pruned = LayerSkipPattern::Pruned;
+
+        // Clone and Debug
+        let _skip_clone = skip.clone();
+        let _debug = format!("{:?}", approx);
+        let _debug2 = format!("{:?}", cached);
+        let _debug3 = format!("{:?}", pruned);
+    }
+
+    // ── LayerMetrics tests ──
+
+    #[test]
+    fn test_layer_metrics_clone() {
+        let metrics = LayerMetrics {
+            layer_id: 0,
+            flops_estimate: 1000,
+            memory_usage_mb: 50,
+            execution_time_ms: 10,
+            confidence_score: 0.8,
+            uncertainty_score: 0.2,
+            output_entropy: 0.5,
+        };
+        let cloned = metrics.clone();
+        assert_eq!(metrics.layer_id, cloned.layer_id);
+        assert_eq!(metrics.flops_estimate, cloned.flops_estimate);
+        assert!((metrics.confidence_score - cloned.confidence_score).abs() < 1e-6);
+    }
+
+    // ── ResourceAllocation tests ──
+
+    #[test]
+    fn test_resource_allocation_empty() {
+        let alloc = ResourceAllocation {
+            memory_per_layer: HashMap::new(),
+            compute_intensity: HashMap::new(),
+            parallelism_factor: HashMap::new(),
+        };
+        assert!(alloc.memory_per_layer.is_empty());
+        assert!(alloc.compute_intensity.is_empty());
+        assert!(alloc.parallelism_factor.is_empty());
+    }
+
+    #[test]
+    fn test_resource_allocation_with_data() {
+        let mut alloc = ResourceAllocation {
+            memory_per_layer: HashMap::new(),
+            compute_intensity: HashMap::new(),
+            parallelism_factor: HashMap::new(),
+        };
+        alloc.memory_per_layer.insert(0, 100);
+        alloc.compute_intensity.insert(0, 0.8);
+        alloc.parallelism_factor.insert(0, 4);
+
+        assert_eq!(alloc.memory_per_layer.get(&0), Some(&100));
+        assert_eq!(alloc.parallelism_factor.get(&0), Some(&4));
+    }
+
+    // ── Complexity estimation method / strategy enums ──
+
+    #[test]
+    fn test_complexity_estimation_method_variants() {
+        let _a = ComplexityEstimationMethod::EntropyBased;
+        let _b = ComplexityEstimationMethod::AttentionBased;
+        let _c = ComplexityEstimationMethod::GradientNorm;
+        let _d = ComplexityEstimationMethod::LearningCurve;
+        let _e = ComplexityEstimationMethod::Hybrid;
+    }
+
+    #[test]
+    fn test_dynamic_depth_strategy_variants() {
+        let _a = DynamicDepthStrategy::ConfidenceBased;
+        let _b = DynamicDepthStrategy::UncertaintyBased;
+        let _c = DynamicDepthStrategy::ResourceConstrained;
+        let _d = DynamicDepthStrategy::LatencyOptimized;
+        let _e = DynamicDepthStrategy::AccuracyOptimized;
+    }
+
+    #[test]
+    fn test_path_selection_strategy_variants() {
+        let _a = PathSelectionStrategy::ConfidenceBased;
+        let _b = PathSelectionStrategy::UncertaintyBased;
+        let _c = PathSelectionStrategy::EnsembleVoting;
+        let _d = PathSelectionStrategy::AdaptiveRouting;
+        let _e = PathSelectionStrategy::CostEffectiveness;
+    }
+
+    #[test]
+    fn test_voting_mechanism_variants() {
+        let _a = VotingMechanism::MajorityVote;
+        let _b = VotingMechanism::WeightedAverage;
+        let _c = VotingMechanism::ConfidenceWeighted;
+        let _d = VotingMechanism::UncertaintyWeighted;
+        let _e = VotingMechanism::ExpertMixing;
     }
 }

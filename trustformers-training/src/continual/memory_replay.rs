@@ -488,4 +488,189 @@ mod tests {
         // (This is probabilistic, so we just check that we got some samples)
         assert!(!samples.is_empty());
     }
+
+    #[test]
+    fn test_memory_replay_config_default() {
+        let config = MemoryReplayConfig::default();
+        assert_eq!(config.buffer_size_per_task, 1000);
+        assert_eq!(config.replay_batch_size, 32);
+        assert_eq!(config.replay_ratio, 0.5);
+        assert!(!config.use_herding);
+        assert_eq!(config.num_clusters, 10);
+    }
+
+    #[test]
+    fn test_sampling_strategy_variants() {
+        let strategies = [
+            SamplingStrategy::Random,
+            SamplingStrategy::Uniform,
+            SamplingStrategy::Weighted,
+            SamplingStrategy::Diverse,
+            SamplingStrategy::GradientBased,
+        ];
+        assert_eq!(strategies.len(), 5);
+    }
+
+    #[test]
+    fn test_experience_sample_creation() {
+        let sample = ExperienceSample::new("task_1".to_string(), vec![1.0, 2.0], vec![0.0]);
+        assert_eq!(sample.task_id, "task_1");
+        assert_eq!(sample.input.len(), 2);
+        assert_eq!(sample.target.len(), 1);
+        assert_eq!(sample.importance, 1.0);
+        assert_eq!(sample.replay_count, 0);
+    }
+
+    #[test]
+    fn test_experience_sample_update_importance() {
+        let mut sample = ExperienceSample::new("task_1".to_string(), vec![1.0], vec![0.0]);
+        sample.update_importance(5.0);
+        assert!(sample.importance > 0.1);
+        assert!(sample.importance < 5.0);
+    }
+
+    #[test]
+    fn test_experience_sample_increment_replay() {
+        let mut sample = ExperienceSample::new("task_1".to_string(), vec![1.0], vec![0.0]);
+        assert_eq!(sample.replay_count, 0);
+        sample.increment_replay();
+        assert_eq!(sample.replay_count, 1);
+        sample.increment_replay();
+        assert_eq!(sample.replay_count, 2);
+    }
+
+    #[test]
+    fn test_experience_buffer_empty() {
+        let buffer = ExperienceBuffer::new(10, Some(42));
+        let stats = buffer.get_stats();
+        assert_eq!(stats.total_samples, 0);
+        assert!(stats.task_counts.is_empty());
+    }
+
+    #[test]
+    fn test_experience_buffer_multiple_tasks() {
+        let mut buffer = ExperienceBuffer::new(5, Some(42));
+        for i in 0..3 {
+            let sample = ExperienceSample::new("task_a".to_string(), vec![i as f32], vec![0.0]);
+            buffer.add_sample(sample);
+        }
+        for i in 0..4 {
+            let sample = ExperienceSample::new("task_b".to_string(), vec![i as f32], vec![1.0]);
+            buffer.add_sample(sample);
+        }
+        let stats = buffer.get_stats();
+        assert_eq!(stats.task_counts.get("task_a"), Some(&3));
+        assert_eq!(stats.task_counts.get("task_b"), Some(&4));
+    }
+
+    #[test]
+    fn test_experience_buffer_overflow() {
+        let mut buffer = ExperienceBuffer::new(2, Some(42));
+        for i in 0..5 {
+            let sample = ExperienceSample::new("task1".to_string(), vec![i as f32], vec![0.0]);
+            buffer.add_sample(sample);
+        }
+        let stats = buffer.get_stats();
+        assert_eq!(stats.total_samples, 2); // Only last 2 kept
+    }
+
+    #[test]
+    fn test_memory_replay_creation() {
+        let config = MemoryReplayConfig::default();
+        let replay = MemoryReplay::new(config, Some(42));
+        assert!(!replay.has_samples());
+    }
+
+    #[test]
+    fn test_memory_replay_has_samples() {
+        let config = MemoryReplayConfig::default();
+        let mut replay = MemoryReplay::new(config, Some(42));
+        assert!(!replay.has_samples());
+        let sample = ExperienceSample::new("task1".to_string(), vec![1.0], vec![0.0]);
+        replay.add_experience(sample);
+        assert!(replay.has_samples());
+    }
+
+    #[test]
+    fn test_memory_replay_uniform_sampling() {
+        let config = MemoryReplayConfig {
+            buffer_size_per_task: 10,
+            sampling_strategy: SamplingStrategy::Uniform,
+            replay_batch_size: 4,
+            ..Default::default()
+        };
+        let mut replay = MemoryReplay::new(config, Some(42));
+        for task_id in ["task1", "task2", "task3"] {
+            for i in 0..5 {
+                let sample = ExperienceSample::new(
+                    task_id.to_string(),
+                    vec![i as f32],
+                    vec![(i % 2) as f32],
+                );
+                replay.add_experience(sample);
+            }
+        }
+        let samples = replay.sample_replay_batch();
+        assert!(samples.len() <= 4);
+    }
+
+    #[test]
+    fn test_importance_update_minimum() {
+        let mut sample = ExperienceSample::new("task1".to_string(), vec![1.0], vec![0.0]);
+        // Even with 0 loss, importance should stay above minimum
+        sample.update_importance(0.0);
+        assert!(sample.importance >= 0.1);
+    }
+
+    #[test]
+    fn test_importance_update_repeated() {
+        let mut sample = ExperienceSample::new("task1".to_string(), vec![1.0], vec![0.0]);
+        for _ in 0..10 {
+            sample.update_importance(2.0);
+        }
+        // After many updates with high loss, importance should be substantial
+        assert!(sample.importance > 0.1);
+    }
+
+    #[test]
+    fn test_weighted_sampling_returns_samples() {
+        let mut buffer = ExperienceBuffer::new(20, Some(42));
+        for i in 0..10 {
+            let mut sample = ExperienceSample::new("task1".to_string(), vec![i as f32], vec![0.0]);
+            sample.importance = (i + 1) as f32;
+            buffer.add_sample(sample);
+        }
+        let samples = buffer.sample_weighted(5);
+        assert_eq!(samples.len(), 5);
+    }
+
+    #[test]
+    fn test_buffer_stats_task_counts() {
+        let mut buffer = ExperienceBuffer::new(100, Some(42));
+        for i in 0..10 {
+            let task = if i < 5 { "task_a" } else { "task_b" };
+            let sample = ExperienceSample::new(task.to_string(), vec![i as f32], vec![0.0]);
+            buffer.add_sample(sample);
+        }
+        let stats = buffer.get_stats();
+        assert_eq!(stats.total_samples, 10);
+        assert_eq!(stats.task_counts.len(), 2);
+    }
+
+    #[test]
+    fn test_replay_batch_size_larger_than_buffer() {
+        let config = MemoryReplayConfig {
+            buffer_size_per_task: 3,
+            sampling_strategy: SamplingStrategy::Random,
+            replay_batch_size: 100, // Much larger than available
+            ..Default::default()
+        };
+        let mut replay = MemoryReplay::new(config, Some(42));
+        for i in 0..3 {
+            let sample = ExperienceSample::new("task1".to_string(), vec![i as f32], vec![0.0]);
+            replay.add_experience(sample);
+        }
+        let samples = replay.sample_replay_batch();
+        assert!(samples.len() <= 3);
+    }
 }

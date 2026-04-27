@@ -978,4 +978,238 @@ mod tests {
             panic!("Expected Progressive strategy");
         }
     }
+
+    // ---- Response distillation loss: soft targets with temperature T ----
+
+    /// Scaling logits by temperature T > 1 must produce a softer (higher-entropy) distribution.
+    #[test]
+    fn test_temperature_softens_distribution() {
+        // Soft distribution: p = softmax(logits / T)
+        // Higher T → more uniform distribution → higher entropy.
+        fn softmax_entropy(logits: &[f64], temperature: f64) -> f64 {
+            let scaled: Vec<f64> = logits.iter().map(|&x| x / temperature).collect();
+            let max_val = scaled.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let exp_vals: Vec<f64> = scaled.iter().map(|&x| (x - max_val).exp()).collect();
+            let sum: f64 = exp_vals.iter().sum();
+            let probs: Vec<f64> = exp_vals.iter().map(|&x| x / sum).collect();
+            -probs.iter().map(|&p| if p > 0.0 { p * p.ln() } else { 0.0 }).sum::<f64>()
+        }
+
+        let logits = [2.0f64, 1.0, 0.5, -0.5];
+        let entropy_t1 = softmax_entropy(&logits, 1.0);
+        let entropy_t4 = softmax_entropy(&logits, 4.0);
+        let entropy_t10 = softmax_entropy(&logits, 10.0);
+
+        assert!(
+            entropy_t4 > entropy_t1,
+            "T=4 must produce higher entropy than T=1; got {:.4} vs {:.4}",
+            entropy_t4,
+            entropy_t1
+        );
+        assert!(
+            entropy_t10 > entropy_t4,
+            "T=10 must produce higher entropy than T=4"
+        );
+    }
+
+    /// At T=1 the soft-target distribution must equal the standard softmax.
+    #[test]
+    fn test_temperature_1_equals_standard_softmax() {
+        fn softmax(logits: &[f64], temperature: f64) -> Vec<f64> {
+            let scaled: Vec<f64> = logits.iter().map(|&x| x / temperature).collect();
+            let max_val = scaled.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let exp_vals: Vec<f64> = scaled.iter().map(|&x| (x - max_val).exp()).collect();
+            let sum: f64 = exp_vals.iter().sum();
+            exp_vals.iter().map(|&x| x / sum).collect()
+        }
+
+        let logits = [1.5f64, -0.3, 0.8, 2.1];
+        let p_t1 = softmax(&logits, 1.0);
+        let p_standard = softmax(&logits, 1.0);
+        for (a, b) in p_t1.iter().zip(p_standard.iter()) {
+            assert!(
+                (a - b).abs() < 1e-12,
+                "T=1 soft targets must equal standard softmax"
+            );
+        }
+    }
+
+    /// KL divergence D_KL(P||Q) ≥ 0 always, with equality when P = Q.
+    #[test]
+    fn test_kl_divergence_non_negative() {
+        fn kl_div(p: &[f64], q: &[f64]) -> f64 {
+            p.iter()
+                .zip(q.iter())
+                .map(
+                    |(&pi, &qi)| {
+                        if pi > 0.0 {
+                            pi * (pi / qi).ln()
+                        } else {
+                            0.0
+                        }
+                    },
+                )
+                .sum()
+        }
+
+        // Same distributions: KL = 0
+        let p = [0.5f64, 0.3, 0.2];
+        let kl_same = kl_div(&p, &p);
+        assert!(kl_same.abs() < 1e-12, "KL(P||P) must be 0; got {}", kl_same);
+
+        // Different distributions: KL ≥ 0
+        let q = [0.2f64, 0.5, 0.3];
+        let kl_diff = kl_div(&p, &q);
+        assert!(kl_diff >= 0.0, "KL(P||Q) must be >= 0; got {}", kl_diff);
+    }
+
+    // ---- Feature matching MSE ----
+
+    /// MSE between identical tensors must be zero.
+    #[test]
+    fn test_feature_mse_zero_for_identical() {
+        use trustformers_core::tensor::Tensor;
+        let t = Tensor::zeros(&[4, 8]).expect("tensor creation must succeed");
+        let s = Tensor::zeros(&[4, 8]).expect("tensor creation must succeed");
+        let diff = t.sub(&s).expect("subtraction must succeed");
+        let sq = diff.mul(&diff).expect("element-wise mul must succeed");
+        let mse = sq.mean().expect("mean must succeed");
+        let val = mse.data_f32().expect("data extraction must succeed");
+        assert!(
+            val.iter().all(|&x| x.abs() < 1e-6),
+            "MSE between identical zero tensors must be 0"
+        );
+    }
+
+    // ---- Attention map distillation ----
+
+    /// Attention map MSE must be ≥ 0.
+    #[test]
+    fn test_attention_mse_non_negative() {
+        use trustformers_core::tensor::Tensor;
+        let t = Tensor::ones(&[2, 4, 8, 8]).expect("teacher attention must be created");
+        let s = Tensor::zeros(&[2, 4, 8, 8]).expect("student attention must be created");
+        let diff = t.sub(&s).expect("subtraction must succeed");
+        let sq = diff.mul(&diff).expect("squaring must succeed");
+        let mse = sq.mean().expect("mean must succeed");
+        let val = mse.data_f32().expect("data extraction must succeed");
+        assert!(val.iter().all(|&x| x >= 0.0), "Attention MSE must be >= 0");
+    }
+
+    // ---- Layer mapping ----
+
+    /// A feature_matching_layers mapping of teacher → student must be correctly stored.
+    #[test]
+    fn test_layer_mapping_stored_correctly() {
+        let mut mapping = HashMap::new();
+        mapping.insert(11usize, 5usize); // teacher layer 11 → student layer 5
+        mapping.insert(6, 3);
+        let config = utils::feature_distillation_config(mapping.clone(), 0.7);
+        assert_eq!(config.feature_matching_layers.get(&11), Some(&5usize));
+        assert_eq!(config.feature_matching_layers.get(&6), Some(&3usize));
+    }
+
+    // ---- Progressive distillation scheduling ----
+
+    /// linear_decay_stages must produce monotonically decreasing temperature from initial to final.
+    #[test]
+    fn test_linear_decay_stages_monotone_temperature() {
+        let stages = utils::linear_decay_stages(8.0, 1.0, 0.9, 0.4, 5, 500);
+        assert_eq!(stages.len(), 5);
+        for w in stages.windows(2) {
+            assert!(
+                w[0].temperature >= w[1].temperature,
+                "Temperature must be monotonically decreasing; got {} > {}",
+                w[0].temperature,
+                w[1].temperature
+            );
+        }
+    }
+
+    /// The first stage temperature must equal the initial and last must equal the final.
+    #[test]
+    fn test_linear_decay_stages_endpoints() {
+        let init_t = 6.0f32;
+        let final_t = 1.5f32;
+        let stages = utils::linear_decay_stages(init_t, final_t, 0.8, 0.5, 4, 1000);
+        assert!(
+            (stages[0].temperature - init_t).abs() < 1e-5,
+            "First stage must have initial temp"
+        );
+        assert!(
+            (stages[stages.len() - 1].temperature - final_t).abs() < 1e-5,
+            "Last stage must have final temp"
+        );
+    }
+
+    /// Each stage duration must equal the steps_per_stage value.
+    #[test]
+    fn test_linear_decay_stages_duration_per_stage() {
+        let steps_per_stage = 250;
+        let stages = utils::linear_decay_stages(5.0, 1.0, 0.8, 0.5, 4, steps_per_stage);
+        for stage in &stages {
+            assert_eq!(
+                stage.duration, steps_per_stage,
+                "Each stage must have duration == steps_per_stage"
+            );
+        }
+    }
+
+    // ---- Distillation weight scheduling ----
+
+    /// alpha must remain in [0, 1] across all linear_decay_stages.
+    #[test]
+    fn test_linear_decay_alpha_in_unit_interval() {
+        let stages = utils::linear_decay_stages(5.0, 1.0, 0.9, 0.3, 8, 100);
+        for stage in &stages {
+            assert!(
+                stage.alpha >= 0.0 && stage.alpha <= 1.0,
+                "Alpha must be in [0,1]; got {}",
+                stage.alpha
+            );
+        }
+    }
+
+    // ---- DistillationConfig defaults ----
+
+    #[test]
+    fn test_distillation_config_min_temperature_default() {
+        let config = DistillationConfig::default();
+        assert!(
+            (config.min_temperature - 1.0).abs() < 1e-6,
+            "Default min_temperature must be 1.0"
+        );
+    }
+
+    #[test]
+    fn test_distillation_config_progressive_stages_default() {
+        let config = DistillationConfig::default();
+        assert_eq!(
+            config.progressive_stages, 5,
+            "Default progressive_stages must be 5"
+        );
+    }
+
+    #[test]
+    fn test_combined_strategy_weights_sum_to_one() {
+        let rw = 0.5f32;
+        let fw = 0.3f32;
+        let aw = 0.2f32;
+        let config = utils::combined_distillation_config(4.0, 0.7, rw, fw, aw);
+        if let DistillationStrategy::Combined {
+            response_weight,
+            feature_weight,
+            attention_weight,
+        } = config.strategy
+        {
+            let total = response_weight + feature_weight + attention_weight;
+            assert!(
+                (total - 1.0).abs() < 1e-6,
+                "Combined strategy weights must sum to 1.0; got {}",
+                total
+            );
+        } else {
+            panic!("Expected Combined strategy");
+        }
+    }
 }

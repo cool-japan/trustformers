@@ -875,3 +875,293 @@ impl Default for VerificationCache {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::types::{
+        ChecksumAlgorithm, ConflictResolutionStrategy, MergeAlgorithm, NetworkAdaptationConfig,
+        SyncStrategy,
+    };
+    use super::*;
+    use std::time::Instant;
+
+    fn lcg_f32(state: &mut u64) -> f32 {
+        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (*state % 1000) as f32 / 1000.0
+    }
+
+    fn make_sync_request(id: &str, version: &str, data: Vec<u8>, priority: u8) -> SyncRequest {
+        SyncRequest {
+            sync_id: id.to_string(),
+            source_version: version.to_string(),
+            target_version: format!("{}_next", version),
+            model_data: data,
+            priority,
+            timestamp: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn test_model_sync_coordinator_new() {
+        let config = NetworkAdaptationConfig::default();
+        let coordinator = ModelSyncCoordinator::new(config);
+        assert!(coordinator.is_ok());
+    }
+
+    #[test]
+    fn test_model_sync_coordinator_start_stop() {
+        let config = NetworkAdaptationConfig::default();
+        let mut coordinator = ModelSyncCoordinator::new(config)
+            .unwrap_or_else(|_| panic!("coordinator creation failed"));
+        assert!(coordinator.start().is_ok());
+        assert!(coordinator.stop().is_ok());
+    }
+
+    #[test]
+    fn test_schedule_sync_with_valid_request() {
+        let config = NetworkAdaptationConfig::default();
+        let mut coordinator = ModelSyncCoordinator::new(config)
+            .unwrap_or_else(|_| panic!("coordinator creation failed"));
+        let request = make_sync_request("sync_1", "1.0.0", vec![1u8, 2u8, 3u8], 5);
+        let result = coordinator.schedule_sync(request);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_schedule_sync_empty_data_fails() {
+        let config = NetworkAdaptationConfig::default();
+        let mut coordinator = ModelSyncCoordinator::new(config)
+            .unwrap_or_else(|_| panic!("coordinator creation failed"));
+        let request = make_sync_request("sync_empty", "1.0.0", vec![], 5);
+        let result = coordinator.schedule_sync(request);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_schedule_sync_empty_source_version_fails() {
+        let config = NetworkAdaptationConfig::default();
+        let mut coordinator = ModelSyncCoordinator::new(config)
+            .unwrap_or_else(|_| panic!("coordinator creation failed"));
+        let request = SyncRequest {
+            sync_id: "sync_no_version".to_string(),
+            source_version: "".to_string(),
+            target_version: "1.0.1".to_string(),
+            model_data: vec![1, 2, 3],
+            priority: 5,
+            timestamp: Instant::now(),
+        };
+        let result = coordinator.schedule_sync(request);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_sync_status_unknown_returns_none() {
+        let config = NetworkAdaptationConfig::default();
+        let coordinator = ModelSyncCoordinator::new(config)
+            .unwrap_or_else(|_| panic!("coordinator creation failed"));
+        assert!(coordinator.get_sync_status("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_get_integrity_stats_initial() {
+        let config = NetworkAdaptationConfig::default();
+        let coordinator = ModelSyncCoordinator::new(config)
+            .unwrap_or_else(|_| panic!("coordinator creation failed"));
+        let (failure_count, hit_rate) = coordinator.get_integrity_stats();
+        assert_eq!(failure_count, 0);
+        assert_eq!(hit_rate, 0.0);
+    }
+
+    #[test]
+    fn test_get_conflict_history_initial_empty() {
+        let config = NetworkAdaptationConfig::default();
+        let coordinator = ModelSyncCoordinator::new(config)
+            .unwrap_or_else(|_| panic!("coordinator creation failed"));
+        assert!(coordinator.get_conflict_history().is_empty());
+    }
+
+    #[test]
+    fn test_sync_scheduler_new_queue_empty() {
+        let scheduler = SyncScheduler::new();
+        assert_eq!(scheduler.get_queue_length(), 0);
+    }
+
+    #[test]
+    fn test_sync_scheduler_schedule_and_retrieve() {
+        let mut scheduler = SyncScheduler::new();
+        let request = make_sync_request("s1", "1.0.0", vec![1, 2], 5);
+        let result = scheduler.schedule_sync(request);
+        assert!(result.is_ok());
+        assert_eq!(scheduler.get_queue_length(), 1);
+    }
+
+    #[test]
+    fn test_sync_scheduler_get_next_clears_queue() {
+        let mut scheduler = SyncScheduler::new();
+        let request = make_sync_request("s2", "1.0.0", vec![1, 2], 5);
+        let _ = scheduler.schedule_sync(request);
+        let next = scheduler.get_next_sync();
+        assert!(next.is_some());
+        assert_eq!(scheduler.get_queue_length(), 0);
+    }
+
+    #[test]
+    fn test_sync_scheduler_mark_completed() {
+        let mut scheduler = SyncScheduler::new();
+        let request = make_sync_request("s3", "1.0.0", vec![1, 2], 5);
+        let _ = scheduler.schedule_sync(request);
+        let next = scheduler.get_next_sync();
+        let sync_id = next.map(|r| r.sync_id).unwrap_or_default();
+        scheduler.mark_sync_completed(&sync_id);
+        let status = scheduler.get_sync_status(&sync_id);
+        assert!(matches!(status, Some(SyncStatus::Completed)));
+    }
+
+    #[test]
+    fn test_sync_scheduler_cancel_all() {
+        let mut scheduler = SyncScheduler::new();
+        for i in 0..3 {
+            let req = make_sync_request(&format!("s{}", i), "1.0.0", vec![1, 2], 5);
+            let _ = scheduler.schedule_sync(req);
+        }
+        scheduler.cancel_all_syncs();
+        assert_eq!(scheduler.get_queue_length(), 0);
+    }
+
+    #[test]
+    fn test_sync_scheduler_priority_ordering() {
+        let mut scheduler = SyncScheduler::new();
+        let low_req = make_sync_request("low", "1.0.0", vec![1], 1);
+        let high_req = make_sync_request("high", "1.0.0", vec![1], 9);
+        let _ = scheduler.schedule_sync(low_req);
+        let _ = scheduler.schedule_sync(high_req);
+        let next = scheduler.get_next_sync();
+        assert!(next.map(|r| r.sync_id == "high").unwrap_or(false));
+    }
+
+    #[test]
+    fn test_model_version_manager_initial_version() {
+        let manager = ModelVersionManager::new();
+        assert_eq!(manager.current_version, "0.1.0");
+        assert!(manager.version_history.is_empty());
+    }
+
+    #[test]
+    fn test_model_version_manager_create_new_version() {
+        let mut manager = ModelVersionManager::new();
+        let result = manager.create_new_version(&[1u8, 2u8, 3u8]);
+        assert!(result.is_ok());
+        let new_version = result.unwrap_or_default();
+        assert!(!new_version.is_empty());
+        assert_eq!(manager.version_history.len(), 1);
+    }
+
+    #[test]
+    fn test_model_version_manager_version_increments() {
+        let mut manager = ModelVersionManager::new();
+        let v1 = manager.create_new_version(&[1u8]).unwrap_or_default();
+        assert_eq!(v1, "0.1.1");
+        let v2 = manager.create_new_version(&[2u8]).unwrap_or_default();
+        assert_eq!(v2, "0.1.2");
+    }
+
+    #[test]
+    fn test_integrity_checker_verify_valid_data() {
+        let mut checker = IntegrityChecker::new();
+        let result = checker.verify_integrity(&[1u8, 2u8, 3u8]);
+        assert!(result.is_ok());
+        assert!(result.unwrap_or(false));
+    }
+
+    #[test]
+    fn test_integrity_checker_reject_empty_data() {
+        let mut checker = IntegrityChecker::new();
+        let result = checker.verify_integrity(&[]);
+        assert!(result.is_ok());
+        assert!(!result.unwrap_or(true));
+    }
+
+    #[test]
+    fn test_integrity_checker_initial_failure_rate_zero() {
+        let checker = IntegrityChecker::new();
+        assert_eq!(checker.get_failure_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_verification_cache_miss_returns_none() {
+        let mut cache = VerificationCache::new();
+        assert!(cache.get("nonexistent_key").is_none());
+    }
+
+    #[test]
+    fn test_verification_cache_insert_and_hit() {
+        let mut cache = VerificationCache::new();
+        cache.insert("my_hash".to_string(), true);
+        let result = cache.get("my_hash");
+        assert!(result.is_some());
+        assert!(result.unwrap_or(false));
+    }
+
+    #[test]
+    fn test_verification_cache_hit_rate_updates() {
+        let mut cache = VerificationCache::new();
+        cache.insert("key1".to_string(), true);
+        let _ = cache.get("key1");
+        assert!(cache.get_hit_rate() > 0.0);
+    }
+
+    #[test]
+    fn test_conflict_resolver_resolve_last_writer_wins() {
+        let mut resolver = ConflictResolver::new();
+        let conflict = ConflictMetadata {
+            conflict_id: "c1".to_string(),
+            source_version: "1.0.0".to_string(),
+            target_version: "1.0.1".to_string(),
+            conflict_type: "version_mismatch".to_string(),
+            timestamp: Instant::now(),
+            resolution_strategy: ConflictResolutionStrategy::LastWriterWins,
+            metadata: std::collections::HashMap::new(),
+        };
+        let result = resolver.resolve_conflict(&conflict);
+        assert!(result.is_ok());
+        let resolution = result.unwrap_or_else(|_| panic!("resolution failed"));
+        assert!(resolution.resolution_id.starts_with("lww_"));
+        assert_eq!(resolution.resolved_version, "1.0.1");
+    }
+
+    #[test]
+    fn test_conflict_resolver_history_grows() {
+        let mut resolver = ConflictResolver::new();
+        for i in 0..3 {
+            let conflict = ConflictMetadata {
+                conflict_id: format!("c{}", i),
+                source_version: "1.0.0".to_string(),
+                target_version: "1.0.1".to_string(),
+                conflict_type: "version_mismatch".to_string(),
+                timestamp: Instant::now(),
+                resolution_strategy: ConflictResolutionStrategy::LastWriterWins,
+                metadata: std::collections::HashMap::new(),
+            };
+            let _ = resolver.resolve_conflict(&conflict);
+        }
+        assert_eq!(resolver.conflict_history.len(), 3);
+    }
+
+    #[test]
+    fn test_sync_status_variants() {
+        assert!(matches!(SyncStatus::Pending, SyncStatus::Pending));
+        assert!(matches!(SyncStatus::InProgress, SyncStatus::InProgress));
+        assert!(matches!(SyncStatus::Completed, SyncStatus::Completed));
+        assert!(matches!(SyncStatus::Failed, SyncStatus::Failed));
+        assert!(matches!(SyncStatus::Cancelled, SyncStatus::Cancelled));
+    }
+
+    #[test]
+    fn test_update_config_ok() {
+        let config = NetworkAdaptationConfig::default();
+        let mut coordinator = ModelSyncCoordinator::new(config)
+            .unwrap_or_else(|_| panic!("coordinator creation failed"));
+        let new_config = NetworkAdaptationConfig::default();
+        assert!(coordinator.update_config(new_config).is_ok());
+    }
+}

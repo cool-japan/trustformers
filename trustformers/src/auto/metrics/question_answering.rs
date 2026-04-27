@@ -98,6 +98,7 @@
 
 use super::{Metric, MetricInput, MetricResult};
 use crate::error::{Result, TrustformersError};
+use crate::evaluation::bridge::NlpAdapter;
 use std::collections::HashMap;
 
 /// Question answering metric implementation
@@ -300,68 +301,40 @@ impl Metric for QuestionAnsweringMetric {
             ));
         }
 
-        let mut exact_matches = 0;
-        let mut total_f1 = 0.0;
         let num_pairs = self.predictions.len().min(self.references.len());
 
+        // Exact match via local normalisation loop (must normalise before comparing).
+        let mut exact_matches = 0;
         for (pred, ref_) in self.predictions.iter().zip(self.references.iter()) {
-            // Normalize strings for comparison
             let pred_norm = self.normalize_answer(pred);
             let ref_norm = self.normalize_answer(ref_);
-
-            // Exact match check
             if pred_norm == ref_norm {
                 exact_matches += 1;
             }
-
-            // Token-level F1 calculation
-            let pred_tokens: Vec<&str> = pred_norm.split_whitespace().collect();
-            let ref_tokens: Vec<&str> = ref_norm.split_whitespace().collect();
-
-            // Count common tokens
-            let mut common = 0;
-            for token in &pred_tokens {
-                if ref_tokens.contains(token) {
-                    common += 1;
-                }
-            }
-
-            // Calculate precision, recall, and F1
-            let precision = if pred_tokens.is_empty() {
-                0.0
-            } else {
-                common as f64 / pred_tokens.len() as f64
-            };
-
-            let recall = if ref_tokens.is_empty() {
-                0.0
-            } else {
-                common as f64 / ref_tokens.len() as f64
-            };
-
-            let f1 = if precision + recall == 0.0 {
-                0.0
-            } else {
-                2.0 * precision * recall / (precision + recall)
-            };
-
-            total_f1 += f1;
         }
-
-        // Calculate final scores
         let exact_match_score =
             if num_pairs > 0 { exact_matches as f64 / num_pairs as f64 } else { 0.0 };
 
-        let avg_f1 = if num_pairs > 0 { total_f1 / num_pairs as f64 } else { 0.0 };
+        // Token-level F1 — delegate to NlpAdapter::token_f1() on normalised strings.
+        let norm_preds: Vec<String> =
+            self.predictions.iter().map(|s| self.normalize_answer(s)).collect();
+        let norm_refs: Vec<String> =
+            self.references.iter().map(|s| self.normalize_answer(s)).collect();
 
-        // Build result details
+        let preds_input = MetricInput::Text(norm_preds);
+        let refs_input = MetricInput::Text(norm_refs);
+        let mut token_f1_adapter = NlpAdapter::token_f1();
+        token_f1_adapter.add_batch(&preds_input, &refs_input)?;
+        let f1_result = token_f1_adapter.compute()?;
+        let avg_f1 = f1_result.value;
+
         let mut details = HashMap::new();
         details.insert("exact_match".to_string(), exact_match_score);
         details.insert("f1".to_string(), avg_f1);
 
         Ok(MetricResult {
             name: "question_answering".to_string(),
-            value: (exact_match_score + avg_f1) / 2.0, // Average of EM and F1
+            value: (exact_match_score + avg_f1) / 2.0,
             details,
             metadata: HashMap::new(),
         })

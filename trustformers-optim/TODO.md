@@ -1,6 +1,6 @@
 # trustformers-optim TODO List
 
-**Version:** 0.1.0 | **Status:** Stable | **Tests:** 583 | **SLoC:** 43,888 | **Updated:** 2026-03-21
+**Version:** 0.1.0 | **Status:** Stable | **Tests:** 589 | **SLoC:** ~45,000 | **Updated:** 2026-03-22
 
 ## Overview
 
@@ -690,20 +690,23 @@ let optimizer = ZeroOptimizer::new(
 ## Future Enhancements
 
 ### High Priority
-- Additional emerging optimizers as they appear (2025+)
-- Enhanced distributed optimizer state management with async overlap
-- Automatic hyperparameter tuning integration
+- [ ] Additional emerging optimizers as they appear (2025+)
+  - **Refinement needed:** List specific optimizers: SOAP, Muon, Adam-mini, Grokfast?
+- [ ] Enhanced distributed optimizer state management with async overlap
+  - **Refinement needed:** async overlap strategy? Overlap with which compute phases?
+- [ ] Automatic hyperparameter tuning integration
+  - **Refinement needed:** which tuning framework? Optuna, Ray Tune, custom Bayesian search?
 
 ### Performance
-- Fused quantized optimizer kernels for GPU
-- Lazy optimizer state allocation (allocate only when first gradient seen)
-- Better async communication overlap for ZeRO stage 3
+- [ ] Fused quantized optimizer kernels for GPU
+- [x] **Lazy optimizer state allocation** — `LazyAdam` allocates moment buffers only when first gradient is seen (`lazy_state.rs`)
+- [ ] Better async communication overlap for ZeRO stage 3
 
 ### Features
-- More sophisticated schedulers (cyclic with decay)
-- Automatic learning rate finder (LR range test)
-- Optimizer surgery (change optimizer type mid-training)
-- Per-layer quantization bit-width selection
+- [x] **Cyclic LR with decay** — `CyclicLrScheduler` (Triangular/Triangular2/ExpRange) + `OneCycleLrScheduler` (`cyclic_decay.rs`)
+- [x] **Automatic LR Finder** — `LrFinder` + `LrFinderConfig` + `LrFinderResult` + `find_optimal_lr` (`lr_finder.rs`)
+- [ ] Optimizer surgery (change optimizer type mid-training)
+- [ ] Per-layer quantization bit-width selection
 
 ---
 

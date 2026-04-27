@@ -798,4 +798,146 @@ mod tests {
         assert!(cyclical_lr >= scheduler.config.min_lr);
         assert!(cyclical_lr <= scheduler.config.max_lr);
     }
+
+    // ── Additional tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_config_default_initial_lr_positive() {
+        let cfg = AdaptiveLearningRateConfig::default();
+        assert!(cfg.initial_lr > 0.0);
+    }
+
+    #[test]
+    fn test_config_default_lr_bounds() {
+        let cfg = AdaptiveLearningRateConfig::default();
+        assert!(cfg.min_lr < cfg.initial_lr);
+        assert!(cfg.initial_lr < cfg.max_lr);
+    }
+
+    #[test]
+    fn test_config_default_reduction_factor_range() {
+        let cfg = AdaptiveLearningRateConfig::default();
+        assert!(cfg.reduction_factor > 0.0 && cfg.reduction_factor < 1.0);
+    }
+
+    #[test]
+    fn test_config_default_increase_factor_gt_one() {
+        let cfg = AdaptiveLearningRateConfig::default();
+        assert!(cfg.increase_factor > 1.0);
+    }
+
+    #[test]
+    fn test_config_default_momentum_range() {
+        let cfg = AdaptiveLearningRateConfig::default();
+        assert!(cfg.momentum > 0.0 && cfg.momentum < 1.0);
+    }
+
+    #[test]
+    fn test_scheduler_initial_lr_equals_config() {
+        let cfg = AdaptiveLearningRateConfig::default();
+        let scheduler = AdaptiveLearningRateScheduler::new(cfg.clone());
+        assert!((scheduler.get_lr() - cfg.initial_lr).abs() < 1e-7);
+    }
+
+    #[test]
+    fn test_scheduler_lr_remains_positive_after_many_steps() {
+        let cfg = AdaptiveLearningRateConfig {
+            plateau_patience: 2,
+            ..AdaptiveLearningRateConfig::default()
+        };
+        let mut scheduler = AdaptiveLearningRateScheduler::new(cfg);
+        let mut s = 42u64;
+        for step in 1..=30usize {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let loss = (s % 1000) as f32 / 500.0; // 0.0 to 2.0
+            let dynamics = TrainingDynamics {
+                step,
+                loss,
+                gradient_norm: 0.5,
+                learning_rate: scheduler.get_lr(),
+                accuracy: None,
+            };
+            let _ = scheduler.step(dynamics);
+        }
+        assert!(scheduler.get_lr() > 0.0, "LR should remain positive");
+    }
+
+    #[test]
+    fn test_scheduler_lr_never_below_min_lr() {
+        let cfg = AdaptiveLearningRateConfig {
+            plateau_patience: 1,
+            reduction_factor: 0.5,
+            ..AdaptiveLearningRateConfig::default()
+        };
+        let min_lr = cfg.min_lr;
+        let mut scheduler = AdaptiveLearningRateScheduler::new(cfg);
+        // Force plateau by repeating same loss
+        for step in 1..=20usize {
+            let d = TrainingDynamics {
+                step,
+                loss: 1.5,
+                gradient_norm: 0.5,
+                learning_rate: scheduler.get_lr(),
+                accuracy: None,
+            };
+            let _ = scheduler.step(d);
+        }
+        assert!(
+            scheduler.get_lr() >= min_lr,
+            "LR {} should be >= min_lr {}",
+            scheduler.get_lr(),
+            min_lr
+        );
+    }
+
+    #[test]
+    fn test_adaptation_strategy_variants_distinct() {
+        let s1 = AdaptationStrategy::ReduceOnPlateau;
+        let s2 = AdaptationStrategy::CosineAnnealing;
+        let s3 = AdaptationStrategy::ExponentialDecay;
+        assert_ne!(s1, s2);
+        assert_ne!(s2, s3);
+    }
+
+    #[test]
+    fn test_scheduler_state_initial_plateau_counter_zero() {
+        let cfg = AdaptiveLearningRateConfig::default();
+        let scheduler = AdaptiveLearningRateScheduler::new(cfg);
+        let state = scheduler.get_state();
+        assert_eq!(state.plateau_counter, 0);
+        assert_eq!(state.step_count, 0);
+    }
+
+    #[test]
+    fn test_learning_rate_update_structure() {
+        let cfg = AdaptiveLearningRateConfig::default();
+        let scheduler = AdaptiveLearningRateScheduler::new(cfg);
+        let lr = scheduler.get_lr();
+        // Just verify get_lr returns a positive value — full LearningRateUpdate
+        // is produced by scheduler.step() which requires a running scheduler
+        assert!(lr > 0.0, "Initial LR should be positive");
+    }
+
+    #[test]
+    fn test_training_dynamics_struct_fields() {
+        let d = TrainingDynamics {
+            step: 100,
+            loss: 0.5,
+            gradient_norm: 0.3,
+            learning_rate: 1e-4,
+            accuracy: Some(0.85),
+        };
+        assert_eq!(d.step, 100);
+        assert!(d.accuracy.is_some());
+        assert!((d.accuracy.unwrap_or(0.0) - 0.85).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_performance_trend_variants() {
+        let _ = PerformanceTrend::Improving;
+        let _ = PerformanceTrend::Stable;
+        let _ = PerformanceTrend::Deteriorating;
+        let _ = PerformanceTrend::Oscillating;
+        let _ = PerformanceTrend::Unknown;
+    }
 }

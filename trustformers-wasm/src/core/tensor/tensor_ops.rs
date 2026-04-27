@@ -30,7 +30,7 @@ impl WasmTensor {
     pub(super) fn relu_simd_impl(&self) -> Vec<f32> {
         let mut result = Vec::with_capacity(self.data.len());
         let chunks = self.data.len() / 4;
-        let zero_vec = unsafe { f32x4_splat(0.0) };
+        let zero_vec = f32x4_splat(0.0);
 
         // Process 4 elements at a time with SIMD with bounds checking
         for i in 0..chunks {
@@ -86,10 +86,10 @@ impl WasmTensor {
         use std::f32::consts::PI;
         let mut result = Vec::with_capacity(self.data.len());
         let chunks = self.data.len() / 4;
-        let half = unsafe { f32x4_splat(0.5) };
-        let one = unsafe { f32x4_splat(1.0) };
-        let gelu_const = unsafe { f32x4_splat((2.0 / PI).sqrt()) };
-        let cubic_const = unsafe { f32x4_splat(0.044715) };
+        let half = f32x4_splat(0.5);
+        let one = f32x4_splat(1.0);
+        let gelu_const = f32x4_splat((2.0 / PI).sqrt());
+        let cubic_const = f32x4_splat(0.044715);
 
         // Process 4 elements at a time with SIMD with bounds checking
         for i in 0..chunks {
@@ -157,7 +157,7 @@ impl WasmTensor {
     pub(super) fn sigmoid_simd_impl(&self) -> Vec<f32> {
         let mut result = Vec::with_capacity(self.data.len());
         let chunks = self.data.len() / 4;
-        let one = unsafe { f32x4_splat(1.0) };
+        let one = f32x4_splat(1.0);
 
         // Process 4 elements at a time with SIMD with bounds checking
         for i in 0..chunks {
@@ -165,33 +165,33 @@ impl WasmTensor {
 
             // Safety check: ensure we don't read beyond array bounds
             if offset + 4 <= self.data.len() {
-                unsafe {
-                    let x = v128_load(&self.data[offset] as *const f32 as *const v128);
-                    // Compute -x
-                    let neg_x = f32x4_neg(x);
+                // Safety: v128_load/v128_store require unsafe due to raw pointer dereference;
+                // bounds are checked above
+                let x = unsafe { v128_load(&self.data[offset] as *const f32 as *const v128) };
+                // Compute -x
+                let neg_x = f32x4_neg(x);
 
-                    // Approximate exp(-x) using polynomial approximation
-                    // For better accuracy in WASM, we use a simplified approach
-                    // sigmoid(x) ≈ 1 / (1 + exp(-x))
-                    let mut temp_in = [0.0f32; 4];
-                    v128_store(&mut temp_in[0] as *mut f32 as *mut v128, neg_x);
+                // Approximate exp(-x) using polynomial approximation
+                // For better accuracy in WASM, we use a simplified approach
+                // sigmoid(x) ≈ 1 / (1 + exp(-x))
+                let mut temp_in = [0.0f32; 4];
+                unsafe { v128_store(&mut temp_in[0] as *mut f32 as *mut v128, neg_x) };
 
-                    // Compute exp for each element (no SIMD exp in WASM)
-                    let exp_vals = [
-                        temp_in[0].exp(),
-                        temp_in[1].exp(),
-                        temp_in[2].exp(),
-                        temp_in[3].exp(),
-                    ];
+                // Compute exp for each element (no SIMD exp in WASM)
+                let exp_vals = [
+                    temp_in[0].exp(),
+                    temp_in[1].exp(),
+                    temp_in[2].exp(),
+                    temp_in[3].exp(),
+                ];
 
-                    let exp_vec = v128_load(&exp_vals[0] as *const f32 as *const v128);
-                    let denom = f32x4_add(one, exp_vec);
-                    let sigmoid_result = f32x4_div(one, denom);
+                let exp_vec = unsafe { v128_load(&exp_vals[0] as *const f32 as *const v128) };
+                let denom = f32x4_add(one, exp_vec);
+                let sigmoid_result = f32x4_div(one, denom);
 
-                    let mut temp = [0.0f32; 4];
-                    v128_store(&mut temp[0] as *mut f32 as *mut v128, sigmoid_result);
-                    result.extend_from_slice(&temp);
-                }
+                let mut temp = [0.0f32; 4];
+                unsafe { v128_store(&mut temp[0] as *mut f32 as *mut v128, sigmoid_result) };
+                result.extend_from_slice(&temp);
             } else {
                 // Fallback to safe scalar operations if bounds check fails
                 for j in 0..4 {
@@ -228,8 +228,8 @@ impl WasmTensor {
     pub(super) fn tanh_simd_impl(&self) -> Vec<f32> {
         let mut result = Vec::with_capacity(self.data.len());
         let chunks = self.data.len() / 4;
-        let one = unsafe { f32x4_splat(1.0) };
-        let two = unsafe { f32x4_splat(2.0) };
+        let one = f32x4_splat(1.0);
+        let two = f32x4_splat(2.0);
 
         // Process 4 elements at a time with SIMD with bounds checking
         for i in 0..chunks {
@@ -237,35 +237,35 @@ impl WasmTensor {
 
             // Safety check: ensure we don't read beyond array bounds
             if offset + 4 <= self.data.len() {
-                unsafe {
-                    let x = v128_load(&self.data[offset] as *const f32 as *const v128);
+                // Safety: v128_load/v128_store require unsafe due to raw pointer dereference;
+                // bounds are checked above
+                let x = unsafe { v128_load(&self.data[offset] as *const f32 as *const v128) };
 
-                    // Compute 2*x
-                    let two_x = f32x4_mul(two, x);
+                // Compute 2*x
+                let two_x = f32x4_mul(two, x);
 
-                    // Extract values for exp computation (no SIMD exp in WASM)
-                    let mut temp_in = [0.0f32; 4];
-                    v128_store(&mut temp_in[0] as *mut f32 as *mut v128, two_x);
+                // Extract values for exp computation (no SIMD exp in WASM)
+                let mut temp_in = [0.0f32; 4];
+                unsafe { v128_store(&mut temp_in[0] as *mut f32 as *mut v128, two_x) };
 
-                    // Compute exp(2*x) for each element
-                    let exp_vals = [
-                        temp_in[0].exp(),
-                        temp_in[1].exp(),
-                        temp_in[2].exp(),
-                        temp_in[3].exp(),
-                    ];
+                // Compute exp(2*x) for each element
+                let exp_vals = [
+                    temp_in[0].exp(),
+                    temp_in[1].exp(),
+                    temp_in[2].exp(),
+                    temp_in[3].exp(),
+                ];
 
-                    let exp_2x = v128_load(&exp_vals[0] as *const f32 as *const v128);
+                let exp_2x = unsafe { v128_load(&exp_vals[0] as *const f32 as *const v128) };
 
-                    // tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
-                    let numerator = f32x4_sub(exp_2x, one);
-                    let denominator = f32x4_add(exp_2x, one);
-                    let tanh_result = f32x4_div(numerator, denominator);
+                // tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
+                let numerator = f32x4_sub(exp_2x, one);
+                let denominator = f32x4_add(exp_2x, one);
+                let tanh_result = f32x4_div(numerator, denominator);
 
-                    let mut temp = [0.0f32; 4];
-                    v128_store(&mut temp[0] as *mut f32 as *mut v128, tanh_result);
-                    result.extend_from_slice(&temp);
-                }
+                let mut temp = [0.0f32; 4];
+                unsafe { v128_store(&mut temp[0] as *mut f32 as *mut v128, tanh_result) };
+                result.extend_from_slice(&temp);
             } else {
                 // Fallback to safe scalar operations if bounds check fails
                 for j in 0..4 {

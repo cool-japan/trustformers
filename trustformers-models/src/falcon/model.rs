@@ -28,7 +28,7 @@ impl ALiBi {
         let mut slopes = Vec::new();
         let ratio = 2.0_f32.powf(-8.0 / num_heads as f32);
 
-        if num_heads % 2 == 0 {
+        if num_heads.is_multiple_of(2) {
             // Even number of heads
             for i in 0..num_heads / 2 {
                 slopes.push(ratio.powf((2 * i + 1) as f32));
@@ -927,6 +927,21 @@ impl Layer for FalconForCausalLM {
 mod tests {
     use super::*;
 
+    // ---- Tiny config helper for cheap in-test model instantiation ----
+    fn tiny_falcon_config() -> FalconConfig {
+        FalconConfig {
+            vocab_size: 64,
+            hidden_size: 64,
+            num_hidden_layers: 1,
+            num_attention_heads: 4,
+            num_kv_heads: Some(1), // multi-query: 1 KV head
+            max_position_embeddings: 32,
+            alibi: false, // avoid extra bias allocation
+            parallel_attn: true,
+            ..FalconConfig::default()
+        }
+    }
+
     #[test]
     #[ignore] // Very heavy test - Falcon 7B model (SIGKILL risk), run with --ignored
     fn test_falcon_model_creation() {
@@ -986,5 +1001,172 @@ mod tests {
         let config = FalconConfig::falcon_7b();
         let mlp = FalconMLP::new(&config);
         assert!(mlp.is_ok());
+    }
+
+    // ---- ALiBi slope properties ----
+
+    #[test]
+    fn test_alibi_even_heads() {
+        // Even number of heads must not panic
+        let alibi = ALiBi::new(8).expect("ALiBi with 8 heads");
+        assert_eq!(alibi.num_heads, 8);
+    }
+
+    #[test]
+    fn test_alibi_odd_heads() {
+        // Odd number of heads (e.g. 71 for Falcon-7B) must succeed
+        let alibi = ALiBi::new(7).expect("ALiBi with 7 heads");
+        assert_eq!(alibi.num_heads, 7);
+    }
+
+    #[test]
+    fn test_alibi_device_cpu() {
+        let alibi = ALiBi::new(4).expect("ALiBi with 4 heads");
+        assert_eq!(alibi.device(), Device::CPU);
+    }
+
+    // ---- Multi-query attention (num_kv_heads = 1) ----
+
+    #[test]
+    fn test_falcon_7b_num_kv_heads_is_one() {
+        let config = FalconConfig::falcon_7b();
+        assert_eq!(
+            config.num_kv_heads(),
+            1,
+            "Falcon-7B must use 1 KV head (multi-query)"
+        );
+    }
+
+    #[test]
+    fn test_falcon_attention_tiny_creation() {
+        let config = tiny_falcon_config();
+        let attn = FalconAttention::new(&config);
+        assert!(
+            attn.is_ok(),
+            "FalconAttention construction with tiny config failed"
+        );
+    }
+
+    #[test]
+    fn test_falcon_attention_parameter_count_positive() {
+        let config = tiny_falcon_config();
+        let attn = FalconAttention::new(&config).expect("FalconAttention construction");
+        assert!(attn.parameter_count() > 0);
+    }
+
+    // ---- Parallel attention flag ----
+
+    #[test]
+    fn test_falcon_decoder_layer_parallel_attn_flag() {
+        let config = tiny_falcon_config();
+        let layer = FalconDecoderLayer::new(&config).expect("FalconDecoderLayer construction");
+        assert!(layer.parallel_attn, "Tiny config sets parallel_attn=true");
+    }
+
+    #[test]
+    fn test_falcon_decoder_layer_sequential_attn() {
+        let mut config = tiny_falcon_config();
+        config.parallel_attn = false;
+        let layer = FalconDecoderLayer::new(&config).expect("FalconDecoderLayer construction");
+        assert!(!layer.parallel_attn);
+    }
+
+    // ---- new_decoder_architecture flag ----
+
+    #[test]
+    fn test_falcon_180b_new_decoder_architecture() {
+        let config = FalconConfig::falcon_180b();
+        assert!(config.new_decoder_architecture);
+    }
+
+    #[test]
+    fn test_falcon_7b_old_decoder_architecture() {
+        let config = FalconConfig::falcon_7b();
+        assert!(!config.new_decoder_architecture);
+    }
+
+    // ---- MLP ----
+
+    #[test]
+    fn test_falcon_mlp_tiny_creation() {
+        let config = tiny_falcon_config();
+        let mlp = FalconMLP::new(&config).expect("FalconMLP tiny creation");
+        assert!(mlp.parameter_count() > 0);
+    }
+
+    #[test]
+    fn test_falcon_mlp_device_cpu() {
+        let config = tiny_falcon_config();
+        let mlp = FalconMLP::new(&config).expect("FalconMLP tiny creation");
+        assert_eq!(mlp.device(), Device::CPU);
+    }
+
+    // ---- FalconModel creation and parameter count ----
+
+    #[test]
+    fn test_falcon_model_tiny_creation() {
+        let config = tiny_falcon_config();
+        let model = FalconModel::new(config);
+        assert!(model.is_ok(), "FalconModel with tiny config must succeed");
+    }
+
+    #[test]
+    fn test_falcon_model_num_parameters_positive() {
+        let config = tiny_falcon_config();
+        let model = FalconModel::new(config).expect("FalconModel tiny");
+        assert!(model.num_parameters() > 0);
+    }
+
+    #[test]
+    fn test_falcon_causal_lm_tiny_creation() {
+        let config = tiny_falcon_config();
+        let model = FalconForCausalLM::new(config);
+        assert!(
+            model.is_ok(),
+            "FalconForCausalLM with tiny config must succeed"
+        );
+    }
+
+    #[test]
+    fn test_falcon_causal_lm_parameter_count_exceeds_base() {
+        let config = tiny_falcon_config();
+        let base = FalconModel::new(config.clone()).expect("FalconModel");
+        let lm_head_model = FalconForCausalLM::new(config).expect("FalconForCausalLM");
+        // CausalLM adds an lm_head on top → more parameters
+        assert!(lm_head_model.num_parameters() > base.num_parameters());
+    }
+
+    // ---- ALiBi slopes are well-formed ----
+
+    #[test]
+    fn test_alibi_slopes_positive() {
+        // Slopes must be positive (they decay attention over distance)
+        let alibi = ALiBi::new(4).expect("ALiBi with 4 heads");
+        let data = alibi.slopes.data().expect("slope data");
+        for (i, &s) in data.iter().enumerate() {
+            assert!(s > 0.0, "Slope[{}] = {} must be positive", i, s);
+        }
+    }
+
+    // ---- Causal mask ----
+
+    #[test]
+    fn test_causal_mask_upper_triangle_is_neg_inf() {
+        let config = tiny_falcon_config();
+        let attn = FalconAttention::new(&config).expect("FalconAttention");
+        let mask = attn.create_causal_mask(4).expect("causal mask");
+        match &mask {
+            Tensor::F32(arr) => {
+                // Upper triangle [0,1], [0,2], [0,3], [1,2], etc. must be -inf
+                assert!(arr[[0, 1]].is_infinite() && arr[[0, 1]] < 0.0);
+                assert!(arr[[0, 2]].is_infinite() && arr[[0, 2]] < 0.0);
+                assert!(arr[[1, 2]].is_infinite() && arr[[1, 2]] < 0.0);
+                // Diagonal and below must be 0
+                assert_eq!(arr[[0, 0]], 0.0);
+                assert_eq!(arr[[1, 1]], 0.0);
+                assert_eq!(arr[[2, 1]], 0.0);
+            },
+            _ => panic!("Expected F32 mask"),
+        }
     }
 }

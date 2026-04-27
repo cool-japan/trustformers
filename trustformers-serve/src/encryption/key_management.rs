@@ -717,3 +717,223 @@ impl SaltStorageInterface for InMemorySaltStorage {
         Ok(vec![0u8; size]) // Placeholder
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn test_hsm_key_spec_creation() {
+        let spec = HSMKeySpec {
+            key_type: HSMKeyType::AES,
+            key_size: 256,
+            usage: vec![HSMKeyUsage::Encrypt, HSMKeyUsage::Decrypt],
+            attributes: HashMap::new(),
+        };
+        assert_eq!(spec.key_size, 256);
+        assert_eq!(spec.usage.len(), 2);
+    }
+
+    #[test]
+    fn test_hsm_key_type_variants_debug() {
+        let types = [
+            HSMKeyType::AES,
+            HSMKeyType::RSA,
+            HSMKeyType::ECC,
+            HSMKeyType::Generic,
+        ];
+        for kt in &types {
+            let s = format!("{:?}", kt);
+            assert!(!s.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_hsm_key_usage_variants_debug() {
+        let usages = [
+            HSMKeyUsage::Encrypt,
+            HSMKeyUsage::Decrypt,
+            HSMKeyUsage::Sign,
+            HSMKeyUsage::Verify,
+            HSMKeyUsage::Derive,
+        ];
+        for u in &usages {
+            let s = format!("{:?}", u);
+            assert!(!s.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_cache_statistics_default_zero() {
+        let stats = CacheStatistics::default();
+        assert_eq!(stats.hits.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.misses.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.evictions.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.current_size.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_cache_statistics_atomic_increment() {
+        let stats = CacheStatistics::default();
+        stats.hits.fetch_add(5, Ordering::Relaxed);
+        stats.misses.fetch_add(3, Ordering::Relaxed);
+        assert_eq!(stats.hits.load(Ordering::Relaxed), 5);
+        assert_eq!(stats.misses.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn test_encryption_result_creation() {
+        let result = EncryptionResult {
+            ciphertext: vec![1, 2, 3, 4],
+            iv: vec![5, 6, 7, 8, 9, 10, 11, 12],
+            tag: Some(vec![13, 14, 15, 16]),
+            key_id: "key-abc".to_string(),
+            algorithm: EncryptionAlgorithm::AES256GCM,
+        };
+        assert_eq!(result.ciphertext.len(), 4);
+        assert_eq!(result.iv.len(), 8);
+        assert!(result.tag.is_some());
+        assert_eq!(result.key_id, "key-abc");
+    }
+
+    #[test]
+    fn test_encryption_result_no_tag() {
+        let result = EncryptionResult {
+            ciphertext: vec![0u8; 16],
+            iv: vec![0u8; 16],
+            tag: None,
+            key_id: "key-no-tag".to_string(),
+            algorithm: EncryptionAlgorithm::AES256CBC,
+        };
+        assert!(result.tag.is_none());
+    }
+
+    #[test]
+    fn test_decryption_result_creation() {
+        let result = DecryptionResult {
+            plaintext: b"hello world".to_vec(),
+            key_id: "key-dec-1".to_string(),
+            verified: true,
+        };
+        assert_eq!(result.plaintext, b"hello world");
+        assert!(result.verified);
+        assert_eq!(result.key_id, "key-dec-1");
+    }
+
+    #[test]
+    fn test_decryption_result_unverified() {
+        let result = DecryptionResult {
+            plaintext: vec![],
+            key_id: "key-unverified".to_string(),
+            verified: false,
+        };
+        assert!(!result.verified);
+        assert!(result.plaintext.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_kms_new_empty() {
+        let kms = InMemoryKMS::new();
+        let keys = kms.list_master_keys().await;
+        assert!(keys.is_ok());
+        if let Ok(k) = keys {
+            assert!(k.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_kms_store_and_get() {
+        use super::super::types::{MasterKeyConfig, KeyGenerationMethod, KeyStatus};
+        let kms = InMemoryKMS::new();
+        let config = MasterKeyConfig::default();
+        let master_key = kms.generate_master_key("test-key-1", &config).await;
+        assert!(master_key.is_ok());
+        if let Ok(mk) = master_key {
+            assert_eq!(mk.key_id, "test-key-1");
+            assert_eq!(mk.status, KeyStatus::Active);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_kms_list_after_generate() {
+        use super::super::types::MasterKeyConfig;
+        let kms = InMemoryKMS::new();
+        let config = MasterKeyConfig::default();
+        kms.generate_master_key("list-test-key", &config).await.unwrap_or_else(|_| {
+            panic!("key generation should succeed in test")
+        });
+        let keys = kms.list_master_keys().await;
+        assert!(keys.is_ok());
+        if let Ok(k) = keys {
+            assert!(k.contains(&"list-test-key".to_string()));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_kms_delete() {
+        use super::super::types::MasterKeyConfig;
+        let kms = InMemoryKMS::new();
+        let config = MasterKeyConfig::default();
+        kms.generate_master_key("delete-me", &config).await.unwrap_or_else(|_| {
+            panic!("key generation should succeed in test")
+        });
+        let del_result = kms.delete_master_key("delete-me").await;
+        assert!(del_result.is_ok());
+        let keys = kms.list_master_keys().await.unwrap_or_default();
+        assert!(!keys.contains(&"delete-me".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_salt_storage_store_and_get() {
+        let storage = InMemorySaltStorage::new();
+        let salt = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
+        let store_result = storage.store_salt("ctx-1", &salt).await;
+        assert!(store_result.is_ok());
+        let retrieved = storage.get_salt("ctx-1").await;
+        assert!(retrieved.is_ok());
+        if let Ok(s) = retrieved {
+            assert_eq!(s, salt);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_salt_storage_missing_context_returns_error() {
+        let storage = InMemorySaltStorage::new();
+        let result = storage.get_salt("nonexistent-ctx").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_salt_storage_generate() {
+        let storage = InMemorySaltStorage::new();
+        let salt = storage.generate_salt(32).await;
+        assert!(salt.is_ok());
+        if let Ok(s) = salt {
+            assert_eq!(s.len(), 32);
+        }
+    }
+
+    #[test]
+    fn test_hsm_key_spec_with_all_usages() {
+        let spec = HSMKeySpec {
+            key_type: HSMKeyType::RSA,
+            key_size: 4096,
+            usage: vec![
+                HSMKeyUsage::Sign,
+                HSMKeyUsage::Verify,
+                HSMKeyUsage::Encrypt,
+                HSMKeyUsage::Decrypt,
+                HSMKeyUsage::Derive,
+            ],
+            attributes: {
+                let mut m = HashMap::new();
+                m.insert("extractable".to_string(), "false".to_string());
+                m
+            },
+        };
+        assert_eq!(spec.key_size, 4096);
+        assert_eq!(spec.usage.len(), 5);
+        assert_eq!(spec.attributes.len(), 1);
+    }
+}

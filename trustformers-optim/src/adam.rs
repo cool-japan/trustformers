@@ -1106,3 +1106,7 @@ impl Optimizer for AdaBelief {
         self.lr = lr;
     }
 }
+
+#[cfg(test)]
+#[path = "adam_tests.rs"]
+mod adam_tests;

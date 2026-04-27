@@ -426,3 +426,236 @@ impl<E: Expert> ExpertParallel<E> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── MoEConfig ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_moe_config_default_values() {
+        let cfg = MoEConfig::default();
+        assert_eq!(cfg.hidden_size, 4096);
+        assert_eq!(cfg.num_experts, 8);
+        assert_eq!(cfg.num_experts_per_token, 2);
+        assert!(cfg.expert_capacity.is_none());
+        assert!((cfg.load_balancing_loss_coeff - 0.01).abs() < 1e-7);
+        assert!((cfg.router_z_loss_coeff - 0.001).abs() < 1e-7);
+        assert!(cfg.use_auxiliary_loss);
+        assert!((cfg.jitter_noise - 1e-2).abs() < 1e-7);
+    }
+
+    #[test]
+    fn test_moe_config_clone() {
+        let cfg = MoEConfig::default();
+        let c = cfg.clone();
+        assert_eq!(c.num_experts, cfg.num_experts);
+        assert_eq!(c.hidden_size, cfg.hidden_size);
+    }
+
+    #[test]
+    fn test_moe_config_custom() {
+        let cfg = MoEConfig {
+            hidden_size: 512,
+            num_experts: 16,
+            num_experts_per_token: 4,
+            expert_capacity: Some(32),
+            load_balancing_loss_coeff: 0.05,
+            router_z_loss_coeff: 0.005,
+            use_auxiliary_loss: false,
+            jitter_noise: 0.0,
+        };
+        assert_eq!(cfg.hidden_size, 512);
+        assert_eq!(cfg.num_experts, 16);
+        assert_eq!(cfg.expert_capacity, Some(32));
+        assert!(!cfg.use_auxiliary_loss);
+    }
+
+    // ── switch_config / glam_config helper functions ───────────────────────
+
+    #[test]
+    fn test_switch_config_top1() {
+        let cfg = switch_config(256, 4);
+        assert_eq!(cfg.hidden_size, 256);
+        assert_eq!(cfg.num_experts, 4);
+        assert_eq!(cfg.num_experts_per_token, 1, "Switch uses top-1");
+    }
+
+    #[test]
+    fn test_glam_config_top2() {
+        let cfg = glam_config(512, 8);
+        assert_eq!(cfg.hidden_size, 512);
+        assert_eq!(cfg.num_experts, 8);
+        assert_eq!(cfg.num_experts_per_token, 2, "GLaM uses top-2");
+    }
+
+    // ── RoutingStats ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_routing_stats_construction() {
+        let stats = RoutingStats {
+            expert_counts: vec![10.0, 15.0, 8.0, 12.0],
+            expert_weights: vec![0.3, 0.35, 0.15, 0.2],
+            load_balancing_loss: 0.002,
+            router_z_loss: 0.0005,
+        };
+        assert_eq!(stats.expert_counts.len(), 4);
+        assert!((stats.load_balancing_loss - 0.002).abs() < 1e-7);
+    }
+
+    #[test]
+    fn test_routing_stats_clone() {
+        let stats = RoutingStats {
+            expert_counts: vec![1.0, 2.0],
+            expert_weights: vec![0.5, 0.5],
+            load_balancing_loss: 0.01,
+            router_z_loss: 0.001,
+        };
+        let c = stats.clone();
+        assert_eq!(c.expert_counts, stats.expert_counts);
+    }
+
+    // ── MLPExpert ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_mlp_expert_construction_id() {
+        let expert = MLPExpert::new(3, 64, 128, "silu".to_string())
+            .expect("MLPExpert creation should succeed");
+        assert_eq!(expert.expert_id(), 3);
+    }
+
+    #[test]
+    fn test_mlp_expert_id_zero() {
+        let expert = MLPExpert::new(0, 32, 64, "gelu".to_string())
+            .expect("MLPExpert creation should succeed");
+        assert_eq!(expert.expert_id(), 0);
+    }
+
+    #[test]
+    fn test_mlp_expert_capacity_default_none() {
+        let expert = MLPExpert::new(1, 64, 128, "relu".to_string())
+            .expect("MLPExpert creation should succeed");
+        assert!(expert.capacity().is_none());
+    }
+
+    #[test]
+    fn test_mlp_expert_forward_output_shape() {
+        let expert = MLPExpert::new(0, 8, 16, "silu".to_string())
+            .expect("MLPExpert creation should succeed");
+        let input = Tensor::zeros(&[4, 8]).expect("tensor creation should succeed");
+        let out = expert.forward(input).expect("expert forward should succeed");
+        assert_eq!(
+            out.shape(),
+            &[4, 8],
+            "output shape should match hidden_size"
+        );
+    }
+
+    #[test]
+    fn test_mlp_expert_forward_gelu() {
+        let expert = MLPExpert::new(2, 8, 16, "gelu".to_string())
+            .expect("MLPExpert creation should succeed");
+        let input = Tensor::zeros(&[2, 8]).expect("tensor creation should succeed");
+        let out = expert.forward(input).expect("gelu expert forward should succeed");
+        assert_eq!(out.shape(), &[2, 8]);
+    }
+
+    #[test]
+    fn test_mlp_expert_forward_relu() {
+        let expert =
+            MLPExpert::new(0, 4, 8, "relu".to_string()).expect("MLPExpert creation should succeed");
+        let input = Tensor::zeros(&[1, 4]).expect("tensor creation should succeed");
+        let out = expert.forward(input).expect("relu expert forward should succeed");
+        assert_eq!(out.shape(), &[1, 4]);
+    }
+
+    #[test]
+    fn test_mlp_expert_forward_unknown_activation() {
+        // unknown activation falls through to identity (no activation)
+        let expert = MLPExpert::new(0, 4, 8, "unknown_act".to_string())
+            .expect("MLPExpert creation should succeed");
+        let input = Tensor::zeros(&[1, 4]).expect("tensor creation should succeed");
+        let out = expert.forward(input).expect("expert with unknown act should succeed");
+        assert_eq!(out.shape(), &[1, 4]);
+    }
+
+    // ── TopKRouter ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_top_k_router_construction() {
+        let cfg = MoEConfig {
+            hidden_size: 16,
+            num_experts: 4,
+            num_experts_per_token: 2,
+            expert_capacity: None,
+            load_balancing_loss_coeff: 0.01,
+            router_z_loss_coeff: 0.001,
+            use_auxiliary_loss: true,
+            jitter_noise: 0.0,
+        };
+        let _router = TopKRouter::new(cfg).expect("TopKRouter construction should succeed");
+    }
+
+    // ── ExpertParallel ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_expert_parallel_has_expert() {
+        let experts: Vec<MLPExpert> = (0..4)
+            .map(|i| {
+                MLPExpert::new(i, 8, 16, "silu".to_string())
+                    .expect("expert creation should succeed")
+            })
+            .collect();
+        let ep = ExpertParallel::new(experts, 0, 2);
+        assert!(ep.has_expert(0));
+        assert!(ep.has_expert(1));
+        assert!(ep.has_expert(2));
+        assert!(ep.has_expert(3));
+        assert!(!ep.has_expert(4));
+    }
+
+    #[test]
+    fn test_expert_parallel_forward_local_present() {
+        let experts: Vec<MLPExpert> = (0..2)
+            .map(|i| {
+                MLPExpert::new(i, 8, 16, "silu".to_string())
+                    .expect("expert creation should succeed")
+            })
+            .collect();
+        let ep = ExpertParallel::new(experts, 0, 1);
+        let input = Tensor::zeros(&[1, 8]).expect("tensor creation should succeed");
+        let out = ep.forward_local(0, &input).expect("forward_local should succeed");
+        assert!(out.is_some(), "expert 0 should be local");
+    }
+
+    #[test]
+    fn test_expert_parallel_forward_local_absent() {
+        let experts: Vec<MLPExpert> = (0..2)
+            .map(|i| {
+                MLPExpert::new(i, 8, 16, "silu".to_string())
+                    .expect("expert creation should succeed")
+            })
+            .collect();
+        let ep = ExpertParallel::new(experts, 0, 2);
+        let input = Tensor::zeros(&[1, 8]).expect("tensor creation should succeed");
+        let out = ep.forward_local(99, &input).expect("forward_local for absent should succeed");
+        assert!(out.is_none(), "expert 99 should not be local");
+    }
+
+    #[test]
+    fn test_expert_parallel_world_size_mapping() {
+        // Shard 4 experts across 2 workers
+        let all_experts: Vec<MLPExpert> = (0..4)
+            .map(|i| {
+                MLPExpert::new(i, 8, 16, "silu".to_string())
+                    .expect("expert creation should succeed")
+            })
+            .collect();
+        let ep = ExpertParallel::new(all_experts, 1, 2);
+        // All 4 experts are stored locally (ExpertParallel holds all it's given)
+        for i in 0..4usize {
+            assert!(ep.has_expert(i), "expert {} should exist", i);
+        }
+    }
+}

@@ -912,3 +912,179 @@ impl Layer for RMSNorm {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::errors::Result;
+
+    #[test]
+    fn test_layernorm_creation() -> Result<()> {
+        let ln = LayerNorm::new(vec![64], 1e-5)?;
+        assert_eq!(ln.device(), Device::CPU);
+        Ok(())
+    }
+
+    #[test]
+    fn test_layernorm_with_device() -> Result<()> {
+        let ln = LayerNorm::new_with_device(vec![32], 1e-5, Device::CPU)?;
+        assert_eq!(ln.device(), Device::CPU);
+        Ok(())
+    }
+
+    #[test]
+    fn test_layernorm_simple() {
+        let ln = LayerNorm::new_simple(128, 1e-5);
+        assert_eq!(ln.device(), Device::CPU);
+    }
+
+    #[test]
+    fn test_layernorm_parameter_count() -> Result<()> {
+        let ln = LayerNorm::new(vec![64], 1e-5)?;
+        // weight: 64 + bias: 64 = 128
+        assert_eq!(ln.parameter_count(), 128);
+        Ok(())
+    }
+
+    #[test]
+    fn test_layernorm_set_weight() -> Result<()> {
+        let mut ln = LayerNorm::new(vec![4], 1e-5)?;
+        let new_weight = Tensor::full_with_shape(&[4], 2.0)?;
+        ln.set_weight(new_weight)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_layernorm_set_bias() -> Result<()> {
+        let mut ln = LayerNorm::new(vec![4], 1e-5)?;
+        let new_bias = Tensor::full_with_shape(&[4], 0.5)?;
+        ln.set_bias(new_bias)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_layernorm_to_device() -> Result<()> {
+        let ln = LayerNorm::new(vec![16], 1e-5)?;
+        let ln2 = ln.to_device(Device::CPU);
+        assert_eq!(ln2.device(), Device::CPU);
+        Ok(())
+    }
+
+    #[test]
+    fn test_layernorm_forward_2d() -> Result<()> {
+        let ln = LayerNorm::new(vec![4], 1e-5)?;
+        let input = Tensor::from_data(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 4])?;
+        let output = ln.forward(input)?;
+        assert_eq!(output.shape(), vec![2, 4]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_layernorm_forward_normalizes() -> Result<()> {
+        let ln = LayerNorm::new(vec![4], 1e-5)?;
+        let input = Tensor::from_data(vec![1.0, 2.0, 3.0, 4.0], &[1, 4])?;
+        let output = ln.forward(input)?;
+        // After normalization, mean should be close to 0
+        let mean = output.mean()?;
+        let data = mean.data()?;
+        assert!(data[0].abs() < 0.1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_layernorm_constant_input() -> Result<()> {
+        let ln = LayerNorm::new(vec![4], 1e-5)?;
+        let input = Tensor::full_with_shape(&[1, 4], 5.0)?;
+        let output = ln.forward(input)?;
+        assert_eq!(output.shape(), vec![1, 4]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_layernorm_3d_input() -> Result<()> {
+        let ln = LayerNorm::new(vec![8], 1e-5)?;
+        let input = Tensor::ones(&[2, 4, 8])?;
+        let output = ln.forward(input)?;
+        assert_eq!(output.shape(), vec![2, 4, 8]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_rmsnorm_creation() -> Result<()> {
+        let rms = RMSNorm::new(64, 1e-6)?;
+        assert_eq!(rms.device(), Device::CPU);
+        Ok(())
+    }
+
+    #[test]
+    fn test_rmsnorm_with_device() -> Result<()> {
+        let rms = RMSNorm::new_with_device(32, 1e-6, Device::CPU)?;
+        assert_eq!(rms.device(), Device::CPU);
+        Ok(())
+    }
+
+    #[test]
+    fn test_rmsnorm_parameter_count() -> Result<()> {
+        let rms = RMSNorm::new(64, 1e-6)?;
+        // weight only: 64
+        assert_eq!(rms.parameter_count(), 64);
+        Ok(())
+    }
+
+    #[test]
+    fn test_rmsnorm_set_weight() -> Result<()> {
+        let mut rms = RMSNorm::new(4, 1e-6)?;
+        let new_weight = Tensor::full_with_shape(&[4], 2.0)?;
+        rms.set_weight(new_weight)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_rmsnorm_to_device() -> Result<()> {
+        let rms = RMSNorm::new(16, 1e-6)?;
+        let rms2 = rms.to_device(Device::CPU);
+        assert_eq!(rms2.device(), Device::CPU);
+        Ok(())
+    }
+
+    #[test]
+    fn test_rmsnorm_forward_2d() -> Result<()> {
+        let rms = RMSNorm::new(4, 1e-6)?;
+        let input = Tensor::from_data(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 4])?;
+        let output = rms.forward(input)?;
+        assert_eq!(output.shape(), vec![2, 4]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_rmsnorm_forward_3d() -> Result<()> {
+        let rms = RMSNorm::new(8, 1e-6)?;
+        let input = Tensor::ones(&[2, 4, 8])?;
+        let output = rms.forward(input)?;
+        assert_eq!(output.shape(), vec![2, 4, 8]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_layernorm_forward_large_batch() -> Result<()> {
+        let ln = LayerNorm::new(vec![16], 1e-5)?;
+        let input = Tensor::ones(&[32, 16])?;
+        let output = ln.forward(input)?;
+        assert_eq!(output.shape(), vec![32, 16]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_rmsnorm_forward_ones() -> Result<()> {
+        let rms = RMSNorm::new(4, 1e-6)?;
+        let input = Tensor::ones(&[1, 4])?;
+        let output = rms.forward(input)?;
+        assert_eq!(output.shape(), vec![1, 4]);
+        // For uniform input of 1s, RMS = 1, so output should be weight * 1 = 1
+        let data = output.data()?;
+        for val in &data {
+            assert!((val - 1.0).abs() < 0.1);
+        }
+        Ok(())
+    }
+}

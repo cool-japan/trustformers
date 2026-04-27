@@ -1823,3 +1823,7 @@ pub struct ContextFactorType {
     pub factor_name: String,
     pub weight: f64,
 }
+
+#[cfg(test)]
+#[path = "core_tests.rs"]
+mod core_tests;

@@ -703,7 +703,7 @@ impl RobustScaler {
             let mut values: Vec<f64> = features.iter().map(|sample| sample[j]).collect();
             values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let n = values.len();
-            let median = if n % 2 == 0 {
+            let median = if n.is_multiple_of(2) {
                 (values[n / 2 - 1] + values[n / 2]) / 2.0
             } else {
                 values[n / 2]

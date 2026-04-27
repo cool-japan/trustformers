@@ -616,4 +616,115 @@ mod tests {
         extra_config.insert("unknown_param".to_string(), ParameterValue::Int(42));
         assert!(space.validate(&extra_config).is_err());
     }
+
+    // -----------------------------------------------------------------------
+    // ParameterValue
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parameter_value_int_as_float_upcasts() {
+        let v = ParameterValue::Int(7);
+        assert_eq!(v.as_float(), Some(7.0f64));
+    }
+
+    #[test]
+    fn test_parameter_value_float_as_int_is_none() {
+        let v = ParameterValue::Float(std::f64::consts::PI);
+        assert_eq!(v.as_int(), None);
+    }
+
+    #[test]
+    fn test_parameter_value_string_as_bool_is_none() {
+        let v = ParameterValue::String("true".to_string());
+        assert_eq!(v.as_bool(), None);
+    }
+
+    #[test]
+    fn test_parameter_value_bool_false() {
+        let v = ParameterValue::Bool(false);
+        assert_eq!(v.as_bool(), Some(false));
+        assert_eq!(v.as_int(), None);
+    }
+
+    #[test]
+    fn test_parameter_value_display_int() {
+        assert_eq!(format!("{}", ParameterValue::Int(42)), "42");
+    }
+
+    #[test]
+    fn test_parameter_value_display_bool() {
+        assert_eq!(format!("{}", ParameterValue::Bool(true)), "true");
+    }
+
+    // -----------------------------------------------------------------------
+    // HyperParameter — name dispatch
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_hyper_parameter_name_categorical() {
+        let hp = HyperParameter::Categorical(CategoricalParameter::new(
+            "scheduler",
+            vec!["cosine", "linear"],
+        ));
+        assert_eq!(hp.name(), "scheduler");
+    }
+
+    #[test]
+    fn test_hyper_parameter_name_log() {
+        let hp = HyperParameter::Log(LogParameter::new("weight_decay", 1e-6, 1e-2));
+        assert_eq!(hp.name(), "weight_decay");
+    }
+
+    #[test]
+    fn test_hyper_parameter_is_valid_continuous_in_range() {
+        let hp = HyperParameter::Continuous(ContinuousParameter::new("lr", 0.0001, 0.1));
+        assert!(hp.is_valid(&ParameterValue::Float(0.01)));
+    }
+
+    #[test]
+    fn test_hyper_parameter_is_valid_continuous_out_of_range() {
+        let hp = HyperParameter::Continuous(ContinuousParameter::new("lr", 0.0001, 0.1));
+        assert!(!hp.is_valid(&ParameterValue::Float(0.5)));
+    }
+
+    #[test]
+    fn test_hyper_parameter_is_valid_discrete_step_boundary() {
+        let hp = HyperParameter::Discrete(DiscreteParameter::new("bs", 8, 64, 8));
+        assert!(hp.is_valid(&ParameterValue::Int(16)));
+        assert!(!hp.is_valid(&ParameterValue::Int(10))); // not divisible by step
+    }
+
+    // -----------------------------------------------------------------------
+    // SearchSpace
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_search_space_empty_has_no_params() {
+        let space = SearchSpaceBuilder::new().build();
+        assert_eq!(space.parameters.len(), 0);
+        assert_eq!(space.parameter_names().len(), 0);
+    }
+
+    #[test]
+    fn test_search_space_parameter_names_match() {
+        let space = SearchSpaceBuilder::new()
+            .categorical("z_param", vec!["a", "b"])
+            .continuous("a_param", 0.0, 1.0)
+            .build();
+        let names = space.parameter_names();
+        assert!(names.iter().any(|n| n == &"z_param".to_string()));
+        assert!(names.iter().any(|n| n == &"a_param".to_string()));
+    }
+
+    #[test]
+    fn test_search_space_log_parameter_in_range() {
+        let space = SearchSpaceBuilder::new().log_uniform("wd", 1e-6, 1e-2).build();
+        let mut rng = StdRng::seed_from_u64(42);
+        let config = space.sample(&mut rng).expect("log uniform sampling should succeed");
+        if let Some(ParameterValue::Float(v)) = config.get("wd") {
+            assert!(*v >= 1e-6 && *v <= 1e-2, "log value {} out of range", v);
+        } else {
+            panic!("expected Float for log parameter");
+        }
+    }
 }

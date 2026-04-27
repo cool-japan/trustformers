@@ -39,6 +39,8 @@ pub enum ModelFormat {
     TorchScript,
     /// Custom binary format
     CustomBinary,
+    /// JSON format
+    Json,
 }
 
 /// Model format detection result

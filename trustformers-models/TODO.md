@@ -31,7 +31,7 @@ for configuration, weight loading, and forward passes.
 
 ### Model Categories
 - **Encoder Models:** 6 models (BERT, RoBERTa, ALBERT, DistilBERT, ELECTRA, DeBERTa)
-- **Decoder Models:** 11 models (GPT-2, GPT-Neo, GPT-J, GPT-NeoX, LLaMA, Mistral, Gemma, Qwen, Phi-3, Falcon, StableLM)
+- **Decoder Models:** 12 models (GPT-2, GPT-Neo, GPT-J, GPT-NeoX, LLaMA, Mistral, Gemma, Gemma-2, Qwen, Phi-3, Falcon, StableLM)
 - **Encoder-Decoder Models:** 1 model (T5)
 - **Vision Models:** 2 models (ViT, CLIP with CLIPEncoderConfig trait)
 - **Multimodal Models:** 5 models (BLIP-2, LLaVA, DALL-E, Flamingo, CogVLM)
@@ -242,14 +242,49 @@ for configuration, weight loading, and forward passes.
 #### Phi-3 (Microsoft, Small Language Model)
 - ✅ **Architecture**
   - High performance at small scale (3.8B params)
+  - Sliding Window Attention (SWA), window_size=2048
+  - LongRope scaling for extended context (up to 128K)
+  - SwiGLU activation, Grouped Query Attention (GQA)
   - Efficient architecture
   - Specialized high-quality training data
   - Long context support (128K tokens)
+
+- ✅ **tasks.rs** (completed 2026-03-23)
+  - `Phi3Error` enum with Display
+  - `apply_sliding_window_mask` (set out-of-window scores to -inf)
+  - `sliding_window_coverage` (fraction of token pairs covered)
+  - `format_chat_prompt` (Phi-3 `<|user|>/<|assistant|>` template)
+  - `apply_rope` with optional LongRope scale factors
+  - `gqa_attention` (GQA + sliding window + causal mask)
+  - `greedy_generate` (greedy decoding loop)
+  - `rms_norm`, `silu`, `swiglu` utilities
+  - 17 tests all passing
 
 - ✅ **Design Philosophy**
   - Data quality over quantity
   - Curriculum learning
   - Synthetic data generation
+
+#### Gemma-2 (Google DeepMind)
+- ✅ **Architecture** (completed 2026-03-23)
+  - Alternating local (even layers) and global (odd layers) attention
+  - Logit soft-capping: `tanh(x/cap)*cap` on attention scores (cap=50) and final logits (cap=30)
+  - Grouped Query Attention (GQA): 8 KV heads (9B)
+  - Post-normalization: RMSNorm before and after each residual add
+  - GEGLU activation: `gelu(gate) * up`
+  - Fixed head_dim=256 for all variants
+  - vocab_size=256000 (Gemma tokenizer)
+
+- ✅ **Variants**
+  - 2B: hidden=2304, layers=26, heads=8, kv_heads=4
+  - 9B: hidden=3584, layers=42, heads=16, kv_heads=8
+
+- ✅ **tasks.rs**
+  - `Gemma2Error` enum with Display + From<TrustformersError>
+  - `format_chat_prompt` (Gemma `<start_of_turn>` template)
+  - `Gemma2ForCausalLM` with final logit soft-capping
+  - `generate` greedy decoding
+  - 18 tests all passing
 
 #### Falcon (Technology Innovation Institute)
 - ✅ **Architecture**
@@ -588,19 +623,36 @@ trustformers-models/src/
 
 ### High Priority
 - ~~Complete CLIP text/vision encoder weight loading~~ ✅ COMPLETED (0.1.0 stable)
-- Enhanced multimodal model support
-- Additional vision transformer variants
+- [ ] Enhanced multimodal model support
+  - **Refinement needed:** which modality pairs beyond existing (text-image, text-audio)?
+- [ ] Add Swin Transformer (hierarchical ViT with shifted windows)
+- [ ] Add DeiT (Data-efficient Image Transformers with distillation token)
+- [ ] Add BEiT (BERT pre-training for image transformers)
+- [ ] Add DINOv2 (self-supervised ViT with DINO pretraining)
+- [ ] Add SAM (Segment Anything Model)
+- [ ] Add EVA (Exploring the Limits of Masked Visual Pre-training)
 
 ### New Models
-- Latest research architectures as they emerge
-- Domain-specific model variants
-- More efficient architectures
+- [ ] Latest research architectures as they emerge
+  - **Refinement needed:** this item requires specific architecture selection. List candidate architectures and add separate items.
+- [ ] Add BioMedLM / BioGPT (biomedical language model)
+- [ ] Add CodeLlama (code generation, already has base via LLaMA)
+- [ ] Add FinBERT (financial sentiment analysis)
+- [ ] More efficient architectures
+  - **Refinement needed:** which efficiency axis (memory, latency, throughput)? Candidate: MEGALODON, GLA, RecurrentGemma.
 
 ### Optimizations
-- Model-specific kernel optimizations
-- Enhanced quantization support
-- Memory usage improvements
-- Faster weight loading
+- [ ] Kernel opt: LLaMA fused RoPE+projection (reduces memory bandwidth)
+- [ ] Kernel opt: Mistral sliding-window attention fused kernel
+- [ ] Kernel opt: BERT fused attention+layer_norm kernel
+- [ ] Kernel opt: T5 cross-attention cache optimization
+- [ ] Quantization: FP8 (E4M3/E5M2) for inference on H100/A100-class GPUs
+- [ ] Quantization: MX microscaling (MXFP4/MXFP6) for next-gen hardware
+- [ ] Quantization: AWQ (Activation-aware Weight Quantization) extension
+- [ ] Quantization: GPTQ full support (currently partial)
+- [ ] Memory usage improvements
+  - **Refinement needed:** target peak RSS reduction %, which model family?
+- [ ] Faster weight loading
 
 ---
 

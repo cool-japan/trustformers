@@ -553,4 +553,255 @@ mod tests {
         assert!(response.timeout);
         assert!(response.events.is_empty());
     }
+
+    #[test]
+    fn test_default_config() {
+        let config = LongPollingConfig::default();
+        assert_eq!(config.timeout_seconds, 30);
+        assert_eq!(config.max_concurrent_connections, 1000);
+        assert_eq!(config.cleanup_interval_seconds, 60);
+        assert_eq!(config.event_buffer_size, 100);
+    }
+
+    #[tokio::test]
+    async fn test_publish_multiple_events() {
+        let config = LongPollingConfig::default();
+        let service = LongPollingService::new(config);
+
+        for i in 0..5 {
+            let event = PollEvent::InferenceComplete {
+                job_id: format!("job-{}", i),
+                result: format!("result-{}", i),
+                processing_time_ms: 50.0 + i as f64 * 10.0,
+            };
+            service.publish_event(event).await.expect("publish ok");
+        }
+
+        let stats = service.get_stats().await;
+        assert_eq!(stats.total_events_published, 5);
+    }
+
+    #[tokio::test]
+    async fn test_publish_model_deployment_event() {
+        let config = LongPollingConfig::default();
+        let service = LongPollingService::new(config);
+
+        let event = PollEvent::ModelDeployment {
+            model_id: "gpt2".to_string(),
+            status: "deployed".to_string(),
+            message: "Successfully deployed".to_string(),
+        };
+        let result = service.publish_event(event).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_publish_health_status_event() {
+        let config = LongPollingConfig::default();
+        let service = LongPollingService::new(config);
+
+        let event = PollEvent::HealthStatusUpdate {
+            status: "healthy".to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            details: "All systems operational".to_string(),
+        };
+        let result = service.publish_event(event).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_publish_batch_complete_event() {
+        let config = LongPollingConfig::default();
+        let service = LongPollingService::new(config);
+
+        let event = PollEvent::BatchComplete {
+            batch_id: "batch-1".to_string(),
+            processed_count: 100,
+            failed_count: 2,
+        };
+        let result = service.publish_event(event).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_publish_custom_event() {
+        let config = LongPollingConfig::default();
+        let service = LongPollingService::new(config);
+
+        let event = PollEvent::Custom {
+            event_type: "custom_type".to_string(),
+            data: serde_json::json!({"key": "value"}),
+        };
+        let result = service.publish_event(event).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_active_connections_initially_zero() {
+        let config = LongPollingConfig::default();
+        let service = LongPollingService::new(config);
+        assert_eq!(service.get_active_connections(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_stats_initial() {
+        let config = LongPollingConfig::default();
+        let service = LongPollingService::new(config);
+        let stats = service.get_stats().await;
+        assert_eq!(stats.active_connections, 0);
+        assert_eq!(stats.total_events_published, 0);
+        assert_eq!(stats.total_connections_served, 0);
+        assert_eq!(stats.total_timeouts, 0);
+    }
+
+    #[tokio::test]
+    async fn test_connection_limit_exceeded() {
+        let mut config = LongPollingConfig::default();
+        config.max_concurrent_connections = 0; // No connections allowed
+        config.timeout_seconds = 1;
+
+        let service = LongPollingService::new(config);
+        let request = LongPollRequest {
+            event_types: vec!["*".to_string()],
+            client_id: None,
+            timeout_seconds: Some(1),
+            last_event_id: None,
+        };
+
+        let response = service.poll(request).await.expect("poll ok");
+        assert!(response.timeout);
+    }
+
+    #[tokio::test]
+    async fn test_missed_events_no_last_id() {
+        let config = LongPollingConfig::default();
+        let service = LongPollingService::new(config);
+
+        // Publish an event first
+        let event = PollEvent::InferenceComplete {
+            job_id: "j1".to_string(),
+            result: "r1".to_string(),
+            processing_time_ms: 10.0,
+        };
+        service.publish_event(event).await.expect("publish ok");
+
+        // Poll without last_event_id - should get no missed events and go to timeout
+        let request = LongPollRequest {
+            event_types: vec!["inference_complete".to_string()],
+            client_id: None,
+            timeout_seconds: Some(1),
+            last_event_id: None,
+        };
+        let response = service.poll(request).await.expect("poll ok");
+        // Since we have no last_event_id, missed events are empty, so it waits for timeout
+        assert!(response.timeout || !response.events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_event_history_limit() {
+        let config = LongPollingConfig::default();
+        let service = LongPollingService::new(config);
+
+        // Publish many events (history limit is 1000)
+        for i in 0..50 {
+            let event = PollEvent::InferenceComplete {
+                job_id: format!("job-{}", i),
+                result: "result".to_string(),
+                processing_time_ms: 10.0,
+            };
+            service.publish_event(event).await.expect("publish ok");
+        }
+
+        let history = service.event_history.lock().await;
+        assert_eq!(history.len(), 50);
+    }
+
+    #[tokio::test]
+    async fn test_start_and_stop() {
+        let config = LongPollingConfig::default();
+        let service = LongPollingService::new(config);
+        let start_result = service.start().await;
+        assert!(start_result.is_ok());
+        let stop_result = service.stop().await;
+        assert!(stop_result.is_ok());
+    }
+
+    #[test]
+    fn test_poll_event_serialization() {
+        let event = PollEvent::InferenceComplete {
+            job_id: "j1".to_string(),
+            result: "r1".to_string(),
+            processing_time_ms: 123.456,
+        };
+        let json = serde_json::to_string(&event);
+        assert!(json.is_ok());
+        if let Ok(s) = json {
+            assert!(s.contains("j1"));
+            assert!(s.contains("123.456"));
+        }
+    }
+
+    #[test]
+    fn test_poll_event_deserialization() {
+        let json =
+            r#"{"InferenceComplete":{"job_id":"j2","result":"r2","processing_time_ms":50.0}}"#;
+        let event: std::result::Result<PollEvent, _> = serde_json::from_str(json);
+        assert!(event.is_ok());
+    }
+
+    #[test]
+    fn test_long_poll_response_serialization() {
+        let response = LongPollResponse {
+            events: vec![],
+            timeout: true,
+            next_token: None,
+            timestamp: "2025-01-01T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&response);
+        assert!(json.is_ok());
+    }
+
+    #[test]
+    fn test_long_polling_stats_default() {
+        let stats = LongPollingStats::default();
+        assert_eq!(stats.active_connections, 0);
+        assert_eq!(stats.total_events_published, 0);
+        assert_eq!(stats.total_timeouts, 0);
+        assert!((stats.events_per_minute - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_long_polling_stats_serialization() {
+        let stats = LongPollingStats {
+            active_connections: 5,
+            total_events_published: 100,
+            total_connections_served: 50,
+            total_timeouts: 10,
+            avg_connection_duration_ms: 500.0,
+            events_per_minute: 3.5,
+        };
+        let json = serde_json::to_string(&stats);
+        assert!(json.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_publish_events_lcg_values() {
+        let config = LongPollingConfig::default();
+        let service = LongPollingService::new(config);
+
+        let mut lcg: u64 = 12345;
+        for _ in 0..20 {
+            lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let val = (lcg % 10000) as f64 / 100.0;
+            let event = PollEvent::InferenceComplete {
+                job_id: format!("lcg-{}", lcg % 1000),
+                result: "ok".to_string(),
+                processing_time_ms: val,
+            };
+            service.publish_event(event).await.expect("publish ok");
+        }
+
+        let stats = service.get_stats().await;
+        assert_eq!(stats.total_events_published, 20);
+    }
 }

@@ -85,6 +85,9 @@ pub mod gpu_accelerated;
 pub mod gpu_ops;
 pub mod hardware;
 // Temporarily disabled when CUDA feature is enabled - needs cudarc 0.17.7 API migration
+#[cfg(test)]
+mod error_tests;
+pub mod grad_checkpoint;
 #[cfg(not(feature = "cuda"))]
 pub mod hardware_acceleration;
 pub mod kernel_fusion;
@@ -114,6 +117,8 @@ pub mod testing;
 pub mod tests;
 pub mod tokenizer_backend;
 pub mod traits;
+#[cfg(test)]
+mod traits_tests;
 pub mod utils;
 pub mod versioning;
 pub mod visualization;

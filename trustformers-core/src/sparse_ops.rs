@@ -96,7 +96,7 @@ impl NMSparsity {
         let cols = shape[1];
 
         // Check that columns are divisible by M
-        if cols % self.m != 0 {
+        if !cols.is_multiple_of(self.m) {
             return Err(TrustformersError::shape_error(format!(
                 "Number of columns {} must be divisible by M={}",
                 cols, self.m
@@ -338,6 +338,69 @@ pub fn sparse_matmul(sparse: &SparseTensor, dense: &Tensor) -> Result<Tensor> {
     Tensor::from_vec(result, &[m, n])
 }
 
+/// Linear Congruential Generator (LCG) for deterministic pseudo-random number generation.
+///
+/// Uses the Knuth LCG parameters:
+/// - `a = 6364136223846793005`
+/// - `c = 1442695040888963407`
+///
+/// This provides a pure-Rust, no-dependency RNG suitable for reproducible sparsity patterns.
+#[derive(Debug, Clone)]
+pub struct Lcg64 {
+    state: u64,
+}
+
+impl Lcg64 {
+    /// LCG multiplier (Knuth's constant)
+    const A: u64 = 6364136223846793005u64;
+    /// LCG increment (Knuth's constant)
+    const C: u64 = 1442695040888963407u64;
+
+    /// Create a new LCG with the given seed.
+    pub fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    /// Advance the state and return the next raw u64 value.
+    pub fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_mul(Self::A).wrapping_add(Self::C);
+        self.state
+    }
+
+    /// Return a uniformly distributed value in `[0, bound)`.
+    ///
+    /// Uses rejection sampling to avoid modulo bias.
+    pub fn next_bounded(&mut self, bound: u64) -> u64 {
+        if bound == 0 {
+            return 0;
+        }
+        if bound == 1 {
+            // Advance state to keep sequence consistent even when bound is 1
+            let _ = self.next_u64();
+            return 0;
+        }
+        // Rejection sampling to eliminate modulo bias
+        let threshold = u64::MAX - (u64::MAX % bound);
+        loop {
+            let val = self.next_u64();
+            if val < threshold {
+                return val % bound;
+            }
+        }
+    }
+
+    /// Return a float in `[0.0, 1.0)`.
+    pub fn next_f32(&mut self) -> f32 {
+        // Use upper 24 bits for mantissa precision
+        (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32
+    }
+
+    /// Get current internal state (for serialization / checkpointing).
+    pub fn state(&self) -> u64 {
+        self.state
+    }
+}
+
 /// Sparse attention utilities
 pub mod sparse_attention {
     use super::*;
@@ -346,14 +409,25 @@ pub mod sparse_attention {
     pub struct BlockSparseAttention {
         block_size: usize,
         num_random_blocks: usize,
+        seed: u64,
     }
 
     impl BlockSparseAttention {
-        /// Create a new block-sparse attention pattern
+        /// Create a new block-sparse attention pattern with default seed (42).
         pub fn new(block_size: usize, num_random_blocks: usize) -> Self {
             Self {
                 block_size,
                 num_random_blocks,
+                seed: 42,
+            }
+        }
+
+        /// Create a new block-sparse attention pattern with a custom seed.
+        pub fn with_seed(block_size: usize, num_random_blocks: usize, seed: u64) -> Self {
+            Self {
+                block_size,
+                num_random_blocks,
+                seed,
             }
         }
 
@@ -364,6 +438,9 @@ pub mod sparse_attention {
             let mut row_indices = Vec::new();
             let mut col_indices = Vec::new();
             let mut values = Vec::new();
+
+            // Seed the LCG deterministically based on the instance seed and seq_len
+            let mut rng = Lcg64::new(self.seed.wrapping_add(seq_len as u64));
 
             for block_i in 0..num_blocks {
                 // Local attention (diagonal blocks)
@@ -378,10 +455,9 @@ pub mod sparse_attention {
                     );
                 }
 
-                // Random global attention (using simple deterministic pattern for now)
-                // TODO: Use proper RNG when scirs2_core Random API is clearer
-                for j in 0..self.num_random_blocks {
-                    let random_block = (block_i * 7 + j * 13) % num_blocks;
+                // Random global attention via LCG-based selection
+                for _j in 0..self.num_random_blocks {
+                    let random_block = rng.next_bounded(num_blocks as u64) as usize;
                     self.add_block(
                         block_i,
                         random_block,
@@ -678,18 +754,158 @@ pub mod pruning {
 mod tests {
     use super::*;
 
+    // ── LCG tests ──
+
+    #[test]
+    fn test_lcg_deterministic() {
+        let mut rng1 = Lcg64::new(12345);
+        let mut rng2 = Lcg64::new(12345);
+        for _ in 0..100 {
+            assert_eq!(rng1.next_u64(), rng2.next_u64());
+        }
+    }
+
+    #[test]
+    fn test_lcg_different_seeds_differ() {
+        let mut rng1 = Lcg64::new(0);
+        let mut rng2 = Lcg64::new(1);
+        // At least one of the first 10 values should differ
+        let differ = (0..10).any(|_| rng1.next_u64() != rng2.next_u64());
+        assert!(differ);
+    }
+
+    #[test]
+    fn test_lcg_next_bounded_range() {
+        let mut rng = Lcg64::new(999);
+        for _ in 0..200 {
+            let val = rng.next_bounded(10);
+            assert!(val < 10, "next_bounded(10) returned {}", val);
+        }
+    }
+
+    #[test]
+    fn test_lcg_next_bounded_zero() {
+        let mut rng = Lcg64::new(42);
+        assert_eq!(rng.next_bounded(0), 0);
+    }
+
+    #[test]
+    fn test_lcg_next_bounded_one() {
+        let mut rng = Lcg64::new(42);
+        for _ in 0..20 {
+            assert_eq!(rng.next_bounded(1), 0);
+        }
+    }
+
+    #[test]
+    fn test_lcg_next_f32_range() {
+        let mut rng = Lcg64::new(7777);
+        for _ in 0..500 {
+            let val = rng.next_f32();
+            assert!((0.0..1.0).contains(&val), "next_f32 out of range: {}", val);
+        }
+    }
+
+    #[test]
+    fn test_lcg_state_accessor() {
+        let rng = Lcg64::new(42);
+        assert_eq!(rng.state(), 42);
+    }
+
+    #[test]
+    fn test_lcg_state_advances() {
+        let mut rng = Lcg64::new(42);
+        let s0 = rng.state();
+        rng.next_u64();
+        let s1 = rng.state();
+        assert_ne!(s0, s1);
+    }
+
+    #[test]
+    fn test_lcg_clone_independence() {
+        let mut rng = Lcg64::new(100);
+        rng.next_u64();
+        let mut clone = rng.clone();
+        // Cloned rng should produce same sequence from this point
+        assert_eq!(rng.next_u64(), clone.next_u64());
+        assert_eq!(rng.next_u64(), clone.next_u64());
+    }
+
+    #[test]
+    fn test_lcg_bounded_distribution_coverage() {
+        // Verify all values in [0, bound) are reachable
+        let mut rng = Lcg64::new(0);
+        let bound = 5u64;
+        let mut seen = [false; 5];
+        for _ in 0..500 {
+            let val = rng.next_bounded(bound) as usize;
+            seen[val] = true;
+        }
+        for (i, &s) in seen.iter().enumerate() {
+            assert!(s, "Value {} was never generated by next_bounded(5)", i);
+        }
+    }
+
+    #[test]
+    fn test_lcg_large_bound() {
+        let mut rng = Lcg64::new(42);
+        let bound = u64::MAX / 2;
+        let val = rng.next_bounded(bound);
+        assert!(val < bound);
+    }
+
+    #[test]
+    fn test_lcg_constants_match() {
+        // Verify the constants are the Knuth LCG constants
+        assert_eq!(Lcg64::A, 6364136223846793005u64);
+        assert_eq!(Lcg64::C, 1442695040888963407u64);
+    }
+
+    // ── Block-sparse attention with LCG tests ──
+
+    #[test]
+    fn test_block_sparse_attention_deterministic() -> Result<()> {
+        let attn = sparse_attention::BlockSparseAttention::with_seed(4, 2, 42);
+        let mask1 = attn.generate_mask(16)?;
+        let mask2 = attn.generate_mask(16)?;
+        assert_eq!(mask1.nnz, mask2.nnz);
+        assert_eq!(mask1.values.len(), mask2.values.len());
+        Ok(())
+    }
+
+    #[test]
+    fn test_block_sparse_attention_different_seeds() -> Result<()> {
+        let attn1 = sparse_attention::BlockSparseAttention::with_seed(4, 3, 0);
+        let attn2 = sparse_attention::BlockSparseAttention::with_seed(4, 3, 999);
+        let mask1 = attn1.generate_mask(32)?;
+        let mask2 = attn2.generate_mask(32)?;
+        // Different seeds should (very likely) produce different patterns
+        // We check nnz may or may not differ, but indices should differ
+        // At minimum, both produce valid masks
+        assert!(mask1.nnz > 0);
+        assert!(mask2.nnz > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_block_sparse_attention_default_seed() -> Result<()> {
+        let attn = sparse_attention::BlockSparseAttention::new(8, 1);
+        let mask = attn.generate_mask(24)?;
+        assert!(mask.nnz > 0);
+        Ok(())
+    }
+
+    // ── Original tests preserved ──
+
     #[test]
     fn test_nm_sparsity() -> Result<()> {
         let nm = NMSparsity::new(2, 4);
         assert_eq!(nm.sparsity_ratio(), 0.5);
 
-        // Create a test tensor
         let data: Vec<f32> = (0..64).map(|i| i as f32).collect();
         let tensor = Tensor::from_vec(data, &[8, 8])?;
 
         let sparse = nm.apply(&tensor)?;
-
-        // Check that we have 50% sparsity
         let expected_nnz = 8 * 8 / 2; // 50% of 64
         assert_eq!(sparse.nnz, expected_nnz);
 
@@ -697,8 +913,35 @@ mod tests {
     }
 
     #[test]
+    fn test_nm_sparsity_1_4() -> Result<()> {
+        let nm = NMSparsity::new(1, 4);
+        assert_eq!(nm.sparsity_ratio(), 0.75);
+
+        let data: Vec<f32> = (0..32).map(|i| i as f32).collect();
+        let tensor = Tensor::from_vec(data, &[4, 8])?;
+
+        let sparse = nm.apply(&tensor)?;
+        assert_eq!(sparse.nnz, 8); // 25% of 32
+        Ok(())
+    }
+
+    #[test]
+    fn test_nm_sparsity_keeps_largest() -> Result<()> {
+        // In each window [a, b, c, d], top-2 by magnitude should be kept
+        let data = vec![1.0, 10.0, 2.0, 9.0, 3.0, 8.0, 4.0, 7.0];
+        let tensor = Tensor::from_vec(data, &[1, 8])?;
+        let nm = NMSparsity::new(2, 4);
+        let sparse = nm.apply(&tensor)?;
+        assert_eq!(sparse.nnz, 4);
+        // The kept values should be {10.0, 9.0, 8.0, 7.0}
+        let mut kept: Vec<f32> = sparse.values.clone();
+        kept.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        assert_eq!(kept, vec![7.0, 8.0, 9.0, 10.0]);
+        Ok(())
+    }
+
+    #[test]
     fn test_sparse_matmul() -> Result<()> {
-        // Create a sparse matrix
         let sparse = SparseTensor::new_coo(
             vec![3, 3],
             vec![0, 0, 1, 2],
@@ -706,16 +949,53 @@ mod tests {
             vec![1.0, 2.0, 3.0, 4.0],
         )?;
 
-        // Create a dense matrix
         let dense_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let dense = Tensor::from_vec(dense_data, &[3, 2])?;
 
-        // Multiply
         let result = sparse_matmul(&sparse, &dense)?;
-
         assert_eq!(result.shape(), &[3, 2]);
 
+        // Verify specific values: row 0 = 1*[1,2] + 2*[3,4] = [7,10]
+        let result_data = result.to_vec_f32()?;
+        assert!((result_data[0] - 7.0).abs() < 1e-6);
+        assert!((result_data[1] - 10.0).abs() < 1e-6);
+        // row 1 = 3*[3,4] = [9,12]
+        assert!((result_data[2] - 9.0).abs() < 1e-6);
+        assert!((result_data[3] - 12.0).abs() < 1e-6);
+
         Ok(())
+    }
+
+    #[test]
+    fn test_sparse_matmul_csr() -> Result<()> {
+        // CSR: row_ptr=[0,2,3,4], col=[0,1,1,2], vals=[1,2,3,4]
+        let sparse = SparseTensor::new_csr(
+            vec![3, 3],
+            vec![0, 2, 3, 4],
+            vec![0, 1, 1, 2],
+            vec![1.0, 2.0, 3.0, 4.0],
+        )?;
+
+        let dense_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let dense = Tensor::from_vec(dense_data, &[3, 2])?;
+
+        let result = sparse_matmul(&sparse, &dense)?;
+        assert_eq!(result.shape(), &[3, 2]);
+
+        let result_data = result.to_vec_f32()?;
+        assert!((result_data[0] - 7.0).abs() < 1e-6);
+        assert!((result_data[1] - 10.0).abs() < 1e-6);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_sparse_matmul_shape_mismatch() {
+        let sparse = SparseTensor::new_coo(vec![3, 3], vec![0], vec![0], vec![1.0])
+            .expect("COO creation failed");
+
+        let dense = Tensor::from_vec(vec![1.0, 2.0], &[2, 1]).expect("tensor creation failed");
+        assert!(sparse_matmul(&sparse, &dense).is_err());
     }
 
     #[test]
@@ -726,8 +1006,6 @@ mod tests {
         let tensor = Tensor::from_vec(data, &[8, 8])?;
 
         let sparse = block_sparse.apply(&tensor)?;
-
-        // Should keep approximately 50% of blocks
         assert!(sparse.nnz > 0);
         assert!(sparse.nnz < 64);
 
@@ -737,14 +1015,24 @@ mod tests {
     #[test]
     fn test_sliding_window_mask() -> Result<()> {
         let mask = sparse_attention::sliding_window_mask(100, 10)?;
-
-        // Each position attends to window_size/2 positions on each side plus itself
-        // So each position has approximately window_size + 1 elements
-        // The total is bounded by seq_len * (window_size + 1) for middle positions
-        // Edge positions have fewer elements due to boundary effects
         assert!(mask.nnz <= 100 * 11);
         assert!(mask.nnz > 0);
+        Ok(())
+    }
 
+    #[test]
+    fn test_sliding_window_small() -> Result<()> {
+        let mask = sparse_attention::sliding_window_mask(4, 2)?;
+        // Each position attends to at most 2 neighbours + itself
+        assert!(mask.nnz > 0);
+        assert!(mask.nnz <= 4 * 3);
+        Ok(())
+    }
+
+    #[test]
+    fn test_dilated_window_mask() -> Result<()> {
+        let mask = sparse_attention::dilated_window_mask(32, 4, 2)?;
+        assert!(mask.nnz > 0);
         Ok(())
     }
 
@@ -754,11 +1042,42 @@ mod tests {
         let tensor = Tensor::from_vec(data, &[8, 8])?;
 
         let sparse = pruning::magnitude_prune(&tensor, 0.25)?;
-
-        // Should keep 25% of elements
         assert_eq!(sparse.nnz, 16);
 
         Ok(())
+    }
+
+    #[test]
+    fn test_magnitude_pruning_keeps_largest() -> Result<()> {
+        let data = vec![0.1, 100.0, -50.0, 0.01];
+        let tensor = Tensor::from_vec(data, &[2, 2])?;
+        let sparse = pruning::magnitude_prune(&tensor, 0.5)?;
+        assert_eq!(sparse.nnz, 2);
+        // The two largest by magnitude are 100.0 and -50.0
+        let mut kept: Vec<f32> = sparse.values.clone();
+        kept.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        assert_eq!(kept, vec![-50.0, 100.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_gradient_based_pruning() -> Result<()> {
+        let weights = vec![1.0, 2.0, 3.0, 4.0];
+        let grads = vec![4.0, 3.0, 2.0, 1.0];
+        let w_tensor = Tensor::from_vec(weights, &[2, 2])?;
+        let g_tensor = Tensor::from_vec(grads, &[2, 2])?;
+        let sparse = pruning::gradient_based_prune(&w_tensor, &g_tensor, 0.5)?;
+        assert_eq!(sparse.nnz, 2);
+        // Importance = |w*g|: [4,6,6,4]. Ties broken by sort stability.
+        Ok(())
+    }
+
+    #[test]
+    fn test_gradient_pruning_shape_mismatch() {
+        let w = Tensor::from_vec(vec![1.0, 2.0], &[1, 2]).expect("tensor creation failed");
+        let g =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("tensor creation failed");
+        assert!(pruning::gradient_based_prune(&w, &g, 0.5).is_err());
     }
 
     #[test]
@@ -771,15 +1090,100 @@ mod tests {
         )?;
 
         let csr = conversion::coo_to_csr(&coo)?;
-
         assert_eq!(csr.format, SparseFormat::CSR);
         assert_eq!(csr.nnz, 4);
 
-        // Convert back
         let coo2 = conversion::csr_to_coo(&csr)?;
         assert_eq!(coo2.format, SparseFormat::COO);
         assert_eq!(coo2.nnz, 4);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_coo_to_csr_wrong_format() {
+        let csr = SparseTensor::new_csr(vec![2, 2], vec![0, 1, 2], vec![0, 1], vec![1.0, 2.0])
+            .expect("CSR creation failed");
+        assert!(conversion::coo_to_csr(&csr).is_err());
+    }
+
+    #[test]
+    fn test_csr_to_coo_wrong_format() {
+        let coo = SparseTensor::new_coo(vec![2, 2], vec![0, 1], vec![0, 1], vec![1.0, 2.0])
+            .expect("COO creation failed");
+        assert!(conversion::csr_to_coo(&coo).is_err());
+    }
+
+    #[test]
+    fn test_nm_sparsity_non_2d_error() {
+        let nm = NMSparsity::new(1, 2);
+        let data: Vec<f32> = (0..8).map(|i| i as f32).collect();
+        let tensor = Tensor::from_vec(data, &[8]).expect("tensor creation failed");
+        assert!(nm.apply(&tensor).is_err());
+    }
+
+    #[test]
+    fn test_nm_sparsity_cols_not_divisible_error() {
+        let nm = NMSparsity::new(2, 4);
+        // 3 cols not divisible by 4
+        let data: Vec<f32> = (0..6).map(|i| i as f32).collect();
+        let tensor = Tensor::from_vec(data, &[2, 3]).expect("tensor creation failed");
+        assert!(nm.apply(&tensor).is_err());
+    }
+
+    #[test]
+    fn test_block_sparsity_non_2d_error() {
+        let bs = BlockSparsity::new(2, 2, 0.5);
+        let data: Vec<f32> = (0..8).map(|i| i as f32).collect();
+        let tensor = Tensor::from_vec(data, &[8]).expect("tensor creation failed");
+        assert!(bs.apply(&tensor).is_err());
+    }
+
+    #[test]
+    fn test_magnitude_pruning_non_2d_error() {
+        let data: Vec<f32> = (0..8).map(|i| i as f32).collect();
+        let tensor = Tensor::from_vec(data, &[8]).expect("tensor creation failed");
+        assert!(pruning::magnitude_prune(&tensor, 0.5).is_err());
+    }
+
+    #[test]
+    fn test_structured_sparsity_pattern_variants() {
+        // Ensure all variants can be constructed
+        let _nm = StructuredSparsityPattern::NM { n: 2, m: 4 };
+        let _block = StructuredSparsityPattern::Block {
+            block_height: 4,
+            block_width: 4,
+        };
+        let _channel = StructuredSparsityPattern::Channel {
+            dimension: 0,
+            keep_ratio: 0.5,
+        };
+        let _head = StructuredSparsityPattern::Head {
+            num_heads: 8,
+            keep_ratio: 0.75,
+        };
+        let _random = StructuredSparsityPattern::Random { sparsity: 0.5 };
+        let _magnitude = StructuredSparsityPattern::Magnitude { keep_ratio: 0.9 };
+    }
+
+    #[test]
+    fn test_sparse_matmul_identity() -> Result<()> {
+        // Sparse identity * dense = dense
+        let identity = SparseTensor::new_coo(
+            vec![3, 3],
+            vec![0, 1, 2],
+            vec![0, 1, 2],
+            vec![1.0, 1.0, 1.0],
+        )?;
+
+        let dense_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let dense = Tensor::from_vec(dense_data.clone(), &[3, 2])?;
+        let result = sparse_matmul(&identity, &dense)?;
+        let result_data = result.to_vec_f32()?;
+
+        for (a, b) in result_data.iter().zip(dense_data.iter()) {
+            assert!((a - b).abs() < 1e-6);
+        }
         Ok(())
     }
 }

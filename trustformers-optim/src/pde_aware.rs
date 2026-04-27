@@ -322,3 +322,7 @@ impl Optimizer for PDEAwareOptimizer {
         self.learning_rate = lr;
     }
 }
+
+#[cfg(test)]
+#[path = "pde_aware_tests.rs"]
+mod pde_aware_tests;

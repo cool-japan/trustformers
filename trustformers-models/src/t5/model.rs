@@ -1253,3 +1253,255 @@ pub struct T5LMOutput {
     pub past_key_values: Option<Vec<Tensor>>,
     pub encoder_last_hidden_state: Option<Tensor>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trustformers_core::traits::Config;
+
+    fn small_t5_config() -> T5Config {
+        T5Config {
+            vocab_size: 100,
+            d_model: 32,
+            d_kv: 8,
+            d_ff: 64,
+            num_layers: 2,
+            num_decoder_layers: None,
+            num_heads: 4,
+            relative_attention_num_buckets: 16,
+            relative_attention_max_distance: 64,
+            dropout_rate: 0.0,
+            layer_norm_epsilon: 1e-6,
+            initializer_factor: 1.0,
+            feed_forward_proj: "relu".to_string(),
+            is_encoder_decoder: true,
+            use_cache: false,
+            pad_token_id: 0,
+            eos_token_id: 1,
+            model_type: "t5".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_t5_config_default() {
+        let config = T5Config::default();
+        assert_eq!(config.vocab_size, 32128);
+        assert_eq!(config.d_model, 512);
+        assert_eq!(config.num_layers, 6);
+        assert_eq!(config.num_heads, 8);
+        assert!(config.is_encoder_decoder);
+    }
+
+    #[test]
+    fn test_t5_config_validate() {
+        let config = small_t5_config();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_t5_model_creation() {
+        let config = small_t5_config();
+        let result = T5Model::new(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_t5_model_with_device() {
+        let config = small_t5_config();
+        let result = T5Model::new_with_device(config, Device::CPU);
+        assert!(result.is_ok());
+        let model = result.expect("model creation should succeed");
+        assert!(matches!(model.device(), &Device::CPU));
+    }
+
+    #[test]
+    fn test_t5_model_config() {
+        let config = small_t5_config();
+        let model = T5Model::new(config.clone()).expect("model creation should succeed");
+        let mc = model.get_config();
+        assert_eq!(mc.vocab_size, config.vocab_size);
+        assert_eq!(mc.d_model, config.d_model);
+    }
+
+    #[test]
+    fn test_t5_model_num_parameters() {
+        let config = small_t5_config();
+        let model = T5Model::new(config).expect("model creation should succeed");
+        assert!(model.num_parameters() > 0);
+    }
+
+    #[test]
+    fn test_t5_model_forward_encoder_only() {
+        let config = small_t5_config();
+        let model = T5Model::new(config).expect("model creation should succeed");
+        let input = T5Input {
+            input_ids: TokenizedInput::new(vec![1, 2, 3], vec![1, 1, 1]),
+            decoder_input_ids: None,
+            encoder_outputs: None,
+        };
+        let result = model.forward(input);
+        assert!(result.is_ok());
+        let output = result.expect("forward should succeed");
+        assert!(output.encoder_last_hidden_state.is_some());
+    }
+
+    #[test]
+    fn test_t5_model_forward_with_decoder() {
+        let config = small_t5_config();
+        let model = T5Model::new(config).expect("model creation should succeed");
+        let input = T5Input {
+            input_ids: TokenizedInput::new(vec![1, 2, 3], vec![1, 1, 1]),
+            decoder_input_ids: Some(TokenizedInput::new(vec![1, 5], vec![1, 1])),
+            encoder_outputs: None,
+        };
+        let result = model.forward(input);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_t5_conditional_generation_creation() {
+        let config = small_t5_config();
+        let result = T5ForConditionalGeneration::new(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_t5_conditional_generation_num_parameters() {
+        let config = small_t5_config();
+        let model = T5ForConditionalGeneration::new(config).expect("model creation should succeed");
+        assert!(model.num_parameters() > 0);
+    }
+
+    #[test]
+    fn test_t5_config_custom_decoder_layers() {
+        let mut config = small_t5_config();
+        config.num_decoder_layers = Some(1);
+        let result = T5Model::new(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_relu_function() {
+        let arr = ArrayD::from_shape_vec(IxDyn(&[4]), vec![-2.0f32, -1.0, 0.0, 1.0])
+            .expect("array creation should succeed");
+        let tensor = Tensor::F32(arr);
+        let result = relu(tensor);
+        assert!(result.is_ok());
+        let out = result.expect("relu should succeed");
+        let v0 = out.get_scalar(&[0]).expect("get scalar should succeed");
+        let v1 = out.get_scalar(&[1]).expect("get scalar should succeed");
+        let v2 = out.get_scalar(&[2]).expect("get scalar should succeed");
+        let v3 = out.get_scalar(&[3]).expect("get scalar should succeed");
+        assert!((v0 - 0.0).abs() < f32::EPSILON);
+        assert!((v1 - 0.0).abs() < f32::EPSILON);
+        assert!((v2 - 0.0).abs() < f32::EPSILON);
+        assert!((v3 - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_create_attention_mask() {
+        let arr = ArrayD::from_shape_vec(IxDyn(&[1, 4, 32]), vec![0.0f32; 128])
+            .expect("array creation should succeed");
+        let hidden = Tensor::F32(arr);
+        let result = create_attention_mask(&hidden);
+        assert!(result.is_ok());
+        let mask = result.expect("mask should succeed");
+        assert_eq!(mask.shape().len(), 4);
+    }
+
+    #[test]
+    fn test_t5_input_output_types() {
+        let input = T5Input {
+            input_ids: TokenizedInput::new(vec![1], vec![1]),
+            decoder_input_ids: None,
+            encoder_outputs: None,
+        };
+        assert!(input.decoder_input_ids.is_none());
+        assert!(input.encoder_outputs.is_none());
+    }
+
+    #[test]
+    fn test_t5_model_load_pretrained_error() {
+        let config = small_t5_config();
+        let mut model = T5Model::new(config).expect("model creation should succeed");
+        let mut reader: &[u8] = &[];
+        let result = model.load_pretrained(&mut reader);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_t5_conditional_generation_with_device() {
+        let config = small_t5_config();
+        let result = T5ForConditionalGeneration::new_with_device(config, Device::CPU);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_t5_model_clone() {
+        let config = small_t5_config();
+        let model = T5Model::new(config).expect("model creation should succeed");
+        let cloned = model.clone();
+        assert_eq!(cloned.num_parameters(), model.num_parameters());
+    }
+
+    #[test]
+    fn test_t5_config_feed_forward_proj() {
+        let mut config = small_t5_config();
+        config.feed_forward_proj = "gated-gelu".to_string();
+        let result = T5Model::new(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_t5_config_model_type() {
+        let config = small_t5_config();
+        assert_eq!(config.model_type, "t5");
+    }
+
+    #[test]
+    fn test_t5_output_types() {
+        let output = T5Output {
+            last_hidden_state: Tensor::zeros(&[1, 3, 32]).expect("tensor creation should succeed"),
+            encoder_last_hidden_state: None,
+            past_key_values: None,
+        };
+        assert!(output.encoder_last_hidden_state.is_none());
+        assert!(output.past_key_values.is_none());
+    }
+
+    #[test]
+    fn test_t5_lm_output_types() {
+        let output = T5LMOutput {
+            logits: Tensor::zeros(&[1, 3, 100]).expect("tensor creation should succeed"),
+            past_key_values: None,
+            encoder_last_hidden_state: None,
+        };
+        assert!(output.past_key_values.is_none());
+    }
+
+    #[test]
+    fn test_t5_conditional_generation_config() {
+        let config = small_t5_config();
+        let model =
+            T5ForConditionalGeneration::new(config.clone()).expect("model creation should succeed");
+        let mc = model.get_config();
+        assert_eq!(mc.vocab_size, config.vocab_size);
+    }
+
+    #[test]
+    fn test_t5_config_use_cache() {
+        let mut config = small_t5_config();
+        config.use_cache = true;
+        let result = T5Model::new(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_t5_conditional_generation_params_gt_base() {
+        let config = small_t5_config();
+        let base = T5Model::new(config.clone()).expect("base model creation should succeed");
+        let cond =
+            T5ForConditionalGeneration::new(config).expect("cond gen creation should succeed");
+        assert!(cond.num_parameters() >= base.num_parameters());
+    }
+}

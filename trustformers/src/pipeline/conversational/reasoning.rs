@@ -600,3 +600,237 @@ pub struct ReasoningSummary {
     pub evidence_count: usize,
     pub assumption_count: usize,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_context() -> ReasoningContext {
+        ReasoningContext {
+            reasoning_chain: Vec::new(),
+            current_goal: None,
+            evidence: Vec::new(),
+            assumptions: Vec::new(),
+            confidence: 1.0,
+        }
+    }
+
+    fn default_config() -> ReasoningConfig {
+        ReasoningConfig::default()
+    }
+
+    // ---- Engine construction ----
+
+    #[test]
+    fn test_engine_new_stores_config() {
+        let config = default_config();
+        let engine = ReasoningEngine::new(config.clone());
+        assert_eq!(
+            engine.config.enabled, config.enabled,
+            "config must be stored correctly"
+        );
+    }
+
+    // ---- detect_reasoning_type ----
+
+    #[test]
+    fn test_detect_reasoning_type_mathematical() {
+        let engine = ReasoningEngine::new(default_config());
+        let rt = engine.detect_reasoning_type("please calculate the sum of 3 + 5");
+        assert_eq!(
+            rt,
+            ReasoningType::Mathematical,
+            "'calculate' should detect Mathematical"
+        );
+    }
+
+    #[test]
+    fn test_detect_reasoning_type_logical_because() {
+        let engine = ReasoningEngine::new(default_config());
+        let rt = engine.detect_reasoning_type("It is cold because winter arrived.");
+        assert_eq!(
+            rt,
+            ReasoningType::Logical,
+            "'because' should detect Logical"
+        );
+    }
+
+    #[test]
+    fn test_detect_reasoning_type_causal() {
+        let engine = ReasoningEngine::new(default_config());
+        let rt = engine.detect_reasoning_type("Exercise leads to better health.");
+        assert_eq!(rt, ReasoningType::Causal, "'leads to' should detect Causal");
+    }
+
+    #[test]
+    fn test_detect_reasoning_type_creative() {
+        let engine = ReasoningEngine::new(default_config());
+        let rt = engine.detect_reasoning_type("Imagine a creative design for this project.");
+        assert_eq!(
+            rt,
+            ReasoningType::Creative,
+            "'imagine' and 'creative' should detect Creative"
+        );
+    }
+
+    #[test]
+    fn test_detect_reasoning_type_emotional() {
+        let engine = ReasoningEngine::new(default_config());
+        let rt = engine.detect_reasoning_type("I feel happy today.");
+        assert_eq!(
+            rt,
+            ReasoningType::Emotional,
+            "'feel' should detect Emotional"
+        );
+    }
+
+    #[test]
+    fn test_detect_reasoning_type_default_logical_fallback() {
+        let engine = ReasoningEngine::new(default_config());
+        let rt = engine.detect_reasoning_type("The earth orbits the sun.");
+        // No special keyword → defaults to Logical
+        assert_eq!(
+            rt,
+            ReasoningType::Logical,
+            "generic text should default to Logical"
+        );
+    }
+
+    // ---- process_reasoning_step ----
+
+    #[test]
+    fn test_process_logical_step_returns_step() {
+        let engine = ReasoningEngine::new(default_config());
+        let mut ctx = make_context();
+        let result = engine.process_reasoning_step(&mut ctx, "if A then B", ReasoningType::Logical);
+        assert!(result.is_ok(), "logical reasoning step must succeed");
+        let step = result.expect("step must be Ok");
+        assert_eq!(
+            step.step_type,
+            ReasoningType::Logical,
+            "step type must be Logical"
+        );
+    }
+
+    #[test]
+    fn test_process_step_appends_to_chain() {
+        let engine = ReasoningEngine::new(default_config());
+        let mut ctx = make_context();
+        let _ = engine
+            .process_reasoning_step(&mut ctx, "something causes another", ReasoningType::Causal)
+            .expect("step must succeed");
+        assert_eq!(
+            ctx.reasoning_chain.len(),
+            1,
+            "step must be appended to reasoning chain"
+        );
+    }
+
+    #[test]
+    fn test_process_multiple_steps_accumulate() {
+        let engine = ReasoningEngine::new(default_config());
+        let mut ctx = make_context();
+        for _ in 0..3u32 {
+            engine
+                .process_reasoning_step(&mut ctx, "input", ReasoningType::Logical)
+                .expect("step must succeed");
+        }
+        assert_eq!(
+            ctx.reasoning_chain.len(),
+            3,
+            "three steps must accumulate in chain"
+        );
+    }
+
+    #[test]
+    fn test_process_step_disabled_engine_returns_passthrough() {
+        let mut config = default_config();
+        config.enabled = false;
+        let engine = ReasoningEngine::new(config);
+        let mut ctx = make_context();
+        let step = engine
+            .process_reasoning_step(&mut ctx, "test input", ReasoningType::Logical)
+            .expect("disabled engine should still return a step");
+        assert_eq!(
+            step.output, "test input",
+            "disabled engine must passthrough input as output"
+        );
+    }
+
+    // ---- generate_reasoning_summary ----
+
+    #[test]
+    fn test_summary_empty_chain() {
+        let engine = ReasoningEngine::new(default_config());
+        let ctx = make_context();
+        let summary = engine.generate_reasoning_summary(&ctx);
+        assert_eq!(
+            summary.total_steps, 0,
+            "empty chain should yield 0 total_steps"
+        );
+        assert!(
+            (summary.avg_confidence - 0.0).abs() < f32::EPSILON,
+            "empty chain avg confidence should be 0"
+        );
+    }
+
+    #[test]
+    fn test_summary_reflects_step_count() {
+        let engine = ReasoningEngine::new(default_config());
+        let mut ctx = make_context();
+        for _ in 0..4u32 {
+            engine
+                .process_reasoning_step(&mut ctx, "premise", ReasoningType::Logical)
+                .expect("step must succeed");
+        }
+        let summary = engine.generate_reasoning_summary(&ctx);
+        assert_eq!(
+            summary.total_steps, 4,
+            "summary total_steps must reflect chain length"
+        );
+    }
+
+    #[test]
+    fn test_summary_avg_confidence_within_bounds() {
+        let engine = ReasoningEngine::new(default_config());
+        let mut ctx = make_context();
+        engine
+            .process_reasoning_step(&mut ctx, "a therefore b", ReasoningType::Logical)
+            .expect("step must succeed");
+        let summary = engine.generate_reasoning_summary(&ctx);
+        assert!(
+            (0.0..=1.0).contains(&summary.avg_confidence),
+            "avg_confidence must be in [0,1]"
+        );
+    }
+
+    #[test]
+    fn test_summary_goal_propagated() {
+        let engine = ReasoningEngine::new(default_config());
+        let ctx = ReasoningContext {
+            reasoning_chain: Vec::new(),
+            current_goal: Some("find answer".to_string()),
+            evidence: Vec::new(),
+            assumptions: Vec::new(),
+            confidence: 1.0,
+        };
+        let summary = engine.generate_reasoning_summary(&ctx);
+        assert_eq!(
+            summary.current_goal.as_deref(),
+            Some("find answer"),
+            "summary must propagate the current goal"
+        );
+    }
+
+    // ---- is_timeout_exceeded ----
+
+    #[test]
+    fn test_timeout_not_exceeded_immediately() {
+        let engine = ReasoningEngine::new(default_config());
+        let start = std::time::Instant::now();
+        assert!(
+            !engine.is_timeout_exceeded(start),
+            "timeout must not be exceeded immediately after start"
+        );
+    }
+}

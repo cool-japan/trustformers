@@ -1675,3 +1675,317 @@ impl ParallelPerformanceMonitor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0
+        }
+        fn next_f64(&mut self) -> f64 {
+            (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+        }
+        fn next_f32(&mut self) -> f32 {
+            self.next_f64() as f32
+        }
+        fn next_usize(&mut self, bound: usize) -> usize {
+            (self.next_u64() as usize) % bound.max(1)
+        }
+    }
+
+    // ---- StatisticalAnomalyDetector tests ----
+    #[test]
+    fn test_statistical_anomaly_detector_new() {
+        let det = StatisticalAnomalyDetector::new(2.0, 100);
+        assert!((det.threshold - 2.0).abs() < f32::EPSILON);
+        assert_eq!(det.stats.detections, 0);
+    }
+
+    #[test]
+    fn test_statistical_anomaly_detector_z_score_normal() {
+        let det = StatisticalAnomalyDetector::new(2.0, 100);
+        let z = det.calculate_z_score(105.0, 100.0, 10.0);
+        assert!((z - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_statistical_anomaly_detector_z_score_zero_std() {
+        let det = StatisticalAnomalyDetector::new(2.0, 100);
+        let z = det.calculate_z_score(105.0, 100.0, 0.0);
+        assert!((z - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_statistical_anomaly_detector_z_score_negative() {
+        let det = StatisticalAnomalyDetector::new(2.0, 100);
+        let z = det.calculate_z_score(80.0, 100.0, 10.0);
+        assert!((z - (-2.0)).abs() < f64::EPSILON);
+    }
+
+    // ---- MovingAverageTrendDetector tests ----
+    #[test]
+    fn test_moving_average_trend_detector_new() {
+        let det = MovingAverageTrendDetector::new(5);
+        assert!(det.values.is_empty());
+        assert!((det.change_threshold - 0.05).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_moving_average_add_value_insufficient_data() {
+        let mut det = MovingAverageTrendDetector::new(5);
+        assert!(det.add_value(1.0).is_none());
+        assert!(det.add_value(2.0).is_none());
+        assert!(det.add_value(3.0).is_none());
+        assert!(det.add_value(4.0).is_none());
+    }
+
+    #[test]
+    fn test_moving_average_add_value_full_window() {
+        let mut det = MovingAverageTrendDetector::new(3);
+        det.add_value(1.0);
+        det.add_value(2.0);
+        let avg = det.add_value(3.0);
+        assert!(avg.is_some());
+        assert!((avg.expect("should be some") - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_moving_average_window_slides() {
+        let mut det = MovingAverageTrendDetector::new(3);
+        det.add_value(1.0);
+        det.add_value(2.0);
+        det.add_value(3.0);
+        let avg = det.add_value(6.0);
+        assert!(avg.is_some());
+        // window is [2.0, 3.0, 6.0], average = 11.0/3.0 ~= 3.666...
+        let expected = (2.0 + 3.0 + 6.0) / 3.0;
+        assert!((avg.expect("should be some") - expected).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_moving_average_constant_values() {
+        let mut det = MovingAverageTrendDetector::new(4);
+        for _ in 0..3 {
+            det.add_value(5.0);
+        }
+        let avg = det.add_value(5.0);
+        assert!(avg.is_some());
+        assert!((avg.expect("should be some") - 5.0).abs() < f64::EPSILON);
+    }
+
+    // ---- ThresholdAnomalyDetector tests ----
+    #[test]
+    fn test_threshold_anomaly_detector_new() {
+        let det = ThresholdAnomalyDetector::new();
+        assert!((det.throughput_threshold - 0.3).abs() < f32::EPSILON);
+        assert!((det.latency_threshold - 0.5).abs() < f32::EPSILON);
+        assert!((det.cpu_threshold - 0.2).abs() < f32::EPSILON);
+        assert!((det.memory_threshold - 0.25).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_threshold_exceeds_true() {
+        let det = ThresholdAnomalyDetector::new();
+        assert!(det.exceeds_threshold(150.0, 100.0, 0.3));
+    }
+
+    #[test]
+    fn test_threshold_exceeds_false() {
+        let det = ThresholdAnomalyDetector::new();
+        assert!(!det.exceeds_threshold(110.0, 100.0, 0.3));
+    }
+
+    #[test]
+    fn test_threshold_exceeds_zero_baseline() {
+        let det = ThresholdAnomalyDetector::new();
+        assert!(!det.exceeds_threshold(100.0, 0.0, 0.3));
+    }
+
+    #[test]
+    fn test_threshold_exceeds_negative_deviation() {
+        let det = ThresholdAnomalyDetector::new();
+        assert!(det.exceeds_threshold(50.0, 100.0, 0.3));
+    }
+
+    // ---- PatternAnomalyDetector tests ----
+    #[test]
+    fn test_pattern_anomaly_detector_new() {
+        let det = PatternAnomalyDetector::new(50);
+        assert!(det.patterns.is_empty());
+        assert!((det.similarity_threshold - 0.7).abs() < f32::EPSILON);
+    }
+
+    // ---- BaselineValidationEngine tests ----
+    #[test]
+    fn test_baseline_validation_engine_new() {
+        let _engine = BaselineValidationEngine::new();
+    }
+
+    // ---- AnomalyEvent tests ----
+    #[test]
+    fn test_anomaly_event_to_event_data() {
+        let event = AnomalyEvent {
+            timestamp: Utc::now(),
+            anomaly_type: "spike".to_string(),
+            severity: SeverityLevel::High,
+            description: "CPU spike detected".to_string(),
+            affected_metrics: vec!["cpu".to_string(), "latency".to_string()],
+            score: 0.9,
+            confidence: 0.85,
+            expected_value: 50.0,
+            actual_value: 95.0,
+            deviation: 45.0,
+            detection_algorithm: "z_score".to_string(),
+            context: HashMap::new(),
+            recommendations: vec!["Scale up".to_string()],
+        };
+        let data = event.to_event_data();
+        assert_eq!(data.get("type"), Some(&"spike".to_string()));
+        assert!(data.contains_key("score"));
+        assert!(data.contains_key("confidence"));
+    }
+
+    #[test]
+    fn test_anomaly_event_requires_immediate_attention_high() {
+        let event = AnomalyEvent {
+            timestamp: Utc::now(),
+            anomaly_type: "spike".to_string(),
+            severity: SeverityLevel::High,
+            description: String::new(),
+            affected_metrics: Vec::new(),
+            score: 0.9,
+            confidence: 0.85,
+            expected_value: 50.0,
+            actual_value: 95.0,
+            deviation: 45.0,
+            detection_algorithm: String::new(),
+            context: HashMap::new(),
+            recommendations: Vec::new(),
+        };
+        assert!(event.requires_immediate_attention());
+    }
+
+    #[test]
+    fn test_anomaly_event_no_immediate_attention_low() {
+        let event = AnomalyEvent {
+            timestamp: Utc::now(),
+            anomaly_type: "drift".to_string(),
+            severity: SeverityLevel::Low,
+            description: String::new(),
+            affected_metrics: Vec::new(),
+            score: 0.2,
+            confidence: 0.5,
+            expected_value: 50.0,
+            actual_value: 55.0,
+            deviation: 5.0,
+            detection_algorithm: String::new(),
+            context: HashMap::new(),
+            recommendations: Vec::new(),
+        };
+        assert!(!event.requires_immediate_attention());
+    }
+
+    #[test]
+    fn test_anomaly_event_impact_score() {
+        let event = AnomalyEvent {
+            timestamp: Utc::now(),
+            anomaly_type: "spike".to_string(),
+            severity: SeverityLevel::Medium,
+            description: String::new(),
+            affected_metrics: Vec::new(),
+            score: 0.8,
+            confidence: 0.5,
+            expected_value: 0.0,
+            actual_value: 0.0,
+            deviation: 0.0,
+            detection_algorithm: String::new(),
+            context: HashMap::new(),
+            recommendations: Vec::new(),
+        };
+        let impact = event.impact_score();
+        assert!((impact - 0.4).abs() < f32::EPSILON);
+    }
+
+    // ---- LoadBalancingAlgorithm tests ----
+    #[test]
+    fn test_load_balancing_algorithm_variants() {
+        let algs = [
+            LoadBalancingAlgorithm::RoundRobin,
+            LoadBalancingAlgorithm::LeastConnections,
+            LoadBalancingAlgorithm::WeightedRoundRobin,
+            LoadBalancingAlgorithm::LoadBased,
+            LoadBalancingAlgorithm::PerformanceBased,
+        ];
+        assert_eq!(algs.len(), 5);
+    }
+
+    #[test]
+    fn test_load_balancing_algorithm_equality() {
+        assert_eq!(
+            LoadBalancingAlgorithm::RoundRobin,
+            LoadBalancingAlgorithm::RoundRobin
+        );
+        assert_ne!(
+            LoadBalancingAlgorithm::RoundRobin,
+            LoadBalancingAlgorithm::LoadBased
+        );
+    }
+
+    // ---- Default impl tests ----
+    #[test]
+    fn test_thread_pool_statistics_default() {
+        let s = ThreadPoolStatistics::default();
+        assert_eq!(s.current_threads, 0);
+        assert_eq!(s.scaling_events, 0);
+    }
+
+    // ---- LCG-driven tests ----
+    #[test]
+    fn test_lcg_z_scores() {
+        let mut rng = Lcg::new(42);
+        let det = StatisticalAnomalyDetector::new(2.0, 100);
+        for _ in 0..50 {
+            let value = rng.next_f64() * 200.0;
+            let z = det.calculate_z_score(value, 100.0, 15.0);
+            let expected = (value - 100.0) / 15.0;
+            assert!((z - expected).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_lcg_moving_averages() {
+        let mut rng = Lcg::new(999);
+        let mut det = MovingAverageTrendDetector::new(5);
+        let mut values_added = 0;
+        for _ in 0..20 {
+            let v = rng.next_f64() * 100.0;
+            let result = det.add_value(v);
+            values_added += 1;
+            if values_added >= 5 {
+                assert!(result.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn test_lcg_threshold_checks() {
+        let mut rng = Lcg::new(555);
+        let det = ThresholdAnomalyDetector::new();
+        let baseline = 100.0;
+        let mut exceeded_count = 0;
+        for _ in 0..100 {
+            let current = rng.next_f64() * 200.0;
+            if det.exceeds_threshold(current, baseline, 0.3) {
+                exceeded_count += 1;
+            }
+        }
+        assert!(exceeded_count > 0);
+    }
+}

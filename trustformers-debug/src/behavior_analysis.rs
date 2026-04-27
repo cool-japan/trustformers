@@ -890,3 +890,7 @@ pub struct AnalysisSummary {
     pub total_inputs_tracked: usize,
     pub analysis_coverage: f32,
 }
+
+#[cfg(test)]
+#[path = "behavior_analysis_tests.rs"]
+mod behavior_analysis_tests;

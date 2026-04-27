@@ -30,7 +30,9 @@ The `trustformers-serve` crate provides high-performance inference serving infra
 ### Implementation Status
 - [x] **PRODUCTION-READY** - Complete serving infrastructure
 - [x] **ZERO COMPILATION ERRORS** - Clean compilation
-- [x] **COMPREHENSIVE TESTING** - 216 tests, 100% pass rate
+- [x] **COMPREHENSIVE TESTING** - 255 tests, 100% pass rate (216 + 22 queue + 17 scheduler)
+- [x] **REQUEST QUEUING** - Priority queue with deadline awareness and cancellation (`queue` module)
+- [x] **PRIORITY SCHEDULING** - WRR, EDF, fair queuing, priority, and FIFO strategies (`scheduler` module)
 - [x] **HARDWARE ACCELERATED** - CUDA, ROCm, Metal support
 - [x] **KUBERNETES READY** - Helm charts, autoscaling, monitoring
 
@@ -570,21 +572,25 @@ helm install trustformers ./helm/trustformers \
 ## Future Enhancements
 
 ### High Priority
-- Enhanced semantic caching (embedding-based cache lookup)
-- Better request scheduling algorithms
-- Improved GPU memory management
-- WebAssembly serving for edge deployment
+- [ ] Enhanced semantic caching (embedding-based cache lookup — use cosine similarity on embeddings to find semantically equivalent cached requests)
+- ~~Better request scheduling algorithms~~ ✅ Done — priority queue + WRR/EDF/fair/FIFO scheduler
+- [ ] Improved GPU memory management
+  - **Refinement needed:** target metric (peak GPU memory %, allocation fragmentation?), which strategy (buddy allocator? memory pool tunability?)?
+- [ ] WebAssembly serving for edge deployment (WASM-compiled inference server, complements trustformers-wasm)
 
 ### Performance
-- Further kernel fusion optimizations
-- Dynamic precision selection
-- Better batching strategies for variable-length generation
+- [ ] Further kernel fusion optimizations
+  - **Refinement needed:** which ops? attention+layernorm? ffn fused? target inference speedup %.
+- [ ] Dynamic precision selection (auto-select fp32/fp16/bf16/int8 based on hardware and accuracy tolerance)
+- [ ] Better batching strategies for variable-length generation (continuous batching / PagedAttention-style batching)
 
 ### Features
-- More authentication methods (OIDC, SAML)
-- Enhanced monitoring dashboards
-- Improved A/B testing with statistical significance detection
-- Real-time model updates with zero-downtime hot-reload
+- [ ] Auth: OIDC (OpenID Connect) provider integration
+- [ ] Auth: SAML 2.0 SSO integration
+- [ ] Enhanced monitoring dashboards
+  - **Refinement needed:** Grafana dashboards? Prometheus alert rules? What metrics to surface?
+- [ ] Improved A/B testing with statistical significance detection (add t-test / Mann-Whitney U significance testing to A/B reporting)
+- [ ] Real-time model updates with zero-downtime hot-reload (blue-green model swap with atomic pointer update)
 
 ---
 

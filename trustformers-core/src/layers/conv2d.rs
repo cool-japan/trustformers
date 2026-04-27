@@ -99,7 +99,7 @@ impl Conv2d {
                 "Conv2d::new_full",
             ));
         }
-        if in_channels % groups != 0 {
+        if !in_channels.is_multiple_of(groups) {
             return Err(TrustformersError::tensor_op_error(
                 &format!(
                     "in_channels ({}) must be divisible by groups ({})",
@@ -108,7 +108,7 @@ impl Conv2d {
                 "Conv2d::new_full",
             ));
         }
-        if out_channels % groups != 0 {
+        if !out_channels.is_multiple_of(groups) {
             return Err(TrustformersError::tensor_op_error(
                 &format!(
                     "out_channels ({}) must be divisible by groups ({})",
@@ -663,7 +663,7 @@ mod tests {
 
         // Group 0 weight (filter 0): all 1.0
         // Group 1 weight (filter 1): all 1.0
-        let weight_data = vec![1.0f32; 2 * 1 * 3 * 3];
+        let weight_data = vec![1.0f32; 2 * 3 * 3];
 
         let conv = make_conv2d(
             2,

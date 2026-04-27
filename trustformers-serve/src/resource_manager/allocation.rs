@@ -529,3 +529,268 @@ impl AllocationCoordinator {
         Ok((*stats).clone())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_parallelization::{ConflictResolutionConfig, ResourceAllocation};
+    use std::collections::HashMap;
+
+    fn make_resource_allocation(resource_id: &str) -> ResourceAllocation {
+        ResourceAllocation {
+            resource_type: "network_port".to_string(),
+            resource_id: resource_id.to_string(),
+            allocated_at: chrono::Utc::now(),
+            deallocated_at: None,
+            duration: std::time::Duration::from_secs(0),
+            utilization: 0.5,
+            efficiency: 0.8,
+        }
+    }
+
+    #[test]
+    fn test_allocation_statistics_default() {
+        let s = AllocationStatistics::default();
+        assert_eq!(s.total_allocations, 0);
+        assert_eq!(s.active_allocations, 0);
+        assert_eq!(s.failed_allocations, 0);
+        assert_eq!(s.conflict_rate, 0.0);
+        assert_eq!(s.utilization_efficiency, 0.0);
+    }
+
+    #[test]
+    fn test_coordination_statistics_default() {
+        let s = CoordinationStatistics::default();
+        assert_eq!(s.total_requests, 0);
+        assert_eq!(s.successful_allocations, 0);
+        assert_eq!(s.failed_allocations, 0);
+        assert_eq!(s.conflicts_detected, 0);
+        assert_eq!(s.conflicts_resolved, 0);
+    }
+
+    #[test]
+    fn test_conflict_type_variants() {
+        let v = [
+            format!("{:?}", ConflictType::PortConflict),
+            format!("{:?}", ConflictType::DirectoryConflict),
+            format!("{:?}", ConflictType::GpuConflict),
+            format!("{:?}", ConflictType::DatabaseConflict),
+            format!("{:?}", ConflictType::MemoryConflict),
+            format!("{:?}", ConflictType::CpuConflict),
+        ];
+        assert_eq!(v[0], "PortConflict");
+        assert_eq!(v[2], "GpuConflict");
+    }
+
+    #[test]
+    fn test_conflict_severity_variants() {
+        assert_eq!(format!("{:?}", ConflictSeverity::Low), "Low");
+        assert_eq!(format!("{:?}", ConflictSeverity::Medium), "Medium");
+        assert_eq!(format!("{:?}", ConflictSeverity::High), "High");
+        assert_eq!(format!("{:?}", ConflictSeverity::Critical), "Critical");
+    }
+
+    #[test]
+    fn test_conflict_resolution_variants() {
+        let variants = [
+            format!("{:?}", ConflictResolution::RetryWithAlternative),
+            format!("{:?}", ConflictResolution::QueueForLater),
+            format!("{:?}", ConflictResolution::Reject),
+            format!("{:?}", ConflictResolution::ForceAllocate),
+            format!("{:?}", ConflictResolution::ScaleUp),
+        ];
+        assert_eq!(variants[2], "Reject");
+        assert_eq!(variants[4], "ScaleUp");
+    }
+
+    #[test]
+    fn test_conflict_detection_logic_variants() {
+        let v = [
+            format!("{:?}", ConflictDetectionLogic::PortRangeOverlap),
+            format!("{:?}", ConflictDetectionLogic::DirectoryPathConflict),
+            format!("{:?}", ConflictDetectionLogic::GpuExclusiveAccess),
+            format!("{:?}", ConflictDetectionLogic::DatabaseConnectionLimit),
+            format!("{:?}", ConflictDetectionLogic::MemoryUsageLimit),
+            format!("{:?}", ConflictDetectionLogic::CpuUsageLimit),
+        ];
+        assert_eq!(v[0], "PortRangeOverlap");
+        assert_eq!(v[2], "GpuExclusiveAccess");
+    }
+
+    #[test]
+    fn test_conflict_detection_rule_creation() {
+        let rule = ConflictDetectionRule {
+            name: "port-overlap".to_string(),
+            resource_types: vec!["network_port".to_string()],
+            detection_logic: ConflictDetectionLogic::PortRangeOverlap,
+            priority: 0.9,
+            enabled: true,
+        };
+        assert_eq!(rule.name, "port-overlap");
+        assert!(rule.enabled);
+        assert!((rule.priority - 0.9).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn test_resource_allocator_new() {
+        let allocator = ResourceAllocator::new().await;
+        assert!(allocator.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_resource_allocator_get_active_empty() {
+        let allocator = ResourceAllocator::new().await.unwrap_or_else(|_| panic!("failed"));
+        let active = allocator.get_active_allocations().await.unwrap_or_default();
+        assert!(active.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_resource_allocator_get_history_empty() {
+        let allocator = ResourceAllocator::new().await.unwrap_or_else(|_| panic!("failed"));
+        let history = allocator.get_allocation_history().await.unwrap_or_default();
+        assert!(history.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_resource_allocator_track_allocation() {
+        let allocator = ResourceAllocator::new().await.unwrap_or_else(|_| panic!("failed"));
+        let alloc = make_resource_allocation("port-8080");
+        let r = allocator.track_allocation(&alloc).await;
+        assert!(r.is_ok());
+        let stats = allocator.get_statistics().await.unwrap_or_default();
+        assert_eq!(stats.total_allocations, 1);
+    }
+
+    #[tokio::test]
+    async fn test_resource_allocator_mark_deallocated() {
+        let allocator = ResourceAllocator::new().await.unwrap_or_else(|_| panic!("failed"));
+        let alloc = make_resource_allocation("port-8081");
+        allocator.track_allocation(&alloc).await.unwrap_or(());
+        let r = allocator.mark_deallocated(&alloc).await;
+        assert!(r.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_resource_allocator_untrack_allocation() {
+        let allocator = ResourceAllocator::new().await.unwrap_or_else(|_| panic!("failed"));
+        let alloc = make_resource_allocation("port-8082");
+        allocator.track_allocation(&alloc).await.unwrap_or(());
+        let r = allocator.untrack_allocation("t-001").await;
+        assert!(r.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_resource_allocator_get_statistics() {
+        let allocator = ResourceAllocator::new().await.unwrap_or_else(|_| panic!("failed"));
+        let alloc = make_resource_allocation("port-8083");
+        allocator.track_allocation(&alloc).await.unwrap_or(());
+        let stats = allocator.get_statistics().await.unwrap_or_default();
+        assert!(stats.total_allocations >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_conflict_detector_new() {
+        let config = ConflictResolutionConfig::default();
+        let detector = ConflictDetector::new(config).await;
+        assert!(detector.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_conflict_detector_history_empty() {
+        let config = ConflictResolutionConfig::default();
+        let detector = ConflictDetector::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        let history = detector.get_conflict_history().await.unwrap_or_default();
+        assert!(history.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_conflict_detector_add_rule() {
+        let config = ConflictResolutionConfig::default();
+        let detector = ConflictDetector::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        let rule = ConflictDetectionRule {
+            name: "test-rule".to_string(),
+            resource_types: vec!["gpu".to_string()],
+            detection_logic: ConflictDetectionLogic::GpuExclusiveAccess,
+            priority: 1.0,
+            enabled: true,
+        };
+        let r = detector.add_detection_rule(rule).await;
+        assert!(r.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_conflict_detector_remove_nonexistent_rule() {
+        let config = ConflictResolutionConfig::default();
+        let detector = ConflictDetector::new(config).await.unwrap_or_else(|_| panic!("failed"));
+        let removed = detector.remove_detection_rule("no-such-rule").await.unwrap_or(false);
+        assert!(!removed);
+    }
+
+    #[tokio::test]
+    async fn test_allocation_coordinator_new() {
+        let config = ConflictResolutionConfig::default();
+        let allocator =
+            Arc::new(ResourceAllocator::new().await.unwrap_or_else(|_| panic!("failed")));
+        let detector =
+            Arc::new(ConflictDetector::new(config).await.unwrap_or_else(|_| panic!("failed")));
+        let coordinator = AllocationCoordinator::new(allocator, detector).await;
+        assert!(coordinator.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_allocation_coordinator_get_stats_initial() {
+        let config = ConflictResolutionConfig::default();
+        let allocator =
+            Arc::new(ResourceAllocator::new().await.unwrap_or_else(|_| panic!("failed")));
+        let detector =
+            Arc::new(ConflictDetector::new(config).await.unwrap_or_else(|_| panic!("failed")));
+        let coordinator = AllocationCoordinator::new(allocator, detector)
+            .await
+            .unwrap_or_else(|_| panic!("failed"));
+        let stats = coordinator.get_coordination_statistics().await.unwrap_or_default();
+        assert_eq!(stats.total_requests, 0);
+        assert_eq!(stats.successful_allocations, 0);
+    }
+
+    #[test]
+    fn test_allocation_request_creation() {
+        use crate::parallel_execution_engine::ResourceRequirement;
+        let req = AllocationRequest {
+            request_id: "req-001".to_string(),
+            test_id: "t-001".to_string(),
+            requirements: ResourceRequirement {
+                resource_type: "gpu".to_string(),
+                min_amount: 0.0,
+                cpu_cores: 2.0,
+                memory_mb: 1024,
+                gpu_devices: vec![],
+                network_ports: 1,
+                temp_directories: 0,
+                database_connections: 0,
+                custom_resources: HashMap::new(),
+            },
+            requested_at: chrono::Utc::now(),
+            priority: 0.8,
+            timeout: std::time::Duration::from_secs(30),
+            retry_count: 0,
+        };
+        assert_eq!(req.request_id, "req-001");
+        assert_eq!(req.retry_count, 0);
+        assert!((req.priority - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_conflict_event_creation() {
+        let event = ConflictEvent {
+            timestamp: chrono::Utc::now(),
+            conflict_type: ConflictType::PortConflict,
+            conflicting_tests: vec!["t-a".to_string(), "t-b".to_string()],
+            resource_id: "port-8080".to_string(),
+            severity: ConflictSeverity::Medium,
+            resolution: Some(ConflictResolution::RetryWithAlternative),
+            details: HashMap::new(),
+        };
+        assert_eq!(event.conflicting_tests.len(), 2);
+        assert!(event.resolution.is_some());
+    }
+}

@@ -42,6 +42,8 @@ pub struct MpiCommunicatorImpl {
     world_size: usize,
     #[cfg(feature = "mpi")]
     #[allow(dead_code)]
+    // SAFETY: MPI thread safety is guaranteed by unsafe Send/Sync impl below
+    #[allow(clippy::arc_with_non_send_sync)]
     pending_requests: Arc<Mutex<Vec<Request<'static, f32>>>>,
 }
 
@@ -65,12 +67,18 @@ impl MpiCommunicatorImpl {
                 println!("  Processor Name: {}", proc_name);
             }
 
+            // SAFETY: MPI requests are only driven from a single dedicated MPI thread,
+            // so Arc<Mutex<Vec<Request<...>>>> is safe here even though Request carries
+            // a lifetime that prevents automatic Send+Sync derivation.
+            #[allow(clippy::arc_with_non_send_sync)]
+            let pending_requests = Arc::new(Mutex::new(Vec::new()));
+
             Ok(Self {
                 world,
                 custom_comm: None,
                 rank,
                 world_size,
-                pending_requests: Arc::new(Mutex::new(Vec::new())),
+                pending_requests,
             })
         }
 

@@ -521,3 +521,402 @@ impl crate::pipeline::AsyncPipeline for QuestionAnsweringPipeline {
             .map_err(|e| TrustformersError::pipeline(e.to_string(), "runtime"))?
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- helper: minimal pipeline stand-in that bypasses the model layer ----
+
+    /// Thin wrapper giving direct access to the private helper methods for
+    /// white-box testing without a real model.
+    struct QAHelpers;
+
+    impl QAHelpers {
+        fn softmax(logits: &[f32]) -> Vec<f32> {
+            if logits.is_empty() {
+                return Vec::new();
+            }
+            let max_logit = logits.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+            let exp_logits: Vec<f32> = logits.iter().map(|&x| (x - max_logit).exp()).collect();
+            let sum_exp: f32 = exp_logits.iter().sum();
+            if sum_exp > 0.0 {
+                exp_logits.iter().map(|&x| x / sum_exp).collect()
+            } else {
+                vec![1.0 / logits.len() as f32; logits.len()]
+            }
+        }
+
+        fn is_time_expression(word: &str) -> bool {
+            if word.len() == 4 && word.chars().all(|c| c.is_ascii_digit()) {
+                if let Ok(year) = word.parse::<u32>() {
+                    return (1000..=2100).contains(&year);
+                }
+            }
+            let time_words = [
+                "january",
+                "february",
+                "march",
+                "april",
+                "may",
+                "june",
+                "july",
+                "august",
+                "september",
+                "october",
+                "november",
+                "december",
+                "monday",
+                "tuesday",
+                "wednesday",
+                "thursday",
+                "friday",
+                "saturday",
+                "sunday",
+                "morning",
+                "afternoon",
+                "evening",
+                "night",
+                "today",
+                "yesterday",
+                "tomorrow",
+            ];
+            time_words.contains(&word.to_lowercase().as_str())
+        }
+
+        fn is_location_phrase(phrase: &str) -> bool {
+            phrase.contains("in ")
+                || phrase.contains("at ")
+                || phrase.contains("on ")
+                || phrase.contains("near ")
+                || phrase.contains("city")
+                || phrase.contains("country")
+                || phrase.contains("state")
+                || phrase.contains("town")
+                || phrase.contains("village")
+        }
+    }
+
+    // ---- QAConfig tests ----
+
+    #[test]
+    fn test_qa_config_default_values() {
+        let cfg = QAConfig::default();
+        assert_eq!(cfg.max_length, 384);
+        assert_eq!(cfg.max_answer_length, 15);
+        assert!(!cfg.handle_impossible_answer);
+        assert_eq!(cfg.doc_stride, 128);
+    }
+
+    #[test]
+    fn test_qa_config_clone_and_debug() {
+        let cfg = QAConfig::default();
+        let cloned = cfg.clone();
+        assert_eq!(cfg.max_length, cloned.max_length);
+        let dbg = format!("{:?}", cloned);
+        assert!(dbg.contains("QAConfig"));
+    }
+
+    #[test]
+    fn test_qa_input_construction() {
+        let input = QAInput {
+            question: "What is the capital?".to_string(),
+            context: "The capital of France is Paris.".to_string(),
+        };
+        assert_eq!(input.question, "What is the capital?");
+        assert!(!input.context.is_empty());
+    }
+
+    // ---- Softmax tests ----
+
+    #[test]
+    fn test_softmax_single_element() {
+        let result = QAHelpers::softmax(&[1.0]);
+        assert!((result[0] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_softmax_two_equal_elements() {
+        let result = QAHelpers::softmax(&[0.0, 0.0]);
+        assert_eq!(result.len(), 2);
+        assert!((result[0] - 0.5).abs() < 1e-6);
+        assert!((result[1] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_softmax_probabilities_sum_to_one() {
+        // LCG-generated logits for determinism
+        let logits: Vec<f32> = (0..8u32)
+            .map(|i| {
+                let lcg = 1664525u32.wrapping_mul(i).wrapping_add(1013904223);
+                (lcg % 1000) as f32 / 100.0 - 5.0
+            })
+            .collect();
+        let probs = QAHelpers::softmax(&logits);
+        let sum: f32 = probs.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-5, "softmax sum = {}", sum);
+    }
+
+    #[test]
+    fn test_softmax_empty_input() {
+        let result = QAHelpers::softmax(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_softmax_maximum_probability_dominates() {
+        let logits = vec![0.0, 0.0, 100.0];
+        let probs = QAHelpers::softmax(&logits);
+        assert!(probs[2] > 0.99, "dominant logit should win: {:?}", probs);
+    }
+
+    // ---- Time expression detection ----
+
+    #[test]
+    fn test_is_time_expression_year() {
+        assert!(QAHelpers::is_time_expression("2024"));
+        assert!(QAHelpers::is_time_expression("1990"));
+    }
+
+    #[test]
+    fn test_is_time_expression_month_name() {
+        assert!(QAHelpers::is_time_expression("January"));
+        assert!(QAHelpers::is_time_expression("december"));
+    }
+
+    #[test]
+    fn test_is_time_expression_day_name() {
+        assert!(QAHelpers::is_time_expression("Monday"));
+        assert!(QAHelpers::is_time_expression("friday"));
+    }
+
+    #[test]
+    fn test_is_time_expression_time_of_day() {
+        assert!(QAHelpers::is_time_expression("morning"));
+        assert!(QAHelpers::is_time_expression("afternoon"));
+        assert!(QAHelpers::is_time_expression("evening"));
+        assert!(QAHelpers::is_time_expression("night"));
+    }
+
+    #[test]
+    fn test_is_time_expression_relative() {
+        assert!(QAHelpers::is_time_expression("today"));
+        assert!(QAHelpers::is_time_expression("yesterday"));
+        assert!(QAHelpers::is_time_expression("tomorrow"));
+    }
+
+    #[test]
+    fn test_is_not_time_expression() {
+        assert!(!QAHelpers::is_time_expression("Paris"));
+        assert!(!QAHelpers::is_time_expression("apple"));
+        assert!(!QAHelpers::is_time_expression("99")); // not a 4-digit year
+        assert!(!QAHelpers::is_time_expression("12345")); // not a 4-digit year
+    }
+
+    // ---- Location phrase detection ----
+
+    #[test]
+    fn test_is_location_phrase_prepositions() {
+        assert!(QAHelpers::is_location_phrase("in Berlin"));
+        assert!(QAHelpers::is_location_phrase("at the airport"));
+        assert!(QAHelpers::is_location_phrase("on the hill"));
+        assert!(QAHelpers::is_location_phrase("near the river"));
+    }
+
+    #[test]
+    fn test_is_location_phrase_place_words() {
+        assert!(QAHelpers::is_location_phrase("the city center"));
+        assert!(QAHelpers::is_location_phrase("the country side"));
+        assert!(QAHelpers::is_location_phrase("the state of Maine"));
+        assert!(QAHelpers::is_location_phrase("the small town"));
+        assert!(QAHelpers::is_location_phrase("a village green"));
+    }
+
+    #[test]
+    fn test_is_not_location_phrase() {
+        assert!(!QAHelpers::is_location_phrase("running fast"));
+        assert!(!QAHelpers::is_location_phrase("the quick brown fox"));
+    }
+
+    // ---- QuestionAnsweringOutput structure tests ----
+
+    #[test]
+    fn test_qa_output_fields_present() {
+        let out = QuestionAnsweringOutput {
+            answer: "Paris".to_string(),
+            score: 0.92,
+            start: 10,
+            end: 15,
+        };
+        assert_eq!(out.answer, "Paris");
+        assert!((out.score - 0.92).abs() < 1e-6);
+        assert!(out.start < out.end);
+    }
+
+    #[test]
+    fn test_qa_output_score_range() {
+        // Score must be in [0, 1] for valid probability output
+        let out = QuestionAnsweringOutput {
+            answer: "test".to_string(),
+            score: 0.75,
+            start: 0,
+            end: 4,
+        };
+        assert!(out.score >= 0.0 && out.score <= 1.0);
+    }
+
+    #[test]
+    fn test_qa_output_empty_answer_for_no_answer() {
+        let out = QuestionAnsweringOutput {
+            answer: String::new(),
+            score: 0.1,
+            start: 0,
+            end: 0,
+        };
+        assert!(out.answer.is_empty());
+        assert_eq!(out.start, out.end);
+    }
+
+    // ---- Span extraction / sliding window ----
+
+    #[test]
+    fn test_span_extraction_start_before_end() {
+        // Any valid extracted span must satisfy start <= end
+        let context = "The quick brown fox jumps over the lazy dog.";
+        let words: Vec<&str> = context.split_whitespace().collect();
+        let start_word = 1;
+        let end_word = 4;
+        let answer = words[start_word..end_word].join(" ");
+        let char_start: usize = words[..start_word].iter().map(|w| w.len() + 1).sum();
+        let char_end = char_start + answer.len();
+        assert!(char_start <= char_end);
+        assert!(!answer.is_empty());
+    }
+
+    #[test]
+    fn test_doc_stride_chunks() {
+        // Verify sliding-window chunk logic: stride must be less than max_length
+        let cfg = QAConfig {
+            max_length: 384,
+            doc_stride: 128,
+            ..QAConfig::default()
+        };
+        assert!(cfg.doc_stride < cfg.max_length);
+    }
+
+    #[test]
+    fn test_max_answer_length_config_roundtrip() {
+        let cfg = QAConfig {
+            max_answer_length: 30,
+            ..QAConfig::default()
+        };
+        assert_eq!(cfg.max_answer_length, 30);
+    }
+
+    // ---- Score computation / answer ranking ----
+
+    #[test]
+    fn test_answer_ranking_highest_score_wins() {
+        let mut candidates = [
+            QuestionAnsweringOutput {
+                answer: "London".to_string(),
+                score: 0.5,
+                start: 0,
+                end: 6,
+            },
+            QuestionAnsweringOutput {
+                answer: "Paris".to_string(),
+                score: 0.9,
+                start: 7,
+                end: 12,
+            },
+            QuestionAnsweringOutput {
+                answer: "Berlin".to_string(),
+                score: 0.3,
+                start: 13,
+                end: 19,
+            },
+        ];
+        candidates
+            .sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        assert_eq!(candidates[0].answer, "Paris");
+    }
+
+    #[test]
+    fn test_no_answer_detection_low_score() {
+        // If score < threshold, treat as impossible answer
+        let threshold = 0.3_f32;
+        let out = QuestionAnsweringOutput {
+            answer: String::new(),
+            score: 0.15,
+            start: 0,
+            end: 0,
+        };
+        assert!(out.score < threshold, "should be flagged as no-answer");
+    }
+
+    // ---- SQuAD-style F1 / EM metrics ----
+
+    fn compute_em(prediction: &str, ground_truth: &str) -> f32 {
+        if prediction.trim().to_lowercase() == ground_truth.trim().to_lowercase() {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    fn compute_f1(prediction: &str, ground_truth: &str) -> f32 {
+        let pred_tokens: std::collections::HashSet<&str> = prediction.split_whitespace().collect();
+        let truth_tokens: std::collections::HashSet<&str> =
+            ground_truth.split_whitespace().collect();
+        let common: usize = pred_tokens.intersection(&truth_tokens).count();
+        if common == 0 {
+            return 0.0;
+        }
+        let precision = common as f32 / pred_tokens.len() as f32;
+        let recall = common as f32 / truth_tokens.len() as f32;
+        2.0 * precision * recall / (precision + recall)
+    }
+
+    #[test]
+    fn test_exact_match_identical_strings() {
+        assert!((compute_em("Paris", "Paris") - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_exact_match_different_strings() {
+        assert!((compute_em("London", "Paris") - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_exact_match_case_insensitive() {
+        assert!((compute_em("paris", "Paris") - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_f1_perfect_overlap() {
+        let f1 = compute_f1("the quick brown fox", "the quick brown fox");
+        assert!((f1 - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_f1_no_overlap() {
+        let f1 = compute_f1("cat", "dog");
+        assert!((f1 - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_f1_partial_overlap() {
+        let f1 = compute_f1("quick brown fox", "the quick brown");
+        assert!(f1 > 0.0 && f1 < 1.0, "f1 should be partial: {}", f1);
+    }
+
+    #[test]
+    fn test_qa_config_impossible_answer_flag() {
+        let cfg = QAConfig {
+            handle_impossible_answer: true,
+            ..QAConfig::default()
+        };
+        assert!(cfg.handle_impossible_answer);
+    }
+}

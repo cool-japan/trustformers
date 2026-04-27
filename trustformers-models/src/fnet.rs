@@ -7,3 +7,6 @@ pub mod model;
 
 pub use config::FNetConfig;
 pub use model::{FNetForMaskedLM, FNetForSequenceClassification, FNetModel};
+
+#[cfg(test)]
+mod tests;

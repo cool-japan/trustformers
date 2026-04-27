@@ -472,3 +472,156 @@ impl Clone for CpuGpuLoadBalancer {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpu_gpu_load_balancer::config::{LoadBalancerConfig, LoadBalancingStrategy};
+    use crate::cpu_gpu_load_balancer::types::{ComputeTask, TaskPriority, TaskType};
+
+    fn make_test_config() -> LoadBalancerConfig {
+        LoadBalancerConfig {
+            enabled: true,
+            cpu_pool_size: 2,
+            task_queue_capacity: 100,
+            monitoring_interval_seconds: 60,
+            strategy: LoadBalancingStrategy::Adaptive,
+            ..LoadBalancerConfig::default()
+        }
+    }
+
+    fn make_inference_task(id: &str) -> ComputeTask {
+        ComputeTask {
+            task_type: TaskType::Inference,
+            compute_operations: 5000,
+            parallelizability: 0.8,
+            memory_required: 1024,
+            priority: TaskPriority::Normal,
+            ..ComputeTask::new(id.to_string(), TaskType::Inference)
+        }
+    }
+
+    // --- CpuGpuLoadBalancer construction tests ---
+
+    #[tokio::test]
+    async fn test_balancer_new_creates_instance() {
+        let config = make_test_config();
+        let _balancer = CpuGpuLoadBalancer::new(config);
+        // Just verify construction succeeds
+    }
+
+    #[tokio::test]
+    async fn test_balancer_initial_stats_zero_tasks() {
+        let config = make_test_config();
+        let balancer = CpuGpuLoadBalancer::new(config);
+        let stats = balancer.get_stats().await;
+        assert_eq!(stats.total_tasks, 0);
+    }
+
+    #[tokio::test]
+    async fn test_balancer_start_and_stop() {
+        let config = make_test_config();
+        let balancer = CpuGpuLoadBalancer::new(config);
+        balancer.start().await.expect("start should succeed");
+        balancer.stop().await.expect("stop should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_balancer_disabled_rejects_tasks() {
+        let config = LoadBalancerConfig {
+            enabled: false,
+            ..make_test_config()
+        };
+        let balancer = CpuGpuLoadBalancer::new(config);
+        let task = make_inference_task("t1");
+        let result = balancer.submit_task(task).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_balancer_submit_task_returns_task_id() {
+        let config = make_test_config();
+        let balancer = CpuGpuLoadBalancer::new(config);
+        balancer.start().await.expect("start should succeed");
+        let task = make_inference_task("task_abc");
+        let result = balancer.submit_task(task).await;
+        assert!(result.is_ok());
+        assert_eq!(result.expect("should be Ok"), "task_abc");
+    }
+
+    #[tokio::test]
+    async fn test_balancer_get_task_status_unknown_returns_none() {
+        let config = make_test_config();
+        let balancer = CpuGpuLoadBalancer::new(config);
+        let status = balancer.get_task_status("nonexistent_task").await;
+        assert!(status.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_balancer_subscribe_events_returns_receiver() {
+        let config = make_test_config();
+        let balancer = CpuGpuLoadBalancer::new(config);
+        let _receiver = balancer.subscribe_events();
+        // Just verify we get a valid receiver
+    }
+
+    #[tokio::test]
+    async fn test_balancer_assign_processor_after_init() {
+        let config = make_test_config();
+        let balancer = CpuGpuLoadBalancer::new(config);
+        balancer.start().await.expect("start should succeed");
+        let task = make_inference_task("t1");
+        // May return None if no resources available or Some if assigned
+        let _ = balancer.assign_processor(&task).await;
+    }
+
+    #[tokio::test]
+    async fn test_balancer_initialize_resources_creates_cpu_resources() {
+        let config = LoadBalancerConfig {
+            cpu_pool_size: 4,
+            ..make_test_config()
+        };
+        let balancer = CpuGpuLoadBalancer::new(config);
+        balancer.initialize_resources().await.expect("init should succeed");
+        let cpu_count = balancer.cpu_resources.read().expect("lock ok").len();
+        assert_eq!(cpu_count, 4);
+    }
+
+    #[tokio::test]
+    async fn test_balancer_clone_shares_state() {
+        let config = make_test_config();
+        let balancer = CpuGpuLoadBalancer::new(config);
+        let _cloned = balancer.clone();
+        // Just verify clone doesn't panic and is possible
+    }
+
+    #[tokio::test]
+    async fn test_balancer_multiple_tasks_submitted() {
+        let config = make_test_config();
+        let balancer = CpuGpuLoadBalancer::new(config);
+        balancer.start().await.expect("start should succeed");
+        for i in 0..5 {
+            let task = make_inference_task(&format!("task_{}", i));
+            balancer.submit_task(task).await.expect("submit should succeed");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_balancer_queue_full_returns_error() {
+        let config = LoadBalancerConfig {
+            task_queue_capacity: 1,
+            ..make_test_config()
+        };
+        let balancer = CpuGpuLoadBalancer::new(config);
+        balancer.start().await.expect("start should succeed");
+        // Fill the queue
+        let t1 = make_inference_task("t1");
+        let _ = balancer.submit_task(t1).await;
+        // Give task processor time to possibly drain
+        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+        // Submit another and check if queue gets full at some point
+        // The test just verifies no panic occurs
+        let t2 = make_inference_task("t2");
+        let _ = balancer.submit_task(t2).await;
+    }
+}

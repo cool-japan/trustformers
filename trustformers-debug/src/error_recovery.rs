@@ -725,3 +725,269 @@ pub struct ErrorStatistics {
     pub circuit_breaker_state: CircuitState,
     pub system_health: HealthStatus,
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_error_event(error_type: ErrorType) -> ErrorEvent {
+        ErrorEvent {
+            id: Uuid::new_v4(),
+            error_type,
+            error_message: "test error".to_string(),
+            component: "test_component".to_string(),
+            severity: ErrorSeverity::Medium,
+            timestamp: chrono::Utc::now(),
+            context: ErrorContext {
+                session_id: Uuid::new_v4(),
+                operation: "test_op".to_string(),
+                parameters: HashMap::new(),
+                system_state: SystemState {
+                    memory_usage_mb: 1024,
+                    cpu_usage_percent: 50.0,
+                    active_tensors: 4,
+                    active_sessions: 1,
+                    uptime_seconds: 100,
+                },
+            },
+            stack_trace: None,
+        }
+    }
+
+    // ── ErrorRecoveryConfig ──────────────────────────────────────────────
+
+    #[test]
+    fn test_config_default_fields() {
+        let cfg = ErrorRecoveryConfig::default();
+        assert!(cfg.enabled);
+        assert!(cfg.max_retry_attempts > 0);
+        assert!(cfg.circuit_breaker_threshold > 0);
+        assert!(cfg.error_history_limit > 0);
+    }
+
+    // ── ErrorRecoverySystem creation ──────────────────────────────────────
+
+    #[test]
+    fn test_system_new_initializes_strategies() {
+        let system = ErrorRecoverySystem::new(ErrorRecoveryConfig::default());
+        // Should have strategies initialized for at least TensorInspectionError
+        let strategies = system.get_recovery_strategies(&ErrorType::TensorInspectionError);
+        assert!(!strategies.is_empty());
+    }
+
+    #[test]
+    fn test_system_new_circuit_breaker_closed() {
+        let system = ErrorRecoverySystem::new(ErrorRecoveryConfig::default());
+        assert!(matches!(system.circuit_breaker.state, CircuitState::Closed));
+    }
+
+    // ── record_error ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_record_error_adds_to_history() {
+        let mut system = ErrorRecoverySystem::new(ErrorRecoveryConfig::default());
+        let event = make_error_event(ErrorType::IOError);
+        system.record_error(event);
+        assert_eq!(system.error_history.len(), 1);
+    }
+
+    #[test]
+    fn test_record_error_respects_history_limit() {
+        let mut cfg = ErrorRecoveryConfig::default();
+        cfg.error_history_limit = 3;
+        let mut system = ErrorRecoverySystem::new(cfg);
+        for _ in 0..5 {
+            system.record_error(make_error_event(ErrorType::NetworkError));
+        }
+        assert_eq!(system.error_history.len(), 3);
+    }
+
+    // ── safe_mode ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_enable_disable_safe_mode() {
+        let mut system = ErrorRecoverySystem::new(ErrorRecoveryConfig::default());
+        assert!(!system.failsafe_manager.safe_mode_enabled);
+        system.enable_safe_mode();
+        assert!(system.failsafe_manager.safe_mode_enabled);
+        system.disable_safe_mode();
+        assert!(!system.failsafe_manager.safe_mode_enabled);
+    }
+
+    // ── get_error_statistics ──────────────────────────────────────────────
+
+    #[test]
+    fn test_error_statistics_empty() {
+        let system = ErrorRecoverySystem::new(ErrorRecoveryConfig::default());
+        let stats = system.get_error_statistics();
+        assert_eq!(stats.total_errors, 0);
+        assert!(matches!(stats.circuit_breaker_state, CircuitState::Closed));
+        assert!(matches!(stats.system_health, HealthStatus::Healthy));
+    }
+
+    #[test]
+    fn test_error_statistics_with_errors() {
+        let mut system = ErrorRecoverySystem::new(ErrorRecoveryConfig::default());
+        system.record_error(make_error_event(ErrorType::IOError));
+        system.record_error(make_error_event(ErrorType::NetworkError));
+        let stats = system.get_error_statistics();
+        assert_eq!(stats.total_errors, 2);
+        assert_eq!(
+            stats.error_type_counts.get(&ErrorType::IOError).copied().unwrap_or(0),
+            1
+        );
+    }
+
+    // ── ErrorType variants ────────────────────────────────────────────────
+
+    #[test]
+    fn test_error_type_variants() {
+        let types = [
+            ErrorType::TensorInspectionError,
+            ErrorType::GradientDebuggingError,
+            ErrorType::ModelDiagnosticsError,
+            ErrorType::VisualizationError,
+            ErrorType::MemoryProfilingError,
+            ErrorType::IOError,
+            ErrorType::NetworkError,
+            ErrorType::ResourceExhaustion,
+            ErrorType::ConfigurationError,
+            ErrorType::DataCorruption,
+            ErrorType::SystemFailure,
+            ErrorType::UserError,
+        ];
+        for t in &types {
+            assert!(!format!("{:?}", t).is_empty());
+        }
+    }
+
+    // ── ErrorSeverity variants ────────────────────────────────────────────
+
+    #[test]
+    fn test_error_severity_variants() {
+        let severities = [
+            ErrorSeverity::Low,
+            ErrorSeverity::Medium,
+            ErrorSeverity::High,
+            ErrorSeverity::Critical,
+            ErrorSeverity::Fatal,
+        ];
+        for s in &severities {
+            assert!(!format!("{:?}", s).is_empty());
+        }
+    }
+
+    // ── RecoveryStrategy variants ─────────────────────────────────────────
+
+    #[test]
+    fn test_recovery_strategy_variants() {
+        let strats = [
+            RecoveryStrategy::Retry {
+                max_attempts: 3,
+                delay_ms: 100,
+            },
+            RecoveryStrategy::Fallback {
+                alternative_method: "alt".to_string(),
+            },
+            RecoveryStrategy::GracefulDegradation {
+                reduced_functionality: "basic".to_string(),
+            },
+            RecoveryStrategy::ResourceCleanup {
+                cleanup_type: "cache".to_string(),
+            },
+            RecoveryStrategy::SystemReset {
+                component: "comp".to_string(),
+            },
+            RecoveryStrategy::EmergencyShutdown,
+            RecoveryStrategy::UserNotification {
+                message: "msg".to_string(),
+            },
+            RecoveryStrategy::AutomaticRepair {
+                repair_action: "repair".to_string(),
+            },
+        ];
+        for s in &strats {
+            assert!(!format!("{:?}", s).is_empty());
+        }
+    }
+
+    // ── CircuitState variants ─────────────────────────────────────────────
+
+    #[test]
+    fn test_circuit_state_variants() {
+        let states = [
+            CircuitState::Closed,
+            CircuitState::Open,
+            CircuitState::HalfOpen,
+        ];
+        for s in &states {
+            assert!(!format!("{:?}", s).is_empty());
+        }
+    }
+
+    // ── HealthStatus variants ─────────────────────────────────────────────
+
+    #[test]
+    fn test_health_status_variants() {
+        let statuses = [
+            HealthStatus::Healthy,
+            HealthStatus::Degraded,
+            HealthStatus::Unhealthy,
+            HealthStatus::Critical,
+        ];
+        for s in &statuses {
+            assert!(!format!("{:?}", s).is_empty());
+        }
+    }
+
+    // ── CircuitBreaker ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_circuit_breaker_initial_state() {
+        let system = ErrorRecoverySystem::new(ErrorRecoveryConfig::default());
+        assert_eq!(system.circuit_breaker.failure_count, 0);
+        assert!(system.circuit_breaker.last_failure_time.is_none());
+        assert_eq!(system.circuit_breaker.threshold, 5);
+    }
+
+    // ── SystemState struct ────────────────────────────────────────────────
+
+    #[test]
+    fn test_system_state_construction() {
+        let state = SystemState {
+            memory_usage_mb: 2048,
+            cpu_usage_percent: 75.5,
+            active_tensors: 10,
+            active_sessions: 2,
+            uptime_seconds: 3600,
+        };
+        assert_eq!(state.memory_usage_mb, 2048);
+        assert!((state.cpu_usage_percent - 75.5).abs() < 1e-6);
+    }
+
+    // ── HealthMetrics ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_health_metrics_initial_values() {
+        let system = ErrorRecoverySystem::new(ErrorRecoveryConfig::default());
+        let m = &system.health_monitor.health_metrics;
+        assert_eq!(m.error_rate, 0.0);
+        assert_eq!(m.recovery_success_rate, 1.0);
+    }
+
+    // ── async handle_error with open circuit breaker ──────────────────────
+
+    #[tokio::test]
+    async fn test_handle_error_with_open_circuit_breaker() {
+        let mut system = ErrorRecoverySystem::new(ErrorRecoveryConfig::default());
+        system.circuit_breaker.state = CircuitState::Open;
+        let event = make_error_event(ErrorType::IOError);
+        let result = system.handle_error(event).await.expect("should succeed");
+        assert!(!result.success);
+        assert!(result.message.contains("Circuit breaker"));
+    }
+}

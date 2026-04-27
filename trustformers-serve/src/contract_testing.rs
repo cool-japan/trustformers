@@ -1042,4 +1042,326 @@ mod tests {
         assert!(report.contains("Summary"));
         assert!(report.contains(&result.test_id));
     }
+
+    #[test]
+    fn test_default_config() {
+        let config = ContractTestConfig::default();
+        assert!(config.enabled);
+        assert!(!config.strict_mode);
+        assert!(matches!(config.version_tolerance, VersionTolerance::SemVer));
+        assert_eq!(config.test_timeout_ms, 30000);
+        assert_eq!(config.parallel_tests, 4);
+        assert!(config.auto_generate_contracts);
+        assert!(!config.mock_responses);
+    }
+
+    #[tokio::test]
+    async fn test_list_contracts_empty() {
+        let framework = ContractTestingFramework::new(ContractTestConfig::default());
+        let contracts = framework.list_contracts().await;
+        assert!(contracts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_contracts_multiple() {
+        let framework = ContractTestingFramework::new(ContractTestConfig::default());
+
+        for i in 0..3 {
+            let contract = ApiContract {
+                id: format!("c-{}", i),
+                name: format!("Contract {}", i),
+                version: "1.0.0".to_string(),
+                description: "Test".to_string(),
+                endpoints: vec![],
+                models: vec![],
+                headers: vec![],
+                authentication: vec![],
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            framework.register_contract(contract).await.expect("register ok");
+        }
+
+        let contracts = framework.list_contracts().await;
+        assert_eq!(contracts.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_get_nonexistent_contract() {
+        let framework = ContractTestingFramework::new(ContractTestConfig::default());
+        let contract = framework.get_contract("nonexistent").await;
+        assert!(contract.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_run_tests_nonexistent_contract() {
+        let framework = ContractTestingFramework::new(ContractTestConfig::default());
+        let result = framework.run_contract_tests("ghost").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_validate_null_schema() {
+        let framework = ContractTestingFramework::new(ContractTestConfig::default());
+        let schema = serde_json::Value::Null;
+        let result = framework.validate_schema(&schema, "test").await.expect("validate ok");
+        assert!(!result.valid);
+        assert!(!result.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_validate_empty_object_schema() {
+        let framework = ContractTestingFramework::new(ContractTestConfig::default());
+        let schema = serde_json::json!({});
+        let result = framework.validate_schema(&schema, "test").await.expect("validate ok");
+        assert!(result.valid);
+        assert!(!result.warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_validate_field_required_missing() {
+        let framework = ContractTestingFramework::new(ContractTestConfig::default());
+        let schema = serde_json::json!({
+            "properties": {
+                "name": {"type": "string"}
+            }
+        });
+        let result = framework.validate_field("age", &schema, true).await.expect("validate ok");
+        assert!(!result.valid);
+    }
+
+    #[tokio::test]
+    async fn test_validate_field_optional_missing() {
+        let framework = ContractTestingFramework::new(ContractTestConfig::default());
+        let schema = serde_json::json!({
+            "properties": {
+                "name": {"type": "string"}
+            }
+        });
+        let result = framework.validate_field("age", &schema, false).await.expect("validate ok");
+        assert!(result.valid);
+    }
+
+    #[tokio::test]
+    async fn test_validate_field_found() {
+        let framework = ContractTestingFramework::new(ContractTestConfig::default());
+        let schema = serde_json::json!({
+            "properties": {
+                "name": {"type": "string"}
+            }
+        });
+        let result = framework.validate_field("name", &schema, true).await.expect("validate ok");
+        assert!(result.valid);
+    }
+
+    #[tokio::test]
+    async fn test_schema_compatibility_null() {
+        let framework = ContractTestingFramework::new(ContractTestConfig::default());
+        let compat = framework
+            .check_schema_compatibility(&serde_json::Value::Null)
+            .await
+            .expect("ok");
+        assert!(!compat);
+    }
+
+    #[tokio::test]
+    async fn test_schema_compatibility_with_type() {
+        let framework = ContractTestingFramework::new(ContractTestConfig::default());
+        let schema = serde_json::json!({"type": "object"});
+        let compat = framework.check_schema_compatibility(&schema).await.expect("ok");
+        assert!(compat);
+    }
+
+    #[tokio::test]
+    async fn test_schema_compatibility_with_properties() {
+        let framework = ContractTestingFramework::new(ContractTestConfig::default());
+        let schema = serde_json::json!({"properties": {"a": {"type": "string"}}});
+        let compat = framework.check_schema_compatibility(&schema).await.expect("ok");
+        assert!(compat);
+    }
+
+    #[tokio::test]
+    async fn test_schema_compatibility_no_known_keys() {
+        let framework = ContractTestingFramework::new(ContractTestConfig::default());
+        let schema = serde_json::json!({"x": "y"});
+        let compat = framework.check_schema_compatibility(&schema).await.expect("ok");
+        assert!(!compat);
+    }
+
+    #[tokio::test]
+    async fn test_run_all_tests_empty() {
+        let framework = ContractTestingFramework::new(ContractTestConfig::default());
+        let results = framework.run_all_tests().await.expect("ok");
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_model_testing() {
+        let framework = ContractTestingFramework::new(ContractTestConfig::default());
+
+        let contract = ApiContract {
+            id: "model-test".to_string(),
+            name: "Model Test".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Test".to_string(),
+            endpoints: vec![],
+            models: vec![DataModelContract {
+                name: "User".to_string(),
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "age": {"type": "number"}
+                    }
+                }),
+                required_fields: vec!["name".to_string()],
+                optional_fields: vec!["age".to_string()],
+                field_types: HashMap::new(),
+                validation_rules: HashMap::new(),
+                examples: vec![],
+            }],
+            headers: vec![],
+            authentication: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        framework.register_contract(contract).await.expect("register ok");
+        let result = framework.run_contract_tests("model-test").await.expect("test ok");
+        assert_eq!(result.model_results.len(), 1);
+        assert!(matches!(result.model_results[0].status, TestStatus::Passed));
+    }
+
+    #[tokio::test]
+    async fn test_openapi_with_components() {
+        let framework = ContractTestingFramework::new(ContractTestConfig::default());
+        let spec = r#"
+        {
+            "openapi": "3.0.0",
+            "info": {"title": "API", "version": "2.0.0"},
+            "paths": {},
+            "components": {
+                "schemas": {
+                    "User": {
+                        "type": "object",
+                        "required": ["name"],
+                        "properties": {"name": {"type": "string"}}
+                    }
+                }
+            }
+        }"#;
+        let contract = framework.generate_contract_from_openapi(spec).await.expect("gen ok");
+        assert_eq!(contract.models.len(), 1);
+        assert_eq!(contract.models[0].name, "User");
+        assert_eq!(contract.models[0].required_fields, vec!["name".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_openapi_invalid_json() {
+        let framework = ContractTestingFramework::new(ContractTestConfig::default());
+        let result = framework.generate_contract_from_openapi("invalid json").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_test_results_retrieval() {
+        let framework = ContractTestingFramework::new(ContractTestConfig::default());
+        let result = framework.get_test_results("nonexistent").await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_summary_calculation() {
+        let framework = ContractTestingFramework::new(ContractTestConfig::default());
+
+        let contract = ApiContract {
+            id: "summary-test".to_string(),
+            name: "Summary Test".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Test".to_string(),
+            endpoints: vec![
+                EndpointContract {
+                    path: "/a".to_string(),
+                    method: HttpMethod::GET,
+                    request_schema: serde_json::json!({"type": "object"}),
+                    response_schema: serde_json::json!({"type": "object"}),
+                    error_schemas: HashMap::new(),
+                    headers: vec!["Content-Type".to_string()],
+                    query_params: vec![],
+                    path_params: vec![],
+                    content_type: vec!["application/json".to_string()],
+                    response_codes: vec![200],
+                    rate_limit: None,
+                },
+                EndpointContract {
+                    path: "/b".to_string(),
+                    method: HttpMethod::POST,
+                    request_schema: serde_json::json!({"type": "object"}),
+                    response_schema: serde_json::json!({"type": "object"}),
+                    error_schemas: HashMap::new(),
+                    headers: vec![],
+                    query_params: vec![],
+                    path_params: vec![],
+                    content_type: vec!["application/json".to_string()],
+                    response_codes: vec![201],
+                    rate_limit: None,
+                },
+            ],
+            models: vec![],
+            headers: vec![],
+            authentication: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        framework.register_contract(contract).await.expect("register ok");
+        let result = framework.run_contract_tests("summary-test").await.expect("test ok");
+        assert_eq!(result.summary.total_tests, 2);
+        assert!(result.summary.success_rate > 0.0);
+    }
+
+    #[test]
+    fn test_http_method_debug() {
+        let methods = vec![
+            HttpMethod::GET,
+            HttpMethod::POST,
+            HttpMethod::PUT,
+            HttpMethod::DELETE,
+            HttpMethod::PATCH,
+            HttpMethod::HEAD,
+            HttpMethod::OPTIONS,
+        ];
+        for m in methods {
+            assert!(!format!("{:?}", m).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_error_severity_debug() {
+        let severities = vec![
+            ErrorSeverity::Critical,
+            ErrorSeverity::High,
+            ErrorSeverity::Medium,
+            ErrorSeverity::Low,
+            ErrorSeverity::Info,
+        ];
+        for s in severities {
+            assert!(!format!("{:?}", s).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_validation_type_debug() {
+        let types = vec![
+            ValidationType::MinLength,
+            ValidationType::MaxLength,
+            ValidationType::Pattern,
+            ValidationType::Range,
+            ValidationType::Required,
+            ValidationType::Format,
+        ];
+        for t in types {
+            assert!(!format!("{:?}", t).is_empty());
+        }
+    }
 }

@@ -543,7 +543,7 @@ impl TensorInspector {
         sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let median = if sorted_values.is_empty() {
             f64::NAN
-        } else if sorted_values.len() % 2 == 0 {
+        } else if sorted_values.len().is_multiple_of(2) {
             (sorted_values[sorted_values.len() / 2 - 1] + sorted_values[sorted_values.len() / 2])
                 / 2.0
         } else {
@@ -1096,5 +1096,350 @@ impl TensorInspectionReport {
 
     pub fn has_critical_alerts(&self) -> bool {
         self.alerts.iter().any(|a| matches!(a.severity, AlertSeverity::Critical))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scirs2_core::ndarray::{ArrayD, IxDyn};
+
+    fn make_config() -> DebugConfig {
+        DebugConfig::default()
+    }
+
+    fn make_tensor(values: &[f64], shape: &[usize]) -> ArrayD<f64> {
+        ArrayD::from_shape_vec(IxDyn(shape), values.to_vec())
+            .expect("tensor creation should succeed")
+    }
+
+    #[test]
+    fn test_tensor_inspector_creation() {
+        let config = make_config();
+        let inspector = TensorInspector::new(&config);
+        assert!(inspector.get_all_tensors().is_empty());
+        assert!(inspector.get_alerts().is_empty());
+    }
+
+    #[test]
+    fn test_inspect_tensor_basic() {
+        let config = make_config();
+        let mut inspector = TensorInspector::new(&config);
+        let data: Vec<f64> = (0..12).map(|i| i as f64).collect();
+        let tensor = make_tensor(&data, &[3, 4]);
+        let result = inspector.inspect_tensor(&tensor, "test_tensor", None, None);
+        assert!(result.is_ok());
+        let id = result.expect("inspect should succeed");
+        let info = inspector.get_tensor_info(id);
+        assert!(info.is_some());
+        let i = info.expect("info should exist");
+        assert_eq!(i.name, "test_tensor");
+        assert_eq!(i.stats.shape, vec![3, 4]);
+        assert_eq!(i.stats.total_elements, 12);
+    }
+
+    #[test]
+    fn test_inspect_tensor_with_layer_name() {
+        let config = make_config();
+        let mut inspector = TensorInspector::new(&config);
+        let tensor = make_tensor(&[1.0, 2.0, 3.0, 4.0], &[4]);
+        let id = inspector
+            .inspect_tensor(&tensor, "w", Some("layer_0"), Some("matmul"))
+            .expect("inspect should succeed");
+        let info = inspector.get_tensor_info(id).expect("info should exist");
+        assert_eq!(info.layer_name, Some("layer_0".to_string()));
+        assert_eq!(info.operation, Some("matmul".to_string()));
+    }
+
+    #[test]
+    fn test_tensor_stats_computation() {
+        let config = make_config();
+        let mut inspector = TensorInspector::new(&config);
+        let tensor = make_tensor(&[1.0, 2.0, 3.0, 4.0, 5.0], &[5]);
+        let id = inspector
+            .inspect_tensor(&tensor, "stats_test", None, None)
+            .expect("inspect should succeed");
+        let info = inspector.get_tensor_info(id).expect("info should exist");
+        assert!((info.stats.mean - 3.0).abs() < 0.01);
+        assert!((info.stats.min - 1.0).abs() < f64::EPSILON);
+        assert!((info.stats.max - 5.0).abs() < f64::EPSILON);
+        assert_eq!(info.stats.nan_count, 0);
+        assert_eq!(info.stats.inf_count, 0);
+    }
+
+    #[test]
+    fn test_tensor_stats_sparsity() {
+        let config = make_config();
+        let mut inspector = TensorInspector::new(&config);
+        let tensor = make_tensor(&[0.0, 0.0, 1.0, 0.0, 2.0], &[5]);
+        let id = inspector
+            .inspect_tensor(&tensor, "sparse_test", None, None)
+            .expect("inspect should succeed");
+        let info = inspector.get_tensor_info(id).expect("info should exist");
+        assert!((info.stats.sparsity - 0.6).abs() < 0.01);
+        assert_eq!(info.stats.zero_count, 3);
+    }
+
+    #[test]
+    fn test_tensor_norms() {
+        let config = make_config();
+        let mut inspector = TensorInspector::new(&config);
+        let tensor = make_tensor(&[3.0, 4.0], &[2]);
+        let id = inspector
+            .inspect_tensor(&tensor, "norm_test", None, None)
+            .expect("inspect should succeed");
+        let info = inspector.get_tensor_info(id).expect("info should exist");
+        assert!((info.stats.l1_norm - 7.0).abs() < 0.01);
+        assert!((info.stats.l2_norm - 5.0).abs() < 0.01);
+        assert!((info.stats.infinity_norm - 4.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_get_all_tensors() {
+        let config = make_config();
+        let mut inspector = TensorInspector::new(&config);
+        let t1 = make_tensor(&[1.0, 2.0], &[2]);
+        let t2 = make_tensor(&[3.0, 4.0], &[2]);
+        let _ = inspector.inspect_tensor(&t1, "t1", None, None);
+        let _ = inspector.inspect_tensor(&t2, "t2", None, None);
+        assert_eq!(inspector.get_all_tensors().len(), 2);
+    }
+
+    #[test]
+    fn test_get_tensors_by_layer() {
+        let config = make_config();
+        let mut inspector = TensorInspector::new(&config);
+        let t1 = make_tensor(&[1.0], &[1]);
+        let t2 = make_tensor(&[2.0], &[1]);
+        let t3 = make_tensor(&[3.0], &[1]);
+        let _ = inspector.inspect_tensor(&t1, "w1", Some("attn"), None);
+        let _ = inspector.inspect_tensor(&t2, "w2", Some("attn"), None);
+        let _ = inspector.inspect_tensor(&t3, "w3", Some("ffn"), None);
+        let attn_tensors = inspector.get_tensors_by_layer("attn");
+        assert_eq!(attn_tensors.len(), 2);
+        let ffn_tensors = inspector.get_tensors_by_layer("ffn");
+        assert_eq!(ffn_tensors.len(), 1);
+    }
+
+    #[test]
+    fn test_clear() {
+        let config = make_config();
+        let mut inspector = TensorInspector::new(&config);
+        let t = make_tensor(&[1.0, 2.0], &[2]);
+        let _ = inspector.inspect_tensor(&t, "t", None, None);
+        inspector.clear();
+        assert!(inspector.get_all_tensors().is_empty());
+        assert!(inspector.get_alerts().is_empty());
+    }
+
+    #[test]
+    fn test_enable_monitoring() {
+        let config = make_config();
+        let mut inspector = TensorInspector::new(&config);
+        inspector.enable_monitoring(true);
+        assert!(inspector.monitoring_enabled);
+        inspector.enable_monitoring(false);
+        assert!(!inspector.monitoring_enabled);
+    }
+
+    #[test]
+    fn test_track_dependency() {
+        let config = make_config();
+        let mut inspector = TensorInspector::new(&config);
+        let src = Uuid::new_v4();
+        let tgt = Uuid::new_v4();
+        inspector.track_dependency(src, tgt, "matmul", 1.0);
+        assert_eq!(inspector.get_dependencies().len(), 1);
+    }
+
+    #[test]
+    fn test_record_lifecycle_event() {
+        let config = make_config();
+        let mut inspector = TensorInspector::new(&config);
+        let tid = Uuid::new_v4();
+        inspector.record_lifecycle_event(tid, TensorLifecycleEvent::Created { size_bytes: 100 });
+        inspector.record_lifecycle_event(
+            tid,
+            TensorLifecycleEvent::Accessed {
+                access_type: "read".to_string(),
+            },
+        );
+        let lifecycle = inspector.get_lifecycle(tid);
+        assert!(lifecycle.is_some());
+        let lc = lifecycle.expect("lifecycle should exist");
+        assert_eq!(lc.events.len(), 2);
+        assert_eq!(lc.total_accesses, 1);
+    }
+
+    #[test]
+    fn test_update_time_series_disabled() {
+        let config = make_config();
+        let mut inspector = TensorInspector::new(&config);
+        let tid = Uuid::new_v4();
+        let stats = TensorStats {
+            shape: vec![2],
+            dtype: "f64".to_string(),
+            total_elements: 2,
+            mean: 1.0,
+            std: 0.5,
+            min: 0.5,
+            max: 1.5,
+            median: 1.0,
+            l1_norm: 2.0,
+            l2_norm: 1.5,
+            infinity_norm: 1.5,
+            nan_count: 0,
+            inf_count: 0,
+            zero_count: 0,
+            memory_usage_bytes: 16,
+            sparsity: 0.0,
+        };
+        inspector.update_time_series(tid, stats);
+        assert!(inspector.get_time_series(tid).is_none());
+    }
+
+    #[test]
+    fn test_update_time_series_enabled() {
+        let config = make_config();
+        let mut inspector = TensorInspector::new(&config);
+        inspector.enable_monitoring(true);
+        let tid = Uuid::new_v4();
+        let stats = TensorStats {
+            shape: vec![2],
+            dtype: "f64".to_string(),
+            total_elements: 2,
+            mean: 1.0,
+            std: 0.5,
+            min: 0.5,
+            max: 1.5,
+            median: 1.0,
+            l1_norm: 2.0,
+            l2_norm: 1.5,
+            infinity_norm: 1.5,
+            nan_count: 0,
+            inf_count: 0,
+            zero_count: 0,
+            memory_usage_bytes: 16,
+            sparsity: 0.0,
+        };
+        inspector.update_time_series(tid, stats);
+        let ts = inspector.get_time_series(tid);
+        assert!(ts.is_some());
+        assert_eq!(ts.expect("ts should exist").values.len(), 1);
+    }
+
+    #[test]
+    fn test_analyze_tensor_relationships_empty() {
+        let config = make_config();
+        let inspector = TensorInspector::new(&config);
+        let rels = inspector.analyze_tensor_relationships();
+        assert!(rels.is_empty());
+    }
+
+    #[test]
+    fn test_analyze_tensor_relationships_with_deps() {
+        let config = make_config();
+        let mut inspector = TensorInspector::new(&config);
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let c = Uuid::new_v4();
+        inspector.track_dependency(a, b, "add", 1.0);
+        inspector.track_dependency(a, c, "mul", 0.5);
+        let rels = inspector.analyze_tensor_relationships();
+        assert_eq!(rels.len(), 1);
+        let targets = &rels[&a];
+        assert_eq!(targets.len(), 2);
+    }
+
+    #[test]
+    fn test_get_frequent_tensors() {
+        let config = make_config();
+        let mut inspector = TensorInspector::new(&config);
+        let tid = Uuid::new_v4();
+        for _ in 0..5 {
+            inspector.record_lifecycle_event(
+                tid,
+                TensorLifecycleEvent::Accessed {
+                    access_type: "read".to_string(),
+                },
+            );
+        }
+        let frequent = inspector.get_frequent_tensors(3);
+        assert_eq!(frequent.len(), 1);
+        let infrequent = inspector.get_frequent_tensors(10);
+        assert!(infrequent.is_empty());
+    }
+
+    #[test]
+    fn test_perform_advanced_analysis() {
+        let config = make_config();
+        let inspector = TensorInspector::new(&config);
+        let tensor = make_tensor(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        let result = inspector.perform_advanced_analysis(&tensor);
+        assert!(result.is_ok());
+        let analysis = result.expect("analysis should succeed");
+        assert!(analysis.information_content.entropy >= 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_generate_report() {
+        let config = make_config();
+        let mut inspector = TensorInspector::new(&config);
+        let t = make_tensor(&[1.0, 2.0, 3.0], &[3]);
+        let _ = inspector.inspect_tensor(&t, "report_test", None, None);
+        let report = inspector.generate_report().await;
+        assert!(report.is_ok());
+        let r = report.expect("report should succeed");
+        assert_eq!(r.total_tensors, 1);
+        assert_eq!(r.tensors_with_issues, 0);
+    }
+
+    #[tokio::test]
+    async fn test_start() {
+        let config = make_config();
+        let mut inspector = TensorInspector::new(&config);
+        let result = inspector.start().await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_inspection_report_methods() {
+        let report = TensorInspectionReport {
+            total_tensors: 5,
+            tensors_with_issues: 0,
+            total_memory_usage: 1024,
+            alerts: vec![],
+            comparisons: vec![],
+            summary_stats: HashMap::new(),
+        };
+        assert!(!report.has_nan_values());
+        assert!(!report.has_inf_values());
+        assert_eq!(report.total_nan_count(), 0);
+        assert_eq!(report.total_inf_count(), 0);
+        assert!(!report.has_critical_alerts());
+    }
+
+    #[test]
+    fn test_compare_tensors() {
+        let config = make_config();
+        let mut inspector = TensorInspector::new(&config);
+        let t1 = make_tensor(&[1.0, 2.0, 3.0], &[3]);
+        let t2 = make_tensor(&[1.1, 2.1, 3.1], &[3]);
+        let id1 = inspector.inspect_tensor(&t1, "t1", None, None).expect("inspect should succeed");
+        let id2 = inspector.inspect_tensor(&t2, "t2", None, None).expect("inspect should succeed");
+        let comparison = inspector.compare_tensors(id1, id2);
+        assert!(comparison.is_ok());
+        let c = comparison.expect("comparison should succeed");
+        assert!(c.shape_match);
+        assert!(c.dtype_match);
+    }
+
+    #[test]
+    fn test_compare_tensors_missing() {
+        let config = make_config();
+        let mut inspector = TensorInspector::new(&config);
+        let missing = Uuid::new_v4();
+        let result = inspector.compare_tensors(missing, missing);
+        assert!(result.is_err());
     }
 }

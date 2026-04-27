@@ -1086,7 +1086,7 @@ impl FaultHandler {
     }
 
     pub fn should_checkpoint(&self, step: usize) -> bool {
-        step % self.config.checkpoint_frequency == 0
+        step.is_multiple_of(self.config.checkpoint_frequency)
     }
 
     pub fn handle_node_failure(&mut self, node_id: usize) -> Result<bool> {

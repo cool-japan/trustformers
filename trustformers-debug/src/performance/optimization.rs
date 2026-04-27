@@ -717,3 +717,167 @@ pub fn ultra_low_overhead_session() -> LowOverheadDebugSession {
 
     optimized_debug_session(selective_config, performance_config)
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── PerformanceConfig::default() ────────────────────────────────────────
+
+    #[test]
+    fn test_performance_config_default() {
+        let cfg = PerformanceConfig::default();
+        assert!(!cfg.low_overhead_mode);
+        assert!(!cfg.selective_debugging);
+        assert!(cfg.lazy_evaluation);
+        assert!(cfg.incremental_updates);
+        assert!(cfg.background_processing);
+        assert!((cfg.sampling_rate - 1.0).abs() < 1e-6);
+        assert!(cfg.max_memory_mb > 0);
+        assert!(cfg.max_cpu_percentage > 0.0);
+        assert!(cfg.background_batch_size > 0);
+        assert!(cfg.incremental_update_interval_ms > 0);
+    }
+
+    #[test]
+    fn test_performance_config_low_overhead() {
+        let cfg = PerformanceConfig {
+            low_overhead_mode: true,
+            selective_debugging: true,
+            sampling_rate: 0.01,
+            max_memory_mb: 100,
+            max_cpu_percentage: 5.0,
+            ..PerformanceConfig::default()
+        };
+        assert!(cfg.low_overhead_mode);
+        assert!((cfg.sampling_rate - 0.01).abs() < 1e-6);
+    }
+
+    // ── DebugComponent variants ───────────────────────────────────────────
+
+    #[test]
+    fn test_debug_component_variants() {
+        let components = [
+            DebugComponent::TensorInspection,
+            DebugComponent::GradientDebugging,
+            DebugComponent::ModelDiagnostics,
+            DebugComponent::MemoryProfiling,
+            DebugComponent::ComputationGraphAnalysis,
+            DebugComponent::AnomalyDetection,
+            DebugComponent::PerformanceProfiling,
+            DebugComponent::ArchitectureAnalysis,
+            DebugComponent::BehaviorAnalysis,
+            DebugComponent::TrainingDynamics,
+        ];
+        for c in &components {
+            assert!(!format!("{:?}", c).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_debug_component_equality() {
+        assert_eq!(
+            DebugComponent::TensorInspection,
+            DebugComponent::TensorInspection
+        );
+        assert_ne!(
+            DebugComponent::TensorInspection,
+            DebugComponent::GradientDebugging
+        );
+    }
+
+    // ── DebugPriority variants ────────────────────────────────────────────
+
+    #[test]
+    fn test_debug_priority_variants() {
+        let priorities = [
+            DebugPriority::Low,
+            DebugPriority::Medium,
+            DebugPriority::High,
+            DebugPriority::Critical,
+        ];
+        for p in &priorities {
+            assert!(!format!("{:?}", p).is_empty());
+        }
+    }
+
+    // ── SelectiveDebugConfig ──────────────────────────────────────────────
+
+    #[test]
+    fn test_production_monitoring_config() {
+        let cfg = SelectiveDebugConfig::production_monitoring();
+        assert!(cfg.components.contains(&DebugComponent::AnomalyDetection));
+        assert!(!cfg.sampling_rules.is_empty());
+        assert!(!cfg.priority_rules.is_empty());
+    }
+
+    #[test]
+    fn test_development_debugging_config() {
+        let cfg = SelectiveDebugConfig::development_debugging();
+        assert!(cfg.components.contains(&DebugComponent::GradientDebugging));
+        assert!(cfg.components.contains(&DebugComponent::ModelDiagnostics));
+        assert!(cfg.resource_limits.max_memory_per_component_mb > 0);
+    }
+
+    #[test]
+    fn test_resource_limits_in_production_config() {
+        let cfg = SelectiveDebugConfig::production_monitoring();
+        let limits = &cfg.resource_limits;
+        assert!(limits.max_memory_per_component_mb > 0);
+        assert!(limits.max_cpu_per_component_percentage > 0.0);
+        assert!(limits.max_concurrent_operations > 0);
+    }
+
+    // ── optimized_debug_session ───────────────────────────────────────────
+
+    #[test]
+    fn test_optimized_debug_session_creation() {
+        let selective_cfg = SelectiveDebugConfig::production_monitoring();
+        let perf_cfg = PerformanceConfig::default();
+        // Verify session was created without panicking.
+        let _session = optimized_debug_session(selective_cfg, perf_cfg);
+    }
+
+    #[test]
+    fn test_low_overhead_session_creation() {
+        let selective_cfg = SelectiveDebugConfig::production_monitoring();
+        let perf_cfg = PerformanceConfig {
+            low_overhead_mode: true,
+            ..PerformanceConfig::default()
+        };
+        // Just verify construction doesn't panic.
+        let _session = optimized_debug_session(selective_cfg, perf_cfg);
+    }
+
+    #[test]
+    fn test_ultra_low_overhead_session_creation() {
+        // Verify creation of the ultra-low overhead session doesn't panic.
+        let _session = ultra_low_overhead_session();
+    }
+
+    // ── InterpretabilityAnalyzer ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_interpretability_analyzer_generate_report() {
+        let analyzer = InterpretabilityAnalyzer::new(InterpretabilityConfig);
+        let report = analyzer.generate_report().await.expect("should succeed");
+        let _ = format!("{:?}", report);
+    }
+
+    #[tokio::test]
+    async fn test_interpretability_analyzer_shap() {
+        let analyzer = InterpretabilityAnalyzer::new(InterpretabilityConfig);
+        let mut instance = HashMap::new();
+        instance.insert("f0".to_string(), 1.0_f64);
+        instance.insert("f1".to_string(), 2.0_f64);
+        let result = analyzer
+            .analyze_shap(&instance, &[0.5, 0.7], &[])
+            .await
+            .expect("should succeed");
+        assert!(!result.is_empty());
+    }
+}

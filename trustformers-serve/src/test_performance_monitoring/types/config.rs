@@ -788,3 +788,229 @@ pub struct InAppNotificationSettings {
     pub notification_type: String,
     pub auto_dismiss_duration: Option<Duration>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_test_performance_monitoring_config_default() {
+        let config = TestPerformanceMonitoringConfig::default();
+        assert!(config.enable_real_time);
+        assert_eq!(config.monitoring_interval, Duration::from_secs(5));
+        assert_eq!(config.retention_period, Duration::from_secs(7 * 24 * 3600));
+    }
+
+    #[test]
+    fn test_report_config_default() {
+        let config = ReportConfig::default();
+        assert!(config.generate_detailed_reports);
+        assert!(config.include_historical_data);
+        assert_eq!(config.export_formats.len(), 2);
+        assert!(config.auto_generate_interval.is_some());
+        assert_eq!(config.report_sections.len(), 4);
+    }
+
+    #[test]
+    fn test_stream_config_default() {
+        let config = StreamConfig::default();
+        assert_eq!(config.max_buffer_size, 10000);
+        assert_eq!(config.batch_size, 100);
+        assert!(config.enable_compression);
+        assert!(config.rate_limiting.is_some());
+        assert_eq!(config.priority_levels.len(), 4);
+    }
+
+    #[test]
+    fn test_monitoring_config_default() {
+        let config = MonitoringConfig::default();
+        assert_eq!(config.collection_interval, Duration::from_millis(1000));
+        assert_eq!(config.metrics_buffer_size, 1000);
+        assert_eq!(config.performance_thresholds.len(), 2);
+        assert!(!config.enable_detailed_tracing);
+    }
+
+    #[test]
+    fn test_anomaly_detection_config_default() {
+        let config = AnomalyDetectionConfig::default();
+        assert!(config.enabled);
+        assert!((config.sensitivity - 0.95).abs() < 1e-9);
+        assert_eq!(config.training_window_size, 100);
+    }
+
+    #[test]
+    fn test_data_retention_config_default() {
+        let config = DataRetentionConfig::default();
+        assert_eq!(config.raw_data_retention, Duration::from_secs(24 * 3600));
+        assert_eq!(
+            config.aggregated_data_retention,
+            Duration::from_secs(30 * 24 * 3600)
+        );
+    }
+
+    #[test]
+    fn test_compression_config_default() {
+        let config = CompressionConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.compression_level, 6);
+    }
+
+    #[test]
+    fn test_archival_config_default() {
+        let config = ArchivalConfig::default();
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn test_event_storage_config_default() {
+        let config = EventStorageConfig::default();
+        assert_eq!(config.max_storage_size, 100 * 1024 * 1024);
+        assert!(config.storage_path.is_none());
+        assert!(!config.persistent);
+    }
+
+    #[test]
+    fn test_event_indexing_config_default() {
+        let config = EventIndexingConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.indexed_fields.len(), 3);
+    }
+
+    #[test]
+    fn test_event_retention_config_default() {
+        let config = EventRetentionConfig::default();
+        assert_eq!(config.max_events, 1000000);
+    }
+
+    #[test]
+    fn test_rate_limit_config_default() {
+        let config = RateLimitConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.max_events_per_second, 1000);
+        assert_eq!(config.burst_capacity, 2000);
+    }
+
+    #[test]
+    fn test_correlation_config_default() {
+        let config = CorrelationConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.correlation_window, Duration::from_secs(60));
+        assert_eq!(config.correlation_fields.len(), 2);
+    }
+
+    #[test]
+    fn test_pattern_config_default() {
+        let config = PatternConfig::default();
+        assert!(config.enabled);
+        assert!(config.pattern_rules.is_empty());
+    }
+
+    #[test]
+    fn test_enrichment_config_default() {
+        let config = EnrichmentConfig::default();
+        assert!(!config.enabled);
+        assert!(config.enrichment_sources.is_empty());
+    }
+
+    #[test]
+    fn test_outlier_detection_config_default() {
+        let config = OutlierDetectionConfig::default();
+        assert!((config.threshold - 2.0).abs() < 1e-9);
+        assert!((config.sensitivity - 0.95).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_user_preferences_default() {
+        let prefs = UserPreferences::default();
+        assert!(prefs.email_enabled);
+        assert!(!prefs.push_enabled);
+        assert_eq!(prefs.notification_frequency, 300);
+        assert_eq!(prefs.theme, "light");
+    }
+
+    #[test]
+    fn test_aggregation_config_default() {
+        let config = AggregationConfig::default();
+        assert_eq!(config.window_size, Duration::from_secs(60));
+        assert!(config.enable_percentiles);
+        assert_eq!(config.percentiles.len(), 4);
+        assert!(!config.enable_outlier_detection);
+    }
+
+    #[test]
+    fn test_suppression_config_default() {
+        let config = SuppressionConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.duration, Duration::from_secs(3600));
+        assert!(config.rules.is_empty());
+    }
+
+    #[test]
+    fn test_historical_data_config_default() {
+        let config = HistoricalDataConfig::default();
+        assert_eq!(config.retention_days, 30);
+        assert!(config.compression_enabled);
+    }
+
+    #[test]
+    fn test_historical_cache_config_default() {
+        let config = HistoricalCacheConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.min_execution_time_ms, 250);
+        assert_eq!(config.max_cacheable_size_mb, 512);
+        assert_eq!(config.max_entries, 10_000);
+    }
+
+    #[test]
+    fn test_real_time_monitoring_config_default() {
+        let config = RealTimeMonitoringConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.sampling_interval_ms, 1000);
+        assert!((config.alert_threshold - 0.8).abs() < 1e-9);
+        assert!(config.compression_enabled);
+        assert_eq!(config.buffer_size, 10_000);
+    }
+
+    #[test]
+    fn test_alert_config_default() {
+        let config = AlertConfig::default();
+        assert!(!config.enabled);
+        assert!(config.notification_channels.is_empty());
+    }
+
+    #[test]
+    fn test_subscription_config_default() {
+        let config = SubscriptionConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.max_subscriptions_per_user, 0);
+    }
+
+    #[test]
+    fn test_quality_settings_default() {
+        let settings = QualitySettings::default();
+        assert_eq!(settings.quality_level, 0);
+        assert!(!settings.preserve_metadata);
+        assert!(!settings.verify_integrity);
+    }
+
+    #[test]
+    fn test_trend_detection_config_default() {
+        let config = TrendDetectionConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.window_size, 0);
+    }
+
+    #[test]
+    fn test_analytics_config_default() {
+        let config = AnalyticsConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.retention_days, 0);
+    }
+
+    #[test]
+    fn test_dashboard_config_default() {
+        let config = DashboardConfig::default();
+        assert!(config.dashboard_id.is_empty());
+        assert!(config.filters.is_empty());
+    }
+}

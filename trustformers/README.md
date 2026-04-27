@@ -1,6 +1,6 @@
 # trustformers
 
-**Version:** 0.1.0 | **Status:** Alpha | **Updated:** 2026-03-21
+**Version:** 0.1.1 | **Status:** Alpha | **Updated:** 2026-04-25
 
 Main integration crate providing high-level APIs, pipelines, and Hugging Face Hub integration for the TrustformeRS ecosystem.
 

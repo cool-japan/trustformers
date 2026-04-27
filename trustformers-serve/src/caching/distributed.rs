@@ -490,3 +490,186 @@ fn hash_key(key: &str) -> u64 {
     key.hash(&mut hasher);
     hasher.finish()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::caching::config::{ConsistencyLevel, DistributedConfig};
+    use std::time::Duration;
+
+    fn make_config_with_nodes(node_addrs: Vec<&str>) -> DistributedConfig {
+        DistributedConfig {
+            nodes: node_addrs.into_iter().map(|s| s.to_string()).collect(),
+            replication_factor: 1,
+            consistency_level: ConsistencyLevel::Eventual,
+            connection_timeout: Duration::from_secs(1),
+            request_timeout: Duration::from_secs(1),
+            retry_attempts: 1,
+            enable_failover: true,
+            health_check_interval: Duration::from_secs(30),
+        }
+    }
+
+    // --- CacheNode tests ---
+
+    #[test]
+    fn test_cache_node_construction() {
+        let node = CacheNode {
+            id: "node-0".to_string(),
+            address: "localhost:6379".to_string(),
+            is_healthy: true,
+            last_health_check: 0,
+        };
+        assert_eq!(node.id, "node-0");
+        assert!(node.is_healthy);
+    }
+
+    // --- ConsistentHashing tests ---
+
+    #[test]
+    fn test_consistent_hashing_finds_node() {
+        let nodes = vec![CacheNode {
+            id: "n0".to_string(),
+            address: "localhost:6379".to_string(),
+            is_healthy: true,
+            last_health_check: 0,
+        }];
+        let ring = ConsistentHashing::new(nodes);
+        let result = ring.get_node("some_key");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_consistent_hashing_empty_nodes_returns_none() {
+        let ring = ConsistentHashing::new(vec![]);
+        let result = ring.get_node("any_key");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_consistent_hashing_same_key_same_node() {
+        let nodes = vec![
+            CacheNode {
+                id: "n0".to_string(),
+                address: "a:1".to_string(),
+                is_healthy: true,
+                last_health_check: 0,
+            },
+            CacheNode {
+                id: "n1".to_string(),
+                address: "b:2".to_string(),
+                is_healthy: true,
+                last_health_check: 0,
+            },
+        ];
+        let ring = ConsistentHashing::new(nodes);
+        let r1 = ring.get_node("stable_key");
+        let r2 = ring.get_node("stable_key");
+        match (r1, r2) {
+            (Some(a), Some(b)) => assert_eq!(a.id, b.id),
+            _ => panic!("Expected both to return a node"),
+        }
+    }
+
+    // --- CacheCluster tests ---
+
+    #[tokio::test]
+    async fn test_cluster_put_and_get() {
+        let config = make_config_with_nodes(vec!["localhost:6379"]);
+        let cluster = CacheCluster::new(config);
+        cluster.put("key1", b"value1".to_vec()).await.expect("put should succeed");
+        let result = cluster.get("key1").await;
+        assert!(result.is_some());
+        assert_eq!(result.expect("should be Some"), b"value1");
+    }
+
+    #[tokio::test]
+    async fn test_cluster_get_missing_key_returns_none() {
+        let config = make_config_with_nodes(vec!["localhost:6379"]);
+        let cluster = CacheCluster::new(config);
+        assert!(cluster.get("nonexistent").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_cluster_remove_deletes_key() {
+        let config = make_config_with_nodes(vec!["localhost:6379"]);
+        let cluster = CacheCluster::new(config);
+        cluster.put("del_key", b"v".to_vec()).await.expect("put should succeed");
+        cluster.remove("del_key").await.expect("remove should succeed");
+        assert!(cluster.get("del_key").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_cluster_clear_all_removes_everything() {
+        let config = make_config_with_nodes(vec!["localhost:6379"]);
+        let cluster = CacheCluster::new(config);
+        cluster.put("a", b"1".to_vec()).await.expect("put should succeed");
+        cluster.put("b", b"2".to_vec()).await.expect("put should succeed");
+        cluster.clear_all().await.expect("clear_all should succeed");
+        assert!(cluster.get("a").await.is_none());
+        assert!(cluster.get("b").await.is_none());
+    }
+
+    #[test]
+    fn test_cluster_node_count() {
+        let config = make_config_with_nodes(vec!["a:1", "b:2", "c:3"]);
+        let cluster = CacheCluster::new(config);
+        assert_eq!(cluster.node_count(), 3);
+    }
+
+    // --- DistributedCache tests ---
+
+    #[tokio::test]
+    async fn test_distributed_cache_put_and_get() {
+        let config = make_config_with_nodes(vec!["localhost:6379"]);
+        let cache = DistributedCache::new(config);
+        cache.put("test_key", b"test_val".to_vec()).await.expect("put should succeed");
+        let result = cache.get("test_key").await;
+        assert!(result.is_some());
+        assert_eq!(result.expect("should be Some"), b"test_val");
+    }
+
+    #[tokio::test]
+    async fn test_distributed_cache_invalidate_all() {
+        let config = make_config_with_nodes(vec!["localhost:6379"]);
+        let cache = DistributedCache::new(config);
+        cache.put("k1", b"v1".to_vec()).await.expect("put should succeed");
+        cache.invalidate_all().await.expect("invalidate_all should succeed");
+        assert!(cache.get("k1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_distributed_cache_stats_reports_healthy_nodes() {
+        let config = make_config_with_nodes(vec!["localhost:1", "localhost:2"]);
+        let cache = DistributedCache::new(config);
+        let stats = cache.get_stats().await.expect("stats should succeed");
+        assert_eq!(stats.node_count, 2);
+        assert_eq!(stats.healthy_nodes, 2);
+    }
+
+    #[tokio::test]
+    async fn test_distributed_cache_update_config_changes_node_count() {
+        let config_1 = make_config_with_nodes(vec!["localhost:1"]);
+        let cache = DistributedCache::new(config_1);
+        let config_2 = make_config_with_nodes(vec!["localhost:1", "localhost:2"]);
+        cache.update_config(config_2).await.expect("update_config should succeed");
+        let stats = cache.get_stats().await.expect("stats should succeed");
+        assert_eq!(stats.node_count, 2);
+    }
+
+    // --- hash_key determinism ---
+
+    #[test]
+    fn test_hash_key_deterministic() {
+        let h1 = hash_key("hello");
+        let h2 = hash_key("hello");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_hash_key_different_inputs_different_hashes() {
+        let h1 = hash_key("key_a");
+        let h2 = hash_key("key_b");
+        assert_ne!(h1, h2);
+    }
+}

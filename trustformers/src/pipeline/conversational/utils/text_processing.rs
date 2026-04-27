@@ -157,3 +157,148 @@ impl TextProcessor {
         std::time::Duration::from_secs(minutes * 60)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_estimate_token_count_empty() {
+        let count = TextProcessor::estimate_token_count("");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_estimate_token_count_basic() {
+        let text = "Hello, world! This is a test."; // 29 chars => 7
+        let count = TextProcessor::estimate_token_count(text);
+        assert_eq!(count, text.len() / 4);
+    }
+
+    #[test]
+    fn test_clean_text_trims_whitespace() {
+        let result = TextProcessor::clean_text("  hello world  ");
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_clean_text_collapses_double_spaces() {
+        let result = TextProcessor::clean_text("hello  world");
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_clean_text_normalizes_tabs() {
+        let result = TextProcessor::clean_text("hello\tworld");
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_clean_text_normalizes_crlf() {
+        let result = TextProcessor::clean_text("line1\r\nline2");
+        assert_eq!(result, "line1\nline2");
+    }
+
+    #[test]
+    fn test_clean_generated_response_removes_eos_tokens() {
+        let result = TextProcessor::clean_generated_response("Hello<|endoftext|>");
+        assert!(!result.contains("<|endoftext|>"));
+    }
+
+    #[test]
+    fn test_clean_generated_response_removes_end_token() {
+        let result = TextProcessor::clean_generated_response("Hello<|end|> World");
+        assert!(!result.contains("<|end|>"));
+    }
+
+    #[test]
+    fn test_clean_generated_response_adds_period() {
+        let result = TextProcessor::clean_generated_response("Hello world");
+        assert!(result.ends_with('.'));
+    }
+
+    #[test]
+    fn test_clean_generated_response_no_double_period() {
+        let result = TextProcessor::clean_generated_response("Hello world.");
+        assert!(result.ends_with('.'));
+        assert!(!result.ends_with(".."));
+    }
+
+    #[test]
+    fn test_clean_generated_response_truncates_long_text() {
+        let long_text = "a".repeat(2500);
+        let result = TextProcessor::clean_generated_response(&long_text);
+        assert!(result.len() <= 2000);
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_clean_generated_response_enhanced_removes_bert_tokens() {
+        let result = TextProcessor::clean_generated_response_enhanced("[CLS] Hello [SEP]");
+        assert!(!result.contains("[CLS]"));
+        assert!(!result.contains("[SEP]"));
+    }
+
+    #[test]
+    fn test_clean_generated_response_enhanced_removes_pad_tokens() {
+        let result = TextProcessor::clean_generated_response_enhanced("text[PAD][UNK]");
+        assert!(!result.contains("[PAD]"));
+        assert!(!result.contains("[UNK]"));
+    }
+
+    #[test]
+    fn test_normalize_for_comparison_lowercases() {
+        let result = TextProcessor::normalize_for_comparison("Hello World");
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_normalize_for_comparison_removes_punctuation() {
+        let result = TextProcessor::normalize_for_comparison("hello, world!");
+        assert!(!result.contains(','));
+        assert!(!result.contains('!'));
+    }
+
+    #[test]
+    fn test_normalize_for_comparison_collapses_whitespace() {
+        let result = TextProcessor::normalize_for_comparison("hello   world");
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_extract_sentences_basic() {
+        let sentences = TextProcessor::extract_sentences("Hello world. How are you? I am fine.");
+        assert!(!sentences.is_empty());
+    }
+
+    #[test]
+    fn test_count_words_empty() {
+        assert_eq!(TextProcessor::count_words(""), 0);
+    }
+
+    #[test]
+    fn test_count_words_single() {
+        assert_eq!(TextProcessor::count_words("hello"), 1);
+    }
+
+    #[test]
+    fn test_count_words_multiple() {
+        assert_eq!(TextProcessor::count_words("one two three four"), 4);
+    }
+
+    #[test]
+    fn test_estimate_reading_time_basic() {
+        // 200 words at 200 wpm = 1 minute
+        let text = (0..200).map(|_| "word").collect::<Vec<_>>().join(" ");
+        let duration = TextProcessor::estimate_reading_time(&text, 200);
+        assert_eq!(duration.as_secs(), 60);
+    }
+
+    #[test]
+    fn test_estimate_reading_time_zero_wpm_division_safe() {
+        // With wpm=1 and 60 words => 60 minutes
+        let text = (0..60).map(|_| "word").collect::<Vec<_>>().join(" ");
+        let duration = TextProcessor::estimate_reading_time(&text, 1);
+        assert_eq!(duration.as_secs(), 3600);
+    }
+}

@@ -11,8 +11,8 @@ fn main() -> Result<()> {
     println!("Test Case: 2x3 @ 3x2 = 2x2\n");
 
     // Matrix A (2x3)
-    let a_data = vec![
-        1.0, 2.0, 3.0, // Row 0
+    let a_data = [
+        1.0_f32, 2.0, 3.0, // Row 0
         4.0, 5.0, 6.0, // Row 1
     ];
     println!("Matrix A (2x3):");
@@ -20,8 +20,8 @@ fn main() -> Result<()> {
     println!("  [{}, {}, {}]\n", a_data[3], a_data[4], a_data[5]);
 
     // Matrix B (3x2)
-    let b_data = vec![
-        7.0, 8.0, // Row 0
+    let b_data = [
+        7.0_f32, 8.0, // Row 0
         9.0, 10.0, // Row 1
         11.0, 12.0, // Row 2
     ];

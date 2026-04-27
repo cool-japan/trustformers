@@ -1241,4 +1241,158 @@ mod tests {
         assert_eq!(stats.total_anomalies_detected, 0);
         assert_eq!(stats.success_rate, 0.0);
     }
+
+    // ── Additional tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_config_default_auto_detection_enabled() {
+        let cfg = GradientRecoveryConfig::default();
+        assert!(cfg.auto_detection);
+    }
+
+    #[test]
+    fn test_config_default_auto_recovery_enabled() {
+        let cfg = GradientRecoveryConfig::default();
+        assert!(cfg.auto_recovery);
+    }
+
+    #[test]
+    fn test_config_default_max_norm_positive() {
+        let cfg = GradientRecoveryConfig::default();
+        assert!(cfg.max_gradient_norm > 0.0);
+    }
+
+    #[test]
+    fn test_config_default_min_norm_positive() {
+        let cfg = GradientRecoveryConfig::default();
+        assert!(cfg.min_gradient_norm > 0.0);
+        assert!(cfg.min_gradient_norm < cfg.max_gradient_norm);
+    }
+
+    #[test]
+    fn test_config_default_nan_tolerance_positive() {
+        let cfg = GradientRecoveryConfig::default();
+        assert!(cfg.nan_tolerance_attempts > 0);
+    }
+
+    #[test]
+    fn test_config_default_clipping_percentile_range() {
+        let cfg = GradientRecoveryConfig::default();
+        assert!(cfg.clipping_percentile > 0.0 && cfg.clipping_percentile <= 100.0);
+    }
+
+    #[test]
+    fn test_gradient_anomaly_type_variants() {
+        let types = [
+            GradientAnomalyType::GradientExplosion,
+            GradientAnomalyType::GradientVanishing,
+            GradientAnomalyType::NaNGradients,
+            GradientAnomalyType::InfiniteGradients,
+            GradientAnomalyType::ZeroGradients,
+        ];
+        // All variants are distinct
+        for (i, t1) in types.iter().enumerate() {
+            for (j, t2) in types.iter().enumerate() {
+                if i == j {
+                    assert_eq!(t1, t2);
+                } else {
+                    assert_ne!(t1, t2);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_gradient_severity_variants_exist() {
+        let _ = GradientSeverity::Minor;
+        let _ = GradientSeverity::Moderate;
+        let _ = GradientSeverity::Severe;
+        let _ = GradientSeverity::Critical;
+    }
+
+    #[test]
+    fn test_recovery_strategy_clip_by_norm() {
+        let strategy = GradientRecoveryStrategy::ClipByNorm { max_norm: 1.0 };
+        let _ = strategy;
+    }
+
+    #[test]
+    fn test_recovery_strategy_reset_variant() {
+        let strategy = GradientRecoveryStrategy::Reset;
+        let _ = strategy;
+    }
+
+    #[test]
+    fn test_layer_stats_all_zeros_ratio() {
+        let cfg = GradientRecoveryConfig::default();
+        let manager = GradientRecoveryManager::new(cfg);
+        let tensor =
+            Tensor::from_data(vec![0.0, 0.0, 0.0, 0.0], &[4]).expect("tensor creation failed");
+        let stats = manager.compute_layer_stats(&tensor).expect("compute_layer_stats failed");
+        assert!(
+            (stats.zero_ratio - 1.0).abs() < 1e-5,
+            "all zeros => zero_ratio=1.0"
+        );
+    }
+
+    #[test]
+    fn test_gradient_norm_multiple_layers() {
+        let cfg = GradientRecoveryConfig::default();
+        let manager = GradientRecoveryManager::new(cfg);
+        let mut gradients = HashMap::new();
+        gradients.insert(
+            "a".to_string(),
+            Tensor::from_data(vec![3.0, 4.0], &[2]).expect("tensor failed"),
+        );
+        gradients.insert(
+            "b".to_string(),
+            Tensor::from_data(vec![0.0, 0.0], &[2]).expect("tensor failed"),
+        );
+        let norm = manager.compute_gradient_norm(&gradients).expect("norm failed");
+        // ||a||^2 + ||b||^2 = 25 + 0 => sqrt(25) = 5.0
+        assert!(
+            (norm - 5.0).abs() < 1e-4,
+            "norm should be 5.0, got {}",
+            norm
+        );
+    }
+
+    #[test]
+    fn test_layer_stats_no_nan_no_inf_for_normal_values() {
+        let cfg = GradientRecoveryConfig::default();
+        let manager = GradientRecoveryManager::new(cfg);
+        let tensor = Tensor::from_data(vec![1.0, -1.0, 2.0], &[3]).expect("tensor creation failed");
+        let stats = manager.compute_layer_stats(&tensor).expect("compute failed");
+        assert!(!stats.has_nan);
+        assert!(!stats.has_inf);
+    }
+
+    #[test]
+    fn test_recovery_statistics_total_recoveries_starts_zero() {
+        let cfg = GradientRecoveryConfig::default();
+        let manager = GradientRecoveryManager::new(cfg);
+        let stats = manager.get_recovery_statistics();
+        assert_eq!(stats.total_recoveries_attempted, 0);
+        assert_eq!(stats.successful_recoveries, 0);
+    }
+
+    #[test]
+    fn test_detect_anomaly_normal_gradients_no_anomaly() {
+        let cfg = GradientRecoveryConfig::default();
+        let mut manager = GradientRecoveryManager::new(cfg);
+        let mut gradients = HashMap::new();
+        let t = Tensor::from_data(vec![0.1f32, 0.2, 0.1], &[3]).unwrap_or_else(|_| {
+            Tensor::zeros(&[3])
+                .unwrap_or_else(|_| Tensor::from_data(vec![0.0f32], &[1]).expect("fallback"))
+        });
+        gradients.insert("layer1".to_string(), t);
+        let result = manager.detect_anomaly(0, &gradients);
+        // Normal gradients should not trigger anomaly
+        assert!(result.is_ok());
+        let anomaly = result.unwrap_or(None);
+        // Either None or Minor
+        if let Some(a) = anomaly {
+            assert!(matches!(a.severity, GradientSeverity::Minor));
+        }
+    }
 }

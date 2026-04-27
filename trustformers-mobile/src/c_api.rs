@@ -556,7 +556,7 @@ pub unsafe extern "C" fn trustformers_mobile_free_string(ptr: *mut c_char) {
 /// Get library version
 #[no_mangle]
 pub extern "C" fn trustformers_mobile_version() -> *const c_char {
-    b"1.0.0\0".as_ptr() as *const c_char
+    c"1.0.0".as_ptr()
 }
 
 /// Check platform support

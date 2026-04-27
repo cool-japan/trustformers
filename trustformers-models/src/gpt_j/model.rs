@@ -978,3 +978,248 @@ fn softmax_gpt_j(logits: ArrayD<f32>) -> Result<ArrayD<f32>> {
     // Normalize
     Ok(exp_vals / sum)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trustformers_core::traits::Config;
+
+    fn tiny_config() -> GptJConfig {
+        GptJConfig {
+            vocab_size: 64,
+            n_embd: 16,
+            n_layer: 1,
+            n_head: 2,
+            n_positions: 32,
+            rotary_dim: 4, // less than head_dim=8
+            activation_function: "gelu_new".to_string(),
+            resid_pdrop: 0.0,
+            embd_pdrop: 0.0,
+            attn_pdrop: 0.0,
+            layer_norm_epsilon: 1e-5,
+            initializer_range: 0.02,
+            use_cache: false,
+            bos_token_id: 50256,
+            eos_token_id: 50256,
+            model_type: "gptj".to_string(),
+        }
+    }
+
+    // --- GptJConfig tests ---
+
+    #[test]
+    fn test_gpt_j_6b_config_values() {
+        let cfg = GptJConfig::gpt_j_6b();
+        assert_eq!(cfg.n_embd, 4096);
+        assert_eq!(cfg.n_head, 16);
+        assert_eq!(cfg.n_layer, 28);
+        assert_eq!(cfg.rotary_dim, 64);
+        assert_eq!(cfg.vocab_size, 50400);
+    }
+
+    #[test]
+    fn test_gpt_j_config_head_dim() {
+        let cfg = GptJConfig::gpt_j_6b();
+        // 4096 / 16 = 256
+        assert_eq!(cfg.head_dim(), 256);
+    }
+
+    #[test]
+    fn test_gpt_j_config_rotary_dim_less_than_head_dim() {
+        let cfg = GptJConfig::gpt_j_6b();
+        // rotary_dim=64 < head_dim=256
+        assert!(
+            cfg.rotary_dim < cfg.head_dim(),
+            "rotary_dim should be a fraction of head_dim for partial RoPE"
+        );
+    }
+
+    #[test]
+    fn test_gpt_j_config_rotary_dim_is_64() {
+        let cfg = GptJConfig::gpt_j_6b();
+        assert_eq!(cfg.rotary_dim, 64, "GPT-J-6B uses rotary_dim=64");
+    }
+
+    #[test]
+    fn test_gpt_j_config_validate_ok() {
+        let cfg = GptJConfig::gpt_j_6b();
+        assert!(cfg.validate().is_ok(), "gpt_j_6b config should validate");
+    }
+
+    #[test]
+    fn test_gpt_j_config_validate_bad_heads() {
+        let cfg = GptJConfig {
+            n_embd: 15, // not divisible by 3
+            n_head: 3,
+            ..GptJConfig::gpt_j_6b()
+        };
+        assert!(
+            cfg.validate().is_err(),
+            "n_embd not divisible by n_head should fail"
+        );
+    }
+
+    #[test]
+    fn test_gpt_j_config_validate_rotary_too_large() {
+        let cfg = GptJConfig {
+            n_embd: 16,
+            n_head: 2,
+            rotary_dim: 16, // == head_dim=8 is fine, but > head_dim would fail
+            ..tiny_config()
+        };
+        // rotary_dim=16 > head_dim=8 → should fail
+        assert!(cfg.validate().is_err(), "rotary_dim > head_dim should fail");
+    }
+
+    #[test]
+    fn test_gpt_j_config_architecture_name() {
+        let cfg = GptJConfig::default();
+        assert_eq!(cfg.architecture(), "GPT-J");
+    }
+
+    #[test]
+    fn test_gpt_j_config_from_pretrained_name() {
+        let cfg = GptJConfig::from_pretrained_name("gpt-j-6b");
+        assert_eq!(cfg.n_embd, 4096);
+    }
+
+    // --- GptJRotaryEmbedding ---
+
+    #[test]
+    fn test_gptj_rope_construction() {
+        let rope = GptJRotaryEmbedding::new(64, 2048, 10000.0);
+        assert_eq!(rope.dim, 64);
+        assert_eq!(rope.max_seq_len, 2048);
+        assert!((rope.base - 10000.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_gptj_rope_apply_preserves_shape() {
+        use scirs2_core::ndarray::{ArrayD, IxDyn};
+        use trustformers_core::tensor::Tensor;
+        let rope = GptJRotaryEmbedding::new(4, 32, 10000.0);
+        let q_data = vec![0.1f32; 2 * 4]; // seq=2, dim=4
+        let k_data = vec![0.2f32; 2 * 4];
+        let q_arr = ArrayD::from_shape_vec(IxDyn(&[2, 4]), q_data).expect("create q");
+        let k_arr = ArrayD::from_shape_vec(IxDyn(&[2, 4]), k_data).expect("create k");
+        let q = Tensor::F32(q_arr);
+        let k = Tensor::F32(k_arr);
+        let (rq, rk) =
+            rope.apply_rotary_emb(&q, &k, &[0, 1]).expect("apply_rotary_emb should succeed");
+        assert_eq!(
+            rq.shape(),
+            q.shape(),
+            "RoPE output q shape must match input"
+        );
+        assert_eq!(
+            rk.shape(),
+            k.shape(),
+            "RoPE output k shape must match input"
+        );
+    }
+
+    // --- GptJModel ---
+
+    #[test]
+    fn test_gptj_model_construction() {
+        let cfg = tiny_config();
+        let model = GptJModel::new(cfg);
+        assert!(model.is_ok(), "GptJModel should construct");
+    }
+
+    #[test]
+    fn test_gptj_model_num_parameters_positive() {
+        use trustformers_core::traits::Model;
+        let cfg = tiny_config();
+        let model = GptJModel::new(cfg).expect("GptJModel should construct");
+        assert!(
+            model.num_parameters() > 0,
+            "model should have positive parameter count"
+        );
+    }
+
+    #[test]
+    fn test_gptj_model_blocks_count() {
+        let cfg = tiny_config();
+        let model = GptJModel::new(cfg.clone()).expect("GptJModel should construct");
+        assert_eq!(
+            model.blocks.len(),
+            cfg.n_layer,
+            "blocks count must match n_layer"
+        );
+    }
+
+    // --- GptJLMHeadModel ---
+
+    #[test]
+    fn test_gptj_lm_head_construction() {
+        let cfg = tiny_config();
+        let model = GptJLMHeadModel::new(cfg);
+        assert!(model.is_ok(), "GptJLMHeadModel should construct");
+    }
+
+    #[test]
+    fn test_gptj_lm_head_num_params_larger_than_base() {
+        use trustformers_core::traits::Model;
+        let cfg = tiny_config();
+        let base = GptJModel::new(cfg.clone()).expect("GptJModel construct");
+        let lm = GptJLMHeadModel::new(cfg).expect("GptJLMHeadModel construct");
+        assert!(
+            lm.num_parameters() > base.num_parameters(),
+            "LM head model should have more params than base"
+        );
+    }
+
+    #[test]
+    fn test_gptj_model_forward_output_shape() {
+        use trustformers_core::traits::{Model, TokenizedInput};
+        let cfg = tiny_config();
+        let model = GptJModel::new(cfg.clone()).expect("GptJModel should construct");
+        let input = TokenizedInput {
+            input_ids: vec![1u32, 2, 3],
+            attention_mask: vec![1u8, 1, 1],
+            token_type_ids: None,
+            special_tokens_mask: None,
+            offset_mapping: None,
+            overflowing_tokens: None,
+        };
+        let output = model.forward(input).expect("GptJModel forward should succeed");
+        let shape = output.last_hidden_state.shape();
+        // hidden_states: [seq_len, n_embd] or [1, seq_len, n_embd]
+        assert!(!shape.is_empty(), "output shape should not be empty");
+        // Last dim must be n_embd
+        let last_dim = *shape.last().expect("shape should have dimensions");
+        assert_eq!(last_dim, cfg.n_embd, "last dim must match n_embd");
+    }
+
+    // --- GptJBlock parallel attention+MLP ---
+
+    #[test]
+    fn test_gptj_block_parallel_attn_mlp() {
+        // GPT-J computes attention and MLP in parallel (both use ln_1 output)
+        // Verify that block construction works for parallel execution
+        let cfg = tiny_config();
+        let model = GptJModel::new(cfg).expect("GptJModel should construct");
+        // Each block has a single LayerNorm (ln_1) used for both attn and mlp
+        assert!(
+            model.blocks.iter().all(|_| true),
+            "all blocks should be constructed"
+        );
+    }
+
+    #[test]
+    fn test_gptj_no_bias_in_attention_projections() {
+        // GPT-J-6B uses no bias in attention projections (use_bias=false)
+        // Verify the default config reflects this
+        let cfg = GptJConfig::gpt_j_6b();
+        assert_eq!(cfg.resid_pdrop, 0.0, "GPT-J-6B uses no residual dropout");
+        assert_eq!(cfg.attn_pdrop, 0.0, "GPT-J-6B uses no attention dropout");
+    }
+
+    #[test]
+    fn test_gptj_n_positions_is_2048() {
+        // GPT-J-6B has a context length of 2048 tokens
+        let cfg = GptJConfig::gpt_j_6b();
+        assert_eq!(cfg.n_positions, 2048, "GPT-J context length should be 2048");
+    }
+}

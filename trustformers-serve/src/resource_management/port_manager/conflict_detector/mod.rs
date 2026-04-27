@@ -12,3 +12,6 @@ pub use conflictprioritythresholds_traits::*;
 pub use conflictdetectorconfig_traits::*;
 pub use types::*;
 pub use functions::*;
+
+#[cfg(test)]
+mod types_tests;

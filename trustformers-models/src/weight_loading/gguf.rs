@@ -763,3 +763,219 @@ impl WeightLoader for GGUFLoader {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── GGUFValueType tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_gguf_value_type_from_u32_known_values() {
+        let cases: &[(u32, bool)] = &[
+            (0, true),   // UInt8
+            (1, true),   // Int8
+            (2, true),   // UInt16
+            (3, true),   // Int16
+            (4, true),   // UInt32
+            (5, true),   // Int32
+            (6, true),   // Float32
+            (7, true),   // Bool
+            (8, true),   // String
+            (9, true),   // Array
+            (10, true),  // UInt64
+            (11, true),  // Int64
+            (12, true),  // Float64
+            (99, false), // Unknown
+        ];
+        for &(v, expected_some) in cases {
+            let result = GGUFValueType::from_u32(v);
+            assert_eq!(
+                result.is_some(),
+                expected_some,
+                "from_u32({}) unexpected",
+                v
+            );
+        }
+    }
+
+    // ── GGMLType tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_ggml_type_from_u32_f32() {
+        let t = GGMLType::from_u32(0);
+        assert!(matches!(t, Some(GGMLType::F32)));
+    }
+
+    #[test]
+    fn test_ggml_type_from_u32_f16() {
+        let t = GGMLType::from_u32(1);
+        assert!(matches!(t, Some(GGMLType::F16)));
+    }
+
+    #[test]
+    fn test_ggml_type_from_u32_quantized_types() {
+        let q4_0 = GGMLType::from_u32(2);
+        assert!(matches!(q4_0, Some(GGMLType::Q4_0)));
+        let q8_0 = GGMLType::from_u32(8);
+        assert!(matches!(q8_0, Some(GGMLType::Q8_0)));
+    }
+
+    #[test]
+    fn test_ggml_type_from_u32_iq_types() {
+        let iq2 = GGMLType::from_u32(16);
+        assert!(matches!(iq2, Some(GGMLType::Iq2Xxs)));
+        let iq4_xs = GGMLType::from_u32(23);
+        assert!(matches!(iq4_xs, Some(GGMLType::Iq4Xs)));
+    }
+
+    #[test]
+    fn test_ggml_type_from_u32_unknown_returns_none() {
+        let unknown = GGMLType::from_u32(999);
+        assert!(unknown.is_none());
+    }
+
+    #[test]
+    fn test_ggml_type_element_size_f32() {
+        assert!((GGMLType::F32.element_size() - 4.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_ggml_type_element_size_f16() {
+        assert!((GGMLType::F16.element_size() - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_ggml_type_element_size_quantized_less_than_float() {
+        let q4 = GGMLType::Q4_0.element_size();
+        let f32_size = GGMLType::F32.element_size();
+        assert!(q4 < f32_size, "Quantized type should be smaller than f32");
+    }
+
+    #[test]
+    fn test_ggml_type_element_size_iq1s_smallest() {
+        let iq1s = GGMLType::Iq1S.element_size();
+        let f32_size = GGMLType::F32.element_size();
+        assert!(iq1s < f32_size, "IQ1S should be much smaller than f32");
+        assert!(iq1s > 0.0, "IQ1S element size should be positive");
+    }
+
+    #[test]
+    fn test_ggml_type_block_size_f32_is_one() {
+        assert_eq!(GGMLType::F32.block_size(), 1);
+    }
+
+    #[test]
+    fn test_ggml_type_block_size_f16_is_one() {
+        assert_eq!(GGMLType::F16.block_size(), 1);
+    }
+
+    #[test]
+    fn test_ggml_type_block_size_q4_is_32() {
+        assert_eq!(GGMLType::Q4_0.block_size(), 32);
+        assert_eq!(GGMLType::Q4_1.block_size(), 32);
+    }
+
+    #[test]
+    fn test_ggml_type_block_size_k_types_is_256() {
+        assert_eq!(GGMLType::Q4K.block_size(), 256);
+        assert_eq!(GGMLType::Q6K.block_size(), 256);
+        assert_eq!(GGMLType::Q8K.block_size(), 256);
+    }
+
+    // ── GGUFHeader tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_gguf_header_construction() {
+        let header = GGUFHeader {
+            magic: *b"GGUF",
+            version: 3,
+            tensor_count: 128,
+            metadata_kv_count: 10,
+        };
+        assert_eq!(&header.magic, b"GGUF");
+        assert_eq!(header.version, 3);
+        assert_eq!(header.tensor_count, 128);
+        assert_eq!(header.metadata_kv_count, 10);
+    }
+
+    #[test]
+    fn test_gguf_header_clone() {
+        let header = GGUFHeader {
+            magic: *b"GGUF",
+            version: 2,
+            tensor_count: 32,
+            metadata_kv_count: 5,
+        };
+        let cloned = header.clone();
+        assert_eq!(cloned.version, 2);
+        assert_eq!(cloned.tensor_count, 32);
+    }
+
+    // ── GGUFTensorInfo tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_gguf_tensor_info_construction() {
+        let info = GGUFTensorInfo {
+            name: "model.embed_tokens.weight".to_string(),
+            n_dims: 2,
+            dimensions: vec![32000, 4096],
+            ggml_type: 0, // F32
+            offset: 0,
+        };
+        assert_eq!(info.name, "model.embed_tokens.weight");
+        assert_eq!(info.n_dims, 2);
+        assert_eq!(info.dimensions.len(), 2);
+    }
+
+    #[test]
+    fn test_gguf_tensor_info_clone() {
+        let info = GGUFTensorInfo {
+            name: "test_tensor".to_string(),
+            n_dims: 1,
+            dimensions: vec![1024],
+            ggml_type: 8, // Q8_0
+            offset: 4096,
+        };
+        let cloned = info.clone();
+        assert_eq!(cloned.name, "test_tensor");
+        assert_eq!(cloned.offset, 4096);
+    }
+
+    // ── GGUFLoader file-based tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_gguf_loader_invalid_file() {
+        // Attempting to open a non-existent file should return an error
+        let result = GGUFLoader::new("/nonexistent/path/model.gguf");
+        assert!(result.is_err(), "Expected error for nonexistent GGUF file");
+    }
+
+    #[test]
+    fn test_gguf_loader_invalid_magic_bytes() {
+        use std::io::Write;
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_invalid_magic.gguf");
+        {
+            let mut f = std::fs::File::create(&path).expect("could not create temp file");
+            // Write wrong magic
+            f.write_all(b"BADS").expect("write failed");
+            f.write_all(&[0u8; 24]).expect("write failed");
+        }
+        let result = GGUFLoader::new(&path);
+        assert!(
+            result.is_err(),
+            "Expected error for invalid GGUF magic bytes"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_ggml_type_equality() {
+        let t1 = GGMLType::F32;
+        let t2 = GGMLType::F32;
+        let t3 = GGMLType::Q4_0;
+        assert_eq!(t1, t2);
+        assert_ne!(t1, t3);
+    }
+}

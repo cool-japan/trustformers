@@ -744,4 +744,200 @@ mod tests {
         assert_eq!(max_dir, Direction::Maximize);
         assert_eq!(min_dir, Direction::Minimize);
     }
+
+    // ── Additional tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_tuner_config_default_study_name() {
+        let cfg = TunerConfig::default();
+        assert!(!cfg.study_name.is_empty());
+    }
+
+    #[test]
+    fn test_tuner_config_default_max_trials_some() {
+        let cfg = TunerConfig::default();
+        assert!(cfg.max_trials.is_some(), "default should have a max_trials");
+        assert!(cfg.max_trials.unwrap_or(0) > 0);
+    }
+
+    #[test]
+    fn test_tuner_config_default_no_seed() {
+        let cfg = TunerConfig::default();
+        assert!(cfg.seed.is_none(), "default should have no fixed seed");
+    }
+
+    #[test]
+    fn test_tuner_config_builder_chain() {
+        let cfg = TunerConfig::new("chain_test")
+            .direction(OptimizationDirection::Minimize)
+            .objective_metric("val_loss")
+            .max_trials(25)
+            .seed(100);
+        assert_eq!(cfg.study_name, "chain_test");
+        assert_eq!(cfg.direction, OptimizationDirection::Minimize);
+        assert_eq!(cfg.max_trials, Some(25));
+        assert_eq!(cfg.seed, Some(100));
+    }
+
+    #[test]
+    fn test_tuner_config_save_checkpoints_default_true() {
+        let cfg = TunerConfig::default();
+        assert!(
+            cfg.save_checkpoints,
+            "save_checkpoints default should be true"
+        );
+    }
+
+    #[test]
+    fn test_tuner_config_min_trials_for_pruning_positive() {
+        let cfg = TunerConfig::default();
+        assert!(cfg.min_trials_for_pruning > 0);
+    }
+
+    #[test]
+    fn test_optimization_direction_eq() {
+        assert_eq!(
+            OptimizationDirection::Minimize,
+            OptimizationDirection::Minimize
+        );
+        assert_eq!(
+            OptimizationDirection::Maximize,
+            OptimizationDirection::Maximize
+        );
+        assert_ne!(
+            OptimizationDirection::Minimize,
+            OptimizationDirection::Maximize
+        );
+    }
+
+    #[test]
+    fn test_study_statistics_best_value_none_initially() {
+        // Simulate a fresh statistics object
+        let stats = StudyStatistics {
+            total_trials: 0,
+            completed_trials: 0,
+            failed_trials: 0,
+            pruned_trials: 0,
+            best_value: None,
+            best_trial_number: None,
+            total_duration: Duration::from_secs(0),
+            average_trial_duration: Duration::from_secs(0),
+            success_rate: 0.0,
+            pruning_rate: 0.0,
+        };
+        assert!(stats.best_value.is_none());
+        assert_eq!(stats.total_trials, 0);
+    }
+
+    #[test]
+    fn test_study_statistics_success_rate_calculation() {
+        let stats = StudyStatistics {
+            total_trials: 10,
+            completed_trials: 8,
+            failed_trials: 2,
+            pruned_trials: 0,
+            best_value: Some(0.95),
+            best_trial_number: Some(3),
+            total_duration: Duration::from_secs(100),
+            average_trial_duration: Duration::from_secs(10),
+            success_rate: 80.0,
+            pruning_rate: 0.0,
+        };
+        assert!((stats.success_rate - 80.0).abs() < 1e-5);
+        assert_eq!(
+            stats.completed_trials + stats.failed_trials,
+            stats.total_trials
+        );
+    }
+
+    #[test]
+    fn test_tuner_creation_with_random_search() {
+        let config = TunerConfig::new("random_test").max_trials(10);
+        let search_space = SearchSpaceBuilder::new().continuous("lr", 1e-5, 1e-1).build();
+        let tuner = HyperparameterTuner::with_random_search(config, search_space);
+        assert_eq!(tuner.current_trial_number, 0);
+        assert!(tuner.history.trials.is_empty());
+    }
+
+    #[test]
+    fn test_hyperparams_to_training_args_learning_rate() {
+        let base_args = TrainingArguments::default();
+        let mut hyperparams = HashMap::new();
+        hyperparams.insert("learning_rate".to_string(), ParameterValue::Float(5e-5));
+        let updated = hyperparams_to_training_args(&base_args, &hyperparams);
+        assert!((updated.learning_rate - 5e-5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_hyperparams_to_training_args_batch_size() {
+        let base_args = TrainingArguments::default();
+        let mut hyperparams = HashMap::new();
+        hyperparams.insert("batch_size".to_string(), ParameterValue::Int(16));
+        let updated = hyperparams_to_training_args(&base_args, &hyperparams);
+        assert_eq!(updated.per_device_train_batch_size, 16);
+    }
+
+    #[test]
+    fn test_hyperparams_to_training_args_epochs() {
+        let base_args = TrainingArguments::default();
+        let mut hyperparams = HashMap::new();
+        hyperparams.insert("num_train_epochs".to_string(), ParameterValue::Float(3.0));
+        let updated = hyperparams_to_training_args(&base_args, &hyperparams);
+        assert!((updated.num_train_epochs - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_logging_callback_on_study_start() {
+        let mut cb = LoggingCallback;
+        let cfg = TunerConfig::new("cb_test");
+        // Should not panic
+        cb.on_study_start(&cfg);
+    }
+
+    #[test]
+    fn test_logging_callback_on_study_end() {
+        let mut cb = LoggingCallback;
+        let cfg = TunerConfig::new("cb_test");
+        let stats = StudyStatistics {
+            total_trials: 5,
+            completed_trials: 5,
+            failed_trials: 0,
+            pruned_trials: 0,
+            best_value: Some(0.9),
+            best_trial_number: Some(2),
+            total_duration: Duration::from_secs(50),
+            average_trial_duration: Duration::from_secs(10),
+            success_rate: 100.0,
+            pruning_rate: 0.0,
+        };
+        // Should not panic
+        cb.on_study_end(&cfg, &stats);
+    }
+
+    #[test]
+    fn test_tuner_config_direction_maximize_default() {
+        let cfg = TunerConfig::default();
+        assert_eq!(cfg.direction, OptimizationDirection::Maximize);
+    }
+
+    #[test]
+    fn test_tuner_config_no_duration_by_default() {
+        let cfg = TunerConfig::default();
+        assert!(
+            cfg.max_duration.is_none(),
+            "default should have no max_duration"
+        );
+    }
+
+    #[test]
+    fn test_tuner_config_no_early_stopping_by_default() {
+        let cfg = TunerConfig::default();
+        assert!(cfg.early_stopping.is_none());
+    }
+
+    #[test]
+    fn test_tuner_config_no_pruning_by_default() {
+        let cfg = TunerConfig::default();
+        assert!(cfg.pruning.is_none());
+    }
 }
