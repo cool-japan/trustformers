@@ -102,7 +102,7 @@ pyo3 = "0.28.3"
 numpy = "0.28.0"
 
 # Additional core dependencies
-oxicode = { version = "0.2", features = ["serde"] }
+oxicode = { version = "0.2.2", features = ["serde"] }
 byteorder = "1.5"
 dashmap = "6.1"
 oxiarc-zstd = { version = "0.2.7" }
@@ -163,7 +163,7 @@ bytemuck = { version = "1.25.0", features = ["derive"] }
 # SciRS2 dependencies - using crates.io 0.1.x
 # Note: "metal" feature removed from default features as it's Apple-specific
 # Individual crates should enable it conditionally using target-specific dependencies
-scirs2-core = { version = "0.4.2", default-features = false, features = [
+scirs2-core = { version = "0.4.3", default-features = false, features = [
     "array",
     "simd",
     "parallel",
@@ -175,7 +175,7 @@ scirs2-core = { version = "0.4.2", default-features = false, features = [
     "gpu",     # GPU acceleration abstractions
     # Metal removed - enable via platform-specific dependencies in individual crates
 ]}
-scirs2-linalg = { version = "0.4.2" }
+scirs2-linalg = { version = "0.4.3" }
 
 [profile.release]
 lto = true
