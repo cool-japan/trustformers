@@ -19,10 +19,9 @@ on:
       publish_target:
         description: 'Publish target'
         required: true
-        default: 'testpypi'
+        default: 'pypi'
         type: choice
         options:
-          - testpypi
           - pypi
           - none
       version_tag:
@@ -148,8 +147,8 @@ jobs:
     needs: [linux, macos, windows]
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
     environment:
-      name: ${{ (github.event.inputs.publish_target == 'pypi' || (github.event_name == 'push' && !contains(github.ref, 'rc') && !contains(github.ref, 'beta') && !contains(github.ref, 'alpha'))) && 'pypi' || 'testpypi' }}
-      url: ${{ (github.event.inputs.publish_target == 'pypi' || (github.event_name == 'push' && !contains(github.ref, 'rc') && !contains(github.ref, 'beta') && !contains(github.ref, 'alpha'))) && format('https://pypi.org/project/{0}/', env.PACKAGE_NAME) || format('https://test.pypi.org/project/{0}/', env.PACKAGE_NAME) }}
+      name: pypi
+      url: https://pypi.org/project/trustformers/
     permissions:
       id-token: write  # Required for Trusted Publishing
     steps:
@@ -171,22 +170,8 @@ jobs:
           echo "Built wheels are available as artifacts"
           exit 0
 
-      # Publish to TestPyPI (pre-release or manual testpypi)
-      - name: Publish to TestPyPI
-        if: |
-          github.event.inputs.publish_target == 'testpypi' ||
-          (github.event_name == 'push' && (contains(github.ref, 'rc') || contains(github.ref, 'beta') || contains(github.ref, 'alpha')))
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
-          skip-existing: true
-          verbose: true
-
-      # Publish to PyPI (release or manual pypi)
+      # Publish to PyPI
       - name: Publish to PyPI
-        if: |
-          github.event.inputs.publish_target == 'pypi' ||
-          (github.event_name == 'push' && !contains(github.ref, 'rc') && !contains(github.ref, 'beta') && !contains(github.ref, 'alpha'))
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           skip-existing: true
