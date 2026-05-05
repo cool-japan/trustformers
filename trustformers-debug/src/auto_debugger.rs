@@ -1046,10 +1046,184 @@ impl DataIssueDetector {
 }
 
 impl IssueDetector for DataIssueDetector {
-    fn detect_issues(&self, _context: &DebugContext) -> Result<Vec<DetectedIssue>> {
-        // Placeholder for data issue detection
-        // In practice, would analyze data loading patterns, batch composition, etc.
-        Ok(Vec::new())
+    fn detect_issues(&self, context: &DebugContext) -> Result<Vec<DetectedIssue>> {
+        // Detect three classes of data-related issues from dashboard metrics:
+        //
+        //  - BatchSizeProblems  : sustained low GPU utilisation paired with low
+        //                         tokens/sec is a strong signal that the batch is
+        //                         too small to saturate the device.
+        //  - DataImbalance      : accuracy pinned at a near-trivial value (high
+        //                         floor or low ceiling) while loss continues to
+        //                         change is the canonical signature of a model
+        //                         collapsing onto a majority class.
+        //  - InsufficientData   : loss decreases but accuracy oscillates wildly,
+        //                         indicating the model is memorising rather than
+        //                         generalising — a classic small-dataset failure
+        //                         mode.
+        //
+        // Heuristics use thresholds tuned for a "typical" supervised-learning
+        // setup; they are intentionally conservative so we do not produce false
+        // positives on small recent_metrics windows.
+        let mut issues = Vec::new();
+
+        const MIN_WINDOW: usize = 5;
+        if context.recent_metrics.len() < MIN_WINDOW {
+            return Ok(issues);
+        }
+
+        // Sample the freshest MIN_WINDOW metrics for analysis.
+        let window: Vec<&DashboardMetrics> =
+            context.recent_metrics.iter().rev().take(MIN_WINDOW * 2).collect();
+
+        // --- BatchSizeProblems ---------------------------------------------
+        let gpu_samples: Vec<f64> = window.iter().filter_map(|m| m.gpu_utilization).collect();
+        let tps_samples: Vec<f64> = window.iter().filter_map(|m| m.tokens_per_second).collect();
+        if gpu_samples.len() >= MIN_WINDOW && tps_samples.len() >= MIN_WINDOW {
+            let gpu_mean = gpu_samples.iter().sum::<f64>() / gpu_samples.len() as f64;
+            let tps_mean = tps_samples.iter().sum::<f64>() / tps_samples.len() as f64;
+            // Low GPU and low throughput together strongly suggest the batch is
+            // starving the device. We use 0.5 (50% utilisation) and 100 tok/s as
+            // canonical thresholds, matching the project's other detectors.
+            if gpu_mean < 0.5 && tps_mean < 100.0 {
+                let mut metrics = HashMap::new();
+                metrics.insert("avg_gpu_utilization".to_string(), gpu_mean);
+                metrics.insert("avg_tokens_per_second".to_string(), tps_mean);
+                issues.push(DetectedIssue {
+                    issue_type: IssueType::BatchSizeProblems,
+                    severity: IssueSeverity::Medium,
+                    confidence: 0.7,
+                    description:
+                        "Sustained low GPU utilisation and throughput suggest batch size may be \
+                         too small to saturate the device"
+                            .to_string(),
+                    evidence: vec![
+                        Evidence {
+                            metric_name: "gpu_utilization".to_string(),
+                            observed_value: gpu_mean,
+                            expected_range: (0.7, 1.0),
+                            explanation:
+                                "Average GPU utilisation is below the typical training range"
+                                    .to_string(),
+                        },
+                        Evidence {
+                            metric_name: "tokens_per_second".to_string(),
+                            observed_value: tps_mean,
+                            expected_range: (100.0, f64::INFINITY),
+                            explanation: "Throughput is below the typical training floor"
+                                .to_string(),
+                        },
+                    ],
+                    metrics,
+                    detected_at: chrono::Utc::now(),
+                });
+            }
+        }
+
+        // --- DataImbalance / InsufficientData ------------------------------
+        let acc_samples: Vec<f64> = window.iter().filter_map(|m| m.accuracy).collect();
+        let loss_samples: Vec<f64> = window.iter().filter_map(|m| m.loss).collect();
+
+        if acc_samples.len() >= MIN_WINDOW && loss_samples.len() >= MIN_WINDOW {
+            let acc_mean = acc_samples.iter().sum::<f64>() / acc_samples.len() as f64;
+            let acc_var = acc_samples
+                .iter()
+                .map(|a| {
+                    let d = a - acc_mean;
+                    d * d
+                })
+                .sum::<f64>()
+                / acc_samples.len() as f64;
+            let acc_stddev = acc_var.sqrt();
+
+            // `window` (and therefore `loss_samples`) is ordered newest-first.
+            // Compare the older half (end of the slice) to the newer half
+            // (start of the slice) to decide whether loss is decreasing.
+            let half = loss_samples.len() / 2;
+            let newer_half = &loss_samples[..half];
+            let older_half = &loss_samples[loss_samples.len() - half..];
+            let newer_avg = if newer_half.is_empty() {
+                0.0
+            } else {
+                newer_half.iter().sum::<f64>() / newer_half.len() as f64
+            };
+            let older_avg = if older_half.is_empty() {
+                0.0
+            } else {
+                older_half.iter().sum::<f64>() / older_half.len() as f64
+            };
+            // Positive => loss decreasing over time.
+            let loss_relative_change = if older_avg.abs() > f64::EPSILON {
+                (older_avg - newer_avg) / older_avg.abs()
+            } else {
+                0.0
+            };
+
+            // DataImbalance: accuracy is pinned (very low variance) at an
+            // extreme value (either trivially low or near-perfect) while the
+            // loss continues to move meaningfully. Models collapsing onto the
+            // majority class show exactly this signature.
+            let acc_pinned_extreme =
+                acc_stddev < 0.01 && (acc_mean < 0.2 || acc_mean > 0.95);
+            let loss_changing = loss_relative_change.abs() > 0.05;
+            if acc_pinned_extreme && loss_changing {
+                let mut metrics = HashMap::new();
+                metrics.insert("accuracy_mean".to_string(), acc_mean);
+                metrics.insert("accuracy_stddev".to_string(), acc_stddev);
+                metrics.insert("loss_relative_change".to_string(), loss_relative_change);
+                issues.push(DetectedIssue {
+                    issue_type: IssueType::DataImbalance,
+                    severity: IssueSeverity::High,
+                    confidence: 0.75,
+                    description:
+                        "Accuracy is pinned at an extreme value while loss continues to change \
+                         — model may be collapsing onto a majority class"
+                            .to_string(),
+                    evidence: vec![Evidence {
+                        metric_name: "accuracy_stddev".to_string(),
+                        observed_value: acc_stddev,
+                        expected_range: (0.01, 0.5),
+                        explanation:
+                            "Accuracy variance is far below the range expected during healthy \
+                             training"
+                                .to_string(),
+                    }],
+                    metrics,
+                    detected_at: chrono::Utc::now(),
+                });
+            }
+
+            // InsufficientData: loss is steadily decreasing (model fitting the
+            // training set) but accuracy is highly volatile, suggesting the
+            // model is memorising rather than generalising — a classic failure
+            // mode of training on too little data.
+            if loss_relative_change > 0.10 && acc_stddev > 0.15 {
+                let mut metrics = HashMap::new();
+                metrics.insert("accuracy_stddev".to_string(), acc_stddev);
+                metrics.insert("loss_relative_change".to_string(), loss_relative_change);
+                issues.push(DetectedIssue {
+                    issue_type: IssueType::InsufficientData,
+                    severity: IssueSeverity::Medium,
+                    confidence: 0.6,
+                    description:
+                        "Loss is decreasing but accuracy fluctuates wildly — the dataset may be \
+                         too small, leading to memorisation rather than generalisation"
+                            .to_string(),
+                    evidence: vec![Evidence {
+                        metric_name: "accuracy_stddev".to_string(),
+                        observed_value: acc_stddev,
+                        expected_range: (0.0, 0.10),
+                        explanation:
+                            "Accuracy variance is well above what is expected when the model \
+                             is generalising"
+                                .to_string(),
+                    }],
+                    metrics,
+                    detected_at: chrono::Utc::now(),
+                });
+            }
+        }
+
+        Ok(issues)
     }
 
     fn get_detector_name(&self) -> &str {
@@ -1314,5 +1488,89 @@ mod tests {
             common_mistakes: vec!["too high initial lr".to_string()],
         };
         assert!(advice.recommended_range.0 < advice.recommended_range.1);
+    }
+
+    fn make_metric(
+        loss: Option<f64>,
+        accuracy: Option<f64>,
+        gpu: Option<f64>,
+        tps: Option<f64>,
+    ) -> DashboardMetrics {
+        DashboardMetrics {
+            timestamp: std::time::SystemTime::now(),
+            loss,
+            accuracy,
+            learning_rate: Some(1e-3),
+            memory_usage_mb: 1024.0,
+            gpu_utilization: gpu,
+            tokens_per_second: tps,
+            gradient_norm: Some(0.5),
+            epoch: Some(0),
+            step: Some(0),
+        }
+    }
+
+    #[test]
+    fn test_data_issue_detector_returns_empty_with_no_metrics() {
+        let detector = DataIssueDetector::new();
+        let context = DebugContext {
+            profiler_report: None,
+            gradient_report: None,
+            anomaly_report: None,
+            recent_metrics: &[],
+            training_duration: Duration::from_secs(60),
+            model_info: None,
+        };
+        let issues = detector.detect_issues(&context).expect("detect_issues should succeed");
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn test_data_issue_detector_flags_batch_size_problem() {
+        let detector = DataIssueDetector::new();
+        // Simulate a long stretch of low GPU utilisation and low throughput.
+        let metrics: Vec<DashboardMetrics> = (0..10)
+            .map(|i| make_metric(Some(2.0 - i as f64 * 0.01), Some(0.6), Some(0.2), Some(50.0)))
+            .collect();
+        let context = DebugContext {
+            profiler_report: None,
+            gradient_report: None,
+            anomaly_report: None,
+            recent_metrics: &metrics,
+            training_duration: Duration::from_secs(600),
+            model_info: None,
+        };
+        let issues = detector.detect_issues(&context).expect("detect_issues should succeed");
+        assert!(
+            issues.iter().any(|i| i.issue_type == IssueType::BatchSizeProblems),
+            "expected BatchSizeProblems to be flagged, got: {:?}",
+            issues.iter().map(|i| &i.issue_type).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_data_issue_detector_flags_data_imbalance_when_accuracy_pinned() {
+        let detector = DataIssueDetector::new();
+        // Accuracy pinned at ~0.97 with virtually no variance, while loss
+        // continues to fall: a classic majority-class collapse.
+        let metrics: Vec<DashboardMetrics> = (0..10)
+            .map(|i| {
+                make_metric(Some(2.0 - i as f64 * 0.10), Some(0.97), Some(0.85), Some(500.0))
+            })
+            .collect();
+        let context = DebugContext {
+            profiler_report: None,
+            gradient_report: None,
+            anomaly_report: None,
+            recent_metrics: &metrics,
+            training_duration: Duration::from_secs(600),
+            model_info: None,
+        };
+        let issues = detector.detect_issues(&context).expect("detect_issues should succeed");
+        assert!(
+            issues.iter().any(|i| i.issue_type == IssueType::DataImbalance),
+            "expected DataImbalance to be flagged, got: {:?}",
+            issues.iter().map(|i| &i.issue_type).collect::<Vec<_>>()
+        );
     }
 }

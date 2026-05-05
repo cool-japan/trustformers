@@ -273,7 +273,9 @@ impl KernelFusionEngine {
             FusionPattern::LinearActivation { .. } => {
                 self.find_linear_activation_patterns(graph, pattern)
             },
-            FusionPattern::AttentionFusion { .. } => self.find_attention_patterns(graph),
+            FusionPattern::AttentionFusion { .. } => {
+                self.find_attention_patterns(graph, pattern)
+            },
             // Add more pattern matching logic for other patterns
             _ => Ok(Vec::new()), // Placeholder for unimplemented patterns
         }
@@ -378,10 +380,174 @@ impl KernelFusionEngine {
         Ok(opportunities)
     }
 
-    fn find_attention_patterns(&self, graph: &ComputationGraph) -> Result<Vec<FusionOpportunity>> {
-        // Placeholder implementation for attention pattern detection
-        // In a full implementation, this would look for Q*K^T -> Softmax -> *V patterns
-        Ok(Vec::new())
+    fn find_attention_patterns(
+        &self,
+        graph: &ComputationGraph,
+        pattern: &FusionPattern,
+    ) -> Result<Vec<FusionOpportunity>> {
+        // Detect scaled dot-product attention chains in the graph:
+        //
+        //   (optional Transpose) -> MatMul (Q * K^T)
+        //                              |
+        //                          (optional element-wise chain: Multiply for scale,
+        //                           Add for mask)
+        //                              |
+        //                           Softmax
+        //                              |
+        //                           MatMul (* V)
+        //
+        // We require at minimum: MatMul -> Softmax -> MatMul. Optional intermediate
+        // element-wise ops between the first MatMul and Softmax (scaling, masking,
+        // dropout) are walked through but counted as part of the fused chain so that
+        // downstream constraint checks see the full set of nodes.
+        //
+        // The configuration on `pattern` (`query_key_matmul`, `softmax`, `value_matmul`,
+        // `dropout`) selects which sub-steps are required; if any of the QKxV/softmax
+        // flags are disabled the corresponding edge is not enforced. We default to the
+        // full pattern when the supplied pattern is not an `AttentionFusion`.
+        let mut opportunities = Vec::new();
+
+        let (require_qk_matmul, require_softmax, require_v_matmul, allow_dropout) =
+            if let FusionPattern::AttentionFusion {
+                query_key_matmul,
+                softmax,
+                value_matmul,
+                dropout,
+            } = pattern
+            {
+                (*query_key_matmul, *softmax, *value_matmul, *dropout)
+            } else {
+                (true, true, true, false)
+            };
+
+        let mut seen_chains: HashSet<Vec<String>> = HashSet::new();
+
+        for node_id in &graph.execution_order {
+            let qk_node = match graph.get_node(node_id) {
+                Some(n) => n,
+                None => continue,
+            };
+
+            // Step 1: anchor on Q*K^T MatMul. We always require a MatMul anchor
+            // — even when `require_qk_matmul` is disabled, we need *some*
+            // starting op and MatMul is the canonical anchor for any
+            // scaled-dot-product attention chain.
+            if qk_node.operation != OperationType::MatMul {
+                continue;
+            }
+
+            let mut chain = vec![node_id.clone()];
+
+            // Step 2: walk through optional intermediates (scale via Multiply, mask via
+            // Add, optional Dropout) until we reach Softmax. Limit the search depth
+            // to a small constant so we don't fall into long element-wise chains
+            // unrelated to attention.
+            let mut current_id = node_id.clone();
+            let mut found_softmax = false;
+            for _ in 0..4 {
+                if let Some(next_id) = self.find_attention_consumer(
+                    &current_id,
+                    &[
+                        OperationType::Softmax,
+                        OperationType::Multiply,
+                        OperationType::Add,
+                        OperationType::Custom("Dropout".to_string()),
+                    ],
+                    graph,
+                ) {
+                    let next_op =
+                        graph.get_node(&next_id).map(|n| n.operation.clone()).unwrap_or_else(
+                            || OperationType::Custom("__unknown__".to_string()),
+                        );
+                    chain.push(next_id.clone());
+                    current_id = next_id;
+                    if next_op == OperationType::Softmax {
+                        found_softmax = true;
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            if require_softmax && !found_softmax {
+                continue;
+            }
+
+            // Step 3: optional dropout between softmax and the value MatMul.
+            if allow_dropout {
+                if let Some(drop_id) = self.find_attention_consumer(
+                    &current_id,
+                    &[OperationType::Custom("Dropout".to_string())],
+                    graph,
+                ) {
+                    chain.push(drop_id.clone());
+                    current_id = drop_id;
+                }
+            }
+
+            // Step 4: the V MatMul.
+            if require_v_matmul {
+                match self.find_attention_consumer(
+                    &current_id,
+                    &[OperationType::MatMul],
+                    graph,
+                ) {
+                    Some(v_id) => chain.push(v_id),
+                    None => continue,
+                }
+            }
+
+            if chain.len() < 2 {
+                continue;
+            }
+            if !seen_chains.insert(chain.clone()) {
+                continue;
+            }
+
+            let benefit = self.estimate_fusion_benefit(&chain, graph)?;
+            let constraints_satisfied = self.verify_fusion_constraints(&chain, graph)?;
+
+            opportunities.push(FusionOpportunity {
+                pattern: FusionPattern::AttentionFusion {
+                    query_key_matmul: require_qk_matmul,
+                    softmax: require_softmax,
+                    value_matmul: require_v_matmul,
+                    dropout: allow_dropout,
+                },
+                node_ids: chain,
+                estimated_benefit: benefit,
+                constraints_satisfied,
+            });
+        }
+
+        Ok(opportunities)
+    }
+
+    /// Find the first direct consumer of `current_id` whose operation matches any of
+    /// the supplied `target_ops`. Mirrors `find_next_operation` but accepts multiple
+    /// target operation types simultaneously.
+    fn find_attention_consumer(
+        &self,
+        current_id: &str,
+        target_ops: &[OperationType],
+        graph: &ComputationGraph,
+    ) -> Option<String> {
+        for node_id in &graph.execution_order {
+            let dependencies = match graph.edges.get(node_id) {
+                Some(deps) => deps,
+                None => continue,
+            };
+            if !dependencies.iter().any(|dep| dep == current_id) {
+                continue;
+            }
+            if let Some(node) = graph.get_node(node_id) {
+                if target_ops.iter().any(|op| op == &node.operation) {
+                    return Some(node_id.clone());
+                }
+            }
+        }
+        None
     }
 
     fn find_next_operation(
@@ -931,5 +1097,108 @@ mod tests {
             .iter()
             .any(|p| matches!(p, FusionPattern::LinearActivation { .. }));
         assert!(has_linear);
+    }
+
+    #[test]
+    fn test_find_attention_patterns_detects_qk_softmax_v_chain() -> crate::errors::Result<()> {
+        let engine = KernelFusionEngine::new();
+        let mut graph = make_empty_graph();
+
+        // Build: qk = MatMul(Q, K^T); attn = Softmax(qk); out = MatMul(attn, V)
+        let qk = make_node("qk", OperationType::MatMul);
+        let softmax = make_node("softmax", OperationType::Softmax);
+        let attn_v = make_node("attn_v", OperationType::MatMul);
+
+        graph.nodes.insert("qk".to_string(), qk);
+        graph.nodes.insert("softmax".to_string(), softmax);
+        graph.nodes.insert("attn_v".to_string(), attn_v);
+        graph.edges.insert("qk".to_string(), vec![]);
+        graph.edges.insert("softmax".to_string(), vec!["qk".to_string()]);
+        graph.edges.insert("attn_v".to_string(), vec!["softmax".to_string()]);
+        graph.execution_order = vec!["qk".to_string(), "softmax".to_string(), "attn_v".to_string()];
+
+        let pattern = FusionPattern::AttentionFusion {
+            query_key_matmul: true,
+            softmax: true,
+            value_matmul: true,
+            dropout: false,
+        };
+        let opportunities = engine.find_attention_patterns(&graph, &pattern)?;
+        assert!(!opportunities.is_empty(), "expected to detect at least one attention chain");
+        let chain = &opportunities[0].node_ids;
+        assert!(chain.contains(&"qk".to_string()));
+        assert!(chain.contains(&"softmax".to_string()));
+        assert!(chain.contains(&"attn_v".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_attention_patterns_walks_scale_and_mask() -> crate::errors::Result<()> {
+        let engine = KernelFusionEngine::new();
+        let mut graph = make_empty_graph();
+
+        // Build: qk -> scale (Multiply) -> mask (Add) -> softmax -> attn_v
+        let qk = make_node("qk", OperationType::MatMul);
+        let scale = make_node("scale", OperationType::Multiply);
+        let mask = make_node("mask", OperationType::Add);
+        let softmax = make_node("softmax", OperationType::Softmax);
+        let attn_v = make_node("attn_v", OperationType::MatMul);
+
+        graph.nodes.insert("qk".to_string(), qk);
+        graph.nodes.insert("scale".to_string(), scale);
+        graph.nodes.insert("mask".to_string(), mask);
+        graph.nodes.insert("softmax".to_string(), softmax);
+        graph.nodes.insert("attn_v".to_string(), attn_v);
+        graph.edges.insert("qk".to_string(), vec![]);
+        graph.edges.insert("scale".to_string(), vec!["qk".to_string()]);
+        graph.edges.insert("mask".to_string(), vec!["scale".to_string()]);
+        graph.edges.insert("softmax".to_string(), vec!["mask".to_string()]);
+        graph.edges.insert("attn_v".to_string(), vec!["softmax".to_string()]);
+        graph.execution_order = vec![
+            "qk".to_string(),
+            "scale".to_string(),
+            "mask".to_string(),
+            "softmax".to_string(),
+            "attn_v".to_string(),
+        ];
+
+        let pattern = FusionPattern::AttentionFusion {
+            query_key_matmul: true,
+            softmax: true,
+            value_matmul: true,
+            dropout: false,
+        };
+        let opportunities = engine.find_attention_patterns(&graph, &pattern)?;
+        assert_eq!(opportunities.len(), 1, "expected exactly one attention chain");
+        let chain = &opportunities[0].node_ids;
+        assert!(chain.contains(&"softmax".to_string()));
+        assert!(chain.contains(&"attn_v".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_attention_patterns_returns_none_when_no_softmax() -> crate::errors::Result<()> {
+        let engine = KernelFusionEngine::new();
+        let mut graph = make_empty_graph();
+
+        // Build: qk -> attn_v but no softmax in between.
+        let qk = make_node("qk", OperationType::MatMul);
+        let attn_v = make_node("attn_v", OperationType::MatMul);
+
+        graph.nodes.insert("qk".to_string(), qk);
+        graph.nodes.insert("attn_v".to_string(), attn_v);
+        graph.edges.insert("qk".to_string(), vec![]);
+        graph.edges.insert("attn_v".to_string(), vec!["qk".to_string()]);
+        graph.execution_order = vec!["qk".to_string(), "attn_v".to_string()];
+
+        let pattern = FusionPattern::AttentionFusion {
+            query_key_matmul: true,
+            softmax: true,
+            value_matmul: true,
+            dropout: false,
+        };
+        let opportunities = engine.find_attention_patterns(&graph, &pattern)?;
+        assert!(opportunities.is_empty());
+        Ok(())
     }
 }
