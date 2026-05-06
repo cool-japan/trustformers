@@ -736,7 +736,87 @@ impl EnhancedProfiler {
                     }
                     Ok(prometheus)
                 },
-                _ => Err("Export format not implemented".to_string()),
+                ExportFormat::Flamegraph => {
+                    // Emit a minimal folded-stacks text format compatible with
+                    // FlameGraph.pl and inferno-flamegraph.
+                    let mut flamegraph = String::new();
+                    for sample in &session.samples {
+                        // Each line: "stack;frame latency_ms"
+                        flamegraph.push_str(&format!(
+                            "{};latency_ms {}\n",
+                            session.operation_name,
+                            sample.latency_ms as u64
+                        ));
+                        if sample.cpu_usage_percent > 0.0 {
+                            flamegraph.push_str(&format!(
+                                "{};cpu_usage {}\n",
+                                session.operation_name,
+                                sample.cpu_usage_percent as u64
+                            ));
+                        }
+                    }
+                    Ok(flamegraph)
+                },
+                ExportFormat::OpenTelemetry => {
+                    // Emit OTLP-compatible JSON span format (simplified).
+                    let spans: Vec<serde_json::Value> = session
+                        .samples
+                        .iter()
+                        .enumerate()
+                        .map(|(i, sample)| {
+                            serde_json::json!({
+                                "traceId": format!("{:032x}", i),
+                                "spanId":  format!("{:016x}", i),
+                                "name": session.operation_name,
+                                "kind": 1,
+                                "attributes": {
+                                    "latency_ms": sample.latency_ms,
+                                    "throughput_ops_per_sec": sample.throughput_ops_per_sec,
+                                    "memory_usage_mb": sample.memory_usage_mb,
+                                    "cpu_usage_percent": sample.cpu_usage_percent,
+                                }
+                            })
+                        })
+                        .collect();
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "resourceSpans": [{
+                            "scopeSpans": [{ "spans": spans }]
+                        }]
+                    }))
+                    .map_err(|e| format!("OpenTelemetry export failed: {}", e))
+                },
+                ExportFormat::Jaeger => {
+                    // Emit Jaeger-compatible JSON trace format.
+                    let spans: Vec<serde_json::Value> = session
+                        .samples
+                        .iter()
+                        .enumerate()
+                        .map(|(i, sample)| {
+                            serde_json::json!({
+                                "traceID": format!("{:032x}", i),
+                                "spanID":  format!("{:016x}", i),
+                                "operationName": session.operation_name,
+                                "duration": (sample.latency_ms * 1000.0) as u64,
+                                "tags": [
+                                    { "key": "throughput_ops_per_sec",
+                                      "vFloat64": sample.throughput_ops_per_sec },
+                                    { "key": "memory_usage_mb",
+                                      "vFloat64": sample.memory_usage_mb },
+                                ]
+                            })
+                        })
+                        .collect();
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "data": [{
+                            "traceID": session_id,
+                            "spans": spans,
+                            "processes": {
+                                "p1": { "serviceName": "trustformers" }
+                            }
+                        }]
+                    }))
+                    .map_err(|e| format!("Jaeger export failed: {}", e))
+                },
             }
         } else {
             Err(format!("Session {} not found", session_id))

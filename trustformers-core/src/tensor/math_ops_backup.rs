@@ -349,32 +349,203 @@ impl Tensor {
         math_ops::mathematical::pow_scalar(self, exponent)
     }
 
-    /// Layer normalization
+    /// Layer normalization.
+    ///
+    /// LN(x) = (x − mean(x)) / sqrt(var(x) + ε) computed over the specified
+    /// `axis` (typically the last dimension). The canonical implementation
+    /// lives in `math_ops/advanced.rs` which is the module compiled into the
+    /// crate; this backup shim records the same signature for reference.
+    ///
+    /// Note: this file (`math_ops_backup.rs`) is not included in the module
+    /// tree — the live implementation is in `math_ops::advanced`.
     pub fn layer_norm(&self, axis: i32, epsilon: f32) -> Result<Tensor> {
-        // This would be in a specialized module if created
-        // For now, provide a placeholder implementation
-        Err(TrustformersError::tensor_op_error("Layer norm not yet implemented in modular structure", "layer_norm"))
+        let ndim = match self {
+            Tensor::F32(a) => a.ndim(),
+            _ => {
+                return Err(TrustformersError::tensor_op_error(
+                    "Layer norm only supported for F32 tensors in backup shim",
+                    "layer_norm",
+                ))
+            },
+        };
+        let canonical_axis =
+            if axis < 0 { (ndim as i32 + axis) as usize } else { axis as usize };
+        if canonical_axis >= ndim {
+            return Err(TrustformersError::tensor_op_error(
+                &format!("Axis {} out of bounds for {}-dim tensor", axis, ndim),
+                "layer_norm",
+            ));
+        }
+        // The real implementation is in math_ops/advanced.rs (compiled).
+        // This backup re-implements the same logic inline for reference.
+        use scirs2_core::ndarray::Axis;
+        match self {
+            Tensor::F32(a) => {
+                let last_dim = a.ndim() - 1;
+                if canonical_axis != last_dim {
+                    return Err(TrustformersError::tensor_op_error(
+                        "Backup layer_norm only supports last-dimension normalization",
+                        "layer_norm",
+                    ));
+                }
+                let mean = a.mean_axis(Axis(canonical_axis)).ok_or_else(|| {
+                    TrustformersError::tensor_op_error("mean computation failed", "layer_norm")
+                })?;
+                let var = a.map_axis(Axis(canonical_axis), |lane| {
+                    let lane_mean =
+                        lane.mean().unwrap_or(0.0_f32);
+                    lane.mapv(|x| (x - lane_mean).powi(2)).mean().unwrap_or(0.0_f32)
+                });
+                let mut result = a.clone();
+                for (i, mut lane) in result.axis_iter_mut(Axis(canonical_axis)).enumerate() {
+                    let m = mean[i];
+                    let v = var[i];
+                    lane.mapv_inplace(|x| (x - m) / (v + epsilon).sqrt());
+                }
+                Ok(Tensor::F32(result))
+            },
+            _ => Err(TrustformersError::tensor_op_error(
+                "Layer norm only supported for F32 tensors",
+                "layer_norm",
+            )),
+        }
     }
 
-    /// Cross entropy loss
+    /// Cross entropy loss.
+    ///
+    /// For each sample: `−Σ y_true · log(y_pred + ε)`.
+    /// Uses numerically stable log to avoid `log(0)`.
+    ///
+    /// Note: the canonical implementation is in `math_ops/advanced.rs`.
     pub fn cross_entropy(&self, targets: &Tensor, reduction: &str) -> Result<Tensor> {
-        // This would be in a specialized module if created
-        // For now, provide a placeholder implementation
-        Err(TrustformersError::tensor_op_error("Cross entropy not yet implemented in modular structure", "cross_entropy"))
+        use scirs2_core::ndarray::{ArrayD, IxDyn, Zip};
+        match (self, targets) {
+            (Tensor::F32(predictions), Tensor::F32(targets)) => {
+                const EPS: f32 = 1e-8;
+                let log_preds = predictions.mapv(|x| (x + EPS).ln());
+                let losses = Zip::from(&log_preds)
+                    .and(targets)
+                    .map_collect(|&lp, &t| -t * lp);
+                match reduction {
+                    "mean" => {
+                        let mean_loss = losses.mean().unwrap_or(0.0_f32);
+                        Ok(Tensor::F32(ArrayD::from_elem(IxDyn(&[]), mean_loss)))
+                    },
+                    "sum" => {
+                        let sum_loss = losses.sum();
+                        Ok(Tensor::F32(ArrayD::from_elem(IxDyn(&[]), sum_loss)))
+                    },
+                    "none" => Ok(Tensor::F32(losses)),
+                    _ => Err(TrustformersError::tensor_op_error(
+                        "Invalid reduction; use 'mean', 'sum', or 'none'",
+                        "cross_entropy",
+                    )),
+                }
+            },
+            _ => Err(TrustformersError::tensor_op_error(
+                "Cross entropy only supported for F32 tensors",
+                "cross_entropy",
+            )),
+        }
     }
 
-    /// Cosine similarity
+    /// Cosine similarity.
+    ///
+    /// `cos_sim(a, b) = (a · b) / (‖a‖ · ‖b‖ + ε)` computed along `dim`.
+    ///
+    /// Note: the canonical implementation is in `math_ops/advanced.rs`.
     pub fn cosine_similarity(&self, other: &Tensor, dim: i32, eps: f32) -> Result<Tensor> {
-        // This would be in a specialized module if created
-        // For now, provide a placeholder implementation
-        Err(TrustformersError::tensor_op_error("Cosine similarity not yet implemented in modular structure", "cosine_similarity"))
+        use scirs2_core::ndarray::{Axis, Zip};
+        match (self, other) {
+            (Tensor::F32(a), Tensor::F32(b)) => {
+                let ndim = a.ndim();
+                let axis =
+                    if dim < 0 { (ndim as i32 + dim) as usize } else { dim as usize };
+                let dot = Zip::from(a).and(b).map_collect(|&x, &y| x * y).sum_axis(Axis(axis));
+                let norm_a =
+                    a.mapv(|x| x * x).sum_axis(Axis(axis)).mapv(|x| (x + eps).sqrt());
+                let norm_b =
+                    b.mapv(|x| x * x).sum_axis(Axis(axis)).mapv(|x| (x + eps).sqrt());
+                let similarity = Zip::from(&dot)
+                    .and(&norm_a)
+                    .and(&norm_b)
+                    .map_collect(|&d, &na, &nb| d / (na * nb));
+                Ok(Tensor::F32(similarity))
+            },
+            _ => Err(TrustformersError::tensor_op_error(
+                "Cosine similarity only supported for F32 tensors",
+                "cosine_similarity",
+            )),
+        }
     }
 
-    /// Log softmax
+    /// Log softmax.
+    ///
+    /// `log_softmax(x)_i = x_i − max(x) − log(Σ exp(x_j − max(x)))`.
+    /// The max subtraction is the standard log-sum-exp trick for numerical
+    /// stability, preventing overflow in `exp`.
+    ///
+    /// Note: the canonical implementation is in `math_ops/advanced.rs`.
     pub fn log_softmax(&self, dim: i32) -> Result<Tensor> {
-        // This would be in a specialized module if created
-        // For now, provide a placeholder implementation
-        Err(TrustformersError::tensor_op_error("Log softmax not yet implemented in modular structure", "log_softmax"))
+        use scirs2_core::ndarray::Axis;
+        match self {
+            Tensor::F32(a) => {
+                let ndim = a.ndim();
+                let axis =
+                    if dim < 0 { (ndim as i32 + dim) as usize } else { dim as usize };
+                if axis >= ndim {
+                    return Err(TrustformersError::tensor_op_error(
+                        &format!("Axis {} out of bounds for {}-dim tensor", dim, ndim),
+                        "log_softmax",
+                    ));
+                }
+                // max over axis for numerical stability
+                let max_vals = a.map_axis(Axis(axis), |lane| {
+                    lane.iter().fold(f32::NEG_INFINITY, |acc, &x| acc.max(x))
+                });
+                let mut max_shape = a.shape().to_vec();
+                max_shape[axis] = 1;
+                let max_exp = max_vals
+                    .into_shape_with_order(max_shape.clone())
+                    .map_err(|_| {
+                        TrustformersError::tensor_op_error(
+                            "reshape failed for max_vals",
+                            "log_softmax",
+                        )
+                    })?;
+                let broadcast_max =
+                    max_exp.broadcast(a.raw_dim()).ok_or_else(|| {
+                        TrustformersError::tensor_op_error(
+                            "broadcast failed for max_vals",
+                            "log_softmax",
+                        )
+                    })?;
+                let shifted = a - &broadcast_max;
+                let log_sum_exp = shifted
+                    .mapv(|x| x.exp())
+                    .sum_axis(Axis(axis))
+                    .mapv(|x| x.ln())
+                    .into_shape_with_order(max_shape)
+                    .map_err(|_| {
+                        TrustformersError::tensor_op_error(
+                            "reshape failed for log_sum_exp",
+                            "log_softmax",
+                        )
+                    })?;
+                let broadcast_lse =
+                    log_sum_exp.broadcast(a.raw_dim()).ok_or_else(|| {
+                        TrustformersError::tensor_op_error(
+                            "broadcast failed for log_sum_exp",
+                            "log_softmax",
+                        )
+                    })?;
+                Ok(Tensor::F32(shifted - &broadcast_lse))
+            },
+            _ => Err(TrustformersError::tensor_op_error(
+                "Log softmax only supported for F32 tensors",
+                "log_softmax",
+            )),
+        }
     }
 }
 

@@ -395,6 +395,103 @@ impl HubUiState {
             ))
         }
     }
+
+    /// Update repository metadata
+    pub fn update_repository(
+        &self,
+        model_id: &str,
+        metadata: RepositoryMetadata,
+    ) -> Result<ModelRepository, TrustformersError> {
+        let mut repos = self.repositories.lock().expect("lock should not be poisoned");
+        if let Some(repo) = repos.get_mut(model_id) {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("SystemTime should be after UNIX_EPOCH")
+                .as_secs();
+            repo.metadata = metadata;
+            repo.metadata.updated_at = now;
+            repo.metadata.stats.last_activity = now;
+            Ok(repo.clone())
+        } else {
+            Err(TrustformersError::hub(
+                format!("Model not found: {}", model_id),
+                model_id.to_string(),
+            ))
+        }
+    }
+
+    /// Delete a repository
+    pub fn delete_repository(&self, model_id: &str) -> Result<(), TrustformersError> {
+        let mut repos = self.repositories.lock().expect("lock should not be poisoned");
+        if repos.remove(model_id).is_some() {
+            Ok(())
+        } else {
+            Err(TrustformersError::hub(
+                format!("Model not found: {}", model_id),
+                model_id.to_string(),
+            ))
+        }
+    }
+
+    /// Update a specific version in a repository
+    pub fn update_version(
+        &self,
+        model_id: &str,
+        version_id: &str,
+        updated_version: ModelVersion,
+    ) -> Result<ModelVersion, TrustformersError> {
+        let mut repos = self.repositories.lock().expect("lock should not be poisoned");
+        if let Some(repo) = repos.get_mut(model_id) {
+            if repo.versions.contains_key(version_id) {
+                repo.versions.insert(version_id.to_string(), updated_version.clone());
+                repo.metadata.updated_at = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("SystemTime should be after UNIX_EPOCH")
+                    .as_secs();
+                Ok(updated_version)
+            } else {
+                Err(TrustformersError::hub(
+                    format!("Version {} not found in {}", version_id, model_id),
+                    model_id.to_string(),
+                ))
+            }
+        } else {
+            Err(TrustformersError::hub(
+                format!("Model not found: {}", model_id),
+                model_id.to_string(),
+            ))
+        }
+    }
+
+    /// Delete a specific version from a repository
+    pub fn delete_version(
+        &self,
+        model_id: &str,
+        version_id: &str,
+    ) -> Result<(), TrustformersError> {
+        let mut repos = self.repositories.lock().expect("lock should not be poisoned");
+        if let Some(repo) = repos.get_mut(model_id) {
+            if repo.versions.remove(version_id).is_some() {
+                repo.version_history.retain(|v| v != version_id);
+                repo.metadata.updated_at = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("SystemTime should be after UNIX_EPOCH")
+                    .as_secs();
+                repo.metadata.stats.version_count = repo.versions.len();
+                Ok(())
+            } else {
+                Err(TrustformersError::hub(
+                    format!("Version {} not found in {}", version_id, model_id),
+                    model_id.to_string(),
+                ))
+            }
+        } else {
+            Err(TrustformersError::hub(
+                format!("Model not found: {}", model_id),
+                model_id.to_string(),
+            ))
+        }
+    }
 }
 
 impl ModelRepository {
@@ -679,16 +776,20 @@ async fn update_repository(
     Path(model_id): Path<String>,
     Json(payload): Json<RepositoryMetadata>,
 ) -> Result<Json<ModelRepository>, StatusCode> {
-    // Implementation would update repository metadata
-    Err(StatusCode::NOT_IMPLEMENTED)
+    state
+        .update_repository(&model_id, payload)
+        .map(Json)
+        .map_err(|_| StatusCode::NOT_FOUND)
 }
 
 async fn delete_repository(
     State(state): State<HubUiState>,
     Path(model_id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
-    // Implementation would delete repository
-    Err(StatusCode::NOT_IMPLEMENTED)
+    state
+        .delete_repository(&model_id)
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(|_| StatusCode::NOT_FOUND)
 }
 
 async fn list_versions(
@@ -730,16 +831,20 @@ async fn update_version(
     Path((model_id, version)): Path<(String, String)>,
     Json(payload): Json<ModelVersion>,
 ) -> Result<Json<ModelVersion>, StatusCode> {
-    // Implementation would update version metadata
-    Err(StatusCode::NOT_IMPLEMENTED)
+    state
+        .update_version(&model_id, &version, payload)
+        .map(Json)
+        .map_err(|_| StatusCode::NOT_FOUND)
 }
 
 async fn delete_version(
     State(state): State<HubUiState>,
     Path((model_id, version)): Path<(String, String)>,
 ) -> Result<StatusCode, StatusCode> {
-    // Implementation would delete version
-    Err(StatusCode::NOT_IMPLEMENTED)
+    state
+        .delete_version(&model_id, &version)
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(|_| StatusCode::NOT_FOUND)
 }
 
 async fn compare_versions(

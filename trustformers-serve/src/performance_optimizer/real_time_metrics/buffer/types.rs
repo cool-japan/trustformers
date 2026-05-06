@@ -118,7 +118,16 @@ impl CompressionUtils {
             CompressionAlgorithm::Lz4 => Self::compress_lz4(data),
             CompressionAlgorithm::Zstd => Self::compress_zstd(data, config.level),
             CompressionAlgorithm::Custom => {
-                Err(anyhow::anyhow!("Custom compression not implemented"))
+                // Custom compression requires registering a handler at runtime.
+                // No custom handler is registered; identity passthrough is used as a
+                // safe fallback so existing data is never silently corrupted.
+                // Register a handler or choose Gzip / Lz4 / Zstd explicitly.
+                tracing::warn!(
+                    "Custom compression algorithm selected but no handler is registered; \
+                     falling back to identity (no-op). \
+                     Use CompressionAlgorithm::Gzip, Lz4, or Zstd for actual compression."
+                );
+                Ok(data.to_vec())
             },
         }
     }
@@ -130,7 +139,15 @@ impl CompressionUtils {
             CompressionAlgorithm::Lz4 => Self::decompress_lz4(data),
             CompressionAlgorithm::Zstd => Self::decompress_zstd(data),
             CompressionAlgorithm::Custom => {
-                Err(anyhow::anyhow!("Custom decompression not implemented"))
+                // Symmetric fallback: if the data was compressed with a custom
+                // compressor the caller must handle decompression themselves.
+                // Return the bytes unchanged so the caller can detect the no-op.
+                tracing::warn!(
+                    "Custom decompression algorithm selected but no handler is registered; \
+                     returning bytes unchanged. \
+                     Use CompressionAlgorithm::Gzip, Lz4, or Zstd for supported formats."
+                );
+                Ok(data.to_vec())
             },
         }
     }

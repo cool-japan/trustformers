@@ -360,7 +360,26 @@ impl DataExportManager {
             ExportFormat::Xml => self.export_xml(&data, &output_path, &options),
             ExportFormat::Yaml => self.export_yaml(&data, &output_path, &options),
             ExportFormat::Sqlite => self.export_sqlite(&data, &output_path, &options),
-            _ => Err(anyhow::anyhow!("Format not yet implemented")),
+            // Binary/columnar formats that require optional external crates or services.
+            // These are intentionally not implemented to keep the core dependency set
+            // minimal.  Callers should use JSON or CSV as a universal fallback.
+            ExportFormat::Hdf5 => Err(anyhow::anyhow!(
+                "HDF5 export is not supported in this build. Use JSON or CSV instead."
+            )),
+            ExportFormat::Parquet => Err(anyhow::anyhow!(
+                "Parquet export is not supported in this build. Use JSON or CSV instead."
+            )),
+            ExportFormat::MessagePack => Err(anyhow::anyhow!(
+                "MessagePack export is not supported in this build. Use JSON instead."
+            )),
+            ExportFormat::Arrow => Err(anyhow::anyhow!(
+                "Apache Arrow export is not supported in this build. Use JSON or CSV instead."
+            )),
+            ExportFormat::Custom(ref name) => Err(anyhow::anyhow!(
+                "Custom export format '{}' is not registered. \
+                 Register a handler or use one of the built-in formats.",
+                name
+            )),
         };
 
         // Update job status

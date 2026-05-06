@@ -463,7 +463,22 @@ impl LargeModelVisualizer {
                 self.generate_interactive_html(&sampled_layers)?
             },
             VisualizationFormat::StaticPng => {
-                anyhow::bail!("PNG generation not yet implemented - use SVG or HTML instead")
+                // PNG output requires the `video` or `gif` feature which gates the `image` crate.
+                // To enable: rebuild with `--features video` (or `--features gif`).
+                // Without that feature, fall back to a descriptive error so callers can
+                // switch to SVG/HTML output which works without any extra features.
+                #[cfg(feature = "video")]
+                {
+                    self.generate_png(&sampled_layers)?
+                }
+                #[cfg(not(feature = "video"))]
+                {
+                    return Err(anyhow::anyhow!(
+                        "PNG generation requires the `video` feature. \
+                         Rebuild with `--features video`, or use \
+                         VisualizationFormat::StaticSvg / InteractiveHtml instead."
+                    ));
+                }
             },
         };
 

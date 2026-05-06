@@ -547,7 +547,18 @@ impl PipelineFactory {
                 let pipeline = QuestionAnsweringPipeline::new(model, tokenizer);
                 Ok(JsValue::from(pipeline))
             },
-            _ => Err(JsValue::from_str("Pipeline type not yet implemented")),
+            PipelineType::TokenClassification => Err(JsValue::from_str(
+                "TokenClassification pipeline is not yet available in the WASM build. \
+                 Use the native Rust API or switch to TextClassification.",
+            )),
+            PipelineType::Summarization => Err(JsValue::from_str(
+                "Summarization pipeline is not yet available in the WASM build. \
+                 Sequence-to-sequence models require additional WASM support.",
+            )),
+            PipelineType::Translation => Err(JsValue::from_str(
+                "Translation pipeline is not yet available in the WASM build. \
+                 Sequence-to-sequence models require additional WASM support.",
+            )),
         }
     }
 }

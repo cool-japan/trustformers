@@ -208,7 +208,14 @@ impl GGUFBlockQuantizer {
                 biases: vec![],
                 metadata: GGUFMetadata::default(),
             }),
-            _ => Err(JsValue::from_str("Quantization type not yet implemented")),
+            GGUFQuantType::Q2_K => Err(JsValue::from_str(
+                "Q2_K quantization (2-bit with K-means superblocks) is not yet implemented. \
+                 Use Q4_0 or Q4_K for a similar size/quality trade-off.",
+            )),
+            GGUFQuantType::Q3_K => Err(JsValue::from_str(
+                "Q3_K quantization (3-bit with K-means superblocks) is not yet implemented. \
+                 Use Q4_0 or Q4_K for a similar size/quality trade-off.",
+            )),
         }
     }
 
