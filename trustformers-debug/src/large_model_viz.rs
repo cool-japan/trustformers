@@ -720,6 +720,102 @@ Type: {} | Parameters: {:.1}M | Memory: {:.2} MB | Compute: {:.1} GFLOPS
         Ok((bytes, size))
     }
 
+    /// Generate a static PNG heatmap visualization of the sampled layers.
+    ///
+    /// Each layer is rendered as a horizontal bar whose width is proportional to
+    /// `param_count` and whose colour encodes `memory_mb` (blue → red gradient).
+    /// The resulting image is PNG-encoded and returned as a raw byte vector.
+    ///
+    /// Requires the `video` feature (which enables the `image` crate).
+    #[cfg(feature = "video")]
+    fn generate_png(&self, sampled_layers: &[usize]) -> Result<(Vec<u8>, usize)> {
+        use image::{ImageBuffer, Rgb};
+        use std::io::Cursor;
+
+        let cache = self.layer_cache.read();
+
+        // Gather layers in index order.
+        let mut layers: Vec<&LayerMetadata> = sampled_layers
+            .iter()
+            .filter_map(|&idx| cache.values().find(|l| l.index == idx))
+            .collect();
+        layers.sort_by_key(|l| l.index);
+
+        // Image layout constants.
+        const IMG_WIDTH: u32 = 1200;
+        const BAR_HEIGHT: u32 = 30;
+        const BAR_PADDING: u32 = 6;
+        const LEFT_MARGIN: u32 = 20;
+        const RIGHT_MARGIN: u32 = 20;
+
+        let row_height = BAR_HEIGHT + BAR_PADDING;
+        let img_height = if layers.is_empty() {
+            100
+        } else {
+            layers.len() as u32 * row_height + 2 * BAR_PADDING + 40 // +40 for title row
+        };
+
+        let max_params = layers
+            .iter()
+            .map(|l| l.param_count)
+            .max()
+            .unwrap_or(1)
+            .max(1);
+
+        let max_memory = layers
+            .iter()
+            .map(|l| l.memory_mb)
+            .fold(0.0_f64, f64::max)
+            .max(1.0);
+
+        let available_width = IMG_WIDTH - LEFT_MARGIN - RIGHT_MARGIN;
+
+        let mut img = ImageBuffer::<Rgb<u8>, Vec<u8>>::new(IMG_WIDTH, img_height);
+
+        // Background: near-white.
+        for pixel in img.pixels_mut() {
+            *pixel = Rgb([245u8, 245u8, 250u8]);
+        }
+
+        // Title bar.
+        for x in 0..IMG_WIDTH {
+            for y in 0..36 {
+                img.put_pixel(x, y, Rgb([74u8, 144u8, 226u8]));
+            }
+        }
+
+        // Draw each layer as a horizontal heatmap bar.
+        for (i, layer) in layers.iter().enumerate() {
+            let bar_top = 40 + i as u32 * row_height;
+
+            // Bar width proportional to param_count.
+            let bar_w = ((layer.param_count as f64 / max_params as f64) * available_width as f64)
+                .round() as u32;
+            let bar_w = bar_w.max(4); // always visible
+
+            // Colour: blue (low memory) → red (high memory) gradient.
+            let t = (layer.memory_mb / max_memory).clamp(0.0, 1.0) as f32;
+            let r = (t * 220.0) as u8;
+            let g = ((1.0 - t) * 100.0 + 40.0) as u8;
+            let b = ((1.0 - t) * 220.0) as u8;
+            let bar_colour = Rgb([r, g, b]);
+
+            for x in LEFT_MARGIN..(LEFT_MARGIN + bar_w).min(IMG_WIDTH - RIGHT_MARGIN) {
+                for y in bar_top..(bar_top + BAR_HEIGHT).min(img_height) {
+                    img.put_pixel(x, y, bar_colour);
+                }
+            }
+        }
+
+        // Encode as PNG into an in-memory buffer.
+        let mut png_bytes: Vec<u8> = Vec::new();
+        img.write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+            .with_context(|| "Failed to PNG-encode large model visualization")?;
+
+        let size = png_bytes.len();
+        Ok((png_bytes, size))
+    }
+
     /// Get current visualization progress (0.0-1.0)
     pub fn get_progress(&self) -> f64 {
         self.state.read().progress
@@ -812,6 +908,47 @@ mod tests {
 
         let sampled = visualizer.determine_sampling()?;
         assert_eq!(sampled.len(), 5);
+
+        Ok(())
+    }
+
+    #[cfg(feature = "video")]
+    #[test]
+    fn test_png_visualization() -> Result<()> {
+        let config = LargeModelVisualizerConfig {
+            output_format: VisualizationFormat::StaticPng,
+            ..Default::default()
+        };
+
+        let visualizer = LargeModelVisualizer::new(config);
+
+        for i in 0..5_usize {
+            let metadata = LayerMetadata {
+                name: format!("layer_{}", i),
+                index: i,
+                layer_type: "Linear".to_string(),
+                param_count: 1024 * (i + 1),
+                memory_mb: 2.0 * (i + 1) as f64,
+                compute_flops: 500_000_000 * (i + 1) as u64,
+                input_shape: vec![512],
+                output_shape: vec![512],
+                is_sampled: false,
+            };
+            visualizer.add_layer(metadata)?;
+        }
+
+        let result = visualizer.visualize(None)?;
+
+        // Basic sanity checks
+        assert_eq!(result.stats.layers_visualized, 5);
+        assert!(result.stats.output_size_bytes > 0, "PNG output must be non-empty");
+
+        // Verify PNG magic bytes: 0x89 P N G
+        let data = result.inline_data.expect("inline data should be present for small PNG");
+        assert!(
+            data.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
+            "Output must start with PNG magic bytes"
+        );
 
         Ok(())
     }
