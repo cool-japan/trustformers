@@ -497,6 +497,148 @@ impl AnswerResult {
     }
 }
 
+/// Token-level classification result for a single token
+#[wasm_bindgen]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenResult {
+    token: String,
+    label: String,
+    score: f32,
+}
+
+#[wasm_bindgen]
+impl TokenResult {
+    #[wasm_bindgen(getter)]
+    pub fn token(&self) -> String {
+        self.token.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn label(&self) -> String {
+        self.label.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn score(&self) -> f32 {
+        self.score
+    }
+}
+
+/// Token classification pipeline (NER / POS tagging).
+///
+/// Each token in the input is assigned an independent label from the label set.
+/// The model is expected to produce per-token logits of shape `[seq_len * num_labels]`.
+#[wasm_bindgen]
+pub struct TokenClassificationPipeline {
+    model: WasmModel,
+    tokenizer: WasmTokenizer,
+    labels: Vec<String>,
+}
+
+#[wasm_bindgen]
+impl TokenClassificationPipeline {
+    /// Create a new token classification pipeline with default NER labels (BIO scheme).
+    #[wasm_bindgen(constructor)]
+    pub fn new(model: WasmModel, tokenizer: WasmTokenizer) -> Self {
+        Self {
+            model,
+            tokenizer,
+            labels: vec![
+                "O".to_string(),
+                "B-PER".to_string(),
+                "I-PER".to_string(),
+                "B-ORG".to_string(),
+                "I-ORG".to_string(),
+                "B-LOC".to_string(),
+                "I-LOC".to_string(),
+                "B-MISC".to_string(),
+                "I-MISC".to_string(),
+            ],
+        }
+    }
+
+    /// Override the label set.
+    pub fn set_labels(&mut self, labels: Vec<String>) {
+        self.labels = labels;
+    }
+
+    /// Classify each token in `text` and return one [`TokenResult`] per input token.
+    ///
+    /// Special tokens ([CLS] / [SEP]) are stripped from the output.
+    pub async fn classify_tokens(&self, text: &str) -> Result<Vec<TokenResult>, JsValue> {
+        let num_labels = self.labels.len();
+        if num_labels == 0 {
+            return Err(JsValue::from_str("TokenClassificationPipeline: label set is empty"));
+        }
+
+        // Tokenize with special tokens so the model sees the standard BERT layout.
+        let input_ids = self.tokenizer.encode(text, true);
+        let seq_len = input_ids.len();
+
+        let input_tensor = WasmTensor::new(
+            input_ids.iter().map(|&id| id as f32).collect(),
+            vec![1, seq_len],
+        )?;
+
+        // Forward pass — expect logits of shape [seq_len * num_labels].
+        let outputs = self.model.forward(&input_tensor)?;
+        let logits = outputs.data();
+
+        // If the model produced fewer logits than expected, fall back gracefully.
+        let effective_labels = if logits.len() >= seq_len * num_labels {
+            num_labels
+        } else if seq_len > 0 && logits.len() >= seq_len {
+            logits.len() / seq_len
+        } else {
+            1
+        };
+
+        let mut results = Vec::with_capacity(seq_len);
+        for (token_idx, &token_id) in input_ids.iter().enumerate() {
+            // Skip special tokens: [CLS]=101, [SEP]=102, [PAD]=0.
+            if token_id == 101 || token_id == 102 || token_id == 0 {
+                continue;
+            }
+
+            let offset = token_idx * effective_labels;
+            let token_logits = if offset + effective_labels <= logits.len() {
+                &logits[offset..offset + effective_labels]
+            } else {
+                // Not enough logit data for this position — assign O label.
+                &logits[..0]
+            };
+
+            let (label_idx, score) = if token_logits.is_empty() {
+                (0_usize, 0.0_f32)
+            } else {
+                // Softmax then argmax.
+                let max_l = token_logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let exp_sum: f32 =
+                    token_logits.iter().map(|&l| (l - max_l).exp()).sum();
+                token_logits
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &l)| (i, (l - max_l).exp() / exp_sum))
+                    .max_by(|(_, a), (_, b)| {
+                        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .unwrap_or((0, 0.0))
+            };
+
+            let label = self
+                .labels
+                .get(label_idx)
+                .cloned()
+                .unwrap_or_else(|| "O".to_string());
+            let token_str = self.tokenizer.decode(vec![token_id], false);
+
+            results.push(TokenResult { token: token_str, label, score });
+        }
+
+        Ok(results)
+    }
+}
+
 /// Pipeline factory
 #[wasm_bindgen]
 pub struct PipelineFactory;
@@ -547,10 +689,10 @@ impl PipelineFactory {
                 let pipeline = QuestionAnsweringPipeline::new(model, tokenizer);
                 Ok(JsValue::from(pipeline))
             },
-            PipelineType::TokenClassification => Err(JsValue::from_str(
-                "TokenClassification pipeline is not yet available in the WASM build. \
-                 Use the native Rust API or switch to TextClassification.",
-            )),
+            PipelineType::TokenClassification => {
+                let pipeline = TokenClassificationPipeline::new(model, tokenizer);
+                Ok(JsValue::from(pipeline))
+            },
             PipelineType::Summarization => Err(JsValue::from_str(
                 "Summarization pipeline is not yet available in the WASM build. \
                  Sequence-to-sequence models require additional WASM support.",
