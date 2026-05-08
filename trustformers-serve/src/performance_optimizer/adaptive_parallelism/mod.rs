@@ -28,12 +28,14 @@
 //!
 //! # Usage Examples
 //!
-//! ```rust
-//! use crate::performance_optimizer::adaptive_parallelism::{
+//! ```rust,no_run
+//! use trustformers_serve::performance_optimizer::adaptive_parallelism::{
 //!     AdaptiveParallelismController, AdaptiveParallelismConfig,
-//!     OptimalParallelismEstimator, PerformanceFeedbackSystem
 //! };
+//! use trustformers_serve::TestCharacteristics;
 //!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Initialize adaptive parallelism controller
 //! let config = AdaptiveParallelismConfig::default();
 //! let controller = AdaptiveParallelismController::new(config).await?;
@@ -42,14 +44,8 @@
 //! let characteristics = TestCharacteristics::default();
 //! let estimate = controller.recommend_parallelism(&characteristics).await?;
 //! println!("Recommended parallelism: {}", estimate.optimal_parallelism);
-//!
-//! // Adjust parallelism based on performance
-//! let performance = PerformanceMeasurement::default();
-//! let new_level = controller.adjust_parallelism(
-//!     AdjustmentReason::PerformanceDegradation,
-//!     performance,
-//!     &characteristics,
-//! ).await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Backward Compatibility

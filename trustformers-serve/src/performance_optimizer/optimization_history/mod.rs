@@ -34,26 +34,20 @@
 //!
 //! # Usage
 //!
-//! ```rust
+//! ```rust,no_run
 //! use trustformers_serve::performance_optimizer::optimization_history::{
 //!     AdvancedOptimizationHistoryManager, OptimizationInsights
 //! };
 //!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create advanced optimization history manager
 //! let manager = AdvancedOptimizationHistoryManager::new().await?;
 //!
-//! // Record optimization event
-//! let event_id = manager.record_optimization_event(
-//!     OptimizationEventType::ParallelismAdjustment,
-//!     "Increased parallel workers".to_string(),
-//!     Some(before_performance),
-//!     Some(after_performance),
-//!     optimization_params,
-//!     metadata,
-//! ).await?;
-//!
 //! // Get comprehensive insights
-//! let insights = manager.get_comprehensive_insights(Duration::from_secs(3600)).await?;
+//! let insights = manager.get_comprehensive_insights(std::time::Duration::from_secs(3600)).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use anyhow::Result;

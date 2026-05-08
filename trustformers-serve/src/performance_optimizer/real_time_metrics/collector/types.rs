@@ -66,16 +66,15 @@ pub struct ImpactAlert {
 ///
 /// ## Example
 ///
-/// ```rust
+/// ```rust,no_run
+/// use trustformers_serve::performance_optimizer::real_time_metrics::SampleRateController;
+///
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let controller = SampleRateController::new().await?;
 /// controller.set_target_rate(50.0).await?; // 50Hz target
-///
-/// // Automatic adjustment based on system conditions
-/// let optimal_rate = controller.adjust_rate(
-///     system_load,
-///     target_accuracy,
-///     resource_availability
-/// ).await?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct SampleRateController {
     /// Current sample rate (Hz * 100 for atomic storage)
@@ -226,10 +225,13 @@ impl DefaultCollectionErrorHandler {
 /// ## Example
 ///
 /// ```rust
-/// let stats = &collector.collection_stats;
+/// use trustformers_serve::performance_optimizer::real_time_metrics::collector::CollectionStatistics;
+/// use std::sync::atomic::Ordering;
+///
+/// let stats = CollectionStatistics::default();
 /// println!("Collection rate: {:.2} Hz", stats.collection_rate.load(Ordering::Relaxed));
 /// println!("Average latency: {:.2} ms", stats.avg_collection_latency.load(Ordering::Relaxed));
-/// println!("Error rate: {:.2}%", stats.error_rate());
+/// println!("Errors: {}", stats.collection_errors.load(Ordering::Relaxed));
 /// ```
 #[derive(Debug, Default)]
 pub struct CollectionStatistics {
@@ -596,7 +598,13 @@ pub struct PublishError;
 ///
 /// ## Example
 ///
-/// ```rust
+/// ```rust,no_run
+/// use trustformers_serve::performance_optimizer::real_time_metrics::collector::MetricsCollectionConfig;
+/// use trustformers_serve::performance_optimizer::real_time_metrics::collector::RealTimeMetricsCollector;
+/// use std::time::Duration;
+///
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = MetricsCollectionConfig {
 ///     base_interval: Duration::from_millis(100),
 ///     min_interval: Duration::from_millis(10),
@@ -610,6 +618,8 @@ pub struct PublishError;
 ///
 /// let collector = RealTimeMetricsCollector::new(config).await?;
 /// collector.start_collection().await?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct RealTimeMetricsCollector {
     /// Current metrics state
@@ -651,7 +661,13 @@ impl RealTimeMetricsCollector {
     ///
     /// ## Example
     ///
-    /// ```rust
+    /// ```rust,no_run
+    /// use trustformers_serve::performance_optimizer::real_time_metrics::collector::MetricsCollectionConfig;
+    /// use trustformers_serve::performance_optimizer::real_time_metrics::collector::RealTimeMetricsCollector;
+    /// use std::time::Duration;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let config = MetricsCollectionConfig {
     ///     base_interval: Duration::from_millis(100),
     ///     adaptive_sampling: true,
@@ -660,6 +676,8 @@ impl RealTimeMetricsCollector {
     /// };
     ///
     /// let collector = RealTimeMetricsCollector::new(config).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn new(config: MetricsCollectionConfig) -> Result<Self> {
         let buffer_size = config.history_buffer_size;
@@ -721,9 +739,17 @@ impl RealTimeMetricsCollector {
     ///
     /// ## Example
     ///
-    /// ```rust
+    /// ```rust,no_run
+    /// use trustformers_serve::performance_optimizer::real_time_metrics::collector::MetricsCollectionConfig;
+    /// use trustformers_serve::performance_optimizer::real_time_metrics::collector::RealTimeMetricsCollector;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let collector = RealTimeMetricsCollector::new(MetricsCollectionConfig::default()).await?;
     /// collector.start_collection().await?;
     /// println!("Metrics collection started successfully");
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn start_collection(&self) -> Result<()> {
         if self.shutdown.load(Ordering::Relaxed) {
@@ -777,11 +803,17 @@ impl RealTimeMetricsCollector {
     ///
     /// ## Example
     ///
-    /// ```rust
+    /// ```rust,no_run
+    /// use trustformers_serve::performance_optimizer::real_time_metrics::collector::MetricsCollectionConfig;
+    /// use trustformers_serve::performance_optimizer::real_time_metrics::collector::RealTimeMetricsCollector;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let collector = RealTimeMetricsCollector::new(MetricsCollectionConfig::default()).await?;
     /// let metrics = collector.collect_metrics().await?;
-    /// println!("CPU usage: {:.2}%", metrics.metrics.cpu_usage);
-    /// println!("Memory usage: {:.2}%", metrics.metrics.memory_usage);
     /// println!("Quality score: {:.2}", metrics.quality_score);
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn collect_metrics(&self) -> Result<TimestampedMetrics> {
         let start_time = Instant::now();
@@ -824,7 +856,15 @@ impl RealTimeMetricsCollector {
     ///
     /// ## Example
     ///
-    /// ```rust
+    /// ```rust,no_run
+    /// use trustformers_serve::performance_optimizer::real_time_metrics::collector::{
+    ///     MetricsCollectionConfig, MetricsPublisher, PublisherType, DeliveryConfig,
+    ///     RealTimeMetricsCollector,
+    /// };
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let collector = RealTimeMetricsCollector::new(MetricsCollectionConfig::default()).await?;
     /// let publisher = MetricsPublisher::new(
     ///     "http_monitor".to_string(),
     ///     PublisherType::Http { endpoint: "http://localhost:8080/metrics".to_string() },
@@ -832,6 +872,8 @@ impl RealTimeMetricsCollector {
     /// );
     ///
     /// collector.add_publisher(publisher).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn add_publisher(&self, publisher: MetricsPublisher) -> Result<()> {
         let publisher = Arc::new(publisher);
@@ -1147,7 +1189,14 @@ pub enum ErrorSeverity {
 ///
 /// ## Example
 ///
-/// ```rust
+/// ```rust,no_run
+/// use trustformers_serve::performance_optimizer::real_time_metrics::collector::{
+///     MetricsPublisher, PublisherType, DeliveryConfig, DeliveryGuarantee,
+/// };
+/// use std::time::Duration;
+///
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let publisher = MetricsPublisher::new(
 ///     "production_monitor".to_string(),
 ///     PublisherType::Http {
@@ -1159,11 +1208,13 @@ pub enum ErrorSeverity {
 ///         retry_delay: Duration::from_millis(500),
 ///         batch_size: 100,
 ///         compression: true,
+///         ..Default::default()
 ///     },
 /// );
 ///
 /// publisher.start().await?;
-/// publisher.publish(&metrics).await?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct MetricsPublisher {
     /// Publisher ID
@@ -1320,18 +1371,15 @@ impl MetricsPublisher {
 ///
 /// ## Example
 ///
-/// ```rust
+/// ```rust,no_run
+/// use trustformers_serve::performance_optimizer::real_time_metrics::collector::PerformanceImpactMonitor;
+///
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let monitor = PerformanceImpactMonitor::new().await?;
 /// monitor.establish_baseline().await?;
-///
-/// // Continuous monitoring
-/// loop {
-///     let impact = monitor.measure_impact().await?;
-///     if impact.severity > ImpactSeverity::Moderate {
-///         monitor.generate_alert(impact).await?;
-///     }
-///     tokio::time::sleep(Duration::from_secs(1)).await;
-/// }
+/// # Ok(())
+/// # }
 /// ```
 pub struct PerformanceImpactMonitor {
     /// Baseline performance metrics

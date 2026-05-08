@@ -3,6 +3,7 @@
 pub mod conflictdetectionconfig_traits;
 pub mod conflictdetector_traits;
 pub mod functions;
+pub mod impl_conflict_detector;
 pub mod resourceconflictthresholds_traits;
 pub mod types;
 

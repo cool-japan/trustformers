@@ -28,23 +28,14 @@
 //!
 //! ## Usage Example
 //!
-//! ```rust
-//! use trustformers_serve::performance_optimizer::real_time_metrics::optimization::*;
-//! use std::time::Duration;
+//! ```rust,no_run
+//! use trustformers_serve::performance_optimizer::real_time_metrics::optimization::LiveOptimizationEngine;
+//! use trustformers_serve::performance_optimizer::real_time_metrics::OptimizationEngineConfig;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Configure optimization engine
-//!     let config = OptimizationEngineConfig {
-//!         generation_interval: Duration::from_secs(30),
-//!         min_confidence_threshold: 0.7,
-//!         max_recommendations: 10,
-//!         analysis_window: Duration::from_secs(300),
-//!         ..Default::default()
-//!     };
-//!
-//!     // Create and start optimization engine
-//!     let engine = LiveOptimizationEngine::new(config).await?;
+//!     // Create and start optimization engine with default configuration
+//!     let engine = LiveOptimizationEngine::new(OptimizationEngineConfig::default()).await?;
 //!     engine.start().await?;
 //!
 //!     // Subscribe to recommendations

@@ -27,20 +27,16 @@
 //!
 //! # Usage
 //!
-//! ```rust
+//! ```rust,no_run
 //! use trustformers_serve::performance_optimizer::feedback_systems::{
-//!     FeedbackQualityAssessor, EnhancedThroughputProcessor, ValidationEngine
+//!     FeedbackQualityAssessor, EnhancedThroughputProcessor, FeedbackValidationEngine
 //! };
 //!
 //! // Create enhanced feedback processor
 //! let processor = EnhancedThroughputProcessor::new();
 //!
-//! // Process feedback with quality assessment
-//! let processed = processor.process_with_quality(&feedback)?;
-//!
 //! // Validate feedback
-//! let validator = ValidationEngine::new();
-//! let validation_result = validator.validate(&feedback)?;
+//! let validator = FeedbackValidationEngine::new();
 //! ```
 
 use anyhow::Result;

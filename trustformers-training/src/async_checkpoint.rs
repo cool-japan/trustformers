@@ -579,7 +579,7 @@ mod tests {
             "save_async took too long: {elapsed:?}"
         );
         // Handle should exist
-        let step = handle.lock().unwrap().step;
+        let step = handle.lock().unwrap_or_else(|e| e.into_inner()).step;
         assert_eq!(step, 100);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -593,9 +593,9 @@ mod tests {
         ckpt.save_async(make_data(20)).unwrap();
         ckpt.wait_all().unwrap();
         // After wait_all all handles are complete
-        let pending = ckpt.pending_handles.lock().unwrap();
+        let pending = ckpt.pending_handles.lock().unwrap_or_else(|e| e.into_inner());
         for h in pending.iter() {
-            assert!(h.lock().unwrap().is_complete);
+            assert!(h.lock().unwrap_or_else(|e| e.into_inner()).is_complete);
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

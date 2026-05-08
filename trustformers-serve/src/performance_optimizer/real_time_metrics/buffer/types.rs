@@ -553,6 +553,7 @@ impl<T> CircularBuffer<T> {
     ///
     /// # Example
     /// ```rust
+    /// use trustformers_serve::performance_optimizer::real_time_metrics::buffer::CircularBuffer;
     /// let buffer = CircularBuffer::<i32>::new(1024);
     /// assert_eq!(buffer.capacity(), 1024);
     /// ```

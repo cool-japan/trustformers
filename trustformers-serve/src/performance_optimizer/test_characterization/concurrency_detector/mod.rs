@@ -28,15 +28,18 @@
 //!
 //! # Example Usage
 //!
-//! ```rust
+//! ```rust,no_run
 //! use trustformers_serve::performance_optimizer::test_characterization::concurrency_detector::*;
+//! use trustformers_serve::performance_optimizer::test_characterization::{
+//!     ConcurrencyDetectorConfig, TestExecutionData,
+//! };
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let config = ConcurrencyDetectorConfig::default();
 //!     let detector = ConcurrencyRequirementsDetector::new(config).await?;
 //!
-//!     let test_data = TestExecutionData::new("test_id", "integration_test");
+//!     let test_data = TestExecutionData::default();
 //!     let analysis = detector.analyze_concurrency(&test_data).await?;
 //!
 //!     println!("Safe concurrency level: {:?}", analysis.requirements.max_safe_concurrency);

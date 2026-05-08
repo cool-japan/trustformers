@@ -25,8 +25,8 @@
 //!
 //! ## Usage
 //!
-//! ```rust
-//! use crate::performance_optimizer::real_time_metrics::types::{
+//! ```rust,no_run
+//! use trustformers_serve::performance_optimizer::real_time_metrics::types::{
 //!     MetricsCollectionConfig,
 //!     RealTimeMetricsError,
 //!     SeverityLevel,

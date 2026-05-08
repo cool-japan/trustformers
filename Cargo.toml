@@ -102,13 +102,13 @@ pyo3 = "0.28.3"
 numpy = "0.28.0"
 
 # Additional core dependencies
-oxicode = { version = "0.2.2", features = ["serde"] }
+oxicode = { version = "0.2.3", features = ["serde"] }
 byteorder = "1.5"
 dashmap = "6.1"
-oxiarc-zstd = { version = "0.2.7" }
-oxiarc-deflate = { version = "0.2.7" }
-oxiarc-lz4 = { version = "0.2.7" }
-oxiarc-archive = { version = "0.2.7" }
+oxiarc-zstd = { version = "0.2.8" }
+oxiarc-deflate = { version = "0.2.8" }
+oxiarc-lz4 = { version = "0.2.8" }
+oxiarc-archive = { version = "0.2.8" }
 libc = "0.2.186"
 libloading = "0.9"
 

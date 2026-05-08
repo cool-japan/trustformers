@@ -834,9 +834,16 @@ impl ParallelPerformanceMonitor {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,no_run
+    /// use trustformers_serve::performance_optimizer::real_time_metrics::MonitorConfiguration;
+    /// use trustformers_serve::performance_optimizer::real_time_metrics::monitor::ParallelPerformanceMonitor;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let config = MonitorConfiguration::default();
     /// let monitor = ParallelPerformanceMonitor::new(config).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn new(config: MonitorConfiguration) -> Result<Self> {
         let (event_sender, _) = broadcast::channel(10000);
@@ -912,9 +919,17 @@ impl ParallelPerformanceMonitor {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,no_run
+    /// use trustformers_serve::performance_optimizer::real_time_metrics::MonitorConfiguration;
+    /// use trustformers_serve::performance_optimizer::real_time_metrics::monitor::ParallelPerformanceMonitor;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let monitor = ParallelPerformanceMonitor::new(MonitorConfiguration::default()).await?;
     /// monitor.start_monitoring().await?;
     /// println!("Monitoring started successfully");
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn start_monitoring(&self) -> Result<()> {
         if self.active.load(Ordering::Relaxed) {
@@ -1063,13 +1078,19 @@ impl ParallelPerformanceMonitor {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,no_run
+    /// use trustformers_serve::performance_optimizer::real_time_metrics::MonitorConfiguration;
+    /// use trustformers_serve::performance_optimizer::real_time_metrics::monitor::ParallelPerformanceMonitor;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let monitor = ParallelPerformanceMonitor::new(MonitorConfiguration::default()).await?;
     /// let mut receiver = monitor.subscribe_to_events();
     /// while let Ok(event) = receiver.recv().await {
-    ///     if event.requires_attention() {
-    ///         println!("Critical event: {}", event.source);
-    ///     }
+    ///     println!("Received event: {}", event.source);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn subscribe_to_events(&self) -> broadcast::Receiver<MonitoringEvent> {
         self.event_broadcaster.subscribe()
