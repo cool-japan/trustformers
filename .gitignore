@@ -111,3 +111,5 @@ trustformers-py/test_results
 
 # Rustc ICE dumps
 rustc-ice-*.txt
+
+target
