@@ -90,13 +90,11 @@ impl ContainerDeploymentManager {
             OrchestrationConfig::CloudRun(cloudrun_config) => {
                 artifacts.extend(self.generate_cloudrun_artifacts(cloudrun_config)?);
             },
-            OrchestrationConfig::ACI(_aci_config) => {
-                // TODO: Implement ACI artifact generation
-                eprintln!("ACI orchestration not yet implemented");
+            OrchestrationConfig::ACI(aci_config) => {
+                artifacts.extend(self.generate_aci_artifacts(aci_config)?);
             },
-            OrchestrationConfig::OpenShift(_openshift_config) => {
-                // TODO: Implement OpenShift artifact generation
-                eprintln!("OpenShift orchestration not yet implemented");
+            OrchestrationConfig::OpenShift(openshift_config) => {
+                artifacts.extend(self.generate_openshift_artifacts(openshift_config)?);
             },
         }
 
@@ -840,6 +838,256 @@ roleRef:
             self.config.app_name,
             self.config.app_name
         ))
+    }
+
+    /// Generate Azure Container Instances artifacts
+    fn generate_aci_artifacts(
+        &self,
+        config: &ACIConfig,
+    ) -> TrustformersResult<DeploymentArtifacts> {
+        let mut artifacts = HashMap::new();
+
+        // ARM template for Azure Container Instances
+        let arm_template = serde_json::json!({
+            "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+            "contentVersion": "1.0.0.0",
+            "resources": [{
+                "type": "Microsoft.ContainerInstance/containerGroups",
+                "apiVersion": "2023-05-01",
+                "name": config.container_group_name,
+                "location": config.location,
+                "properties": {
+                    "containers": [{
+                        "name": self.config.app_name,
+                        "properties": {
+                            "image": format!("{}:{}", self.config.image_config.base_image, self.config.image_config.tag),
+                            "resources": {
+                                "requests": {
+                                    "cpu": config.cpu,
+                                    "memoryInGb": config.memory
+                                }
+                            },
+                            "ports": self.config.network.port_mappings.iter().map(|pm| {
+                                serde_json::json!({ "port": pm.container_port, "protocol": pm.protocol })
+                            }).collect::<Vec<_>>()
+                        }
+                    }],
+                    "osType": "Linux",
+                    "restartPolicy": config.restart_policy,
+                    "ipAddress": {
+                        "type": "Public",
+                        "ports": self.config.network.port_mappings.iter().map(|pm| {
+                            serde_json::json!({ "port": pm.container_port, "protocol": pm.protocol })
+                        }).collect::<Vec<_>>()
+                    }
+                }
+            }]
+        });
+
+        artifacts.insert(
+            "aci-template.json".to_string(),
+            serde_json::to_string_pretty(&arm_template).map_err(|e| {
+                TrustformersError::from_string(format!("Failed to serialize ACI template: {}", e))
+            })?,
+        );
+
+        // Azure CLI deployment script
+        let deploy_script = format!(
+            r#"#!/bin/bash
+set -e
+
+RESOURCE_GROUP="{resource_group}"
+CONTAINER_GROUP="{container_group}"
+LOCATION="{location}"
+
+echo "Deploying {app_name} to Azure Container Instances..."
+
+# Build and push image to ACR
+docker build -t {image}:{tag} .
+az acr login --name ${{ACR_NAME}}
+docker tag {image}:{tag} ${{ACR_NAME}}.azurecr.io/{image}:{tag}
+docker push ${{ACR_NAME}}.azurecr.io/{image}:{tag}
+
+# Deploy container group
+az deployment group create \
+  --resource-group "$RESOURCE_GROUP" \
+  --template-file aci-template.json \
+  --parameters containerGroupName="$CONTAINER_GROUP"
+
+echo "ACI deployment completed successfully!"
+"#,
+            resource_group = config.resource_group,
+            container_group = config.container_group_name,
+            location = config.location,
+            app_name = self.config.app_name,
+            image = self.config.image_config.base_image,
+            tag = self.config.image_config.tag,
+        );
+        artifacts.insert("deploy-aci.sh".to_string(), deploy_script);
+
+        Ok(artifacts)
+    }
+
+    /// Generate OpenShift artifacts
+    fn generate_openshift_artifacts(
+        &self,
+        config: &OpenShiftConfig,
+    ) -> TrustformersResult<DeploymentArtifacts> {
+        let mut artifacts = HashMap::new();
+
+        // OpenShift BuildConfig
+        let build_config_yaml = format!(
+            r#"
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: {app}-build
+  namespace: {project}
+spec:
+  source:
+    type: Git
+    git:
+      uri: {source}
+  strategy:
+    type: {strategy}
+    sourceStrategy:
+      from:
+        kind: ImageStreamTag
+        name: '{image}:{tag}'
+  output:
+    to:
+      kind: ImageStreamTag
+      name: '{output}'
+"#,
+            app = config.application,
+            project = config.project,
+            source = config.build_config.source,
+            strategy = config.build_config.strategy,
+            image = self.config.image_config.base_image,
+            tag = self.config.image_config.tag,
+            output = config.build_config.output_image,
+        );
+        artifacts.insert("openshift-buildconfig.yaml".to_string(), build_config_yaml);
+
+        // OpenShift DeploymentConfig
+        let deployment_config_yaml = format!(
+            r#"
+apiVersion: apps.openshift.io/v1
+kind: DeploymentConfig
+metadata:
+  name: {app}
+  namespace: {project}
+spec:
+  replicas: {replicas}
+  selector:
+    app: {app}
+  strategy:
+    type: {strategy}
+  template:
+    metadata:
+      labels:
+        app: {app}
+    spec:
+      containers:
+      - name: {app}
+        image: {output}
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+        resources:
+          limits:
+            cpu: '{cpu}'
+            memory: '{memory}'
+          requests:
+            cpu: '{cpu}'
+            memory: '{memory}'
+"#,
+            app = config.application,
+            project = config.project,
+            replicas = config.deployment_config.replicas,
+            strategy = config.deployment_config.strategy,
+            output = config.build_config.output_image,
+            cpu = config.deployment_config.resources.cpu,
+            memory = config.deployment_config.resources.memory,
+        );
+        artifacts.insert(
+            "openshift-deploymentconfig.yaml".to_string(),
+            deployment_config_yaml,
+        );
+
+        // OpenShift Service
+        let service_yaml = format!(
+            r#"
+apiVersion: v1
+kind: Service
+metadata:
+  name: {app}
+  namespace: {project}
+spec:
+  selector:
+    app: {app}
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8080
+"#,
+            app = config.application,
+            project = config.project,
+        );
+        artifacts.insert("openshift-service.yaml".to_string(), service_yaml);
+
+        // OpenShift Route (exposes the service externally)
+        let route_yaml = format!(
+            r#"
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {app}
+  namespace: {project}
+spec:
+  to:
+    kind: Service
+    name: {app}
+  port:
+    targetPort: 8080
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+"#,
+            app = config.application,
+            project = config.project,
+        );
+        artifacts.insert("openshift-route.yaml".to_string(), route_yaml);
+
+        // oc CLI deployment script
+        let deploy_script = format!(
+            r#"#!/bin/bash
+set -e
+
+echo "Deploying {app} to OpenShift project {project}..."
+
+# Select project
+oc project {project} || oc new-project {project}
+
+# Apply manifests
+oc apply -f openshift-buildconfig.yaml
+oc apply -f openshift-deploymentconfig.yaml
+oc apply -f openshift-service.yaml
+oc apply -f openshift-route.yaml
+
+# Start build
+oc start-build {app}-build --follow
+
+echo "OpenShift deployment completed successfully!"
+ROUTE=$(oc get route {app} -o jsonpath='{{.spec.host}}')
+echo "Application available at: https://$ROUTE"
+"#,
+            app = config.application,
+            project = config.project,
+        );
+        artifacts.insert("deploy-openshift.sh".to_string(), deploy_script);
+
+        Ok(artifacts)
     }
 }
 

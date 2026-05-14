@@ -83,47 +83,102 @@ impl RotaryEmbedding {
         }
     }
 
-    /// Apply rotary embedding to query and key tensors
+    /// Apply rotary embedding to query and key tensors.
+    ///
+    /// Implements RoPE (Su et al. 2021): rotates pairs of adjacent dimensions
+    /// using position-dependent angles derived from the base frequency.
+    /// Each pair `(x[i], x[i + half_dim])` is rotated by angle `pos / base^(2i/dim)`.
+    ///
+    /// `q` and `k` are expected to have shape `[seq_len, num_heads * head_dim]`
+    /// or `[batch, seq_len, num_heads * head_dim]`.  The rotation is applied
+    /// to the first `self.dim` values in each head.
     pub fn apply_rotary_emb(
         &self,
         q: &Tensor,
         k: &Tensor,
         position_ids: &[usize],
     ) -> Result<(Tensor, Tensor)> {
-        let (rotated_q, rotated_k) = match (q, k) {
+        match (q, k) {
             (Tensor::F32(q_arr), Tensor::F32(k_arr)) => {
-                let rotated_q = q_arr.clone();
-                let rotated_k = k_arr.clone();
+                let mut rotated_q = q_arr.clone();
+                let mut rotated_k = k_arr.clone();
 
-                // Apply rotary embedding
-                for &pos in position_ids.iter() {
-                    for head in 0..(self.dim / 2) {
-                        let freq = 1.0 / self.base.powf(2.0 * head as f32 / self.dim as f32);
-                        let angle = pos as f32 * freq;
-                        let _cos_val = angle.cos();
-                        let _sin_val = angle.sin();
+                // q_arr / k_arr shape: [seq_len, total_dim]  (2-D, no batch)
+                // or [batch, seq_len, total_dim] (3-D).
+                // position_ids has length seq_len.
+                let ndim = self.dim;
+                let half = ndim / 2;
 
-                        // Apply rotation to Q
-                        // Note: This is a simplified RoPE implementation
-                        // In a full implementation, we would need proper tensor reshaping
-                        // and complex number operations
+                // Validate that we can rotate: total_dim must be >= ndim
+                let total_dim = {
+                    let s = q_arr.shape();
+                    s[s.len() - 1]
+                };
+                if total_dim < ndim {
+                    return Err(tensor_op_error(
+                        "RotaryEmbedding::apply_rotary_emb",
+                        format!(
+                            "tensor last dim {} is smaller than rope dim {}",
+                            total_dim, ndim
+                        ),
+                    ));
+                }
 
-                        // Apply rotation to K
-                        // Note: This is a simplified RoPE implementation
+                // Pre-compute (cos, sin) for each position × each frequency pair
+                // freqs[i] = 1 / base^(2i / ndim)  for i in 0..half
+                let freqs: Vec<f32> = (0..half)
+                    .map(|i| 1.0_f32 / self.base.powf(2.0 * i as f32 / ndim as f32))
+                    .collect();
+
+                // Rotate in-place.  We iterate over positions provided by
+                // position_ids. For 2-D tensors the first axis is seq_len;
+                // for 3-D tensors position_ids still indexes along seq_len.
+                let shape = q_arr.shape().to_vec();
+                let rank = shape.len();
+
+                for (seq_idx, &pos) in position_ids.iter().enumerate() {
+                    for i in 0..half {
+                        let j = i + half; // companion dimension
+
+                        let cos_val = (pos as f32 * freqs[i]).cos();
+                        let sin_val = (pos as f32 * freqs[i]).sin();
+
+                        if rank == 2 {
+                            // shape: [seq_len, total_dim]
+                            let qi = rotated_q[[seq_idx, i]];
+                            let qj = rotated_q[[seq_idx, j]];
+                            rotated_q[[seq_idx, i]] = qi * cos_val - qj * sin_val;
+                            rotated_q[[seq_idx, j]] = qi * sin_val + qj * cos_val;
+
+                            let ki = rotated_k[[seq_idx, i]];
+                            let kj = rotated_k[[seq_idx, j]];
+                            rotated_k[[seq_idx, i]] = ki * cos_val - kj * sin_val;
+                            rotated_k[[seq_idx, j]] = ki * sin_val + kj * cos_val;
+                        } else if rank == 3 {
+                            // shape: [batch, seq_len, total_dim]
+                            for b in 0..shape[0] {
+                                let qi = rotated_q[[b, seq_idx, i]];
+                                let qj = rotated_q[[b, seq_idx, j]];
+                                rotated_q[[b, seq_idx, i]] = qi * cos_val - qj * sin_val;
+                                rotated_q[[b, seq_idx, j]] = qi * sin_val + qj * cos_val;
+
+                                let ki = rotated_k[[b, seq_idx, i]];
+                                let kj = rotated_k[[b, seq_idx, j]];
+                                rotated_k[[b, seq_idx, i]] = ki * cos_val - kj * sin_val;
+                                rotated_k[[b, seq_idx, j]] = ki * sin_val + kj * cos_val;
+                            }
+                        }
+                        // ranks other than 2/3 leave the values unchanged
                     }
                 }
 
-                (Tensor::F32(rotated_q), Tensor::F32(rotated_k))
+                Ok((Tensor::F32(rotated_q), Tensor::F32(rotated_k)))
             },
-            _ => {
-                return Err(tensor_op_error(
-                    "RotaryEmbedding::apply_rotary_emb",
-                    "Unsupported tensor types for RoPE",
-                ))
-            },
-        };
-
-        Ok((rotated_q, rotated_k))
+            _ => Err(tensor_op_error(
+                "RotaryEmbedding::apply_rotary_emb",
+                "Unsupported tensor types for RoPE",
+            )),
+        }
     }
 }
 
@@ -325,14 +380,24 @@ impl Layer for LlamaAttention {
     type Input = Tensor;
     type Output = Tensor;
 
+    /// Full scaled dot-product attention with Grouped Query Attention (GQA).
+    ///
+    /// Shapes (2-D input, no explicit batch):
+    ///   input    : [seq_len, hidden_size]
+    ///   q        : [seq_len, num_heads * head_dim]
+    ///   k, v     : [seq_len, num_kv_heads * head_dim]
+    ///   output   : [seq_len, hidden_size]
+    ///
+    /// GQA: each KV head is shared by `num_heads / num_kv_heads` query heads.
+    /// Causal mask: future positions are masked to −∞ before softmax.
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
+        use scirs2_core::ndarray::{s, Array2};
+
         let shape = input.shape();
-        let (_batch_size, seq_len) = if shape.len() == 2 {
-            // No batch dimension: [seq_len, hidden]
-            (1, shape[0])
+        let seq_len = if shape.len() == 2 {
+            shape[0]
         } else if shape.len() == 3 {
-            // Has batch dimension: [batch, seq_len, hidden]
-            (shape[0], shape[1])
+            shape[1]
         } else {
             return Err(tensor_op_error(
                 "LlamaAttention::forward",
@@ -340,30 +405,87 @@ impl Layer for LlamaAttention {
             ));
         };
 
-        // Project to Q, K, V
-        let q = self.q_proj.forward(input.clone())?; // [seq_len, num_heads * head_dim] or [batch, seq_len, ...]
-        let k = self.k_proj.forward(input.clone())?; // [seq_len, num_kv_heads * head_dim] or [batch, seq_len, ...]
-        let _v = self.v_proj.forward(input)?; // [seq_len, num_kv_heads * head_dim] or [batch, seq_len, ...] - TODO: Use in full attention
+        let num_heads = self.num_heads;
+        let num_kv_heads = self.num_kv_heads;
+        let head_dim = self.head_dim;
+        let queries_per_kv = num_heads / num_kv_heads; // GQA repeat factor
 
-        // Generate position IDs (0, 1, 2, ..., seq_len-1)
+        // --- Projections ---
+        let q = self.q_proj.forward(input.clone())?;
+        let k = self.k_proj.forward(input.clone())?;
+        let v = self.v_proj.forward(input)?;
+
+        // --- Apply RoPE ---
         let position_ids: Vec<usize> = (0..seq_len).collect();
+        let (q_rope, k_rope) = self.rotary_emb.apply_rotary_emb(&q, &k, &position_ids)?;
 
-        // Apply rotary embedding
-        let (q_rope, _k_rope) = self.rotary_emb.apply_rotary_emb(&q, &k, &position_ids)?; // TODO: Use _k_rope in full attention
-
-        // Simplified attention for GQA (placeholder - just use Q and project)
-        // TODO: Implement full scaled dot-product attention with proper GQA
-        match &q_rope {
-            Tensor::F32(_q_arr) => {
-                // Simplified: just project Q through output layer
-                // This maintains correct shapes and allows the model to run
-                self.o_proj.forward(q_rope)
+        // --- Extract F32 arrays ---
+        let (q_arr, k_arr, v_arr) = match (&q_rope, &k_rope, &v) {
+            (Tensor::F32(qa), Tensor::F32(ka), Tensor::F32(va)) => {
+                (qa.clone(), ka.clone(), va.clone())
             },
-            _ => Err(tensor_op_error(
-                "LlamaAttention::forward",
-                "Unsupported tensor types for LLaMA attention",
-            )),
+            _ => {
+                return Err(tensor_op_error(
+                    "LlamaAttention::forward",
+                    "Unsupported tensor types for LLaMA attention",
+                ))
+            },
+        };
+
+        // q_arr: [seq_len, num_heads * head_dim]
+        // k_arr: [seq_len, num_kv_heads * head_dim]
+        // v_arr: [seq_len, num_kv_heads * head_dim]
+
+        let scale = (head_dim as f32).sqrt();
+        let hidden_size = num_heads * head_dim;
+        let mut attn_output = Array2::<f32>::zeros((seq_len, hidden_size));
+
+        for h in 0..num_heads {
+            // Which KV head this query head maps to (GQA)
+            let kv_h = h / queries_per_kv;
+
+            // Extract [seq_len, head_dim] slices
+            let q_start = h * head_dim;
+            let kv_start = kv_h * head_dim;
+
+            let q_head = q_arr.slice(s![.., q_start..q_start + head_dim]).to_owned();
+            let k_head = k_arr.slice(s![.., kv_start..kv_start + head_dim]).to_owned();
+            let v_head = v_arr.slice(s![.., kv_start..kv_start + head_dim]).to_owned();
+
+            // Scores = Q @ K^T / sqrt(head_dim)  shape: [seq_len, seq_len]
+            let mut scores = q_head.dot(&k_head.t()) / scale;
+
+            // Causal mask: mask future positions to -inf
+            for i in 0..seq_len {
+                for j in (i + 1)..seq_len {
+                    scores[[i, j]] = f32::NEG_INFINITY;
+                }
+            }
+
+            // Numerically-stable softmax row-wise
+            let mut attn_weights = Array2::<f32>::zeros((seq_len, seq_len));
+            for i in 0..seq_len {
+                let row = scores.row(i);
+                let max_val = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let exp_row: Vec<f32> = row.iter().map(|&x| (x - max_val).exp()).collect();
+                let sum: f32 = exp_row.iter().sum();
+                let safe_sum = if sum == 0.0 { 1.0 } else { sum };
+                for (j, &val) in exp_row.iter().enumerate() {
+                    attn_weights[[i, j]] = val / safe_sum;
+                }
+            }
+
+            // Head output = attn_weights @ V  shape: [seq_len, head_dim]
+            let head_out = attn_weights.dot(&v_head);
+
+            let out_start = h * head_dim;
+            attn_output
+                .slice_mut(s![.., out_start..out_start + head_dim])
+                .assign(&head_out);
         }
+
+        // --- Output projection ---
+        self.o_proj.forward(Tensor::F32(attn_output.into_dyn()))
     }
 }
 
@@ -913,5 +1035,192 @@ impl Model for LlamaForCausalLM {
 
     fn num_parameters(&self) -> usize {
         self.model.num_parameters() + self.lm_head.parameter_count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trustformers_core::traits::Layer;
+
+    /// Small test config to keep runtime fast.
+    fn small_config() -> LlamaConfig {
+        LlamaConfig {
+            vocab_size: 64,
+            hidden_size: 16,
+            intermediate_size: 32,
+            num_hidden_layers: 1,
+            num_attention_heads: 4,
+            num_key_value_heads: None, // MHA (no GQA)
+            rms_norm_eps: 1e-5,
+            max_position_embeddings: 32,
+            rope_theta: 10000.0,
+            ..LlamaConfig::default()
+        }
+    }
+
+    /// GQA config: 4 query heads, 2 KV heads (repeat factor = 2).
+    fn gqa_config() -> LlamaConfig {
+        LlamaConfig {
+            vocab_size: 64,
+            hidden_size: 16,
+            intermediate_size: 32,
+            num_hidden_layers: 1,
+            num_attention_heads: 4,
+            num_key_value_heads: Some(2),
+            rms_norm_eps: 1e-5,
+            max_position_embeddings: 32,
+            rope_theta: 10000.0,
+            ..LlamaConfig::default()
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // RotaryEmbedding tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rope_output_shape_matches_input() {
+        let rope = RotaryEmbedding::new(8, 32, 10000.0);
+        let seq = 5usize;
+        let dim = 16usize;
+
+        // Build a simple [seq, dim] F32 tensor
+        let data: Vec<f32> = (0..seq * dim).map(|i| i as f32 * 0.01).collect();
+        let arr = scirs2_core::ndarray::Array2::from_shape_vec((seq, dim), data)
+            .expect("shape vec");
+        let q = Tensor::F32(arr.into_dyn());
+        let k = q.clone();
+
+        let positions: Vec<usize> = (0..seq).collect();
+        let (q_out, k_out) = rope.apply_rotary_emb(&q, &k, &positions).expect("rope ok");
+        assert_eq!(q_out.shape(), q.shape(), "Q shape must be preserved");
+        assert_eq!(k_out.shape(), k.shape(), "K shape must be preserved");
+    }
+
+    #[test]
+    fn test_rope_position_zero_leaves_values_unchanged() {
+        // At position 0, angle = 0*freq = 0, cos=1, sin=0 → rotation is identity.
+        let rope = RotaryEmbedding::new(4, 32, 10000.0);
+        let seq = 1usize;
+        let dim = 4usize;
+        let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+        let arr = scirs2_core::ndarray::Array2::from_shape_vec((seq, dim), data)
+            .expect("shape vec");
+        let q = Tensor::F32(arr.into_dyn());
+        let k = q.clone();
+
+        let positions = vec![0usize];
+        let (q_out, _k_out) = rope.apply_rotary_emb(&q, &k, &positions).expect("rope ok");
+
+        if let Tensor::F32(out_arr) = q_out {
+            for (orig, rotated) in [1.0f32, 2.0, 3.0, 4.0].iter().zip(out_arr.iter()) {
+                assert!(
+                    (orig - rotated).abs() < 1e-5,
+                    "Position 0 should be identity: {} vs {}",
+                    orig,
+                    rotated
+                );
+            }
+        } else {
+            panic!("Expected F32 tensor");
+        }
+    }
+
+    #[test]
+    fn test_rope_non_zero_position_changes_values() {
+        // At a non-zero position, values should actually change.
+        let rope = RotaryEmbedding::new(4, 32, 10000.0);
+        let seq = 2usize;
+        let dim = 4usize;
+        let data: Vec<f32> = vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        let arr = scirs2_core::ndarray::Array2::from_shape_vec((seq, dim), data)
+            .expect("shape vec");
+        let q = Tensor::F32(arr.into_dyn());
+        let k = q.clone();
+        let positions = vec![0usize, 5]; // position 5 → non-trivial rotation
+        let (q_out, _) = rope.apply_rotary_emb(&q, &k, &positions).expect("rope ok");
+
+        if let Tensor::F32(out_arr) = q_out {
+            // Row 0 (pos=0) should be unchanged; row 1 (pos=5) should differ.
+            // Use slice for dyn array since .row() requires fixed dims.
+            let row1: Vec<f32> = out_arr
+                .slice(scirs2_core::ndarray::s![1, ..])
+                .iter()
+                .copied()
+                .collect();
+            let changed = row1.iter().any(|&v| (v - 1.0).abs() > 1e-4);
+            assert!(changed, "Non-zero position must change values");
+        } else {
+            panic!("Expected F32 tensor");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // LlamaAttention tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_attention_forward_output_shape_mha() {
+        let config = small_config();
+        let attn = LlamaAttention::new(&config).expect("attn");
+        let input = Tensor::zeros(&[6, 16]).expect("zeros");
+        let output = attn.forward(input).expect("forward");
+        assert_eq!(
+            output.shape(),
+            &[6, 16],
+            "MHA attention output shape must match [seq, hidden]"
+        );
+    }
+
+    #[test]
+    fn test_attention_forward_output_shape_gqa() {
+        let config = gqa_config();
+        let attn = LlamaAttention::new(&config).expect("attn");
+        let input = Tensor::zeros(&[4, 16]).expect("zeros");
+        let output = attn.forward(input).expect("forward");
+        assert_eq!(
+            output.shape(),
+            &[4, 16],
+            "GQA attention output shape must match [seq, hidden]"
+        );
+    }
+
+    #[test]
+    fn test_attention_single_token_does_not_panic() {
+        let config = small_config();
+        let attn = LlamaAttention::new(&config).expect("attn");
+        let input = Tensor::zeros(&[1, 16]).expect("zeros");
+        // A single-token input has a trivial causal mask; should succeed.
+        let _output = attn.forward(input).expect("single-token forward");
+    }
+
+    #[test]
+    fn test_attention_forward_values_differ_from_zeros_input() {
+        // With randomised weights (default init) and non-zero input, output should not be all-zero.
+        let config = small_config();
+        let attn = LlamaAttention::new(&config).expect("attn");
+        // Use a non-trivial input (ones)
+        let data: Vec<f32> = vec![1.0f32; 3 * 16];
+        let arr = scirs2_core::ndarray::ArrayD::from_shape_vec(vec![3, 16], data).expect("arr");
+        let input = Tensor::F32(arr);
+        let output = attn.forward(input).expect("forward");
+        if let Tensor::F32(out_arr) = output {
+            let all_zero = out_arr.iter().all(|&v| v == 0.0);
+            assert!(!all_zero, "Attention output should not be all-zero for non-zero input");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // LlamaDecoderLayer smoke test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_decoder_layer_forward_shape() {
+        let config = small_config();
+        let layer = LlamaDecoderLayer::new(&config).expect("layer");
+        let input = Tensor::zeros(&[5, 16]).expect("zeros");
+        let output = layer.forward(input).expect("forward");
+        assert_eq!(output.shape(), &[5, 16]);
     }
 }

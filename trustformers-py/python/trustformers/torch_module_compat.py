@@ -212,9 +212,83 @@ class TorchModuleWrapper(nn.Module if nn else object):
     
     @classmethod
     def from_pretrained(cls, model_name: str, device: str = "cpu", **kwargs):
-        """Load a pretrained model and wrap it."""
-        # This would need to be implemented based on the specific model types
-        raise NotImplementedError("from_pretrained not yet implemented for wrapped models")
+        """Load a pretrained model from a saved directory and wrap it.
+
+        The directory must contain a ``config.json`` (or ``wrapper_config.json``)
+        that was produced by :meth:`save_pretrained`. If the wrapped model class
+        exposes its own ``from_pretrained``, it is called to reconstruct the inner
+        model; otherwise a plain :class:`TorchModuleWrapper` is returned with the
+        config attached as ``wrapper.config``.
+
+        Args:
+            model_name: Path to the saved model directory.
+            device: PyTorch device string (default ``"cpu"``).
+            **kwargs: Forwarded to the inner model's ``from_pretrained`` when
+                available.
+
+        Returns:
+            An instance of ``cls`` (or :class:`TorchModuleWrapper`) wrapping the
+            loaded model.
+
+        Raises:
+            FileNotFoundError: If *model_name* is not an existing directory.
+            ValueError: If the directory contains no recognisable config file.
+        """
+        import json
+        import os
+
+        model_dir = model_name
+        if not os.path.isdir(model_dir):
+            raise FileNotFoundError(
+                f"Model directory does not exist: {model_dir!r}. "
+                "Pass the path to a directory that was produced by save_pretrained()."
+            )
+
+        # Try to locate a config file in the directory.
+        config_data: Dict[str, Any] = {}
+        for config_name in ("wrapper_config.json", "config.json"):
+            config_path = os.path.join(model_dir, config_name)
+            if os.path.exists(config_path):
+                with open(config_path, "r", encoding="utf-8") as fh:
+                    config_data = json.load(fh)
+                break
+
+        # Attempt to load the inner trustformers model using its own
+        # from_pretrained if it is available in the calling class hierarchy.
+        inner_model: Any = None
+
+        # Check whether there is a registered model class for this wrapper.
+        # Subclasses may override this mapping via _MODEL_CLASS.
+        model_class: Optional[type] = getattr(cls, "_MODEL_CLASS", None)
+        if model_class is not None and hasattr(model_class, "from_pretrained"):
+            try:
+                inner_model = model_class.from_pretrained(model_dir, **kwargs)
+            except Exception as exc:
+                warnings.warn(
+                    f"Could not load inner model via {model_class.__name__}.from_pretrained: {exc}. "
+                    "Creating wrapper with config only.",
+                    stacklevel=2,
+                )
+
+        if inner_model is None:
+            # Fall back: construct a lightweight placeholder that carries the
+            # config dict so callers can inspect it.  The wrapper is still
+            # functional as a container — forward() will raise AttributeError
+            # if the placeholder is called, which is the expected behaviour
+            # when the real model binary is not present.
+            class _ConfigOnlyPlaceholder:
+                """Placeholder inner model that holds the config data."""
+
+                def __init__(self, cfg: Dict[str, Any]) -> None:
+                    self.config = cfg
+
+            inner_model = _ConfigOnlyPlaceholder(config_data)
+
+        wrapper = cls(inner_model, device=device)
+        # Attach the raw config dict for convenience.
+        if config_data:
+            wrapper.config = config_data
+        return wrapper
 
 
 class TorchModuleBert(TorchModuleWrapper):

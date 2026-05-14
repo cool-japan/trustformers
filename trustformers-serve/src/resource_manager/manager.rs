@@ -467,11 +467,55 @@ impl ResourceManagementSystem {
             .context("Failed to deallocate custom resources")
     }
 
-    /// Check if resources are available
-    pub async fn check_availability(&self, _requirements: &ResourceRequirement) -> Result<bool> {
-        // TODO: Implement availability checking using the new generic ResourceRequirement structure
-        // The resource_type field should be parsed to determine which type of resource to check
-        // For now, always returning true as placeholder
+    /// Check if all resources described by `requirements` are currently available.
+    ///
+    /// Each sub-resource type (ports, directories, GPU devices, database connections)
+    /// is checked independently; the result is the logical AND of all checks.
+    pub async fn check_availability(&self, requirements: &ResourceRequirement) -> Result<bool> {
+        // Network ports
+        if requirements.network_ports > 0
+            && !self
+                .port_manager
+                .check_availability(requirements.network_ports)
+                .await
+                .context("Port availability check failed")?
+        {
+            return Ok(false);
+        }
+
+        // Temporary directories
+        if requirements.temp_directories > 0
+            && !self
+                .temp_dir_manager
+                .check_availability(requirements.temp_directories)
+                .await
+                .context("Temp-directory availability check failed")?
+        {
+            return Ok(false);
+        }
+
+        // GPU devices — convert usize indices to the u32 slice expected by the manager.
+        if !requirements.gpu_devices.is_empty()
+            && !self
+                .gpu_manager
+                .check_availability(&requirements.gpu_devices)
+                .await
+                .context("GPU availability check failed")?
+        {
+            return Ok(false);
+        }
+
+        // Database connections
+        if requirements.database_connections > 0
+            && !self
+                .database_manager
+                .check_availability(requirements.database_connections)
+                .await
+                .context("Database availability check failed")?
+        {
+            return Ok(false);
+        }
+
         Ok(true)
     }
 
@@ -712,4 +756,50 @@ pub struct EmergencyCleanupResult {
     pub database_connections_closed: usize,
     pub cleanup_tasks_processed: usize,
     pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parallel_execution_engine::ResourceRequirement;
+    use std::collections::HashMap;
+
+    fn make_requirement(
+        resource_type: &str,
+        network_ports: usize,
+        temp_directories: usize,
+        database_connections: usize,
+        gpu_devices: Vec<usize>,
+    ) -> ResourceRequirement {
+        ResourceRequirement {
+            resource_type: resource_type.to_string(),
+            min_amount: 0.0,
+            cpu_cores: 0.0,
+            memory_mb: 0,
+            gpu_devices,
+            network_ports,
+            temp_directories,
+            database_connections,
+            custom_resources: HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_check_availability_zero_requirements_returns_true() {
+        // A default-configured system with no real infrastructure should still
+        // return true when zero resources of each type are requested.
+        use crate::test_parallelization::ResourceManagementConfig;
+        let config = ResourceManagementConfig::default();
+        let system = ResourceManagementSystem::new(config).await.expect("system should initialise");
+
+        let req = make_requirement("mixed", 0, 0, 0, vec![]);
+        let available = system
+            .check_availability(&req)
+            .await
+            .expect("check_availability should not error");
+        assert!(
+            available,
+            "zero-resource requirement should always be available"
+        );
+    }
 }

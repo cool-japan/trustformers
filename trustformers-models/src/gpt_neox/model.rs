@@ -81,7 +81,7 @@ impl Layer for GPTNeoXMLP {
 pub struct GPTNeoXAttention {
     pub query_key_value: Linear,      // Combined QKV projection
     pub dense: Linear,                // Output projection
-    pub _rotary_emb: RotaryEmbedding, // TODO: Use in full attention implementation
+    pub _rotary_emb: RotaryEmbedding,
     pub _num_heads: usize,
     pub _head_dim: usize,
     pub _rotary_ndims: usize,
