@@ -163,7 +163,7 @@ bytemuck = { version = "1.25.0", features = ["derive"] }
 # SciRS2 dependencies - using crates.io 0.1.x
 # Note: "metal" feature removed from default features as it's Apple-specific
 # Individual crates should enable it conditionally using target-specific dependencies
-scirs2-core = { version = "0.4.3", default-features = false, features = [
+scirs2-core = { version = "0.4.4", default-features = false, features = [
     "array",
     "simd",
     "parallel",
@@ -175,7 +175,7 @@ scirs2-core = { version = "0.4.3", default-features = false, features = [
     "gpu",     # GPU acceleration abstractions
     # Metal removed - enable via platform-specific dependencies in individual crates
 ]}
-scirs2-linalg = { version = "0.4.3" }
+scirs2-linalg = { version = "0.4.4" }
 
 [profile.release]
 lto = true

@@ -628,11 +628,144 @@ impl LargeModelVisualizer {
         Ok((bytes, size))
     }
 
-    /// Generate interactive SVG with zoom/pan
+    /// Generate interactive SVG with zoom/pan via embedded ECMAScript
     fn generate_interactive_svg(&self, sampled_layers: &[usize]) -> Result<(Vec<u8>, usize)> {
-        // For now, delegate to static SVG
-        // TODO: Add pan/zoom JavaScript
-        self.generate_static_svg(sampled_layers)
+        let cache = self.layer_cache.read();
+
+        let layer_height = 60usize;
+        let layer_width = 200usize;
+        let x_offset = 500usize;
+        let y_start = 60usize;
+        let svg_height = y_start + sampled_layers.len() * (layer_height + 20) + 40;
+        let svg_width = 1200usize;
+
+        // Build the inner layer elements first
+        let mut layer_elems = String::new();
+        for (i, &idx) in sampled_layers.iter().enumerate() {
+            if let Some(layer) = cache.values().find(|l| l.index == idx) {
+                let y = y_start + i * (layer_height + 20);
+                layer_elems.push_str(&format!(
+                    r#"<rect x="{x}" y="{y}" width="{w}" height="{h}" class="layer" />
+<text x="{cx}" y="{ty}" class="layer-text" text-anchor="middle">{name}</text>
+<text x="{cx}" y="{py}" class="layer-text" text-anchor="middle">{params:.1}M params</text>
+"#,
+                    x = x_offset,
+                    y = y,
+                    w = layer_width,
+                    h = layer_height,
+                    cx = x_offset + layer_width / 2,
+                    ty = y + 25,
+                    py = y + 45,
+                    name = layer.name,
+                    params = layer.param_count as f64 / 1e6
+                ));
+            }
+        }
+
+        // Compose full SVG with embedded pan/zoom JavaScript.
+        // The <script> block uses an SVG foreignObject-free approach: it attaches
+        // pointer-event listeners directly to the root <svg> element and manipulates
+        // a <g id="viewport"> transform, which is valid SVG+JS in any modern browser.
+        let svg = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     xmlns:xlink="http://www.w3.org/1999/xlink"
+     id="svg-root"
+     width="{width}" height="{height}"
+     viewBox="0 0 {width} {height}"
+     style="cursor:grab;user-select:none;">
+<style>
+.layer {{ fill: #4a90e2; stroke: #2c5aa0; stroke-width: 2; }}
+.layer-text {{ fill: white; font-family: Arial, sans-serif; font-size: 12px; }}
+.title {{ font-family: Arial, sans-serif; font-size: 20px; font-weight: bold; }}
+</style>
+<text x="{title_x}" y="30" class="title" text-anchor="middle">Model Architecture (interactive)</text>
+<g id="viewport">
+{layers}
+</g>
+<script type="text/javascript"><![CDATA[
+(function() {{
+  var svg   = document.getElementById('svg-root');
+  var vp    = document.getElementById('viewport');
+  var tx = 0, ty = 0, scale = 1.0;
+  var dragging = false;
+  var startX = 0, startY = 0;
+
+  function applyTransform() {{
+    vp.setAttribute('transform',
+      'translate(' + tx + ',' + ty + ') scale(' + scale + ')');
+  }}
+
+  // Pan: mousedown / mousemove / mouseup
+  svg.addEventListener('mousedown', function(e) {{
+    dragging = true;
+    startX = e.clientX - tx;
+    startY = e.clientY - ty;
+    svg.style.cursor = 'grabbing';
+    e.preventDefault();
+  }});
+  window.addEventListener('mousemove', function(e) {{
+    if (!dragging) return;
+    tx = e.clientX - startX;
+    ty = e.clientY - startY;
+    applyTransform();
+  }});
+  window.addEventListener('mouseup', function() {{
+    dragging = false;
+    svg.style.cursor = 'grab';
+  }});
+
+  // Touch pan
+  var lastTouch = null;
+  svg.addEventListener('touchstart', function(e) {{
+    if (e.touches.length === 1) {{
+      lastTouch = e.touches[0];
+    }}
+    e.preventDefault();
+  }}, {{ passive: false }});
+  svg.addEventListener('touchmove', function(e) {{
+    if (e.touches.length === 1 && lastTouch) {{
+      var t = e.touches[0];
+      tx += t.clientX - lastTouch.clientX;
+      ty += t.clientY - lastTouch.clientY;
+      lastTouch = t;
+      applyTransform();
+    }}
+    e.preventDefault();
+  }}, {{ passive: false }});
+  svg.addEventListener('touchend', function() {{ lastTouch = null; }});
+
+  // Zoom: mousewheel
+  svg.addEventListener('wheel', function(e) {{
+    e.preventDefault();
+    var delta = e.deltaY > 0 ? 0.9 : 1.1;
+    // Zoom towards cursor position
+    var rect  = svg.getBoundingClientRect();
+    var mx = e.clientX - rect.left;
+    var my = e.clientY - rect.top;
+    tx = mx - (mx - tx) * delta;
+    ty = my - (my - ty) * delta;
+    scale = Math.max(0.1, Math.min(10.0, scale * delta));
+    applyTransform();
+  }}, {{ passive: false }});
+
+  // Double-click to reset
+  svg.addEventListener('dblclick', function() {{
+    tx = 0; ty = 0; scale = 1.0;
+    applyTransform();
+  }});
+}})();
+]]></script>
+</svg>"#,
+            width = svg_width,
+            height = svg_height,
+            title_x = svg_width / 2,
+            layers = layer_elems,
+        );
+
+        let bytes = svg.into_bytes();
+        let size = bytes.len();
+        Ok((bytes, size))
     }
 
     /// Generate interactive HTML with JavaScript

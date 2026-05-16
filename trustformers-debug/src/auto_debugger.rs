@@ -1163,7 +1163,7 @@ impl IssueDetector for DataIssueDetector {
             // loss continues to move meaningfully. Models collapsing onto the
             // majority class show exactly this signature.
             let acc_pinned_extreme =
-                acc_stddev < 0.01 && (acc_mean < 0.2 || acc_mean > 0.95);
+                acc_stddev < 0.01 && !(0.2..=0.95).contains(&acc_mean);
             let loss_changing = loss_relative_change.abs() > 0.05;
             if acc_pinned_extreme && loss_changing {
                 let mut metrics = HashMap::new();

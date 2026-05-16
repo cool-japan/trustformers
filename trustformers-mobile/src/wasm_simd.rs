@@ -890,7 +890,226 @@ impl WasmSimdEngine {
 
                 Tensor::from_vec(result, &shape)
             },
-            _ => Err(runtime_error("Fallback not implemented for this operation")),
+            SimdOperationType::Conv2D => {
+                // Scalar 2D convolution fallback (NCHW format required)
+                let w = weights.ok_or_else(|| runtime_error("Conv2D requires weights"))?;
+                let input_data = input.data()?;
+                let kernel_data = w.data()?;
+                let input_shape = input.shape();
+                let kernel_shape = w.shape();
+
+                if input_shape.len() != 4 || kernel_shape.len() != 4 {
+                    return Err(runtime_error("Conv2D requires 4D tensors (NCHW format)"));
+                }
+
+                let (batch, in_channels, in_height, in_width) = (
+                    input_shape[0],
+                    input_shape[1],
+                    input_shape[2],
+                    input_shape[3],
+                );
+                let (out_channels, kernel_channels, kernel_height, kernel_width) = (
+                    kernel_shape[0],
+                    kernel_shape[1],
+                    kernel_shape[2],
+                    kernel_shape[3],
+                );
+
+                if in_channels != kernel_channels {
+                    return Err(runtime_error(
+                        "Input and kernel channel dimensions must match",
+                    ));
+                }
+
+                let out_height = in_height.saturating_sub(kernel_height) + 1;
+                let out_width = in_width.saturating_sub(kernel_width) + 1;
+                let mut result =
+                    vec![0.0f32; batch * out_channels * out_height * out_width];
+
+                for b in 0..batch {
+                    for oc in 0..out_channels {
+                        for oh in 0..out_height {
+                            for ow in 0..out_width {
+                                let mut sum = 0.0f32;
+                                for ic in 0..in_channels {
+                                    for kh in 0..kernel_height {
+                                        for kw in 0..kernel_width {
+                                            let input_idx =
+                                                b * (in_channels * in_height * in_width)
+                                                    + ic * (in_height * in_width)
+                                                    + (oh + kh) * in_width
+                                                    + (ow + kw);
+                                            let kernel_idx = oc
+                                                * (kernel_channels
+                                                    * kernel_height
+                                                    * kernel_width)
+                                                + ic * (kernel_height * kernel_width)
+                                                + kh * kernel_width
+                                                + kw;
+                                            sum += input_data[input_idx]
+                                                * kernel_data[kernel_idx];
+                                        }
+                                    }
+                                }
+                                let result_idx = b
+                                    * (out_channels * out_height * out_width)
+                                    + oc * (out_height * out_width)
+                                    + oh * out_width
+                                    + ow;
+                                result[result_idx] = sum;
+                            }
+                        }
+                    }
+                }
+
+                Tensor::from_vec(result, &[batch, out_channels, out_height, out_width])
+            },
+            SimdOperationType::Mul => {
+                // Scalar element-wise multiplication fallback
+                let w = weights.ok_or_else(|| runtime_error("Mul requires weights"))?;
+                let a_data = input.data()?;
+                let b_data = w.data()?;
+                let shape = input.shape();
+
+                if input.shape() != w.shape() {
+                    return Err(runtime_error(
+                        "Tensors must have the same shape for element-wise multiplication",
+                    ));
+                }
+
+                let total_elements = shape.iter().product::<usize>();
+                let mut result = vec![0.0f32; total_elements];
+                for i in 0..total_elements {
+                    result[i] = a_data[i] * b_data[i];
+                }
+                Tensor::from_vec(result, &shape)
+            },
+            SimdOperationType::BatchNorm => {
+                // Scalar batch normalization fallback
+                let w = weights.ok_or_else(|| runtime_error("BatchNorm requires weights"))?;
+                let input_data = input.data()?;
+                let params_data = w.data()?;
+                let shape = input.shape();
+                let total_elements = shape.iter().product::<usize>();
+
+                // params layout: [gamma, beta, mean, variance]
+                if params_data.len() < 4 {
+                    return Err(runtime_error("Batch norm requires at least 4 parameters"));
+                }
+
+                let gamma = params_data[0];
+                let beta = params_data[1];
+                let mean = params_data[2];
+                let variance = params_data[3];
+                let epsilon = 1e-5f32;
+                let inv_std = 1.0 / (variance + epsilon).sqrt();
+
+                let mut result = vec![0.0f32; total_elements];
+                for i in 0..total_elements {
+                    result[i] = (input_data[i] - mean) * inv_std * gamma + beta;
+                }
+                Tensor::from_vec(result, &shape)
+            },
+            SimdOperationType::Attention => {
+                // Scalar self-attention fallback (simplified: softmax(QK^T/sqrt(d)) * V)
+                let input_data = input.data()?;
+                let shape = input.shape();
+
+                if shape.len() != 2 {
+                    return Err(runtime_error("Simplified attention requires 2D input"));
+                }
+
+                let (seq_len, d_model) = (shape[0], shape[1]);
+                let scale = (d_model as f32).sqrt().recip();
+                let mut result = vec![0.0f32; seq_len * d_model];
+
+                for i in 0..seq_len {
+                    let mut attention_weights = vec![0.0f32; seq_len];
+
+                    for j in 0..seq_len {
+                        let mut dot = 0.0f32;
+                        for k in 0..d_model {
+                            dot += input_data[i * d_model + k] * input_data[j * d_model + k];
+                        }
+                        attention_weights[j] = dot * scale;
+                    }
+
+                    // Numerically stable softmax
+                    let max_score =
+                        attention_weights.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let mut sum_exp = 0.0f32;
+                    for w in &mut attention_weights {
+                        *w = (*w - max_score).exp();
+                        sum_exp += *w;
+                    }
+                    if sum_exp > 0.0 {
+                        for w in &mut attention_weights {
+                            *w /= sum_exp;
+                        }
+                    }
+
+                    // Weighted sum over value vectors (V = input)
+                    for k in 0..d_model {
+                        let mut weighted_sum = 0.0f32;
+                        for j in 0..seq_len {
+                            weighted_sum +=
+                                attention_weights[j] * input_data[j * d_model + k];
+                        }
+                        result[i * d_model + k] = weighted_sum;
+                    }
+                }
+
+                Tensor::from_vec(result, &shape)
+            },
+            SimdOperationType::Pooling => {
+                // Scalar 2x2 max pooling fallback (NCHW format)
+                let input_data = input.data()?;
+                let shape = input.shape();
+
+                if shape.len() != 4 {
+                    return Err(runtime_error("Pooling requires 4D input (NCHW format)"));
+                }
+
+                let (batch, channels, height, width) =
+                    (shape[0], shape[1], shape[2], shape[3]);
+                let pool_size = 2usize;
+                let out_height = height / pool_size;
+                let out_width = width / pool_size;
+                let mut result =
+                    vec![f32::NEG_INFINITY; batch * channels * out_height * out_width];
+
+                for b in 0..batch {
+                    for c in 0..channels {
+                        for oh in 0..out_height {
+                            for ow in 0..out_width {
+                                let mut max_val = f32::NEG_INFINITY;
+                                for ph in 0..pool_size {
+                                    for pw in 0..pool_size {
+                                        let ih = oh * pool_size + ph;
+                                        let iw = ow * pool_size + pw;
+                                        if ih < height && iw < width {
+                                            let idx =
+                                                b * (channels * height * width)
+                                                    + c * (height * width)
+                                                    + ih * width
+                                                    + iw;
+                                            max_val = max_val.max(input_data[idx]);
+                                        }
+                                    }
+                                }
+                                let result_idx = b
+                                    * (channels * out_height * out_width)
+                                    + c * (out_height * out_width)
+                                    + oh * out_width
+                                    + ow;
+                                result[result_idx] = max_val;
+                            }
+                        }
+                    }
+                }
+
+                Tensor::from_vec(result, &[batch, channels, out_height, out_width])
+            },
         }
     }
 

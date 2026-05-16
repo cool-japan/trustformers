@@ -524,9 +524,107 @@ impl MultiCloudOrchestrator {
         Ok(())
     }
 
-    async fn find_replacement_node(&self, _node_id: &str) -> Result<NodeInfo> {
-        // Find replacement for preempted node
-        Err(anyhow!("Replacement node finding not implemented"))
+    async fn find_replacement_node(&self, node_id: &str) -> Result<NodeInfo> {
+        // Retrieve the preempted node's spec so we can match on instance_type and provider
+        let (preempted_instance_type, preempted_provider) = {
+            let active_nodes = self.active_nodes.lock().expect("lock should not be poisoned");
+            match active_nodes.get(node_id) {
+                Some(node) => (node.instance_type.clone(), node.provider.clone()),
+                None => {
+                    // Node already removed — use defaults; any available node will do
+                    (String::new(), String::new())
+                },
+            }
+        };
+
+        // Strategy: prefer the same provider/instance-type; fall back to any provider that
+        // offers a compatible instance type at equal or lower cost.
+        let mut best_instance: Option<(&str, &InstanceType)> = None;
+        let mut best_cost = f64::MAX;
+
+        for provider in &self.config.providers {
+            for instance_type in &provider.instance_types {
+                let is_same_type = instance_type.name == preempted_instance_type;
+                let is_same_provider = provider.name == preempted_provider;
+
+                // Compute effective hourly cost (spot preferred when enabled)
+                let effective_cost = if self.config.cost_config.use_spot_instances
+                    && instance_type.spot_available
+                {
+                    instance_type.cost_per_hour * (1.0 - instance_type.spot_discount)
+                } else {
+                    instance_type.cost_per_hour
+                };
+
+                // Prefer: same provider + same type > same type > lowest cost
+                let priority = match (is_same_provider, is_same_type) {
+                    (true, true) => 0,
+                    (false, true) => 1,
+                    _ => 2,
+                };
+
+                let current_priority = best_instance.map_or(usize::MAX, |(_, _)| {
+                    // recalculate for comparison — we store best_cost for the tie-break
+                    if best_cost < f64::MAX { 0 } else { usize::MAX }
+                });
+
+                let should_replace = best_instance.is_none()
+                    || priority
+                        < {
+                            let (_, bi) = best_instance.unwrap();
+                            let bi_same_provider = self
+                                .config
+                                .providers
+                                .iter()
+                                .any(|p| p.name == preempted_provider && p.instance_types.iter().any(|i| std::ptr::eq(i, bi)));
+                            let bi_same_type = bi.name == preempted_instance_type;
+                            match (bi_same_provider, bi_same_type) {
+                                (true, true) => 0,
+                                (false, true) => 1,
+                                _ => 2,
+                            }
+                        }
+                    || (priority == current_priority && effective_cost < best_cost);
+
+                if should_replace {
+                    best_instance = Some((&provider.name, instance_type));
+                    best_cost = effective_cost;
+                }
+            }
+        }
+
+        match best_instance {
+            None => Err(anyhow!(
+                "No replacement node available for preempted node '{}'",
+                node_id
+            )),
+            Some((provider_name, instance_type)) => {
+                let ts = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let new_node_id = format!("{}-replacement-{}", provider_name, ts);
+                Ok(NodeInfo {
+                    node_id: new_node_id,
+                    provider: provider_name.to_string(),
+                    region: self
+                        .config
+                        .providers
+                        .iter()
+                        .find(|p| p.name == provider_name)
+                        .and_then(|p| p.regions.first())
+                        .cloned()
+                        .unwrap_or_else(|| "us-east-1".to_string()),
+                    instance_type: instance_type.name.clone(),
+                    is_spot: self.config.cost_config.use_spot_instances
+                        && instance_type.spot_available,
+                    status: NodeStatus::Starting,
+                    start_time: SystemTime::now(),
+                    last_health_check: SystemTime::now(),
+                    performance_metrics: PerformanceMetrics::default(),
+                })
+            },
+        }
     }
 
     async fn migrate_training_state(&self, _from_node: &str, _to_node: &str) -> Result<()> {
