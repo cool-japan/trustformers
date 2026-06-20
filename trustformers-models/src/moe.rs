@@ -2,6 +2,7 @@
 ///
 /// This module provides reusable MoE components that can be integrated into
 /// various transformer architectures like Mixtral, GLaM, Switch Transformer, etc.
+use crate::common::ActivationType;
 use std::collections::HashMap;
 use trustformers_core::{errors::Result, layers::Linear, tensor::Tensor, traits::Layer};
 
@@ -56,7 +57,7 @@ pub struct MLPExpert {
     gate_proj: Linear,
     up_proj: Linear,
     down_proj: Linear,
-    activation: String,
+    activation: ActivationType,
 }
 
 impl MLPExpert {
@@ -70,6 +71,11 @@ impl MLPExpert {
         let up_proj = Linear::new(hidden_size, intermediate_size, false);
         let down_proj = Linear::new(intermediate_size, hidden_size, false);
 
+        // Parse the activation string once at construction. Any unsupported
+        // identifier falls back to the identity (matching the previous
+        // `_ => Ok(x.clone())` default arm).
+        let activation = ActivationType::from_config_str_or(&activation, ActivationType::Identity);
+
         Ok(Self {
             id,
             gate_proj,
@@ -80,12 +86,7 @@ impl MLPExpert {
     }
 
     fn apply_activation(&self, x: &Tensor) -> Result<Tensor> {
-        match self.activation.as_str() {
-            "silu" | "swish" => x.silu(),
-            "gelu" => x.gelu(),
-            "relu" => x.relu(),
-            _ => Ok(x.clone()),
-        }
+        self.activation.apply(x)
     }
 }
 

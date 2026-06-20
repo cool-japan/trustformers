@@ -14,10 +14,7 @@ impl Lcg {
         Self { state: seed }
     }
     fn next_u64(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
+        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         self.state
     }
     fn next_f32(&mut self) -> f32 {
@@ -83,8 +80,14 @@ fn test_variability_bounds_ranges_valid() {
 
 #[test]
 fn test_load_balancing_algorithm_equality() {
-    assert_eq!(LoadBalancingAlgorithm::RoundRobin, LoadBalancingAlgorithm::RoundRobin);
-    assert_ne!(LoadBalancingAlgorithm::RoundRobin, LoadBalancingAlgorithm::LeastConnections);
+    assert_eq!(
+        LoadBalancingAlgorithm::RoundRobin,
+        LoadBalancingAlgorithm::RoundRobin
+    );
+    assert_ne!(
+        LoadBalancingAlgorithm::RoundRobin,
+        LoadBalancingAlgorithm::LeastConnections
+    );
 }
 
 #[test]
@@ -109,7 +112,10 @@ fn test_baseline_validation_status_variants() {
         BaselineValidationStatus::Invalid,
     ];
     assert_eq!(statuses.len(), 5);
-    assert_ne!(BaselineValidationStatus::Valid, BaselineValidationStatus::Invalid);
+    assert_ne!(
+        BaselineValidationStatus::Valid,
+        BaselineValidationStatus::Invalid
+    );
 }
 
 #[test]
@@ -161,7 +167,11 @@ fn test_pattern_similarity_identical_patterns() {
     };
     let sim = detector.calculate_similarity(&pattern, &pattern);
     // Identical patterns should have high similarity
-    assert!(sim > 0.99, "expected high similarity for identical patterns, got {}", sim);
+    assert!(
+        sim > 0.99,
+        "expected high similarity for identical patterns, got {}",
+        sim
+    );
 }
 
 #[test]
@@ -329,7 +339,8 @@ fn test_monitoring_status_creation() {
             total_data_points: 0,
             collection_rate: 100.0,
             success_rate: 0.99,
-            avg_collection_time: 10.0, data_quality: 0.95,
+            avg_collection_time: 10.0,
+            data_quality: 0.95,
         },
     };
     assert!(status.active);
@@ -339,7 +350,8 @@ fn test_monitoring_status_creation() {
 #[test]
 fn test_trend_info_creation() {
     let trend = TrendInfo {
-        direction: crate::performance_optimizer::real_time_metrics::types::TrendDirection::Increasing,
+        direction:
+            crate::performance_optimizer::real_time_metrics::types::TrendDirection::Increasing,
         strength: TrendStrength::Strong,
         slope: 0.05,
         r_squared: 0.85,
@@ -376,20 +388,31 @@ fn test_thread_pool_statistics_default() {
 
 #[test]
 fn test_trend_analysis_result_creation() {
-    let make_trend = |dir: crate::performance_optimizer::real_time_metrics::types::TrendDirection| TrendInfo {
-        direction: dir,
-        strength: TrendStrength::Moderate,
-        slope: 0.01,
-        r_squared: 0.7,
-        confidence: 0.8,
-        significance: true,
-    };
+    let make_trend =
+        |dir: crate::performance_optimizer::real_time_metrics::types::TrendDirection| TrendInfo {
+            direction: dir,
+            strength: TrendStrength::Moderate,
+            slope: 0.01,
+            r_squared: 0.7,
+            confidence: 0.8,
+            significance: true,
+        };
     let result = TrendAnalysisResult {
-        throughput_trend: make_trend(crate::performance_optimizer::real_time_metrics::types::TrendDirection::Increasing),
-        latency_trend: make_trend(crate::performance_optimizer::real_time_metrics::types::TrendDirection::Stable),
-        cpu_trend: make_trend(crate::performance_optimizer::real_time_metrics::types::TrendDirection::Decreasing),
-        memory_trend: make_trend(crate::performance_optimizer::real_time_metrics::types::TrendDirection::Stable),
-        overall_trend: make_trend(crate::performance_optimizer::real_time_metrics::types::TrendDirection::Stable),
+        throughput_trend: make_trend(
+            crate::performance_optimizer::real_time_metrics::types::TrendDirection::Increasing,
+        ),
+        latency_trend: make_trend(
+            crate::performance_optimizer::real_time_metrics::types::TrendDirection::Stable,
+        ),
+        cpu_trend: make_trend(
+            crate::performance_optimizer::real_time_metrics::types::TrendDirection::Decreasing,
+        ),
+        memory_trend: make_trend(
+            crate::performance_optimizer::real_time_metrics::types::TrendDirection::Stable,
+        ),
+        overall_trend: make_trend(
+            crate::performance_optimizer::real_time_metrics::types::TrendDirection::Stable,
+        ),
         analysis_confidence: 0.85,
         recommendation: "Scale CPU".to_string(),
     };
@@ -413,7 +436,8 @@ fn test_thread_configuration_creation() {
             max_attempts: 3,
             base_delay: Duration::from_millis(100),
             max_delay: Duration::from_secs(10),
-            backoff_multiplier: 2.0, jitter_enabled: false,
+            backoff_multiplier: 2.0,
+            jitter_enabled: false,
         },
     };
     assert_eq!(config.buffer_size, 1024);

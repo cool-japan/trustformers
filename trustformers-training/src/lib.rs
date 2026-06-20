@@ -13,26 +13,40 @@
 //! ## Quick Start
 //!
 //! ```rust,no_run
-//! use trustformers_training::{
-//!     Trainer, TrainingConfig,
-//!     distributed::DistributedConfig,
-//! };
-//! use trustformers_core::tensor::Tensor;
+//! use trustformers_training::{Trainer, TrainingArguments, MSELoss};
+//! use trustformers_training::trainer::TaskType;
+//! use trustformers_optim::Adam;
+//! # use trustformers_core::tensor::Tensor;
+//! # use trustformers_core::traits::{Config, Model};
+//! # use trustformers_core::TrustformersError;
+//! #
+//! # // A minimal stand-in model; substitute a real architecture from `trustformers-models`.
+//! # #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+//! # struct TinyConfig;
+//! # impl Config for TinyConfig {
+//! #     fn architecture(&self) -> &'static str { "tiny" }
+//! # }
+//! # #[derive(Debug, Clone)]
+//! # struct TinyModel { config: TinyConfig }
+//! # impl Model for TinyModel {
+//! #     type Config = TinyConfig;
+//! #     type Input = Tensor;
+//! #     type Output = Tensor;
+//! #     fn forward(&self, input: Self::Input) -> Result<Self::Output, TrustformersError> { Ok(input) }
+//! #     fn load_pretrained(&mut self, _r: &mut dyn std::io::Read) -> Result<(), TrustformersError> { Ok(()) }
+//! #     fn get_config(&self) -> &Self::Config { &self.config }
+//! #     fn num_parameters(&self) -> usize { 0 }
+//! # }
+//! # let model = TinyModel { config: TinyConfig };
+//! // Configure training (see `TrainingArguments` for the full set of options).
+//! let args = TrainingArguments::default();
 //!
-//! // Configure training
-//! let config = TrainingConfig {
-//!     batch_size: 32,
-//!     learning_rate: 1e-4,
-//!     num_epochs: 10,
-//!     gradient_accumulation_steps: 4,
-//!     ..Default::default()
-//! };
+//! // Choose an optimizer and a loss function.
+//! let optimizer = Box::new(Adam::new(1e-4, (0.9, 0.999), 1e-8, 0.0));
+//! let loss_fn = Box::new(MSELoss::new());
 //!
-//! // Create trainer
-//! let mut trainer = Trainer::new(model, optimizer, config)?;
-//!
-//! // Train model
-//! trainer.train(train_dataset, val_dataset)?;
+//! // Build the trainer; `trainer.train(..)` then runs the loop over your datasets.
+//! let _trainer = Trainer::new(model, args, optimizer, loss_fn, TaskType::Classification)?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
@@ -40,17 +54,44 @@
 //!
 //! ```rust,no_run
 //! use trustformers_training::distributed::{
-//!     DistributedConfig, DistributedStrategy,
+//!     DataParallelTrainer, DistributedBackend, DistributedConfig, SimulatedProcessGroup,
+//! };
+//! use std::sync::Arc;
+//! # use trustformers_core::tensor::Tensor;
+//! # use trustformers_core::traits::{Config, Model};
+//! # use trustformers_core::TrustformersError;
+//! #
+//! # #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+//! # struct TinyConfig;
+//! # impl Config for TinyConfig {
+//! #     fn architecture(&self) -> &'static str { "tiny" }
+//! # }
+//! # #[derive(Debug, Clone)]
+//! # struct TinyModel { config: TinyConfig }
+//! # impl Model for TinyModel {
+//! #     type Config = TinyConfig;
+//! #     type Input = Tensor;
+//! #     type Output = Tensor;
+//! #     fn forward(&self, input: Self::Input) -> Result<Self::Output, TrustformersError> { Ok(input) }
+//! #     fn load_pretrained(&mut self, _r: &mut dyn std::io::Read) -> Result<(), TrustformersError> { Ok(()) }
+//! #     fn get_config(&self) -> &Self::Config { &self.config }
+//! #     fn num_parameters(&self) -> usize { 0 }
+//! # }
+//! # let model = TinyModel { config: TinyConfig };
+//! // Data-parallel setup. The simulated backend needs no real cluster, so this
+//! // example is runnable anywhere; swap in `DistributedBackend::NCCL` on real hardware.
+//! let config = DistributedConfig {
+//!     world_size: 1,
+//!     rank: 0,
+//!     backend: DistributedBackend::Simulated,
+//!     master_addr: "localhost".to_string(),
+//!     master_port: 29500,
+//!     gradient_compression: false,
+//!     bucket_size_mb: 25,
 //! };
 //!
-//! let dist_config = DistributedConfig {
-//!     strategy: DistributedStrategy::DataParallel,
-//!     world_size: 8,
-//!     backend: "nccl",
-//!     ..Default::default()
-//! };
-//!
-//! let trainer = Trainer::new_distributed(model, optimizer, config, dist_config)?;
+//! let process_group = Arc::new(SimulatedProcessGroup::new(0, 1));
+//! let _trainer = DataParallelTrainer::new(model, process_group, config)?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!

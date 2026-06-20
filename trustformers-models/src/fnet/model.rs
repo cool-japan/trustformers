@@ -1,3 +1,4 @@
+use crate::common::ActivationType;
 use crate::fnet::config::FNetConfig;
 use std::io::Read;
 use trustformers_core::{
@@ -258,7 +259,7 @@ impl Layer for FourierTransform {
 pub struct FNetFeedForward {
     dense1: Linear,
     dense2: Linear,
-    activation: String,
+    activation: ActivationType,
     #[allow(dead_code)]
     dropout: f32,
     device: Device,
@@ -278,7 +279,10 @@ impl FNetFeedForward {
         Ok(Self {
             dense1,
             dense2,
-            activation: config.hidden_act.clone(),
+            activation: ActivationType::from_config_str_or(
+                &config.hidden_act,
+                ActivationType::Identity,
+            ),
             dropout: config.hidden_dropout_prob,
             device,
         })
@@ -293,12 +297,7 @@ impl FNetFeedForward {
     }
 
     fn apply_activation(&self, x: &Tensor) -> Result<Tensor> {
-        match self.activation.as_str() {
-            "gelu" => x.gelu(),
-            "relu" => x.relu(),
-            "silu" | "swish" => x.silu(),
-            _ => Ok(x.clone()),
-        }
+        self.activation.apply(x)
     }
 }
 

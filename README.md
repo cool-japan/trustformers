@@ -1,12 +1,14 @@
 # TrustformeRS 🦀
 
 [![Rust](https://img.shields.io/badge/rust-%23000000.svg?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.1.1-blue.svg)](https://github.com/cool-japan/trustformers)
+[![Version](https://img.shields.io/badge/version-0.1.2-blue.svg)](https://github.com/cool-japan/trustformers)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
 A high-performance, memory-safe Rust implementation of Hugging Face Transformers. TrustformeRS brings the power of transformer models to the Rust ecosystem with zero-cost abstractions, fearless concurrency, and deployment flexibility from edge to cloud.
 
-> **Project Status**: TrustformeRS 0.1.1 was released on 2026-04-25. This release delivers 49+ transformer architectures, 5,358 tests with 100% pass rate, ~1,408,134 lines of 100% Pure Rust, and full multi-platform deployment (WebAssembly, server REST/gRPC/GraphQL, mobile iOS/Android, RLHF/DPO training). Multi-backend GPU support: CUDA, Metal, ROCm, WebGPU, Vulkan, OpenCL, TPU.
+> **Project Status (alpha)**: TrustformeRS 0.1.2 (released 2026-06-20) is a large Pure-Rust transformer stack — ~1.4M lines across 10 crates and 49+ transformer architectures — together with multi-platform packaging (WebAssembly, server REST/gRPC/GraphQL, mobile iOS/Android, and RLHF/DPO training scaffolding).
+>
+> **Honest maturity note**: today's compute path is primarily **CPU and `f32`**. F16/BF16 are supported as a storage/serialization format but are upcast to `f32` for arithmetic (native low-precision kernels are on the roadmap). GPU acceleration is **real** (CUDA via `cudarc`, Metal via `objc2`/MPS, WebGPU via `wgpu`) but is currently wired end-to-end **only for GPT-2 and RetNet**; the remaining backends (ROCm, Vulkan, OpenCL) are feature-gated and experimental, and **TPU is a placeholder, not implemented**. Several newer architectures are still being completed. See [Development Status](#-development-status) for the precise maturity of each area.
 
 ## 🚀 Why TrustformeRS?
 
@@ -16,18 +18,19 @@ A high-performance, memory-safe Rust implementation of Hugging Face Transformers
 - **🔧 Control**: Explicit resource management following SciRS2's Core Usage Policy
 - **🤝 Compatibility**: Loads Hugging Face model formats directly
 
-## 📊 Performance Comparison
+## 📊 Performance (indicative)
+
+> ⚠️ The figures below are **indicative targets on the authors' reference hardware**, not the output of an automated benchmark gate, and your results will vary. Reproduce on your own machine with `cargo bench` (benchmark sources live in `benches/`). All numbers are **CPU `f32`** — GPU benchmarks are intentionally omitted until GPU coverage extends beyond GPT-2/RetNet.
 
 | Model | Task | TrustformeRS | HF Transformers | Speedup |
 |-------|------|--------------|-----------------|---------|
 | BERT-base | Inference (CPU) | 23ms | 31ms | 1.35x |
 | BERT-base | Batch=32 (CPU) | 412ms | 687ms | 1.67x |
 | GPT-2 | Generation (CPU) | 89ms | 142ms | 1.59x |
-| LLaMA-7B | Generation (GPU) | 12ms/token | 18ms/token | 1.50x |
-| T5-base | Translation | 156ms | 234ms | 1.50x |
-| ViT-base | Image Classification | 15ms | 22ms | 1.47x |
+| T5-base | Translation (CPU) | 156ms | 234ms | 1.50x |
+| ViT-base | Image Classification (CPU) | 15ms | 22ms | 1.47x |
 
-*Benchmarks on Intel i9-12900K (CPU) and NVIDIA RTX 4090 (GPU)*
+*Reference CPU: Intel i9-12900K. GPU benchmarks will be published once on-device coverage is generalized beyond GPT-2/RetNet (see roadmap).*
 
 ## 🏗️ Architecture
 
@@ -62,7 +65,7 @@ trustformers/
 
 ```toml
 [dependencies]
-trustformers = "0.1.1"
+trustformers = "0.1.2"
 ```
 
 ### Basic Usage
@@ -164,7 +167,7 @@ TrustformeRS includes state-of-the-art optimizations not mentioned in typical do
 - **FlashAttention & FlashAttention-2**: O(N) memory complexity for attention
 - **PagedAttention**: Efficient KV cache management for long sequences
 - **INT8/INT4 Quantization**: GPTQ and AWQ quantization methods
-- **Mixed Precision**: FP16/BF16 training and inference
+- **Mixed Precision (partial)**: FP16/BF16 weight storage + casting/loss-scaling utilities; core arithmetic currently upcasts to FP32 (native FP16/BF16 compute kernels are on the roadmap)
 - **ZeRO Optimization**: All 3 stages for distributed training
 - **SIMD Operations**: Leveraging SciRS2 for vectorized computations
 - **Tensor Parallelism**: Split large models across multiple GPUs
@@ -227,17 +230,21 @@ impl Model for MyTransformer {
 }
 ```
 
-### GPU Acceleration (via SciRS2)
+### GPU Acceleration
+
+GPU backends are real (CUDA via `cudarc`, Metal via `objc2`/MPS, WebGPU via `wgpu`) but are **currently wired end-to-end only for GPT-2 and RetNet**. Enable the matching feature flag (`metal` on macOS, `cuda` on Linux/Windows) and build a supported model on a GPU `Device`; its `forward` then runs the linear/attention path on-device with a persistent KV cache.
 
 ```rust
-use trustformers::GpuContext;
+// Cargo.toml: trustformers-core = { version = "0.1", features = ["metal"] }  // or "cuda"
+use trustformers_core::Device;
 
-let gpu = GpuContext::new(0)?; // Use GPU 0
-let model = model.to_gpu(&gpu)?;
-
-// Inference now runs on GPU
-let outputs = model.forward(&inputs)?;
+// Construct a supported model (e.g. GPT-2) on a GPU device.
+let device = Device::Metal(0); // or Device::Cuda(0)
+let model = Gpt2Model::from_pretrained_on("gpt2", device)?;
+let outputs = model.forward(&inputs)?; // attention + linear run on-device
 ```
+
+> A generic `model.to_gpu()` covering **all** 49+ architectures is **not yet available** — broader coverage is tracked under [Development Status](#-development-status). For unsupported models, inference currently runs on CPU (`f32`).
 
 ### WebAssembly Deployment
 
@@ -314,8 +321,8 @@ let outputs = model.forward(&inputs)?;
 
 ## 🎯 Development Status
 
-### Completed Features (v0.1.1 - 2026-04-25)
-- [x] **49+ transformer architectures** (BERT, RoBERTa, ALBERT, DistilBERT, ELECTRA, DeBERTa, GPT-2, GPT-Neo, GPT-J, GPT-NeoX, LLaMA, Mistral, Gemma, Qwen, Phi-3, Falcon, StableLM, T5, ViT, CLIP, BLIP-2, LLaVA, DALL-E, Flamingo, Mamba, RWKV, S4, Falcon2, Gemma2, Granite, Hyena, InternLM2, Jamba, Jamba2, Linformer, LLaMA3.2, Mamba2, Nemotron, Performer, Phi4, Qwen2.5, RetNet, SD3, StarCoder2, Whisper, xLSTM, Yi)
+### Completed Features (v0.1.2 - 2026-06-20)
+- [x] **49+ transformer architectures** for CPU inference (BERT, RoBERTa, ALBERT, DistilBERT, ELECTRA, DeBERTa, GPT-2, GPT-Neo, GPT-J, GPT-NeoX, LLaMA, Mistral, Gemma, Qwen, Phi-3, Falcon, StableLM, T5, ViT, CLIP, BLIP-2, LLaVA, DALL-E, Flamingo, Mamba, RWKV, S4, Falcon2, Gemma2, Granite, Hyena, InternLM2, Jamba, Jamba2, Linformer, LLaMA3.2, Mamba2, Nemotron, Performer, Phi4, Qwen2.5, RetNet, SD3, StarCoder2, Whisper, xLSTM, Yi). Maturity varies — the BERT/GPT-2/LLaMA/T5/ViT families are the most exercised; several newer or experimental architectures are alpha-quality and still being completed for full numerical parity with the reference implementations.
 - [x] **All major NLP pipelines** fully implemented (text-generation, classification, QA, NER, fill-mask, summarization, translation)
 - [x] **Complete training infrastructure** with distributed training, ZeRO optimization, mixed precision, RLHF and DPO support
 - [x] **Mobile deployment** with iOS (Core ML, Metal) and Android (NNAPI, Vulkan) support
@@ -323,9 +330,9 @@ let outputs = model.forward(&inputs)?;
 - [x] **REST/gRPC/GraphQL APIs** with dynamic batching, Kubernetes deployment, and autoscaling
 - [x] **Safety filtering pipeline** with configurable content moderation
 - [x] **Advanced optimizations**: FlashAttention, PagedAttention, quantization (INT8/INT4/GPTQ/AWQ)
-- [x] **Hardware acceleration**: CUDA, Metal, ROCm, WebGPU, Vulkan, OpenCL, TPU support
+- [x] **GPU backends**: CUDA (`cudarc`) and Metal (MPS) wired into GPT-2/RetNet forward paths; WebGPU/Vulkan/OpenCL/ROCm present as feature-gated backends (experimental, not yet wired into model `forward`)
 - [x] **AutoModel/AutoTokenizer** system with HuggingFace Hub integration
-- [x] **Comprehensive test suite**: 5,358 tests with 100% pass rate
+- [x] **Large test suite**: 23,000+ `#[test]`/`#[tokio::test]` functions across the workspace (run locally with `cargo nextest run --all-features`; a Rust CI gate is being restored — see roadmap)
 - [x] **Debugging tools**: Profilers, visualizers, interactive debugging, TensorBoard integration
 - [x] **100% Pure Rust** (COOLJAPAN Policy) - ~1,408,134 SLoC across 10 crates
 

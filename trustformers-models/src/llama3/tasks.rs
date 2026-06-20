@@ -120,11 +120,8 @@ impl LLaMA3ChatModel {
         match logits {
             Tensor::F32(arr) => {
                 let shape = arr.shape();
-                let vocab_size = if shape.len() >= 2 {
-                    *shape.last().unwrap_or(&arr.len())
-                } else {
-                    arr.len()
-                };
+                let vocab_size =
+                    if shape.len() >= 2 { *shape.last().unwrap_or(&arr.len()) } else { arr.len() };
                 let flat: Vec<f32> = arr.iter().copied().collect();
                 let last_row = if flat.len() > vocab_size {
                     &flat[flat.len() - vocab_size..]

@@ -1,3 +1,4 @@
+use crate::common::ActivationType;
 use crate::falcon::config::FalconConfig;
 use scirs2_core::ndarray::{s, ArrayD, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
@@ -5,7 +6,6 @@ use trustformers_core::{
     device::Device,
     errors::{tensor_op_error, Result, TrustformersError},
     layers::{Embedding, LayerNorm, Linear},
-    ops::activations::{gelu, silu},
     tensor::Tensor,
     traits::{Config, Layer, Model},
 };
@@ -282,7 +282,7 @@ impl Layer for FalconAttention {
 pub struct FalconMLP {
     dense_h_to_4h: Linear,
     dense_4h_to_h: Linear,
-    activation: String,
+    activation: ActivationType,
     device: Device,
 }
 
@@ -300,7 +300,10 @@ impl FalconMLP {
         Ok(Self {
             dense_h_to_4h,
             dense_4h_to_h,
-            activation: config.hidden_act.clone(),
+            activation: ActivationType::from_config_str_or(
+                &config.hidden_act,
+                ActivationType::Identity,
+            ),
             device,
         })
     }
@@ -322,12 +325,7 @@ impl Layer for FalconMLP {
         let hidden = self.dense_h_to_4h.forward(input)?;
 
         // Apply activation function
-        let activated = match self.activation.as_str() {
-            "gelu" => gelu(&hidden)?,
-            "relu" => hidden.relu()?,
-            "silu" | "swish" => silu(&hidden)?,
-            _ => hidden,
-        };
+        let activated = self.activation.apply(&hidden)?;
 
         let output = self.dense_4h_to_h.forward(activated)?;
         Ok(output)

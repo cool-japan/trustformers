@@ -25,19 +25,18 @@
 //!
 //! All functionality is available through the main service interface:
 //!
-//! ```rust
+//! ```rust,no_run
 //! use trustformers_serve::test_performance_monitoring::{
 //!     TestPerformanceMonitoringService, TestPerformanceMonitoringConfig
 //! };
 //!
-//! async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let config = TestPerformanceMonitoringConfig::default();
-//!     let service = TestPerformanceMonitoringService::new(config).await?;
-//!
-//!     service.start().await?;
+//!     let service = TestPerformanceMonitoringService::new(config).await.expect("failed to create service");
 //!     // Use the service for monitoring
-//!     Ok(())
-//! }
+//! # Ok(())
+//! # }
 //! ```
 
 use trustformers_mobile::network_adaptation::types::TimePeriod;

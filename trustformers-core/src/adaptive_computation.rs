@@ -1132,18 +1132,19 @@ impl DynamicArchitectureManager {
 
     // Tensor operation helpers
     fn compute_entropy(&self, tensor: &Tensor) -> Result<f32, Box<dyn std::error::Error>> {
-        // Simplified entropy calculation
-        Ok(0.5) // Placeholder
+        // Normalised softmax entropy in [0, 1] — high = uncertain input.
+        Ok(tensor.softmax_entropy_normalized()?)
     }
 
     fn compute_variance(&self, tensor: &Tensor) -> Result<f32, Box<dyn std::error::Error>> {
-        // Simplified variance calculation
-        Ok(0.3) // Placeholder
+        // Population variance reduced to a scalar via the core statistical op.
+        let var = tensor.variance(None, false)?;
+        Ok(var.to_vec_f32()?.first().copied().unwrap_or(0.0))
     }
 
     fn compute_sparsity(&self, tensor: &Tensor) -> Result<f32, Box<dyn std::error::Error>> {
-        // Simplified sparsity calculation
-        Ok(0.2) // Placeholder
+        // Fraction of zero elements via the core sparsity op.
+        Ok(tensor.sparsity()?)
     }
 }
 

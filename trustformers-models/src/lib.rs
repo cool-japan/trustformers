@@ -134,6 +134,11 @@
 #![allow(clippy::type_complexity)]
 #![allow(clippy::large_enum_variant)]
 
+/// Shared building blocks reused across model implementations
+/// (always compiled regardless of which architecture features are enabled).
+pub mod common;
+pub use common::ActivationType;
+
 #[cfg(feature = "bert")]
 pub mod bert;
 

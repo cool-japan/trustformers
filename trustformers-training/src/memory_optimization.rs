@@ -277,44 +277,104 @@ pub struct MemoryOptimizationStats {
     pub max_memory_usage: usize,
 }
 
-/// Gradient checkpointing wrapper for model layers
+/// Forward computation wrapped by a gradient checkpoint.
+///
+/// Takes the layer inputs and produces the layer outputs. It is invoked both
+/// during the forward pass and again during the backward pass when the
+/// intermediate activations are recomputed from the checkpointed inputs.
+pub type CheckpointForwardFn = Box<dyn Fn(&[Tensor]) -> Result<Vec<Tensor>> + Send + Sync>;
+
+/// Backward computation wrapped by a gradient checkpoint.
+///
+/// Receives the (recomputed) layer inputs and the gradients flowing in from the
+/// outputs, and produces the gradients with respect to the inputs.
+pub type CheckpointBackwardFn =
+    Box<dyn Fn(&[Tensor], &[Tensor]) -> Result<Vec<Tensor>> + Send + Sync>;
+
+/// Gradient checkpointing wrapper for model layers.
+///
+/// Implements true activation checkpointing: the forward pass stores only the
+/// layer *inputs* (not the intermediate activations), trading compute for
+/// memory. During the backward pass the wrapped forward is re-executed from the
+/// checkpointed inputs to rematerialize the activations, after which the wrapped
+/// backward produces the input gradients.
 pub struct GradientCheckpointWrapper {
     optimizer: MemoryOptimizer,
     layer_index: usize,
+    forward_fn: CheckpointForwardFn,
+    backward_fn: CheckpointBackwardFn,
 }
 
 impl GradientCheckpointWrapper {
+    /// Create a wrapper around the identity layer.
+    ///
+    /// The identity forward returns its inputs and the identity backward passes
+    /// the output gradients straight through, which is the mathematically
+    /// correct forward/backward for an identity mapping. Use
+    /// [`GradientCheckpointWrapper::with_functions`] to wrap a real layer
+    /// computation.
     pub fn new(optimizer: MemoryOptimizer, layer_index: usize) -> Self {
+        Self::with_functions(
+            optimizer,
+            layer_index,
+            Box::new(|inputs: &[Tensor]| Ok(inputs.to_vec())),
+            Box::new(|_inputs: &[Tensor], grad_outputs: &[Tensor]| Ok(grad_outputs.to_vec())),
+        )
+    }
+
+    /// Create a wrapper around an arbitrary layer computation.
+    ///
+    /// * `forward_fn` - maps the layer inputs to its outputs.
+    /// * `backward_fn` - maps the (recomputed) inputs and the incoming output
+    ///   gradients to the gradients with respect to the inputs.
+    pub fn with_functions(
+        optimizer: MemoryOptimizer,
+        layer_index: usize,
+        forward_fn: CheckpointForwardFn,
+        backward_fn: CheckpointBackwardFn,
+    ) -> Self {
         Self {
             optimizer,
             layer_index,
+            forward_fn,
+            backward_fn,
         }
     }
 
-    /// Forward pass with checkpointing
+    /// Forward pass with checkpointing.
+    ///
+    /// Stores the inputs as the checkpoint (so intermediate activations need not
+    /// be retained) and runs the wrapped forward computation to produce the
+    /// outputs.
     pub fn forward_with_checkpoint(&mut self, inputs: Vec<Tensor>) -> Result<Vec<Tensor>> {
-        // Create checkpoint before forward pass
+        // Checkpoint the inputs; intermediate activations are intentionally not
+        // stored and will be recomputed in the backward pass.
         self.optimizer.create_checkpoint(self.layer_index, inputs.clone())?;
 
-        // Perform forward pass (simplified)
-        let outputs = inputs; // In real implementation, this would be the actual layer forward pass
-
-        Ok(outputs)
+        // Actually run the wrapped forward computation.
+        (self.forward_fn)(&inputs)
     }
 
-    /// Backward pass with checkpointing
+    /// Backward pass with checkpointing.
+    ///
+    /// Recomputes the forward pass from the checkpointed inputs to rematerialize
+    /// the activations, then applies the wrapped backward to produce the input
+    /// gradients.
     pub fn backward_with_checkpoint(&mut self, grad_outputs: Vec<Tensor>) -> Result<Vec<Tensor>> {
-        // Retrieve activations from checkpoint
-        if let Some(_activations) = self.optimizer.get_checkpoint_activations(self.layer_index) {
-            // Recompute forward pass using checkpointed activations
-            // Then compute gradients (simplified)
-            Ok(grad_outputs) // In real implementation, this would be the actual gradient computation
-        } else {
-            Err(anyhow::anyhow!(
-                "No checkpoint found for layer {}",
-                self.layer_index
-            ))
-        }
+        // Retrieve the checkpointed inputs for this layer.
+        let inputs = self
+            .optimizer
+            .get_checkpoint_activations(self.layer_index)
+            .ok_or_else(|| anyhow::anyhow!("No checkpoint found for layer {}", self.layer_index))?;
+
+        // Recompute the forward pass to rematerialize the activations that were
+        // dropped to save memory. This mirrors the cost model of gradient
+        // checkpointing (recompute instead of store).
+        let _activations = (self.forward_fn)(&inputs)?;
+
+        // Apply the wrapped backward using the recomputed inputs and the
+        // incoming output gradients to obtain the input gradients.
+        (self.backward_fn)(&inputs, &grad_outputs)
     }
 }
 
@@ -434,12 +494,40 @@ mod tests {
             ..Default::default()
         };
         let optimizer = MemoryOptimizer::new(config);
-        let mut wrapper = GradientCheckpointWrapper::new(optimizer, 0);
 
-        let tensor = Tensor::zeros(&[2, 3]).expect("tensor operation failed");
-        let result = wrapper.forward_with_checkpoint(vec![tensor]);
+        // Wrap a real scaling layer y = 3 * x whose backward is grad_x = 3 * grad_y.
+        let scale = 3.0f32;
+        let mut wrapper = GradientCheckpointWrapper::with_functions(
+            optimizer,
+            0,
+            Box::new(move |inputs: &[Tensor]| {
+                inputs
+                    .iter()
+                    .map(|tensor| tensor.mul_scalar(scale).map_err(anyhow::Error::from))
+                    .collect()
+            }),
+            Box::new(move |_inputs: &[Tensor], grad_outputs: &[Tensor]| {
+                grad_outputs
+                    .iter()
+                    .map(|grad| grad.mul_scalar(scale).map_err(anyhow::Error::from))
+                    .collect()
+            }),
+        );
 
-        assert!(result.is_ok());
+        // Forward actually applies the wrapped computation.
+        let input = Tensor::ones(&[2, 3]).expect("tensor operation failed");
+        let outputs = wrapper.forward_with_checkpoint(vec![input]).expect("forward failed");
+        assert_eq!(outputs.len(), 1);
+        let output_values = outputs[0].to_vec_f32().expect("to_vec failed");
+        assert!(output_values.iter().all(|&v| (v - scale).abs() < 1e-6));
+
+        // Backward recomputes the forward and applies the wrapped backward.
+        let grad_output = Tensor::ones(&[2, 3]).expect("tensor operation failed");
+        let grad_inputs =
+            wrapper.backward_with_checkpoint(vec![grad_output]).expect("backward failed");
+        assert_eq!(grad_inputs.len(), 1);
+        let grad_values = grad_inputs[0].to_vec_f32().expect("to_vec failed");
+        assert!(grad_values.iter().all(|&v| (v - scale).abs() < 1e-6));
     }
 
     #[test]

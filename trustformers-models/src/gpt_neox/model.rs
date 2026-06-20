@@ -79,9 +79,9 @@ impl Layer for GPTNeoXMLP {
 
 /// GPT-NeoX Attention layer with Rotary Position Embeddings
 pub struct GPTNeoXAttention {
-    pub query_key_value: Linear,      // Combined QKV projection
-    pub dense: Linear,                // Output projection
-    pub _rotary_emb: RotaryEmbedding, // TODO: Use in full attention implementation
+    pub query_key_value: Linear, // Combined QKV projection
+    pub dense: Linear,           // Output projection
+    pub _rotary_emb: RotaryEmbedding,
     pub _num_heads: usize,
     pub _head_dim: usize,
     pub _rotary_ndims: usize,
@@ -454,6 +454,8 @@ impl Layer for GPTNeoXLayer {
             // Parallel: attn and mlp computed in parallel with different layer norms
             // Formula: x = x + attn(ln1(x)) + mlp(ln2(x))
             let ln1_out = self.input_layernorm.forward(input.clone())?;
+            // `mut` is used only under the `cuda` feature (GPU writeback below).
+            #[allow(unused_mut)]
             let mut attn_out = self.attention.forward(ln1_out)?;
 
             // Convert attention output back to GPU if input is on GPU
@@ -464,6 +466,8 @@ impl Layer for GPTNeoXLayer {
             }
 
             let ln2_out = self.post_attention_layernorm.forward(input.clone())?;
+            // `mut` is used only under the `cuda` feature (GPU writeback below).
+            #[allow(unused_mut)]
             let mut mlp_out = self.mlp.forward(ln2_out)?;
 
             // Convert MLP output back to GPU if needed
@@ -479,6 +483,8 @@ impl Layer for GPTNeoXLayer {
         } else {
             // Sequential: attn first, then mlp
             let ln1_out = self.input_layernorm.forward(input.clone())?;
+            // `mut` is used only under the `cuda` feature (GPU writeback below).
+            #[allow(unused_mut)]
             let mut attn_out = self.attention.forward(ln1_out)?;
 
             // Convert attention output back to GPU if input is on GPU
@@ -491,6 +497,8 @@ impl Layer for GPTNeoXLayer {
             let residual = input.add(&attn_out)?;
 
             let ln2_out = self.post_attention_layernorm.forward(residual.clone())?;
+            // `mut` is used only under the `cuda` feature (GPU writeback below).
+            #[allow(unused_mut)]
             let mut mlp_out = self.mlp.forward(ln2_out)?;
 
             // Convert MLP output back to GPU if needed

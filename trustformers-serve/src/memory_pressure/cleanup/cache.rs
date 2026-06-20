@@ -20,20 +20,25 @@
 //!
 //! ### Basic Cache Manager
 //!
-//! ```rust
+//! ```rust,no_run
 //! use trustformers_serve::memory_pressure::cleanup::cache::DefaultCacheManager;
+//! use trustformers_serve::memory_pressure::cleanup::CacheManager;
+//! use trustformers_serve::MemoryPressureLevel;
 //!
 //! let cache_manager = DefaultCacheManager::new();
 //! let freed_memory = cache_manager.evict_cache(MemoryPressureLevel::Medium)?;
 //! println!("Freed {} bytes from cache", freed_memory);
+//! # Ok::<(), anyhow::Error>(())
 //! ```
 //!
 //! ### Custom Cache Manager
 //!
 //! ```rust
-//! use trustformers_serve::memory_pressure::cleanup::cache::{CacheManager, MemoryPressureLevel};
+//! use trustformers_serve::memory_pressure::cleanup::CacheManager;
+//! use trustformers_serve::MemoryPressureLevel;
 //! use anyhow::Result;
 //!
+//! #[derive(Debug)]
 //! struct ModelCacheManager {
 //!     // Your cache implementation
 //! }

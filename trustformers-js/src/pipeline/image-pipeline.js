@@ -349,15 +349,61 @@ export class ObjectDetectionPipeline extends ImagePipeline {
 
   /**
    * Apply Non-Maximum Suppression
-   * @param {Array} boxes - Bounding boxes
-   * @param {Array} scores - Confidence scores
-   * @param {Array} labels - Class labels
-   * @returns {Array} Filtered detections
+   * @param {Array<{x1:number,y1:number,x2:number,y2:number}>} boxes - Bounding boxes
+   * @param {Array<number>} scores - Confidence scores (parallel to boxes)
+   * @param {Array} labels - Class labels (parallel to boxes)
+   * @param {number} [iouThreshold] - IoU threshold (defaults to config)
+   * @returns {Array<number>} Indices of kept boxes, sorted by score descending
    */
-  applyNMS(boxes, scores, labels) {
-    // NMS implementation
-    // TODO: Implement proper NMS algorithm
-    return [];
+  applyNMS(boxes, scores, labels, iouThreshold) {
+    const threshold = (iouThreshold !== undefined)
+      ? iouThreshold
+      : this.config.iouThreshold;
+
+    const n = boxes.length;
+    if (n === 0) return [];
+
+    // Sort indices by score descending
+    const order = Array.from({ length: n }, (_, i) => i)
+      .sort((a, b) => scores[b] - scores[a]);
+
+    const kept = [];
+
+    for (let i = 0; i < order.length; i++) {
+      const idx = order[i];
+      const a = boxes[idx];
+
+      // Check IoU against all already-kept boxes
+      let suppress = false;
+      for (let j = 0; j < kept.length; j++) {
+        const b = boxes[kept[j]];
+
+        const interX1 = Math.max(a.x1, b.x1);
+        const interY1 = Math.max(a.y1, b.y1);
+        const interX2 = Math.min(a.x2, b.x2);
+        const interY2 = Math.min(a.y2, b.y2);
+
+        const interW = Math.max(0, interX2 - interX1);
+        const interH = Math.max(0, interY2 - interY1);
+        const interArea = interW * interH;
+
+        const areaA = (a.x2 - a.x1) * (a.y2 - a.y1);
+        const areaB = (b.x2 - b.x1) * (b.y2 - b.y1);
+        const unionArea = areaA + areaB - interArea;
+
+        const iou = unionArea > 0 ? interArea / unionArea : 0;
+        if (iou >= threshold) {
+          suppress = true;
+          break;
+        }
+      }
+
+      if (!suppress) {
+        kept.push(idx);
+      }
+    }
+
+    return kept;
   }
 }
 

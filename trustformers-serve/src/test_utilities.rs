@@ -17,16 +17,19 @@ use tokio::sync::OnceCell;
 /// Global test timeout framework instance
 static GLOBAL_FRAMEWORK: OnceCell<Arc<TestTimeoutFramework>> = OnceCell::const_new();
 
-/// Initialize the global test timeout framework
+/// Initialize the global test timeout framework.
+///
+/// Safe to call multiple times: the framework is created exactly once; subsequent
+/// calls return immediately without re-initializing.
 pub async fn init_test_framework() -> Result<()> {
-    let config = crate::test_timeout_optimization::TestTimeoutConfig::default();
-    let mut framework = TestTimeoutFramework::new(config)?;
-    framework.start().await?;
-
     GLOBAL_FRAMEWORK
-        .set(Arc::new(framework))
-        .map_err(|_| anyhow::anyhow!("Test framework already initialized"))?;
-
+        .get_or_try_init(|| async {
+            let config = crate::test_timeout_optimization::TestTimeoutConfig::default();
+            let mut framework = TestTimeoutFramework::new(config)?;
+            framework.start().await?;
+            Ok::<Arc<TestTimeoutFramework>, anyhow::Error>(Arc::new(framework))
+        })
+        .await?;
     Ok(())
 }
 

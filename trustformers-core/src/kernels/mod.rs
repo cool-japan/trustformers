@@ -38,9 +38,6 @@ pub mod vulkan_impl;
 #[cfg(feature = "xla")]
 pub mod xla_impl;
 
-#[cfg(feature = "tpu")]
-pub mod tpu_impl;
-
 #[cfg(feature = "oneapi")]
 pub mod oneapi_impl;
 
@@ -84,9 +81,6 @@ pub use vulkan_impl::*;
 
 #[cfg(feature = "xla")]
 pub use xla_impl::*;
-
-#[cfg(feature = "tpu")]
-pub use tpu_impl::*;
 
 #[cfg(feature = "oneapi")]
 pub use oneapi_impl::*;

@@ -201,17 +201,40 @@ impl ResourceManagementSystem {
             ));
         }
 
-        // TODO: Implement resource allocation using the new generic ResourceRequirement structure
-        // The resource_type field should be parsed to determine which type of resource to allocate
-        // For now, using empty allocations as placeholder
-        let _ports: Vec<u16> = vec![];
-        let _temp_dirs: Vec<String> = vec![];
-        let _gpu_devices: Vec<u32> = vec![];
-        let _db_connections: Vec<String> = vec![];
+        // Dispatch allocation to each sub-manager based on the fields
+        // present in the ResourceRequirement.  Failures are propagated immediately
+        // so that partially-allocated resources can be cleaned up by the caller.
+        if requirements.network_ports > 0 {
+            self.port_manager
+                .allocate_ports(requirements.network_ports, test_id)
+                .await
+                .context("Failed to allocate network ports")?;
+        }
+
+        if requirements.temp_directories > 0 {
+            self.temp_dir_manager
+                .allocate_directories(requirements.temp_directories, test_id)
+                .await
+                .context("Failed to allocate temporary directories")?;
+        }
+
+        if requirements.database_connections > 0 {
+            self.database_manager
+                .allocate_connections(requirements.database_connections, test_id)
+                .await
+                .context("Failed to allocate database connections")?;
+        }
+
+        // Determine resource_type label from whichever sub-resource is primary.
+        let resource_type = if !requirements.resource_type.is_empty() {
+            requirements.resource_type.clone()
+        } else {
+            "mixed".to_string()
+        };
 
         // Create allocation record
         let allocation = ResourceAllocation {
-            resource_type: "mixed".to_string(),
+            resource_type,
             resource_id: format!("allocation-{}", test_id),
             allocated_at: chrono::Utc::now(),
             deallocated_at: None,

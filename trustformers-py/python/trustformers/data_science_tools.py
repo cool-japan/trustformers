@@ -313,7 +313,11 @@ class SklearnIntegration:
             elif hasattr(self.model, 'forward'):
                 return self.model.forward(X)
             else:
-                raise NotImplementedError("Model does not have predict or forward method")
+                raise TypeError(
+                    "Model does not support inference: tried 'predict' — not found; "
+                    "tried 'forward' — not found. The wrapped model must expose at "
+                    "least one of these methods."
+                )
     
     class TensorClassifier(TensorEstimator, ClassifierMixin):
         """Classifier wrapper for Trustformers models."""

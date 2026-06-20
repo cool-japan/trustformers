@@ -241,10 +241,10 @@ impl GpuManager {
 
     /// Detect available GPU devices
     fn detect_devices() -> Vec<GpuDevice> {
-        let mut devices = Vec::new();
-
-        // Always add CPU as fallback
-        devices.push(GpuDevice::cpu());
+        // Always start with CPU as the fallback device. `mut` is used only when a
+        // GPU-backend feature (metal/cuda/rocm/vulkan/…) appends to the list below.
+        #[allow(unused_mut)]
+        let mut devices = vec![GpuDevice::cpu()];
 
         // Platform-specific device detection
         #[cfg(target_os = "macos")]

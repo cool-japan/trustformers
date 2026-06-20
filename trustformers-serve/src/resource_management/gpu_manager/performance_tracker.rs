@@ -23,7 +23,7 @@
 //!
 //! ```rust,no_run
 //! use trustformers_serve::resource_management::gpu_manager::performance_tracker::GpuPerformanceTracker;
-//! use trustformers_serve::resource_management::types::*;
+//! use trustformers_serve::resource_management::gpu_manager::types::GpuBenchmarkType;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -33,10 +33,6 @@
 //!     // Run a compute benchmark on device 0
 //!     let benchmark = tracker.run_benchmark(0, GpuBenchmarkType::Compute).await?;
 //!     println!("Benchmark score: {:.2}", benchmark.score);
-//!
-//!     // Get performance analysis
-//!     let analysis = tracker.get_analysis().await;
-//!     println!("Performance trends: {:?}", analysis.trends);
 //!
 //!     // Get benchmark history
 //!     let history = tracker.get_benchmark_history(0).await;
@@ -142,7 +138,7 @@ impl GpuPerformanceTracker {
     ///
     /// ```rust,no_run
     /// # use trustformers_serve::resource_management::gpu_manager::performance_tracker::GpuPerformanceTracker;
-    /// # use trustformers_serve::resource_management::types::*;
+    /// # use trustformers_serve::resource_management::gpu_manager::types::GpuBenchmarkType;
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let tracker = GpuPerformanceTracker::new();
@@ -655,7 +651,7 @@ impl GpuPerformanceTracker {
     ///
     /// ```rust,no_run
     /// # use trustformers_serve::resource_management::gpu_manager::performance_tracker::GpuPerformanceTracker;
-    /// # use trustformers_serve::resource_management::types::*;
+    /// # use trustformers_serve::resource_management::gpu_manager::types::GpuBenchmarkType;
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let tracker = GpuPerformanceTracker::new();

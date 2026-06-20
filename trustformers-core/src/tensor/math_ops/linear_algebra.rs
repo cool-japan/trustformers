@@ -41,7 +41,7 @@
 //! # }
 //! ```
 
-use super::super::Tensor;
+use super::super::{DType, Tensor};
 use super::stability::*;
 use crate::errors::{Result, TrustformersError};
 use scirs2_core::ndarray::{s, Array2, ArrayD, Axis, Ix2, IxDyn};
@@ -93,14 +93,16 @@ fn blas_dgemm(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize, n: usize)
 #[cfg(not(target_os = "macos"))]
 #[inline]
 fn blas_sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
-    use scirs2_core::ndarray::Array2;
-    let a_arr = Array2::from_shape_vec((m, k), a.to_vec())
-        .expect("matrix dimensions must match slice length");
-    let b_arr = Array2::from_shape_vec((k, n), b.to_vec())
-        .expect("matrix dimensions must match slice length");
-    let mut c_arr = Array2::from_shape_vec((m, n), c.to_vec())
-        .expect("matrix dimensions must match slice length");
-    f32::simd_gemm(1.0, &a_arr.view(), &b_arr.view(), 0.0, &mut c_arr);
+    use scirs2_core::ndarray::{Array2, ArrayView2};
+    // Borrow the input slices as views — `simd_gemm` only reads `a`/`b`, so no copy is needed.
+    let a_arr =
+        ArrayView2::from_shape((m, k), a).expect("matrix dimensions must match slice length");
+    let b_arr =
+        ArrayView2::from_shape((k, n), b).expect("matrix dimensions must match slice length");
+    // `simd_gemm` requires an owned output; with beta = 0.0 the prior contents of `c`
+    // are discarded, so allocate zeros instead of copying `c` in.
+    let mut c_arr = Array2::zeros((m, n));
+    f32::simd_gemm(1.0, &a_arr, &b_arr, 0.0, &mut c_arr);
     c.copy_from_slice(c_arr.as_slice().expect("array must have contiguous layout"));
 }
 
@@ -108,14 +110,15 @@ fn blas_sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize)
 #[allow(dead_code)] // Reserved for f64 tensor matmul
 #[inline]
 fn blas_dgemm(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize, n: usize) {
-    use scirs2_core::ndarray::Array2;
-    let a_arr = Array2::from_shape_vec((m, k), a.to_vec())
-        .expect("matrix dimensions must match slice length");
-    let b_arr = Array2::from_shape_vec((k, n), b.to_vec())
-        .expect("matrix dimensions must match slice length");
-    let mut c_arr = Array2::from_shape_vec((m, n), c.to_vec())
-        .expect("matrix dimensions must match slice length");
-    f64::simd_gemm(1.0, &a_arr.view(), &b_arr.view(), 0.0, &mut c_arr);
+    use scirs2_core::ndarray::{Array2, ArrayView2};
+    // Borrow the input slices as views — `simd_gemm` only reads `a`/`b`, so no copy is needed.
+    let a_arr =
+        ArrayView2::from_shape((m, k), a).expect("matrix dimensions must match slice length");
+    let b_arr =
+        ArrayView2::from_shape((k, n), b).expect("matrix dimensions must match slice length");
+    // beta = 0.0 discards `c`'s prior contents, so allocate zeros instead of copying `c` in.
+    let mut c_arr = Array2::zeros((m, n));
+    f64::simd_gemm(1.0, &a_arr, &b_arr, 0.0, &mut c_arr);
     c.copy_from_slice(c_arr.as_slice().expect("array must have contiguous layout"));
 }
 
@@ -171,16 +174,66 @@ impl Tensor {
     /// # }
     /// ```
     pub fn matmul(&self, other: &Tensor) -> Result<Tensor> {
+        // GPU dispatch guard: if either operand is a GPU-resident tensor, route the
+        // operation to the matching GPU backend in `crate::gpu_ops`. The data is first
+        // downloaded to a host `Tensor::F32` (the GPU backends operate on host slices),
+        // then the dispatch function executes the matmul on the GPU and returns a host
+        // tensor. These arms are `#[cfg]`-gated behind the respective GPU features, so
+        // the default (CPU-only) build is completely unaffected.
+        // CUDA-resident operands are downloaded with device 0 by default (matching the
+        // `to_device_enum` CUDA->CPU download convention), then dispatched to the CUDA
+        // matmul kernel which returns a host `Tensor::F32`.
+        #[cfg(feature = "cuda")]
+        {
+            if matches!(self, Tensor::CUDA(_)) || matches!(other, Tensor::CUDA(_)) {
+                const CUDA_DEVICE_ID: usize = 0;
+                // Download GPU-resident operands to host F32; leave host tensors as-is.
+                let a_host = match self {
+                    Tensor::CUDA(_) => self.to_device_enum(&crate::device::Device::CPU)?,
+                    _ => self.clone(),
+                };
+                let b_host = match other {
+                    Tensor::CUDA(_) => other.to_device_enum(&crate::device::Device::CPU)?,
+                    _ => other.clone(),
+                };
+                return crate::gpu_ops::cuda::dispatch_cuda_matmul(
+                    &a_host,
+                    &b_host,
+                    CUDA_DEVICE_ID,
+                );
+            }
+        }
+
+        // Metal-resident operands are downloaded to host F32, then dispatched to the
+        // Metal matmul backend (via `Device::Metal`) which returns a host `Tensor::F32`.
+        #[cfg(all(target_os = "macos", feature = "metal"))]
+        {
+            if matches!(self, Tensor::Metal(_)) || matches!(other, Tensor::Metal(_)) {
+                const METAL_DEVICE_ID: usize = 0;
+                let device = crate::device::Device::Metal(METAL_DEVICE_ID);
+                // Download GPU-resident operands to host F32; leave host tensors as-is.
+                let a_host = match self {
+                    Tensor::Metal(_) => self.to_device_enum(&crate::device::Device::CPU)?,
+                    _ => self.clone(),
+                };
+                let b_host = match other {
+                    Tensor::Metal(_) => other.to_device_enum(&crate::device::Device::CPU)?,
+                    _ => other.clone(),
+                };
+                return crate::gpu_ops::metal::dispatch_matmul(&a_host, &b_host, &device);
+            }
+        }
+
         // Ensure both inputs have contiguous memory layouts before any operations
         let self_contiguous = match self {
-            Tensor::F32(a) => Tensor::F32(a.as_standard_layout().to_owned()),
-            Tensor::F64(a) => Tensor::F64(a.as_standard_layout().to_owned()),
+            Tensor::F32(a) => Tensor::F32(a.as_standard_layout().into_owned()),
+            Tensor::F64(a) => Tensor::F64(a.as_standard_layout().into_owned()),
             _ => self.clone(),
         };
 
         let other_contiguous = match other {
-            Tensor::F32(a) => Tensor::F32(a.as_standard_layout().to_owned()),
-            Tensor::F64(a) => Tensor::F64(a.as_standard_layout().to_owned()),
+            Tensor::F32(a) => Tensor::F32(a.as_standard_layout().into_owned()),
+            Tensor::F64(a) => Tensor::F64(a.as_standard_layout().into_owned()),
             _ => other.clone(),
         };
 
@@ -307,9 +360,9 @@ impl Tensor {
                             let a_slice = a.slice(s![i, .., ..]);
                             let b_slice = b.slice(s![i, .., ..]);
 
-                            // Ensure contiguous layout before dimensionality conversion
-                            let a_contiguous = a_slice.to_owned().as_standard_layout().to_owned();
-                            let b_contiguous = b_slice.to_owned().as_standard_layout().to_owned();
+                            // Ensure standard (contiguous, row-major) layout with a single copy.
+                            let a_contiguous = a_slice.as_standard_layout().into_owned();
+                            let b_contiguous = b_slice.as_standard_layout().into_owned();
 
                             let a_2d = a_contiguous
                                 .into_dimensionality::<Ix2>()
@@ -328,11 +381,16 @@ impl Tensor {
                                 a_2d.dot(&b_2d)
                             } else {
                                 // Direct BLAS (Accelerate on macOS)
-                                // Arrays are already contiguous from as_standard_layout() above
-                                let a_vec: Vec<f32> = a_2d.iter().copied().collect();
-                                let b_vec: Vec<f32> = b_2d.iter().copied().collect();
+                                // Arrays are standard-layout (from as_standard_layout above),
+                                // so borrow their backing slices directly — no Vec round-trip.
+                                let a_data = a_2d
+                                    .as_slice()
+                                    .expect("standard layout after as_standard_layout");
+                                let b_data = b_2d
+                                    .as_slice()
+                                    .expect("standard layout after as_standard_layout");
                                 let mut result_vec = vec![0.0f32; rows * cols];
-                                blas_sgemm(&a_vec, &b_vec, &mut result_vec, rows, inner, cols);
+                                blas_sgemm(a_data, b_data, &mut result_vec, rows, inner, cols);
                                 Array2::from_shape_vec((rows, cols), result_vec)
                                     .expect("matrix dimensions must match result_vec length")
                             };
@@ -355,13 +413,9 @@ impl Tensor {
                                 let a_slice = a.slice(s![i, j, .., ..]);
                                 let b_slice = b.slice(s![i, j, .., ..]);
 
-                                // Create contiguous copies
-                                let a_matrix = a_slice.to_owned();
-                                let b_matrix = b_slice.to_owned();
-
-                                // Force contiguous layout before dimensionality conversion
-                                let a_contiguous = a_matrix.as_standard_layout().to_owned();
-                                let b_contiguous = b_matrix.as_standard_layout().to_owned();
+                                // Ensure standard (contiguous, row-major) layout with a single copy.
+                                let a_contiguous = a_slice.as_standard_layout().into_owned();
+                                let b_contiguous = b_slice.as_standard_layout().into_owned();
 
                                 // Convert to 2D arrays for GEMM
                                 let a_2d = a_contiguous
@@ -381,13 +435,17 @@ impl Tensor {
                                     a_2d.dot(&b_2d)
                                 } else {
                                     // Direct BLAS (Accelerate on macOS)
-                                    // Arrays are already contiguous from as_standard_layout() above
-                                    let a_vec: Vec<f32> = a_2d.iter().copied().collect();
-                                    let b_vec: Vec<f32> = b_2d.iter().copied().collect();
+                                    // Standard-layout (from as_standard_layout above): borrow slices.
+                                    let a_data = a_2d
+                                        .as_slice()
+                                        .expect("standard layout after as_standard_layout");
+                                    let b_data = b_2d
+                                        .as_slice()
+                                        .expect("standard layout after as_standard_layout");
                                     let mut result_vec = vec![0.0f32; seq_len_a * seq_len_b];
                                     blas_sgemm(
-                                        &a_vec,
-                                        &b_vec,
+                                        a_data,
+                                        b_data,
                                         &mut result_vec,
                                         seq_len_a,
                                         inner,
@@ -409,6 +467,68 @@ impl Tensor {
                     }
 
                     Ok(Tensor::F32(result))
+                }
+            },
+            // Half-precision (F16 / BF16) matmul via f32 upcast.
+            //
+            // `half::f16` / `half::bf16` have no native BLAS GEMM, so we upcast both
+            // operands to f32, perform the multiplication in full single precision
+            // (reusing the BLAS-accelerated F32 path above), and then downcast the
+            // result back to the original half-precision dtype. This mirrors the
+            // standard mixed-precision convention (accumulate in f32, store in f16).
+            //
+            // Note: `Tensor::to_f32()` / `to_dtype()` do not implement the F16/BF16
+            // arms, so the up/down casts are performed inline here using `half`'s
+            // lossless `to_f32` and rounding `from_f32` conversions.
+            (Tensor::F16(_), _)
+            | (_, Tensor::F16(_))
+            | (Tensor::BF16(_), _)
+            | (_, Tensor::BF16(_)) => {
+                let original_dtype = self.dtype();
+
+                // Upcast `self` to an f32 tensor.
+                let self_f32 = match &self_contiguous {
+                    Tensor::F16(a) => Tensor::F32(a.mapv(|x| x.to_f32())),
+                    Tensor::BF16(a) => Tensor::F32(a.mapv(|x| x.to_f32())),
+                    Tensor::F32(a) => Tensor::F32(a.clone()),
+                    other_dtype => {
+                        return Err(TrustformersError::tensor_op_error(
+                            &format!(
+                                "Matmul half-precision upcast not supported for left operand \
+                                 dtype {:?}",
+                                other_dtype.dtype()
+                            ),
+                            "matmul",
+                        ));
+                    },
+                };
+
+                // Upcast `other` to an f32 tensor.
+                let other_f32 = match &other_contiguous {
+                    Tensor::F16(b) => Tensor::F32(b.mapv(|x| x.to_f32())),
+                    Tensor::BF16(b) => Tensor::F32(b.mapv(|x| x.to_f32())),
+                    Tensor::F32(b) => Tensor::F32(b.clone()),
+                    other_dtype => {
+                        return Err(TrustformersError::tensor_op_error(
+                            &format!(
+                                "Matmul half-precision upcast not supported for right operand \
+                                 dtype {:?}",
+                                other_dtype.dtype()
+                            ),
+                            "matmul",
+                        ));
+                    },
+                };
+
+                // Perform the multiplication in f32 (reuses the F32 BLAS path).
+                let result_f32 = self_f32.matmul(&other_f32)?;
+
+                // Downcast the f32 result back to the original half-precision dtype.
+                match (original_dtype, result_f32) {
+                    (DType::F16, Tensor::F32(r)) => Ok(Tensor::F16(r.mapv(half::f16::from_f32))),
+                    (DType::BF16, Tensor::F32(r)) => Ok(Tensor::BF16(r.mapv(half::bf16::from_f32))),
+                    // `self` was F32 but `other` was half-precision: keep the f32 result.
+                    (_, result) => Ok(result),
                 }
             },
             _ => Err(TrustformersError::tensor_op_error(
@@ -794,6 +914,103 @@ mod tests {
         let clipped = tensor.clip_grad_norm(1.0)?;
         let norm = clipped.norm()?;
         assert!((norm - 1.0).abs() < 1e-6);
+        Ok(())
+    }
+
+    /// Build a deterministic F16 tensor from f32 values for testing.
+    fn f16_tensor(data: &[f32], shape: &[usize]) -> Result<Tensor> {
+        use scirs2_core::ndarray::{ArrayD, IxDyn};
+        let half_data: Vec<half::f16> = data.iter().map(|&x| half::f16::from_f32(x)).collect();
+        Ok(Tensor::F16(
+            ArrayD::from_shape_vec(IxDyn(shape), half_data)
+                .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
+        ))
+    }
+
+    /// Build a deterministic BF16 tensor from f32 values for testing.
+    fn bf16_tensor(data: &[f32], shape: &[usize]) -> Result<Tensor> {
+        use scirs2_core::ndarray::{ArrayD, IxDyn};
+        let half_data: Vec<half::bf16> = data.iter().map(|&x| half::bf16::from_f32(x)).collect();
+        Ok(Tensor::BF16(
+            ArrayD::from_shape_vec(IxDyn(shape), half_data)
+                .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
+        ))
+    }
+
+    #[test]
+    fn test_matmul_f16_upcast() -> Result<()> {
+        // A = [[1, 2], [3, 4]], B = [[5, 6], [7, 8]] -> [[19, 22], [43, 50]]
+        let a = f16_tensor(&[1.0, 2.0, 3.0, 4.0], &[2, 2])?;
+        let b = f16_tensor(&[5.0, 6.0, 7.0, 8.0], &[2, 2])?;
+
+        let result = a.matmul(&b)?;
+
+        // Dtype must be preserved as F16 (upcast path downcasts the result back).
+        assert_eq!(result.dtype(), DType::F16);
+
+        match result {
+            Tensor::F16(arr) => {
+                // Shape must be correct.
+                assert_eq!(arr.shape(), &[2, 2]);
+                // All entries must be finite.
+                assert!(arr.iter().all(|x| x.to_f32().is_finite()));
+                // Values must match the expected f32 result within f16 rounding error.
+                let expected = [19.0_f32, 22.0, 43.0, 50.0];
+                for (idx, &exp) in expected.iter().enumerate() {
+                    let i = idx / 2;
+                    let j = idx % 2;
+                    let got = arr[[i, j]].to_f32();
+                    assert!(
+                        (got - exp).abs() < 0.5,
+                        "F16 matmul mismatch at [{}, {}]: got {}, expected {}",
+                        i,
+                        j,
+                        got,
+                        exp
+                    );
+                }
+            },
+            other => panic!("expected Tensor::F16 result, got {:?}", other),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_matmul_bf16_upcast() -> Result<()> {
+        // Non-square shapes to exercise the shape-propagation path: [2x3] x [3x2] -> [2x2].
+        let a = bf16_tensor(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])?;
+        let b = bf16_tensor(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[3, 2])?;
+
+        let result = a.matmul(&b)?;
+
+        // Dtype must be preserved as BF16.
+        assert_eq!(result.dtype(), DType::BF16);
+
+        match result {
+            Tensor::BF16(arr) => {
+                // Shape must be correct.
+                assert_eq!(arr.shape(), &[2, 2]);
+                // All entries must be finite.
+                assert!(arr.iter().all(|x| x.to_f32().is_finite()));
+                // Expected: A @ B = [[22, 28], [49, 64]].
+                let expected = [22.0_f32, 28.0, 49.0, 64.0];
+                for (idx, &exp) in expected.iter().enumerate() {
+                    let i = idx / 2;
+                    let j = idx % 2;
+                    let got = arr[[i, j]].to_f32();
+                    // BF16 has ~8 bits of mantissa: allow a generous relative tolerance.
+                    assert!(
+                        (got - exp).abs() < 1.0,
+                        "BF16 matmul mismatch at [{}, {}]: got {}, expected {}",
+                        i,
+                        j,
+                        got,
+                        exp
+                    );
+                }
+            },
+            other => panic!("expected Tensor::BF16 result, got {:?}", other),
+        }
         Ok(())
     }
 }

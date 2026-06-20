@@ -9,7 +9,16 @@ use trustformers_core::{
     traits::{Layer, Model},
 };
 
-use scirs2_core::ndarray::s; // SciRS2 Integration Policy
+use scirs2_core::ndarray::{s, Array2, Ix1, Ix2}; // SciRS2 Integration Policy
+
+/// Numerically stable softplus: `ln(1 + e^x)`.
+///
+/// Computed as `max(x, 0) + ln(1 + e^{-|x|})` so it never overflows for large
+/// magnitudes. Used to obtain the strictly-positive Mamba timestep Δ.
+#[inline]
+fn softplus(x: f32) -> f32 {
+    x.max(0.0) + (1.0 + (-x.abs()).exp()).ln()
+}
 
 /// RMSNorm layer (Root Mean Square Layer Normalization)
 /// Used in Mamba for normalization
@@ -108,7 +117,15 @@ impl CausalConv1d {
         use_bias: bool,
         device: Device,
     ) -> Result<Self> {
-        let weight = Tensor::randn(&[out_channels, in_channels, kernel_size])?;
+        // Mamba uses a *depthwise* causal convolution (each channel is convolved
+        // independently), so the weight is [channels, kernel_size] rather than a
+        // dense [out, in, kernel] kernel. `in_channels` is kept for API symmetry
+        // and must equal `out_channels` for the depthwise operation.
+        debug_assert_eq!(
+            in_channels, out_channels,
+            "CausalConv1d is depthwise; in_channels must equal out_channels"
+        );
+        let weight = Tensor::randn(&[out_channels, kernel_size])?;
         let bias = if use_bias { Some(Tensor::zeros(&[out_channels])?) } else { None };
         let padding = kernel_size - 1;
 
@@ -131,19 +148,66 @@ impl Layer for CausalConv1d {
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        // Simplified 1D convolution implementation
-        // In practice, this would use optimized convolution operations
-        match &input {
-            Tensor::F32(_input_arr) => {
-                // For now, return input as-is - full implementation would require
-                // proper convolution operations with causal padding
-                Ok(input.clone())
+        // Causal depthwise 1D convolution over the time axis.
+        //
+        // Input is [seq, channels]; each output position only sees current and
+        // past timesteps (left zero-padding of `kernel_size - 1`), so the layer
+        // is autoregressive-safe:
+        //   out[t, c] = bias[c] + Σ_{j<K} weight[c, j] · x[t - (K-1) + j, c]
+        let x = match &input {
+            Tensor::F32(arr) => arr.view().into_dimensionality::<Ix2>().map_err(|_| {
+                tensor_op_error(
+                    "tensor_operation",
+                    "CausalConv1d expects a 2D [seq, channels] input",
+                )
+            })?,
+            _ => {
+                return Err(tensor_op_error(
+                    "tensor_operation",
+                    "Unsupported input tensor type for CausalConv1d",
+                ))
             },
-            _ => Err(tensor_op_error(
-                "tensor_operation",
-                "Unsupported input tensor type for CausalConv1d",
-            )),
+        };
+        let weight = match &self.weight {
+            Tensor::F32(w) => w.view().into_dimensionality::<Ix2>().map_err(|_| {
+                tensor_op_error(
+                    "tensor_operation",
+                    "CausalConv1d weight must be [channels, kernel_size]",
+                )
+            })?,
+            _ => {
+                return Err(tensor_op_error(
+                    "tensor_operation",
+                    "Unsupported weight tensor type for CausalConv1d",
+                ))
+            },
+        };
+
+        let seq = x.shape()[0];
+        let channels = x.shape()[1];
+        let k = self.kernel_size;
+        let bias = match &self.bias {
+            Some(Tensor::F32(b)) => Some(b.view().into_dimensionality::<Ix1>().map_err(|_| {
+                tensor_op_error("tensor_operation", "CausalConv1d bias must be 1D")
+            })?),
+            _ => None,
+        };
+
+        let mut out = Array2::<f32>::zeros((seq, channels));
+        for t in 0..seq {
+            for c in 0..channels {
+                let mut acc = bias.as_ref().map(|b| b[c]).unwrap_or(0.0);
+                for j in 0..k {
+                    let src = t as isize - (k as isize - 1) + j as isize;
+                    if src >= 0 {
+                        acc += weight[[c, j]] * x[[src as usize, c]];
+                    }
+                }
+                out[[t, c]] = acc;
+            }
         }
+
+        Ok(Tensor::F32(out.into_dyn()))
     }
 }
 
@@ -225,31 +289,151 @@ impl MambaBlock {
         self.device
     }
 
-    fn selective_ssm(
-        &self,
-        x: &Tensor,
-        _delta: &Tensor,
-        _a: &Tensor,
-        _b: &Tensor,
-        _c: &Tensor,
-    ) -> Result<Tensor> {
-        // Simplified selective state space model computation
-        // This is a placeholder implementation that returns the input with
-        // a simple transformation. A full implementation would properly
-        // implement the S6 (selective scan) algorithm with correct parameter handling.
-        //
-        // Note: The full Mamba SSM requires proper parameter extraction:
-        // - Split x_proj output into dt, B, C components
-        // - Apply dt_proj to get delta with shape [seq_len, d_inner]
-        // - Use B, C with shape [seq_len, d_state]
-        // - Apply discretization and selective scan
+    /// Split the `x_proj` output into the selective parameters (Δ, B, C).
+    ///
+    /// `x_proj` produces `dt_rank + 2 * d_state` channels. The first `dt_rank`
+    /// columns are projected through `dt_proj` and passed through softplus to
+    /// obtain the strictly-positive, per-channel timestep Δ ∈ [seq, d_inner].
+    /// The remaining two `d_state`-wide blocks are the input-dependent B and C
+    /// matrices ∈ [seq, d_state].
+    fn compute_ssm_parameters(&self, ssm_out: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
+        let dt_rank = self.config.get_dt_rank();
+        let d_state = self.config.d_state;
 
-        // For now, apply a simple gated transformation to preserve shape
-        // Input x has shape [seq_len, d_inner] or [batch, seq_len, d_inner]
-        let activated = x.silu()?;
+        let arr = match ssm_out {
+            Tensor::F32(a) => a,
+            _ => {
+                return Err(tensor_op_error(
+                    "tensor_operation",
+                    "Unsupported tensor type in SSM parameter projection",
+                ))
+            },
+        };
+        let shape = arr.shape();
+        if shape.len() != 2 || shape[1] != dt_rank + 2 * d_state {
+            return Err(tensor_op_error(
+                "tensor_operation",
+                "Invalid x_proj output shape for (Δ, B, C) split",
+            ));
+        }
 
-        // Return with same shape as input
-        Ok(activated)
+        let dt_unproj = Tensor::F32(arr.slice(s![.., ..dt_rank]).to_owned().into_dyn());
+        let b = Tensor::F32(arr.slice(s![.., dt_rank..dt_rank + d_state]).to_owned().into_dyn());
+        let c = Tensor::F32(arr.slice(s![.., dt_rank + d_state..]).to_owned().into_dyn());
+
+        // Δ = softplus(dt_proj(dt_unproj)) — the data-dependent discretisation step.
+        let delta = match self.dt_proj.forward(dt_unproj)? {
+            Tensor::F32(d) => Tensor::F32(d.mapv(softplus)),
+            _ => {
+                return Err(tensor_op_error(
+                    "tensor_operation",
+                    "Unsupported tensor type for Δ projection",
+                ))
+            },
+        };
+
+        Ok((delta, b, c))
+    }
+
+    /// Real selective scan — the "S6" recurrence from Gu & Dao (2023).
+    ///
+    /// For each timestep `t`, the continuous-time SSM `(A, B, C)` is discretised
+    /// with the per-channel, input-dependent step Δ using a zero-order hold:
+    ///   Ā = exp(Δ · A),   B̄ = Δ · B
+    /// and the hidden state is advanced recurrently:
+    ///   h_t = Ā ⊙ h_{t-1} + B̄ · x_t
+    ///   y_t = C_t · h_t + D ⊙ x_t
+    /// with `A = -exp(a_log)` guaranteeing a stable (decaying) recurrence.
+    ///
+    /// Shapes: `x`, `Δ` ∈ [seq, d_inner]; `B`, `C` ∈ [seq, d_state];
+    /// `a_log` ∈ [d_inner, d_state]; `D` ∈ [d_inner]; output ∈ [seq, d_inner].
+    fn selective_scan(&self, x: &Tensor, delta: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
+        let to_2d = |t: &Tensor, msg: &'static str| -> Result<Array2<f32>> {
+            match t {
+                Tensor::F32(a) => a
+                    .view()
+                    .into_dimensionality::<Ix2>()
+                    .map(|v| v.to_owned())
+                    .map_err(|_| tensor_op_error("tensor_operation", msg)),
+                _ => Err(tensor_op_error("tensor_operation", msg)),
+            }
+        };
+
+        let x2 = to_2d(x, "selective_scan: x must be 2D f32")?;
+        let delta2 = to_2d(delta, "selective_scan: Δ must be 2D f32")?;
+        let b2 = to_2d(b, "selective_scan: B must be 2D f32")?;
+        let c2 = to_2d(c, "selective_scan: C must be 2D f32")?;
+
+        let a_log2 = match &self.a_log {
+            Tensor::F32(a) => {
+                a.view().into_dimensionality::<Ix2>().map(|v| v.to_owned()).map_err(|_| {
+                    tensor_op_error(
+                        "tensor_operation",
+                        "selective_scan: a_log must be [d_inner, d_state]",
+                    )
+                })?
+            },
+            _ => {
+                return Err(tensor_op_error(
+                    "tensor_operation",
+                    "selective_scan: a_log must be f32",
+                ))
+            },
+        };
+        let d1 = match &self.d {
+            Tensor::F32(a) => {
+                a.view().into_dimensionality::<Ix1>().map(|v| v.to_owned()).map_err(|_| {
+                    tensor_op_error("tensor_operation", "selective_scan: D must be 1D [d_inner]")
+                })?
+            },
+            _ => {
+                return Err(tensor_op_error(
+                    "tensor_operation",
+                    "selective_scan: D must be f32",
+                ))
+            },
+        };
+
+        let seq = x2.shape()[0];
+        let d_inner = x2.shape()[1];
+        let d_state = a_log2.shape()[1];
+
+        if delta2.shape() != [seq, d_inner]
+            || b2.shape() != [seq, d_state]
+            || c2.shape() != [seq, d_state]
+            || a_log2.shape()[0] != d_inner
+            || d1.len() != d_inner
+        {
+            return Err(tensor_op_error(
+                "tensor_operation",
+                "selective_scan: inconsistent operand shapes",
+            ));
+        }
+
+        // A = -exp(a_log), precomputed once for the whole sequence.
+        let a_neg = a_log2.mapv(|v| -v.exp());
+
+        let mut h = Array2::<f32>::zeros((d_inner, d_state));
+        let mut y = Array2::<f32>::zeros((seq, d_inner));
+
+        for t in 0..seq {
+            for i in 0..d_inner {
+                let delta_ti = delta2[[t, i]];
+                let x_ti = x2[[t, i]];
+                let mut acc = 0.0f32;
+                for n in 0..d_state {
+                    // Zero-order-hold discretisation of (A, B) for this channel/state.
+                    let a_bar = (delta_ti * a_neg[[i, n]]).exp();
+                    let b_bar = delta_ti * b2[[t, n]];
+                    let h_in = a_bar * h[[i, n]] + b_bar * x_ti;
+                    h[[i, n]] = h_in;
+                    acc += c2[[t, n]] * h_in;
+                }
+                y[[t, i]] = acc + d1[i] * x_ti;
+            }
+        }
+
+        Ok(Tensor::F32(y.into_dyn()))
     }
 
     fn parameter_count(&self) -> usize {
@@ -322,12 +506,13 @@ impl Layer for MambaBlock {
         // Apply SiLU activation
         let activated = silu(&conv_out)?;
 
-        // State space projection
+        // State space projection: x_proj maps d_inner -> dt_rank + 2 * d_state.
         let ssm_out = self.x_proj.forward(activated.clone())?;
 
-        // Apply selective SSM (simplified implementation)
-        let ssm_result =
-            self.selective_ssm(&activated, &ssm_out, &self.a_log, &ssm_out, &ssm_out)?;
+        // Recover the input-dependent (Δ, B, C) parameters that make the Mamba
+        // SSM *selective*, then run the real S6 selective scan.
+        let (delta, b, c) = self.compute_ssm_parameters(&ssm_out)?;
+        let ssm_result = self.selective_scan(&activated, &delta, &b, &c)?;
 
         // Apply gating with z (element-wise multiplication after SiLU activation)
         let z_activated = silu(&z)?;
@@ -568,6 +753,52 @@ mod tests {
     fn test_causal_conv1d_creation() {
         let conv = CausalConv1d::new(768, 768, 4, true);
         assert!(conv.is_ok());
+    }
+
+    #[test]
+    fn test_mamba_block_forward_runs_real_ssm() {
+        // Tiny config so the O(seq · d_inner · d_state) selective scan is cheap.
+        let config = MambaConfig {
+            d_model: 16,
+            d_state: 4,
+            d_conv: 4,
+            expand: 2,
+            n_layer: 1,
+            vocab_size: 32,
+            ..MambaConfig::default()
+        };
+        let block = MambaBlock::new(&config).expect("block construction");
+        let seq = 5;
+        let input = Tensor::randn(&[seq, config.d_model]).expect("input");
+        let out = block.forward(input).expect("forward");
+        // The real selective scan preserves shape and yields finite values
+        // (the old placeholder returned silu(x); this exercises the S6 path).
+        assert_eq!(out.shape(), vec![seq, config.d_model]);
+        let data = out.data().expect("data");
+        assert!(
+            data.iter().all(|v| v.is_finite()),
+            "selective scan produced non-finite values"
+        );
+    }
+
+    #[test]
+    fn test_causal_conv1d_is_causal_and_not_identity() {
+        // A depthwise causal conv must preserve shape AND actually mix timesteps,
+        // i.e. it must NOT return its input unchanged (the old fake behaviour).
+        let channels = 3;
+        let conv = CausalConv1d::new(channels, channels, 3, false).expect("conv");
+        let seq = 6;
+        let input = Tensor::randn(&[seq, channels]).expect("input");
+        let out = conv.forward(input.clone()).expect("forward");
+        assert_eq!(out.shape(), vec![seq, channels]);
+        let before = input.data().expect("in data");
+        let after = out.data().expect("out data");
+        // Random weights make an identity pass-through astronomically unlikely.
+        assert!(
+            before.iter().zip(after.iter()).any(|(a, b)| (a - b).abs() > 1e-6),
+            "causal conv returned its input unchanged (identity) — fake implementation"
+        );
+        assert!(after.iter().all(|v| v.is_finite()));
     }
 
     #[test]

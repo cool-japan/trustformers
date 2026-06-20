@@ -32,9 +32,11 @@
 //!
 //! ### Basic Usage
 //!
-//! ```rust
+//! ```rust,no_run
 //! use trustformers_serve::memory_pressure::{MemoryPressureHandler, MemoryPressureConfig};
 //!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = MemoryPressureConfig::default();
 //! let handler = MemoryPressureHandler::new(config);
 //!
@@ -47,11 +49,19 @@
 //!
 //! // Stop monitoring
 //! handler.stop().await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### Event Monitoring
 //!
-//! ```rust
+//! ```rust,no_run
+//! use trustformers_serve::memory_pressure::{MemoryPressureHandler, MemoryPressureConfig, MemoryPressureEvent};
+//!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let config = MemoryPressureConfig::default();
+//! # let handler = MemoryPressureHandler::new(config);
 //! let mut events = handler.subscribe_to_events();
 //!
 //! tokio::spawn(async move {
@@ -67,11 +77,19 @@
 //!         }
 //!     }
 //! });
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### Manual Memory Management
 //!
-//! ```rust
+//! ```rust,no_run
+//! use trustformers_serve::memory_pressure::{MemoryPressureHandler, MemoryPressureConfig};
+//!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let config = MemoryPressureConfig::default();
+//! # let handler = MemoryPressureHandler::new(config);
 //! // Request memory allocation
 //! let allocation_id = handler.request_allocation(1024 * 1024, "buffer".to_string()).await?;
 //!
@@ -79,6 +97,8 @@
 //!
 //! // Release when done
 //! handler.release_allocation(&allocation_id).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use super::{

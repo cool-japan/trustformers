@@ -22,6 +22,40 @@ use scirs2_core::simd_ops::SimdUnifiedOps;
 /// Minimum tensor size to use SIMD operations (avoids overhead for small tensors)
 const MIN_SIZE_FOR_SIMD: usize = 256;
 
+/// Upcast a half-precision (F16/BF16) tensor to F32, run `op`, then downcast the
+/// F32 result back to the original half-precision dtype.
+///
+/// Half-precision floats lack the precision and dynamic range required for stable
+/// activation math (e.g. `exp` in softmax), so we compute in F32 and round the
+/// result back to F16/BF16 so the output dtype matches the input dtype.
+fn run_half_in_f32<F>(input: &Tensor, op: F) -> Result<Tensor>
+where
+    F: Fn(&Tensor) -> Result<Tensor>,
+{
+    match input {
+        Tensor::F16(a) => {
+            // Upcast F16 -> F32 for accurate computation, then downcast back to F16.
+            let upcast = Tensor::F32(a.mapv(|x| x.to_f32()));
+            match op(&upcast)? {
+                Tensor::F32(r) => Ok(Tensor::F16(r.mapv(half::f16::from_f32))),
+                other => other.to_dtype(crate::tensor::DType::F16),
+            }
+        },
+        Tensor::BF16(a) => {
+            // Upcast BF16 -> F32 for accurate computation, then downcast back to BF16.
+            let upcast = Tensor::F32(a.mapv(|x| x.to_f32()));
+            match op(&upcast)? {
+                Tensor::F32(r) => Ok(Tensor::BF16(r.mapv(half::bf16::from_f32))),
+                other => other.to_dtype(crate::tensor::DType::BF16),
+            }
+        },
+        _ => Err(TrustformersError::tensor_op_error(
+            "run_half_in_f32 called on a non-half-precision tensor",
+            "run_half_in_f32",
+        )),
+    }
+}
+
 impl Tensor {
     /// ReLU activation function.
     ///
@@ -38,6 +72,7 @@ impl Tensor {
                 let result = a.mapv(|x| x.max(0.0));
                 Ok(Tensor::F64(result))
             },
+            Tensor::F16(_) | Tensor::BF16(_) => run_half_in_f32(self, |t| t.relu()),
             _ => Err(TrustformersError::tensor_op_error(
                 "ReLU not supported for this tensor type",
                 "relu",
@@ -114,6 +149,7 @@ impl Tensor {
                     Ok(Tensor::F64(result))
                 }
             },
+            Tensor::F16(_) | Tensor::BF16(_) => run_half_in_f32(self, |t| t.sigmoid()),
             _ => Err(TrustformersError::tensor_op_error(
                 "Sigmoid not supported for this tensor type",
                 "sigmoid",
@@ -172,6 +208,7 @@ impl Tensor {
                     Ok(Tensor::F64(result))
                 }
             },
+            Tensor::F16(_) | Tensor::BF16(_) => run_half_in_f32(self, |t| t.tanh()),
             _ => Err(TrustformersError::tensor_op_error(
                 "Tanh not supported for this tensor type",
                 "tanh",
@@ -275,6 +312,7 @@ impl Tensor {
                 let result_contiguous = result.as_standard_layout().to_owned();
                 Ok(Tensor::F64(result_contiguous))
             },
+            Tensor::F16(_) | Tensor::BF16(_) => run_half_in_f32(self, |t| t.softmax(axis)),
             _ => Err(TrustformersError::tensor_op_error(
                 "Softmax not supported for this tensor type",
                 "softmax",
@@ -403,6 +441,7 @@ impl Tensor {
                     Ok(Tensor::F64(result))
                 }
             },
+            Tensor::F16(_) | Tensor::BF16(_) => run_half_in_f32(self, |t| t.gelu()),
             _ => Err(TrustformersError::tensor_op_error(
                 "GELU not supported for this tensor type",
                 "gelu",
@@ -429,6 +468,9 @@ impl Tensor {
                 let negative_slope = negative_slope as f64;
                 let result = a.mapv(|x| if x > 0.0 { x } else { negative_slope * x });
                 Ok(Tensor::F64(result))
+            },
+            Tensor::F16(_) | Tensor::BF16(_) => {
+                run_half_in_f32(self, |t| t.leaky_relu(negative_slope))
             },
             _ => Err(TrustformersError::tensor_op_error(
                 "Leaky ReLU not supported for this tensor type",
@@ -493,6 +535,7 @@ impl Tensor {
                     Ok(Tensor::F64(result))
                 }
             },
+            Tensor::F16(_) | Tensor::BF16(_) => run_half_in_f32(self, |t| t.silu()),
             _ => Err(TrustformersError::tensor_op_error(
                 "SiLU not supported for this tensor type",
                 "silu",
@@ -738,6 +781,167 @@ mod tests {
         let t = Tensor::from_data(vec![0.0, 1.0, -1.0, 2.0], &[2, 2])?;
         let r = t.gelu()?;
         assert_eq!(r.shape(), vec![2, 2]);
+        Ok(())
+    }
+
+    // ---- Half-precision (F16 / BF16) upcast-path tests ----
+
+    use crate::tensor::DType;
+    use scirs2_core::ndarray::{ArrayD, IxDyn};
+
+    /// Build an F16 tensor from f32 values.
+    fn make_f16(data: &[f32], shape: &[usize]) -> Result<Tensor> {
+        let arr = ArrayD::from_shape_vec(
+            IxDyn(shape),
+            data.iter().map(|&x| half::f16::from_f32(x)).collect(),
+        )
+        .map_err(|e| crate::errors::TrustformersError::shape_error(e.to_string()))?;
+        Ok(Tensor::F16(arr))
+    }
+
+    /// Build a BF16 tensor from f32 values.
+    fn make_bf16(data: &[f32], shape: &[usize]) -> Result<Tensor> {
+        let arr = ArrayD::from_shape_vec(
+            IxDyn(shape),
+            data.iter().map(|&x| half::bf16::from_f32(x)).collect(),
+        )
+        .map_err(|e| crate::errors::TrustformersError::shape_error(e.to_string()))?;
+        Ok(Tensor::BF16(arr))
+    }
+
+    /// Read a half-precision tensor's values as f32 for assertions.
+    fn half_to_vec_f32(t: &Tensor) -> Vec<f32> {
+        match t {
+            Tensor::F16(a) => a.iter().map(|x| x.to_f32()).collect(),
+            Tensor::BF16(a) => a.iter().map(|x| x.to_f32()).collect(),
+            _ => panic!("expected a half-precision tensor"),
+        }
+    }
+
+    #[test]
+    fn test_relu_f16_bf16() -> Result<()> {
+        for (t, dt) in [
+            (make_f16(&[-1.0, 0.0, 2.5], &[3])?, DType::F16),
+            (make_bf16(&[-1.0, 0.0, 2.5], &[3])?, DType::BF16),
+        ] {
+            let r = t.relu()?;
+            assert_eq!(r.dtype(), dt);
+            assert_eq!(r.shape(), vec![3]);
+            let data = half_to_vec_f32(&r);
+            assert!(data.iter().all(|v| v.is_finite()));
+            assert!(data[0].abs() < 0.05);
+            assert!(data[1].abs() < 0.05);
+            assert!((data[2] - 2.5).abs() < 0.05);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_sigmoid_f16_bf16() -> Result<()> {
+        for (t, dt) in [
+            (make_f16(&[0.0, 4.0, -4.0], &[3])?, DType::F16),
+            (make_bf16(&[0.0, 4.0, -4.0], &[3])?, DType::BF16),
+        ] {
+            let r = t.sigmoid()?;
+            assert_eq!(r.dtype(), dt);
+            assert_eq!(r.shape(), vec![3]);
+            let data = half_to_vec_f32(&r);
+            assert!(data.iter().all(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0));
+            assert!((data[0] - 0.5).abs() < 0.05);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_tanh_f16_bf16() -> Result<()> {
+        for (t, dt) in [
+            (make_f16(&[0.0, 2.0, -2.0], &[3])?, DType::F16),
+            (make_bf16(&[0.0, 2.0, -2.0], &[3])?, DType::BF16),
+        ] {
+            let r = t.tanh()?;
+            assert_eq!(r.dtype(), dt);
+            assert_eq!(r.shape(), vec![3]);
+            let data = half_to_vec_f32(&r);
+            assert!(data.iter().all(|v| v.is_finite() && *v >= -1.0 && *v <= 1.0));
+            assert!(data[0].abs() < 0.05);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_softmax_f16_bf16_rows_sum_to_one() -> Result<()> {
+        for (t, dt) in [
+            (
+                make_f16(&[1.0, 2.0, 3.0, 0.0, 1.0, 0.0], &[2, 3])?,
+                DType::F16,
+            ),
+            (
+                make_bf16(&[1.0, 2.0, 3.0, 0.0, 1.0, 0.0], &[2, 3])?,
+                DType::BF16,
+            ),
+        ] {
+            let r = t.softmax(-1)?;
+            assert_eq!(r.dtype(), dt);
+            assert_eq!(r.shape(), vec![2, 3]);
+            let data = half_to_vec_f32(&r);
+            assert!(data.iter().all(|v| v.is_finite()));
+            // Each row of 3 elements should sum to approximately 1.0.
+            let row0: f32 = data[0..3].iter().sum();
+            let row1: f32 = data[3..6].iter().sum();
+            assert!((row0 - 1.0).abs() < 0.05, "row0 sum = {}", row0);
+            assert!((row1 - 1.0).abs() < 0.05, "row1 sum = {}", row1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_gelu_f16_bf16() -> Result<()> {
+        for (t, dt) in [
+            (make_f16(&[0.0, 1.0, -1.0], &[3])?, DType::F16),
+            (make_bf16(&[0.0, 1.0, -1.0], &[3])?, DType::BF16),
+        ] {
+            let r = t.gelu()?;
+            assert_eq!(r.dtype(), dt);
+            assert_eq!(r.shape(), vec![3]);
+            let data = half_to_vec_f32(&r);
+            assert!(data.iter().all(|v| v.is_finite()));
+            assert!(data[0].abs() < 0.05);
+            assert!((data[1] - 0.8413).abs() < 0.05);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_leaky_relu_f16_bf16() -> Result<()> {
+        for (t, dt) in [
+            (make_f16(&[-1.0, 2.0], &[2])?, DType::F16),
+            (make_bf16(&[-1.0, 2.0], &[2])?, DType::BF16),
+        ] {
+            let r = t.leaky_relu(0.1)?;
+            assert_eq!(r.dtype(), dt);
+            assert_eq!(r.shape(), vec![2]);
+            let data = half_to_vec_f32(&r);
+            assert!(data.iter().all(|v| v.is_finite()));
+            assert!((data[0] - (-0.1)).abs() < 0.05);
+            assert!((data[1] - 2.0).abs() < 0.05);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_silu_f16_bf16() -> Result<()> {
+        for (t, dt) in [
+            (make_f16(&[0.0, 2.0], &[2])?, DType::F16),
+            (make_bf16(&[0.0, 2.0], &[2])?, DType::BF16),
+        ] {
+            let r = t.silu()?;
+            assert_eq!(r.dtype(), dt);
+            assert_eq!(r.shape(), vec![2]);
+            let data = half_to_vec_f32(&r);
+            assert!(data.iter().all(|v| v.is_finite()));
+            assert!(data[0].abs() < 0.05);
+            assert!(data[1] > 1.5 && data[1] < 2.0);
+        }
         Ok(())
     }
 }

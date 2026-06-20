@@ -273,20 +273,13 @@ pub enum GpuAlertEventType {
     Suppressed,
 }
 
-/// GPU benchmark types
-#[derive(Debug, Clone)]
-pub enum GpuBenchmarkType {
-    /// Compute performance
-    Compute,
-    /// Memory bandwidth
-    MemoryBandwidth,
-    /// Machine learning performance
-    MachineLearning,
-    /// Graphics performance
-    Graphics,
-    /// Custom benchmark
-    Custom(String),
-}
+/// Re-export the canonical GpuBenchmarkType.
+///
+/// The authoritative definition lives in
+/// `resource_management::gpu_manager::types`. This alias keeps the
+/// `resource_manager` module API stable without re-declaring a conflicting
+/// (and less-complete) copy of the enum.
+pub use crate::resource_management::gpu_manager::types::GpuBenchmarkType;
 
 /// Trend direction
 #[derive(Debug, Clone)]

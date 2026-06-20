@@ -179,14 +179,35 @@ impl FeedbackProcessor {
         let batch_size = batch.prompts.len();
         let mut quality_scores = Vec::with_capacity(batch_size);
 
-        // Simplified implementation using tensor mean and basic scoring
-        let mean_rating = 0.5f32; // Placeholder value since item() method not available
+        // Derive a per-item base rating from the ratings tensor instead of a constant.
+        // `ratings` is normally shape `[batch_size]` (one rating per item); if it carries
+        // several values per item (e.g. multiple annotators) average each item's group,
+        // and fall back to the global mean when the layout does not divide evenly.
+        let ratings = batch.ratings.to_vec_f32()?;
+        let global_mean = if ratings.is_empty() {
+            0.0
+        } else {
+            ratings.iter().sum::<f32>() / ratings.len() as f32
+        };
+        let per_item = |index: usize| -> f32 {
+            if batch_size == 0 {
+                global_mean
+            } else if ratings.len() == batch_size {
+                ratings[index]
+            } else if ratings.len() % batch_size == 0 {
+                let group = ratings.len() / batch_size;
+                let start = index * group;
+                ratings[start..start + group].iter().sum::<f32>() / group as f32
+            } else {
+                global_mean
+            }
+        };
 
         for i in 0..batch_size {
-            // Base quality score from mean rating
-            let mut quality = mean_rating;
+            // Base quality score from this item's own rating.
+            let mut quality = per_item(i);
 
-            // Apply diversity bonus (simplified)
+            // Apply diversity bonus.
             let diversity_bonus =
                 self.compute_diversity_bonus(&batch.responses[i])? * self.config.diversity_weight;
             quality += diversity_bonus;
@@ -200,10 +221,23 @@ impl FeedbackProcessor {
     }
 
     fn filter_by_quality(&self, quality_scores: &Tensor) -> Result<Vec<usize>> {
-        // Simplified implementation - return all indices for now
-        let shape = quality_scores.shape();
-        let batch_size = shape[0];
-        Ok((0..batch_size).collect())
+        // Keep only the items whose quality score meets the configured threshold.
+        let scores = quality_scores.to_vec_f32()?;
+        let threshold = self.config.quality_threshold;
+        let filtered = scores
+            .iter()
+            .enumerate()
+            .filter_map(
+                |(index, &score)| {
+                    if score >= threshold {
+                        Some(index)
+                    } else {
+                        None
+                    }
+                },
+            )
+            .collect();
+        Ok(filtered)
     }
 
     fn compute_feedback_weights(
@@ -226,9 +260,18 @@ impl FeedbackProcessor {
         let avg_response_length =
             response_lengths.iter().sum::<f32>() / response_lengths.len() as f32;
 
+        // Real rating statistics over the batch (was a hardcoded 0.5 / 0.1 placeholder).
+        let ratings = batch.ratings.to_vec_f32()?;
+        let mean_rating = if ratings.is_empty() {
+            0.0
+        } else {
+            ratings.iter().sum::<f32>() / ratings.len() as f32
+        };
+        let std_rating = self.compute_rating_std_single(&batch.ratings)?;
+
         Ok(BatchStatistics {
-            mean_rating: 0.5, // Placeholder since item() not available
-            std_rating: 0.1,  // Placeholder since item() not available
+            mean_rating,
+            std_rating,
             avg_response_length,
             feedback_coverage: self.compute_feedback_coverage(batch)?,
         })
@@ -241,14 +284,30 @@ impl FeedbackProcessor {
     }
 
     fn compute_rating_std(&self, ratings: &Tensor) -> Result<Tensor> {
-        // Simplified implementation - return small constant for now
-        let shape = ratings.shape();
-        Ok(Tensor::ones(&shape)?.mul_scalar(0.1)?)
+        // Sample standard deviation reduced to a single scalar tensor of shape [1].
+        let std = self.compute_rating_std_single(ratings)?;
+        Ok(Tensor::from_vec(vec![std], &[1])?)
     }
 
-    fn compute_rating_std_single(&self, _ratings: &Tensor) -> Result<f32> {
-        // Simplified implementation - return constant for now
-        Ok(0.1)
+    fn compute_rating_std_single(&self, ratings: &Tensor) -> Result<f32> {
+        // Real sample standard deviation: mean = Sum(x)/n,
+        // variance = Sum((x - mean)^2) / (n - 1), std = sqrt(variance).
+        let values = ratings.to_vec_f32()?;
+        let n = values.len();
+        if n <= 1 {
+            // Guard against division by zero; a single (or empty) sample has no spread.
+            return Ok(0.0);
+        }
+        let mean = values.iter().sum::<f32>() / n as f32;
+        let variance = values
+            .iter()
+            .map(|&value| {
+                let diff = value - mean;
+                diff * diff
+            })
+            .sum::<f32>()
+            / (n as f32 - 1.0);
+        Ok(variance.sqrt())
     }
 
     fn compute_diversity_bonus(&self, response: &str) -> Result<f32> {
@@ -394,6 +453,70 @@ mod tests {
         assert_eq!(processed.aggregated_ratings.shape(), &[2]);
         assert_eq!(processed.quality_scores.shape(), &[2]);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_quality_scores_reflect_real_ratings() -> Result<()> {
+        // Quality must track each item's own rating, not a constant 0.5 placeholder.
+        let cfg = FeedbackConfig {
+            diversity_weight: 0.0, // isolate the rating contribution
+            ..FeedbackConfig::default()
+        };
+        let processor = FeedbackProcessor::new(cfg);
+
+        let batch = FeedbackBatch {
+            prompts: vec!["p1".to_string(), "p2".to_string()],
+            responses: vec!["a b c".to_string(), "d e f".to_string()],
+            ratings: Tensor::from_vec(vec![0.2, 0.9], &[2])?,
+            feedback_texts: vec![None, None],
+            weights: None,
+        };
+
+        let scores = processor.compute_quality_scores(&batch)?.to_vec_f32()?;
+        assert_eq!(scores.len(), 2);
+        // With diversity disabled, quality == clamped per-item rating.
+        assert!(
+            (scores[0] - 0.2).abs() < 1e-5,
+            "item 0 should reflect its 0.2 rating, got {}",
+            scores[0]
+        );
+        assert!(
+            (scores[1] - 0.9).abs() < 1e-5,
+            "item 1 should reflect its 0.9 rating, got {}",
+            scores[1]
+        );
+        // Low- and high-rated items must differ (they would be equal under the 0.5 placeholder).
+        assert!(scores[1] > scores[0]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_batch_statistics_are_real_not_placeholder() -> Result<()> {
+        let processor = FeedbackProcessor::new(FeedbackConfig::default());
+        let batch = FeedbackBatch {
+            prompts: vec!["p1".to_string(), "p2".to_string(), "p3".to_string()],
+            responses: vec!["x".to_string(), "y".to_string(), "z".to_string()],
+            ratings: Tensor::from_vec(vec![0.1, 0.2, 0.9], &[3])?,
+            feedback_texts: vec![Some("ok".to_string()), None, None],
+            weights: None,
+        };
+
+        let stats = processor.compute_batch_statistics(&batch)?;
+        // mean of {0.1, 0.2, 0.9} = 0.4 — computed, not the 0.5 placeholder.
+        assert!(
+            (stats.mean_rating - 0.4).abs() < 1e-5,
+            "mean should be the real 0.4, got {}",
+            stats.mean_rating
+        );
+        // sample std of {0.1, 0.2, 0.9}: variance = 0.38/2 = 0.19, std = sqrt(0.19) ≈ 0.4359,
+        // clearly not the 0.1 placeholder.
+        assert!(
+            (stats.std_rating - 0.19f32.sqrt()).abs() < 1e-4,
+            "std should be the real sqrt(0.19), got {}",
+            stats.std_rating
+        );
+        assert!((stats.feedback_coverage - (1.0 / 3.0)).abs() < 1e-6);
         Ok(())
     }
 

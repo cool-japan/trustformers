@@ -1,3 +1,4 @@
+use crate::common::ActivationType;
 use crate::performer::config::PerformerConfig;
 use std::io::Read;
 use trustformers_core::{
@@ -333,7 +334,7 @@ impl Layer for FavorPlusAttention {
 pub struct PerformerFeedForward {
     dense1: Linear,
     dense2: Linear,
-    activation: String,
+    activation: ActivationType,
     #[allow(dead_code)]
     dropout: f32,
     device: Device,
@@ -353,7 +354,10 @@ impl PerformerFeedForward {
         Ok(Self {
             dense1,
             dense2,
-            activation: config.hidden_act.clone(),
+            activation: ActivationType::from_config_str_or(
+                &config.hidden_act,
+                ActivationType::Identity,
+            ),
             dropout: config.hidden_dropout_prob,
             device,
         })
@@ -368,12 +372,7 @@ impl PerformerFeedForward {
     }
 
     fn apply_activation(&self, x: &Tensor) -> Result<Tensor> {
-        match self.activation.as_str() {
-            "gelu" => x.gelu(),
-            "relu" => x.relu(),
-            "silu" | "swish" => x.silu(),
-            _ => Ok(x.clone()),
-        }
+        self.activation.apply(x)
     }
 }
 

@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use crate::common::ActivationType;
 use crate::gpt_neo::config::GptNeoConfig;
 use scirs2_core::ndarray::{s, ArrayD, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
@@ -58,7 +59,7 @@ pub struct MultiHeadAttention {
 pub struct GptNeoMLP {
     c_fc: Linear,
     c_proj: Linear,
-    activation: String,
+    activation: ActivationType,
     #[allow(dead_code)]
     dropout: f32,
     device: Device,
@@ -240,10 +241,14 @@ impl GptNeoMLP {
     }
 
     fn new_with_device(config: &GptNeoConfig, device: Device) -> Result<Self> {
+        // Parse the activation string once at construction. Unsupported
+        // identifiers are rejected here (previously this error was raised on
+        // every forward pass).
+        let activation = ActivationType::try_from(config.activation_function.as_str())?;
         Ok(Self {
             c_fc: Linear::new(config.hidden_size, config.intermediate_size, true),
             c_proj: Linear::new(config.intermediate_size, config.hidden_size, true),
-            activation: config.activation_function.clone(),
+            activation,
             dropout: config.resid_dropout,
             device,
         })
@@ -257,15 +262,7 @@ impl GptNeoMLP {
         let hidden_states = self.c_fc.forward(hidden_states)?;
 
         // Apply activation function
-        let hidden_states = match self.activation.as_str() {
-            "gelu" | "gelu_new" => trustformers_core::ops::activations::gelu(&hidden_states)?,
-            "relu" => trustformers_core::ops::activations::relu(&hidden_states)?,
-            _ => {
-                return Err(trustformers_core::errors::TrustformersError::model_error(
-                    format!("Unsupported activation function: {}", self.activation),
-                ));
-            },
-        };
+        let hidden_states = self.activation.apply(&hidden_states)?;
 
         self.c_proj.forward(hidden_states)
     }

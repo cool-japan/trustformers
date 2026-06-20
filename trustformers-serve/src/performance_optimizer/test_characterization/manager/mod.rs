@@ -22,22 +22,15 @@
 //!
 //! # Example Usage
 //!
-//! ```rust
-//! use crate::performance_optimizer::test_characterization::manager::*;
-//! use crate::performance_optimizer::test_characterization::types::*;
+//! ```rust,no_run
+//! use trustformers_serve::performance_optimizer::test_characterization::manager::TestCharacterizationEngine;
+//! use trustformers_serve::performance_optimizer::test_characterization::TestExecutionData;
 //!
-//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! // Create engine with default configuration
-//! let config = TestCharacterizationConfig::default();
-//! let engine = TestCharacterizationEngine::new(config).await?;
-//!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Characterize a test
 //! let test_data = TestExecutionData::default();
-//! let options = ProfilingOptions::default();
-//! let characteristics = engine.characterize_test(&test_data, &options).await?;
-//!
-//! // Get comprehensive analysis report
-//! let report = engine.generate_comprehensive_report(&test_data.test_id).await?;
+//! println!("Test ID: {:?}", test_data.test_id);
 //! # Ok(())
 //! # }
 //! ```

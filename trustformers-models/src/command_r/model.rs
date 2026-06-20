@@ -1,9 +1,9 @@
 use crate::command_r::config::CommandRConfig;
+use crate::common::ActivationType;
 use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Integration Policy
 use trustformers_core::{
     errors::{invalid_config, tensor_op_error, Result, TrustformersError},
     layers::{Embedding, LayerNorm, Linear},
-    ops::activations::silu,
     tensor::Tensor,
     traits::{Config, Layer, Model},
 };
@@ -280,7 +280,7 @@ pub struct CommandRMLP {
     up_proj: Linear,
     down_proj: Linear,
 
-    activation: String,
+    activation: ActivationType,
 }
 
 impl CommandRMLP {
@@ -299,19 +299,19 @@ impl CommandRMLP {
             gate_proj,
             up_proj,
             down_proj,
-            activation: config.activation_function.clone(),
+            // Parse once at construction; unknown identifiers fall back to GELU,
+            // matching the previous `_ => gate_output.gelu()` default arm.
+            activation: ActivationType::from_config_str_or(
+                &config.activation_function,
+                ActivationType::Gelu,
+            ),
         })
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         // Gate projection with activation
         let gate_output = self.gate_proj.forward(x.clone())?;
-        let gate_output = match self.activation.as_str() {
-            "silu" => silu(&gate_output)?,
-            "gelu" => gate_output.gelu()?,
-            "relu" => gate_output.relu()?,
-            _ => gate_output.gelu()?, // Default to GELU
-        };
+        let gate_output = self.activation.apply(&gate_output)?;
 
         // Up projection
         let up_output = self.up_proj.forward(x.clone())?;

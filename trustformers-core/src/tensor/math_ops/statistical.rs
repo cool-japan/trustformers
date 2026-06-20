@@ -15,6 +15,58 @@ use super::utilities::{simd_min_max_f32, simd_min_max_f64};
 use crate::errors::{Result, TrustformersError};
 use scirs2_core::ndarray::{arr0, ArrayD, Axis, IxDyn, Zip};
 
+/// Upcast a half-precision (F16/BF16) tensor to F32, run `op`, then downcast the
+/// F32 result back to the original half-precision dtype.
+///
+/// Half-precision accumulation is lossy for reductions (sum/mean/variance), so we
+/// upcast to F32, run the reduction there, and round the result back to F16/BF16 so
+/// the output dtype matches the input dtype. Results that are not F32 (e.g. integer
+/// index tensors) are returned as-is by the caller via a dedicated match arm.
+fn run_half_in_f32<F>(input: &Tensor, op: F) -> Result<Tensor>
+where
+    F: Fn(&Tensor) -> Result<Tensor>,
+{
+    match input {
+        Tensor::F16(a) => {
+            // Upcast F16 -> F32 for accurate reduction, then downcast back to F16.
+            let upcast = Tensor::F32(a.mapv(|x| x.to_f32()));
+            match op(&upcast)? {
+                Tensor::F32(r) => Ok(Tensor::F16(r.mapv(half::f16::from_f32))),
+                other => other.to_dtype(crate::tensor::DType::F16),
+            }
+        },
+        Tensor::BF16(a) => {
+            // Upcast BF16 -> F32 for accurate reduction, then downcast back to BF16.
+            let upcast = Tensor::F32(a.mapv(|x| x.to_f32()));
+            match op(&upcast)? {
+                Tensor::F32(r) => Ok(Tensor::BF16(r.mapv(half::bf16::from_f32))),
+                other => other.to_dtype(crate::tensor::DType::BF16),
+            }
+        },
+        _ => Err(TrustformersError::tensor_op_error(
+            "run_half_in_f32 called on a non-half-precision tensor",
+            "run_half_in_f32",
+        )),
+    }
+}
+
+/// Upcast a half-precision tensor to F32 and run an `op` whose result dtype is
+/// intentionally independent of the input dtype (e.g. boolean masks or integer
+/// index tensors). The result is returned unchanged (no downcast).
+fn run_half_in_f32_keep<F>(input: &Tensor, op: F) -> Result<Tensor>
+where
+    F: Fn(&Tensor) -> Result<Tensor>,
+{
+    match input {
+        Tensor::F16(a) => op(&Tensor::F32(a.mapv(|x| x.to_f32()))),
+        Tensor::BF16(a) => op(&Tensor::F32(a.mapv(|x| x.to_f32()))),
+        _ => Err(TrustformersError::tensor_op_error(
+            "run_half_in_f32_keep called on a non-half-precision tensor",
+            "run_half_in_f32_keep",
+        )),
+    }
+}
+
 impl Tensor {
     /// Standard deviation across all elements.
     ///
@@ -40,6 +92,7 @@ impl Tensor {
                 let std = variance.sqrt();
                 Ok(Tensor::F64(ArrayD::from_elem(IxDyn(&[]), std)))
             },
+            Tensor::F16(_) | Tensor::BF16(_) => run_half_in_f32(self, |t| t.std()),
             _ => Err(TrustformersError::tensor_op_error(
                 "Standard deviation not supported for this tensor type",
                 "std",
@@ -54,6 +107,7 @@ impl Tensor {
                 let max_val = a.iter().fold(f32::NEG_INFINITY, |acc, &x| acc.max(x));
                 Ok(Tensor::F32(ArrayD::from_elem(IxDyn(&[]), max_val)))
             },
+            Tensor::F16(_) | Tensor::BF16(_) => run_half_in_f32(self, |t| t.max_value()),
             _ => Err(TrustformersError::tensor_op_error(
                 "Max not supported for this tensor type",
                 "max_value",
@@ -180,6 +234,7 @@ impl Tensor {
 
                 Ok(Tensor::F64(indices))
             },
+            Tensor::F16(_) | Tensor::BF16(_) => run_half_in_f32(self, |t| t.argmax(axis)),
             _ => Err(TrustformersError::tensor_op_error(
                 "Argmax not supported for this tensor type",
                 "argmax",
@@ -205,6 +260,7 @@ impl Tensor {
                 let mean = a.mean().expect("Mean calculation failed");
                 Ok(Tensor::F64(ArrayD::from_elem(IxDyn(&[]), mean)))
             },
+            Tensor::F16(_) | Tensor::BF16(_) => run_half_in_f32(self, |t| t.mean()),
             _ => Err(TrustformersError::tensor_op_error(
                 "Mean not supported for this tensor type",
                 "mean",
@@ -224,6 +280,18 @@ impl Tensor {
                 let data = a.as_slice().expect("array must have contiguous layout");
                 let (min_val, max_val) = simd_min_max_f64(data);
                 Ok((min_val as f32, max_val as f32))
+            },
+            Tensor::F16(a) => {
+                // Upcast F16 -> F32 to reuse the SIMD min/max kernel.
+                let data: Vec<f32> = a.iter().map(|x| x.to_f32()).collect();
+                let (min_val, max_val) = simd_min_max_f32(&data);
+                Ok((min_val, max_val))
+            },
+            Tensor::BF16(a) => {
+                // Upcast BF16 -> F32 to reuse the SIMD min/max kernel.
+                let data: Vec<f32> = a.iter().map(|x| x.to_f32()).collect();
+                let (min_val, max_val) = simd_min_max_f32(&data);
+                Ok((min_val, max_val))
             },
             _ => Err(TrustformersError::tensor_op_error(
                 "Min/max not supported for this tensor type",
@@ -281,6 +349,7 @@ impl Tensor {
                 }
                 Ok(Tensor::F64(result))
             },
+            Tensor::F16(_) | Tensor::BF16(_) => run_half_in_f32(self, |t| t.sum_axes(axes)),
             _ => Err(TrustformersError::tensor_op_error(
                 "Sum along axes not supported for this tensor type",
                 "sum_axes",
@@ -340,6 +409,9 @@ impl Tensor {
                     Ok(Tensor::F64(ArrayD::from_elem(IxDyn(&[]), sum_val)))
                 }
             },
+            Tensor::F16(_) | Tensor::BF16(_) => {
+                run_half_in_f32(self, |t| t.sum(axes.clone(), _keepdims))
+            },
             _ => Err(TrustformersError::tensor_op_error(
                 "Sum not supported for this tensor type",
                 "sum",
@@ -397,6 +469,7 @@ impl Tensor {
                 }
                 Ok(Tensor::F64(result))
             },
+            Tensor::F16(_) | Tensor::BF16(_) => run_half_in_f32(self, |t| t.mean_axes(axes)),
             _ => Err(TrustformersError::tensor_op_error(
                 "Mean along axes not supported for this tensor type",
                 "mean_axes",
@@ -522,6 +595,9 @@ impl Tensor {
                     None => squared_diff.mean(),
                 }
             },
+            Tensor::F16(_) | Tensor::BF16(_) => {
+                run_half_in_f32(self, |t| t.variance(axes, _keepdims))
+            },
             _ => Err(TrustformersError::tensor_op_error(
                 "Variance only supported for F32 and F64 tensors",
                 "variance",
@@ -572,6 +648,7 @@ impl Tensor {
                 }
                 Ok(Tensor::F64(result))
             },
+            Tensor::F16(_) | Tensor::BF16(_) => run_half_in_f32(self, |t| t.max_axes(axes)),
             _ => Err(TrustformersError::tensor_op_error(
                 "Max axes not supported for this tensor type",
                 "max_axes",
@@ -602,6 +679,7 @@ impl Tensor {
                 }
                 Ok(Tensor::F64(result))
             },
+            Tensor::F16(_) | Tensor::BF16(_) => run_half_in_f32(self, |t| t.min_axes(axes)),
             _ => Err(TrustformersError::tensor_op_error(
                 "Min axes not supported for this tensor type",
                 "min_axes",
@@ -624,6 +702,7 @@ impl Tensor {
                 let max_val = a.iter().fold(i64::MIN, |acc, &x| acc.max(x));
                 Ok(Tensor::I64(arr0(max_val).into_dyn()))
             },
+            Tensor::F16(_) | Tensor::BF16(_) => run_half_in_f32(self, |t| t.max_scalar()),
             _ => Err(TrustformersError::tensor_op_error(
                 "max_scalar not implemented for this tensor type",
                 "max_scalar",
@@ -646,6 +725,7 @@ impl Tensor {
                 let min_val = a.iter().fold(i64::MAX, |acc, &x| acc.min(x));
                 Ok(Tensor::I64(arr0(min_val).into_dyn()))
             },
+            Tensor::F16(_) | Tensor::BF16(_) => run_half_in_f32(self, |t| t.min_scalar()),
             _ => Err(TrustformersError::tensor_op_error(
                 "min_scalar not implemented for this tensor type",
                 "min_scalar",
@@ -786,6 +866,11 @@ impl Tensor {
                     samples,
                 )?))
             },
+            Tensor::F16(_) | Tensor::BF16(_) => {
+                // Upcast probabilities to F32; the sampled output is an I64 index
+                // tensor whose dtype is independent of the input precision.
+                run_half_in_f32_keep(self, |t| t.multinomial(num_samples, replacement))
+            },
             _ => Err(TrustformersError::tensor_op_error(
                 "multinomial not supported for this tensor type",
                 "multinomial",
@@ -835,6 +920,10 @@ impl Tensor {
                 let all_true = arr.iter().all(|&x| x != 0);
                 let result = if all_true { 1.0f32 } else { 0.0f32 };
                 Ok(Tensor::F32(ArrayD::from_elem(IxDyn(&[]), result)))
+            },
+            Tensor::F16(_) | Tensor::BF16(_) => {
+                // `all` always returns an F32 boolean scalar, independent of input dtype.
+                run_half_in_f32_keep(self, |t| t.all())
             },
             _ => Err(TrustformersError::tensor_op_error(
                 "all not supported for this tensor type",
@@ -1090,6 +1179,146 @@ mod tests {
         let result = t.all()?;
         let data = result.data()?;
         assert!(data[0].abs() < 1e-6);
+        Ok(())
+    }
+
+    // ---- Half-precision (F16 / BF16) upcast-path tests ----
+
+    use crate::tensor::DType;
+    use scirs2_core::ndarray::{ArrayD as TestArrayD, IxDyn as TestIxDyn};
+
+    /// Build an F16 tensor from f32 values.
+    fn make_f16(data: &[f32], shape: &[usize]) -> Result<Tensor> {
+        let arr = TestArrayD::from_shape_vec(
+            TestIxDyn(shape),
+            data.iter().map(|&x| half::f16::from_f32(x)).collect(),
+        )
+        .map_err(|e| crate::errors::TrustformersError::shape_error(e.to_string()))?;
+        Ok(Tensor::F16(arr))
+    }
+
+    /// Build a BF16 tensor from f32 values.
+    fn make_bf16(data: &[f32], shape: &[usize]) -> Result<Tensor> {
+        let arr = TestArrayD::from_shape_vec(
+            TestIxDyn(shape),
+            data.iter().map(|&x| half::bf16::from_f32(x)).collect(),
+        )
+        .map_err(|e| crate::errors::TrustformersError::shape_error(e.to_string()))?;
+        Ok(Tensor::BF16(arr))
+    }
+
+    /// Read a half-precision tensor's values as f32 for assertions.
+    fn half_to_vec_f32(t: &Tensor) -> Vec<f32> {
+        match t {
+            Tensor::F16(a) => a.iter().map(|x| x.to_f32()).collect(),
+            Tensor::BF16(a) => a.iter().map(|x| x.to_f32()).collect(),
+            _ => panic!("expected a half-precision tensor"),
+        }
+    }
+
+    #[test]
+    fn test_reductions_f16_bf16() -> Result<()> {
+        for build in [
+            make_f16 as fn(&[f32], &[usize]) -> Result<Tensor>,
+            make_bf16 as fn(&[f32], &[usize]) -> Result<Tensor>,
+        ] {
+            let t = build(&[1.0, 2.0, 3.0, 4.0], &[4])?;
+            let dt = t.dtype();
+
+            // Scalar reductions: dtype preserved, value correct.
+            let mean = t.mean()?;
+            assert_eq!(mean.dtype(), dt);
+            assert!((half_to_vec_f32(&mean)[0] - 2.5).abs() < 0.05);
+
+            let sum = t.sum(Some(vec![]), false)?;
+            assert_eq!(sum.dtype(), dt);
+            assert!((half_to_vec_f32(&sum)[0] - 10.0).abs() < 0.1);
+
+            let std = t.std()?;
+            assert_eq!(std.dtype(), dt);
+            assert!(half_to_vec_f32(&std)[0].is_finite());
+
+            let max_v = t.max_value()?;
+            assert_eq!(max_v.dtype(), dt);
+            assert!((half_to_vec_f32(&max_v)[0] - 4.0).abs() < 0.05);
+
+            let max_s = t.max_scalar()?;
+            assert_eq!(max_s.dtype(), dt);
+            assert!((half_to_vec_f32(&max_s)[0] - 4.0).abs() < 0.05);
+
+            let min_s = t.min_scalar()?;
+            assert_eq!(min_s.dtype(), dt);
+            assert!((half_to_vec_f32(&min_s)[0] - 1.0).abs() < 0.05);
+
+            // min_max returns an (f32, f32) tuple regardless of dtype.
+            let (mn, mx) = t.min_max()?;
+            assert!((mn - 1.0).abs() < 0.05 && (mx - 4.0).abs() < 0.05);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_axis_reductions_f16_bf16() -> Result<()> {
+        for build in [
+            make_f16 as fn(&[f32], &[usize]) -> Result<Tensor>,
+            make_bf16 as fn(&[f32], &[usize]) -> Result<Tensor>,
+        ] {
+            let t = build(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])?;
+            let dt = t.dtype();
+
+            let sum_axes = t.sum_axes(&[1])?;
+            assert_eq!(sum_axes.dtype(), dt);
+            assert_eq!(sum_axes.shape(), vec![2]);
+            let s = half_to_vec_f32(&sum_axes);
+            assert!((s[0] - 6.0).abs() < 0.1 && (s[1] - 15.0).abs() < 0.1);
+
+            let mean_axes = t.mean_axes(&[1])?;
+            assert_eq!(mean_axes.dtype(), dt);
+            assert_eq!(mean_axes.shape(), vec![2]);
+
+            let max_axes = t.max_axes(&[1])?;
+            assert_eq!(max_axes.dtype(), dt);
+            assert_eq!(max_axes.shape(), vec![2]);
+            let mx = half_to_vec_f32(&max_axes);
+            assert!((mx[0] - 3.0).abs() < 0.05 && (mx[1] - 6.0).abs() < 0.05);
+
+            let min_axes = t.min_axes(&[1])?;
+            assert_eq!(min_axes.dtype(), dt);
+            assert_eq!(min_axes.shape(), vec![2]);
+
+            // Scalar variance over all elements (axis-wise variance is unsupported
+            // on the F32 path too due to broadcast rules).
+            let var = t.variance(None, false)?;
+            assert_eq!(var.dtype(), dt);
+            assert!(half_to_vec_f32(&var)[0].is_finite());
+
+            let argmax = t.argmax(1)?;
+            assert_eq!(argmax.dtype(), dt);
+            assert_eq!(argmax.shape(), vec![2]);
+            let am = half_to_vec_f32(&argmax);
+            // Largest element of each row is at index 2.
+            assert!((am[0] - 2.0).abs() < 0.05 && (am[1] - 2.0).abs() < 0.05);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_all_f16_bf16_returns_f32() -> Result<()> {
+        // `all` returns an F32 boolean scalar even for half-precision input.
+        for build in [
+            make_f16 as fn(&[f32], &[usize]) -> Result<Tensor>,
+            make_bf16 as fn(&[f32], &[usize]) -> Result<Tensor>,
+        ] {
+            let t = build(&[1.0, 1.0, 1.0], &[3])?;
+            let r = t.all()?;
+            assert_eq!(r.dtype(), DType::F32);
+            assert!((r.data()?[0] - 1.0).abs() < 1e-6);
+
+            let t2 = build(&[1.0, 0.0, 1.0], &[3])?;
+            let r2 = t2.all()?;
+            assert_eq!(r2.dtype(), DType::F32);
+            assert!(r2.data()?[0].abs() < 1e-6);
+        }
         Ok(())
     }
 }

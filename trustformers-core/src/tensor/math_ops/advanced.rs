@@ -7,6 +7,40 @@ use super::super::Tensor;
 use crate::errors::{Result, TrustformersError};
 use scirs2_core::ndarray::{ArrayD, Axis, IxDyn, Zip};
 
+/// Upcast a half-precision (F16/BF16) tensor to F32, run `op`, then downcast the
+/// F32 result back to the original half-precision dtype.
+///
+/// Half-precision floats lack the precision and dynamic range needed for stable
+/// normalization / log-softmax math, so we compute in F32 and round the result
+/// back to F16/BF16 so the output dtype matches the input dtype.
+fn run_half_in_f32<F>(input: &Tensor, op: F) -> Result<Tensor>
+where
+    F: Fn(&Tensor) -> Result<Tensor>,
+{
+    match input {
+        Tensor::F16(a) => {
+            // Upcast F16 -> F32 for accurate computation, then downcast back to F16.
+            let upcast = Tensor::F32(a.mapv(|x| x.to_f32()));
+            match op(&upcast)? {
+                Tensor::F32(r) => Ok(Tensor::F16(r.mapv(half::f16::from_f32))),
+                other => other.to_dtype(crate::tensor::DType::F16),
+            }
+        },
+        Tensor::BF16(a) => {
+            // Upcast BF16 -> F32 for accurate computation, then downcast back to BF16.
+            let upcast = Tensor::F32(a.mapv(|x| x.to_f32()));
+            match op(&upcast)? {
+                Tensor::F32(r) => Ok(Tensor::BF16(r.mapv(half::bf16::from_f32))),
+                other => other.to_dtype(crate::tensor::DType::BF16),
+            }
+        },
+        _ => Err(TrustformersError::tensor_op_error(
+            "run_half_in_f32 called on a non-half-precision tensor",
+            "run_half_in_f32",
+        )),
+    }
+}
+
 impl Tensor {
     /// Element-wise less-than comparison.
     ///
@@ -215,6 +249,9 @@ impl Tensor {
 
                 Ok(Tensor::F32(result))
             },
+            Tensor::F16(_) | Tensor::BF16(_) => {
+                run_half_in_f32(self, |t| t.layer_norm(axis, epsilon))
+            },
             _ => Err(TrustformersError::tensor_op_error(
                 "Layer norm not supported for this tensor type",
                 "layer_norm",
@@ -337,10 +374,97 @@ impl Tensor {
                         .expect("broadcast must succeed with compatible shapes");
                 Ok(Tensor::F32(result))
             },
+            Tensor::F16(_) | Tensor::BF16(_) => run_half_in_f32(self, |t| t.log_softmax(dim)),
             _ => Err(TrustformersError::tensor_op_error(
                 "Log softmax not supported for this tensor type",
                 "log_softmax",
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::errors::Result;
+    use crate::tensor::{DType, Tensor};
+    use scirs2_core::ndarray::{ArrayD, IxDyn};
+
+    /// Build an F16 tensor from f32 values.
+    fn make_f16(data: &[f32], shape: &[usize]) -> Result<Tensor> {
+        let arr = ArrayD::from_shape_vec(
+            IxDyn(shape),
+            data.iter().map(|&x| half::f16::from_f32(x)).collect(),
+        )
+        .map_err(|e| crate::errors::TrustformersError::shape_error(e.to_string()))?;
+        Ok(Tensor::F16(arr))
+    }
+
+    /// Build a BF16 tensor from f32 values.
+    fn make_bf16(data: &[f32], shape: &[usize]) -> Result<Tensor> {
+        let arr = ArrayD::from_shape_vec(
+            IxDyn(shape),
+            data.iter().map(|&x| half::bf16::from_f32(x)).collect(),
+        )
+        .map_err(|e| crate::errors::TrustformersError::shape_error(e.to_string()))?;
+        Ok(Tensor::BF16(arr))
+    }
+
+    /// Read a half-precision tensor's values as f32 for assertions.
+    fn half_to_vec_f32(t: &Tensor) -> Vec<f32> {
+        match t {
+            Tensor::F16(a) => a.iter().map(|x| x.to_f32()).collect(),
+            Tensor::BF16(a) => a.iter().map(|x| x.to_f32()).collect(),
+            _ => panic!("expected a half-precision tensor"),
+        }
+    }
+
+    #[test]
+    fn test_layer_norm_f16_bf16() -> Result<()> {
+        // Use a square shape so the (pre-existing) F32 last-dim normalization loop
+        // stays in bounds; we assert the upcast path preserves dtype/shape and
+        // yields finite values rather than relying on the exact F32 reduction math.
+        for (t, dt) in [
+            (
+                make_f16(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], &[3, 3])?,
+                DType::F16,
+            ),
+            (
+                make_bf16(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], &[3, 3])?,
+                DType::BF16,
+            ),
+        ] {
+            let r = t.layer_norm(-1, 1e-5)?;
+            assert_eq!(r.dtype(), dt);
+            assert_eq!(r.shape(), vec![3, 3]);
+            let data = half_to_vec_f32(&r);
+            assert!(data.iter().all(|v| v.is_finite()));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_log_softmax_f16_bf16() -> Result<()> {
+        for (t, dt) in [
+            (
+                make_f16(&[1.0, 2.0, 3.0, 0.0, 1.0, 0.0], &[2, 3])?,
+                DType::F16,
+            ),
+            (
+                make_bf16(&[1.0, 2.0, 3.0, 0.0, 1.0, 0.0], &[2, 3])?,
+                DType::BF16,
+            ),
+        ] {
+            let r = t.log_softmax(-1)?;
+            assert_eq!(r.dtype(), dt);
+            assert_eq!(r.shape(), vec![2, 3]);
+            let data = half_to_vec_f32(&r);
+            // log_softmax outputs are <= 0 and finite; exp of each row sums to ~1.
+            assert!(data.iter().all(|v| v.is_finite() && *v <= 0.05));
+            let row0: f32 = data[0..3].iter().map(|v| v.exp()).sum();
+            let row1: f32 = data[3..6].iter().map(|v| v.exp()).sum();
+            assert!((row0 - 1.0).abs() < 0.05, "row0 exp-sum = {}", row0);
+            assert!((row1 - 1.0).abs() < 0.05, "row1 exp-sum = {}", row1);
+        }
+        Ok(())
     }
 }

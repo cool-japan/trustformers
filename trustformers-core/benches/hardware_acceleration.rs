@@ -12,7 +12,7 @@
 
 #[cfg(not(feature = "cuda"))]
 mod benches {
-    use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+    use criterion::{criterion_group, BenchmarkId, Criterion};
     use std::hint::black_box;
     use std::time::Duration;
     use trustformers_core::hardware_acceleration::{
@@ -309,9 +309,14 @@ mod benches {
         benchmark_operation_throughput,
         benchmark_memory_pressure
     );
-
-    criterion_main!(hardware_benches);
 }
+
+// `criterion_main!` must define `main` at the crate root. Invoking it here
+// (referencing the `pub fn` that `criterion_group!` emits inside `mod benches`)
+// rather than inside the module avoids generating a `benches::main`, which left
+// the bench binary with no crate-level entry point (E0601).
+#[cfg(not(feature = "cuda"))]
+criterion::criterion_main!(benches::hardware_benches);
 
 // When cuda feature is enabled, provide a no-op main since the
 // hardware_acceleration module is disabled for cuda builds.

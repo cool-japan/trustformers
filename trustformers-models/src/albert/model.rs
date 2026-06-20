@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::albert::config::AlbertConfig;
+use crate::common::ActivationType;
 use std::io::Read;
 use trustformers_core::device::Device;
 use trustformers_core::errors::Result;
@@ -64,7 +65,7 @@ pub struct AlbertAttentionOutput {
 #[derive(Debug, Clone)]
 pub struct AlbertFeedForward {
     dense: Linear,
-    intermediate_act_fn: String,
+    intermediate_act_fn: ActivationType,
     device: Device,
 }
 
@@ -99,7 +100,7 @@ pub struct AlbertTransformer {
 #[derive(Debug, Clone)]
 pub struct AlbertPooler {
     dense: Linear,
-    activation: String,
+    activation: ActivationType,
     device: Device,
 }
 
@@ -263,6 +264,10 @@ impl AlbertFeedForward {
     }
 
     fn new_with_device(config: &AlbertConfig, device: Device) -> Result<Self> {
+        // Parse the activation string once at construction. Unsupported
+        // identifiers are rejected here (previously this error was raised on
+        // every forward pass).
+        let intermediate_act_fn = ActivationType::try_from(config.hidden_act.as_str())?;
         Ok(Self {
             dense: Linear::new_with_device(
                 config.hidden_size,
@@ -270,7 +275,7 @@ impl AlbertFeedForward {
                 true,
                 device,
             ),
-            intermediate_act_fn: config.hidden_act.clone(),
+            intermediate_act_fn,
             device,
         })
     }
@@ -282,19 +287,7 @@ impl AlbertFeedForward {
     fn forward(&self, hidden_states: Tensor) -> Result<Tensor> {
         let hidden_states = self.dense.forward(hidden_states)?;
 
-        let hidden_states = match self.intermediate_act_fn.as_str() {
-            "gelu" => trustformers_core::ops::activations::gelu(&hidden_states)?,
-            "gelu_new" => trustformers_core::ops::activations::gelu(&hidden_states)?,
-            "relu" => trustformers_core::ops::activations::relu(&hidden_states)?,
-            _ => {
-                return Err(trustformers_core::errors::TrustformersError::model_error(
-                    format!(
-                        "Unsupported activation function: {}",
-                        self.intermediate_act_fn
-                    ),
-                ))
-            },
-        };
+        let hidden_states = self.intermediate_act_fn.apply(&hidden_states)?;
 
         Ok(hidden_states)
     }
@@ -448,7 +441,7 @@ impl AlbertPooler {
     fn new_with_device(config: &AlbertConfig, device: Device) -> Self {
         Self {
             dense: Linear::new_with_device(config.hidden_size, config.hidden_size, true, device),
-            activation: "tanh".to_string(),
+            activation: ActivationType::Tanh,
             device,
         }
     }
@@ -461,16 +454,7 @@ impl AlbertPooler {
         let first_token_tensor = hidden_states.select_first_token()?;
         let pooled_output = self.dense.forward(first_token_tensor)?;
 
-        let pooled_output = match self.activation.as_str() {
-            "tanh" => match &pooled_output {
-                Tensor::F32(arr) => {
-                    let tanh_output = arr.mapv(|x| x.tanh());
-                    Tensor::F32(tanh_output)
-                },
-                _ => pooled_output,
-            },
-            _ => pooled_output,
-        };
+        let pooled_output = self.activation.apply(&pooled_output)?;
 
         Ok(pooled_output)
     }

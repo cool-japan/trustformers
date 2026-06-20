@@ -1,16 +1,16 @@
 # trustformers-core
 
-![Version](https://img.shields.io/badge/version-0.1.1-blue)
+![Version](https://img.shields.io/badge/version-0.1.2-blue)
 ![Status](https://img.shields.io/badge/status-Stable-brightgreen)
 ![Tests](https://img.shields.io/badge/tests-1%2C140%20passing-brightgreen)
 ![SLoC](https://img.shields.io/badge/SLoC-121%2C799-informational)
-![Date](https://img.shields.io/badge/updated-2026--04--25-lightgrey)
+![Date](https://img.shields.io/badge/updated-2026--06--20-lightgrey)
 
 Core infrastructure crate providing fundamental abstractions and utilities for the TrustformeRS ecosystem.
 
 ## Current State
 
-**Version 0.1.1 — Stable (2026-04-25)**
+**Version 0.1.2 — Stable (2026-06-20)**
 
 This crate is **stable and production-ready**, serving as the foundation for all other TrustformeRS components. It provides high-performance tensor operations, layer implementations, and advanced optimization techniques. All 1,140 tests pass with zero stubs or unimplemented items.
 
@@ -19,7 +19,7 @@ This crate is **stable and production-ready**, serving as the foundation for all
 ### Tensor Operations
 - **Comprehensive tensor abstraction** supporting multiple backends
 - **SciRS2 integration** for SIMD-optimized operations
-- **GPU support** through multiple backends (CUDA, Metal, Vulkan, WebGPU, OpenCL, ROCm, Vulkan, TPU, OneAPI, XLA, RISC-V)
+- **GPU support** through multiple backends (CUDA, Metal, Vulkan, WebGPU, OpenCL, ROCm, OneAPI, XLA, RISC-V)
 - **Automatic differentiation** with reverse-mode and forward-mode autodiff
 - **Memory-efficient operations** with zero-copy views
 

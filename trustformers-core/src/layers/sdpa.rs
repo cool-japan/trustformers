@@ -55,11 +55,19 @@ fn blas_sgemm(
     k: usize,
     n: usize,
 ) {
-    // Safe unwrap: shape and vector length are guaranteed to match by caller
-    let a_arr = Array2::from_shape_vec((m, k), a.to_vec()).expect("BLAS input shape mismatch");
-    let b_arr = Array2::from_shape_vec((k, n), b.to_vec()).expect("BLAS input shape mismatch");
-    let mut c_arr = Array2::from_shape_vec((m, n), c.to_vec()).expect("BLAS output shape mismatch");
-    f32::simd_gemm(alpha, &a_arr.view(), &b_arr.view(), beta, &mut c_arr);
+    // Borrow the inputs as views — `simd_gemm` only reads `a`/`b`, so no copy is needed.
+    // `c` is read only when beta != 0; in the common beta == 0.0 case its prior contents
+    // are discarded, so allocate zeros instead of copying `c` in.
+    let a_arr =
+        scirs2_core::ndarray::ArrayView2::from_shape((m, k), a).expect("BLAS input shape mismatch");
+    let b_arr =
+        scirs2_core::ndarray::ArrayView2::from_shape((k, n), b).expect("BLAS input shape mismatch");
+    let mut c_arr = if beta == 0.0 {
+        Array2::zeros((m, n))
+    } else {
+        Array2::from_shape_vec((m, n), c.to_vec()).expect("BLAS output shape mismatch")
+    };
+    f32::simd_gemm(alpha, &a_arr, &b_arr, beta, &mut c_arr);
     if let Some(slice) = c_arr.as_slice() {
         c.copy_from_slice(slice);
     } else {
@@ -174,13 +182,14 @@ impl SDPA {
                             && head_dim >= MIN_SIZE_FOR_BLAS
                         {
                             // Use direct BLAS (Accelerate on macOS) for larger matrices
-                            let q_vec: Vec<f32> = q_2d.iter().copied().collect();
-                            let k_t_vec: Vec<f32> = k_t_owned.iter().copied().collect();
+                            let q_data = q_2d.as_slice().expect("q_2d is standard layout");
+                            let k_t_data =
+                                k_t_owned.as_slice().expect("k_t_owned is standard layout");
                             let mut result_vec = vec![0.0f32; seq_q * seq_k];
                             blas_sgemm(
                                 scale,
-                                &q_vec,
-                                &k_t_vec,
+                                q_data,
+                                k_t_data,
                                 0.0,
                                 &mut result_vec,
                                 seq_q,
@@ -255,13 +264,13 @@ impl SDPA {
                             && head_dim >= MIN_SIZE_FOR_BLAS
                         {
                             // Use direct BLAS (Accelerate on macOS) for larger matrices
-                            let scores_vec: Vec<f32> = scores.iter().copied().collect();
-                            let v_vec: Vec<f32> = v_2d.iter().copied().collect();
+                            let scores_data = scores.as_slice().expect("scores is standard layout");
+                            let v_data = v_2d.as_slice().expect("v_2d is standard layout");
                             let mut result_vec = vec![0.0f32; seq_q * head_dim];
                             blas_sgemm(
                                 1.0,
-                                &scores_vec,
-                                &v_vec,
+                                scores_data,
+                                v_data,
                                 0.0,
                                 &mut result_vec,
                                 seq_q,
@@ -346,13 +355,14 @@ impl SDPA {
                             && head_dim >= MIN_SIZE_FOR_BLAS
                         {
                             // Use direct BLAS (Accelerate on macOS)
-                            let q_vec: Vec<f32> = q_2d.iter().copied().collect();
-                            let k_t_vec: Vec<f32> = k_t_owned.iter().copied().collect();
+                            let q_data = q_2d.as_slice().expect("q_2d is standard layout");
+                            let k_t_data =
+                                k_t_owned.as_slice().expect("k_t_owned is standard layout");
                             let mut result_vec = vec![0.0f32; seq_q * seq_k];
                             blas_sgemm(
                                 scale,
-                                &q_vec,
-                                &k_t_vec,
+                                q_data,
+                                k_t_data,
                                 0.0,
                                 &mut result_vec,
                                 seq_q,
@@ -427,13 +437,13 @@ impl SDPA {
                             && head_dim >= MIN_SIZE_FOR_BLAS
                         {
                             // Use direct BLAS (Accelerate on macOS)
-                            let scores_vec: Vec<f32> = scores.iter().copied().collect();
-                            let v_vec: Vec<f32> = v_2d.iter().copied().collect();
+                            let scores_data = scores.as_slice().expect("scores is standard layout");
+                            let v_data = v_2d.as_slice().expect("v_2d is standard layout");
                             let mut result_vec = vec![0.0f32; seq_q * head_dim];
                             blas_sgemm(
                                 1.0,
-                                &scores_vec,
-                                &v_vec,
+                                scores_data,
+                                v_data,
                                 0.0,
                                 &mut result_vec,
                                 seq_q,
@@ -539,13 +549,15 @@ impl SDPA {
                                     && head_dim >= MIN_SIZE_FOR_BLAS
                                 {
                                     // Use direct BLAS (Accelerate on macOS)
-                                    let q_vec: Vec<f32> = q_tile_2d.iter().copied().collect();
-                                    let k_t_vec: Vec<f32> = k_tile_t.iter().copied().collect();
+                                    let q_data =
+                                        q_tile_2d.as_slice().expect("q_tile_2d is standard layout");
+                                    let k_t_data =
+                                        k_tile_t.as_slice().expect("k_tile_t is standard layout");
                                     let mut result_vec = vec![0.0f32; q_tile_size * k_tile_size];
                                     blas_sgemm(
                                         scale,
-                                        &q_vec,
-                                        &k_t_vec,
+                                        q_data,
+                                        k_t_data,
                                         0.0,
                                         &mut result_vec,
                                         q_tile_size,
@@ -635,8 +647,11 @@ impl SDPA {
                                     && head_dim >= MIN_SIZE_FOR_BLAS
                                 {
                                     // Use direct BLAS with beta=1.0 to add to existing o_tile
-                                    let exp_vec: Vec<f32> = exp_scores.iter().copied().collect();
-                                    let v_vec: Vec<f32> = v_tile_2d.iter().copied().collect();
+                                    let exp_data = exp_scores
+                                        .as_slice()
+                                        .expect("exp_scores is standard layout");
+                                    let v_data =
+                                        v_tile_2d.as_slice().expect("v_tile_2d is standard layout");
                                     let o_slice = o_tile.as_slice_mut().ok_or_else(|| {
                                         TrustformersError::tensor_op_error(
                                             "Failed to get mutable slice from output tile",
@@ -645,8 +660,8 @@ impl SDPA {
                                     })?;
                                     blas_sgemm(
                                         1.0,
-                                        &exp_vec,
-                                        &v_vec,
+                                        exp_data,
+                                        v_data,
                                         1.0,
                                         o_slice,
                                         q_tile_size,

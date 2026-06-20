@@ -24,22 +24,18 @@
 //!
 //! # Example Usage
 //!
-//! ```rust
-//! use crate::performance_optimizer::performance_modeling::{
+//! ```rust,no_run
+//! use trustformers_serve::performance_optimizer::performance_modeling::{
 //!     PerformanceModelingManager,
-//!     PredictionRequest,
 //!     ModelTypeConfig,
 //! };
 //!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create a performance modeling manager
 //! let manager = PerformanceModelingManager::new().await?;
-//!
-//! // Train a model
-//! let model = manager.train_model(&training_data, &ModelTypeConfig::LinearRegression).await?;
-//!
-//! // Make predictions
-//! let request = PredictionRequest { /* ... */ };
-//! let prediction = manager.predict(&request).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 pub mod adaptive_learning;

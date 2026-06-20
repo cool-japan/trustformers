@@ -759,10 +759,17 @@ pub struct GraphMetadata {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,no_run
+/// use trustformers_serve::performance_optimizer::test_characterization::synchronization_analyzer::{
+///     SynchronizationAnalyzer, SynchronizationAnalyzerConfig,
+/// };
+///
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = SynchronizationAnalyzerConfig::default();
 /// let analyzer = SynchronizationAnalyzer::new(config).await?;
-/// let analysis = analyzer.analyze_test_synchronization(&test_metadata).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug)]
 pub struct SynchronizationAnalyzer {
@@ -801,9 +808,17 @@ impl SynchronizationAnalyzer {
     /// * `Result<Self>` - New analyzer instance or error
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,no_run
+    /// use trustformers_serve::performance_optimizer::test_characterization::synchronization_analyzer::{
+    ///     SynchronizationAnalyzer, SynchronizationAnalyzerConfig,
+    /// };
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let config = SynchronizationAnalyzerConfig::default();
     /// let analyzer = SynchronizationAnalyzer::new(config).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn new(config: SynchronizationAnalyzerConfig) -> Result<Self> {
         let lock_dependency_analyzer = Arc::new(
@@ -875,9 +890,28 @@ impl SynchronizationAnalyzer {
     /// * `Result<SynchronizationAnalysisResult>` - Analysis result or error
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,no_run
+    /// use trustformers_serve::performance_optimizer::test_characterization::synchronization_analyzer::{
+    ///     SynchronizationAnalyzer, SynchronizationAnalyzerConfig,
+    /// };
+    /// use trustformers_serve::performance_optimizer::test_characterization::TestMetadata;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let analyzer = SynchronizationAnalyzer::new(SynchronizationAnalyzerConfig::default()).await?;
+    /// # let test_metadata = TestMetadata {
+    /// #     test_id: "test_id".to_string(),
+    /// #     test_name: "test".to_string(),
+    /// #     test_suite: "suite".to_string(),
+    /// #     tags: vec![],
+    /// #     author: "author".to_string(),
+    /// #     created_at: chrono::Utc::now(),
+    /// #     description: "desc".to_string(),
+    /// # };
     /// let analysis = analyzer.analyze_test_synchronization(&test_metadata).await?;
     /// println!("Found {} synchronization points", analysis.synchronization_points.len());
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn analyze_test_synchronization(
         &self,

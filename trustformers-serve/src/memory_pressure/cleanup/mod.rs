@@ -27,9 +27,11 @@
 //! ### Custom Cleanup Handler
 //!
 //! ```rust
-//! use trustformers_serve::memory_pressure::cleanup::{CleanupHandler, MemoryPressureLevel};
+//! use trustformers_serve::memory_pressure::cleanup::CleanupHandler;
+//! use trustformers_serve::MemoryPressureLevel;
 //! use anyhow::Result;
 //!
+//! #[derive(Debug)]
 //! struct CustomCleanupHandler;
 //!
 //! impl CleanupHandler for CustomCleanupHandler {
@@ -60,9 +62,11 @@
 //! ### Cache Manager Implementation
 //!
 //! ```rust
-//! use trustformers_serve::memory_pressure::cleanup::{CacheManager, MemoryPressureLevel};
+//! use trustformers_serve::memory_pressure::cleanup::CacheManager;
+//! use trustformers_serve::MemoryPressureLevel;
 //! use anyhow::Result;
 //!
+//! #[derive(Debug)]
 //! struct ModelCacheManager {
 //!     // Cache implementation
 //! }

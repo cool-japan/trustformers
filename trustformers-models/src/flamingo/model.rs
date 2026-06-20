@@ -1091,21 +1091,20 @@ impl MultiHeadAttentionExt for MultiHeadAttention {
         query: &Tensor,
         key: &Tensor,
         value: &Tensor,
-        _attention_mask: Option<&Tensor>,
+        attention_mask: Option<&Tensor>,
     ) -> Result<Tensor, Box<dyn std::error::Error>> {
-        // Simplified cross-attention implementation
-        // In a real implementation, this would use the actual MultiHeadAttention internals
-        let batch_size = query.shape()[0];
-        let seq_len_q = query.shape()[1];
-        let seq_len_kv = key.shape()[1];
-        let _hidden_size = query.shape()[2];
-
-        // Simplified: just return a weighted combination (should be proper attention)
-        let dummy_weights =
-            Tensor::ones_dtype(TensorType::F32, &[batch_size, seq_len_q, seq_len_kv])?;
-        let normalized_weights = dummy_weights.softmax(-1)?;
-        let output = normalized_weights.matmul(value)?;
-
+        // Real multi-head scaled-dot-product cross-attention.
+        //
+        // The query comes from the latent/language tokens while the key/value come
+        // from the (vision) features; this routine projects all three with the
+        // layer's own Q/K/V projections, computes Q.Kᵀ / sqrt(head_dim), applies a
+        // softmax over the key axis, weights the values, and applies the output
+        // projection.  Cross-attention is *not* causally masked (the latents attend
+        // to every feature position).  This replaces the previous placeholder that
+        // returned uniform weights and so bypassed the learned attention entirely.
+        let output = self
+            .forward_attention(query, key, value, attention_mask, false)
+            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
         Ok(output)
     }
 }
@@ -1210,6 +1209,121 @@ mod tests {
             &[batch_size, seq_len, hidden_size]
         );
         assert!(output.attention_weights.is_some());
+    }
+
+    /// Deterministically validates the real scaled-dot-product-attention math that
+    /// the fixed `forward_cross` relies on. Builds fully-controlled tiny `[batch,
+    /// heads, seq, head_dim]` Q/K/V where one query row aligns strongly with the
+    /// first key and weakly with the second, runs `Q.Kᵀ / sqrt(head_dim)` then a
+    /// softmax over the key axis, and asserts the resulting weights are finite,
+    /// sum to one and are NOT uniform. The old placeholder produced all-ones (and
+    /// thus uniform) weights, so a non-uniform row proves real attention.
+    #[test]
+    fn test_real_sdpa_weights_non_uniform() {
+        let batch = 1usize;
+        let heads = 1usize;
+        let seq_q = 2usize;
+        let seq_kv = 2usize;
+        let head_dim = 2usize;
+
+        // Query row 0 points along axis 0, query row 1 along axis 1.
+        let query = Tensor::from_vec(
+            vec![
+                1.0, 0.0, // q row 0
+                0.0, 1.0, // q row 1
+            ],
+            &[batch, heads, seq_q, head_dim],
+        )
+        .expect("query tensor");
+        // Key row 0 aligns with axis 0, key row 1 aligns with axis 1, with a clear
+        // magnitude separation so the softmax cannot collapse to uniform.
+        let key = Tensor::from_vec(
+            vec![
+                4.0, 0.0, // k row 0
+                0.0, 4.0, // k row 1
+            ],
+            &[batch, heads, seq_kv, head_dim],
+        )
+        .expect("key tensor");
+
+        // scores = Q.Kᵀ * (1/sqrt(head_dim)); softmax over the key axis.
+        let key_t = key.transpose(2, 3).expect("transpose key");
+        let scale = (head_dim as f32).sqrt().recip();
+        let scores = query
+            .matmul(&key_t)
+            .expect("qk matmul")
+            .mul_scalar(scale)
+            .expect("scale scores");
+        let weights = scores.softmax(-1).expect("softmax");
+
+        assert_eq!(weights.shape(), &[batch, heads, seq_q, seq_kv]);
+
+        let w = weights.to_vec_f32().expect("weights to vec");
+        assert!(w.iter().all(|v| v.is_finite()), "weights must be finite");
+
+        // Each softmax row must sum to one.
+        let row0_sum = w[0] + w[1];
+        let row1_sum = w[2] + w[3];
+        assert!((row0_sum - 1.0).abs() < 1e-4, "row 0 must be normalised");
+        assert!((row1_sum - 1.0).abs() < 1e-4, "row 1 must be normalised");
+
+        // Real, input-dependent attention: rows must be far from the uniform 0.5.
+        // Row 0 should prefer key 0, row 1 should prefer key 1.
+        let uniform = 1.0f32 / seq_kv as f32;
+        assert!(
+            (w[0] - uniform).abs() > 0.1,
+            "row 0 attention must not be uniform (got {w:?})"
+        );
+        assert!(w[0] > w[1], "row 0 should attend more to key 0");
+        assert!(w[3] > w[2], "row 1 should attend more to key 1");
+    }
+
+    /// Exercises the actual fixed `MultiHeadAttention::forward_cross` end-to-end on
+    /// tiny tensors. Asserts the output shape and finiteness, and that the output
+    /// is input-dependent: changing only the key/value (vision) features while the
+    /// query is held fixed must change the result. The old uniform-weight
+    /// placeholder mean-pooled the values, so this guards against its return.
+    #[test]
+    fn test_forward_cross_is_real_attention() {
+        let hidden_size = 8usize;
+        let num_heads = 2usize;
+        let batch = 1usize;
+        let seq_q = 3usize;
+        let seq_kv = 4usize;
+
+        let attn = MultiHeadAttention::new(hidden_size, num_heads, 0.0, false)
+            .expect("attention construct");
+
+        let query = Tensor::randn(&[batch, seq_q, hidden_size]).expect("query");
+        let key_a = Tensor::randn(&[batch, seq_kv, hidden_size]).expect("key a");
+        let value_a = Tensor::randn(&[batch, seq_kv, hidden_size]).expect("value a");
+
+        let out_a = attn.forward_cross(&query, &key_a, &value_a, None).expect("forward_cross a");
+
+        // Output preserves the query sequence and hidden size.
+        assert_eq!(out_a.shape(), &[batch, seq_q, hidden_size]);
+        let out_a_vec = out_a.to_vec_f32().expect("out a to vec");
+        assert!(
+            out_a_vec.iter().all(|v| v.is_finite()),
+            "cross-attention output must be finite"
+        );
+
+        // Different key/value features (same query) must yield a different result,
+        // which a uniform/placeholder weighting could not guarantee.
+        let key_b = Tensor::randn(&[batch, seq_kv, hidden_size]).expect("key b");
+        let value_b = Tensor::randn(&[batch, seq_kv, hidden_size]).expect("value b");
+        let out_b = attn.forward_cross(&query, &key_b, &value_b, None).expect("forward_cross b");
+        let out_b_vec = out_b.to_vec_f32().expect("out b to vec");
+
+        let max_abs_diff = out_a_vec
+            .iter()
+            .zip(out_b_vec.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_abs_diff > 1e-5,
+            "cross-attention must depend on key/value features (max diff {max_abs_diff})"
+        );
     }
 
     #[test]

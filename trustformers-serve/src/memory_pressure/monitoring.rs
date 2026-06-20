@@ -22,21 +22,20 @@
 //!
 //! ## Usage Examples
 //!
-//! ```rust
+//! ```rust,no_run
 //! use trustformers_serve::memory_pressure::monitoring::MemoryMonitor;
 //! use trustformers_serve::memory_pressure::config::MemoryPressureConfig;
 //!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = MemoryPressureConfig::default();
 //! let monitor = MemoryMonitor::new(config);
 //!
 //! // Get current memory statistics
 //! let stats = monitor.get_system_memory_info().await?;
 //! println!("Memory utilization: {:.1}%", stats.utilization * 100.0);
-//!
-//! // Get memory usage prediction
-//! let forecast = monitor.predict_memory_usage(30).await?;
-//! println!("Predicted utilization in 30 minutes: {:.1}%",
-//!          forecast.predicted_utilization * 100.0);
+//! # Ok(())
+//! # }
 //! ```
 
 use super::config::*;

@@ -131,39 +131,56 @@ class Add extends ONNXOperator {
     const ndimB = shapeB.length;
     const ndimOut = Math.max(ndimA, ndimB);
 
+    // Pad shapes on the left with 1s to equal length.
+    const paddedA = new Array(ndimOut).fill(1);
+    const paddedB = new Array(ndimOut).fill(1);
+    for (let i = 0; i < ndimA; i++) paddedA[ndimOut - ndimA + i] = shapeA[i];
+    for (let i = 0; i < ndimB; i++) paddedB[ndimOut - ndimB + i] = shapeB[i];
+
     const outShape = new Array(ndimOut);
-    const stridesA = new Array(ndimOut);
-    const stridesB = new Array(ndimOut);
-
-    let strideA = 1;
-    let strideB = 1;
-
     for (let i = 0; i < ndimOut; i++) {
-      const dimA = i < ndimA ? shapeA[ndimA - 1 - i] : 1;
-      const dimB = i < ndimB ? shapeB[ndimB - 1 - i] : 1;
-
-      if (dimA !== dimB && dimA !== 1 && dimB !== 1) {
-        throw new Error(`Cannot broadcast shapes ${shapeA} and ${shapeB}`);
+      const da = paddedA[i];
+      const db = paddedB[i];
+      if (da !== db && da !== 1 && db !== 1) {
+        throw new Error(`Cannot broadcast shapes [${shapeA}] and [${shapeB}]`);
       }
-
-      outShape[ndimOut - 1 - i] = Math.max(dimA, dimB);
-      stridesA[ndimOut - 1 - i] = dimA === 1 ? 0 : strideA;
-      stridesB[ndimOut - 1 - i] = dimB === 1 ? 0 : strideB;
-
-      strideA *= dimA;
-      strideB *= dimB;
+      outShape[i] = Math.max(da, db);
     }
+
+    // Compute flat strides for each padded source shape (C-contiguous).
+    const computeStrides = (shape) => {
+      const s = new Array(ndimOut);
+      s[ndimOut - 1] = 1;
+      for (let i = ndimOut - 2; i >= 0; i--) {
+        s[i] = s[i + 1] * shape[i + 1];
+      }
+      return s;
+    };
+
+    const rawStridesA = computeStrides(paddedA);
+    const rawStridesB = computeStrides(paddedB);
+
+    // For broadcast (dim==1) axes, force stride to 0.
+    const stridesA = rawStridesA.map((s, i) => paddedA[i] === 1 ? 0 : s);
+    const stridesB = rawStridesB.map((s, i) => paddedB[i] === 1 ? 0 : s);
 
     return { shape: outShape, stridesA, stridesB };
   }
 
   getBroadcastIndex(linearIdx, shape, strides) {
+    // Compute the output's multi-dimensional coordinates, then map each
+    // dimension through the per-source strides (0 for broadcast dims).
     let idx = 0;
-    for (let i = shape.length - 1; i >= 0; i--) {
-      const coord = Math.floor(linearIdx / strides[i]) % shape[i];
-      const stride = strides[i] === 0 ? 0 : strides[i];
-      idx += coord * (stride === 0 ? 0 : 1);
-      linearIdx %= strides[i] || 1;
+    // We need per-output-dimension strides to decode linearIdx correctly.
+    // outStrides[i] = product of outShape[i+1 ..].
+    const outStrides = new Array(shape.length);
+    outStrides[shape.length - 1] = 1;
+    for (let i = shape.length - 2; i >= 0; i--) {
+      outStrides[i] = outStrides[i + 1] * shape[i + 1];
+    }
+    for (let i = 0; i < shape.length; i++) {
+      const coord = Math.floor(linearIdx / outStrides[i]) % shape[i];
+      idx += coord * strides[i]; // strides[i] == 0 means broadcast → contributes 0
     }
     return idx;
   }
@@ -744,7 +761,8 @@ class Concat extends ONNXOperator {
 }
 
 /**
- * Slice operator
+ * Slice operator — full multi-dimensional implementation with steps support.
+ * Inputs: data, starts, ends[, axes[, steps]]
  */
 class Slice extends ONNXOperator {
   constructor(attributes = {}) {
@@ -753,45 +771,229 @@ class Slice extends ONNXOperator {
 
   execute(inputs) {
     this.validateInputs(inputs, 3);
-    const [data, starts, ends, axes, steps] = inputs.length >= 5
-      ? inputs
-      : [...inputs, null, null];
+    const [data, startsT, endsT] = inputs;
+    const axesT = inputs.length >= 4 ? inputs[3] : null;
+    const stepsT = inputs.length >= 5 ? inputs[4] : null;
 
-    const startsArr = Array.from(starts.data).map(x => Number(x));
-    const endsArr = Array.from(ends.data).map(x => Number(x));
-    const axesArr = axes
-      ? Array.from(axes.data).map(x => Number(x))
-      : startsArr.map((_, i) => i);
-    const stepsArr = steps
-      ? Array.from(steps.data).map(x => Number(x))
-      : startsArr.map(() => 1);
+    const ndim = data.shape.length;
 
-    // Compute output shape
-    const outShape = [...data.shape];
-    for (let i = 0; i < axesArr.length; i++) {
-      const axis = axesArr[i];
-      const start = startsArr[i] < 0 ? data.shape[axis] + startsArr[i] : startsArr[i];
-      const end = endsArr[i] < 0 ? data.shape[axis] + endsArr[i] : endsArr[i];
-      const step = stepsArr[i];
-      outShape[axis] = Math.ceil((end - start) / step);
+    const startsRaw = Array.from(startsT.data).map(Number);
+    const endsRaw = Array.from(endsT.data).map(Number);
+    const axesRaw = axesT
+      ? Array.from(axesT.data).map(Number)
+      : startsRaw.map((_, i) => i);
+    const stepsRaw = stepsT
+      ? Array.from(stepsT.data).map(Number)
+      : startsRaw.map(() => 1);
+
+    // Normalise negative indices; clamp to valid range per ONNX spec.
+    const clampedStarts = new Array(ndim).fill(0);
+    const clampedEnds = data.shape.slice();
+    const clampedSteps = new Array(ndim).fill(1);
+
+    for (let k = 0; k < axesRaw.length; k++) {
+      let ax = axesRaw[k];
+      if (ax < 0) ax += ndim;
+      const dim = data.shape[ax];
+      const step = stepsRaw[k];
+      clampedSteps[ax] = step;
+
+      let s = startsRaw[k] < 0 ? startsRaw[k] + dim : startsRaw[k];
+      let e = endsRaw[k] < 0 ? endsRaw[k] + dim : endsRaw[k];
+
+      if (step > 0) {
+        s = Math.max(0, Math.min(dim, s));
+        e = Math.max(0, Math.min(dim, e));
+      } else {
+        s = Math.max(-1, Math.min(dim - 1, s));
+        e = Math.max(-1, Math.min(dim - 1, e));
+      }
+      clampedStarts[ax] = s;
+      clampedEnds[ax] = e;
     }
 
-    // Extract slice (simplified implementation)
+    // Compute output shape
+    const outShape = new Array(ndim);
+    for (let ax = 0; ax < ndim; ax++) {
+      const step = clampedSteps[ax];
+      const s = clampedStarts[ax];
+      const e = clampedEnds[ax];
+      const span = e - s;
+      outShape[ax] = step > 0
+        ? Math.max(0, Math.ceil(span / step))
+        : Math.max(0, Math.ceil(-span / -step));
+    }
+
     const resultSize = outShape.reduce((a, b) => a * b, 1);
     const result = new Float32Array(resultSize);
 
-    // For simplicity, handle 1D case
-    if (data.shape.length === 1) {
-      let outIdx = 0;
-      for (let i = startsArr[0]; i < endsArr[0]; i += stepsArr[0]) {
-        result[outIdx++] = data.data[i];
+    // Compute input C-contiguous strides.
+    const inStrides = new Array(ndim);
+    inStrides[ndim - 1] = 1;
+    for (let i = ndim - 2; i >= 0; i--) {
+      inStrides[i] = inStrides[i + 1] * data.shape[i + 1];
+    }
+
+    // Output C-contiguous strides.
+    const outStrides = new Array(ndim);
+    outStrides[ndim - 1] = 1;
+    for (let i = ndim - 2; i >= 0; i--) {
+      outStrides[i] = outStrides[i + 1] * outShape[i + 1];
+    }
+
+    // Iterate every output element by its multi-index.
+    for (let outIdx = 0; outIdx < resultSize; outIdx++) {
+      let inIdx = 0;
+      let remaining = outIdx;
+      for (let ax = 0; ax < ndim; ax++) {
+        const outCoord = Math.floor(remaining / outStrides[ax]);
+        remaining -= outCoord * outStrides[ax];
+        const inCoord = clampedStarts[ax] + outCoord * clampedSteps[ax];
+        inIdx += inCoord * inStrides[ax];
       }
-    } else {
-      // Multi-dimensional slice (simplified)
-      result.set(data.data.slice(0, resultSize));
+      result[outIdx] = data.data[inIdx];
     }
 
     return [new Tensor(result, outShape, data.dtype)];
+  }
+}
+
+/**
+ * Gather operator — gathers slices from data along an axis using indices.
+ *
+ * ONNX spec: output[i_0,...,i_{r-1},j_0,...,j_{q-1}] =
+ *              data[i_0,...,i_{axis-1}, indices[j_0,...,j_{q-1}], i_{axis+1},...,i_{r-1}]
+ * where r = data.shape.length, q = indices.shape.length.
+ */
+class Gather extends ONNXOperator {
+  constructor(attributes = {}) {
+    super('Gather', attributes);
+  }
+
+  execute(inputs) {
+    this.validateInputs(inputs, 2);
+    const [data, indices] = inputs;
+
+    let axis = this.getAttribute('axis', 0);
+    if (axis < 0) axis += data.shape.length;
+
+    if (axis < 0 || axis >= data.shape.length) {
+      throw new Error(`Gather: axis ${axis} out of range for shape [${data.shape}]`);
+    }
+
+    const dataNdim = data.shape.length;
+    const idxNdim = indices.shape.length;
+
+    // Output shape = data.shape[:axis] + indices.shape + data.shape[axis+1:]
+    const outShape = [
+      ...data.shape.slice(0, axis),
+      ...indices.shape,
+      ...data.shape.slice(axis + 1)
+    ];
+
+    const resultSize = outShape.reduce((a, b) => a * b, 1);
+    const result = new Float32Array(resultSize);
+
+    // Compute strides for data (C-contiguous).
+    const dataStrides = new Array(dataNdim);
+    dataStrides[dataNdim - 1] = 1;
+    for (let i = dataNdim - 2; i >= 0; i--) {
+      dataStrides[i] = dataStrides[i + 1] * data.shape[i + 1];
+    }
+
+    // Compute strides for output (C-contiguous).
+    const outStrides = new Array(outShape.length);
+    outStrides[outShape.length - 1] = 1;
+    for (let i = outShape.length - 2; i >= 0; i--) {
+      outStrides[i] = outStrides[i + 1] * outShape[i + 1];
+    }
+
+    // Compute strides for indices (C-contiguous).
+    const idxStrides = new Array(idxNdim);
+    if (idxNdim > 0) {
+      idxStrides[idxNdim - 1] = 1;
+      for (let i = idxNdim - 2; i >= 0; i--) {
+        idxStrides[i] = idxStrides[i + 1] * indices.shape[i + 1];
+      }
+    }
+
+    // Iterate over every output element.
+    for (let outFlat = 0; outFlat < resultSize; outFlat++) {
+      // Decode output multi-index
+      let remaining = outFlat;
+      const outCoords = new Array(outShape.length);
+      for (let d = 0; d < outShape.length; d++) {
+        outCoords[d] = Math.floor(remaining / outStrides[d]);
+        remaining -= outCoords[d] * outStrides[d];
+      }
+
+      // Split into: outCoords[:axis], outCoords[axis:axis+idxNdim], outCoords[axis+idxNdim:]
+      const preDims = outCoords.slice(0, axis);
+      const idxCoords = idxNdim > 0 ? outCoords.slice(axis, axis + idxNdim) : [];
+      const postDims = outCoords.slice(axis + idxNdim);
+
+      // Find the flat index into the indices tensor
+      let idxFlat = 0;
+      for (let d = 0; d < idxNdim; d++) {
+        idxFlat += idxCoords[d] * idxStrides[d];
+      }
+
+      let gatherIdx = Math.floor(indices.data[idxFlat]);
+      // Support negative indices
+      if (gatherIdx < 0) gatherIdx += data.shape[axis];
+
+      if (gatherIdx < 0 || gatherIdx >= data.shape[axis]) {
+        throw new Error(
+          `Gather: index ${gatherIdx} out of bounds for axis ${axis} size ${data.shape[axis]}`
+        );
+      }
+
+      // Build the flat data index
+      let dataFlat = 0;
+      for (let d = 0; d < axis; d++) {
+        dataFlat += preDims[d] * dataStrides[d];
+      }
+      dataFlat += gatherIdx * dataStrides[axis];
+      for (let d = 0; d < postDims.length; d++) {
+        dataFlat += postDims[d] * dataStrides[axis + 1 + d];
+      }
+
+      result[outFlat] = data.data[dataFlat];
+    }
+
+    return [new Tensor(result, outShape, data.dtype)];
+  }
+}
+
+/**
+ * Flatten operator — flattens input into 2D [outer, inner].
+ *
+ * ONNX spec: output shape = [prod(shape[:axis]), prod(shape[axis:])]
+ * axis defaults to 1.  axis may be negative.
+ */
+class Flatten extends ONNXOperator {
+  constructor(attributes = {}) {
+    super('Flatten', attributes);
+  }
+
+  execute(inputs) {
+    this.validateInputs(inputs, 1);
+    const [data] = inputs;
+
+    let axis = this.getAttribute('axis', 1);
+    if (axis < 0) axis += data.shape.length;
+
+    if (axis < 0 || axis > data.shape.length) {
+      throw new Error(
+        `Flatten: axis ${this.getAttribute('axis', 1)} out of range for rank-${data.shape.length} tensor`
+      );
+    }
+
+    const outerSize = data.shape.slice(0, axis).reduce((a, b) => a * b, 1);
+    const innerSize = data.shape.slice(axis).reduce((a, b) => a * b, 1);
+    const outShape = [outerSize, innerSize];
+
+    return [new Tensor(data.data, outShape, data.dtype)];
   }
 }
 
@@ -961,6 +1163,8 @@ export class ONNXOperatorRegistry {
     this.register('Transpose', Transpose);
     this.register('Concat', Concat);
     this.register('Slice', Slice);
+    this.register('Gather', Gather);
+    this.register('Flatten', Flatten);
 
     // Reduction
     this.register('ReduceSum', ReduceSum);
@@ -1045,6 +1249,8 @@ export {
   Transpose,
   Concat,
   Slice,
+  Gather,
+  Flatten,
   // Reduction
   ReduceSum,
   ReduceMean,

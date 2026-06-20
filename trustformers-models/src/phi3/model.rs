@@ -1,10 +1,11 @@
+use crate::common::ActivationType;
 use crate::phi3::config::Phi3Config;
+use scirs2_core::ndarray::{Array2, ArrayD, Ix2, IxDyn};
 use std::io::Read;
 use trustformers_core::{
     device::Device,
     errors::{tensor_op_error, Result, TrustformersError},
     layers::{Embedding, Linear},
-    ops::activations::{gelu, silu},
     tensor::Tensor,
     traits::{Config, Layer, Model},
 };
@@ -74,6 +75,11 @@ pub struct RotaryEmbedding {
     pub dim: usize,
     pub max_seq_len: usize,
     pub base: f32,
+    /// Base inverse frequencies `1 / base^(2i / dim)` for `i` in `0..dim/2`.
+    pub inv_freq: Vec<f64>,
+    /// Threshold (the model's *original* context length) beyond which the
+    /// LongRope `long_factor` is used instead of `short_factor`.
+    pub original_max_seq_len: usize,
     pub scaling_factor: Option<f32>,
     pub long_factor: Option<Vec<f32>>,
     pub short_factor: Option<Vec<f32>>,
@@ -99,10 +105,22 @@ impl RotaryEmbedding {
                 (None, None, None)
             };
 
+        // Standard RoPE base inverse frequencies: 1 / base^(2i / dim).
+        let half = dim / 2;
+        let base = config.rope_theta as f64;
+        let inv_freq: Vec<f64> = (0..half)
+            .map(|i| {
+                let exponent = 2.0 * i as f64 / dim as f64;
+                1.0 / base.powf(exponent)
+            })
+            .collect();
+
         Self {
             dim,
             max_seq_len: config.max_position_embeddings,
             base: config.rope_theta,
+            inv_freq,
+            original_max_seq_len: config.original_max_position_embeddings,
             scaling_factor,
             long_factor,
             short_factor,
@@ -114,25 +132,108 @@ impl RotaryEmbedding {
         self.device
     }
 
-    /// Apply rotary embedding with LongRope scaling support
+    /// Half the rotary dimension (number of rotation pairs).
+    pub fn half_dim(&self) -> usize {
+        self.inv_freq.len()
+    }
+
+    /// Effective per-pair inverse frequencies for a given sequence length.
+    ///
+    /// Phi-3 uses *LongRope*: each base inverse frequency is divided by a
+    /// per-dimension rescaling factor. When the context exceeds the model's
+    /// original training length the `long_factor` table is applied, otherwise
+    /// the `short_factor` table is used. With no `rope_scaling` configured the
+    /// base inverse frequencies are returned unchanged (vanilla RoPE).
+    fn effective_inv_freq(&self, seq_len: usize) -> Vec<f64> {
+        let factors = if seq_len > self.original_max_seq_len {
+            self.long_factor.as_ref()
+        } else {
+            self.short_factor.as_ref()
+        };
+
+        match factors {
+            Some(factor) if factor.len() == self.inv_freq.len() => self
+                .inv_freq
+                .iter()
+                .zip(factor.iter())
+                .map(|(freq, scale)| freq / (*scale as f64))
+                .collect(),
+            // No (or mismatched) rescaling table: fall back to vanilla RoPE.
+            _ => self.inv_freq.clone(),
+        }
+    }
+
+    /// Apply rotary position embeddings to `q` and `k` (shape-preserving) using
+    /// the `rotate_half` convention, with Phi-3 LongRope frequency rescaling.
+    ///
+    /// Each input is `[seq, n_heads * head_dim]`; the number of heads is inferred
+    /// from the projection width so the same routine serves the query and the
+    /// (narrower) key projection. Within every head, dimension `i` and
+    /// `i + head_dim/2` form a rotation pair driven by `position · inv_freq[i]`:
+    ///   out[i]        = x[i]·cos − x[i+half]·sin
+    ///   out[i + half] = x[i+half]·cos + x[i]·sin
     pub fn apply_rotary_emb(
         &self,
         q: &Tensor,
         k: &Tensor,
-        _position_ids: &[usize],
+        position_ids: &[usize],
     ) -> Result<(Tensor, Tensor)> {
-        // For now, return simplified rotary embedding
-        // In a full implementation, this would include proper LongRope scaling
+        let seq_len = position_ids.len();
+        let inv_freq = self.effective_inv_freq(seq_len);
         match (q, k) {
-            (Tensor::F32(q_arr), Tensor::F32(k_arr)) => {
-                // Simplified rotation - in practice would be more complex
-                Ok((Tensor::F32(q_arr.clone()), Tensor::F32(k_arr.clone())))
-            },
+            (Tensor::F32(q_arr), Tensor::F32(k_arr)) => Ok((
+                Tensor::F32(self.rotate(q_arr, position_ids, &inv_freq)?),
+                Tensor::F32(self.rotate(k_arr, position_ids, &inv_freq)?),
+            )),
             _ => Err(tensor_op_error(
-                "tensor_operation",
+                "RotaryEmbedding::apply_rotary_emb",
                 "Unsupported tensor types for RoPE",
             )),
         }
+    }
+
+    /// Rotate a single `[seq, n_heads * head_dim]` projection.
+    fn rotate(
+        &self,
+        arr: &ArrayD<f32>,
+        position_ids: &[usize],
+        inv_freq: &[f64],
+    ) -> Result<ArrayD<f32>> {
+        let view = arr.view().into_dimensionality::<Ix2>().map_err(|_| {
+            tensor_op_error(
+                "RotaryEmbedding::rotate",
+                "RoPE input must be a 2D [seq, n_heads * head_dim] tensor",
+            )
+        })?;
+        let seq = view.shape()[0];
+        let width = view.shape()[1];
+        let head_dim = self.dim;
+        let half = head_dim / 2;
+        if head_dim == 0 || width % head_dim != 0 {
+            return Err(tensor_op_error(
+                "RotaryEmbedding::rotate",
+                "projection width is not a multiple of head_dim",
+            ));
+        }
+        let n_heads = width / head_dim;
+
+        let mut out = Array2::<f32>::zeros((seq, width));
+        for t in 0..seq {
+            let pos = position_ids.get(t).copied().unwrap_or(t);
+            for h in 0..n_heads {
+                let base = h * head_dim;
+                for i in 0..half {
+                    let angle = pos as f64 * inv_freq[i];
+                    let cos = angle.cos() as f32;
+                    let sin = angle.sin() as f32;
+                    let x1 = view[[t, base + i]];
+                    let x2 = view[[t, base + i + half]];
+                    out[[t, base + i]] = x1 * cos - x2 * sin;
+                    out[[t, base + i + half]] = x2 * cos + x1 * sin;
+                }
+            }
+        }
+        Ok(out.into_dyn())
     }
 }
 
@@ -141,7 +242,7 @@ impl RotaryEmbedding {
 pub struct Phi3MLP {
     gate_up_proj: Linear,
     down_proj: Linear,
-    hidden_act: String,
+    hidden_act: ActivationType,
     device: Device,
 }
 
@@ -169,7 +270,10 @@ impl Phi3MLP {
         Ok(Self {
             gate_up_proj,
             down_proj,
-            hidden_act: config.hidden_act.clone(),
+            // Parse the activation string once at construction. Unsupported
+            // identifiers are rejected here (previously this error was raised on
+            // every forward pass).
+            hidden_act: ActivationType::try_from(config.hidden_act.as_str())?,
             device,
         })
     }
@@ -234,16 +338,7 @@ impl Layer for Phi3MLP {
         };
 
         // Apply activation to gate
-        let activated_gate = match self.hidden_act.as_str() {
-            "silu" => silu(&gate)?,
-            "gelu" => gelu(&gate)?,
-            _ => {
-                return Err(TrustformersError::tensor_op_error(
-                    &format!("Unsupported activation: {}", self.hidden_act),
-                    "activation",
-                ))
-            },
-        };
+        let activated_gate = self.hidden_act.apply(&gate)?;
 
         // Gated activation: gate * up
         let gated = match (&activated_gate, &up) {
@@ -269,10 +364,11 @@ pub struct Phi3Attention {
     v_proj: Linear,
     o_proj: Linear,
     rotary_emb: RotaryEmbedding,
-    #[allow(dead_code)]
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
+    /// `num_heads / num_kv_heads`: how many query heads share each KV head (GQA).
+    num_query_groups: usize,
     sliding_window: Option<usize>,
     attention_dropout: f32,
     device: Device,
@@ -326,6 +422,7 @@ impl Phi3Attention {
             num_heads: config.num_attention_heads,
             num_kv_heads,
             head_dim,
+            num_query_groups: config.num_query_groups(),
             sliding_window: config.sliding_window,
             attention_dropout: config.attention_dropout,
             device,
@@ -335,6 +432,53 @@ impl Phi3Attention {
     pub fn device(&self) -> Device {
         self.device
     }
+
+    /// Expand grouped key/value heads to match the query heads for GQA.
+    ///
+    /// Input is `[seq, num_kv_heads * head_dim]`; each KV head is repeated
+    /// `num_query_groups` times contiguously, producing
+    /// `[seq, num_heads * head_dim]`. For multi-head attention
+    /// (`num_query_groups == 1`) the tensor is returned unchanged.
+    fn repeat_kv(&self, kv: &Tensor) -> Result<Tensor> {
+        if self.num_query_groups == 1 {
+            return Ok(kv.clone());
+        }
+        match kv {
+            Tensor::F32(arr) => {
+                let shape = arr.shape();
+                let total = shape.iter().product::<usize>();
+                let chunk_size = self.head_dim;
+                let num_chunks = total / chunk_size;
+
+                let flat: Vec<f32> = arr.iter().copied().collect();
+                let mut expanded = Vec::with_capacity(total * self.num_query_groups);
+                for chunk in 0..num_chunks {
+                    let start = chunk * chunk_size;
+                    let slice = &flat[start..start + chunk_size];
+                    for _ in 0..self.num_query_groups {
+                        expanded.extend_from_slice(slice);
+                    }
+                }
+
+                let mut new_shape = shape.to_vec();
+                if let Some(last) = new_shape.last_mut() {
+                    *last *= self.num_query_groups;
+                }
+                let expanded_arr =
+                    ArrayD::from_shape_vec(IxDyn(&new_shape), expanded).map_err(|e| {
+                        tensor_op_error(
+                            "Phi3Attention::repeat_kv",
+                            format!("shape error during KV expansion: {e}"),
+                        )
+                    })?;
+                Ok(Tensor::F32(expanded_arr))
+            },
+            _ => Err(tensor_op_error(
+                "Phi3Attention::repeat_kv",
+                "unsupported tensor dtype for KV expansion",
+            )),
+        }
+    }
 }
 
 impl Layer for Phi3Attention {
@@ -342,26 +486,86 @@ impl Layer for Phi3Attention {
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        // Project to Q, K, V
-        let q = self.q_proj.forward(input.clone())?;
-        let k = self.k_proj.forward(input.clone())?;
-        let _v = self.v_proj.forward(input)?;
+        // Determine the real sequence length from the input rank.
+        // The Phi-3 model feeds a 2D `[seq, hidden]` tensor; a leading batch
+        // dimension (`[1, seq, hidden]`) is also accepted.
+        let shape = input.shape().to_vec();
+        let seq_len = match shape.len() {
+            2 => shape[0],
+            3 => shape[1],
+            n => {
+                return Err(tensor_op_error(
+                    "Phi3Attention::forward",
+                    format!("unexpected input rank {n}"),
+                ))
+            },
+        };
 
-        // Apply rotary embeddings
-        let position_ids: Vec<usize> = (0..64).collect(); // Simplified position IDs
-        let (q_rotated, _k_rotated) = self.rotary_emb.apply_rotary_emb(&q, &k, &position_ids)?;
+        // Project to Q, K, V.
+        let q = self.q_proj.forward(input.clone())?; // [seq, num_heads    * head_dim]
+        let k = self.k_proj.forward(input.clone())?; // [seq, num_kv_heads * head_dim]
+        let v = self.v_proj.forward(input)?; // [seq, num_kv_heads * head_dim]
 
-        // Simplified attention computation
-        // In a full implementation, this would include:
-        // - Proper head reshaping
-        // - Sliding window masking
-        // - Grouped-query attention
-        // - Flash attention optimization
-        // Simplified attention - just return the query for now
-        let attended = q_rotated;
+        // Flatten any leading batch dimension so RoPE / GQA operate on a
+        // canonical 2D `[seq, width]` layout.
+        let head_dim = self.head_dim;
+        let num_heads = self.num_heads;
+        let q = q.reshape(&[seq_len, num_heads * head_dim])?;
+        let k = k.reshape(&[seq_len, self.num_kv_heads * head_dim])?;
+        let v = v.reshape(&[seq_len, self.num_kv_heads * head_dim])?;
 
-        // Output projection
-        self.o_proj.forward(attended)
+        // Rotary position embeddings (real positions 0..seq_len).
+        let position_ids: Vec<usize> = (0..seq_len).collect();
+        let (q_rope, k_rope) = self.rotary_emb.apply_rotary_emb(&q, &k, &position_ids)?;
+
+        // Expand grouped key/value heads to match the query heads (GQA).
+        let k_expanded = self.repeat_kv(&k_rope)?;
+        let v_expanded = self.repeat_kv(&v)?;
+
+        // [seq, num_heads * head_dim] -> [1, num_heads, seq, head_dim].
+        let to_heads = |t: &Tensor| -> Result<Tensor> {
+            t.reshape(&[1, seq_len, num_heads, head_dim])?.transpose(1, 2)
+        };
+        let q_h = to_heads(&q_rope)?;
+        let k_h = to_heads(&k_expanded)?;
+        let v_h = to_heads(&v_expanded)?;
+
+        // Scaled dot-product scores: [1, num_heads, seq, seq].
+        let scale = (head_dim as f32).sqrt().recip();
+        let scores = q_h.matmul(&k_h.transpose(2, 3)?)?.mul_scalar(scale)?;
+
+        // Additive causal mask (optionally narrowed to a sliding window),
+        // softmax over the key axis, then weight the values.
+        let scores = scores.add(&self.attention_mask(seq_len)?)?;
+        let weights = scores.softmax(-1)?;
+        let context = weights.matmul(&v_h)?; // [1, num_heads, seq, head_dim]
+
+        // [1, num_heads, seq, head_dim] -> [seq, num_heads * head_dim].
+        let context = context.transpose(1, 2)?.reshape(&[seq_len, num_heads * head_dim])?;
+
+        self.o_proj.forward(context)
+    }
+}
+
+impl Phi3Attention {
+    /// Build the additive attention mask of shape `[1, 1, seq, seq]`.
+    ///
+    /// Positions strictly above the diagonal (the future) are set to a large
+    /// negative value so they vanish under softmax. When `sliding_window` is
+    /// configured, positions farther than the window into the past are masked
+    /// out as well, matching Phi-3's local-attention variants.
+    fn attention_mask(&self, seq_len: usize) -> Result<Tensor> {
+        let mut mask = vec![0.0f32; seq_len * seq_len];
+        for i in 0..seq_len {
+            for j in 0..seq_len {
+                let masked = j > i
+                    || self.sliding_window.is_some_and(|window| i.saturating_sub(j) >= window);
+                if masked {
+                    mask[i * seq_len + j] = -1.0e9;
+                }
+            }
+        }
+        Tensor::from_vec(mask, &[seq_len, seq_len])?.reshape(&[1, 1, seq_len, seq_len])
     }
 }
 
@@ -962,3 +1166,106 @@ impl Model for Phi3ForCausalLM {
 
 // Helper for tensor slicing (would normally be imported)
 // SciRS2 Integration Policy
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::phi3::config::Phi3Config;
+
+    /// Tiny grouped-query-attention config used to exercise the real attention
+    /// path without allocating a full-size model.
+    ///
+    /// `hidden_size = 16`, `num_attention_heads = 4` (so `head_dim = 4`) and
+    /// `num_key_value_heads = 2` give two query groups, forcing the GQA
+    /// `repeat_kv` expansion to run.
+    fn tiny_config() -> Phi3Config {
+        Phi3Config {
+            vocab_size: 32,
+            hidden_size: 16,
+            intermediate_size: 32,
+            num_hidden_layers: 2,
+            num_attention_heads: 4,
+            num_key_value_heads: Some(2),
+            max_position_embeddings: 64,
+            original_max_position_embeddings: 64,
+            ..Phi3Config::default()
+        }
+    }
+
+    fn all_finite(tensor: &Tensor) -> bool {
+        match tensor {
+            Tensor::F32(arr) => arr.iter().all(|x| x.is_finite()),
+            Tensor::F64(arr) => arr.iter().all(|x| x.is_finite()),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn test_rotary_emb_actually_rotates() {
+        // A non-zero, position-dependent input must come back *changed* — proving
+        // the rotary embedding is a real rotation and not an identity pass-through.
+        let cfg = tiny_config();
+        let rope = RotaryEmbedding::new(&cfg);
+        let head_dim = cfg.head_dim();
+        let seq = 3usize;
+        // Single head per row so the width equals head_dim.
+        let data: Vec<f32> = (0..seq * head_dim).map(|i| 0.1 + i as f32 * 0.05).collect();
+        let q = Tensor::from_vec(data.clone(), &[seq, head_dim]).expect("q tensor");
+        let k = q.clone();
+        let pos: Vec<usize> = (0..seq).collect();
+        let (q_rot, _k_rot) = rope.apply_rotary_emb(&q, &k, &pos).expect("rope must run");
+
+        assert_eq!(q_rot.shape(), &[seq, head_dim], "RoPE must preserve shape");
+
+        // Row 0 has position 0 (angle 0 => identity); later rows must differ.
+        if let (Tensor::F32(input), Tensor::F32(output)) = (&q, &q_rot) {
+            let changed = input.iter().zip(output.iter()).any(|(a, b)| (a - b).abs() > 1e-6);
+            assert!(changed, "RoPE must actually rotate (not an identity op)");
+        } else {
+            panic!("expected F32 tensors");
+        }
+    }
+
+    #[test]
+    fn test_attention_forward_shape_and_finite() {
+        let cfg = tiny_config();
+        let attn = Phi3Attention::new(&cfg).expect("attention must construct");
+        let seq = 5usize;
+        let hidden = cfg.hidden_size;
+        let input_data: Vec<f32> =
+            (0..seq * hidden).map(|i| ((i % 7) as f32 - 3.0) * 0.1).collect();
+        let input = Tensor::from_vec(input_data, &[seq, hidden]).expect("input tensor");
+
+        let out = attn.forward(input).expect("attention forward must succeed");
+        assert_eq!(
+            out.shape(),
+            &[seq, hidden],
+            "attention output must be [seq, hidden]"
+        );
+        assert!(
+            all_finite(&out),
+            "attention output must be finite (no NaN/Inf)"
+        );
+    }
+
+    #[test]
+    fn test_causal_lm_forward_shape_and_finite() {
+        // Run the full model forward through the real attention path and confirm
+        // the logits have the right shape and contain no NaN/Inf.
+        let cfg = tiny_config();
+        let vocab = cfg.vocab_size;
+        let model = Phi3ForCausalLM::new(cfg).expect("causal LM must construct");
+
+        let token_ids: Vec<i64> = vec![1, 5, 9, 2];
+        let seq = token_ids.len();
+        let input = Tensor::from_vec_i64(token_ids, &[seq]).expect("token tensor");
+
+        let logits = model.forward(input).expect("forward must succeed");
+        assert_eq!(
+            *logits.shape().last().expect("logits have a shape"),
+            vocab,
+            "causal LM output last dim must be vocab_size"
+        );
+        assert!(all_finite(&logits), "logits must be finite (no NaN/Inf)");
+    }
+}

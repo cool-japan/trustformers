@@ -695,8 +695,43 @@ impl GraphDebugger {
         graph: &ComputationGraph,
         nodes: &[GraphNode],
     ) -> Result<Vec<NodeId>> {
-        // Placeholder implementation
-        Ok(Vec::new())
+        // A node is "disconnected" when it participates in no edges in either direction:
+        // it has no parents (no inputs feeding it) AND no children (no consumers).
+        //
+        // We additionally cross-validate against the graph itself: even if a node lists
+        // a parent/child id, the referenced node must actually exist for the edge to
+        // count. This catches stale references after partial graph mutations.
+        //
+        // Single-node graphs are not flagged as disconnected — a graph with exactly one
+        // node trivially has no edges, but it is also the entire computation, not a
+        // stranded subgraph.
+        if nodes.len() <= 1 {
+            return Ok(Vec::new());
+        }
+
+        // Build the set of ids that any edge actually references, going via the live
+        // graph rather than just the snapshot, so we treat dangling parent/child ids
+        // as missing edges.
+        let mut referenced: HashSet<NodeId> = HashSet::new();
+        for node in nodes {
+            for &parent_id in &node.parents {
+                if graph.get_node(parent_id).is_some() {
+                    referenced.insert(parent_id);
+                    referenced.insert(node.id);
+                }
+            }
+            for &child_id in &node.children {
+                if graph.get_node(child_id).is_some() {
+                    referenced.insert(child_id);
+                    referenced.insert(node.id);
+                }
+            }
+        }
+
+        let mut disconnected: Vec<NodeId> =
+            nodes.iter().filter(|n| !referenced.contains(&n.id)).map(|n| n.id).collect();
+        disconnected.sort_unstable();
+        Ok(disconnected)
     }
 
     fn compute_tensor_magnitude(&self, tensor: &Tensor) -> Result<f32> {
@@ -956,5 +991,88 @@ mod tests {
     fn test_output_formats() {
         assert_eq!(GraphOutputFormat::Dot, GraphOutputFormat::Dot);
         assert_ne!(GraphOutputFormat::Dot, GraphOutputFormat::ASCII);
+    }
+
+    #[test]
+    fn test_find_disconnected_nodes_detects_isolated_variables() {
+        use crate::tensor::Tensor;
+
+        let debugger = GraphDebugger::new();
+        let mut graph = ComputationGraph::new();
+
+        // Two isolated variables (no edges at all).
+        let a_tensor = Tensor::ones(&[2]).expect("create tensor a");
+        let b_tensor = Tensor::ones(&[2]).expect("create tensor b");
+        let isolated_a = graph.add_node(a_tensor, true, Some("isolated_a".to_string()));
+        let isolated_b = graph.add_node(b_tensor, true, Some("isolated_b".to_string()));
+
+        // Two connected variables that participate in c = a + b.
+        let conn_a = Tensor::ones(&[2]).expect("create tensor conn_a");
+        let conn_b = Tensor::ones(&[2]).expect("create tensor conn_b");
+        let conn_c = conn_a.add(&conn_b).expect("add tensors");
+        let node_a = graph.add_node(conn_a, true, Some("a".to_string()));
+        let node_b = graph.add_node(conn_b, true, Some("b".to_string()));
+        let _node_c = graph
+            .add_operation_node(
+                conn_c,
+                OperationType::Add,
+                vec![node_a, node_b],
+                true,
+                Some("c".to_string()),
+            )
+            .expect("add operation node");
+
+        let nodes = graph.export_graph().nodes;
+        let mut disconnected =
+            debugger.find_disconnected_nodes(&graph, &nodes).expect("find disconnected");
+        disconnected.sort_unstable();
+
+        let mut expected = vec![isolated_a, isolated_b];
+        expected.sort_unstable();
+        assert_eq!(disconnected, expected);
+    }
+
+    #[test]
+    fn test_find_disconnected_nodes_returns_empty_for_fully_connected_graph() {
+        use crate::tensor::Tensor;
+
+        let debugger = GraphDebugger::new();
+        let mut graph = ComputationGraph::new();
+
+        let a = Tensor::ones(&[2]).expect("create tensor a");
+        let b = Tensor::ones(&[2]).expect("create tensor b");
+        let c = a.add(&b).expect("add tensors");
+
+        let node_a = graph.add_node(a, true, Some("a".to_string()));
+        let node_b = graph.add_node(b, true, Some("b".to_string()));
+        let _node_c = graph
+            .add_operation_node(
+                c,
+                OperationType::Add,
+                vec![node_a, node_b],
+                true,
+                Some("c".to_string()),
+            )
+            .expect("add operation node");
+
+        let nodes = graph.export_graph().nodes;
+        let disconnected =
+            debugger.find_disconnected_nodes(&graph, &nodes).expect("find disconnected");
+        assert!(disconnected.is_empty());
+    }
+
+    #[test]
+    fn test_find_disconnected_nodes_singleton_graph_is_not_disconnected() {
+        use crate::tensor::Tensor;
+
+        let debugger = GraphDebugger::new();
+        let mut graph = ComputationGraph::new();
+        let t = Tensor::ones(&[1]).expect("create tensor");
+        graph.add_node(t, true, Some("only".to_string()));
+
+        let nodes = graph.export_graph().nodes;
+        let disconnected =
+            debugger.find_disconnected_nodes(&graph, &nodes).expect("find disconnected");
+        assert!(disconnected.is_empty());
     }
 }

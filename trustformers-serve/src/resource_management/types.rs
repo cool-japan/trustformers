@@ -762,24 +762,13 @@ pub enum EscalationActionType {
     Custom(String),
 }
 
-/// Types of GPU benchmarks
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum GpuBenchmarkType {
-    /// Compute performance benchmark
-    Compute,
-
-    /// Memory bandwidth benchmark
-    MemoryBandwidth,
-
-    /// Machine learning performance benchmark
-    MachineLearning,
-
-    /// Graphics performance benchmark
-    Graphics,
-
-    /// Custom benchmark type
-    Custom(String),
-}
+/// Re-export the canonical GpuBenchmarkType from the gpu_manager submodule.
+///
+/// The authoritative definition lives in `gpu_manager::types` and carries six
+/// variants (including `MatrixOperations`, `MLInference`, and `MLTraining`).
+/// All code inside `resource_management` should import this type from here or
+/// directly from `gpu_manager::types` — do NOT redeclare it locally.
+pub use super::gpu_manager::types::GpuBenchmarkType;
 
 /// Performance trend directions
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

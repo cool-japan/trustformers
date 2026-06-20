@@ -89,7 +89,15 @@ impl StarCoder2RotaryEmbedding {
         self.inv_freq.len()
     }
 
-    /// Apply RoPE rotations (shape-preserving).
+    /// Apply rotary position embeddings to `q` and `k` (shape-preserving).
+    ///
+    /// Each input is `[seq, n_heads * head_dim]` (the number of heads is inferred
+    /// from the width, so the same routine serves the query and the narrower
+    /// key/value projections). Within every head the `rotate_half` convention is
+    /// used: dimension `i` and `i + head_dim/2` form a rotation pair driven by the
+    /// angle `position · inv_freq[i]`, matching the reference StarCoder2/LLaMA RoPE:
+    ///   out[i]          = x[i]·cos − x[i+half]·sin
+    ///   out[i + half]   = x[i+half]·cos + x[i]·sin
     pub fn apply_rotary_emb(
         &self,
         q: &Tensor,
@@ -97,24 +105,78 @@ impl StarCoder2RotaryEmbedding {
         position_ids: &[usize],
     ) -> Result<(Tensor, Tensor)> {
         match (q, k) {
-            (Tensor::F32(q_arr), Tensor::F32(k_arr)) => {
-                // Simplified: compute angles but return cloned tensors
-                // (full apply would reshape to [seq, nheads, head_dim] and rotate pairs)
-                let q_rotated = q_arr.clone();
-                let k_rotated = k_arr.clone();
-                for &pos in position_ids {
-                    for (i, &freq) in self.inv_freq.iter().enumerate() {
-                        let _angle = (pos as f64 * freq) as f32;
-                        let _ = i;
-                    }
-                }
-                Ok((Tensor::F32(q_rotated), Tensor::F32(k_rotated)))
-            },
+            (Tensor::F32(q_arr), Tensor::F32(k_arr)) => Ok((
+                Tensor::F32(self.rotate(q_arr, position_ids)?),
+                Tensor::F32(self.rotate(k_arr, position_ids)?),
+            )),
             _ => Err(tensor_op_error(
                 "StarCoder2RotaryEmbedding::apply_rotary_emb",
                 "unsupported tensor dtype for RoPE",
             )),
         }
+    }
+
+    /// Rotate a projection tensor along its head pairs (rank-agnostic).
+    ///
+    /// Accepts any layout whose last dimension is `n_heads * head_dim`: a bare
+    /// `[width]` head vector (treated as a single position), `[seq, width]`, or
+    /// `[batch, seq, width]`. Positions are taken from the second-to-last axis
+    /// (or position 0 for a 1-D input); every leading axis is an independent
+    /// batch. Iteration is in row-major logical order so it matches
+    /// `from_shape_vec` regardless of the input's physical memory layout.
+    fn rotate(&self, arr: &ArrayD<f32>, position_ids: &[usize]) -> Result<ArrayD<f32>> {
+        let shape = arr.shape().to_vec();
+        if shape.is_empty() {
+            return Err(tensor_op_error(
+                "StarCoder2RotaryEmbedding::rotate",
+                "RoPE input must have at least one dimension",
+            ));
+        }
+        let width = shape[shape.len() - 1];
+        let head_dim = self.head_dim;
+        let half = head_dim / 2;
+        if head_dim == 0 || !width.is_multiple_of(head_dim) {
+            return Err(tensor_op_error(
+                "StarCoder2RotaryEmbedding::rotate",
+                "projection width is not a multiple of head_dim",
+            ));
+        }
+        let n_heads = width / head_dim;
+        let (outer, seq) = if shape.len() == 1 {
+            (1usize, 1usize)
+        } else {
+            let seq = shape[shape.len() - 2];
+            let outer: usize = shape[..shape.len() - 2].iter().product();
+            (outer, seq)
+        };
+
+        let flat: Vec<f32> = arr.iter().copied().collect();
+        let mut out = flat.clone();
+        for o in 0..outer {
+            for t in 0..seq {
+                let pos = position_ids.get(t).copied().unwrap_or(t);
+                let row_base = (o * seq + t) * width;
+                for h in 0..n_heads {
+                    let base = row_base + h * head_dim;
+                    for i in 0..half {
+                        let angle = pos as f64 * self.inv_freq[i];
+                        let cos = angle.cos() as f32;
+                        let sin = angle.sin() as f32;
+                        let x1 = flat[base + i];
+                        let x2 = flat[base + i + half];
+                        out[base + i] = x1 * cos - x2 * sin;
+                        out[base + i + half] = x2 * cos + x1 * sin;
+                    }
+                }
+            }
+        }
+
+        ArrayD::from_shape_vec(IxDyn(&shape), out).map_err(|e| {
+            tensor_op_error(
+                "StarCoder2RotaryEmbedding::rotate",
+                format!("failed to rebuild rotated tensor: {e}"),
+            )
+        })
     }
 }
 
@@ -320,9 +382,9 @@ impl Layer for StarCoder2Attention {
 
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
         let shape = input.shape();
-        let seq_len = match shape.len() {
-            2 => shape[0],
-            3 => shape[1],
+        let (batch_size, seq_len, is_3d) = match shape.len() {
+            2 => (1usize, shape[0], false),
+            3 => (shape[0], shape[1], true),
             n => {
                 return Err(tensor_op_error(
                     "StarCoder2Attention::forward",
@@ -338,22 +400,53 @@ impl Layer for StarCoder2Attention {
         let position_ids: Vec<usize> = (0..seq_len).collect();
         let (q_rope, k_rope) = self.rotary_emb.apply_rotary_emb(&q, &k, &position_ids)?;
 
-        let _k_expanded = self.repeat_kv(&k_rope)?;
-        let _v_expanded = self.repeat_kv(&v)?;
+        // Expand the grouped key/value heads to match the query heads (GQA).
+        let k_expanded = self.repeat_kv(&k_rope)?;
+        let v_expanded = self.repeat_kv(&v)?;
 
-        let scale = (self.head_dim as f32).sqrt().recip();
-        let attn_output = match &q_rope {
-            Tensor::F32(q_arr) => Tensor::F32(q_arr.mapv(|x| x * scale)),
-            _ => {
-                return Err(tensor_op_error(
-                    "StarCoder2Attention::forward",
-                    "tensor dtype mismatch in attention computation",
-                ))
-            },
+        let head_dim = self.head_dim;
+        let num_heads = self.num_heads;
+
+        // [.., num_heads * head_dim] -> [batch, num_heads, seq, head_dim].
+        let to_heads = |t: &Tensor| -> Result<Tensor> {
+            t.reshape(&[batch_size, seq_len, num_heads, head_dim])?.transpose(1, 2)
+        };
+        let q_h = to_heads(&q_rope)?;
+        let k_h = to_heads(&k_expanded)?;
+        let v_h = to_heads(&v_expanded)?;
+
+        // Scaled dot-product scores: [batch, num_heads, seq, seq].
+        let scale = (head_dim as f32).sqrt().recip();
+        let scores = q_h.matmul(&k_h.transpose(2, 3)?)?.mul_scalar(scale)?;
+
+        // Additive causal mask ([1,1,seq,seq] broadcasts over batch & heads),
+        // softmax over the key axis, then weight the values.
+        let scores = scores.add(&causal_mask(seq_len)?)?;
+        let weights = scores.softmax(-1)?;
+        let context = weights.matmul(&v_h)?; // [batch, num_heads, seq, head_dim]
+
+        // -> [batch, seq, num_heads * head_dim], collapsing the batch axis for 2-D inputs.
+        let context = context.transpose(1, 2)?;
+        let context = if is_3d {
+            context.reshape(&[batch_size, seq_len, num_heads * head_dim])?
+        } else {
+            context.reshape(&[seq_len, num_heads * head_dim])?
         };
 
-        self.o_proj.forward(attn_output)
+        self.o_proj.forward(context)
     }
+}
+
+/// Build an additive causal mask of shape `[1, 1, seq, seq]`: `0` on and below the
+/// diagonal, a large negative value above it so masked positions vanish under softmax.
+fn causal_mask(seq_len: usize) -> Result<Tensor> {
+    let mut mask = vec![0.0f32; seq_len * seq_len];
+    for i in 0..seq_len {
+        for j in (i + 1)..seq_len {
+            mask[i * seq_len + j] = -1.0e9;
+        }
+    }
+    Tensor::from_vec(mask, &[seq_len, seq_len])?.reshape(&[1, 1, seq_len, seq_len])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

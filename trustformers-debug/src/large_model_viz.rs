@@ -463,7 +463,22 @@ impl LargeModelVisualizer {
                 self.generate_interactive_html(&sampled_layers)?
             },
             VisualizationFormat::StaticPng => {
-                anyhow::bail!("PNG generation not yet implemented - use SVG or HTML instead")
+                // PNG output requires the `video` or `gif` feature which gates the `image` crate.
+                // To enable: rebuild with `--features video` (or `--features gif`).
+                // Without that feature, fall back to a descriptive error so callers can
+                // switch to SVG/HTML output which works without any extra features.
+                #[cfg(feature = "video")]
+                {
+                    self.generate_png(&sampled_layers)?
+                }
+                #[cfg(not(feature = "video"))]
+                {
+                    return Err(anyhow::anyhow!(
+                        "PNG generation requires the `video` feature. \
+                         Rebuild with `--features video`, or use \
+                         VisualizationFormat::StaticSvg / InteractiveHtml instead."
+                    ));
+                }
             },
         };
 
@@ -613,11 +628,144 @@ impl LargeModelVisualizer {
         Ok((bytes, size))
     }
 
-    /// Generate interactive SVG with zoom/pan
+    /// Generate interactive SVG with zoom/pan via embedded ECMAScript
     fn generate_interactive_svg(&self, sampled_layers: &[usize]) -> Result<(Vec<u8>, usize)> {
-        // For now, delegate to static SVG
-        // TODO: Add pan/zoom JavaScript
-        self.generate_static_svg(sampled_layers)
+        let cache = self.layer_cache.read();
+
+        let layer_height = 60usize;
+        let layer_width = 200usize;
+        let x_offset = 500usize;
+        let y_start = 60usize;
+        let svg_height = y_start + sampled_layers.len() * (layer_height + 20) + 40;
+        let svg_width = 1200usize;
+
+        // Build the inner layer elements first
+        let mut layer_elems = String::new();
+        for (i, &idx) in sampled_layers.iter().enumerate() {
+            if let Some(layer) = cache.values().find(|l| l.index == idx) {
+                let y = y_start + i * (layer_height + 20);
+                layer_elems.push_str(&format!(
+                    r#"<rect x="{x}" y="{y}" width="{w}" height="{h}" class="layer" />
+<text x="{cx}" y="{ty}" class="layer-text" text-anchor="middle">{name}</text>
+<text x="{cx}" y="{py}" class="layer-text" text-anchor="middle">{params:.1}M params</text>
+"#,
+                    x = x_offset,
+                    y = y,
+                    w = layer_width,
+                    h = layer_height,
+                    cx = x_offset + layer_width / 2,
+                    ty = y + 25,
+                    py = y + 45,
+                    name = layer.name,
+                    params = layer.param_count as f64 / 1e6
+                ));
+            }
+        }
+
+        // Compose full SVG with embedded pan/zoom JavaScript.
+        // The <script> block uses an SVG foreignObject-free approach: it attaches
+        // pointer-event listeners directly to the root <svg> element and manipulates
+        // a <g id="viewport"> transform, which is valid SVG+JS in any modern browser.
+        let svg = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     xmlns:xlink="http://www.w3.org/1999/xlink"
+     id="svg-root"
+     width="{width}" height="{height}"
+     viewBox="0 0 {width} {height}"
+     style="cursor:grab;user-select:none;">
+<style>
+.layer {{ fill: #4a90e2; stroke: #2c5aa0; stroke-width: 2; }}
+.layer-text {{ fill: white; font-family: Arial, sans-serif; font-size: 12px; }}
+.title {{ font-family: Arial, sans-serif; font-size: 20px; font-weight: bold; }}
+</style>
+<text x="{title_x}" y="30" class="title" text-anchor="middle">Model Architecture (interactive)</text>
+<g id="viewport">
+{layers}
+</g>
+<script type="text/javascript"><![CDATA[
+(function() {{
+  var svg   = document.getElementById('svg-root');
+  var vp    = document.getElementById('viewport');
+  var tx = 0, ty = 0, scale = 1.0;
+  var dragging = false;
+  var startX = 0, startY = 0;
+
+  function applyTransform() {{
+    vp.setAttribute('transform',
+      'translate(' + tx + ',' + ty + ') scale(' + scale + ')');
+  }}
+
+  // Pan: mousedown / mousemove / mouseup
+  svg.addEventListener('mousedown', function(e) {{
+    dragging = true;
+    startX = e.clientX - tx;
+    startY = e.clientY - ty;
+    svg.style.cursor = 'grabbing';
+    e.preventDefault();
+  }});
+  window.addEventListener('mousemove', function(e) {{
+    if (!dragging) return;
+    tx = e.clientX - startX;
+    ty = e.clientY - startY;
+    applyTransform();
+  }});
+  window.addEventListener('mouseup', function() {{
+    dragging = false;
+    svg.style.cursor = 'grab';
+  }});
+
+  // Touch pan
+  var lastTouch = null;
+  svg.addEventListener('touchstart', function(e) {{
+    if (e.touches.length === 1) {{
+      lastTouch = e.touches[0];
+    }}
+    e.preventDefault();
+  }}, {{ passive: false }});
+  svg.addEventListener('touchmove', function(e) {{
+    if (e.touches.length === 1 && lastTouch) {{
+      var t = e.touches[0];
+      tx += t.clientX - lastTouch.clientX;
+      ty += t.clientY - lastTouch.clientY;
+      lastTouch = t;
+      applyTransform();
+    }}
+    e.preventDefault();
+  }}, {{ passive: false }});
+  svg.addEventListener('touchend', function() {{ lastTouch = null; }});
+
+  // Zoom: mousewheel
+  svg.addEventListener('wheel', function(e) {{
+    e.preventDefault();
+    var delta = e.deltaY > 0 ? 0.9 : 1.1;
+    // Zoom towards cursor position
+    var rect  = svg.getBoundingClientRect();
+    var mx = e.clientX - rect.left;
+    var my = e.clientY - rect.top;
+    tx = mx - (mx - tx) * delta;
+    ty = my - (my - ty) * delta;
+    scale = Math.max(0.1, Math.min(10.0, scale * delta));
+    applyTransform();
+  }}, {{ passive: false }});
+
+  // Double-click to reset
+  svg.addEventListener('dblclick', function() {{
+    tx = 0; ty = 0; scale = 1.0;
+    applyTransform();
+  }});
+}})();
+]]></script>
+</svg>"#,
+            width = svg_width,
+            height = svg_height,
+            title_x = svg_width / 2,
+            layers = layer_elems,
+        );
+
+        let bytes = svg.into_bytes();
+        let size = bytes.len();
+        Ok((bytes, size))
     }
 
     /// Generate interactive HTML with JavaScript
@@ -703,6 +851,93 @@ Type: {} | Parameters: {:.1}M | Memory: {:.2} MB | Compute: {:.1} GFLOPS
         let bytes = html.into_bytes();
         let size = bytes.len();
         Ok((bytes, size))
+    }
+
+    /// Generate a static PNG heatmap visualization of the sampled layers.
+    ///
+    /// Each layer is rendered as a horizontal bar whose width is proportional to
+    /// `param_count` and whose colour encodes `memory_mb` (blue → red gradient).
+    /// The resulting image is PNG-encoded and returned as a raw byte vector.
+    ///
+    /// Requires the `video` feature (which enables the `image` crate).
+    #[cfg(feature = "video")]
+    fn generate_png(&self, sampled_layers: &[usize]) -> Result<(Vec<u8>, usize)> {
+        use image::{ImageBuffer, Rgb};
+        use std::io::Cursor;
+
+        let cache = self.layer_cache.read();
+
+        // Gather layers in index order.
+        let mut layers: Vec<&LayerMetadata> = sampled_layers
+            .iter()
+            .filter_map(|&idx| cache.values().find(|l| l.index == idx))
+            .collect();
+        layers.sort_by_key(|l| l.index);
+
+        // Image layout constants.
+        const IMG_WIDTH: u32 = 1200;
+        const BAR_HEIGHT: u32 = 30;
+        const BAR_PADDING: u32 = 6;
+        const LEFT_MARGIN: u32 = 20;
+        const RIGHT_MARGIN: u32 = 20;
+
+        let row_height = BAR_HEIGHT + BAR_PADDING;
+        let img_height = if layers.is_empty() {
+            100
+        } else {
+            layers.len() as u32 * row_height + 2 * BAR_PADDING + 40 // +40 for title row
+        };
+
+        let max_params = layers.iter().map(|l| l.param_count).max().unwrap_or(1).max(1);
+
+        let max_memory = layers.iter().map(|l| l.memory_mb).fold(0.0_f64, f64::max).max(1.0);
+
+        let available_width = IMG_WIDTH - LEFT_MARGIN - RIGHT_MARGIN;
+
+        let mut img = ImageBuffer::<Rgb<u8>, Vec<u8>>::new(IMG_WIDTH, img_height);
+
+        // Background: near-white.
+        for pixel in img.pixels_mut() {
+            *pixel = Rgb([245u8, 245u8, 250u8]);
+        }
+
+        // Title bar.
+        for x in 0..IMG_WIDTH {
+            for y in 0..36 {
+                img.put_pixel(x, y, Rgb([74u8, 144u8, 226u8]));
+            }
+        }
+
+        // Draw each layer as a horizontal heatmap bar.
+        for (i, layer) in layers.iter().enumerate() {
+            let bar_top = 40 + i as u32 * row_height;
+
+            // Bar width proportional to param_count.
+            let bar_w = ((layer.param_count as f64 / max_params as f64) * available_width as f64)
+                .round() as u32;
+            let bar_w = bar_w.max(4); // always visible
+
+            // Colour: blue (low memory) → red (high memory) gradient.
+            let t = (layer.memory_mb / max_memory).clamp(0.0, 1.0) as f32;
+            let r = (t * 220.0) as u8;
+            let g = ((1.0 - t) * 100.0 + 40.0) as u8;
+            let b = ((1.0 - t) * 220.0) as u8;
+            let bar_colour = Rgb([r, g, b]);
+
+            for x in LEFT_MARGIN..(LEFT_MARGIN + bar_w).min(IMG_WIDTH - RIGHT_MARGIN) {
+                for y in bar_top..(bar_top + BAR_HEIGHT).min(img_height) {
+                    img.put_pixel(x, y, bar_colour);
+                }
+            }
+        }
+
+        // Encode as PNG into an in-memory buffer.
+        let mut png_bytes: Vec<u8> = Vec::new();
+        img.write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+            .with_context(|| "Failed to PNG-encode large model visualization")?;
+
+        let size = png_bytes.len();
+        Ok((png_bytes, size))
     }
 
     /// Get current visualization progress (0.0-1.0)
@@ -797,6 +1032,50 @@ mod tests {
 
         let sampled = visualizer.determine_sampling()?;
         assert_eq!(sampled.len(), 5);
+
+        Ok(())
+    }
+
+    #[cfg(feature = "video")]
+    #[test]
+    fn test_png_visualization() -> Result<()> {
+        let config = LargeModelVisualizerConfig {
+            output_format: VisualizationFormat::StaticPng,
+            ..Default::default()
+        };
+
+        let visualizer = LargeModelVisualizer::new(config);
+
+        for i in 0..5_usize {
+            let metadata = LayerMetadata {
+                name: format!("layer_{}", i),
+                index: i,
+                layer_type: "Linear".to_string(),
+                param_count: 1024 * (i + 1),
+                memory_mb: 2.0 * (i + 1) as f64,
+                compute_flops: 500_000_000 * (i + 1) as u64,
+                input_shape: vec![512],
+                output_shape: vec![512],
+                is_sampled: false,
+            };
+            visualizer.add_layer(metadata)?;
+        }
+
+        let result = visualizer.visualize(None)?;
+
+        // Basic sanity checks
+        assert_eq!(result.stats.layers_visualized, 5);
+        assert!(
+            result.stats.output_size_bytes > 0,
+            "PNG output must be non-empty"
+        );
+
+        // Verify PNG magic bytes: 0x89 P N G
+        let data = result.inline_data.expect("inline data should be present for small PNG");
+        assert!(
+            data.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
+            "Output must start with PNG magic bytes"
+        );
 
         Ok(())
     }

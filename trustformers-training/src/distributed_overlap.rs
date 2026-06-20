@@ -397,7 +397,7 @@ mod tests {
     fn test_gradient_ready_marks_layer() {
         let mgr = make_manager(4, 4);
         mgr.gradient_ready("layer_0", vec![1.0, 2.0, 3.0]).unwrap();
-        let grads = mgr.gradients.lock().unwrap();
+        let grads = mgr.gradients.lock().unwrap_or_else(|e| e.into_inner());
         let t = &grads["layer_0"];
         assert!(t.is_ready);
     }
@@ -411,13 +411,13 @@ mod tests {
         mgr.gradient_ready("layer_0", vec![4.0]).unwrap();
         // Bucket not complete yet
         {
-            let grads = mgr.gradients.lock().unwrap();
+            let grads = mgr.gradients.lock().unwrap_or_else(|e| e.into_inner());
             assert!(!grads["layer_0"].is_reduced);
         }
         mgr.gradient_ready("layer_1", vec![4.0]).unwrap();
         // Both in bucket done → AllReduce should have fired
         {
-            let grads = mgr.gradients.lock().unwrap();
+            let grads = mgr.gradients.lock().unwrap_or_else(|e| e.into_inner());
             assert!(grads["layer_0"].is_reduced);
             assert!(grads["layer_1"].is_reduced);
             // world_size=2 → values should be 4.0/2 = 2.0
@@ -449,7 +449,7 @@ mod tests {
         let mgr = GradientOverlapManager::new(cfg, layers);
         mgr.gradient_ready("l0", vec![8.0, 16.0]).unwrap();
         mgr.gradient_ready("l1", vec![8.0]).unwrap();
-        let grads = mgr.gradients.lock().unwrap();
+        let grads = mgr.gradients.lock().unwrap_or_else(|e| e.into_inner());
         // 8.0 / 8 = 1.0
         assert!((grads["l0"].values[0] - 1.0).abs() < 1e-10);
         assert!((grads["l0"].values[1] - 2.0).abs() < 1e-10);

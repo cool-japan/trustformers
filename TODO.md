@@ -7,18 +7,218 @@ The project provides a comprehensive ecosystem for transformer model development
 with support for 21+ architectures and multiple deployment targets.
 
 ### Version Information
-- **Current Version:** 0.1.1 (Released 2026-04-25)
-- **Previous Release:** 0.1.0 (Released 2026-03-21)
-- **Status:** First Stable Release + v0.1.1 Enhancements
+- **Current Version:** 0.1.2 (Released 2026-06-20)
+- **Previous Release:** 0.1.1 (Released 2026-04-25)
+- **Status:** First Stable Release + v0.1.2 Enhancements
 - **License:** Apache-2.0
 - **Repository:** https://github.com/cool-japan/trustformers
 
-### Project Health
-- ✅ **ZERO COMPILATION ERRORS** - Complete workspace compilation success across all crates
-- ✅ **COMPREHENSIVE TEST COVERAGE** - 5,358 total tests with 100% pass rate
-- ✅ **ALL MAJOR FEATURES IMPLEMENTED** - 49+ transformer architectures, full deployment targets
-- ✅ **PRODUCTION QUALITY** - Battle-tested code with extensive error handling and safety filtering
-- ✅ **100% PURE RUST** - ~1,408,134 SLoC (COOLJAPAN Policy compliant)
+### Project Health (corrected 2026-06-19 — see Code-Quality Audit below)
+- ✅ **Compiles cleanly** across all crates (no-warnings policy enforced where checked)
+- ✅ **Large test suite** — ~23,700 `#[test]`/`#[tokio::test]` functions (run locally with `cargo nextest`; a Rust CI gate is being restored, so the "100% pass" claim is not yet machine-verified — Task 9 below)
+- 🟡 **49+ architectures for CPU inference** — maturity varies; a batch of "fake implementation" defects was fixed 2026-06-19 (see audit), others may remain
+- 🟡 **Compute is CPU / `f32`** — F16/BF16 are storage-only (upcast for math); GPU is wired only for GPT-2/RetNet (see audit Tasks 4 & 5)
+- ✅ **100% Pure Rust** source (~1.4M SLoC; GPU backends bind to system libraries via Rust crates)
+
+---
+
+## 🔍 Code-Quality Audit (2026-06-19)
+
+A thorough source audit was run against external criticism (Reddit) that the project
+over-claims its capabilities. The criticism was found to be **exaggerated but
+substantively correct** in several areas. Evidence-backed verdicts:
+
+| Criticism | Verdict | Detail |
+|-----------|---------|--------|
+| GPU "in name only" | **Partially true** | Real CUDA(`cudarc`)/Metal backends exist, but core `Tensor::matmul` errors on GPU variants and only GPT-2/RetNet wire GPU into `forward` (2 of ~58 models). `gpu.rs::GpuMemoryPool` is a counter-only simulation; device detection is stubbed. |
+| "Float32 only" | **True (compute)** | 11 of 17 core ops are F32(+F64) only; F16/BF16 are storage that is upcast to f32. RMSNorm is `f32`-hardcoded. |
+| Stubs / `todo!()` | **Partially true** | Only 12 `todo!()` (mostly in doc-comments) + 0 `unimplemented!()`, BUT ~15–25 genuinely *fake* functions returned wrong/placeholder results in real compute paths. |
+| Allocation-heavy / non-idiomatic | **Partially true (~50%)** | Real `Vec` round-trips in matmul/SDPA hot loops; stringly-typed activation dispatch in 20+ models. (`[T;N]` const-generic critique does **not** apply to dynamic tensors.) |
+| README false advertising ("看板倒れ") | **Several FALSE claims** | Fabricated LLaMA-7B GPU benchmark numbers, a non-compiling GPU code example, overstated test count, TPU listed as supported (empty feature flag). |
+
+### ✅ Resolved 2026-06-19
+- **README & this file**: removed fabricated GPU benchmarks, fixed the non-compiling GPU example, corrected GPU/precision/test/TPU claims, added honest maturity notes.
+- **Fake model implementations replaced with real algorithms (+ tests, all green):**
+  - `mamba`: real S6 selective scan (ZOH discretisation `Ā=exp(ΔA)`, `B̄=ΔB`, recurrent `h_t`) + real causal depthwise `conv1d` (was `silu(x)` / identity).
+  - `starcoder2`: real `rotate_half` RoPE + real GQA causal attention (rank-agnostic 2D/3D) (was return-clone RoPE + `q·scale` only).
+  - `phi3`: real RoPE (incl. LongRope scaling) + real GQA causal attention (was identity RoPE + "return query").
+  - `flamingo`: real cross-attention via existing SDPA (was uniform/all-ones weights).
+- **Mathematically-wrong helpers fixed**: privacy-inference `softmax` (was `exp` w/o normalisation), `renormalize_probabilities`, MLX `BatchNorm`/`Embedding`, mobile lifecycle freed-byte reporting, RLHF `compute_rating_std` (was hardcoded `0.1`) & `filter_by_quality`, gradient-checkpoint forward/backward.
+- **Dead code removed**: ~11.5k lines of orphaned `*_backup.rs` / `*_backup/` files across core/serve/mobile.
+
+### ✅ Resolved 2026-06-20 (Task 2/3 follow-up)
+- **RLHF feedback scoring de-faked** (`trustformers-training/src/rlhf/feedback.rs`): `compute_quality_scores`
+  used a constant `mean_rating = 0.5` base for every item — now bases each item's quality on its **own**
+  rating (per-item, with group-average / global-mean fallbacks). `compute_batch_statistics` hardcoded
+  `mean_rating: 0.5` / `std_rating: 0.1` — now computes the real batch mean and reuses the existing
+  `compute_rating_std_single` (sample std). Both excused themselves with "item() method not available",
+  but `to_vec_f32()` was already in use 20 lines below. +2 behavioural tests (assert scores track ratings
+  and stats ≠ the old constants); `cargo test -p trustformers-training --lib rlhf::feedback` → 20 passed,
+  0 warnings. NOTE: the OPEN-sites list below had mis-filed this as `memory_optimization.rs`; corrected.
+  `aggregate_ratings` deliberately left as-is — `ratings` is 1-D `[batch_size]` (one rating/item, confirmed
+  by `test_feedback_batch_processing`), so `Mean`→clone is correct and a 2-D annotator semantic would be invented.
+- **Adaptive-computation stats de-faked** (`trustformers-core/src/adaptive_computation.rs`):
+  `compute_entropy`/`compute_variance`/`compute_sparsity` returned hardcoded `0.5`/`0.3`/`0.2` (ignoring their
+  `tensor` argument) yet feed `analyze_input_complexity`'s **live** branching/complexity score. Now: entropy →
+  a new reusable `Tensor::softmax_entropy_normalized()` (numerically-stable softmax → `H/ln(n)` ∈ [0,1], added
+  to `tensor/utils.rs`); variance → existing core `Tensor::variance`; sparsity → existing core `Tensor::sparsity`
+  (no duplicate math). +1 entropy test (uniform≈1, peaked≈0, single=0); all 36 `adaptive_computation` tests
+  still green; 0 warnings; file kept at 1998 lines (**< 2000** — delegated rather than inlined to respect the
+  size policy). `execute_single_path` still returns `input.clone()` (honest scaffold; needs a real model
+  plumbed — see tracked future work below), but the metrics that *select* paths are now real.
+- **Broken crate-doc examples fixed** (`trustformers-training/src/lib.rs`): the "Quick Start" and "Distributed
+  Training" `//!` doctests never compiled — they used a name-collided `TrainingConfig` (resolved to
+  `model_versioning::TrainingConfig`), a 3-arg `Trainer::new`, and a non-existent `Trainer::new_distributed`.
+  Rewritten against the real API (`Trainer::new(model, TrainingArguments, Box<dyn Optimizer>, Box<dyn Loss>,
+  TaskType)` with `trustformers_optim::Adam` + `MSELoss`; `DataParallelTrainer::new` + `DistributedConfig` +
+  `SimulatedProcessGroup` for the distributed one), with a hidden minimal mock model so the rendered docs stay
+  clean. `cargo test -p trustformers-training --doc` → 2 passed (was 2 failed). Same "看板倒れ" class as the
+  README fix in Task 1.
+- **CI-incidental code fixes** (kept; GitHub Actions intentionally NOT added — billable): `trustformers-core`
+  `hardware_acceleration` bench failed to compile (`criterion_main!` inside `mod benches` → no crate-level
+  `main`, E0601) — moved to crate root; `gpu.rs` `detect_devices` `vec_init_then_push` clippy warning fixed
+  (with feature-conditional `allow(unused_mut)`).
+- **Full local verification (free, no GitHub CI), 2026-06-20 — all green**:
+  `cargo fmt --all -- --check` = 0 diffs · `cargo clippy --workspace --all-targets -- -D warnings` = exit 0 ·
+  `cargo nextest run --workspace` (default) = **14,498 passed** / 0 failed · `cargo nextest run -p
+  trustformers-models --features all --retries 3` = **4,319 passed** / 0 failed (1 timing-flaky recovered:
+  `memory_profiling::test_monitoring_performance_stats`, unrelated) · core doctests = 66 passed · training
+  doctests = 2 passed · bench builds. The "no-warnings / tests pass" claim is now locally machine-verified.
+
+### 📌 Handoff — codebase facts a successor MUST know
+
+Read this before touching anything; these are non-obvious and cost time to rediscover.
+
+- **`trustformers-models` is feature-gated per model.** `default = ["bert"]`, and each model is its
+  own empty feature (`mamba = []`, `phi3 = []`, `starcoder2 = []`, `flamingo = []`, …). A bare
+  `cargo check -p trustformers-models` **does not compile most models**. Always pass the features you
+  touch, e.g. `--features "mamba,starcoder2,phi3,flamingo"`, or `--features all` for everything.
+  This is why a default check can finish in <1s while silently skipping your file.
+- **Two GPU systems, don't confuse them.** The *real* backends are in
+  `trustformers-core/src/gpu_ops/` (`cuda/` via `cudarc`, `metal/` via `objc2`/MPS, `webgpu.rs`,
+  `opencl.rs`, `rocm.rs`) — feature-gated, off by default. The high-level
+  `trustformers-core/src/gpu.rs` (`GpuContext`, `GpuMemoryPool`, `detect_*_devices`) is a **CPU
+  simulation**: `allocate()` just increments a counter and device detection returns hard-coded
+  placeholder devices. Core `Tensor::matmul` **now dispatches** to `gpu_ops` for `Tensor::CUDA`/
+  `Tensor::Metal` operands (added 2026-06-20, `#[cfg(feature=…)]`-gated) — but per-model `forward` GPU
+  wiring is still only `gpt2`/`retnet`, and `gpu.rs` remains a CPU simulation.
+- **Working reference implementations to copy** for attention/RoPE work:
+  `trustformers-models/src/mistral/model.rs` and `…/starcoder2/model.rs` (the latter was fixed in
+  this campaign and is rank-agnostic for 2D `[seq,h]` and 3D `[batch,seq,h]`). NOTE: mistral leaves
+  stray `eprintln!` debug lines — do not copy those.
+- **Confirmed `Tensor` API** (`trustformers_core::tensor::Tensor`, an enum `F32(ArrayD<f32>)`, `F16`,
+  `BF16`, … plus `Metal`/`CUDA` buffer variants): `reshape(&[usize])`, `transpose(usize,usize)`,
+  `matmul(&Tensor)` (4-D batched OK), `mul_scalar(f32)`, `softmax(i32)` (use `-1`), `add(&Tensor)`
+  (broadcasts `[1,1,S,S]` against `[B,H,S,S]`), `from_vec(Vec<f32>,&[usize])`, `shape() -> Vec<usize>`,
+  `data() -> Result<Vec<f32>>`. The additive causal-mask helper pattern is `fn causal_mask(seq)` in
+  `starcoder2/model.rs`.
+- **Policies enforced here**: no warnings; no `todo!()`/`unimplemented!()`/placeholder returns; use
+  `scirs2_core::ndarray` / `scirs2_core::random` (NOT raw `ndarray`/`rand`); files < 2000 lines.
+
+### ⏳ Remaining work (tracked, prioritised — each item is independently actionable)
+
+> **STATUS 2026-06-20 — parallel batch landed.** #4 (precision F16/BF16 upcast), #5 (GPU matmul→`gpu_ops`
+> dispatch), #7 (`ActivationType` enum, 12 models), #10 (TPU façade removed) are **DONE** — run as
+> worktree-isolated parallel agents, 3-way-integrated onto HEAD, and re-verified TOGETHER:
+> `cargo clippy --workspace --all-targets --features all -- -D warnings` = clean (now lints all ~58
+> models, not just `bert`), `fmt --check` = 0 diffs, core `--lib` = 2269 passed, models `--lib
+> --features all` = 4322 passed. #9 also done (local verification; **GitHub Actions CI intentionally NOT
+> added — billable, per user**). **#6 (efficiency) also DONE 2026-06-20** — all 16 Vec round-trips in
+> the matmul/SDPA hot paths removed (borrow `ArrayView2` instead of `from_shape_vec(to_vec())`; `as_slice`
+> instead of `iter().copied().collect()`; `as_standard_layout().into_owned()` instead of the triple-copy).
+> Verified: core 2269 + models-all 4324 pass, fmt/clippy clean, matmul ~26% faster (67.8µs→~50µs). **The
+> entire original-criticism campaign (#1–#10) is now complete.**
+> Implementation notes: precision upcast is inline via `half::{f16,bf16}::{to_f32,from_f32}` because
+> `conversions.rs::to_f32`/`to_dtype` have NO F16/BF16 support (the handoff above is corrected by this).
+> Two PRE-EXISTING F32 bugs were found (not fixed, out of scope): `advanced.rs::layer_norm` general-shape
+> indexing and `statistical.rs::variance` axis-wise broadcast. The #4/#5/#7/#10 blocks below are kept for
+> historical context.
+
+**4. Precision — wire F16/BF16 through core ops.**
+   - Where: `trustformers-core/src/tensor/math_ops/linear_algebra.rs` (`matmul`),
+     `…/tensor/activations.rs`, `…/tensor/math_ops/*`, `…/fused/mod.rs` (`rms_norm_slice` is
+     `&[f32]`-hardcoded). 11 of 17 surveyed ops are F32(+F64) only.
+   - How: add a consistent upcast-compute-downcast path (F16/BF16 → f32 → compute → original dtype)
+     so non-F32 tensors stop returning `Err("… not supported for these tensor types")`. Native
+     low-precision kernels are a later optimisation.
+   - Verify: add tests feeding F16/BF16 tensors to `matmul`/`softmax`/`layer_norm`; assert finite,
+     shape-correct output. `cargo test -p trustformers-core --lib`.
+
+**5. GPU — connect real backends to the compute/model path.**
+   - Where: `Tensor::matmul` & friends in `…/tensor/math_ops/`; dispatch fns in
+     `…/gpu_ops/{cuda,metal,webgpu}` (`dispatch_cuda_matmul`, `dispatch_matmul`, …); per-model
+     `forward` (model the wiring on `gpt2/model/model_core.rs` + `model_blocks.rs`, which use
+     `to_device_enum` + `*_gpu_to_gpu`).
+   - How: in the core ops, detect `Tensor::CUDA`/`Tensor::Metal` variants and route to the matching
+     `gpu_ops` dispatch; factor a device-aware self-attention/linear helper and adopt it across
+     models so GPU is not GPT-2/RetNet-only. Reconcile/retire the simulated `gpu.rs` layer (or make
+     its `GpuMemoryPool`/detection back onto the real backends). Big task — stage it: (a) core matmul
+     GPU dispatch + tests, (b) one extra model (e.g. llama), (c) generalise.
+   - Verify: feature-gated tests under `--features cuda` / `metal`; keep CPU default green.
+
+**6. Efficiency — kill hot-path allocations.**
+   - Where: `…/tensor/math_ops/linear_algebra.rs` and `…/layers/sdpa.rs` — **16** `iter().copied()
+     .collect::<Vec<f32>>()` sites that round-trip already-contiguous data through a `Vec` before
+     `from_shape_vec`/BLAS, mostly inside per-batch/per-head loops.
+   - How: prefer `.as_slice()` when the view is contiguous and pass it straight to BLAS; only allocate
+     on the non-contiguous fallback. Remove the `as_standard_layout().to_owned()` double-copy at the
+     top of `matmul`. **Benchmark before/after** (`cargo bench`, `benches/`) — `from_shape_vec` needs
+     ownership, so confirm each removal is a real win and not load-bearing for the BLAS signature.
+
+**7. Idiom — enum-ise activation dispatch.**
+   - Where: **14** files in `trustformers-models/src/` use `match self.<act>.as_str() { "gelu" => … }`
+     per forward pass (albert, moe, hyena, linformer, fnet, performer, gpt_neo, retnet, gpt_j, …).
+   - How: introduce an `ActivationType` enum (parse once at config load), give it an `apply(&Tensor)`,
+     and migrate each model. Mechanical but spread out; do it crate-wide in one pass.
+
+**9. Infra — restore Rust CI (regression guard for everything above).**
+   - The Rust workflows are archived in `.github/_archived/workflows/` (`ci.yml`, `code-quality.yml`,
+     `code-style.yml`, `pr-tests.yml`, `benchmarks.yml`, …); `.github/workflows/` currently has only
+     `npm-publish.yml` + `pypi-publish.yml`.
+   - How: restore a `cargo nextest run` (+ per-model feature matrix or `--features all`) and
+     `cargo clippy -- -D warnings` gate. This is what makes the "100% pass / no-warnings" claim true
+     and stops fake-impl / non-compiling-example regressions. **High leverage — recommend doing first.**
+
+**10. Backends — make TPU honest.**
+   - `tpu = []` (empty feature, no deps), `trustformers-core/src/kernels/tpu_impl.rs` is comments only.
+   - How: either implement a minimal real TPU path with a smoke test, or delete the `tpu` flag +
+     `tpu_impl.rs` and keep README/this-file scoped to CUDA/Metal/WebGPU (already done in prose). The
+     same applies to ROCm/Vulkan/OpenCL: real backend code exists but is unverified and non-default —
+     either add smoke tests or label clearly experimental.
+
+### 🧪 Known fake/placeholder sites still OPEN (audit-flagged, NOT yet fixed)
+
+Fix under Task 2/3 follow-up — triaged 2026-06-20:
+- ~~`trustformers-training/.../rlhf/feedback.rs` — `compute_quality_scores` / `compute_batch_statistics`
+  hardcoded `0.5` / `0.1`~~ — **RESOLVED 2026-06-20** (see above; was mis-filed as `memory_optimization.rs`).
+- `trustformers-mobile/src/react_native.rs:722` — `run_inference` returns `input.clone()`. This is NOT a
+  silent fake: the whole block is openly `// Mock implementation of MobileInferenceEngine methods for
+  React Native` (every method — `initialize`/`load_model_from_path`/`run_inference`/`is_model_loaded` — is
+  an FFI-boundary stub holding no model/weights). Making it real means plumbing the actual mobile engine
+  through the RN bridge — a **feature**, not a quick correctness fix. Tracked as future work, not a hidden defect.
+- `trustformers-core/src/adaptive_computation.rs:~881` — `execute_single_path` returns `input.clone()` as a
+  path's "neural-network output". Honest scaffold (the struct holds no model); the *path-selection* metrics it
+  consumes are now real (resolved above), but actually executing a path needs a real model wired in — a feature.
+- `trustformers-wasm/src/layers.rs:194` — dropout disabled ("return input as dropout requires RNG");
+  fine for inference but should use `scirs2_core::random` if training on WASM.
+- `trustformers/src/profiler.rs:334` — returns a mock dashboard URL (benign, but labelled "in a real
+  implementation…").
+- `trustformers-c/src/cuda.rs` (legacy, excluded from workspace) — CUDA matmul copies via host memory
+  as a placeholder; `cloud/aws_lambda.rs` returns `{"task":"placeholder"}`. Lower priority (legacy crate).
+- Re-run the sweep periodically: `grep -rniE "placeholder|return input|simplified|in a real implementation|dummy|hardcoded" --include=*.rs | grep -v /target/` and triage real-compute hits vs. benign error strings.
+
+### ✅ Verification cheat-sheet (what "done" looked like this campaign)
+
+```bash
+# Models touched this campaign (compile + behavioural tests, all green):
+cargo test -p trustformers-models --lib --features "mamba,starcoder2,phi3,flamingo"
+#   → 1560 passed; 0 failed; 0 warnings
+# Helper/cleanup crates:
+cargo check -p trustformers-core -p trustformers-mobile -p trustformers-training -p trustformers-serve --lib
+#   → Finished, exit 0, no warnings
+# Full model matrix when validating broad changes:
+cargo check -p trustformers-models --lib --features all
+```
 
 ---
 
@@ -43,6 +243,11 @@ TrustformeRS is organized as a Cargo workspace of specialized crates:
 | **Total** | **5,358** | | **~1,408,134** |
 
 *(v0.1.0 baseline: 5,007 tests / ~900,000+ SLoC)*
+
+> **Correction (2026-06-19 audit):** the "5,358" figure is a stale/curated snapshot. The actual
+> in-tree count is **~23,700** `#[test]` + `#[tokio::test]` functions, but there is currently **no
+> Rust CI** to substantiate a "100% pass" claim (CI is archived — see Task 9 in the Code-Quality
+> Audit above). Treat per-crate numbers in this table as historical until CI is restored.
 
 ### Core Crates
 1. **trustformers-core** - Fundamental tensor operations, layers, hardware acceleration (Stable)
@@ -432,6 +637,11 @@ TrustformeRS is organized as a Cargo workspace of specialized crates:
 
 ## Known Limitations
 
+### Security Advisories
+- [ ] rsa 0.9.10 — Marvin Attack (RUSTSEC-2023-0071) — no upstream fix available; dep comes via azure_core transitive chain (trustformers-serve → azure_core → rsa). Monitor for upstream resolution.
+- [ ] rustls-webpki 0.101.7 — CVEs (RUSTSEC-2023-0052, RUSTSEC-2023-0053, RUSTSEC-2024-0357) — transitive dep via trustformers-serve → aws-smithy-http-client → rustls v0.21.12 → rustls-webpki 0.101.7; cannot be upgraded until AWS SDK drops rustls 0.21 dependency. Monitor aws-smithy-http-client for updates.
+- [ ] pyo3 0.28.x — RUSTSEC-2026-0176 / RUSTSEC-2026-0177 — trustformers-py is pinned to pyo3 "0.28" because scirs2-core 0.5.0 requires pyo3 = "0.28.3" (links="python" conflict prevents dual versions). The workspace (trustformers-tokenizers optional dep) was upgraded to pyo3 0.29. Unblock trustformers-py upgrade once scirs2-core publishes with pyo3 0.29 support.
+
 ### Platform Limitations
 - **Metal Flash Attention:** Requires macOS 10.15+ or iOS 13+
 - **TPU Backend:** Requires Google Cloud TPU access
@@ -667,7 +877,7 @@ cargo run -p trustformers --example clip_multimodal_example --features "clip,vit
 
 ---
 
-**Last Updated:** 2026-04-25 - v0.1.1 Released
+**Last Updated:** 2026-06-20 - v0.1.2 Released
 **Next Milestone:** Beta 1.0 Release (pending scirs2-core 0.3.0 with MPSGraph for 50-200x Metal performance)
 **Target Audience:** ML engineers, researchers, and production deployment teams
 
@@ -749,3 +959,77 @@ cargo run -p trustformers --example clip_multimodal_example --features "clip,vit
 - ✅ BLAS integration verified: Accelerate framework via scirs2-core
 - ✅ Multi-backend: CUDA, Metal, ROCm, WebGPU, Vulkan, OpenCL, TPU
 - Awaiting scirs2-core 0.3.0 release for 50-200x MPSGraph Metal performance improvement
+
+## Stubs to implement (added 2026-06-12 by /cooljapan-stub-check)
+
+- [ ] `trustformers-serve`: `build.rs:2` — Proto compilation is disabled because `tonic-build` 0.14 API changed; investigate new builder pattern or pre-generated proto files and restore gRPC stub generation.
+  - Priority: P2 | Scope: medium | Hint: none
+
+- [ ] `trustformers-serve`: `src/lib.rs:81,335` — Two proto-generated modules are commented out pending build.rs fix; re-enable once proto compilation is restored.
+  - Priority: P2 | Scope: trivial | Hint: none
+
+- [ ] `trustformers-serve`: `src/resource_management/gpu_manager.rs` — Entire GPU manager module is commented-out because types (`GpuDeviceCapability`, `GpuLoadBalancer`, `GpuPerformanceTrend`, `GpuMonitoringSystem`, etc.) do not exist at the expected import paths; resolve import paths or define the missing types and uncomment.
+  - Priority: P2 | Scope: large | Hint: none
+  - Locations: :73-131 (large commented-out import block)
+
+- [ ] `trustformers-serve`: `src/performance_optimizer/test_characterization/concurrency_detector/deadlock_analyzer.rs` — Deadlock analyzer accumulates API-mismatch workarounds: `PotentialDeadlock` fields (`confidence`, `probability`, `deadlock_type`, `impact`) no longer exist; `DeadlockRiskLevel` changed from enum to struct; lock-acquisition/release signatures changed; fix all field accesses and call sites to match current API.
+  - Priority: P2 | Scope: medium | Hint: none
+  - Locations: :54,:56,:93,:215,:223,:267,:310,:341,:349,:398,:421,:430,:497,:512,:532,:552 (16 mismatch sites)
+
+- [ ] `trustformers-serve`: `src/performance_optimizer/test_characterization/concurrency_detector/thread_analyzer.rs` — `ThreadAnalysis` API changed (`thread_id` removed, `detected_patterns` is now `Vec<String>`); `ExecutionTrace` lost `duration` and `result` fields; `InteractionType`/`PatternType`/`PatternImpact` enum variants renamed; fix all mismatches.
+  - Priority: P2 | Scope: medium | Hint: none
+  - Locations: :39,:69,:123,:124,:193,:286,:300,:317,:467,:477,:484,:504,:521 (13 mismatch sites)
+
+- [ ] `trustformers-serve`: `src/performance_optimizer/test_characterization/concurrency_detector/lock_analyzer.rs` — `ContentionFrequencyAnalysis::new` and `WaitTimeAnalysis::new` signatures changed; `ExecutionTrace` lost `result` field; `contention_summary`/`latency_bounds` require conversion from analyzer structs.
+  - Priority: P2 | Scope: small | Hint: none
+  - Locations: :36,:39,:120,:121,:157,:173 (6 mismatch sites)
+
+- [ ] `trustformers-serve`: `src/performance_optimizer/test_characterization/concurrency_detector/conflict_detector.rs` — `ResourceConflict.resources` field removed (only `resource_id` remains); `ConflictType` enum variants simplified; `ConflictHistory::new()`/`ResourceDependencyGraph::new()` return `Result` now; fix all construction and field access sites.
+  - Priority: P2 | Scope: small | Hint: none
+  - Locations: :53,:55,:80,:213,:217,:302,:318,:346 (8 mismatch sites)
+
+- [ ] `trustformers-serve`: `src/performance_optimizer/test_characterization/concurrency_detector/pattern_detector.rs` — `ScalabilityRating`, `ScalingBehavior`, and `OptimizationComplexity` changed from enums to structs; fix all match arms and construction sites.
+  - Priority: P2 | Scope: small | Hint: none
+  - Locations: :204,:230,:278,:322,:378,:428,:576,:588 (8 mismatch sites)
+
+- [ ] `trustformers-serve`: `src/performance_optimizer/test_characterization/concurrency_detector/sharing_analyzer.rs` — `ResourceSharingCapabilities` lost `sharing_safety_level` enum field and `implementation_complexity`; `performance_overhead` renamed to `sharing_overhead`; fix field names.
+  - Priority: P2 | Scope: trivial | Hint: none
+  - Locations: :185,:190,:194,:212 (4 sites)
+
+- [ ] `trustformers-serve`: `src/performance_optimizer/test_characterization/concurrency_detector/risk_assessment.rs` — `PreventiveMitigation::new` and `ReactiveMitigation::new` required args changed; `assess_risk`, `is_applicable`, `generate_mitigation` argument counts changed; fix all call sites.
+  - Priority: P2 | Scope: small | Hint: none
+  - Locations: :44,:46,:74,:96,:265,:267 (6 mismatch sites)
+
+- [ ] `trustformers-serve`: `src/performance_optimizer/test_characterization/concurrency_detector/detector.rs` — `PatternEstimationConfig` → `EstimationConfig` type mismatch; `SharingCapability` (enum) vs `ResourceSharingCapabilities` (struct) conversion missing; `SynchronizationRequirements`/`ConcurrencyRequirements` field renames; `IsolationLevel::Process` variant missing.
+  - Priority: P2 | Scope: medium | Hint: none
+  - Locations: :83,:219,:228,:319,:340,:389,:451,:456,:461 (9 mismatch sites)
+
+- [ ] `trustformers-serve`: `src/performance_optimizer/performance_modeling/mod.rs:207` — Trained model cannot be stored in `active_models` because field uses `Box` while insertion needs `Arc`; refactor `active_models` to `Arc<dyn PerformanceModel>` and fix the train path.
+  - Priority: P2 | Scope: small | Hint: none
+
+- [ ] `trustformers-serve`: `src/test_performance_monitoring/historical_data/types.rs` — Multiple data-lifecycle methods (compress, optimize, check_policy, cleanup, archive, retrieve, cache_lookup, query_execute, cache_store, lifecycle_eval) all return `Ok(())`/default stubs; implement each.
+  - Priority: P2 | Scope: large | Hint: none
+  - Locations: :117,:122,:196,:201,:271,:280,:396,:401,:417,:881 (10 stub methods)
+
+- [ ] `trustformers-c`: `src/containers/deployment.rs:57` — `DockerImageConfig` conversion from `containers::types::DockerImageConfig` to `docker::DockerImageConfig` is a placeholder; implement the struct field mapping.
+  - Priority: P2 | Scope: small | Hint: none
+
+- [ ] `trustformers-c`: `src/cloud/aws_lambda.rs,azure_functions.rs,google_cloud_functions.rs` — Cloud function handlers set `TrustformersModel` and `TrustformersPipeline` handles to `0` (null) and return placeholder JSON; wire real model loading and pipeline execution.
+  - Priority: P2 | Scope: large | Hint: none
+  - Locations: aws_lambda.rs:204,208,324,342,358,383 / azure_functions.rs:285,289,418,424,528 / google_cloud_functions.rs:271,274,431,437,494
+
+- [ ] `trustformers-c`: `src/utils.rs:236` and `src/utils_impl/mod.rs:184` — Tests reference old `validate_string_comprehensive` / `validate_string` / `safe_c_string` signatures that no longer exist; update tests to current API or restore the functions.
+  - Priority: P2 | Scope: small | Hint: none
+
+- [ ] `trustformers-core`: `src/gpu_ops/cuda/cuda_split/cuda_backend_ext.rs:457` — `run_fused_transformer_layer` executes operations individually instead of fused; implement a fully fused LayerNorm+QKV+RoPE+Attention+Proj+Residual CUDA kernel path.
+  - Priority: P2 | Scope: large | Hint: none
+
+- [ ] `trustformers-wasm`: `src/compute/gpu_tensor.rs:52,85` — WebGPU backend initialization is a stub (no device creation); `Rc<RefCell<>>` wrapper for interior mutability not applied; implement WebGPU device/queue setup and wrap backend.
+  - Priority: P2 | Scope: medium | Hint: none
+
+- [ ] `trustformers`: `tests/compatibility_tests.rs:34,107,203,349` — Four tests are `#[ignore]`d waiting for `GlobalMemoryPool`, `ZeroCopyTensorView`, and `GlobalProfiler`; either implement these types or delete the placeholder tests.
+  - Priority: P2 | Scope: medium | Hint: none
+  - Locations: GlobalMemoryPool :34,:107, ZeroCopyTensorView :203, GlobalProfiler :349
+
+- [ ] `trustformers-debug`: `src/interpretability_tools.rs:27,34` — Interpretability-tools module is entirely commented out waiting for the module to be implemented; implement `AttentionVisualizer` and `FeatureAttributor` (or the equivalent current API) and re-enable.
+  - Priority: P2 | Scope: large | Hint: none

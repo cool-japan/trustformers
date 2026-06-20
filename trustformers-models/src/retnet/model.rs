@@ -1,3 +1,4 @@
+use crate::common::ActivationType;
 use crate::retnet::config::RetNetConfig;
 use std::io::Read;
 use trustformers_core::{
@@ -804,7 +805,7 @@ pub struct RetNetFFN {
     gate_proj: Linear,
     up_proj: Linear,
     down_proj: Linear,
-    activation: String,
+    activation: ActivationType,
     use_glu: bool,
     #[allow(dead_code)]
     dropout: f32,
@@ -852,7 +853,10 @@ impl RetNetFFN {
             }),
             up_proj,
             down_proj,
-            activation: config.hidden_act.clone(),
+            activation: ActivationType::from_config_str_or(
+                &config.hidden_act,
+                ActivationType::Identity,
+            ),
             use_glu: config.use_glu,
             dropout: config.activation_dropout,
             device,
@@ -864,12 +868,7 @@ impl RetNetFFN {
     }
 
     fn apply_activation(&self, x: &Tensor) -> Result<Tensor> {
-        match self.activation.as_str() {
-            "swish" | "silu" => x.silu(),
-            "gelu" => x.gelu(),
-            "relu" => x.relu(),
-            _ => Ok(x.clone()),
-        }
+        self.activation.apply(x)
     }
 
     pub fn parameter_count(&self) -> usize {

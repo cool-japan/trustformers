@@ -34,40 +34,21 @@
 //!
 //! ## Usage Examples
 //!
-//! ```rust
-//! use crate::performance_optimizer::resource_modeling::{
+//! ```rust,no_run
+//! use trustformers_serve::performance_optimizer::resource_modeling::{
 //!     ResourceModelingManager, ResourceModelingConfig,
-//!     PerformanceProfiler, TemperatureMonitor,
-//!     TopologyAnalyzer, HardwareDetector,
 //! };
 //!
-//! // Initialize resource modeling with comprehensive configuration
-//! let config = ResourceModelingConfig::default()
-//!     .with_detailed_detection(true)
-//!     .with_profiling_enabled(true)
-//!     .with_temperature_monitoring(true)
-//!     .with_numa_analysis(true);
-//!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // Initialize resource modeling with default configuration
+//! let config = ResourceModelingConfig::default();
 //! let manager = ResourceModelingManager::new(config).await?;
 //!
 //! // Get current system resource model
 //! let resource_model = manager.get_resource_model();
-//! println!("Detected {} CPU cores", resource_model.cpu_model.core_count);
-//!
-//! // Profile system performance characteristics
-//! let performance_results = manager.profile_performance().await?;
-//! println!("CPU performance: {} instructions/sec",
-//!          performance_results.cpu_profile.instructions_per_second);
-//!
-//! // Monitor resource utilization
-//! let utilization_report = manager.monitor_utilization(Duration::from_secs(60)).await?;
-//! println!("Average CPU utilization: {}%", utilization_report.cpu_utilization.average);
-//!
-//! // Analyze hardware topology
-//! let topology_results = manager.analyze_topology().await?;
-//! if let Some(numa) = topology_results.numa_topology {
-//!     println!("NUMA nodes detected: {}", numa.node_count);
-//! }
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Backward Compatibility

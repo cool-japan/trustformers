@@ -8,6 +8,58 @@ use crate::starcoder2::{
 };
 use trustformers_core::{tensor::Tensor, traits::Config, traits::Layer, traits::Model};
 
+// ── Real RoPE / attention behavioural tests ───────────────────────────────────
+
+/// Tiny model dimensions so the attention/scan paths run instantly while still
+/// exercising grouped-query attention (4 query heads, 2 KV heads → group size 2).
+fn tiny_config() -> StarCoder2Config {
+    StarCoder2Config {
+        hidden_size: 16,
+        num_attention_heads: 4,
+        num_key_value_heads: 2,
+        num_hidden_layers: 1,
+        intermediate_size: 32,
+        vocab_size: 32,
+        ..StarCoder2Config::default()
+    }
+}
+
+#[test]
+fn test_rope_actually_rotates() {
+    let head_dim = 4;
+    let rope = StarCoder2RotaryEmbedding::new(head_dim, 16, 10_000.0);
+    let q = Tensor::randn(&[3, head_dim]).expect("q"); // one head, seq = 3
+    let k = q.clone();
+    let (q_rot, _k_rot) = rope.apply_rotary_emb(&q, &k, &[0, 1, 2]).expect("rope");
+    assert_eq!(q_rot.shape(), vec![3, head_dim]);
+    let before = q.data().expect("before");
+    let after = q_rot.data().expect("after");
+    // Position 0 is unrotated (angle 0), but positions 1 and 2 must change the
+    // vector — the old implementation returned the input unchanged.
+    assert!(
+        before.iter().zip(after.iter()).any(|(a, b)| (a - b).abs() > 1e-6),
+        "RoPE returned its input unchanged — rotation not applied"
+    );
+    assert!(after.iter().all(|v| v.is_finite()));
+}
+
+#[test]
+fn test_attention_forward_shape_and_finite() {
+    let cfg = tiny_config();
+    let attn = StarCoder2Attention::new(&cfg).expect("attention");
+    let seq = 5;
+    let input = Tensor::randn(&[seq, cfg.hidden_size]).expect("input");
+    let out = attn.forward(input).expect("forward");
+    // Real GQA causal attention preserves [seq, hidden] and stays numerically sane
+    // (the old code returned q·scale with no Q·Kᵀ/softmax/·V).
+    assert_eq!(out.shape(), vec![seq, cfg.hidden_size]);
+    let data = out.data().expect("data");
+    assert!(
+        data.iter().all(|v| v.is_finite()),
+        "attention produced non-finite values"
+    );
+}
+
 // ── Config preset tests ───────────────────────────────────────────────────────
 
 #[test]

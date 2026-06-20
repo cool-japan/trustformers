@@ -242,36 +242,179 @@ export class AudioPipeline {
    * @param {Float32Array} samples - Input samples
    * @param {number} nFFT - FFT size
    * @param {number} hopLength - Hop length
-   * @returns {Array<Float32Array>}
+   * @returns {Array<Float32Array>} Power spectrum frames, shape [n_frames][nFFT/2+1]
    */
   stft(samples, nFFT, hopLength) {
-    // Simplified STFT implementation
-    // TODO: Implement proper STFT with windowing
-    const numFrames = Math.floor((samples.length - nFFT) / hopLength) + 1;
+    // Ensure nFFT is a power of two for radix-2 FFT; zero-pad frame if needed
+    const fftSize = AudioPipeline._nextPow2(nFFT);
+    const numFrames = Math.max(0, Math.floor((samples.length - nFFT) / hopLength) + 1);
+    const numBins = Math.floor(fftSize / 2) + 1;
     const frames = [];
+
+    // Pre-compute Hann window for frame_length = nFFT
+    const window = new Float32Array(nFFT);
+    for (let n = 0; n < nFFT; n++) {
+      window[n] = 0.5 * (1 - Math.cos((2 * Math.PI * n) / (nFFT - 1)));
+    }
+
+    // Reusable FFT buffers (length = fftSize, zero-padded if fftSize > nFFT)
+    const re = new Float64Array(fftSize);
+    const im = new Float64Array(fftSize);
 
     for (let i = 0; i < numFrames; i++) {
       const start = i * hopLength;
-      const frame = samples.subarray(start, start + nFFT);
-      frames.push(frame);
+
+      // Fill real part with windowed samples; imaginary part stays zero
+      for (let n = 0; n < fftSize; n++) {
+        const sampleIdx = start + n;
+        re[n] = (n < nFFT && sampleIdx < samples.length)
+          ? samples[sampleIdx] * window[n]
+          : 0;
+        im[n] = 0;
+      }
+
+      // In-place iterative Cooley-Tukey radix-2 FFT
+      AudioPipeline._fftInPlace(re, im, fftSize);
+
+      // Store one-sided power spectrum |X[k]|^2 for k in [0, fftSize/2]
+      const power = new Float32Array(numBins);
+      for (let k = 0; k < numBins; k++) {
+        power[k] = re[k] * re[k] + im[k] * im[k];
+      }
+      frames.push(power);
     }
 
     return frames;
   }
 
   /**
+   * In-place iterative Cooley-Tukey radix-2 DIT FFT.
+   * Operates on parallel real/imag Float64Arrays of length n (must be power of two).
+   * @param {Float64Array} re - Real part (modified in place)
+   * @param {Float64Array} im - Imaginary part (modified in place)
+   * @param {number} n - Transform size (power of two)
+   */
+  static _fftInPlace(re, im, n) {
+    // Bit-reversal permutation
+    let j = 0;
+    for (let i = 1; i < n; i++) {
+      let bit = n >> 1;
+      while (j & bit) {
+        j ^= bit;
+        bit >>= 1;
+      }
+      j ^= bit;
+      if (i < j) {
+        let tmp = re[i]; re[i] = re[j]; re[j] = tmp;
+        tmp = im[i]; im[i] = im[j]; im[j] = tmp;
+      }
+    }
+
+    // Butterfly stages
+    for (let len = 2; len <= n; len <<= 1) {
+      const halfLen = len >> 1;
+      const ang = -2 * Math.PI / len;
+      const wRe = Math.cos(ang);
+      const wIm = Math.sin(ang);
+
+      for (let i = 0; i < n; i += len) {
+        let curRe = 1;
+        let curIm = 0;
+        for (let k = 0; k < halfLen; k++) {
+          const uRe = re[i + k];
+          const uIm = im[i + k];
+          const vRe = re[i + k + halfLen] * curRe - im[i + k + halfLen] * curIm;
+          const vIm = re[i + k + halfLen] * curIm + im[i + k + halfLen] * curRe;
+          re[i + k]           = uRe + vRe;
+          im[i + k]           = uIm + vIm;
+          re[i + k + halfLen] = uRe - vRe;
+          im[i + k + halfLen] = uIm - vIm;
+          const nextRe = curRe * wRe - curIm * wIm;
+          curIm        = curRe * wIm + curIm * wRe;
+          curRe        = nextRe;
+        }
+      }
+    }
+  }
+
+  /**
+   * Return the smallest power of two >= n.
+   * @param {number} n
+   * @returns {number}
+   */
+  static _nextPow2(n) {
+    if (n <= 1) return 1;
+    let p = 1;
+    while (p < n) p <<= 1;
+    return p;
+  }
+
+  /**
    * Apply mel filterbank
-   * @param {Array<Float32Array>} stft - STFT frames
+   * @param {Array<Float32Array>} stft - STFT power spectrum frames [n_frames][numBins]
    * @param {number} sampleRate - Sample rate
    * @param {number} nMels - Number of mel bins
    * @param {number} fMin - Minimum frequency
    * @param {number} fMax - Maximum frequency
-   * @returns {Float32Array}
+   * @returns {Float32Array} Flat mel spectrogram, length = n_frames * nMels (row-major)
    */
   melFilterbank(stft, sampleRate, nMels, fMin, fMax) {
-    // Simplified mel filterbank
-    // TODO: Implement proper mel filterbank
-    return new Float32Array(nMels * stft.length);
+    const nFrames = stft.length;
+    if (nFrames === 0) return new Float32Array(0);
+
+    // Number of FFT bins in the one-sided spectrum
+    const numBins = stft[0].length; // nFFT/2+1
+
+    // Mel-scale helpers
+    const hzToMel = (hz) => 2595 * Math.log10(1 + hz / 700);
+    const melToHz = (mel) => 700 * (Math.pow(10, mel / 2595) - 1);
+
+    // Compute nMels+2 center frequencies evenly spaced in mel between fMin and fMax
+    const melMin = hzToMel(fMin);
+    const melMax = hzToMel(fMax);
+    const melPoints = new Float64Array(nMels + 2);
+    for (let m = 0; m <= nMels + 1; m++) {
+      melPoints[m] = melMin + (m / (nMels + 1)) * (melMax - melMin);
+    }
+
+    // Convert center mel points to nearest FFT bin indices
+    // Each bin k corresponds to frequency k * sampleRate / (2*(numBins-1))
+    const freqPerBin = sampleRate / (2 * (numBins - 1));
+    const binCenters = new Float64Array(nMels + 2);
+    for (let m = 0; m <= nMels + 1; m++) {
+      binCenters[m] = melToHz(melPoints[m]) / freqPerBin;
+    }
+
+    // Build triangular filters and apply to each frame
+    const result = new Float32Array(nFrames * nMels);
+
+    for (let frameIdx = 0; frameIdx < nFrames; frameIdx++) {
+      const powerFrame = stft[frameIdx];
+      for (let m = 0; m < nMels; m++) {
+        const left   = binCenters[m];       // left edge bin
+        const center = binCenters[m + 1];   // peak bin
+        const right  = binCenters[m + 2];   // right edge bin
+
+        let energy = 0;
+        // Iterate over FFT bins that could have non-zero weight
+        const binStart = Math.max(0, Math.ceil(left));
+        const binEnd   = Math.min(numBins - 1, Math.floor(right));
+
+        for (let k = binStart; k <= binEnd; k++) {
+          let weight = 0;
+          if (k <= center) {
+            weight = (center - left) > 0 ? (k - left) / (center - left) : 0;
+          } else {
+            weight = (right - center) > 0 ? (right - k) / (right - center) : 0;
+          }
+          energy += weight * powerFrame[k];
+        }
+
+        result[frameIdx * nMels + m] = energy;
+      }
+    }
+
+    return result;
   }
 
   /**
@@ -589,21 +732,50 @@ export class AudioFeatureExtractionPipeline extends AudioPipeline {
    * Extract MFCC features
    * @param {Float32Array} samples - Input samples
    * @param {Object} [options] - Extraction options
-   * @returns {Float32Array}
+   * @returns {Float32Array} Flat MFCC array, shape [n_frames * nMFCC]
    */
   extractMFCC(samples, options = {}) {
     const {
       nMFCC = 13,
       nFFT = 400,
-      hopLength = 160
+      hopLength = 160,
+      nMels = 80,
+      fMin = 0,
+      fMax = 8000
     } = options;
 
-    // Compute mel spectrogram
-    const melSpec = this.extractMelSpectrogram(samples, { nFFT, hopLength });
+    // Compute power mel spectrogram (returns flat Float32Array: n_frames * nMels)
+    const stftFrames = this.stft(samples, nFFT, hopLength);
+    const nFrames = stftFrames.length;
+    const melFlat = this.melFilterbank(stftFrames, this.config.sampleRate, nMels, fMin, fMax);
 
-    // Apply DCT to get MFCCs
-    // TODO: Implement proper DCT
-    return new Float32Array(nMFCC * 100); // Mock MFCC
+    if (nFrames === 0) return new Float32Array(0);
+
+    // Apply log compression per mel bin value (avoid log(0))
+    const logMel = new Float32Array(melFlat.length);
+    for (let i = 0; i < melFlat.length; i++) {
+      logMel[i] = Math.log(Math.max(melFlat[i], 1e-10));
+    }
+
+    // Apply DCT-II to each frame's nMels log-mel vector, keep first nMFCC coefficients
+    // Formula: X[k] = sum_{n=0}^{N-1} x[n] * cos(pi * k * (n + 0.5) / N)
+    // Orthonormal scale: multiply X[0] by 1/sqrt(2), then all by sqrt(2/N)
+    const mfccs = new Float32Array(nFrames * nMFCC);
+    const N = nMels;
+    const scale = Math.sqrt(2 / N);
+
+    for (let f = 0; f < nFrames; f++) {
+      for (let k = 0; k < nMFCC; k++) {
+        let sum = 0;
+        for (let n = 0; n < N; n++) {
+          sum += logMel[f * N + n] * Math.cos(Math.PI * k * (n + 0.5) / N);
+        }
+        // Orthonormal form: zeroth coefficient scaled by 1/sqrt(2) * scale
+        mfccs[f * nMFCC + k] = (k === 0 ? sum * (scale / Math.SQRT2) : sum * scale);
+      }
+    }
+
+    return mfccs;
   }
 }
 

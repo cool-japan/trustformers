@@ -38,10 +38,16 @@ use tokio::{sync::Mutex as TokioMutex, task::JoinHandle};
 /// - Thread-safe concurrent operations
 ///
 /// # Example
-/// ```rust
+/// ```rust,no_run
+/// use trustformers_serve::performance_optimizer::test_characterization::PatternRecognitionConfig;
+///
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use trustformers_serve::performance_optimizer::test_characterization::pattern_engine::TestPatternRecognitionEngine;
 /// let config = PatternRecognitionConfig::default();
 /// let engine = TestPatternRecognitionEngine::new(config).await?;
-/// let patterns = engine.recognize_patterns(&test_data).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug)]
 pub struct TestPatternRecognitionEngine {

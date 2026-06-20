@@ -809,11 +809,18 @@ impl MlxEngine {
         Ok(vec![result_tensor])
     }
 
-    /// Execute batch normalization (simplified implementation)
+    /// Execute batch normalization.
+    ///
+    /// Computes `y = (x - mean) / sqrt(var + eps) * gamma + beta`, where the mean
+    /// and variance are gathered per feature across the batch dimension (the
+    /// defining behaviour of batch normalization, as opposed to layer norm which
+    /// normalizes per sample across features). The input is treated as a
+    /// `[batch, features]` matrix where `features` is the size of the last
+    /// dimension; the remaining leading dimensions are flattened into the batch.
     fn execute_batch_norm(
         &self,
         inputs: &[Tensor],
-        _parameters: &HashMap<String, f32>,
+        parameters: &HashMap<String, f32>,
     ) -> Result<Vec<Tensor>> {
         if inputs.is_empty() {
             return Err(TrustformersError::runtime_error(
@@ -822,8 +829,51 @@ impl MlxEngine {
             .into());
         }
 
-        // Simplified: return input (real implementation would normalize)
-        Ok(vec![inputs[0].clone()])
+        let input = &inputs[0];
+        let epsilon = parameters.get("epsilon").copied().unwrap_or(1e-5);
+        let gamma = parameters.get("gamma").copied().unwrap_or(1.0);
+        let beta = parameters.get("beta").copied().unwrap_or(0.0);
+        let input_data = input.data()?;
+        let shape = input.shape();
+
+        if shape.is_empty() {
+            return Err(TrustformersError::runtime_error(
+                "BatchNorm requires at least 1D input".to_string(),
+            )
+            .into());
+        }
+
+        let num_features = shape[shape.len() - 1];
+        if num_features == 0 {
+            return Ok(vec![input.clone()]);
+        }
+        let batch_size = input_data.len() / num_features;
+        let mut result = vec![0.0f32; input_data.len()];
+
+        // Per-feature statistics across the batch dimension.
+        for feature in 0..num_features {
+            let mut mean = 0.0f32;
+            for batch in 0..batch_size {
+                mean += input_data[batch * num_features + feature];
+            }
+            mean /= batch_size as f32;
+
+            let mut variance = 0.0f32;
+            for batch in 0..batch_size {
+                let diff = input_data[batch * num_features + feature] - mean;
+                variance += diff * diff;
+            }
+            variance /= batch_size as f32;
+
+            let inv_std = 1.0 / (variance + epsilon).sqrt();
+            for batch in 0..batch_size {
+                let idx = batch * num_features + feature;
+                result[idx] = (input_data[idx] - mean) * inv_std * gamma + beta;
+            }
+        }
+
+        let result_tensor = Tensor::from_vec(result, &shape)?;
+        Ok(vec![result_tensor])
     }
 
     /// Execute activation function (simplified implementation)
@@ -869,7 +919,13 @@ impl MlxEngine {
         Ok(vec![result_tensor])
     }
 
-    /// Execute embedding lookup (simplified implementation)
+    /// Execute embedding lookup.
+    ///
+    /// Gathers rows from the embedding table for each input token id. The first
+    /// input holds the integer token ids (any shape), the second input is the
+    /// `[vocab_size, embedding_dim]` embedding table. For each id the matching
+    /// row is selected, producing an output of shape `indices_shape +
+    /// [embedding_dim]`.
     fn execute_embedding(
         &self,
         inputs: &[Tensor],
@@ -882,8 +938,41 @@ impl MlxEngine {
             .into());
         }
 
-        // Simplified: return second input (embedding table)
-        Ok(vec![inputs[1].clone()])
+        let indices = &inputs[0];
+        let table = &inputs[1];
+        let table_shape = table.shape();
+        if table_shape.len() != 2 {
+            return Err(TrustformersError::runtime_error(
+                "Embedding table must be a 2D [vocab_size, embedding_dim] tensor".to_string(),
+            )
+            .into());
+        }
+
+        let vocab_size = table_shape[0];
+        let embedding_dim = table_shape[1];
+        let table_data = table.data()?;
+        let index_data = indices.data()?;
+
+        let mut result = vec![0.0f32; index_data.len() * embedding_dim];
+        for (token, &raw_id) in index_data.iter().enumerate() {
+            let id = raw_id.round() as i64;
+            if id < 0 || id as usize >= vocab_size {
+                return Err(TrustformersError::runtime_error(format!(
+                    "Embedding index {} out of bounds for vocabulary size {}",
+                    id, vocab_size
+                ))
+                .into());
+            }
+            let row_start = id as usize * embedding_dim;
+            let dst_start = token * embedding_dim;
+            result[dst_start..dst_start + embedding_dim]
+                .copy_from_slice(&table_data[row_start..row_start + embedding_dim]);
+        }
+
+        let mut output_shape = indices.shape();
+        output_shape.push(embedding_dim);
+        let result_tensor = Tensor::from_vec(result, &output_shape)?;
+        Ok(vec![result_tensor])
     }
 
     /// Execute softmax (simplified implementation)

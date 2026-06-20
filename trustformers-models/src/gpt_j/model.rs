@@ -1,3 +1,4 @@
+use crate::common::ActivationType;
 use crate::gpt_j::config::GptJConfig;
 use scirs2_core::ndarray::{s, ArrayD, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
@@ -99,7 +100,7 @@ pub struct GptJAttention {
 pub struct GptJMLP {
     fc_in: Linear,
     fc_out: Linear,
-    activation: String,
+    activation: ActivationType,
     #[allow(dead_code)]
     dropout: f32,
 }
@@ -339,7 +340,7 @@ impl GptJMLP {
         Ok(Self {
             fc_in: Linear::new(config.n_embd, intermediate_size, true),
             fc_out: Linear::new(intermediate_size, config.n_embd, true),
-            activation: config.activation_function.clone(),
+            activation: ActivationType::try_from(config.activation_function.as_str())?,
             dropout: config.resid_pdrop,
         })
     }
@@ -350,7 +351,7 @@ impl GptJMLP {
         Ok(Self {
             fc_in: Linear::new_with_device(config.n_embd, intermediate_size, true, device),
             fc_out: Linear::new_with_device(intermediate_size, config.n_embd, true, device),
-            activation: config.activation_function.clone(),
+            activation: ActivationType::try_from(config.activation_function.as_str())?,
             dropout: config.resid_pdrop,
         })
     }
@@ -377,15 +378,7 @@ impl GptJMLP {
         let hidden_states = self.fc_in.forward(hidden_states)?;
 
         // Apply activation function
-        let hidden_states = match self.activation.as_str() {
-            "gelu" | "gelu_new" => trustformers_core::ops::activations::gelu(&hidden_states)?,
-            "relu" => trustformers_core::ops::activations::relu(&hidden_states)?,
-            _ => {
-                return Err(trustformers_core::errors::TrustformersError::model_error(
-                    format!("Unsupported activation function: {}", self.activation),
-                ));
-            },
-        };
+        let hidden_states = self.activation.apply(&hidden_states)?;
 
         self.fc_out.forward(hidden_states)
     }

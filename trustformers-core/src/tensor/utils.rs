@@ -731,6 +731,29 @@ impl Tensor {
         }
     }
 
+    /// Normalised Shannon entropy of the softmax distribution over the tensor values.
+    ///
+    /// Values are mapped to a probability distribution with a numerically-stable softmax,
+    /// then `H = -∑ p·ln(p)` is divided by `ln(n)` so the result lands in `[0, 1]`
+    /// (≈0 when one value dominates, ≈1 when the values are uniform). Useful as an
+    /// uncertainty signal for adaptive / early-exit computation.
+    pub fn softmax_entropy_normalized(&self) -> Result<f32> {
+        let values = self.to_vec_f32()?;
+        let n = values.len();
+        if n <= 1 {
+            return Ok(0.0);
+        }
+        let max = values.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let exps: Vec<f32> = values.iter().map(|&v| (v - max).exp()).collect();
+        let sum: f32 = exps.iter().sum();
+        if sum <= 0.0 {
+            return Ok(0.0);
+        }
+        let entropy: f32 =
+            exps.iter().map(|&e| e / sum).filter(|&p| p > 1e-10).map(|p| -p * p.ln()).sum();
+        Ok((entropy / (n as f32).ln()).clamp(0.0, 1.0))
+    }
+
     /// Get tensor data as F32 vector (alias for data() method).
     ///
     /// # Returns
@@ -1333,5 +1356,33 @@ mod tests {
 
         disable_grad();
         assert!(!is_grad_enabled());
+    }
+
+    #[test]
+    fn test_softmax_entropy_normalized_bounds() {
+        // Uniform values → maximal (≈1.0) normalised entropy.
+        let uniform =
+            Tensor::from_vec(vec![1.0, 1.0, 1.0, 1.0], &[4]).expect("failed to build tensor");
+        let h_uniform = uniform.softmax_entropy_normalized().expect("entropy failed");
+        assert!(
+            h_uniform > 0.99,
+            "uniform entropy should be ~1.0, got {h_uniform}"
+        );
+
+        // One value dominates → near-zero normalised entropy.
+        let peaked =
+            Tensor::from_vec(vec![20.0, 0.0, 0.0, 0.0], &[4]).expect("failed to build tensor");
+        let h_peaked = peaked.softmax_entropy_normalized().expect("entropy failed");
+        assert!(
+            (0.0..0.2).contains(&h_peaked),
+            "peaked entropy should be small, got {h_peaked}"
+        );
+
+        // Single element → defined as 0.
+        let single = Tensor::from_vec(vec![5.0], &[1]).expect("failed to build tensor");
+        assert_eq!(
+            single.softmax_entropy_normalized().expect("entropy failed"),
+            0.0
+        );
     }
 }

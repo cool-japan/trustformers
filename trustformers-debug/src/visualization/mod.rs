@@ -204,7 +204,15 @@ impl TerminalVisualizer {
     pub fn display_histogram(&self, data: &HistogramData) -> Result<()> {
         println!("Terminal Histogram: {}", data.title);
         println!("Data points: {}", data.values.len());
-        // Placeholder for actual terminal histogram
+        if data.values.is_empty() {
+            return Ok(());
+        }
+        let bins = if data.bins == 0 { 10 } else { data.bins };
+        let rendered = self.ascii_histogram(&data.values, bins);
+        if !data.x_label.is_empty() || !data.y_label.is_empty() {
+            println!("{} vs {}", data.y_label, data.x_label);
+        }
+        print!("{}", rendered);
         Ok(())
     }
 
@@ -312,5 +320,53 @@ impl TerminalVisualizer {
 impl Default for TerminalVisualizer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_display_histogram_empty_returns_ok() {
+        let viz = TerminalVisualizer::new();
+        let data = HistogramData {
+            values: vec![],
+            bins: 10,
+            title: "empty".to_string(),
+            x_label: String::new(),
+            y_label: String::new(),
+            density: false,
+        };
+        assert!(viz.display_histogram(&data).is_ok());
+    }
+
+    #[test]
+    fn test_display_histogram_with_values_returns_ok() {
+        let viz = TerminalVisualizer::new();
+        let data = HistogramData {
+            values: (0..50).map(|i| i as f64).collect(),
+            bins: 5,
+            title: "ramp".to_string(),
+            x_label: "value".to_string(),
+            y_label: "count".to_string(),
+            density: false,
+        };
+        assert!(viz.display_histogram(&data).is_ok());
+    }
+
+    #[test]
+    fn test_display_histogram_zero_bins_falls_back_to_default() {
+        let viz = TerminalVisualizer::new();
+        let data = HistogramData {
+            values: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            bins: 0,
+            title: "fallback".to_string(),
+            x_label: String::new(),
+            y_label: String::new(),
+            density: false,
+        };
+        // Should not panic with zero bins.
+        assert!(viz.display_histogram(&data).is_ok());
     }
 }

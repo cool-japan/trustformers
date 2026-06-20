@@ -138,11 +138,12 @@ impl GpuMonitoringSystem {
     /// #[tokio::main]
     /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ///     let config = GpuMonitoringConfig {
-    ///         enable_realtime: true,
+    ///         real_time_monitoring: true,
     ///         monitoring_interval: Duration::from_secs(5),
     ///         enable_performance_tracking: true,
     ///         enable_alerts: true,
     ///         alert_config: GpuAlertConfig::default(),
+    ///         ..Default::default()
     ///     };
     ///
     ///     let monitoring_system = GpuMonitoringSystem::new(config).await?;
