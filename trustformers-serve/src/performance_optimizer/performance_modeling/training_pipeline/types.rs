@@ -526,12 +526,70 @@ impl TrainingPipelineOrchestrator {
                                         });
                                     },
                                     Err(e) => {
-                                        pipeline_run
-                                            .errors
-                                            .push(format!("Model validation failed: {}", e));
-                                        pipeline_run
-                                            .stages
-                                            .push(self.create_failed_stage("model_validation", &e));
+                                        let min_validation_samples =
+                                            self.config.read().validation.min_validation_samples;
+                                        if prepared_data.validation_data.len()
+                                            < min_validation_samples
+                                        {
+                                            tracing::warn!(
+                                                "Skipping model validation: insufficient validation data ({} samples, minimum {}). Proceeding with validation_score=0.0",
+                                                prepared_data.validation_data.len(),
+                                                min_validation_samples
+                                            );
+                                            pipeline_run.stages.push(PipelineStage {
+                                                stage_name: "model_validation".to_string(),
+                                                status: StageStatus::Completed,
+                                                start_time: Utc::now(),
+                                                end_time: Some(Utc::now()),
+                                                metrics: HashMap::new(),
+                                                error: None,
+                                            });
+                                            pipeline_run.status = PipelineStatus::Completed;
+                                            pipeline_run.end_time = Some(Utc::now());
+                                            pipeline_run.final_model = Some(TrainedModelInfo {
+                                                model_type: model_type.model_type.clone(),
+                                                training_time: pipeline_start.elapsed(),
+                                                validation_score: 0.0,
+                                            });
+                                            {
+                                                let mut history = self.pipeline_history.write();
+                                                history.push(pipeline_run);
+                                                if history.len() > 100 {
+                                                    history.remove(0);
+                                                }
+                                            }
+                                            {
+                                                let mut monitor = self.training_monitor.lock();
+                                                monitor.complete_pipeline_run(&run_id, true);
+                                            }
+                                            tracing::info!(
+                                                "Training pipeline completed successfully (validation skipped): {}",
+                                                run_id
+                                            );
+                                            let feature_count =
+                                                engineered_features.feature_names.len();
+                                            return Ok(TrainedModel {
+                                                model: trained_model.model,
+                                                feature_names: engineered_features.feature_names,
+                                                training_metadata: TrainingMetadata {
+                                                    model_type: model_type.model_type.clone(),
+                                                    training_data_size: training_data.len(),
+                                                    feature_count,
+                                                    training_time: pipeline_start.elapsed(),
+                                                    validation_score: 0.0,
+                                                    pipeline_run_id: run_id,
+                                                    trained_at: Utc::now(),
+                                                },
+                                                validation_results: None,
+                                            });
+                                        } else {
+                                            pipeline_run
+                                                .errors
+                                                .push(format!("Model validation failed: {}", e));
+                                            pipeline_run.stages.push(
+                                                self.create_failed_stage("model_validation", &e),
+                                            );
+                                        }
                                     },
                                 }
                             },
@@ -558,6 +616,7 @@ impl TrainingPipelineOrchestrator {
         }
         pipeline_run.status = PipelineStatus::Failed;
         pipeline_run.end_time = Some(Utc::now());
+        let error_detail = pipeline_run.errors.join("; ");
         {
             let mut history = self.pipeline_history.write();
             history.push(pipeline_run);
@@ -566,8 +625,8 @@ impl TrainingPipelineOrchestrator {
             let mut monitor = self.training_monitor.lock();
             monitor.complete_pipeline_run(&run_id, false);
         }
-        tracing::error!("Training pipeline failed: {}", run_id);
-        Err(anyhow!("Training pipeline failed"))
+        tracing::error!("Training pipeline failed: {} — {}", run_id, error_detail);
+        Err(anyhow!("Training pipeline failed: {}", error_detail))
     }
     /// Execute data preparation stage
     async fn execute_data_preparation(

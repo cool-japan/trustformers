@@ -33,7 +33,7 @@ enum Commands {
         duration: u64,
 
         /// Number of concurrent users
-        #[arg(short, long, default_value = "10")]
+        #[arg(short = 'n', long, default_value = "10")]
         concurrent_users: usize,
 
         /// Requests per second (rate limiting)

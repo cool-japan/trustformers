@@ -1,12 +1,12 @@
 # TrustformeRS 🦀
 
 [![Rust](https://img.shields.io/badge/rust-%23000000.svg?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.1.2-blue.svg)](https://github.com/cool-japan/trustformers)
+[![Version](https://img.shields.io/badge/version-0.1.3-blue.svg)](https://github.com/cool-japan/trustformers)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
 A high-performance, memory-safe Rust implementation of Hugging Face Transformers. TrustformeRS brings the power of transformer models to the Rust ecosystem with zero-cost abstractions, fearless concurrency, and deployment flexibility from edge to cloud.
 
-> **Project Status (alpha)**: TrustformeRS 0.1.2 (released 2026-06-20) is a large Pure-Rust transformer stack — ~1.4M lines across 10 crates and 49+ transformer architectures — together with multi-platform packaging (WebAssembly, server REST/gRPC/GraphQL, mobile iOS/Android, and RLHF/DPO training scaffolding).
+> **Project Status (alpha)**: TrustformeRS 0.1.3 (in development) is a large Pure-Rust transformer stack — ~1.4M lines across 10 crates and 49+ transformer architectures — together with multi-platform packaging (WebAssembly, server REST/gRPC/GraphQL, mobile iOS/Android, and RLHF/DPO training scaffolding).
 >
 > **Honest maturity note**: today's compute path is primarily **CPU and `f32`**. F16/BF16 are supported as a storage/serialization format but are upcast to `f32` for arithmetic (native low-precision kernels are on the roadmap). GPU acceleration is **real** (CUDA via `cudarc`, Metal via `objc2`/MPS, WebGPU via `wgpu`) but is currently wired end-to-end **only for GPT-2 and RetNet**; the remaining backends (ROCm, Vulkan, OpenCL) are feature-gated and experimental, and **TPU is a placeholder, not implemented**. Several newer architectures are still being completed. See [Development Status](#-development-status) for the precise maturity of each area.
 
@@ -65,7 +65,7 @@ trustformers/
 
 ```toml
 [dependencies]
-trustformers = "0.1.2"
+trustformers = "0.1.3"
 ```
 
 ### Basic Usage
@@ -321,6 +321,15 @@ let outputs = model.forward(&inputs)?;
 
 ## 🎯 Development Status
 
+### Completed Features (v0.1.3 - 2026-06-24)
+- [x] **Gorilla time-series compression + historical-data engine** (trustformers-serve): delta-of-delta timestamp encoding plus XOR float encoding for metric series, with a real lifecycle/archival/query engine (expiry cleanup, archive/retrieve, cached query execution) replacing prior stubs
+- [x] **Real concurrency-detector analytics** (trustformers-serve): working cycle/deadlock, thread, lock, and conflict detection with pattern, sharing, and risk-assessment scoring across all eight detector modules
+- [x] **Interpretability tools wired in** (trustformers-debug): real SHAP, LIME, and Integrated-Gradients feature attribution exposed as `InterpretabilityAnalyzer` / `InterpretabilityConfig` / `InterpretabilityReport`
+- [x] **`GlobalMemoryPool` / `ZeroCopyTensorView` / `GlobalProfiler`** (trustformers): a thread-safe aligned allocator, a bounds-checked borrowed `f32` tensor view, and a per-session profiler operation API, all re-exported from the crate root
+- [x] **Real `.xlsx` export** (trustformers-debug): emits a valid OOXML workbook package via `oxiarc-archive` (Pure Rust), replacing the previous CSV-with-`.xlsx`-extension placeholder
+- [x] **Real SHA-256 on the HuggingFace upload path** (via `sha2`), replacing a non-cryptographic XOR-fold stub
+- [x] **Reliability fixes**: clap `-c` short-flag collisions that panicked the `load_test` / `message_queue_cli` binaries are fixed; Miri-verified memory-pool fixes for heap mis-layout deallocation (undefined behavior) and a block-reuse leak
+
 ### Completed Features (v0.1.2 - 2026-06-20)
 - [x] **49+ transformer architectures** for CPU inference (BERT, RoBERTa, ALBERT, DistilBERT, ELECTRA, DeBERTa, GPT-2, GPT-Neo, GPT-J, GPT-NeoX, LLaMA, Mistral, Gemma, Qwen, Phi-3, Falcon, StableLM, T5, ViT, CLIP, BLIP-2, LLaVA, DALL-E, Flamingo, Mamba, RWKV, S4, Falcon2, Gemma2, Granite, Hyena, InternLM2, Jamba, Jamba2, Linformer, LLaMA3.2, Mamba2, Nemotron, Performer, Phi4, Qwen2.5, RetNet, SD3, StarCoder2, Whisper, xLSTM, Yi). Maturity varies — the BERT/GPT-2/LLaMA/T5/ViT families are the most exercised; several newer or experimental architectures are alpha-quality and still being completed for full numerical parity with the reference implementations.
 - [x] **All major NLP pipelines** fully implemented (text-generation, classification, QA, NER, fill-mask, summarization, translation)
@@ -332,7 +341,7 @@ let outputs = model.forward(&inputs)?;
 - [x] **Advanced optimizations**: FlashAttention, PagedAttention, quantization (INT8/INT4/GPTQ/AWQ)
 - [x] **GPU backends**: CUDA (`cudarc`) and Metal (MPS) wired into GPT-2/RetNet forward paths; WebGPU/Vulkan/OpenCL/ROCm present as feature-gated backends (experimental, not yet wired into model `forward`)
 - [x] **AutoModel/AutoTokenizer** system with HuggingFace Hub integration
-- [x] **Large test suite**: 23,000+ `#[test]`/`#[tokio::test]` functions across the workspace (run locally with `cargo nextest run --all-features`; a Rust CI gate is being restored — see roadmap)
+- [x] **Large test suite**: **18,008 tests pass** via `cargo nextest run --all-features` (119 skipped) across the full workspace, verified locally on 2026-06-24
 - [x] **Debugging tools**: Profilers, visualizers, interactive debugging, TensorBoard integration
 - [x] **100% Pure Rust** (COOLJAPAN Policy) - ~1,408,134 SLoC across 10 crates
 

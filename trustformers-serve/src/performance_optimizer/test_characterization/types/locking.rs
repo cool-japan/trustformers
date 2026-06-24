@@ -1116,8 +1116,6 @@ impl LockDependencyGraph {
             self.add_lock(held_lock.clone());
             self.edges.entry(held_lock).or_default().push(lock_id.clone());
         }
-
-        // TODO: Update cycle detection
     }
 
     /// Record a lock release

@@ -140,9 +140,9 @@ pub struct MambaBlock {
     dt_proj: Vec<Vec<f64>>,
     /// Projects inner_dim → hidden_size
     out_proj: Vec<Vec<f64>>,
-    /// Log of negative A eigenvalues: [inner_dim]
+    /// Log of negative A eigenvalues: `[inner_dim]`
     a_log: Vec<f64>,
-    /// D skip-connection coefficient: [inner_dim]
+    /// D skip-connection coefficient: `[inner_dim]`
     d_param: Vec<f64>,
     /// Pre-normalization
     norm: Jamba2RmsNorm,

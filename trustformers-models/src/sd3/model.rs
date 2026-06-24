@@ -1,11 +1,11 @@
 //! Stable Diffusion 3 text encoder pipeline.
 //!
 //! SD3 conditions the diffusion model on text via three encoders:
-//!   - CLIP-L  (hidden=768, layers=12): produces 77-token embeddings + pooled [EOS] vector
-//!   - CLIP-G  (hidden=1280, layers=32): produces 77-token embeddings + pooled [EOS] vector
+//!   - CLIP-L  (hidden=768, layers=12): produces 77-token embeddings + pooled `[EOS]` vector
+//!   - CLIP-G  (hidden=1280, layers=32): produces 77-token embeddings + pooled `[EOS]` vector
 //!   - T5-XXL  (hidden=4096, layers=24): produces 256-token embeddings for cross-attention
 //!
-//! The pooled conditioning vector is `concat(clip_l_eos, clip_g_eos)` → [2048].
+//! The pooled conditioning vector is `concat(clip_l_eos, clip_g_eos)` → `[2048]`.
 //! The cross-attention conditioning is the full T5 encoder output → [256, 4096].
 //!
 //! Reference: "Scaling Rectified Flow Transformers for High-Resolution Image Synthesis"

@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Copyright 2025-2026 COOLJAPAN OU (Team KitaSan)
 
+## [0.1.3] - 2026-06-24
+
+### Added
+- Gorilla-style time-series compression in `trustformers-serve` historical data (`CompressionEngine::compress_series`): delta-of-delta timestamp encoding plus XOR float encoding with leading/trailing zero-bit counts, replacing a `TODO` stub; adds `optimize_compression`
+- Historical-data lifecycle, archival, and query engine in `trustformers-serve`: real `cleanup_expired_data`, `evaluate_lifecycle`, and `check_deletion_allowed` (LifecycleManager); `archive_data`/`retrieve_data` (ArchivalSystem, previously `TODO: Implement actual archival logic`); and `execute_query`/`check_cache`/`cache_result` (query engine) — all converted from parameter-ignoring stubs to working implementations
+- Concurrency-detector analytics in `trustformers-serve` (`performance_optimizer::test_characterization::concurrency_detector`): real cycle/deadlock, thread, lock, and conflict detection plus pattern, sharing, and risk-assessment analytics across the eight detector modules (lock-cycle extraction, detection-confidence and risk scoring); clears dozens of type-mismatch `TODO` stubs in `detector.rs`
+- Interpretability tools wired in (`trustformers-debug`): real SHAP, LIME, and Integrated-Gradients feature attribution via a new `interpretability` module, exposed as `InterpretabilityAnalyzer`, `InterpretabilityConfig`, and `InterpretabilityReport` (replaces previous placeholder unit-struct stubs)
+- `ZeroCopyTensorView<'a>` in `trustformers`: a bounds-checked, sub-viewable borrowed `f32` tensor view (`from_slice`, `subview`, stride computation), re-exported from the crate root
+- `GlobalMemoryPool` in `trustformers`: a thread-safe aligned allocator (`allocate`, `allocate_aligned`, `unsafe deallocate`) with layout-tracked, leak-free deallocation, re-exported from the crate root
+- `GlobalProfiler` operation API in `trustformers`: `Profiler::instance()` plus per-session `start_operation`/`end_operation`, with `GlobalProfiler` re-exported from the crate root
+- Real `.xlsx` export in `trustformers-debug` data export: emits a valid Office Open XML (OOXML) workbook package (`[Content_Types].xml`, relationships, workbook, worksheet) via `oxiarc-archive` (Pure Rust), replacing the previous CSV-with-`.xlsx`-extension placeholder
+
+### Changed
+- `PerformanceModelingEngine` now stores each trained model in `active_models` (pushing an `Arc<dyn PerformancePredictor>` on every `train`) instead of discarding it after training
+- Resource statistics now compute real active-resource and peak-usage figures from per-subsystem snapshot stats (port, directory, GPU, database) instead of hardcoded `0`/snapshot-count placeholders
+- Consolidated several crate dependencies to `workspace = true` for single-source version management: `async-trait`, `log`, `tower`, and `tower-http` (`trustformers`); `rmp-serde` (`trustformers-serve`); `libc` (`trustformers-mobile`); and `memmap2` (`trustformers-tokenizers`)
+
+### Fixed
+- HuggingFace upload now computes a real SHA-256 digest (via `sha2`) for content addressing; the previous `sha256_stub` was a non-cryptographic 128-hex XOR-fold, not SHA-256 (output is now 64 hex chars, covered by known-answer test vectors)
+- Heap mis-layout deallocation (undefined behavior) and a memory leak in the zero-copy / memory pools: reused blocks now record and free their *actual* allocation layout instead of the smaller requested size (freeing with a mismatched layout is UB), and each `MemoryBlock` releases its backing allocation exactly once through its own `Drop` (regression test added for larger-block reuse)
+- clap `-c` short-flag collisions that panicked the `load_test` and `message_queue_cli` binaries on startup: the colliding arguments now pin an explicit `short = 'n'`
+- Replaced a flaky wall-clock assertion in the async-operations benchmark (`per_operation < 100µs`, which failed under parallel test execution due to scheduler contention) with a deterministic liveness check (every yielded task resumes; elapsed time is positive)
+
 ## [0.1.2] - 2026-06-20
 
 ### Added
@@ -140,6 +163,7 @@ Copyright 2025-2026 COOLJAPAN OU (Team KitaSan)
 
 ---
 
+[0.1.3]: https://github.com/cool-japan/trustformers/releases/tag/v0.1.3
 [0.1.2]: https://github.com/cool-japan/trustformers/releases/tag/v0.1.2
 [0.1.1]: https://github.com/cool-japan/trustformers/releases/tag/v0.1.1
 [0.1.0]: https://github.com/cool-japan/trustformers/releases/tag/0.1.0

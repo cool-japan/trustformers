@@ -204,10 +204,9 @@ impl PerformanceModelingManager {
             ));
         }
 
-        // TODO: Add trained model to active_models - requires refactoring to use Arc instead of Box
-        // For now, return a default model
-        // This is a temporary placeholder to fix compilation
-        Ok(Arc::new(trained_model))
+        let model: Arc<dyn PerformancePredictor> = Arc::new(trained_model);
+        self.active_models.write().await.push(Arc::clone(&model));
+        Ok(model)
     }
 
     /// Makes a performance prediction using the best available model.
@@ -362,5 +361,57 @@ impl PerformanceModelingManager {
         }
 
         Ok(models)
+    }
+}
+
+#[cfg(test)]
+mod tests_train_model_fix {
+    use super::*;
+    use crate::performance_optimizer::performance_modeling::types::{
+        ModelConfig, ModelTypeConfig, ValidationConfig,
+    };
+    use crate::performance_optimizer::types::PerformanceDataPoint;
+
+    fn make_config_with_zero_min_accuracy() -> ModelConfig {
+        let mut config = ModelConfig::default();
+        config.validation = ValidationConfig {
+            minimum_accuracy: 0.0,
+            ..ValidationConfig::default()
+        };
+        config
+    }
+
+    #[tokio::test]
+    async fn test_train_model_stores_in_active_models() {
+        let manager = PerformanceModelingManager::with_config(make_config_with_zero_min_accuracy())
+            .await
+            .expect("manager creation failed");
+
+        // Create minimal training data — enough points to satisfy min_validation_samples (default 10)
+        let training_data: Vec<PerformanceDataPoint> = (0..20)
+            .map(|i| PerformanceDataPoint {
+                parallelism: i + 1,
+                throughput: (i as f64) * 10.0 + 1.0,
+                ..PerformanceDataPoint::default()
+            })
+            .collect();
+
+        let model_config = ModelTypeConfig::linear_regression();
+
+        manager
+            .train_model(&training_data, &model_config)
+            .await
+            .expect("first train_model should succeed");
+        manager
+            .train_model(&training_data, &model_config)
+            .await
+            .expect("second train_model should succeed");
+
+        let metrics = manager.get_model_metrics().await.expect("get_model_metrics should work");
+        assert_eq!(
+            metrics.len(),
+            2,
+            "active_models should contain 2 models after two train calls"
+        );
     }
 }

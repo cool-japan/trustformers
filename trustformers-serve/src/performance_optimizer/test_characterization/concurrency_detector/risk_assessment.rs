@@ -41,9 +41,7 @@ impl ConcurrencyRiskAssessment {
         )));
 
         // Initialize mitigation strategies
-        // TODO: PreventiveMitigation::new requires enabled: bool, strategies: Vec<String>
         mitigation_strategies.push(Box::new(PreventiveMitigation::new(true, Vec::new())));
-        // TODO: ReactiveMitigation::new requires enabled: bool, response_time_ms: u64
         mitigation_strategies.push(Box::new(ReactiveMitigation::new(true, 1000)));
         mitigation_strategies.push(Box::new(AdaptiveMitigation::new()));
 
@@ -71,7 +69,6 @@ impl ConcurrencyRiskAssessment {
                 .map(|algorithm| {
                     let algorithm_name = algorithm.name().to_string();
                     let assessment_start = Instant::now();
-                    // TODO: assess_risk takes 0 arguments, removed test_data parameter
                     let result = algorithm.assess_risk();
                     let assessment_duration = assessment_start.elapsed();
                     (algorithm_name, result, assessment_duration)
@@ -84,40 +81,34 @@ impl ConcurrencyRiskAssessment {
         let mut algorithm_results = Vec::new();
 
         for (algorithm_name, risk_score, duration) in assessment_task_results {
+            // Build risk factors derived from the assessed risk score
+            let risk_factors = Self::build_risk_factors_from_score(risk_score, &algorithm_name);
+            let primary_risk_factor = Self::derive_primary_risk_factor(risk_score);
+
+            let risk_level_str = if risk_score > 0.7 {
+                "High"
+            } else if risk_score > 0.4 {
+                "Medium"
+            } else {
+                "Low"
+            };
+
             let assessment = RiskAssessment {
-                risk_level: if risk_score > 0.7 {
-                    "HIGH".to_string()
-                } else if risk_score > 0.4 {
-                    "MEDIUM".to_string()
-                } else {
-                    "LOW".to_string()
-                },
+                risk_level: risk_level_str.to_string(),
                 risk_score,
-                risk_factors: Vec::new(), // TODO: populate from algorithm details
-                primary_risk_factor: "concurrency".to_string(),
+                risk_factors: risk_factors.clone(),
+                primary_risk_factor: primary_risk_factor.clone(),
                 potential_impact: risk_score,
             };
 
-            let risk_assessment_struct = RiskAssessment {
-                risk_level: if risk_score > 0.7 {
-                    "High"
-                } else if risk_score > 0.4 {
-                    "Medium"
-                } else {
-                    "Low"
-                }
-                .to_string(),
-                risk_score,
-                risk_factors: Vec::new(),
-                primary_risk_factor: "Concurrency".to_string(),
-                potential_impact: risk_score,
-            };
+            // Compute confidence from risk score: extreme scores (high/low) are more certain
+            let confidence = Self::compute_risk_assessment_confidence(risk_score);
 
             algorithm_results.push(RiskAlgorithmResult {
                 algorithm: algorithm_name,
-                assessment: risk_assessment_struct.clone(),
+                assessment: assessment.clone(),
                 assessment_duration: duration,
-                confidence: 0.8, // Default confidence for risk assessment
+                confidence,
             });
             risk_assessments.push(assessment);
         }
@@ -262,9 +253,7 @@ impl ConcurrencyRiskAssessment {
 
         for assessment in assessments {
             for strategy in strategies.iter() {
-                // TODO: is_applicable takes 0 arguments, removed assessment parameter
                 if strategy.is_applicable() {
-                    // TODO: generate_mitigation takes 0 arguments, removed assessment parameter
                     let mitigation = strategy.generate_mitigation();
                     recommendations.push(RiskMitigationRecommendation {
                         risk_factor: assessment.primary_risk_factor.clone(),
@@ -350,5 +339,191 @@ impl ConcurrencyRiskAssessment {
         let coefficient_of_variation = if mean > 0.0 { std_dev / mean } else { 1.0 };
 
         (1.0 - coefficient_of_variation.min(1.0)).max(0.1)
+    }
+
+    /// Builds risk factors derived from the assessed risk score and algorithm context
+    pub(crate) fn build_risk_factors_from_score(
+        risk_score: f64,
+        algorithm_name: &str,
+    ) -> Vec<RiskFactor> {
+        let mut factors = Vec::new();
+
+        if risk_score > 0.4 {
+            factors.push(RiskFactor {
+                factor_type: RiskFactorType::LockContention,
+                description: format!(
+                    "{} detected elevated lock contention risk (score: {:.2})",
+                    algorithm_name, risk_score
+                ),
+                weight: 0.35,
+                severity: risk_score,
+                mitigation_options: vec![
+                    "Reduce lock scope".to_string(),
+                    "Use lock-free algorithms".to_string(),
+                    "Partition resources to minimize contention".to_string(),
+                ],
+                detection_difficulty: 0.4,
+                resolution_complexity: 0.6,
+                historical_frequency: risk_score * 0.5,
+                performance_impact: risk_score * 0.7,
+                confidence: 1.0 - (risk_score - 0.5).abs() * 0.4,
+            });
+        }
+
+        if risk_score > 0.6 {
+            factors.push(RiskFactor {
+                factor_type: RiskFactorType::DeadlockPotential,
+                description: format!(
+                    "{} detected potential deadlock conditions (score: {:.2})",
+                    algorithm_name, risk_score
+                ),
+                weight: 0.45,
+                severity: risk_score * 0.8,
+                mitigation_options: vec![
+                    "Enforce lock ordering".to_string(),
+                    "Implement timeout-based lock acquisition".to_string(),
+                    "Use deadlock detection algorithms".to_string(),
+                ],
+                detection_difficulty: 0.7,
+                resolution_complexity: 0.8,
+                historical_frequency: risk_score * 0.3,
+                performance_impact: risk_score * 0.9,
+                confidence: 1.0 - (risk_score - 0.75).abs() * 0.3,
+            });
+        }
+
+        if risk_score > 0.3 {
+            factors.push(RiskFactor {
+                factor_type: RiskFactorType::PerformanceDegradation,
+                description: format!(
+                    "{} detected performance degradation risk under concurrency (score: {:.2})",
+                    algorithm_name, risk_score
+                ),
+                weight: 0.20,
+                severity: risk_score * 0.6,
+                mitigation_options: vec![
+                    "Profile concurrent execution paths".to_string(),
+                    "Optimize critical sections".to_string(),
+                ],
+                detection_difficulty: 0.3,
+                resolution_complexity: 0.5,
+                historical_frequency: risk_score * 0.6,
+                performance_impact: risk_score * 0.5,
+                confidence: 0.7,
+            });
+        }
+
+        // Always include resource exhaustion as a baseline factor
+        factors.push(RiskFactor {
+            factor_type: RiskFactorType::ResourceExhaustion,
+            description: format!(
+                "{} resource exhaustion baseline assessment (score: {:.2})",
+                algorithm_name, risk_score
+            ),
+            weight: 0.10,
+            severity: risk_score * 0.4,
+            mitigation_options: vec![
+                "Monitor resource usage".to_string(),
+                "Implement resource limits".to_string(),
+            ],
+            detection_difficulty: 0.2,
+            resolution_complexity: 0.3,
+            historical_frequency: 0.2,
+            performance_impact: risk_score * 0.3,
+            confidence: 0.8,
+        });
+
+        factors
+    }
+
+    /// Derives the primary risk factor label from risk score
+    pub(crate) fn derive_primary_risk_factor(risk_score: f64) -> String {
+        if risk_score > 0.7 {
+            "DeadlockPotential".to_string()
+        } else if risk_score > 0.4 {
+            "LockContention".to_string()
+        } else {
+            "PerformanceDegradation".to_string()
+        }
+    }
+
+    /// Computes confidence: risk scores near the extremes (very high/low) are more certain
+    pub(crate) fn compute_risk_assessment_confidence(risk_score: f64) -> f64 {
+        // Confidence is highest when risk is clearly low (< 0.2) or clearly high (> 0.8)
+        // Lower confidence in the ambiguous middle range
+        let distance_from_midpoint = (risk_score - 0.5).abs();
+        // Map [0.0, 0.5] to [0.6, 0.95]
+        0.6 + distance_from_midpoint * 0.7
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_risk_factors_from_score_high_risk() {
+        let factors = ConcurrencyRiskAssessment::build_risk_factors_from_score(0.85, "TestAlgo");
+        // High risk score should produce multiple factors including deadlock
+        assert!(
+            factors.len() >= 3,
+            "high risk should produce multiple factors, got {}",
+            factors.len()
+        );
+        let has_deadlock = factors
+            .iter()
+            .any(|f| matches!(f.factor_type, RiskFactorType::DeadlockPotential));
+        assert!(has_deadlock, "high risk should have deadlock factor");
+    }
+
+    #[test]
+    fn test_build_risk_factors_from_score_low_risk() {
+        let factors = ConcurrencyRiskAssessment::build_risk_factors_from_score(0.1, "TestAlgo");
+        // Low risk: only ResourceExhaustion baseline factor
+        assert!(
+            !factors.is_empty(),
+            "should always have at least one factor"
+        );
+        let has_deadlock = factors
+            .iter()
+            .any(|f| matches!(f.factor_type, RiskFactorType::DeadlockPotential));
+        assert!(!has_deadlock, "low risk should NOT have deadlock factor");
+    }
+
+    #[test]
+    fn test_compute_risk_confidence_extremes() {
+        let high_risk_conf = ConcurrencyRiskAssessment::compute_risk_assessment_confidence(0.95);
+        let mid_risk_conf = ConcurrencyRiskAssessment::compute_risk_assessment_confidence(0.5);
+        let low_risk_conf = ConcurrencyRiskAssessment::compute_risk_assessment_confidence(0.05);
+
+        assert!(
+            high_risk_conf > mid_risk_conf,
+            "high risk should be more confident than middle"
+        );
+        assert!(
+            low_risk_conf > mid_risk_conf,
+            "low risk should be more confident than middle"
+        );
+        assert!(
+            high_risk_conf > 0.8,
+            "extreme risk should have high confidence, got {}",
+            high_risk_conf
+        );
+    }
+
+    #[test]
+    fn test_derive_primary_risk_factor() {
+        assert_eq!(
+            ConcurrencyRiskAssessment::derive_primary_risk_factor(0.8),
+            "DeadlockPotential"
+        );
+        assert_eq!(
+            ConcurrencyRiskAssessment::derive_primary_risk_factor(0.5),
+            "LockContention"
+        );
+        assert_eq!(
+            ConcurrencyRiskAssessment::derive_primary_risk_factor(0.2),
+            "PerformanceDegradation"
+        );
     }
 }

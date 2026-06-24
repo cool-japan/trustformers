@@ -85,6 +85,7 @@ pub mod health_checker;
 pub mod hooks;
 pub mod ide_integration;
 pub mod interactive_debugger;
+pub(crate) mod interpretability;
 pub mod interpretability_tools;
 pub mod kernel_optimizer;
 pub mod large_model_viz;
@@ -363,3 +364,8 @@ pub use help::*;
 pub use interface::*;
 pub use performance::*;
 pub use tutorial::*;
+
+// Interpretability types (real implementations from interpretability_tools module)
+pub use interpretability_tools::{
+    InterpretabilityAnalyzer, InterpretabilityConfig, InterpretabilityReport,
+};

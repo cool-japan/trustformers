@@ -946,8 +946,8 @@ cargo doc -p trustformers-core --all-features --no-deps
 
 ---
 
-**Last Updated:** 2026-03-21 - 0.1.0 Stable Release
-**Version:** 0.1.0
+**Last Updated:** 2026-06-24 - v0.1.3 Development
+**Version:** 0.1.3
 **Status:** Stable — production-ready core infrastructure
 **Test Coverage:** 1,140 tests, 100% pass rate, 0 stubs
 **Public API:** 1,596 items

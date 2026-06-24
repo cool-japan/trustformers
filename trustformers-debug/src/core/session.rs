@@ -82,7 +82,7 @@ impl Default for DebugConfig {
             behavior_analysis_config: BehaviorAnalysisConfig::default(),
             training_dynamics_config: TrainingDynamicsConfig::default(),
             differential_debugging_config: DifferentialDebuggingConfig::default(),
-            interpretability_config: InterpretabilityConfig,
+            interpretability_config: InterpretabilityConfig::default(),
             neural_network_debugging_config: None,
             advanced_ml_debugging_config: AdvancedMLDebuggingConfig::default(),
             advanced_gpu_profiling_config: AdvancedGpuProfilingConfig::default(),

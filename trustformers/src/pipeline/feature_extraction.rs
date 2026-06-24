@@ -3,7 +3,7 @@
 //! Extract dense vector embeddings from text for semantic search, clustering, and retrieval.
 //!
 //! ## Supported pooling strategies
-//! - **CLS** — use the [CLS] token embedding
+//! - **CLS** — use the `[CLS]` token embedding
 //! - **MeanPooling** — mean over all token embeddings
 //! - **MaxPooling** — per-dimension max over all token embeddings
 //! - **WeightedMean** — weighted mean using per-token weights
@@ -51,7 +51,7 @@ pub enum ExtractionError {
 /// Strategy used to convert per-token representations into a single embedding.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PoolingStrategy {
-    /// Use the [CLS] token embedding.
+    /// Use the `[CLS]` token embedding.
     Cls,
     /// Mean of all token embeddings.
     MeanPooling,
@@ -218,7 +218,7 @@ impl FeatureExtractionPipeline {
 
     /// Extract a single embedding for `text`.
     ///
-    /// Uses a deterministic mock: embedding[i] = sin(hash * (i+1) * 0.01).
+    /// Uses a deterministic mock: `embedding[i] = sin(hash * (i+1) * 0.01)`.
     pub fn extract(&self, text: &str) -> Result<Embedding, ExtractionError> {
         if text.is_empty() {
             return Err(ExtractionError::EmptyText);

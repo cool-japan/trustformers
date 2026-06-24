@@ -96,8 +96,11 @@ impl StarCoder2RotaryEmbedding {
     /// key/value projections). Within every head the `rotate_half` convention is
     /// used: dimension `i` and `i + head_dim/2` form a rotation pair driven by the
     /// angle `position · inv_freq[i]`, matching the reference StarCoder2/LLaMA RoPE:
+    ///
+    /// ```text
     ///   out[i]          = x[i]·cos − x[i+half]·sin
     ///   out[i + half]   = x[i+half]·cos + x[i]·sin
+    /// ```
     pub fn apply_rotary_emb(
         &self,
         q: &Tensor,

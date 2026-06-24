@@ -564,7 +564,7 @@ impl TokenClassificationPipeline {
 
     /// Classify each token in `text` and return one [`TokenResult`] per input token.
     ///
-    /// Special tokens ([CLS] / [SEP]) are stripped from the output.
+    /// Special tokens (`[CLS]` / `[SEP]`) are stripped from the output.
     pub async fn classify_tokens(&self, text: &str) -> Result<Vec<TokenResult>, JsValue> {
         let num_labels = self.labels.len();
         if num_labels == 0 {

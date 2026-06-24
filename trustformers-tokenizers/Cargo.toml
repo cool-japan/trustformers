@@ -33,7 +33,7 @@ async-trait.workspace = true
 tokio-stream.workspace = true
 num_cpus.workspace = true
 once_cell.workspace = true
-memmap2 = "0.9.10"
+memmap2.workspace = true
 jieba-rs = "0.8.1"
 mecab = { version = "0.1.6", optional = true }
 # Korean tokenization support

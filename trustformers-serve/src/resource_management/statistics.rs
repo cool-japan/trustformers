@@ -500,12 +500,27 @@ impl StatisticsCollector {
             recent_snapshots.iter().map(|s| s.memory_utilization as f64).sum::<f64>()
                 / total_snapshots;
 
-        // TODO: active_resources and total_resources_allocated are not on SystemPerformanceSnapshot
-        // Need to derive from system_stats or use different approach
         Ok(ResourceStatistics {
             total_allocated: recent_snapshots.len() as u64,
-            active_resources: 0, // TODO: Calculate from system_stats
-            peak_usage: recent_snapshots.len() as u64, // TODO: Calculate from system_stats
+            active_resources: recent_snapshots
+                .last()
+                .map(|s| {
+                    (s.port_stats.currently_allocated
+                        + s.directory_stats.currently_allocated
+                        + s.gpu_stats.currently_allocated
+                        + s.database_stats.currently_active) as u32
+                })
+                .unwrap_or(0),
+            peak_usage: recent_snapshots
+                .iter()
+                .map(|s| {
+                    (s.port_stats.peak_usage
+                        + s.directory_stats.peak_usage
+                        + s.gpu_stats.peak_usage
+                        + s.database_stats.peak_usage) as u64
+                })
+                .max()
+                .unwrap_or(0),
             avg_lifetime: period / recent_snapshots.len().max(1) as u32,
             utilization_rate: average_cpu.max(average_memory) / 100.0,
             cpu_utilization: average_cpu,
@@ -899,5 +914,88 @@ impl Default for SystemMetrics {
             active_processes: 0,
             load_average: 0.0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests_statistics_fix {
+    use super::*;
+    use crate::resource_management::types_data::{
+        DatabaseUsageStatistics, DirectoryUsageStatistics, GpuUsageStatistics, PortUsageStatistics,
+        SystemResourceStatistics,
+    };
+    use chrono::Utc;
+
+    fn make_snapshot(
+        port_alloc: usize,
+        port_peak: usize,
+        dir_alloc: usize,
+        dir_peak: usize,
+        gpu_alloc: usize,
+        gpu_peak: usize,
+        db_active: usize,
+        db_peak: usize,
+    ) -> SystemPerformanceSnapshot {
+        SystemPerformanceSnapshot {
+            timestamp: Utc::now(),
+            cpu_utilization: 0.0,
+            memory_utilization: 0.0,
+            gpu_utilization: None,
+            network_utilization: 0.0,
+            disk_utilization: 0.0,
+            overall_efficiency: 0.0,
+            system_stats: SystemResourceStatistics::default(),
+            gpu_stats: GpuUsageStatistics {
+                currently_allocated: gpu_alloc,
+                peak_usage: gpu_peak,
+                ..Default::default()
+            },
+            database_stats: DatabaseUsageStatistics {
+                currently_active: db_active,
+                peak_usage: db_peak,
+                ..Default::default()
+            },
+            port_stats: PortUsageStatistics {
+                currently_allocated: port_alloc,
+                peak_usage: port_peak,
+                ..Default::default()
+            },
+            directory_stats: DirectoryUsageStatistics {
+                currently_allocated: dir_alloc,
+                peak_usage: dir_peak,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_active_resources_and_peak_usage() {
+        let collector = StatisticsCollector::new(StatisticsConfig::default())
+            .await
+            .expect("StatisticsCollector::new should succeed");
+        // Snapshot 1: active sum = 1+2+3+4 = 10, peak sum = 5+6+7+8 = 26
+        collector
+            .record_snapshot(make_snapshot(1, 5, 2, 6, 3, 7, 4, 8))
+            .await
+            .expect("record_snapshot should succeed");
+        // Snapshot 2 (most recent): active sum = 10+20+30+40 = 100, peak sum = 50+60+70+80 = 260
+        collector
+            .record_snapshot(make_snapshot(10, 50, 20, 60, 30, 70, 40, 80))
+            .await
+            .expect("record_snapshot should succeed");
+        let stats = collector
+            .get_performance_statistics(std::time::Duration::from_secs(3600))
+            .await
+            .expect("get_performance_statistics should succeed");
+        // active_resources: last snapshot sum = 10+20+30+40 = 100
+        assert_eq!(
+            stats.active_resources, 100,
+            "active_resources should be last snapshot sum"
+        );
+        // peak_usage: max over all snapshots = max(26, 260) = 260
+        assert_eq!(
+            stats.peak_usage, 260,
+            "peak_usage should be max peak sum across snapshots"
+        );
     }
 }

@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(name = "message_queue_cli")]
+#[command(version)]
 #[command(about = "A CLI tool for interacting with message queues")]
 struct Cli {
     #[command(subcommand)]
@@ -72,7 +73,7 @@ enum Commands {
         topic: String,
 
         /// Number of messages to send
-        #[arg(short, long, default_value = "10")]
+        #[arg(short = 'n', long, default_value = "10")]
         count: usize,
 
         /// Message prefix
@@ -145,7 +146,7 @@ enum Commands {
         topic: String,
 
         /// Number of messages to send
-        #[arg(short, long, default_value = "1000")]
+        #[arg(short = 'n', long, default_value = "1000")]
         count: usize,
 
         /// Message size in bytes

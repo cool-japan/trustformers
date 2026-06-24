@@ -425,7 +425,7 @@ impl ModelTypeConfig {
     /// Create a linear regression model configuration
     pub fn linear_regression() -> Self {
         Self {
-            model_type: "linear_regression".to_string(),
+            model_type: "LinearRegression".to_string(),
             parameters: HashMap::new(),
             performance_profile: ModelPerformanceProfile {
                 training_complexity: ComplexityClass::Linear,
@@ -450,7 +450,7 @@ impl ModelTypeConfig {
     /// Create a polynomial regression model configuration
     pub fn polynomial_regression() -> Self {
         Self {
-            model_type: "polynomial_regression".to_string(),
+            model_type: "PolynomialRegression".to_string(),
             parameters: HashMap::new(),
             performance_profile: ModelPerformanceProfile {
                 training_complexity: ComplexityClass::Quadratic,

@@ -193,7 +193,7 @@ fn test_pattern_similarity_different_patterns() {
     };
     let sim = detector.calculate_similarity(&p1, &p2);
     // Inverse patterns should still produce a result (absolute correlation)
-    assert!(sim >= 0.0 && sim <= 1.0);
+    assert!((0.0..=1.0).contains(&sim));
 }
 
 #[test]

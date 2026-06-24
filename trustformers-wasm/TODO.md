@@ -18,7 +18,7 @@ The `trustformers-wasm` crate enables browser and edge deployment of transformer
 
 ## Current Status
 
-**Version:** 0.1.0 | **Date:** 2026-03-21 | **Status:** Stable
+**Version:** 0.1.3 | **Date:** 2026-06-24 | **Status:** Stable
 
 ### Implementation Status
 ✅ **STABLE** - Complete WASM infrastructure
@@ -667,8 +667,8 @@ svelte = []
 
 ---
 
-**Last Updated:** 2026-03-21
-**Version:** 0.1.0
+**Last Updated:** 2026-06-24
+**Version:** 0.1.3
 **Status:** Stable
 **Test Suite:** 128 tests, 100% pass rate
 **SLoC:** 55,504

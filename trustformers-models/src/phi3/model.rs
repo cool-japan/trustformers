@@ -170,8 +170,11 @@ impl RotaryEmbedding {
     /// from the projection width so the same routine serves the query and the
     /// (narrower) key projection. Within every head, dimension `i` and
     /// `i + head_dim/2` form a rotation pair driven by `position · inv_freq[i]`:
+    ///
+    /// ```text
     ///   out[i]        = x[i]·cos − x[i+half]·sin
     ///   out[i + half] = x[i+half]·cos + x[i]·sin
+    /// ```
     pub fn apply_rotary_emb(
         &self,
         q: &Tensor,

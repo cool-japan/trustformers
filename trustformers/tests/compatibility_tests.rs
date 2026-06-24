@@ -1,9 +1,13 @@
 #![allow(clippy::all)]
 use rstest::*;
 use std::env;
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 use trustformers::config_management::ConfigurationManager;
 use trustformers::error::TrustformersError;
 use trustformers::hub::get_cache_dir;
+use trustformers::{GlobalMemoryPool, GlobalProfiler, ZeroCopyTensorView};
 
 /// Cross-platform compatibility tests for TrustformeRS
 /// These tests verify functionality across different platforms, architectures, and environments
@@ -31,31 +35,26 @@ mod compatibility_tests {
     }
 
     /// Test memory alignment across architectures
-    // TODO: Implement GlobalMemoryPool or remove this test
     #[rstest]
-    #[ignore = "GlobalMemoryPool not implemented"]
     fn test_memory_alignment_compatibility() {
-        // let pool = GlobalMemoryPool::instance();
+        let pool = GlobalMemoryPool::instance();
 
         // Test different alignment requirements
-        // for alignment in [8, 16, 32, 64, 128] {
-        //     let size = 1024;
-        //     let ptr =
-        //         pool.allocate_aligned(size, alignment).expect("Should allocate aligned memory");
+        for alignment in [8, 16, 32, 64, 128] {
+            let size = 1024;
+            let ptr =
+                pool.allocate_aligned(size, alignment).expect("Should allocate aligned memory");
 
-        //     // Verify alignment
-        //     assert_eq!(
-        //         ptr as usize % alignment,
-        //         0,
-        //         "Memory should be aligned to {} bytes",
-        //         alignment
-        //     );
+            // Verify alignment
+            assert_eq!(
+                ptr as usize % alignment,
+                0,
+                "Memory should be aligned to {} bytes",
+                alignment
+            );
 
-        //     pool.deallocate(ptr, size);
-        // }
-
-        // Placeholder test to avoid empty function
-        assert!(true);
+            unsafe { pool.deallocate(ptr, size) };
+        }
     }
 
     /// Test endianness compatibility
@@ -104,41 +103,36 @@ mod compatibility_tests {
     }
 
     /// Test thread safety across platforms
-    // TODO: Implement GlobalMemoryPool or remove this test
     #[rstest]
-    #[ignore = "GlobalMemoryPool not implemented"]
     fn test_thread_safety_compatibility() {
-        // use std::sync::{Arc, Barrier};
+        use std::sync::Barrier;
 
-        // let num_threads = 4;
-        // let barrier = Arc::new(Barrier::new(num_threads));
-        // let pool = Arc::new(GlobalMemoryPool::instance());
+        let num_threads = 4;
+        let barrier = Arc::new(Barrier::new(num_threads));
+        let pool = Arc::new(GlobalMemoryPool::instance());
 
-        // let handles: Vec<_> = (0..num_threads)
-        //     .map(|i| {
-        //         let barrier = barrier.clone();
-        //         let pool = pool.clone();
-        //         thread::spawn(move || {
-        //             barrier.wait();
+        let handles: Vec<_> = (0..num_threads)
+            .map(|i| {
+                let barrier = barrier.clone();
+                let pool = pool.clone();
+                thread::spawn(move || {
+                    barrier.wait();
 
-        //             // Test concurrent memory allocation
-        //             let size = 1024 + i * 512;
-        //             let ptr = pool.allocate(size).expect("Should allocate memory");
+                    // Test concurrent memory allocation
+                    let size = 1024 + i * 512;
+                    let ptr = pool.allocate(size).expect("Should allocate memory");
 
-        //             // Do some work
-        //             thread::sleep(Duration::from_millis(10));
+                    // Do some work
+                    thread::sleep(Duration::from_millis(10));
 
-        //             pool.deallocate(ptr, size);
-        //         })
-        //     })
-        //     .collect();
+                    unsafe { pool.deallocate(ptr, size) };
+                })
+            })
+            .collect();
 
-        // for handle in handles {
-        //     handle.join().expect("Thread should complete successfully");
-        // }
-
-        // Placeholder test to avoid empty function
-        assert!(true);
+        for handle in handles {
+            handle.join().expect("Thread should complete successfully");
+        }
     }
 
     /// Test file system compatibility
@@ -200,27 +194,22 @@ mod compatibility_tests {
     }
 
     /// Test zero-copy operations compatibility
-    // TODO: Implement ZeroCopyTensorView or remove this test
     #[rstest]
-    #[ignore = "ZeroCopyTensorView not implemented"]
     fn test_zero_copy_compatibility() {
-        // let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
-        // let shape = vec![2, 3];
+        let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let shape = vec![2, 3];
 
-        // // Test zero-copy tensor creation
-        // let tensor_view =
-        //     ZeroCopyTensorView::from_slice(&data, &shape).expect("Should create zero-copy view");
+        // Test zero-copy tensor creation
+        let tensor_view =
+            ZeroCopyTensorView::from_slice(&data, &shape).expect("Should create zero-copy view");
 
-        // // Test that data is accessible
-        // assert_eq!(tensor_view.shape(), &shape);
-        // assert_eq!(tensor_view.data().len(), data.len());
+        // Test that data is accessible
+        assert_eq!(tensor_view.shape(), &shape);
+        assert_eq!(tensor_view.data().len(), data.len());
 
-        // // Test subview creation
-        // let subview = tensor_view.subview(&[0..1, 0..2]).expect("Should create subview");
-        // assert_eq!(subview.shape(), &[1, 2]);
-
-        // Placeholder test to avoid empty function
-        assert!(true);
+        // Test subview creation
+        let subview = tensor_view.subview(&[0..1, 0..2]).expect("Should create subview");
+        assert_eq!(subview.shape(), &[1, 2]);
     }
 
     /// Test platform-specific compilation features
@@ -346,29 +335,24 @@ mod compatibility_tests {
     }
 
     /// Test profiler compatibility across platforms
-    // TODO: Implement GlobalProfiler or remove this test
     #[rstest]
-    #[ignore = "GlobalProfiler not implemented"]
     fn test_profiler_compatibility() {
-        // let profiler = GlobalProfiler::instance();
+        let profiler = GlobalProfiler::instance();
 
         // Test basic profiling operations
-        // let session_id = profiler.start_session("compatibility_test");
-        // assert!(session_id.is_ok());
+        let session_id = profiler.start_session("compatibility_test");
+        assert!(session_id.is_ok());
 
-        // let session_id = session_id.unwrap();
+        let session_id = session_id.unwrap();
 
-        // // Test operation timing
-        // profiler.start_operation(&session_id, "test_operation", None);
-        // thread::sleep(Duration::from_millis(1));
-        // profiler.end_operation(&session_id, "test_operation");
+        // Test operation timing
+        profiler.start_operation(&session_id, "test_operation", None);
+        thread::sleep(Duration::from_millis(1));
+        profiler.end_operation(&session_id, "test_operation");
 
-        // // Test session cleanup
-        // let result = profiler.end_session(&session_id);
-        // assert!(result.is_ok());
-
-        // Placeholder test to avoid empty function
-        assert!(true);
+        // Test session cleanup
+        let result = profiler.end_session(&session_id);
+        assert!(result.is_ok());
     }
 
     /// Test configuration validation across platforms

@@ -4,5 +4,5 @@ pub mod functions;
 pub mod types;
 
 // Re-export all types
-pub use functions::*;
+// Note: functions.rs is intentionally minimal (split at struct boundary); all impls are in types.rs
 pub use types::*;

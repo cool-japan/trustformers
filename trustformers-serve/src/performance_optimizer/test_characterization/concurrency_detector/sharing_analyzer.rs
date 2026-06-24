@@ -182,19 +182,14 @@ impl SharingCapabilityAnalyzer {
     fn calculate_strategy_confidence(&self, capability: &ResourceSharingCapabilities) -> f32 {
         let mut confidence_factors = Vec::new();
 
-        // TODO: ResourceSharingCapabilities no longer has sharing_safety_level enum
-        // It has safety_assessment: f64 instead
-        // Factor in sharing safety
-        confidence_factors.push(capability.safety_assessment);
+        // Factor in sharing safety (higher safety_assessment = higher confidence)
+        confidence_factors.push(capability.safety_assessment.clamp(0.0, 1.0));
 
-        // TODO: performance_overhead → sharing_overhead
-        // Factor in performance impact
-        confidence_factors.push(1.0 - capability.sharing_overhead.abs());
+        // Factor in performance overhead (lower overhead = higher confidence)
+        confidence_factors.push((1.0 - capability.performance_overhead).clamp(0.0, 1.0));
 
-        // TODO: ResourceSharingCapabilities no longer has implementation_complexity
-        // Using sharing_overhead as proxy (lower overhead = less complex)
-        // Factor in complexity
-        confidence_factors.push(1.0 - capability.sharing_overhead);
+        // Factor in implementation complexity (lower complexity = higher confidence)
+        confidence_factors.push((1.0 - capability.implementation_complexity).clamp(0.0, 1.0));
 
         confidence_factors.iter().sum::<f64>() as f32 / confidence_factors.len() as f32
     }
@@ -209,21 +204,17 @@ impl SharingCapabilityAnalyzer {
         }
 
         // Find the most restrictive but safe sharing approach
-        // TODO: ResourceSharingCapabilities no longer has sharing_safety_level enum
-        // It has safety_assessment: f64 instead (higher = safer)
-        // Also no longer has implementation_complexity
-        // Safe: is_empty() check above guarantees capabilities.first() is Some
+        // Among safe capabilities (safety_assessment >= 0.7), pick the least complex implementation
         let safest_capability = capabilities
             .iter()
-            .filter(|c| c.safety_assessment >= 0.7) // Safe or conditionally safe
+            .filter(|c| c.safety_assessment >= 0.7)
             .min_by(|a, b| {
-                // Use sharing_overhead as complexity proxy (lower = simpler)
-                a.sharing_overhead
-                    .partial_cmp(&b.sharing_overhead)
+                a.implementation_complexity
+                    .partial_cmp(&b.implementation_complexity)
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
             .or_else(|| capabilities.first())
-            .expect("capabilities is non-empty after is_empty check");
+            .ok_or_else(|| anyhow::anyhow!("capabilities is non-empty after is_empty check"))?;
 
         // Convert String to SharingMode enum
         let sharing_mode = match safest_capability.sharing_mode.as_str() {
@@ -504,5 +495,82 @@ impl SharingCapabilityAnalyzer {
         let consistency_factor = self.calculate_capability_consistency(capabilities);
 
         avg_confidence * consistency_factor
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn make_capability(
+        safety: f64,
+        perf_overhead: f64,
+        impl_complexity: f64,
+    ) -> ResourceSharingCapabilities {
+        ResourceSharingCapabilities {
+            supports_read_sharing: true,
+            supports_write_sharing: false,
+            max_concurrent_readers: Some(4),
+            max_concurrent_writers: None,
+            sharing_overhead: 0.1,
+            consistency_guarantees: vec!["Read consistency".to_string()],
+            isolation_requirements: vec![],
+            recommended_strategy: SharingStrategy::ReadSharing,
+            safety_assessment: safety,
+            performance_tradeoffs: HashMap::new(),
+            performance_overhead: perf_overhead,
+            implementation_complexity: impl_complexity,
+            sharing_mode: "read-only".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_strategy_confidence_uses_all_three_fields() {
+        // High safety, low overhead, low complexity → high confidence
+        let cap_good = make_capability(0.95, 0.05, 0.1);
+        // Low safety, high overhead, high complexity → low confidence
+        let cap_bad = make_capability(0.2, 0.8, 0.9);
+
+        let good_confidence = (cap_good.safety_assessment.clamp(0.0, 1.0)
+            + (1.0 - cap_good.performance_overhead).clamp(0.0, 1.0)
+            + (1.0 - cap_good.implementation_complexity).clamp(0.0, 1.0))
+            / 3.0;
+        let bad_confidence = (cap_bad.safety_assessment.clamp(0.0, 1.0)
+            + (1.0 - cap_bad.performance_overhead).clamp(0.0, 1.0)
+            + (1.0 - cap_bad.implementation_complexity).clamp(0.0, 1.0))
+            / 3.0;
+
+        assert!(
+            good_confidence > bad_confidence,
+            "better capability should have higher confidence"
+        );
+        assert!(
+            good_confidence > 0.7,
+            "good capability confidence should be high"
+        );
+        assert!(
+            bad_confidence < 0.5,
+            "bad capability confidence should be low"
+        );
+    }
+
+    #[test]
+    fn test_implementation_complexity_used_in_selection() {
+        let high_complexity = make_capability(0.9, 0.1, 0.9);
+        let low_complexity = make_capability(0.9, 0.1, 0.1);
+
+        let capabilities = vec![high_complexity.clone(), low_complexity.clone()];
+        let best = capabilities.iter().filter(|c| c.safety_assessment >= 0.7).min_by(|a, b| {
+            a.implementation_complexity
+                .partial_cmp(&b.implementation_complexity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        assert!(best.is_some());
+        assert_eq!(
+            best.unwrap().implementation_complexity,
+            low_complexity.implementation_complexity
+        );
     }
 }

@@ -238,8 +238,8 @@ pub use pipeline::{
 #[cfg(feature = "async")]
 pub use pipeline::ConversationalPipeline;
 pub use profiler::{
-    profile_async, profile_fn, ExportFormat, ProfileResults, ProfileSummary, Profiler,
-    ProfilerConfig,
+    profile_async, profile_fn, ExportFormat, GlobalProfiler, ProfileResults, ProfileSummary,
+    Profiler, ProfilerConfig,
 };
 pub use validation::{
     ClassificationOutput, ClassificationOutputValidator, ClassificationValidationConfig,
@@ -250,6 +250,7 @@ pub use validation::{
     ValidationSuggestion, ValidationSuggestionType, ValidationWarning as OutputValidationWarning,
     ValidationWarningType,
 };
+pub use zero_copy::{GlobalMemoryPool, ZeroCopyTensorView};
 
 pub mod prelude {
     pub use crate::{

@@ -19,7 +19,7 @@ custom tokenizers, batch processing, and Python bindings for seamless integratio
 
 ## Current Status
 
-**Version:** 0.1.0 | **Date:** 2026-03-21 | **Status:** Stable
+**Version:** 0.1.3 | **Date:** 2026-06-24 | **Status:** Stable
 
 ### Implementation Status
 ✅ **STABLE** - All major tokenizers implemented and tested
@@ -796,8 +796,8 @@ cargo check -p trustformers-tokenizers --all-features
 
 ---
 
-**Last Updated:** 2026-03-21
-**Version:** 0.1.0
+**Last Updated:** 2026-06-24
+**Version:** 0.1.3
 **Status:** Stable
 **Test Coverage:** 500 tests, 100% pass rate
 **SLoC:** 51,211

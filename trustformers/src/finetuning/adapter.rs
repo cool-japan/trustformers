@@ -174,15 +174,15 @@ impl AdapterConfig {
 pub struct BottleneckAdapter {
     /// Down-projection weight: hidden_size → bottleneck_size.
     pub down_proj: Tensor,
-    /// Down-projection bias: shape [bottleneck_size].
+    /// Down-projection bias: shape `[bottleneck_size]`.
     pub down_bias: Tensor,
     /// Up-projection weight: bottleneck_size → hidden_size.
     pub up_proj: Tensor,
-    /// Up-projection bias: shape [hidden_size].
+    /// Up-projection bias: shape `[hidden_size]`.
     pub up_bias: Tensor,
-    /// Layer-norm scale (gamma), shape [hidden_size] — present if `use_layer_norm`.
+    /// Layer-norm scale (gamma), shape `[hidden_size]` — present if `use_layer_norm`.
     pub layer_norm_weight: Option<Tensor>,
-    /// Layer-norm bias (beta), shape [hidden_size] — present if `use_layer_norm`.
+    /// Layer-norm bias (beta), shape `[hidden_size]` — present if `use_layer_norm`.
     pub layer_norm_bias: Option<Tensor>,
     /// The configuration this adapter was built from.
     pub config: AdapterConfig,

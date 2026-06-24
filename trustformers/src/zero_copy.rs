@@ -407,9 +407,12 @@ impl MemoryPool {
     pub fn allocate(&self, size: usize) -> Result<NonNull<u8>> {
         let aligned_size = align_to(size, self.config.alignment_bytes);
 
-        // Try to reuse existing block
-        if let Some(ptr) = self.try_reuse_block(aligned_size) {
-            self.record_allocation(ptr.as_ptr(), aligned_size);
+        // Try to reuse existing block. Record the block's ACTUAL size (not the
+        // smaller requested size) so it is later deallocated with the matching
+        // layout; recording the smaller size would free it with a mismatched
+        // layout, which is undefined behavior.
+        if let Some((ptr, actual_size)) = self.try_reuse_block(aligned_size) {
+            self.record_allocation(ptr.as_ptr(), actual_size);
             return Ok(ptr);
         }
 
@@ -500,20 +503,23 @@ impl MemoryPool {
         }
     }
 
-    fn try_reuse_block(&self, size: usize) -> Option<NonNull<u8>> {
+    fn try_reuse_block(&self, size: usize) -> Option<(NonNull<u8>, usize)> {
         let mut free_blocks = self.free_blocks.write().expect("lock should not be poisoned");
 
         // Try exact size first
         if let Some(blocks) = free_blocks.get_mut(&size) {
-            if !blocks.is_empty() {
-                return blocks.pop();
+            if let Some(ptr) = blocks.pop() {
+                return Some((ptr, size));
             }
         }
 
-        // Try larger blocks (simple first-fit)
+        // Try larger blocks (simple first-fit). Return the block's ACTUAL size so
+        // the allocation is later freed with the layout it was created with.
         for (&block_size, blocks) in free_blocks.iter_mut() {
-            if block_size >= size && !blocks.is_empty() {
-                return blocks.pop();
+            if block_size >= size {
+                if let Some(ptr) = blocks.pop() {
+                    return Some((ptr, block_size));
+                }
             }
         }
 
@@ -846,6 +852,160 @@ impl<T: Clone> Drop for ZeroCopyBuffer<T> {
     }
 }
 
+/// Zero-copy tensor view for f32 data with borrowed lifetime
+///
+/// Provides a safe, bounds-checked view over an existing f32 slice without copying.
+/// The lifetime `'a` ensures the view cannot outlive the source data.
+pub struct ZeroCopyTensorView<'a> {
+    data: &'a [f32],
+    shape: Vec<usize>,
+    strides: Vec<usize>,
+    offset: usize,
+}
+
+impl<'a> ZeroCopyTensorView<'a> {
+    /// Create a zero-copy view from a borrowed f32 slice and shape
+    pub fn from_slice(data: &'a [f32], shape: &[usize]) -> Result<Self> {
+        let total: usize = shape.iter().product();
+        if data.len() != total {
+            return Err(TrustformersError::invalid_input(format!(
+                "Data length {} does not match shape {:?} (product {})",
+                data.len(),
+                shape,
+                total
+            )));
+        }
+        let strides = Self::compute_strides(shape);
+        Ok(Self {
+            data,
+            shape: shape.to_vec(),
+            strides,
+            offset: 0,
+        })
+    }
+
+    /// Get the shape of this tensor view
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+
+    /// Get the data slice starting from the view's internal offset
+    pub fn data(&self) -> &[f32] {
+        &self.data[self.offset..]
+    }
+
+    /// Create a sub-view covering the given ranges (one per dimension)
+    pub fn subview(&self, ranges: &[std::ops::Range<usize>]) -> Result<ZeroCopyTensorView<'a>> {
+        if ranges.len() != self.shape.len() {
+            return Err(TrustformersError::invalid_input(format!(
+                "ranges length {} must equal number of dimensions {}",
+                ranges.len(),
+                self.shape.len()
+            )));
+        }
+        let mut new_shape = Vec::with_capacity(ranges.len());
+        let mut new_offset = self.offset;
+        for (i, range) in ranges.iter().enumerate() {
+            if range.end > self.shape[i] {
+                return Err(TrustformersError::invalid_input(format!(
+                    "Range end {} exceeds dimension {} size {}",
+                    range.end, i, self.shape[i]
+                )));
+            }
+            new_offset += range.start * self.strides[i];
+            new_shape.push(range.end - range.start);
+        }
+        Ok(ZeroCopyTensorView {
+            data: self.data,
+            shape: new_shape,
+            strides: self.strides.clone(),
+            offset: new_offset,
+        })
+    }
+
+    fn compute_strides(shape: &[usize]) -> Vec<usize> {
+        let n = shape.len();
+        let mut strides = vec![1usize; n];
+        for i in (0..n.saturating_sub(1)).rev() {
+            strides[i] = strides[i + 1] * shape[i + 1];
+        }
+        strides
+    }
+}
+
+/// Global aligned memory pool — thread-safe raw allocator with layout tracking
+///
+/// Each call to `instance()` returns a fresh pool. For sharing across threads,
+/// wrap in `Arc<GlobalMemoryPool>`.
+pub struct GlobalMemoryPool {
+    allocations: Mutex<HashMap<usize, Layout>>,
+}
+
+impl GlobalMemoryPool {
+    /// Create a new `GlobalMemoryPool` instance
+    pub fn instance() -> GlobalMemoryPool {
+        GlobalMemoryPool {
+            allocations: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Allocate `size` bytes with the specified `alignment`
+    pub fn allocate_aligned(&self, size: usize, alignment: usize) -> Result<*mut u8> {
+        let layout = Layout::from_size_align(size, alignment).map_err(|e| {
+            TrustformersError::runtime_error(format!(
+                "Invalid layout size={} align={}: {}",
+                size, alignment, e
+            ))
+        })?;
+        // SAFETY: layout is valid (checked above by Layout::from_size_align)
+        let ptr = unsafe { alloc(layout) };
+        if ptr.is_null() {
+            return Err(TrustformersError::runtime_error(
+                "Aligned allocation failed: out of memory".to_string(),
+            ));
+        }
+        self.allocations
+            .lock()
+            .map_err(|e| {
+                TrustformersError::runtime_error(format!("Allocation tracker lock poisoned: {}", e))
+            })?
+            .insert(ptr as usize, layout);
+        Ok(ptr)
+    }
+
+    /// Allocate `size` bytes with default 64-byte alignment (suitable for SIMD)
+    pub fn allocate(&self, size: usize) -> Result<*mut u8> {
+        self.allocate_aligned(size, 64)
+    }
+
+    /// Deallocate a pointer previously returned by `allocate_aligned` or `allocate`
+    ///
+    /// The `_size` parameter is accepted for API compatibility; the actual layout
+    /// is recovered from the internal tracking map.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must have been returned by a previous call to `allocate_aligned` or `allocate`
+    ///   on this same `GlobalMemoryPool` instance.
+    /// - The caller must not use `ptr` after calling this function (no double-free).
+    /// - `ptr` must not be aliased by any other live reference when this is called.
+    pub unsafe fn deallocate(&self, ptr: *mut u8, _size: usize) {
+        if ptr.is_null() {
+            return;
+        }
+        let layout = self.allocations.lock().ok().and_then(|mut m| m.remove(&(ptr as usize)));
+        if let Some(layout) = layout {
+            // SAFETY: ptr was allocated with this exact layout from the system allocator
+            unsafe { dealloc(ptr, layout) };
+        }
+    }
+}
+
+// SAFETY: GlobalMemoryPool delegates all allocation to the system allocator (thread-safe),
+// and all interior mutability is guarded by a Mutex.
+unsafe impl Send for GlobalMemoryPool {}
+unsafe impl Sync for GlobalMemoryPool {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -915,6 +1075,24 @@ mod tests {
 
         let stats = pool.get_stats();
         assert_eq!(stats.total_deallocations, 2);
+    }
+
+    #[test]
+    fn test_memory_pool_reuse_larger_block_layout() {
+        // Regression: reusing a larger free block to satisfy a smaller request must
+        // not later deallocate it with a mismatched (smaller) layout, which is UB.
+        let pool = MemoryPool::new(ZeroCopyConfig::default());
+
+        let big = pool.allocate(4096).expect("allocate big");
+        pool.deallocate(big);
+
+        // First-fit reuses the 4096-byte block for this 64-byte request.
+        let small = pool.allocate(64).expect("allocate small (reuses big block)");
+        pool.deallocate(small);
+
+        // Dropping the pool runs `clear_unused`, which must free the reused block
+        // with its real (4096) layout, not the 64-byte request.
+        drop(pool);
     }
 
     #[test]

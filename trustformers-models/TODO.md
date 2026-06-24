@@ -1,6 +1,6 @@
 # trustformers-models TODO List
 
-**Version:** 0.1.0 (Alpha) | **Date:** 2026-03-21 | **Tests:** 759 passing | **SLoC:** 113,086 | **Stubs:** 0 | **Public API items:** 1,220
+**Version:** 0.1.3 (Alpha) | **Date:** 2026-06-24 | **Tests:** 759 passing | **SLoC:** 113,086 | **Stubs:** 0 | **Public API items:** 1,220
 
 ## Overview
 
@@ -739,6 +739,6 @@ cargo check -p trustformers-models --all-features
 
 ---
 
-**Last Updated:** 2026-03-21 - 0.1.0 Alpha Release (27+ architectures, 759 tests passing, 0 stubs, 1,220 public API items)
+**Last Updated:** 2026-06-24 - 0.1.3 Alpha Release (27+ architectures, 759 tests passing, 0 stubs, 1,220 public API items)
 **Status:** Alpha
 **Model Count:** 27+ architectures implemented, all with full weight loading (0 stubs)

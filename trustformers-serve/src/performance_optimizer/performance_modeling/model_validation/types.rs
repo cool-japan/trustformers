@@ -324,12 +324,18 @@ impl ModelValidationOrchestrator {
         model: &dyn PerformancePredictor,
         test_data: &[PerformanceDataPoint],
     ) -> Result<ComprehensiveValidationResult> {
-        if test_data.len() < self.config.read().min_validation_samples {
+        let min_samples = self.config.read().min_validation_samples;
+        if test_data.len() < 2 {
             return Err(anyhow!(
-                "Insufficient validation samples: {} < {}",
+                "Insufficient validation samples: {} (minimum 2 required)",
                 test_data.len(),
-                self.config.read().min_validation_samples
             ));
+        } else if test_data.len() < min_samples {
+            tracing::warn!(
+                "Validation sample count {} is below recommended minimum {}; proceeding with reduced reliability",
+                test_data.len(),
+                min_samples
+            );
         }
         let mut strategy_results = HashMap::new();
         let start_time = std::time::Instant::now();

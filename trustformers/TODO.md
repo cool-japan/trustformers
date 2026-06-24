@@ -1,6 +1,6 @@
 # trustformers TODO List
 
-**Version:** 0.1.0 | **Status:** Alpha | **Updated:** 2026-03-23
+**Version:** 0.1.3 | **Status:** Alpha | **Updated:** 2026-06-24
 
 ## Overview
 
@@ -591,8 +591,8 @@ let model = AutoModel::from_config(&config)?;
 
 ---
 
-**Last Updated:** 2026-03-21
-**Version:** 0.1.0
+**Last Updated:** 2026-06-24
+**Version:** 0.1.3
 **Status:** Alpha
 **API:** HuggingFace-compatible high-level API
 **Hub:** Full integration with HuggingFace Hub

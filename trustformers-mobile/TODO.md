@@ -17,7 +17,7 @@ The `trustformers-mobile` crate provides mobile deployment infrastructure for iO
 
 ## Current Status
 
-**Version:** 0.1.0 | **Date:** 2026-03-22 | **Status:** Alpha
+**Version:** 0.1.3 | **Date:** 2026-06-24 | **Status:** Alpha
 
 ### Implementation Status
 🔵 **ALPHA** - Core infrastructure implemented; API may change
@@ -731,8 +731,8 @@ fun TrustformersDemo() {
 
 ---
 
-**Last Updated:** 2026-03-21
-**Version:** 0.1.0
+**Last Updated:** 2026-06-24
+**Version:** 0.1.3
 **Status:** Alpha
 **Test Suite:** 1 Rust integration test
 **SLoC:** 131,187

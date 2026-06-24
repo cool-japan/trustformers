@@ -16,9 +16,6 @@ pub struct ResourceConflictDetector {
     /// Conflict resolution strategies
     resolution_strategies: Arc<Mutex<Vec<Box<dyn ConflictResolutionStrategy + Send + Sync>>>>,
 
-    /// Conflict history for learning
-    conflict_history: Arc<Mutex<ConflictHistory>>,
-
     /// Resource dependency graph
     dependency_graph: Arc<RwLock<ResourceDependencyGraph>>,
 
@@ -50,10 +47,7 @@ impl ResourceConflictDetector {
         Ok(Self {
             algorithms: Arc::new(Mutex::new(algorithms)),
             resolution_strategies: Arc::new(Mutex::new(strategies)),
-            // TODO: Changed ConflictHistory::new() to ::default() to fix E0308 - new() returns Result
-            conflict_history: Arc::new(Mutex::new(ConflictHistory::default())),
-            // TODO: Changed ResourceDependencyGraph::new() to ::default() to fix E0308 - new() returns Result
-            dependency_graph: Arc::new(RwLock::new(ResourceDependencyGraph::default())),
+            dependency_graph: Arc::new(RwLock::new(ResourceDependencyGraph::new()?)),
             config,
         })
     }
@@ -64,6 +58,27 @@ impl ResourceConflictDetector {
         test_data: &TestExecutionData,
     ) -> Result<ConflictAnalysisResult> {
         let start_time = Utc::now();
+
+        if !self.config.detection_enabled {
+            return Ok(ConflictAnalysisResult {
+                conflicts: Vec::new(),
+                resource_conflicts: Vec::new(),
+                resolutions: Vec::new(),
+                resource_constraints: HashMap::new(),
+                resource_limits: HashMap::new(),
+                isolation_requirements: IsolationRequirements {
+                    process_isolation: false,
+                    thread_isolation: false,
+                    memory_isolation: false,
+                    network_isolation: false,
+                    filesystem_isolation: false,
+                    custom_isolation: HashMap::new(),
+                },
+                detection_results: Vec::new(),
+                analysis_duration: std::time::Duration::from_secs(0),
+                confidence: 1.0,
+            });
+        }
 
         // Update dependency graph
         self.update_dependency_graph(test_data).await?;
@@ -77,7 +92,6 @@ impl ResourceConflictDetector {
                 .map(|algorithm| {
                     let algorithm_name = algorithm.name().to_string();
                     let detection_start = Instant::now();
-                    // TODO: detect_conflicts takes 1 argument, removed dependency_graph parameter
                     let result = algorithm.detect_conflicts(&test_data.resource_access_patterns);
                     let detection_duration = detection_start.elapsed();
                     (algorithm_name, result, detection_duration)
@@ -96,7 +110,7 @@ impl ResourceConflictDetector {
                         algorithm: algorithm_name,
                         conflicts: conflicts.clone(),
                         duration,
-                        confidence: self.calculate_detection_confidence(&conflicts) as f64,
+                        confidence: self.calculate_detection_confidence(&conflicts),
                     });
                     all_conflicts.append(&mut conflicts);
                 },
@@ -106,9 +120,19 @@ impl ResourceConflictDetector {
             }
         }
 
-        // Deduplicate and prioritize conflicts
-        let unique_conflicts = self.deduplicate_conflicts(&all_conflicts);
-        let prioritized_conflicts = self.prioritize_conflicts(&unique_conflicts);
+        // Filter conflicts below sensitivity threshold
+        let sensitive_conflicts: Vec<ResourceConflict> = all_conflicts
+            .into_iter()
+            .filter(|c| c.probability >= self.config.sensitivity)
+            .collect();
+
+        // Deduplicate and prioritize conflicts; cap depth to max_depth
+        let unique_conflicts = self.deduplicate_conflicts(&sensitive_conflicts);
+        let prioritized_conflicts: Vec<ResourceConflict> = self
+            .prioritize_conflicts(&unique_conflicts)
+            .into_iter()
+            .take(self.config.max_depth)
+            .collect();
 
         // Generate resolution strategies
         let resolutions = self.generate_resolutions(&prioritized_conflicts).await?;
@@ -119,12 +143,21 @@ impl ResourceConflictDetector {
             .iter()
             .map(|c| (c.resource_type.clone(), c.max_value))
             .collect();
-        let resource_limits_f32 = self.calculate_resource_limits(&prioritized_conflicts);
-        let resource_limits: HashMap<String, usize> = resource_limits_f32
-            .iter()
-            .map(|(k, v)| (k.clone(), (*v as usize).max(1)))
-            .collect();
+        let resource_limits_f64 = self.calculate_resource_limits(&prioritized_conflicts);
+        // resource_limits_f64 values are severity-based fractions in 0.05..=0.9;
+        // the minimum concurrent resource limit is 1 for each resource.
+        let resource_limits: HashMap<String, usize> =
+            resource_limits_f64.keys().map(|k| (k.clone(), 1_usize)).collect();
         let isolation_requirements = self.generate_isolation_requirements(&prioritized_conflicts);
+
+        let elapsed = Utc::now().signed_duration_since(start_time).to_std().unwrap_or_default();
+        if elapsed > self.config.timeout {
+            log::warn!(
+                "Conflict detection exceeded configured timeout ({:?} > {:?})",
+                elapsed,
+                self.config.timeout
+            );
+        }
 
         Ok(ConflictAnalysisResult {
             conflicts: prioritized_conflicts.clone(),
@@ -134,11 +167,8 @@ impl ResourceConflictDetector {
             resource_limits,
             isolation_requirements,
             detection_results: algorithm_results,
-            analysis_duration: Utc::now()
-                .signed_duration_since(start_time)
-                .to_std()
-                .unwrap_or_default(),
-            confidence: self.calculate_overall_conflict_confidence(&unique_conflicts) as f64,
+            analysis_duration: elapsed,
+            confidence: self.calculate_overall_conflict_confidence(&unique_conflicts),
         })
     }
 
@@ -151,7 +181,7 @@ impl ResourceConflictDetector {
 
             for trace in &test_data.execution_traces {
                 if trace.resource == pattern.resource_id {
-                    // Convert Instant timestamp to f64 seconds
+                    // Convert Instant timestamp to f64 seconds (elapsed time as weight)
                     let timestamp_secs = trace.timestamp.elapsed().as_secs_f64();
                     graph.add_dependency(
                         pattern.resource_id.clone(),
@@ -166,17 +196,17 @@ impl ResourceConflictDetector {
     }
 
     /// Calculates detection confidence based on conflict characteristics
-    fn calculate_detection_confidence(&self, conflicts: &[ResourceConflict]) -> f32 {
+    fn calculate_detection_confidence(&self, conflicts: &[ResourceConflict]) -> f64 {
         if conflicts.is_empty() {
             return 1.0;
         }
 
         let avg_probability =
-            conflicts.iter().map(|c| c.probability).sum::<f64>() as f32 / conflicts.len() as f32;
+            conflicts.iter().map(|c| c.probability).sum::<f64>() / conflicts.len() as f64;
         let severity_factor = conflicts
             .iter()
             .map(|c| match c.severity {
-                ConflictSeverity::Fatal => 1.0,
+                ConflictSeverity::Fatal => 1.0_f64,
                 ConflictSeverity::Blocking => 0.95,
                 ConflictSeverity::Critical => 0.9,
                 ConflictSeverity::Severe => 0.8,
@@ -184,8 +214,8 @@ impl ResourceConflictDetector {
                 ConflictSeverity::Moderate | ConflictSeverity::Medium => 0.4,
                 ConflictSeverity::Minor | ConflictSeverity::Low => 0.2,
             })
-            .sum::<f64>() as f32
-            / conflicts.len() as f32;
+            .sum::<f64>()
+            / conflicts.len() as f64;
 
         (avg_probability + severity_factor) / 2.0
     }
@@ -209,12 +239,10 @@ impl ResourceConflictDetector {
 
     /// Checks if two conflicts are similar enough to be considered duplicates
     fn conflicts_are_similar(&self, a: &ResourceConflict, b: &ResourceConflict) -> bool {
-        // Check if conflicts involve the same resources
-        // TODO: ResourceConflict no longer has resources field, only resource_id
+        // Check if conflicts involve the same resource
         let resource_overlap = a.resource_id == b.resource_id;
 
         // Check if conflict types are compatible
-        // TODO: ConflictType enum simplified - using new variants
         let type_similarity = match (&a.conflict_type, &b.conflict_type) {
             (ConflictType::Data, ConflictType::Data) => true,
             (ConflictType::Lock, ConflictType::Lock) => true,
@@ -299,7 +327,6 @@ impl ResourceConflictDetector {
         let mut constraints = Vec::new();
 
         for conflict in conflicts {
-            // TODO: ResourceConflict no longer has resources field, only resource_id
             let max_concurrent = match conflict.severity {
                 ConflictSeverity::Fatal => 1.0,
                 ConflictSeverity::Blocking => 1.0,
@@ -315,7 +342,6 @@ impl ResourceConflictDetector {
                 resource_type: conflict.resource_id.clone(),
                 min_value: 0.0,
                 max_value: max_concurrent,
-                // TODO: ConflictType enum simplified - mapping new variants to constraint types
                 constraint_type: match conflict.conflict_type {
                     ConflictType::Data => "ExclusiveAccess".to_string(),
                     ConflictType::Lock => "LimitedConcurrency".to_string(),
@@ -339,12 +365,11 @@ impl ResourceConflictDetector {
     }
 
     /// Calculates resource limits based on conflicts
-    fn calculate_resource_limits(&self, conflicts: &[ResourceConflict]) -> HashMap<String, f32> {
-        let mut limits: HashMap<String, f32> = HashMap::new();
+    fn calculate_resource_limits(&self, conflicts: &[ResourceConflict]) -> HashMap<String, f64> {
+        let mut limits: HashMap<String, f64> = HashMap::new();
 
         for conflict in conflicts {
-            // TODO: ResourceConflict no longer has resources field, only resource_id
-            let limit: f32 = match conflict.severity {
+            let limit: f64 = match conflict.severity {
                 ConflictSeverity::Fatal => 0.05,
                 ConflictSeverity::Blocking => 0.08,
                 ConflictSeverity::Critical => 0.1,
@@ -418,26 +443,26 @@ impl ResourceConflictDetector {
     }
 
     /// Calculates overall conflict confidence
-    fn calculate_overall_conflict_confidence(&self, conflicts: &[ResourceConflict]) -> f32 {
+    fn calculate_overall_conflict_confidence(&self, conflicts: &[ResourceConflict]) -> f64 {
         if conflicts.is_empty() {
             return 1.0;
         }
 
         let avg_probability =
-            conflicts.iter().map(|c| c.probability).sum::<f64>() as f32 / conflicts.len() as f32;
+            conflicts.iter().map(|c| c.probability).sum::<f64>() / conflicts.len() as f64;
         let consistency_factor = self.calculate_conflict_consistency(conflicts);
 
         avg_probability * consistency_factor
     }
 
     /// Calculates consistency factor for conflicts
-    fn calculate_conflict_consistency(&self, conflicts: &[ResourceConflict]) -> f32 {
+    fn calculate_conflict_consistency(&self, conflicts: &[ResourceConflict]) -> f64 {
         if conflicts.len() < 2 {
             return 1.0;
         }
 
         // Measure how consistent the conflict severities are
-        let severities: Vec<f32> = conflicts
+        let severities: Vec<f64> = conflicts
             .iter()
             .map(|c| match c.severity {
                 ConflictSeverity::Fatal => 7.0,
@@ -450,14 +475,89 @@ impl ResourceConflictDetector {
             })
             .collect();
 
-        let mean =
-            severities.iter().map(|&s| s as f64).sum::<f64>() as f32 / severities.len() as f32;
-        let variance = severities.iter().map(|&s| (s - mean).powi(2) as f64).sum::<f64>() as f32
-            / severities.len() as f32;
+        let mean = severities.iter().sum::<f64>() / severities.len() as f64;
+        let variance =
+            severities.iter().map(|&s| (s - mean).powi(2)).sum::<f64>() / severities.len() as f64;
 
         let std_dev = variance.sqrt();
         let coefficient_of_variation = if mean > 0.0 { std_dev / mean } else { 1.0 };
 
         (1.0 - coefficient_of_variation.min(1.0)).max(0.1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_conflict_history_new_returns_ok() {
+        let history = ConflictHistory::new();
+        assert!(history.is_ok());
+        let h = history.expect("should succeed");
+        assert!(h.conflicts.is_empty());
+        assert_eq!(h.total_conflicts, 0);
+    }
+
+    #[test]
+    fn test_resource_dependency_graph_new_and_populate() {
+        let graph_result = ResourceDependencyGraph::new();
+        assert!(
+            graph_result.is_ok(),
+            "ResourceDependencyGraph::new() should return Ok"
+        );
+        let mut graph = graph_result.expect("should succeed");
+
+        graph.add_resource("resource_a".to_string());
+        graph.add_resource("resource_b".to_string());
+        graph.add_dependency("resource_a".to_string(), "resource_b".to_string(), 1.0);
+
+        assert!(graph.nodes.contains(&"resource_a".to_string()));
+        assert!(graph.nodes.contains(&"resource_b".to_string()));
+        assert!(!graph.edges.is_empty());
+    }
+
+    #[test]
+    fn test_resource_conflict_uses_resource_id() {
+        // Verify the ResourceConflict type has resource_id field (not resources)
+        // This is a compile-time check that our field access is correct
+        let conflict = ResourceConflict {
+            conflict_id: "test_conflict".to_string(),
+            conflict_type: ConflictType::Lock,
+            severity: ConflictSeverity::High,
+            conflicting_tests: vec!["test_a".to_string(), "test_b".to_string()],
+            resource_id: "shared_mutex".to_string(),
+            probability: 0.8,
+            performance_impact: ConflictImpact {
+                performance_degradation: 0.5,
+                reliability_impact: 0.3,
+                resource_impact: std::collections::HashMap::new(),
+                user_experience_impact: 0.2,
+                stability_impact: 0.1,
+                recovery_time: std::time::Duration::from_secs(0),
+                cascade_potential: 0.4,
+                mitigation_effectiveness: 0.7,
+                long_term_effects: Vec::new(),
+                confidence: 0.9,
+            },
+            resolutions: Vec::new(),
+            detected_at: std::time::Instant::now(),
+            confidence: 0.9,
+            historical_count: 0,
+            max_safe_concurrency: 1,
+        };
+
+        assert_eq!(conflict.resource_id, "shared_mutex");
+        assert!(!conflict.conflicting_tests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_conflict_detector_constructs_without_error() {
+        let config = ConflictDetectionConfig::default();
+        let detector = ResourceConflictDetector::new(config).await;
+        assert!(
+            detector.is_ok(),
+            "ResourceConflictDetector::new() should succeed"
+        );
     }
 }

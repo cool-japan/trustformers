@@ -1,6 +1,6 @@
 # trustformers-optim TODO List
 
-**Version:** 0.1.0 | **Status:** Stable | **Tests:** 589 | **SLoC:** ~45,000 | **Updated:** 2026-03-22
+**Version:** 0.1.3 | **Status:** Stable | **Tests:** 589 | **SLoC:** ~45,000 | **Updated:** 2026-06-24
 
 ## Overview
 
@@ -759,7 +759,7 @@ cargo check -p trustformers-optim --all-features
 
 ---
 
-**Last Updated:** 2026-03-21 - 0.1.0 Stable Release
+**Last Updated:** 2026-06-24 - v0.1.3 Development
 **Status:** Production-ready optimization
 **Tests:** 583 tests, 100% pass rate
 **Optimizers:** SGD, Adam, AdamW, RAdam, LAMB, AdaFactor, Lion, Muon, CAME, MicroAdam, BGE-Adam, HN-Adam, AdEMAMix, Schedule-Free variants, Sophia, Shampoo, and more

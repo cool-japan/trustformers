@@ -1,6 +1,6 @@
 # trustformers-serve TODO List
 
-**Version:** 0.1.0 | **Status:** Stable | **Tests:** 216 | **SLoC:** 206,636 | **Updated:** 2026-03-21
+**Version:** 0.1.3 | **Status:** Stable | **Tests:** 216 | **SLoC:** 206,636 | **Updated:** 2026-06-24
 
 ## Overview
 
@@ -733,7 +733,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ---
 
-**Last Updated:** 2026-03-21 - 0.1.0 Stable Release
+**Last Updated:** 2026-06-24 - v0.1.3 Development
 **Status:** Production-ready serving infrastructure
 **Tests:** 216 (100% pass rate)
 **APIs:** REST, gRPC, GraphQL

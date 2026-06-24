@@ -655,50 +655,6 @@ pub fn optimized_debug_session(
     )
 }
 
-/// Placeholder configuration for interpretability analysis
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct InterpretabilityConfig;
-
-/// Placeholder interpretability analyzer
-#[derive(Debug)]
-pub struct InterpretabilityAnalyzer;
-
-impl InterpretabilityAnalyzer {
-    pub fn new(_config: InterpretabilityConfig) -> Self {
-        Self
-    }
-
-    pub async fn generate_report(&self) -> anyhow::Result<InterpretabilityReport> {
-        Ok(InterpretabilityReport)
-    }
-
-    pub async fn analyze_shap(
-        &self,
-        _instance: &HashMap<String, f64>,
-        _model_predictions: &[f64],
-        _background_data: &[HashMap<String, f64>],
-    ) -> anyhow::Result<Vec<f64>> {
-        // Placeholder implementation
-        Ok(vec![0.1, 0.2, 0.3])
-    }
-
-    pub async fn analyze_lime<F>(
-        &self,
-        _instance: &HashMap<String, f64>,
-        _model_fn: F,
-    ) -> anyhow::Result<Vec<f64>>
-    where
-        F: Fn(&HashMap<String, f64>) -> f64 + Send + 'static,
-    {
-        // Placeholder implementation
-        Ok(vec![0.1, 0.2, 0.3])
-    }
-}
-
-/// Placeholder interpretability report
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct InterpretabilityReport;
-
 /// Create ultra-low overhead session for production monitoring
 pub fn ultra_low_overhead_session() -> LowOverheadDebugSession {
     let selective_config = SelectiveDebugConfig::production_monitoring();
@@ -857,27 +813,5 @@ mod tests {
     fn test_ultra_low_overhead_session_creation() {
         // Verify creation of the ultra-low overhead session doesn't panic.
         let _session = ultra_low_overhead_session();
-    }
-
-    // ── InterpretabilityAnalyzer ──────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_interpretability_analyzer_generate_report() {
-        let analyzer = InterpretabilityAnalyzer::new(InterpretabilityConfig);
-        let report = analyzer.generate_report().await.expect("should succeed");
-        let _ = format!("{:?}", report);
-    }
-
-    #[tokio::test]
-    async fn test_interpretability_analyzer_shap() {
-        let analyzer = InterpretabilityAnalyzer::new(InterpretabilityConfig);
-        let mut instance = HashMap::new();
-        instance.insert("f0".to_string(), 1.0_f64);
-        instance.insert("f1".to_string(), 2.0_f64);
-        let result = analyzer
-            .analyze_shap(&instance, &[0.5, 0.7], &[])
-            .await
-            .expect("should succeed");
-        assert!(!result.is_empty());
     }
 }

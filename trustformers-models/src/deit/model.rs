@@ -136,7 +136,7 @@ impl DeiTPatchEmbedding {
 
 /// Full embedding layer for DeiT.
 ///
-/// Prepends a [CLS] token and, when `use_distillation_token` is set, a
+/// Prepends a `[CLS]` token and, when `use_distillation_token` is set, a
 /// distillation token to the sequence of patch embeddings, then adds learned
 /// 1-D positional embeddings.
 ///
@@ -146,7 +146,7 @@ impl DeiTPatchEmbedding {
 pub struct DeiTEmbeddings {
     pub patch_embeddings: DeiTPatchEmbedding,
     pub position_embeddings: Embedding,
-    /// Learnable [CLS] token (shape: `hidden_size`).
+    /// Learnable `[CLS]` token (shape: `hidden_size`).
     pub cls_token: Array1<f32>,
     /// Learnable distillation token (shape: `hidden_size`), present when
     /// `config.use_distillation_token` is true.

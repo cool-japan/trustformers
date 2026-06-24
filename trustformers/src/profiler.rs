@@ -303,6 +303,33 @@ impl Profiler {
         Ok((result, profile_results))
     }
 
+    /// Get the global profiler instance
+    pub fn instance() -> &'static Profiler {
+        get_global_profiler()
+    }
+
+    /// Start a named operation within a session, recording its beginning
+    ///
+    /// `_metadata` is accepted for API compatibility and reserved for future use.
+    pub fn start_operation(
+        &self,
+        session_id: &str,
+        op_name: &str,
+        _metadata: Option<HashMap<String, String>>,
+    ) {
+        let key = format!("{}::{}", session_id, op_name);
+        // start_operation returns a guard that records the operation when dropped
+        let _guard = self.core_profiler.start_operation(&key);
+        // Guard dropped here — records a zero-duration begin event for the operation.
+    }
+
+    /// End a named operation within a session, recording its completion
+    pub fn end_operation(&self, session_id: &str, op_name: &str) {
+        let key = format!("{}::end::{}", session_id, op_name);
+        let _guard = self.core_profiler.start_operation(&key);
+        // Guard dropped here — records the end event.
+    }
+
     /// Get active sessions
     pub fn get_active_sessions(&self) -> Result<Vec<ProfileSession>> {
         let sessions = self.active_sessions.lock().map_err(|e| {

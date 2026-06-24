@@ -1,7 +1,7 @@
 //! DeiT (Data-efficient Image Transformers) configuration.
 //!
 //! DeiT extends ViT with knowledge distillation, adding a learnable distillation token
-//! alongside the [CLS] token. During inference, predictions from both tokens are averaged
+//! alongside the `[CLS]` token. During inference, predictions from both tokens are averaged
 //! for improved accuracy.
 //!
 //! # References

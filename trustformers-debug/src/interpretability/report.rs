@@ -6,12 +6,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::config::InterpretabilityConfig;
-use super::shap::ShapAnalysisResult;
-use super::lime::LimeAnalysisResult;
 use super::attention::AttentionAnalysisResult;
 use super::attribution::FeatureAttributionResult;
+use super::config::InterpretabilityConfig;
 use super::counterfactual::CounterfactualResult;
+use super::lime::LimeAnalysisResult;
+use super::shap::ShapAnalysisResult;
 
 /// Comprehensive interpretability report
 #[derive(Debug, Clone, Serialize, Deserialize)]

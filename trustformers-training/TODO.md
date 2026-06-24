@@ -626,7 +626,7 @@ cargo check -p trustformers-training --all-features
 
 ---
 
-**Last Updated:** 2026-03-21 - 0.1.0 Stable Release
-**Version:** 0.1.0
+**Last Updated:** 2026-06-24 - v0.1.3 Development
+**Version:** 0.1.3
 **Status:** Stable — 333 passing tests, 846 public API items, 38,667 SLoC, 0 stubs
 **Multi-Node:** Full MPI support with all collective operations

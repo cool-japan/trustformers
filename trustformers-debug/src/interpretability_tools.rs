@@ -24,123 +24,111 @@
 //! - Code reuse through focused modules
 //! - Developer experience when working on specific interpretability methods
 
-// TODO: Re-enable when interpretability module is implemented
-// Re-export the entire interpretability module
-// pub use self::interpretability::*;
-
-// Import the interpretability module
-// mod interpretability;
-
-// TODO: Re-enable when interpretability module is implemented
-// Convenience exports for backwards compatibility
-/*
-pub use interpretability::{
-    // Configuration
-    InterpretabilityConfig,
-    AttributionMethod,
-
-    // SHAP analysis
-    ShapAnalysisResult,
-    FeatureContribution,
-    ShapSummary,
-
-    // LIME analysis
-    LimeAnalysisResult,
-    FeatureImportance,
-    PerturbationAnalysis,
-    PerturbationResult,
-    NeighborhoodStats,
-
+pub use crate::interpretability::{
+    ActionableInsight,
     // Attention analysis
     AttentionAnalysisResult,
-    AttentionLayerResult,
-    AttentionHeadResult,
-    TokenAttentionScore,
-    HeadSpecializationType,
-    AttentionPatterns,
-    DiagonalPattern,
-    VerticalPattern,
-    BlockPattern,
-    RepetitivePattern,
-    LayerAttentionPatterns,
-    LayerAttentionStats,
-    HeadSpecializationAnalysis,
-    HeadCluster,
-    SpecializationEvolution,
-    SpecializationTransition,
-    SpecializationTrend,
-    HeadRedundancyAnalysis,
-    RedundantHeadPair,
-    RedundancyType,
-    PruningRecommendation,
-    PruningImpact,
-    RiskLevel,
+    AttentionBottleneck,
     AttentionFlowAnalysis,
     AttentionFlowPath,
-    LayerFlowStep,
-    FlowTransformation,
-    AttentionBottleneck,
-    BottleneckType,
-    FlowEfficiencyMetrics,
-    LayerFlowStats,
-    AttentionStatistics,
-    SparsityDistribution,
+    AttentionHeadResult,
     AttentionInsight,
-    InsightType,
+    AttentionLayerResult,
+    AttentionPatterns,
+    AttentionStatistics,
+    AttributionMethod,
 
-    // Feature attribution
-    FeatureAttributionResult,
     AttributionMethodResult,
-    FeatureAttribution,
-    MethodAgreementAnalysis,
-    TopFeature,
     AttributionVisualizationData,
-    TimelinePoint,
-    FeatureInteraction,
-    InteractionType,
-
+    BlockPattern,
+    BottleneckType,
+    BoundaryCrossingPoint,
+    ChangeDirection,
+    Counterfactual,
+    CounterfactualQualityMetrics,
     // Counterfactual generation
     CounterfactualResult,
-    Counterfactual,
+    DecisionBoundaryAnalysis,
+    DiagonalPattern,
+    FeatureAttribution,
+    // Feature attribution
+    FeatureAttributionResult,
     FeatureChange,
-    ChangeDirection,
-    CounterfactualQualityMetrics,
+    FeatureContribution,
+    FeatureImportance,
+    FeatureInteraction,
     FeatureSensitivityAnalysis,
+    FlowEfficiencyMetrics,
+    FlowTransformation,
+    HeadCluster,
+    HeadRedundancyAnalysis,
+    HeadSpecializationAnalysis,
+    HeadSpecializationType,
+    ImplementationDifficulty,
+    InsightType,
+
     InteractionEffect,
     InteractionEffectType,
-    ThresholdAnalysis,
-    DecisionBoundaryAnalysis,
-    BoundaryCrossingPoint,
-    ActionableInsight,
-    ImplementationDifficulty,
-    TimeHorizon,
+    InteractionType,
 
     // Main analyzer
     InterpretabilityAnalyzer,
 
+    // Configuration
+    InterpretabilityConfig,
     // Reporting
     InterpretabilityReport,
-};
-*/
+    LayerAttentionPatterns,
+    LayerAttentionStats,
+    LayerFlowStats,
+    LayerFlowStep,
+    // LIME analysis
+    LimeAnalysisResult,
+    MethodAgreementAnalysis,
+    NeighborhoodStats,
 
-// Re-export tests for compatibility
+    PerturbationAnalysis,
+    PerturbationResult,
+    PruningImpact,
+    PruningRecommendation,
+    RedundancyType,
+    RedundantHeadPair,
+    RepetitivePattern,
+    RiskLevel,
+    // SHAP analysis
+    ShapAnalysisResult,
+    ShapSummary,
+
+    SparsityDistribution,
+    SpecializationEvolution,
+    SpecializationTransition,
+    SpecializationTrend,
+    ThresholdAnalysis,
+    TimeHorizon,
+
+    TimelinePoint,
+    TokenAttentionScore,
+    TopFeature,
+    VerticalPattern,
+};
+
 #[cfg(test)]
 mod tests {
-
-    use crate::{InterpretabilityAnalyzer, InterpretabilityConfig};
+    use crate::interpretability::{
+        AttributionMethod, InterpretabilityAnalyzer, InterpretabilityConfig,
+    };
     use std::collections::HashMap;
 
     #[tokio::test]
     async fn test_interpretability_analyzer_creation() {
-        let config = InterpretabilityConfig;
+        let config = InterpretabilityConfig::default();
         let _analyzer = InterpretabilityAnalyzer::new(config);
-        // Basic test to ensure analyzer can be created
     }
 
     #[tokio::test]
     async fn test_shap_analysis() {
-        let config = InterpretabilityConfig;
-        let analyzer = InterpretabilityAnalyzer::new(config);
+        let config = InterpretabilityConfig::default();
+        let mut analyzer = InterpretabilityAnalyzer::new(config);
 
         let mut instance = HashMap::new();
         instance.insert("feature1".to_string(), 1.0);
@@ -160,17 +148,49 @@ mod tests {
 
     #[tokio::test]
     async fn test_lime_analysis() {
-        let config = InterpretabilityConfig;
-        let analyzer = InterpretabilityAnalyzer::new(config);
+        let config = InterpretabilityConfig::default();
+        let mut analyzer = InterpretabilityAnalyzer::new(config);
 
         let mut instance = HashMap::new();
         instance.insert("feature1".to_string(), 1.0);
         instance.insert("feature2".to_string(), 2.0);
 
-        let model_fn =
-            Box::new(|input: &HashMap<String, f64>| -> f64 { input.values().sum::<f64>() * 0.1 });
+        let model_fn: Box<dyn Fn(&HashMap<String, f64>) -> f64> =
+            Box::new(|input: &HashMap<String, f64>| input.values().sum::<f64>() * 0.1);
 
         let result = analyzer.analyze_lime(&instance, model_fn).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_feature_attribution_integrated_gradients() {
+        let config = InterpretabilityConfig {
+            enable_feature_attribution: true,
+            attribution_methods: vec![AttributionMethod::IntegratedGradients],
+            ..InterpretabilityConfig::default()
+        };
+        let mut analyzer = InterpretabilityAnalyzer::new(config);
+
+        let mut instance = HashMap::new();
+        instance.insert("feature1".to_string(), 0.5);
+        instance.insert("feature2".to_string(), 1.5);
+        instance.insert("feature3".to_string(), 2.0);
+
+        let model_predictions = vec![0.7, 0.6, 0.8];
+        let background_data = vec![{
+            let mut bg = HashMap::new();
+            bg.insert("feature1".to_string(), 0.0);
+            bg.insert("feature2".to_string(), 0.0);
+            bg.insert("feature3".to_string(), 0.0);
+            bg
+        }];
+
+        let result = analyzer.analyze_shap(&instance, &model_predictions, &background_data).await;
+        assert!(result.is_ok());
+        let shap_result = result.expect("SHAP analysis failed");
+        assert!(
+            !shap_result.feature_contributions.is_empty(),
+            "attributions must be non-empty"
+        );
     }
 }

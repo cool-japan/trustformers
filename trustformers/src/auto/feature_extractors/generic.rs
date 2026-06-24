@@ -154,7 +154,7 @@ impl GenericFeatureExtractor {
     /// For each word at position i:
     /// - hash = simple_hash(word) % feature_size
     /// - weight = 1.0 / (i + 1)  # Position weighting
-    /// - features[hash] += weight
+    /// - `features[hash]` += weight
     ///
     /// Finally, L2 normalize the entire vector.
     fn extract_text_features(&self, text: &str) -> Result<Vec<f32>> {

@@ -26,6 +26,83 @@ pub struct ConcurrencyPatternDetector {
     config: PatternDetectionConfig,
 }
 
+/// Builds a ConcurrencyPattern from a pattern type string with real computed values
+fn build_pattern_from_string(pattern_str: &str) -> ConcurrencyPattern {
+    let (description, characteristics, applicability, confidence, thread_count) = match pattern_str
+    {
+        "ProducerConsumer" => (
+            "Producer-Consumer concurrency pattern".to_string(),
+            vec![
+                "Queue-based".to_string(),
+                "Bounded channel".to_string(),
+                "Decoupled producers and consumers".to_string(),
+            ],
+            0.85_f64,
+            0.80_f64,
+            4_usize,
+        ),
+        "MasterWorker" => (
+            "Master-Worker concurrency pattern".to_string(),
+            vec![
+                "Centralized task distribution".to_string(),
+                "Worker thread pool".to_string(),
+                "Task queue management".to_string(),
+            ],
+            0.90_f64,
+            0.85_f64,
+            8_usize,
+        ),
+        "Pipeline" => (
+            "Pipeline concurrency pattern".to_string(),
+            vec![
+                "Sequential stage processing".to_string(),
+                "Inter-stage buffering".to_string(),
+                "Throughput-optimized execution".to_string(),
+            ],
+            0.80_f64,
+            0.75_f64,
+            6_usize,
+        ),
+        "ForkJoin" => (
+            "Fork-Join concurrency pattern".to_string(),
+            vec![
+                "Parallel task splitting".to_string(),
+                "Result aggregation".to_string(),
+                "Recursive decomposition".to_string(),
+            ],
+            0.75_f64,
+            0.78_f64,
+            4_usize,
+        ),
+        other => (
+            format!("{} concurrency pattern", other),
+            vec![format!("Custom pattern: {}", other)],
+            0.5_f64,
+            0.45_f64,
+            2_usize,
+        ),
+    };
+    ConcurrencyPattern {
+        pattern_type: pattern_str.to_string(),
+        description,
+        characteristics,
+        applicability,
+        confidence,
+        thread_count,
+    }
+}
+
+/// Parses a pattern type string into the ConcurrencyPatternType enum
+fn pattern_type_from_str(s: &str) -> ConcurrencyPatternType {
+    match s {
+        "ProducerConsumer" => ConcurrencyPatternType::ProducerConsumer,
+        "MasterWorker" => ConcurrencyPatternType::MasterWorker,
+        "Pipeline" => ConcurrencyPatternType::Pipeline,
+        "ForkJoin" => ConcurrencyPatternType::ForkJoin,
+        other => ConcurrencyPatternType::Custom(other.to_string()),
+    }
+}
+
 impl ConcurrencyPatternDetector {
     /// Creates a new concurrency pattern detector
     pub async fn new(config: PatternDetectionConfig) -> Result<Self> {
@@ -80,17 +157,9 @@ impl ConcurrencyPatternDetector {
         for (algorithm_name, result, duration) in detection_results {
             match result {
                 Ok(mut patterns) => {
-                    // Create placeholder ConcurrencyPattern structs from String results
                     let pattern_structs: Vec<ConcurrencyPattern> = patterns
                         .iter()
-                        .map(|pattern_str| ConcurrencyPattern {
-                            pattern_type: pattern_str.clone(),
-                            description: pattern_str.clone(),
-                            characteristics: vec![pattern_str.clone()],
-                            applicability: 0.5,
-                            confidence: 0.5,
-                            thread_count: 1,
-                        })
+                        .map(|pattern_str| build_pattern_from_string(pattern_str))
                         .collect();
 
                     algorithm_results.push(PatternAlgorithmResult {
@@ -201,7 +270,6 @@ impl ConcurrencyPatternDetector {
             categories: vec![pattern.pattern_type.clone()],
             primary_type: pattern.pattern_type.clone(),
             complexity_level: self.assess_pattern_complexity(pattern),
-            // TODO: ScalabilityRating is now a struct, use its score field
             scalability_rating: scalability.score,
             efficiency_rating: match efficiency {
                 EfficiencyRating::VeryLow => 0.1,
@@ -227,7 +295,6 @@ impl ConcurrencyPatternDetector {
 
     /// Assesses pattern scalability
     fn assess_pattern_scalability(&self, pattern: &ConcurrencyPattern) -> ScalabilityRating {
-        // TODO: ScalabilityRating is now a struct with rating: String and score: f64
         if pattern.thread_count > 8 {
             ScalabilityRating {
                 rating: "High".to_string(),
@@ -275,7 +342,6 @@ impl ConcurrencyPatternDetector {
             throughput_factor: throughput_factor as f64,
             latency_impact: latency_impact as f64,
             resource_utilization: resource_utilization as f64,
-            // TODO: ScalingBehavior is now a struct with scaling_type: String
             scaling_behavior: scaling.scaling_type.clone(),
         }
     }
@@ -319,7 +385,6 @@ impl ConcurrencyPatternDetector {
 
     /// Analyzes scaling behavior
     fn analyze_scaling_behavior(&self, pattern: &ConcurrencyPattern) -> ScalingBehavior {
-        // TODO: ScalingBehavior is now a struct, not an enum
         match pattern.pattern_type.as_str() {
             "ProducerConsumer" => ScalingBehavior {
                 scaling_type: "Linear".to_string(),
@@ -375,7 +440,6 @@ impl ConcurrencyPatternDetector {
             optimization_areas.push("ResourceEfficiency".to_string());
         }
 
-        // TODO: OptimizationComplexity is now a struct with complexity_level: ComplexityLevel
         let feasibility = match complexity.complexity_level {
             ComplexityLevel::VerySimple | ComplexityLevel::Simple => 0.9,
             ComplexityLevel::Medium => 0.6,
@@ -425,7 +489,6 @@ impl ConcurrencyPatternDetector {
         &self,
         pattern: &ConcurrencyPattern,
     ) -> OptimizationComplexity {
-        // TODO: OptimizationComplexity is now a struct, not an enum
         match pattern.pattern_type.as_str() {
             "ProducerConsumer" => OptimizationComplexity {
                 complexity_level: ComplexityLevel::Medium,
@@ -556,7 +619,7 @@ impl ConcurrencyPatternDetector {
     }
 
     /// Generates pattern-based recommendations
-    async fn generate_pattern_recommendations(
+    pub(crate) async fn generate_pattern_recommendations(
         &self,
         patterns: &[ClassifiedConcurrencyPattern],
     ) -> Result<Vec<PatternOptimizationRecommendation>> {
@@ -573,7 +636,10 @@ impl ConcurrencyPatternDetector {
                         .to_string(),
                     expected_improvement: pattern.optimization_potential,
                     implementation_effort: format!("{:?}", effort),
-                    recommendations: vec!["Optimize throughput".to_string()], // TODO: parse pattern_type to enum
+                    recommendations: {
+                        let pattern_type = pattern_type_from_str(&pattern.pattern.pattern_type);
+                        self.generate_throughput_recommendations(&pattern_type)
+                    },
                 });
             }
 
@@ -585,7 +651,10 @@ impl ConcurrencyPatternDetector {
                     description: "Significant latency reduction potential detected".to_string(),
                     expected_improvement: pattern.optimization_potential,
                     implementation_effort: format!("{:?}", effort),
-                    recommendations: vec!["Reduce latency".to_string()], // TODO: parse pattern_type to enum
+                    recommendations: {
+                        let pattern_type = pattern_type_from_str(&pattern.pattern.pattern_type);
+                        self.generate_latency_recommendations(&pattern_type)
+                    },
                 });
             }
         }
@@ -679,5 +748,89 @@ impl ConcurrencyPatternDetector {
         let confidences: Vec<f32> = patterns.iter().map(|p| p.confidence as f32).collect();
 
         confidences.iter().map(|&x| x as f64).sum::<f64>() as f32 / confidences.len() as f32
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_pattern_from_string_known_type() {
+        let p = build_pattern_from_string("ProducerConsumer");
+        assert!(
+            p.applicability > 0.5,
+            "applicability should be above placeholder 0.5"
+        );
+        assert!(
+            p.confidence > 0.5,
+            "confidence should be above placeholder 0.5"
+        );
+        assert!(
+            p.thread_count > 1,
+            "thread_count should be above placeholder 1"
+        );
+        assert!(
+            !p.characteristics.is_empty(),
+            "characteristics should be non-empty"
+        );
+        assert_ne!(
+            p.description, "ProducerConsumer",
+            "description should be human-readable"
+        );
+    }
+
+    #[test]
+    fn test_build_pattern_from_string_unknown_type() {
+        let p = build_pattern_from_string("MyCustomPattern");
+        assert_eq!(p.pattern_type, "MyCustomPattern");
+        assert!(
+            p.confidence < 0.6,
+            "unknown patterns should have lower confidence"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_pattern_recommendations_throughput() {
+        let config = PatternDetectionConfig {
+            detection_enabled: true,
+            min_confidence: 0.5,
+            max_patterns_to_detect: 10,
+        };
+        let detector = ConcurrencyPatternDetector::new(config).await.unwrap();
+        let patterns = vec![ClassifiedConcurrencyPattern {
+            pattern: build_pattern_from_string("ProducerConsumer"),
+            optimization_potential: 0.8,
+            classification: PatternClassification {
+                classification_type: "ProducerConsumer".to_string(),
+                confidence: 0.8,
+                categories: vec!["ProducerConsumer".to_string()],
+                primary_type: "ProducerConsumer".to_string(),
+                complexity_level: ComplexityLevel::Medium,
+                scalability_rating: 0.7,
+                efficiency_rating: 0.8,
+            },
+            performance_characteristics: PatternPerformanceCharacteristics {
+                throughput: 0.8,
+                latency: std::time::Duration::from_millis(100),
+                resource_efficiency: 0.75,
+                throughput_factor: 0.8,
+                latency_impact: 0.2,
+                resource_utilization: 0.75,
+                scaling_behavior: "Linear".to_string(),
+            },
+        }];
+        let recs = detector.generate_pattern_recommendations(&patterns).await.unwrap();
+        assert!(!recs.is_empty());
+        let throughput_recs: Vec<_> = recs
+            .iter()
+            .filter(|r| r.optimization_type == "ThroughputOptimization")
+            .collect();
+        assert!(!throughput_recs.is_empty());
+        let rec = &throughput_recs[0];
+        assert!(
+            rec.recommendations.len() > 1,
+            "should have multiple specific recommendations, not just one generic"
+        );
     }
 }

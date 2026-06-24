@@ -19,6 +19,7 @@ workspace = true
 anyhow.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+oxiarc-archive = { workspace = true }
 thiserror.workspace = true
 uuid = { workspace = true, features = ["v4", "serde"] }
 tokio = { workspace = true, features = ["full"] }

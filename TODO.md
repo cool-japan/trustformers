@@ -7,9 +7,9 @@ The project provides a comprehensive ecosystem for transformer model development
 with support for 21+ architectures and multiple deployment targets.
 
 ### Version Information
-- **Current Version:** 0.1.2 (Released 2026-06-20)
-- **Previous Release:** 0.1.1 (Released 2026-04-25)
-- **Status:** First Stable Release + v0.1.2 Enhancements
+- **Current Version:** 0.1.3 (Unreleased)
+- **Previous Release:** 0.1.2 (Released 2026-06-20)
+- **Status:** Active Development (v0.1.3)
 - **License:** Apache-2.0
 - **Repository:** https://github.com/cool-japan/trustformers
 
@@ -226,7 +226,7 @@ cargo check -p trustformers-models --lib --features all
 
 TrustformeRS is organized as a Cargo workspace of specialized crates:
 
-### Per-Crate Status (v0.1.1, 2026-04-25)
+### Per-Crate Status (v0.1.3, 2026-06-24)
 
 | Crate | Tests | Status | SLoC |
 |-------|-------|--------|------|
@@ -767,7 +767,7 @@ TrustformeRS is organized as a Cargo workspace of specialized crates:
 ## Proposed follow-ups
 - **scirs2-core 0.3.0 MPSGraph (externally blocked):** The 3 checkbox items under Track A are awaiting upstream scirs2-core 0.3.0 release.
 - **`trustformers-js` workspace governance gap:** The `trustformers-js/` directory is not declared in root `Cargo.toml` workspace `members` or `exclude`. Consider: add to `exclude` (explicit), or create a bridge Cargo.toml for the npm monorepo.
-- **Branch/version gap:** Resolved — workspace `Cargo.toml` and all package files are now at version `0.1.1`.
+- **Branch/version gap:** Resolved — workspace `Cargo.toml` and all package files are now at version `0.1.3`.
 
 ---
 
@@ -877,7 +877,7 @@ cargo run -p trustformers --example clip_multimodal_example --features "clip,vit
 
 ---
 
-**Last Updated:** 2026-06-20 - v0.1.2 Released
+**Last Updated:** 2026-06-24 - v0.1.3 Development
 **Next Milestone:** Beta 1.0 Release (pending scirs2-core 0.3.0 with MPSGraph for 50-200x Metal performance)
 **Target Audience:** ML engineers, researchers, and production deployment teams
 
@@ -968,46 +968,46 @@ cargo run -p trustformers --example clip_multimodal_example --features "clip,vit
 - [ ] `trustformers-serve`: `src/lib.rs:81,335` — Two proto-generated modules are commented out pending build.rs fix; re-enable once proto compilation is restored.
   - Priority: P2 | Scope: trivial | Hint: none
 
-- [ ] `trustformers-serve`: `src/resource_management/gpu_manager.rs` — Entire GPU manager module is commented-out because types (`GpuDeviceCapability`, `GpuLoadBalancer`, `GpuPerformanceTrend`, `GpuMonitoringSystem`, etc.) do not exist at the expected import paths; resolve import paths or define the missing types and uncomment.
+- [x] `trustformers-serve`: `src/resource_management/gpu_manager.rs` — Entire GPU manager module is commented-out because types (`GpuDeviceCapability`, `GpuLoadBalancer`, `GpuPerformanceTrend`, `GpuMonitoringSystem`, etc.) do not exist at the expected import paths; resolve import paths or define the missing types and uncomment.
   - Priority: P2 | Scope: large | Hint: none
   - Locations: :73-131 (large commented-out import block)
 
-- [ ] `trustformers-serve`: `src/performance_optimizer/test_characterization/concurrency_detector/deadlock_analyzer.rs` — Deadlock analyzer accumulates API-mismatch workarounds: `PotentialDeadlock` fields (`confidence`, `probability`, `deadlock_type`, `impact`) no longer exist; `DeadlockRiskLevel` changed from enum to struct; lock-acquisition/release signatures changed; fix all field accesses and call sites to match current API.
+- [x] `trustformers-serve`: `src/performance_optimizer/test_characterization/concurrency_detector/deadlock_analyzer.rs` — Deadlock analyzer accumulates API-mismatch workarounds: `PotentialDeadlock` fields (`confidence`, `probability`, `deadlock_type`, `impact`) no longer exist; `DeadlockRiskLevel` changed from enum to struct; lock-acquisition/release signatures changed; fix all field accesses and call sites to match current API.
   - Priority: P2 | Scope: medium | Hint: none
   - Locations: :54,:56,:93,:215,:223,:267,:310,:341,:349,:398,:421,:430,:497,:512,:532,:552 (16 mismatch sites)
 
-- [ ] `trustformers-serve`: `src/performance_optimizer/test_characterization/concurrency_detector/thread_analyzer.rs` — `ThreadAnalysis` API changed (`thread_id` removed, `detected_patterns` is now `Vec<String>`); `ExecutionTrace` lost `duration` and `result` fields; `InteractionType`/`PatternType`/`PatternImpact` enum variants renamed; fix all mismatches.
+- [x] `trustformers-serve`: `src/performance_optimizer/test_characterization/concurrency_detector/thread_analyzer.rs` — `ThreadAnalysis` API changed (`thread_id` removed, `detected_patterns` is now `Vec<String>`); `ExecutionTrace` lost `duration` and `result` fields; `InteractionType`/`PatternType`/`PatternImpact` enum variants renamed; fix all mismatches.
   - Priority: P2 | Scope: medium | Hint: none
   - Locations: :39,:69,:123,:124,:193,:286,:300,:317,:467,:477,:484,:504,:521 (13 mismatch sites)
 
-- [ ] `trustformers-serve`: `src/performance_optimizer/test_characterization/concurrency_detector/lock_analyzer.rs` — `ContentionFrequencyAnalysis::new` and `WaitTimeAnalysis::new` signatures changed; `ExecutionTrace` lost `result` field; `contention_summary`/`latency_bounds` require conversion from analyzer structs.
+- [x] `trustformers-serve`: `src/performance_optimizer/test_characterization/concurrency_detector/lock_analyzer.rs` — `ContentionFrequencyAnalysis::new` and `WaitTimeAnalysis::new` signatures changed; `ExecutionTrace` lost `result` field; `contention_summary`/`latency_bounds` require conversion from analyzer structs.
   - Priority: P2 | Scope: small | Hint: none
   - Locations: :36,:39,:120,:121,:157,:173 (6 mismatch sites)
 
-- [ ] `trustformers-serve`: `src/performance_optimizer/test_characterization/concurrency_detector/conflict_detector.rs` — `ResourceConflict.resources` field removed (only `resource_id` remains); `ConflictType` enum variants simplified; `ConflictHistory::new()`/`ResourceDependencyGraph::new()` return `Result` now; fix all construction and field access sites.
+- [x] `trustformers-serve`: `src/performance_optimizer/test_characterization/concurrency_detector/conflict_detector.rs` — `ResourceConflict.resources` field removed (only `resource_id` remains); `ConflictType` enum variants simplified; `ConflictHistory::new()`/`ResourceDependencyGraph::new()` return `Result` now; fix all construction and field access sites.
   - Priority: P2 | Scope: small | Hint: none
   - Locations: :53,:55,:80,:213,:217,:302,:318,:346 (8 mismatch sites)
 
-- [ ] `trustformers-serve`: `src/performance_optimizer/test_characterization/concurrency_detector/pattern_detector.rs` — `ScalabilityRating`, `ScalingBehavior`, and `OptimizationComplexity` changed from enums to structs; fix all match arms and construction sites.
+- [x] `trustformers-serve`: `src/performance_optimizer/test_characterization/concurrency_detector/pattern_detector.rs` — `ScalabilityRating`, `ScalingBehavior`, and `OptimizationComplexity` changed from enums to structs; fix all match arms and construction sites.
   - Priority: P2 | Scope: small | Hint: none
   - Locations: :204,:230,:278,:322,:378,:428,:576,:588 (8 mismatch sites)
 
-- [ ] `trustformers-serve`: `src/performance_optimizer/test_characterization/concurrency_detector/sharing_analyzer.rs` — `ResourceSharingCapabilities` lost `sharing_safety_level` enum field and `implementation_complexity`; `performance_overhead` renamed to `sharing_overhead`; fix field names.
+- [x] `trustformers-serve`: `src/performance_optimizer/test_characterization/concurrency_detector/sharing_analyzer.rs` — `ResourceSharingCapabilities` lost `sharing_safety_level` enum field and `implementation_complexity`; `performance_overhead` renamed to `sharing_overhead`; fix field names.
   - Priority: P2 | Scope: trivial | Hint: none
   - Locations: :185,:190,:194,:212 (4 sites)
 
-- [ ] `trustformers-serve`: `src/performance_optimizer/test_characterization/concurrency_detector/risk_assessment.rs` — `PreventiveMitigation::new` and `ReactiveMitigation::new` required args changed; `assess_risk`, `is_applicable`, `generate_mitigation` argument counts changed; fix all call sites.
+- [x] `trustformers-serve`: `src/performance_optimizer/test_characterization/concurrency_detector/risk_assessment.rs` — `PreventiveMitigation::new` and `ReactiveMitigation::new` required args changed; `assess_risk`, `is_applicable`, `generate_mitigation` argument counts changed; fix all call sites.
   - Priority: P2 | Scope: small | Hint: none
   - Locations: :44,:46,:74,:96,:265,:267 (6 mismatch sites)
 
-- [ ] `trustformers-serve`: `src/performance_optimizer/test_characterization/concurrency_detector/detector.rs` — `PatternEstimationConfig` → `EstimationConfig` type mismatch; `SharingCapability` (enum) vs `ResourceSharingCapabilities` (struct) conversion missing; `SynchronizationRequirements`/`ConcurrencyRequirements` field renames; `IsolationLevel::Process` variant missing.
+- [x] `trustformers-serve`: `src/performance_optimizer/test_characterization/concurrency_detector/detector.rs` — `PatternEstimationConfig` → `EstimationConfig` type mismatch; `SharingCapability` (enum) vs `ResourceSharingCapabilities` (struct) conversion missing; `SynchronizationRequirements`/`ConcurrencyRequirements` field renames; `IsolationLevel::Process` variant missing.
   - Priority: P2 | Scope: medium | Hint: none
   - Locations: :83,:219,:228,:319,:340,:389,:451,:456,:461 (9 mismatch sites)
 
-- [ ] `trustformers-serve`: `src/performance_optimizer/performance_modeling/mod.rs:207` — Trained model cannot be stored in `active_models` because field uses `Box` while insertion needs `Arc`; refactor `active_models` to `Arc<dyn PerformanceModel>` and fix the train path.
+- [x] `trustformers-serve`: `src/performance_optimizer/performance_modeling/mod.rs:207` — Trained model cannot be stored in `active_models` because field uses `Box` while insertion needs `Arc`; refactor `active_models` to `Arc<dyn PerformanceModel>` and fix the train path.
   - Priority: P2 | Scope: small | Hint: none
 
-- [ ] `trustformers-serve`: `src/test_performance_monitoring/historical_data/types.rs` — Multiple data-lifecycle methods (compress, optimize, check_policy, cleanup, archive, retrieve, cache_lookup, query_execute, cache_store, lifecycle_eval) all return `Ok(())`/default stubs; implement each.
+- [x] `trustformers-serve`: `src/test_performance_monitoring/historical_data/types.rs` — Multiple data-lifecycle methods (compress, optimize, check_policy, cleanup, archive, retrieve, cache_lookup, query_execute, cache_store, lifecycle_eval) all return `Ok(())`/default stubs; implement each.
   - Priority: P2 | Scope: large | Hint: none
   - Locations: :117,:122,:196,:201,:271,:280,:396,:401,:417,:881 (10 stub methods)
 
@@ -1027,9 +1027,124 @@ cargo run -p trustformers --example clip_multimodal_example --features "clip,vit
 - [ ] `trustformers-wasm`: `src/compute/gpu_tensor.rs:52,85` — WebGPU backend initialization is a stub (no device creation); `Rc<RefCell<>>` wrapper for interior mutability not applied; implement WebGPU device/queue setup and wrap backend.
   - Priority: P2 | Scope: medium | Hint: none
 
-- [ ] `trustformers`: `tests/compatibility_tests.rs:34,107,203,349` — Four tests are `#[ignore]`d waiting for `GlobalMemoryPool`, `ZeroCopyTensorView`, and `GlobalProfiler`; either implement these types or delete the placeholder tests.
+- [x] `trustformers`: `tests/compatibility_tests.rs:34,107,203,349` — Four tests are `#[ignore]`d waiting for `GlobalMemoryPool`, `ZeroCopyTensorView`, and `GlobalProfiler`; either implement these types or delete the placeholder tests.
   - Priority: P2 | Scope: medium | Hint: none
   - Locations: GlobalMemoryPool :34,:107, ZeroCopyTensorView :203, GlobalProfiler :349
 
-- [ ] `trustformers-debug`: `src/interpretability_tools.rs:27,34` — Interpretability-tools module is entirely commented out waiting for the module to be implemented; implement `AttentionVisualizer` and `FeatureAttributor` (or the equivalent current API) and re-enable.
+- [x] `trustformers-debug`: `src/interpretability_tools.rs:27,34` — Interpretability-tools module is entirely commented out waiting for the module to be implemented; implement `AttentionVisualizer` and `FeatureAttributor` (or the equivalent current API) and re-enable.
   - Priority: P2 | Scope: large | Hint: none
+
+## Stubs to implement (added 2026-06-22 by /cooljapan-stub-check)
+
+- [ ] **trustformers** `trustformers-py`: `src/auto.rs:96` — `TODO`: `"rwkv" | "mamba" => { // State-space models - for now use BERT as fallback`
+  - **Priority:** P2  **Scope:** large  **Cross-project:** none
+  - **Approach:** Route the `rwkv`/`mamba` arm to the real state-space loaders (`PyRwkvModel`/`PyMambaModel`) instead of the BERT fallback; wire `from_pretrained` to load state-space weights.
+  - **Risk:** Known-wrong correctness bug — silently returns a BERT model for RWKV/Mamba checkpoints, producing garbage outputs; needs the model crates' loaders to exist and be Python-exposed.
+
+- [ ] **trustformers** `trustformers-core`: `src/ops/activations.rs:42` — `TODO`: `let device_id = 0; // TODO: Get from tensor metadata`
+  - **Priority:** P2  **Scope:** small  **Cross-project:** none
+  - **Approach:** Read the CUDA device id from `cuda_data` tensor metadata (e.g. `cuda_data.device_id()`/its `Device::CUDA(id)`) instead of hardcoding `0` before `get_cuda_backend`.
+  - **Risk:** Wrong on multi-GPU — activations dispatched to device 0 regardless of where the tensor lives, causing cross-device faults or silent corruption.
+
+- [ ] **trustformers** `trustformers-core`: `src/tensor/utils.rs:440` — `TODO`: `// For now, just return a clone (buffer is reference counted) ... device-to-device transfer (Metal)`
+  - **Priority:** P2  **Scope:** medium  **Cross-project:** none
+  - **Approach:** Implement a real Metal device→device buffer copy (blit encoder) when source and destination Metal devices differ, instead of cloning the reference-counted buffer.
+  - **Risk:** Multi-device Metal transfers alias the source buffer rather than copying, so data is not actually moved to the target device.
+
+- [ ] **trustformers** `trustformers-core`: `src/tensor/utils.rs:562` — `TODO`: `// For now, just return a clone (buffer is reference counted) ... device-to-device transfer (CUDA)`
+  - **Priority:** P2  **Scope:** medium  **Cross-project:** none
+  - **Approach:** Implement direct CUDA device→device copy (`cudaMemcpyPeer`/equivalent in the CUDA backend) when the destination device differs; avoid the host round-trip / clone shortcut.
+  - **Risk:** Same as the Metal case — CUDA peer transfers silently alias instead of relocating data across GPUs.
+
+- [ ] **trustformers** `trustformers-core`: `src/tensor/math_ops/arithmetic.rs:141` — `TODO`: `// Mixed Metal/CPU - convert to CPU for now // TODO: Could upload CPU tensor to GPU instead`
+  - **Priority:** P2  **Scope:** small  **Cross-project:** none
+  - **Approach:** When exactly one operand is on GPU (Metal), upload the CPU operand to the GPU and run the op on-device, rather than downloading the GPU operand to CPU.
+  - **Risk:** Perf/correctness — current path forces a GPU→CPU download per mixed op, defeating GPU residency and adding latency in hot arithmetic paths.
+
+- [x] **trustformers** `trustformers-serve`: `src/resource_management/statistics.rs:507` — `TODO`: `active_resources: 0, // TODO: Calculate from system_stats`
+  - **Priority:** P2  **Scope:** small  **Cross-project:** none
+  - **Approach:** Derive `active_resources` from `system_stats` (e.g. count currently-allocated resource handles) instead of the hardcoded `0`.
+  - **Risk:** Reported active-resource count is always 0, misleading dashboards/autoscaling decisions.
+
+- [x] **trustformers** `trustformers-serve`: `src/resource_management/statistics.rs:508` — `TODO`: `peak_usage: recent_snapshots.len() as u64, // TODO: Calculate from system_stats`
+  - **Priority:** P2  **Scope:** small  **Cross-project:** none
+  - **Approach:** Compute true peak usage as the max observed usage across `recent_snapshots`/`system_stats`, not the snapshot count.
+  - **Risk:** `peak_usage` currently equals the number of snapshots (a sampling artifact), not real peak resource consumption.
+
+- [x] **trustformers** `trustformers-serve`: `src/performance_optimizer/performance_modeling/mod.rs:207` — `TODO`: `// TODO: Add trained model to active_models - requires refactoring to use Arc instead of Box`
+  - **Priority:** P2  **Scope:** medium  **Cross-project:** none
+  - **Approach:** Refactor `active_models` storage from `Box<dyn PerformanceModel>` to `Arc<dyn PerformanceModel>`, then insert the freshly trained model instead of returning a default placeholder.
+  - **Risk:** Training succeeds but the model is discarded (a default is returned), so trained performance models are never actually served.
+
+- [ ] **trustformers** `trustformers-models`: `src/gpt2/model/model_blocks.rs:953` — `TODO`: `// TODO: Fused matmul+bias+GELU kernel for Metal GPU`
+  - **Priority:** P2  **Scope:** medium  **Cross-project:** none
+  - **Approach:** Integrate the existing Metal fused matmul+bias+GELU kernel (`gpu_ops/metal/metalbackend_matmul_gelu_f32_group.rs`) into the Linear layer with GPU-resident buffers, replacing the current MPS/Accelerate path.
+  - **Risk:** Perf only (current MPS/Accelerate path is correct); integration requires GPU-resident buffer ops in the Linear layer.
+
+- [ ] **trustformers** `trustformers-models`: `src/gpt_neox/model.rs:165` — `TODO`: `// Temporary fallback: Convert Metal/CUDA tensors to F32 // TODO: Implement full Tensor::Metal/CUDA support in Attention`
+  - **Priority:** P2  **Scope:** medium  **Cross-project:** none
+  - **Approach:** Implement native Metal/CUDA tensor support in GPT-NeoX attention (QKV split + RoPE on-device) instead of downcasting GPU tensors to CPU F32.
+  - **Risk:** Perf/correctness — GPU GPT-NeoX attention silently round-trips to CPU F32, losing GPU residency and precision flexibility.
+
+- [ ] **trustformers** `trustformers-serve`: `src/resource_management/gpu_manager/manager.rs:259` — `TODO`: `// TODO: In production, add real GPU discovery:`
+  - **Priority:** P2  **Scope:** medium  **Cross-project:** none
+  - **Approach:** Implement real GPU discovery (NVIDIA via NVML/Pure-Rust probe, AMD via ROCm, cross-vendor via the project's compute backends) and driver-compatibility checks instead of the placeholder enumeration.
+  - **Risk:** Serve cannot see actual GPUs in production; scheduling/placement runs on stubbed device info. (Real bindings should follow the Pure-Rust/noffi policy.)
+
+- [ ] **trustformers** `trustformers-c`: `src/tensor.rs:1153` — `TODO`: `/// Clamp tensor values to [min, max] range (NOT YET IMPLEMENTED) // TODO: Implement clamp() method`
+  - **Priority:** P2  **Scope:** small  **Cross-project:** none
+  - **Approach:** Add a `clamp(min, max)` method to `trustformers_core::tensor::Tensor`, then uncomment and wire the `trustformers_tensor_clamp` C export.
+  - **Risk:** C API advertises clamp but the entry point is commented out; consumers cannot clamp via FFI until the core method lands.
+
+### Known external-blocked placeholders (not actionable)
+
+- `trustformers-serve` `build.rs:2` — Proto compilation disabled: `tonic-build`/`tonic-prost-build` 0.14 API changed; blocked on settling the new builder pattern (also gates `src/lib.rs:81,335` proto module re-enables). Tracked in the 2026-06-12 section.
+- `trustformers-core` `src/gpu_ops/rocm.rs:131` — `// TODO: Implement actual HIP kernel execution when HIP bindings are available`; falls back to CPU. Blocked on Pure-Rust/HIP bindings.
+- `trustformers-core` `src/gpu_ops/cuda/cuda_split/cuda_backend_ext.rs:457` — `// TODO: Implement fully fused transformer kernel`; needs a hand-written fused CUDA kernel. Already tracked (large) in the 2026-06-12 section.
+- `trustformers-wasm` `src/compute/gpu_tensor.rs:52,85` — WebGPU device creation + `Rc<RefCell<>>` interior-mutability wiring; blocked on the WebGPU backend. Already tracked (medium) in the 2026-06-12 section.
+
+## Deferred stubs surfaced by /stub-check (2026-06-24)
+
+Real but non-actionable-now stubs found in workspace member crates during nagare Phase 2; each needs cross-cutting wiring, external resources, GPU hardware, or upstream fixes. Documented for future passes.
+
+- [ ] `trustformers-serve`: `src/openai_compat/mod.rs:742,769` — route_chat/route_completion return hardcoded stub responses; need real model inference wired through serve (reason: crosscut, needs inference path + weights)
+- [ ] `trustformers-serve`: `src/graphql.rs:181` — models() returns a single hardcoded entry; model_service not wired into GraphQL context (reason: crosscut)
+- [ ] `trustformers-serve`: `src/model_management/manager.rs:47,56` — ModelInstance::infer() returns a placeholder string (reason: crosscut, needs inference)
+- [ ] `trustformers-serve`: `src/performance_optimizer/real_time_metrics/optimization/advanced_algorithms.rs:150,285,406,523,651,707,777` — update_with_feedback is a no-op across 7 algorithms; AlgorithmStatistics lost feedback_count/positive_feedback/negative_feedback fields (reason: crosscut, type API drift)
+- [ ] `trustformers-serve`: `src/performance_optimizer/real_time_metrics/mod.rs:167` — threshold module disabled (only stub impls); comment cites 1,700+ compile errors to restore from .bak2 (reason: oversized)
+- [ ] `trustformers-serve`: `src/test_performance_monitoring/types/storage.rs:35` — StorageManager::get_report returns a stub Report (reason: crosscut)
+- [ ] `trustformers-serve`: `src/test_performance_monitoring/types/reporting.rs:36` — ReportExporter::export_report returns a stub ExportResult without writing a file (reason: crosscut)
+- [ ] `trustformers-serve`: `src/test_performance_monitoring/mod.rs:205-207,223` and `src/test_performance_monitoring/service.rs:111,115,120` — config fields (compliance_reporting/historical_data_config/event_config/alert_config) absent on the config types; API drift (reason: external/crosscut)
+- [ ] `trustformers`: `src/auto/feature_extractors/vision.rs:251,291` — preprocess_image and extract_visual_features return zero vectors (reason: crosscut)
+- [ ] `trustformers`: `src/hub_offline_packs.rs:356` — get_model_info returns a mock ModelInfo; needs a HuggingFace Hub HTTP call (reason: external)
+- [ ] `trustformers`: `src/pipeline/conversational/config/presets.rs:409,462,488` — references AnalysisConfigBuilder/ReasoningConfigBuilder that may not exist; verify whether live or dead before implementing (reason: needs-clarification)
+- [ ] `trustformers-mobile`: `src/react_native_fabric.rs:410` — execute_standard_inference returns a placeholder vec (reason: crosscut)
+- [ ] `trustformers-optim`: `src/genie_stub.rs`, `src/sofo_stub.rs`, `src/lora_rite_stub.rs` — simplified GENIE/SOFO/LoRA-RITE optimizer steps; full research algorithms pending API-compat resolution (reason: research/needs-clarification)
+- [ ] `trustformers-debug`: `src/data_export.rs:608` — export_sqlite falls back to JSON instead of a real SQLite file; should use oxisql-sqlite-compat per COOLJAPAN policy (reason: small-medium, deferred)
+- [ ] `trustformers-debug`: `src/kernel_optimizer.rs:987,1035,1101,1180` — GPU kernel analyzers (LaunchConfig/MemoryAccess/ComputeUtilization/KernelFusion) return empty results (reason: gpu)
+
+> **Skipped as already-tracked:** `trustformers-core` `src/gpu_ops/rocm.rs:131` (HIP kernel execution pending Pure-Rust HIP bindings, reason: external/gpu) — already documented under "Known external-blocked placeholders" in the 2026-06-22 section above.
+
+## Planned campaigns — COOLJAPAN policy debt (scheduled 2026-06-24)
+
+Two dedicated campaigns for pre-existing debt (not introduced by 0.1.3). Each is large and must run as a focused, per-crate, verify-as-you-go pass — NOT a quick fix. Sized from the nagare 0.1.3 policy-check + purity audit.
+
+### Campaign A — No-unwrap + dead-code elimination
+
+- [ ] **Campaign A — No-unwrap + dead-code elimination**
+  - **Goal:** eliminate 1,844 `#[allow(...)]` (1,337 `dead_code`, 104 `unused_variables`, 61 `unused_imports`, 41 `unreachable_patterns`, 32 `deprecated`, ~160 clippy) and drive 2,421 production `unwrap`/`expect` (73 unwrap + 2,348 expect) toward zero, per the No-warnings + No-unwrap policies. Build/tests currently pass only because the allows silence the warnings.
+  - **Scope:** workspace member `src/` only (exclude `#[cfg(test)]`/`tests/`). Per-crate `#[allow]` counts: debug 484, core 467, models 329, training 127, optim 110, serve 102, wasm 81, trustformers 62, mobile 42, tokenizers 30. Worst `unwrap`/`expect` files: mobile `profiler_impl.rs` 48, mobile `profiler_split/types.rs` 48, core `memory_leak_detector.rs` 41, mobile `adaptive_cache_manager.rs` 36, core `checkpoint/mapping.rs` 36, wasm `webgpu/types.rs` 35, core `hardware/registry.rs` 34, mobile `optimization/memory_pool.rs` 33, debug `realtime_dashboard.rs` 32, trustformers `memory_pool.rs` 31.
+  - **Approach (phased, per-crate, leaf-first):** A1 — remove `#[allow(dead_code)]`; for each surfaced item: delete if truly dead, wire it up if it should be used, or make it `pub` if it's intended API. A2 — remove remaining `#[allow(unused_*/unreachable/deprecated/clippy)]`, fix root causes (unused imports/vars, update deprecated APIs). A3 — replace `unwrap()`/`expect()` in src with `Result`/`?`/`ok_or_else`/`unwrap_or_else`; keep a documented `expect` ONLY where the invariant is provably infallible.
+  - **Risk:** removing `dead_code` allows may unmask code used only via macros/reflection — verify before deleting; deleting public-looking items can break downstream. Large effort; slice per-crate, PR-sized.
+  - **Verify:** per crate `cargo clippy -p <crate> --all-features --all-targets -- -D warnings` clean WITHOUT the removed allows; `cargo nextest run -p <crate> --all-features` green.
+  - **Suggested execution:** a dedicated `/recursive` or `/loop` campaign, one crate per slice, leaf-of-dep-graph first, capped iterations, never re-adding an `#[allow]`.
+
+### Campaign B — Pure-Rust default-features dependency hygiene
+
+- [ ] **Campaign B — Pure-Rust default-features dependency hygiene**
+  - **Goal:** make DEFAULT features 100% Pure Rust (COOLJAPAN policy). Today every non-wasm member transitively compiles C libs in its default tree; only `trustformers-wasm` is clean. Our own crates are already compliant (use `oxiarc-*`, gate all heavy C backends) — this is third-party transitive leakage.
+  - **Scope (default-tree offenders + who pulls them):** `aws-lc-sys` via `reqwest`→`rustls` (reqwest is a non-optional dep of `trustformers-core`); `onig_sys` via `tokenizers` (non-optional dep of core); `zstd-sys`/`zstd` via `jieba-rs`→`include-flate` (tokenizers); banned compression `flate2`+`miniz_oxide` via `plotters`/`image`/`png` (debug `visual`) and cloud-SDK HTTP stacks (serve); `brotli` via `lambda-web` (serve); `zip` (build-dep) via `utoipa-swagger-ui` (serve). NOTE: torch/cuda/opencl/vulkan/mpi/ffmpeg/kafka C deps are ALREADY correctly feature-gated (non-default) — leave them.
+  - **Approach:** (1) `reqwest`/`rustls`: switch the default crypto provider off `aws-lc-rs` to a pure-Rust path (e.g. `reqwest` default-features=false + rustls with a RustCrypto provider), dropping `aws-lc-sys`. (2) `tokenizers`: disable its default `onig` feature, use the pure-Rust `fancy-regex` backend, dropping `onig_sys`. (3) `jieba-rs`/`include-flate`: replace or feature-gate so `zstd-sys` leaves default (or store data uncompressed / via `oxiarc`). (4) debug `visual` (plotters/image): move behind a non-default feature, or use a pure-Rust raster backend, dropping `flate2`/`miniz_oxide`. (5) serve: gate `lambda-web` behind a non-default `lambda` feature (drops `brotli`) and `utoipa-swagger-ui` behind a non-default `swagger-ui` feature (drops the `zip` build-dep).
+  - **Risk:** changing the TLS crypto provider can affect HTTPS behavior; disabling `onig` can change tokenizer regex semantics for some models; gating debug-visual / serve lambda+swagger changes the default API/feature surface. Each change needs build+test verification and a default-vs-all-features tree diff.
+  - **Verify:** `cargo tree -p <member> -e normal,build` shows no `-sys`/banned-compression in the DEFAULT tree for every member; `cargo build`/`cargo nextest run` green on default features; `--all-features` still green.
+  - **Suggested execution:** a focused dependency-surgery pass, one offender at a time with a `cargo tree` diff + build/test gate after each; use `trustformers-wasm` (already pure) as the reference.

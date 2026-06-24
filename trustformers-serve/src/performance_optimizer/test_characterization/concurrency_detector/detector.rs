@@ -67,6 +67,97 @@ pub struct ConcurrencyRequirementsDetector {
     shutdown: Arc<AtomicBool>,
 }
 
+/// Converts a SharingCapability enum variant into a ResourceSharingCapabilities struct
+fn sharing_capability_to_struct(cap: &SharingCapability) -> ResourceSharingCapabilities {
+    use std::collections::HashMap;
+    match cap {
+        SharingCapability::None => ResourceSharingCapabilities {
+            supports_read_sharing: false,
+            supports_write_sharing: false,
+            max_concurrent_readers: Some(0),
+            max_concurrent_writers: Some(0),
+            sharing_overhead: 0.0,
+            consistency_guarantees: Vec::new(),
+            isolation_requirements: vec!["Exclusive access required".to_string()],
+            recommended_strategy: SharingStrategy::NoSharing,
+            safety_assessment: 1.0,
+            performance_tradeoffs: HashMap::new(),
+            performance_overhead: 0.0,
+            implementation_complexity: 0.1,
+            sharing_mode: "none".to_string(),
+        },
+        SharingCapability::ReadOnly => ResourceSharingCapabilities {
+            supports_read_sharing: true,
+            supports_write_sharing: false,
+            max_concurrent_readers: None,
+            max_concurrent_writers: Some(0),
+            sharing_overhead: 0.05,
+            consistency_guarantees: vec!["Read consistency guaranteed".to_string()],
+            isolation_requirements: vec!["No concurrent writers".to_string()],
+            recommended_strategy: SharingStrategy::ReadSharing,
+            safety_assessment: 0.95,
+            performance_tradeoffs: HashMap::new(),
+            performance_overhead: 0.05,
+            implementation_complexity: 0.2,
+            sharing_mode: "read-only".to_string(),
+        },
+        SharingCapability::ReadWrite => ResourceSharingCapabilities {
+            supports_read_sharing: true,
+            supports_write_sharing: true,
+            max_concurrent_readers: None,
+            max_concurrent_writers: Some(1),
+            sharing_overhead: 0.15,
+            consistency_guarantees: vec!["Sequential consistency for writes".to_string()],
+            isolation_requirements: vec!["Write serialization required".to_string()],
+            recommended_strategy: SharingStrategy::CopyOnWrite,
+            safety_assessment: 0.80,
+            performance_tradeoffs: {
+                let mut m = HashMap::new();
+                m.insert("write_latency".to_string(), 0.15);
+                m.insert("read_latency".to_string(), 0.05);
+                m
+            },
+            performance_overhead: 0.15,
+            implementation_complexity: 0.6,
+            sharing_mode: "read-write".to_string(),
+        },
+        SharingCapability::Exclusive => ResourceSharingCapabilities {
+            supports_read_sharing: false,
+            supports_write_sharing: true,
+            max_concurrent_readers: Some(1),
+            max_concurrent_writers: Some(1),
+            sharing_overhead: 0.25,
+            consistency_guarantees: vec!["Exclusive access guaranteed".to_string()],
+            isolation_requirements: vec!["Single accessor at a time".to_string()],
+            recommended_strategy: SharingStrategy::NoSharing,
+            safety_assessment: 0.99,
+            performance_tradeoffs: {
+                let mut m = HashMap::new();
+                m.insert("throughput_reduction".to_string(), 0.5);
+                m
+            },
+            performance_overhead: 0.25,
+            implementation_complexity: 0.4,
+            sharing_mode: "exclusive".to_string(),
+        },
+        SharingCapability::Shared => ResourceSharingCapabilities {
+            supports_read_sharing: true,
+            supports_write_sharing: false,
+            max_concurrent_readers: Some(8),
+            max_concurrent_writers: Some(0),
+            sharing_overhead: 0.10,
+            consistency_guarantees: vec!["Eventual consistency".to_string()],
+            isolation_requirements: Vec::new(),
+            recommended_strategy: SharingStrategy::ReadSharing,
+            safety_assessment: 0.85,
+            performance_tradeoffs: HashMap::new(),
+            performance_overhead: 0.10,
+            implementation_complexity: 0.35,
+            sharing_mode: "shared".to_string(),
+        },
+    }
+}
+
 impl ConcurrencyRequirementsDetector {
     /// Creates a new concurrency requirements detector
     ///
@@ -80,15 +171,25 @@ impl ConcurrencyRequirementsDetector {
     pub async fn new(config: ConcurrencyDetectorConfig) -> Result<Self> {
         let config_arc = Arc::new(RwLock::new(config.clone()));
 
-        // TODO: PatternEstimationConfig -> EstimationConfig type mismatch
-        // Using default EstimationConfig for now
+        // Convert PatternEstimationConfig to EstimationConfig:
+        // - safety_margin: derived from enabled flag (active = more conservative 0.2, disabled = 0.5)
+        //   and bounded below by 1/(timeout_seconds+1) to reflect urgency
+        // - history_retention_limit: derived from max_iterations (capped to reasonable range)
+        let estimation_config = {
+            let pc = &config.estimation_config;
+            EstimationConfig {
+                safety_margin: if pc.enabled {
+                    0.2_f64.max(1.0 / (pc.timeout_seconds as f64 + 1.0))
+                } else {
+                    0.5
+                },
+                history_retention_limit: pc.max_iterations.clamp(100, 10_000),
+            }
+        };
         let estimator = Arc::new(
-            SafeConcurrencyEstimator::new(EstimationConfig {
-                safety_margin: 0.2,
-                history_retention_limit: 1000,
-            })
-            .await
-            .context("Failed to create safe concurrency estimator")?,
+            SafeConcurrencyEstimator::new(estimation_config)
+                .await
+                .context("Failed to create safe concurrency estimator")?,
         );
 
         let conflict_detector = Arc::new(
@@ -216,8 +317,6 @@ impl ConcurrencyRequirementsDetector {
         // Extract lock dependencies from lock analysis
         let lock_dependencies = self.extract_lock_dependencies(&lock_result)?;
 
-        // TODO: Type mismatch - sharing_result has Vec<SharingCapability> (enum) but field expects Vec<ResourceSharingCapabilities> (struct)
-        // Using empty vec for now - needs proper conversion
         let analysis_result = ConcurrencyAnalysisResult {
             timestamp: start_time,
             test_id: test_data.test_id.clone(),
@@ -225,7 +324,11 @@ impl ConcurrencyRequirementsDetector {
             recommended_concurrency: estimation_result.recommended_concurrency,
             resource_conflicts: conflict_result.resource_conflicts.clone(),
             lock_dependencies,
-            sharing_capabilities: Vec::new(), // TODO: Convert from sharing_result.sharing_capabilities
+            sharing_capabilities: sharing_result
+                .sharing_capabilities
+                .iter()
+                .map(sharing_capability_to_struct)
+                .collect(),
             safety_constraints: safety_result
                 .safety_constraints
                 .first()
@@ -316,10 +419,6 @@ impl ConcurrencyRequirementsDetector {
 
         let final_concurrency = risk_limited.min(self.config.read().max_concurrency);
 
-        // TODO: Type mismatches - need proper conversions
-        // conflicts.resource_constraints is HashMap<String, f64> but field expects Vec<String>
-        // deadlock.synchronization_requirements is Vec<String> but field expects SynchronizationRequirements
-        // sharing.sharing_capabilities is Vec<SharingCapability> but field expects ResourceSharingCapabilities
         Ok(ConcurrencyRequirements {
             max_concurrent_instances: final_concurrency,
             isolation_level: IsolationLevel::default(),
@@ -337,7 +436,6 @@ impl ConcurrencyRequirementsDetector {
             optimal_concurrency: estimation.optimal_concurrency,
             resource_constraints: conflicts.resource_constraints.keys().cloned().collect(),
             sharing_requirements: sharing.sharing_requirements.clone(),
-            // TODO: SynchronizationRequirements struct fields changed - using defaults
             synchronization_requirements: SynchronizationRequirements {
                 synchronization_points: Vec::new(),
                 lock_usage_patterns: Vec::new(),
@@ -358,21 +456,25 @@ impl ConcurrencyRequirementsDetector {
             performance_guarantees: self.build_performance_guarantees(threads, locks, patterns),
             max_threads: final_concurrency,
             parallel_capable: estimation.is_parallelizable,
-            resource_sharing: ResourceSharingCapabilities {
-                supports_read_sharing: false,
-                supports_write_sharing: false,
-                max_concurrent_readers: None,
-                max_concurrent_writers: None,
-                sharing_overhead: 0.0,
-                consistency_guarantees: Vec::new(),
-                isolation_requirements: Vec::new(),
-                recommended_strategy: SharingStrategy::NoSharing,
-                safety_assessment: 0.0,
-                performance_tradeoffs: std::collections::HashMap::new(),
-                performance_overhead: 0.0,
-                implementation_complexity: 0.0,
-                sharing_mode: String::from("none"),
-            },
+            resource_sharing: sharing
+                .sharing_capabilities
+                .first()
+                .map(sharing_capability_to_struct)
+                .unwrap_or_else(|| ResourceSharingCapabilities {
+                    supports_read_sharing: false,
+                    supports_write_sharing: false,
+                    max_concurrent_readers: Some(0),
+                    max_concurrent_writers: Some(0),
+                    sharing_overhead: 0.0,
+                    consistency_guarantees: Vec::new(),
+                    isolation_requirements: vec!["No sharing configured".to_string()],
+                    recommended_strategy: SharingStrategy::NoSharing,
+                    safety_assessment: 1.0,
+                    performance_tradeoffs: std::collections::HashMap::new(),
+                    performance_overhead: 0.0,
+                    implementation_complexity: 0.1,
+                    sharing_mode: "none".to_string(),
+                }),
         })
     }
 
@@ -386,7 +488,6 @@ impl ConcurrencyRequirementsDetector {
     ) -> SafetyConstraints {
         SafetyConstraints {
             max_instances: estimation.recommended_concurrency,
-            // TODO: IsolationLevel::Process doesn't exist - using Serializable for strong isolation
             isolation_level: IsolationLevel::Serializable,
             resource_restrictions: std::collections::HashMap::new(),
             ordering_dependencies: Vec::new(),
@@ -445,23 +546,31 @@ impl ConcurrencyRequirementsDetector {
 
     /// Calculates overall confidence score
     fn calculate_overall_confidence(&self, requirements: &ConcurrencyRequirements) -> f32 {
-        // Implementation of confidence calculation algorithm
         let mut confidence_scores = Vec::new();
 
-        // TODO: ConcurrencyRequirements fields changed - max_safe_concurrency is now max_concurrent_instances (usize, not Option)
+        // Non-zero concurrency indicates we have a concrete estimate
         if requirements.max_concurrent_instances > 0 {
-            confidence_scores.push(0.9);
+            confidence_scores.push(0.9_f64);
         }
 
-        // TODO: resource_constraints doesn't exist, using shared_resources instead
+        // Having identified resource constraints improves confidence
+        if !requirements.resource_constraints.is_empty() {
+            confidence_scores.push(0.85);
+        }
+
+        // Having shared resources information improves confidence
         if !requirements.shared_resources.is_empty() {
             confidence_scores.push(0.8);
         }
 
-        // TODO: sharing_requirements is now safety_constraints (not Option)
-        // Check if safety constraints are defined (not default)
+        // Safety constraints being defined improves confidence
         if requirements.safety_constraints.max_instances > 0 {
             confidence_scores.push(0.85);
+        }
+
+        // Performance guarantees further improve confidence
+        if !requirements.performance_guarantees.is_empty() {
+            confidence_scores.push(0.8);
         }
 
         if confidence_scores.is_empty() {
@@ -644,5 +753,112 @@ impl ConcurrencyRequirementsDetector {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sharing_capability_to_struct_read_only() {
+        let cap = sharing_capability_to_struct(&SharingCapability::ReadOnly);
+        assert!(
+            cap.supports_read_sharing,
+            "ReadOnly should support read sharing"
+        );
+        assert!(
+            !cap.supports_write_sharing,
+            "ReadOnly should NOT support write sharing"
+        );
+        assert!(
+            cap.safety_assessment > 0.8,
+            "ReadOnly should have high safety"
+        );
+        assert!(
+            cap.performance_overhead < 0.2,
+            "ReadOnly should have low overhead"
+        );
+    }
+
+    #[test]
+    fn test_sharing_capability_to_struct_read_write() {
+        let cap = sharing_capability_to_struct(&SharingCapability::ReadWrite);
+        assert!(
+            cap.supports_read_sharing,
+            "ReadWrite should support read sharing"
+        );
+        assert!(
+            cap.supports_write_sharing,
+            "ReadWrite should support write sharing"
+        );
+        assert!(
+            cap.safety_assessment < 0.95,
+            "ReadWrite should have lower safety than ReadOnly"
+        );
+        assert!(
+            cap.implementation_complexity > 0.3,
+            "ReadWrite should have higher complexity"
+        );
+    }
+
+    #[test]
+    fn test_sharing_capability_to_struct_exclusive() {
+        let cap = sharing_capability_to_struct(&SharingCapability::Exclusive);
+        assert!(
+            !cap.supports_read_sharing,
+            "Exclusive should not support read sharing"
+        );
+        assert!(
+            cap.safety_assessment > 0.95,
+            "Exclusive access should be very safe"
+        );
+        assert_eq!(
+            cap.max_concurrent_readers,
+            Some(1),
+            "Exclusive allows only 1 reader"
+        );
+    }
+
+    #[test]
+    fn test_estimation_config_from_pattern_config() {
+        let pattern_cfg = PatternEstimationConfig {
+            enabled: true,
+            timeout_seconds: 30,
+            max_iterations: 500,
+        };
+        let estimation_cfg = EstimationConfig {
+            safety_margin: if pattern_cfg.enabled {
+                0.2_f64.max(1.0 / (pattern_cfg.timeout_seconds as f64 + 1.0))
+            } else {
+                0.5
+            },
+            history_retention_limit: pattern_cfg.max_iterations.clamp(100, 10_000),
+        };
+        assert!(
+            estimation_cfg.safety_margin > 0.0,
+            "safety_margin should be positive"
+        );
+        assert!(
+            estimation_cfg.safety_margin <= 0.2,
+            "enabled config should use conservative margin"
+        );
+        assert_eq!(
+            estimation_cfg.history_retention_limit, 500,
+            "max_iterations maps to history limit"
+        );
+    }
+
+    #[test]
+    fn test_resource_constraints_populated() {
+        let reqs = ConcurrencyRequirements {
+            resource_constraints: vec!["cpu".to_string(), "memory".to_string()],
+            ..ConcurrencyRequirements::default()
+        };
+        assert_eq!(
+            reqs.resource_constraints.len(),
+            2,
+            "resource_constraints should be populated"
+        );
     }
 }

@@ -648,71 +648,23 @@ impl HubUploadProgress {
     }
 }
 
-// ─── SHA-256 stub ─────────────────────────────────────────────────────────────
+// ─── SHA-256 ──────────────────────────────────────────────────────────────────
 
-/// Compute a deterministic 64-hex-character digest of `data`.
-///
-/// This is a pure-Rust XOR-fold-based stub that produces a reproducible hash
-/// without any external dependencies.  It is NOT cryptographically secure and
-/// is provided only for content-addressing in upload metadata.
-pub fn sha256_stub(data: &[u8]) -> String {
-    // Eight 64-bit accumulators, seeded with distinct primes.
-    let mut state: [u64; 8] = [
-        0x6a09_e667_f3bc_c908,
-        0xbb67_ae85_84ca_a73b,
-        0x3c6e_f372_fe94_f82b,
-        0xa54f_f53a_5f1d_36f1,
-        0x510e_527f_ade6_82d1,
-        0x9b05_688c_2b3e_6c1f,
-        0x1f83_d9ab_fb41_bd6b,
-        0x5be0_cd19_137e_2179,
-    ];
-
-    // Process every byte by folding it into all eight state words.
-    for (i, &byte) in data.iter().enumerate() {
-        let b = byte as u64;
-        let idx = i % 8;
-        let shift = (i % 64) as u32;
-        // Mix the byte into the primary slot.
-        state[idx] = state[idx]
-            .wrapping_add(b.wrapping_mul(0x517c_c1b7_2722_0a95))
-            .rotate_left(shift.wrapping_add(7));
-        // Cross-mix all slots for diffusion.
-        for j in 0..8_usize {
-            let other = state[(idx + j + 1) % 8];
-            state[j] = state[j].wrapping_add(other).rotate_left(13);
-            state[j] ^= state[j].wrapping_shr(17);
-        }
-    }
-
-    // Finalise: mix in the data length.
-    let len = data.len() as u64;
-    for (k, word) in state.iter_mut().enumerate() {
-        *word = word
-            .wrapping_add(len.wrapping_mul(0x9e37_79b9_7f4a_7c15))
-            .rotate_left((k as u32).wrapping_mul(7).wrapping_add(1));
-        *word ^= word.wrapping_shr(31);
-        *word = word.wrapping_mul(0x517c_c1b7_2722_0a95);
-        *word ^= word.wrapping_shr(27);
-    }
-
-    // Encode as 64 hex characters (8 × 8 bytes).
-    state
-        .iter()
-        .flat_map(|w| {
-            let bytes = w.to_be_bytes();
-            bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>()
-        })
-        .collect()
+/// Compute the real SHA-256 digest of `data`, returned as 64 lowercase hex chars.
+pub fn sha256(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hex::encode(hasher.finalize())
 }
 
-/// Compute the SHA-256 stub hash of a file on disk.
+/// Compute the SHA-256 hash of a file on disk.
 pub fn sha256_file(path: &Path) -> std::result::Result<String, HubError> {
     let data = std::fs::read(path).map_err(|e| HubError::Io {
         message: format!("Cannot read file for hashing: {e}"),
         path: Some(path.display().to_string()),
     })?;
-    Ok(sha256_stub(&data))
+    Ok(sha256(&data))
 }
 
 // ─── SingleFileUploadResult ───────────────────────────────────────────────────
@@ -726,7 +678,7 @@ pub struct SingleFileUploadResult {
     pub commit_url: String,
     /// Size of the uploaded file in bytes.
     pub file_size: u64,
-    /// SHA-256 stub hash of the file content.
+    /// SHA-256 hash of the file content.
     pub sha256: String,
 }
 
@@ -1169,7 +1121,7 @@ mod tests {
         assert_eq!(result.files_uploaded.len(), 2);
     }
 
-    // ── New tests for HubError, HubUploadConfig, HubUploadProgress, sha256_stub ──
+    // ── New tests for HubError, HubUploadConfig, HubUploadProgress, sha256 ──
 
     #[test]
     fn test_hub_error_display_unauthorized() {
@@ -1277,29 +1229,38 @@ mod tests {
     }
 
     #[test]
-    fn test_sha256_stub_deterministic() {
+    fn test_sha256_deterministic() {
         let data = b"hello, trustformers!";
-        let h1 = sha256_stub(data);
-        let h2 = sha256_stub(data);
+        let h1 = sha256(data);
+        let h2 = sha256(data);
         assert_eq!(h1, h2);
-        // 8 × u64 → 8 × 16 hex chars = 128 chars.
-        assert_eq!(h1.len(), 128);
+        // Real SHA-256 = 32 bytes = 64 hex chars.
+        assert_eq!(h1.len(), 64);
         // Should be all hex characters.
         assert!(h1.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
-    fn test_sha256_stub_different_inputs() {
-        let h1 = sha256_stub(b"foo");
-        let h2 = sha256_stub(b"bar");
+    fn test_sha256_different_inputs() {
+        let h1 = sha256(b"foo");
+        let h2 = sha256(b"bar");
         assert_ne!(h1, h2);
     }
 
     #[test]
-    fn test_sha256_stub_empty() {
-        let h = sha256_stub(b"");
-        assert_eq!(h.len(), 128);
-        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    fn test_sha256_known_vectors() {
+        // SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+        assert_eq!(
+            sha256(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        // SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+        assert_eq!(
+            sha256(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        // Output is always 64 hex chars.
+        assert_eq!(sha256(b"hello").len(), 64);
     }
 
     #[test]
@@ -1310,7 +1271,7 @@ mod tests {
         fs::write(&path, b"test file content for hashing").unwrap();
 
         let hash = sha256_file(&path).unwrap();
-        assert_eq!(hash.len(), 128);
+        assert_eq!(hash.len(), 64);
         // Must be deterministic.
         let hash2 = sha256_file(&path).unwrap();
         assert_eq!(hash, hash2);
@@ -1331,7 +1292,7 @@ mod tests {
         assert_eq!(result.file_size, 17);
         assert!(result.remote_url.contains("testuser/test-model"));
         assert!(result.commit_url.contains("testuser/test-model"));
-        assert_eq!(result.sha256.len(), 128);
+        assert_eq!(result.sha256.len(), 64);
 
         fs::remove_dir_all(&dir).ok();
     }

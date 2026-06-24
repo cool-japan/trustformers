@@ -393,7 +393,7 @@ pub enum MemoryAccessPattern {
 }
 
 /// Memory block metadata
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct MemoryBlock {
     ptr: NonNull<u8>,
     size: usize,
@@ -444,15 +444,6 @@ impl MemoryBlock {
         })
     }
 
-    fn free(&mut self) {
-        if !self.is_free {
-            unsafe {
-                dealloc(self.ptr.as_ptr(), self.layout);
-            }
-            self.is_free = true;
-        }
-    }
-
     fn mark_used(&mut self) {
         self.is_free = false;
         self.last_accessed = Instant::now();
@@ -466,8 +457,13 @@ impl MemoryBlock {
 
 impl Drop for MemoryBlock {
     fn drop(&mut self) {
-        if !self.is_free {
-            self.free();
+        // Each `MemoryBlock` owns exactly one allocation created in `new` with
+        // `self.layout`; `is_free` only tracks availability for reuse, not
+        // ownership of the backing memory. Release the allocation exactly once.
+        // SAFETY: `self.ptr` was produced by `alloc(self.layout)` in `new` and is
+        // not freed anywhere else, so this deallocates it exactly once.
+        unsafe {
+            dealloc(self.ptr.as_ptr(), self.layout);
         }
     }
 }
@@ -835,9 +831,10 @@ impl MemoryPool {
             // Remove blocks (in reverse order to maintain indices)
             blocks_to_remove.reverse();
             for &index in &blocks_to_remove {
-                let block = &mut blocks[index];
+                let block = &blocks[index];
                 memory_freed += block.size;
-                block.free();
+                // The allocation is released when the block is removed from
+                // `blocks` below (its `Drop` runs); do not free it here.
 
                 // Remove from bucket
                 let bucket = &mut buckets[block.bucket_index];
@@ -990,16 +987,6 @@ impl MemoryPool {
 
         info!("Pool shrink freed {} bytes", bytes_freed);
         Ok(bytes_freed)
-    }
-}
-
-impl Drop for MemoryPool {
-    fn drop(&mut self) {
-        // Ensure all blocks are properly freed
-        let mut blocks = self.blocks.write().expect("lock should not be poisoned");
-        for block in blocks.iter_mut() {
-            block.free();
-        }
     }
 }
 

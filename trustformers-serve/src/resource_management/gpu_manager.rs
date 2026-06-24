@@ -70,9 +70,6 @@ pub use types::*;
 
 // Legacy re-exports for backward compatibility
 pub use types::{
-    // GpuDeviceCapability, // TODO: Fix - does not exist
-    // GpuFramework, // TODO: Fix - does not exist
-    // AlertType, // TODO: Fix - does not exist
     AlertSeverity,
     // Alert types
     GpuAlert,
@@ -85,32 +82,19 @@ pub use types::{
     GpuClockSpeeds,
 
     GpuConstraint,
-    // GpuLoadBalancer, // TODO: Fix - use load_balancer::GpuLoadBalancer
 
     // Core data types
     GpuDeviceInfo,
-    // GpuPerformanceTrend, // TODO: Fix - does not exist
-    // GpuPerformanceRegression, // TODO: Fix - does not exist
 
     // Enum types
     GpuDeviceStatus,
-    // Component types
-    // GpuMonitoringSystem, // TODO: Fix - use monitoring::GpuMonitoringSystem
-    // GpuAlertSystem, // TODO: Fix - use alert_system::GpuAlertSystem
-    // GpuPerformanceTracker, // TODO: Fix - use performance_tracker::GpuPerformanceTracker
-    // GpuHealthMonitor, // TODO: Fix - use health_monitor::GpuHealthMonitor
     GpuHealthStatus,
     GpuHistoricalMetric,
     // Core manager and error types
-    // GpuResourceManager, // TODO: Fix - use manager::GpuResourceManager
     GpuManagerError,
     GpuMonitoringConfig,
     GpuPerformanceAnalysis,
-    // AlertEscalationRule, // TODO: Fix - does not exist
-    // AlertCondition, // TODO: Fix - does not exist
 
-    // Performance types
-    // GpuBenchmarkResult, // TODO: Fix - does not exist
     GpuPerformanceBaseline,
     GpuPerformanceRequirements,
     // Configuration types
@@ -118,18 +102,11 @@ pub use types::{
     GpuRealTimeMetrics,
     GpuResult,
 
-    // PerformanceTrendDirection, // TODO: Fix - does not exist
     LoadBalancingStrategy,
 };
 
 // Legacy compatibility types (maintain exact same interface as before)
 pub type GpuResourceManagerLegacy = GpuResourceManager;
-
-// Legacy initialization functions for backward compatibility
-// pub use manager::{
-//     init_gpu_manager, init_gpu_manager_with_config, // TODO: Fix - these functions don't exist
-//     validate_gpu_config // TODO: Fix - this function doesn't exist
-// };
 
 // Additional convenience functions
 

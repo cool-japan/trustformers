@@ -14,7 +14,7 @@ use trustformers_core::traits::Layer;
 
 /// DeiT image-classification head.
 ///
-/// Two linear heads are applied — one on the [CLS] token and one on the
+/// Two linear heads are applied — one on the `[CLS]` token and one on the
 /// distillation token.  During inference the logits are averaged, which was
 /// shown to improve accuracy versus using either token alone.
 ///
@@ -33,7 +33,7 @@ use trustformers_core::traits::Layer;
 #[derive(Debug, Clone)]
 pub struct DeiTForImageClassification {
     pub deit: DeiTModel,
-    /// Head applied to the [CLS] token.
+    /// Head applied to the `[CLS]` token.
     pub cls_head: Linear,
     /// Head applied to the distillation token (only present when
     /// `config.use_distillation_token` is true).

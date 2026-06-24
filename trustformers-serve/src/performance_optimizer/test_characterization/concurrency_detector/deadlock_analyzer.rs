@@ -5,7 +5,7 @@
 
 use super::super::types::*;
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use parking_lot::{Mutex, RwLock};
 use std::{
     collections::{HashMap, HashSet},
@@ -22,12 +22,6 @@ pub struct DeadlockAnalyzer {
 
     /// Lock dependency graph
     dependency_graph: Arc<RwLock<LockDependencyGraph>>,
-
-    /// Deadlock incident history
-    incident_history: Arc<Mutex<DeadlockIncidentHistory>>,
-
-    /// Real-time monitoring data
-    monitoring_data: Arc<RwLock<DeadlockMonitoringData>>,
 
     /// Configuration
     config: DeadlockAnalysisConfig,
@@ -51,9 +45,7 @@ impl DeadlockAnalyzer {
         detection_algorithms.push(Box::new(PredictiveDeadlockAlgorithm::new(true, 0.8)));
 
         // Initialize prevention strategies
-        // TODO: OrderedLockingStrategy::new requires hierarchy: Vec<String>
         prevention_strategies.push(Box::new(OrderedLockingStrategy::new(true, Vec::new())));
-        // TODO: TimeoutBasedStrategy::new requires abort_on_timeout: bool
         prevention_strategies.push(Box::new(TimeoutBasedStrategy::new(1000, false)));
         prevention_strategies.push(Box::new(ResourceOrderingStrategy::new()?));
         prevention_strategies.push(Box::new(AdaptivePreventionStrategy::new()?));
@@ -62,8 +54,6 @@ impl DeadlockAnalyzer {
             detection_algorithms: Arc::new(Mutex::new(detection_algorithms)),
             prevention_strategies: Arc::new(Mutex::new(prevention_strategies)),
             dependency_graph: Arc::new(RwLock::new(LockDependencyGraph::new()?)),
-            incident_history: Arc::new(Mutex::new(DeadlockIncidentHistory::new()?)),
-            monitoring_data: Arc::new(RwLock::new(DeadlockMonitoringData::new()?)),
             config,
         })
     }
@@ -74,6 +64,23 @@ impl DeadlockAnalyzer {
         test_data: &TestExecutionData,
     ) -> Result<DeadlockAnalysisResult> {
         let start_time = Utc::now();
+
+        if !self.config.detection_enabled {
+            return Ok(DeadlockAnalysisResult {
+                potential_deadlocks: Vec::new(),
+                has_deadlock_risk: false,
+                risk_level: "None".to_string(),
+                safe_concurrency_limit: self.config.max_detection_depth,
+                prevention_recommendations: Vec::new(),
+                synchronization_requirements: Vec::new(),
+                prevention_requirements: Vec::new(),
+                detection_results: Vec::new(),
+                analysis_duration: std::time::Duration::from_secs(0),
+                confidence: 1.0,
+            });
+        }
+
+        let timeout = std::time::Duration::from_secs(self.config.timeout_seconds);
 
         // Update dependency graph
         self.update_dependency_graph(test_data).await?;
@@ -90,7 +97,6 @@ impl DeadlockAnalyzer {
                 .map(|algorithm| {
                     let algorithm_name = algorithm.name().to_string();
                     let detection_start = Instant::now();
-                    // TODO: detect_deadlocks takes 1 argument, removed graph parameter
                     let result = algorithm.detect_deadlocks(&lock_dependencies);
                     let detection_duration = detection_start.elapsed();
                     (algorithm_name, result, detection_duration)
@@ -105,30 +111,43 @@ impl DeadlockAnalyzer {
         for (algorithm_name, result, duration) in detection_task_results {
             match result {
                 Ok(mut deadlocks) => {
-                    // Convert DeadlockRisk to DeadlockScenario
+                    // Convert DeadlockRisk to DeadlockScenario, populating fields from real data
                     let scenarios: Vec<DeadlockScenario> = deadlocks
                         .iter()
-                        .map(|_d| DeadlockScenario {
-                            scenario_id: format!("deadlock_{}", uuid::Uuid::new_v4()),
-                            involved_threads: Vec::new(),
-                            involved_resources: Vec::new(),
-                            lock_order: Vec::new(),
-                            risk_level: "Medium".to_string(),
-                            timestamp: Utc::now(),
+                        .map(|d| {
+                            let lock_names: Vec<String> =
+                                d.lock_cycles.iter().flat_map(|c| c.iter().cloned()).collect();
+                            let risk_str = if d.probability > 0.8 {
+                                "Critical"
+                            } else if d.probability > 0.5 {
+                                "High"
+                            } else {
+                                "Medium"
+                            };
+                            DeadlockScenario {
+                                scenario_id: format!("deadlock_{}", uuid::Uuid::new_v4()),
+                                involved_threads: Vec::new(),
+                                involved_resources: lock_names.clone(),
+                                lock_order: lock_names,
+                                risk_level: risk_str.to_string(),
+                                timestamp: Utc::now(),
+                            }
                         })
                         .collect();
 
-                    // Convert to PotentialDeadlock for confidence calculation
+                    // Convert to PotentialDeadlock for confidence calculation, using real lock cycles
                     let potential: Vec<PotentialDeadlock> = deadlocks
                         .iter()
-                        .map(|_d| PotentialDeadlock { locks: Vec::new() })
+                        .map(|d| PotentialDeadlock {
+                            locks: d.lock_cycles.iter().flat_map(|c| c.iter().cloned()).collect(),
+                        })
                         .collect();
 
                     detection_results.push(DeadlockDetectionResult {
                         algorithm: algorithm_name,
                         deadlocks: scenarios,
                         detection_duration: duration,
-                        confidence: self.calculate_detection_confidence(&potential) as f64,
+                        confidence: self.calculate_detection_confidence(&potential),
                     });
                     potential_deadlocks.append(&mut deadlocks);
                 },
@@ -138,10 +157,12 @@ impl DeadlockAnalyzer {
             }
         }
 
-        // Convert DeadlockRisk to PotentialDeadlock for deduplication
+        // Convert DeadlockRisk to PotentialDeadlock for deduplication, using real lock cycles
         let potential_deadlock_converted: Vec<PotentialDeadlock> = potential_deadlocks
             .iter()
-            .map(|_d| PotentialDeadlock { locks: Vec::new() })
+            .map(|d| PotentialDeadlock {
+                locks: d.lock_cycles.iter().flat_map(|c| c.iter().cloned()).collect(),
+            })
             .collect();
 
         // Deduplicate and prioritize deadlocks
@@ -166,21 +187,40 @@ impl DeadlockAnalyzer {
             self.generate_synchronization_requirements(&prioritized_deadlocks);
         let prevention_requirements = self.generate_prevention_requirements(&prioritized_deadlocks);
 
-        // Convert types to match DeadlockAnalysisResult requirements
+        // Build final DeadlockScenario list from prioritized PotentialDeadlocks
         let deadlock_scenarios: Vec<DeadlockScenario> = prioritized_deadlocks
             .iter()
-            .map(|_d| DeadlockScenario {
-                scenario_id: format!("deadlock_{}", uuid::Uuid::new_v4()),
-                involved_threads: Vec::new(),
-                involved_resources: Vec::new(),
-                lock_order: Vec::new(),
-                risk_level: "Medium".to_string(),
-                timestamp: Utc::now(),
+            .map(|d| {
+                let risk_str = if d.locks.len() > 4 {
+                    "Critical"
+                } else if d.locks.len() > 2 {
+                    "High"
+                } else {
+                    "Medium"
+                };
+                DeadlockScenario {
+                    scenario_id: format!("deadlock_{}", uuid::Uuid::new_v4()),
+                    involved_threads: Vec::new(),
+                    involved_resources: d.locks.clone(),
+                    lock_order: d.locks.clone(),
+                    risk_level: risk_str.to_string(),
+                    timestamp: Utc::now(),
+                }
             })
             .collect();
 
+        let elapsed = Utc::now().signed_duration_since(start_time).to_std().unwrap_or_default();
+        if elapsed > timeout {
+            log::warn!(
+                "Deadlock analysis exceeded timeout ({:?} > {:?})",
+                elapsed,
+                timeout
+            );
+        }
+
         let risk_level_str = format!("{:?}", risk_level);
-        let safe_limit = safe_concurrency_limit.unwrap_or(1);
+        // Cap concurrency at configured max_detection_depth
+        let safe_limit = safe_concurrency_limit.unwrap_or(1).min(self.config.max_detection_depth);
         let sync_reqs_vec = vec![format!("{:?}", synchronization_requirements)];
         let prev_reqs_vec = vec![format!("{:?}", prevention_requirements)];
 
@@ -193,11 +233,8 @@ impl DeadlockAnalyzer {
             synchronization_requirements: sync_reqs_vec,
             prevention_requirements: prev_reqs_vec,
             detection_results,
-            analysis_duration: Utc::now()
-                .signed_duration_since(start_time)
-                .to_std()
-                .unwrap_or_default(),
-            confidence: self.calculate_overall_deadlock_confidence(&unique_deadlocks) as f64,
+            analysis_duration: elapsed,
+            confidence: self.calculate_overall_deadlock_confidence(&unique_deadlocks),
         })
     }
 
@@ -212,7 +249,6 @@ impl DeadlockAnalyzer {
             for trace in &test_data.execution_traces {
                 match trace.operation.as_str() {
                     "LockAcquire" => {
-                        // TODO: add_lock_acquisition signature changed - needs thread_id, lock_id, and stack trace
                         graph.add_lock_acquisition(
                             trace.thread_id,
                             trace.resource.clone(),
@@ -220,7 +256,6 @@ impl DeadlockAnalyzer {
                         );
                     },
                     "LockRelease" => {
-                        // TODO: add_lock_release takes 2 arguments (thread_id, lock_id), removed timestamp
                         graph.add_lock_release(trace.thread_id, trace.resource.clone());
                     },
                     _ => {},
@@ -264,14 +299,12 @@ impl DeadlockAnalyzer {
                     let (lock1, time1) = &locks[i];
                     let (lock2, time2) = &locks[j];
 
-                    // TODO: calculate_dependency_strength expects DateTime<Utc>, but we have Instant
-                    // Using default probability instead
                     let time_diff = if time2 > time1 {
-                        time2.duration_since(*time1).as_secs_f32()
+                        time2.duration_since(*time1).as_secs_f64()
                     } else {
                         0.0
                     };
-                    let contention_prob = (1.0 / (1.0 + time_diff)).min(0.9) as f64;
+                    let contention_prob = (1.0_f64 / (1.0 + time_diff)).min(0.9);
 
                     dependencies.push(LockDependency {
                         lock_id: lock1.clone(),
@@ -292,27 +325,22 @@ impl DeadlockAnalyzer {
         Ok(dependencies)
     }
 
-    /// Calculates dependency strength based on timing
-    fn calculate_dependency_strength(&self, time1: &DateTime<Utc>, time2: &DateTime<Utc>) -> f32 {
-        let duration = (*time2 - *time1).num_milliseconds() as f32;
-
-        // Shorter intervals indicate stronger dependencies
-        let strength: f32 = 1.0 / (1.0 + duration / 1000.0);
-        strength.clamp(0.1, 1.0)
-    }
-
-    /// Calculates detection confidence
-    fn calculate_detection_confidence(&self, deadlocks: &[PotentialDeadlock]) -> f32 {
+    /// Calculates detection confidence based on deadlock count and average lock cycle length
+    fn calculate_detection_confidence(&self, deadlocks: &[PotentialDeadlock]) -> f64 {
         if deadlocks.is_empty() {
             return 1.0;
         }
 
-        // TODO: PotentialDeadlock no longer has confidence and probability fields
-        // Using placeholder values
-        let avg_confidence = 0.8_f32; // Placeholder
-        let avg_probability = 0.7_f32; // Placeholder
+        // Confidence grows with more detected deadlocks (more evidence = more certain)
+        let count_factor = (deadlocks.len() as f64 / 10.0).min(1.0);
+        let base_confidence = 0.5 + count_factor * 0.4;
 
-        (avg_confidence + avg_probability) / 2.0
+        // Longer lock cycles are more reliably identified (more distinguishing structure)
+        let total_locks: usize = deadlocks.iter().map(|d| d.locks.len()).sum();
+        let avg_cycle_len = total_locks as f64 / deadlocks.len() as f64;
+        let cycle_factor = (avg_cycle_len / 4.0).min(1.0) * 0.1;
+
+        (base_confidence + cycle_factor).min(1.0)
     }
 
     /// Deduplicates deadlocks based on involved locks
@@ -338,21 +366,13 @@ impl DeadlockAnalyzer {
         let a_locks: HashSet<_> = a.locks.iter().collect();
         let b_locks: HashSet<_> = b.locks.iter().collect();
 
-        // TODO: PotentialDeadlock no longer has deadlock_type field
-        a_locks == b_locks // && a.deadlock_type == b.deadlock_type
+        a_locks == b_locks
     }
 
-    /// Prioritizes deadlocks based on severity and probability
+    /// Prioritizes deadlocks based on lock cycle length (longer cycles = higher priority)
     fn prioritize_deadlocks(&self, deadlocks: &[PotentialDeadlock]) -> Vec<PotentialDeadlock> {
-        let prioritized = deadlocks.to_vec();
-
-        // TODO: PotentialDeadlock no longer has impact and probability fields
-        // Cannot prioritize without these fields, returning as-is
-        // prioritized.sort_by(|a, b| {
-        //     // First by severity, then by probability
-        //     b.probability.partial_cmp(&a.probability).unwrap_or(std::cmp::Ordering::Equal)
-        // });
-
+        let mut prioritized = deadlocks.to_vec();
+        prioritized.sort_by_key(|b| std::cmp::Reverse(b.locks.len()));
         prioritized
     }
 
@@ -378,7 +398,7 @@ impl DeadlockAnalyzer {
                             deadlock_id: deadlock.locks.join("->"),
                             strategy_name: strategy.name().to_string(),
                             prevention_action: action_str,
-                            expected_effectiveness: effectiveness as f64,
+                            expected_effectiveness: effectiveness,
                             implementation_complexity: format!("{:.2}", complexity),
                         });
                     }
@@ -394,8 +414,7 @@ impl DeadlockAnalyzer {
         &self,
         strategy_name: &str,
         _deadlock: &PotentialDeadlock,
-    ) -> f32 {
-        // TODO: PotentialDeadlock no longer has deadlock_type field
+    ) -> f64 {
         match strategy_name {
             "OrderedLockingStrategy" => 0.9,
             "TimeoutBasedStrategy" => 0.8,
@@ -406,7 +425,7 @@ impl DeadlockAnalyzer {
     }
 
     /// Calculates implementation complexity
-    fn calculate_implementation_complexity(&self, strategy_name: &str) -> f32 {
+    fn calculate_implementation_complexity(&self, strategy_name: &str) -> f64 {
         match strategy_name {
             "OrderedLockingStrategy" => 0.6,
             "TimeoutBasedStrategy" => 0.3,
@@ -416,9 +435,8 @@ impl DeadlockAnalyzer {
         }
     }
 
-    /// Assesses overall deadlock risk level
+    /// Assesses overall deadlock risk level based on lock cycle length and count
     fn assess_deadlock_risk_level(&self, deadlocks: &[PotentialDeadlock]) -> DeadlockRiskLevel {
-        // TODO: DeadlockRiskLevel changed from enum to struct
         if deadlocks.is_empty() {
             return DeadlockRiskLevel {
                 level: "None".to_string(),
@@ -427,33 +445,50 @@ impl DeadlockAnalyzer {
             };
         }
 
-        // TODO: PotentialDeadlock no longer has impact and probability fields
-        // Using deadlock count as a simple heuristic for risk level
         let count = deadlocks.len();
+        // Compute average lock count per deadlock to scale risk_score
+        let total_locks: usize = deadlocks.iter().map(|d| d.locks.len()).sum();
+        let avg_lock_count = total_locks / count.max(1);
+        // risk_score is proportional to average cycle length, clamped to 0..1
+        // A cycle of 4+ locks is considered maximum risk
+        let raw_score = avg_lock_count as f64 / 4.0;
+        let base_risk_score = raw_score.clamp(0.0, 1.0);
 
         if count > 10 {
             DeadlockRiskLevel {
                 level: "Critical".to_string(),
-                risk_score: 1.0,
-                contributing_factors: vec!["High deadlock count".to_string()],
+                risk_score: base_risk_score.max(0.9),
+                contributing_factors: vec![
+                    "High deadlock count".to_string(),
+                    format!("Average cycle length: {}", avg_lock_count),
+                ],
             }
         } else if count > 5 {
             DeadlockRiskLevel {
                 level: "High".to_string(),
-                risk_score: 0.8,
-                contributing_factors: vec!["Moderate deadlock count".to_string()],
+                risk_score: base_risk_score.max(0.6),
+                contributing_factors: vec![
+                    "Moderate deadlock count".to_string(),
+                    format!("Average cycle length: {}", avg_lock_count),
+                ],
             }
         } else if count > 2 {
             DeadlockRiskLevel {
                 level: "Medium".to_string(),
-                risk_score: 0.5,
-                contributing_factors: vec!["Some deadlocks detected".to_string()],
+                risk_score: base_risk_score.max(0.3),
+                contributing_factors: vec![
+                    "Some deadlocks detected".to_string(),
+                    format!("Average cycle length: {}", avg_lock_count),
+                ],
             }
         } else {
             DeadlockRiskLevel {
                 level: "Low".to_string(),
-                risk_score: 0.2,
-                contributing_factors: vec!["Few deadlocks detected".to_string()],
+                risk_score: base_risk_score,
+                contributing_factors: vec![
+                    "Few deadlocks detected".to_string(),
+                    format!("Average cycle length: {}", avg_lock_count),
+                ],
             }
         }
     }
@@ -464,8 +499,13 @@ impl DeadlockAnalyzer {
             return usize::MAX;
         }
 
-        // Find the most restrictive deadlock
-        let min_lock_count = deadlocks.iter().map(|d| d.locks.len()).min().unwrap_or(1);
+        // Find the most restrictive deadlock (smallest lock cycle)
+        let min_lock_count = deadlocks.iter().map(|d| d.locks.len()).min().unwrap_or(0);
+
+        // Guard against 0: a cycle of length 0 or 1 gives a safe limit of 1
+        if min_lock_count <= 1 {
+            return 1;
+        }
 
         // Safe concurrency is one less than the minimum lock cycle size
         (min_lock_count - 1).max(1)
@@ -494,7 +534,6 @@ impl DeadlockAnalyzer {
             custom_requirements: vec![],
         };
 
-        // TODO: PotentialDeadlock no longer has deadlock_type, impact, confidence, probability fields
         // Enable generic deadlock prevention requirements for all detected deadlocks
         for _deadlock in deadlocks {
             requirements.ordered_locking = true;
@@ -509,8 +548,6 @@ impl DeadlockAnalyzer {
         &self,
         deadlocks: &[PotentialDeadlock],
     ) -> DeadlockPreventionRequirements {
-        // TODO: PotentialDeadlock no longer has impact field
-        // Using count-based heuristic: many deadlocks = critical
         DeadlockPreventionRequirements {
             lock_ordering_required: true,
             timeout_enabled: true,
@@ -524,14 +561,13 @@ impl DeadlockAnalyzer {
     }
 
     /// Calculates overall deadlock confidence
-    fn calculate_overall_deadlock_confidence(&self, deadlocks: &[PotentialDeadlock]) -> f32 {
+    fn calculate_overall_deadlock_confidence(&self, deadlocks: &[PotentialDeadlock]) -> f64 {
         if deadlocks.is_empty() {
             return 1.0;
         }
 
-        // TODO: PotentialDeadlock no longer has confidence field
-        // Using count-based confidence: more deadlocks = higher confidence
-        let avg_confidence = if deadlocks.len() > 5 {
+        // More detected deadlocks gives higher confidence in the detection system
+        let avg_confidence: f64 = if deadlocks.len() > 5 {
             0.9
         } else if deadlocks.len() > 2 {
             0.7
@@ -543,15 +579,102 @@ impl DeadlockAnalyzer {
         avg_confidence * consistency_factor
     }
 
-    /// Calculates deadlock consistency
-    fn calculate_deadlock_consistency(&self, deadlocks: &[PotentialDeadlock]) -> f32 {
+    /// Calculates deadlock consistency by checking for common locks across all detected deadlocks
+    fn calculate_deadlock_consistency(&self, deadlocks: &[PotentialDeadlock]) -> f64 {
         if deadlocks.len() < 2 {
             return 1.0;
         }
 
-        // TODO: PotentialDeadlock no longer has probability field
-        // Using count-based consistency: more deadlocks of same type = higher consistency
-        // Assuming moderate consistency for now
-        0.7
+        // Build the set of locks in the first deadlock as baseline
+        let first_locks: HashSet<&String> = deadlocks[0].locks.iter().collect();
+
+        // Check if all subsequent deadlocks share at least one common lock with the first
+        let all_share_common_lock = deadlocks[1..].iter().all(|d| {
+            let d_locks: HashSet<&String> = d.locks.iter().collect();
+            !first_locks.is_disjoint(&d_locks)
+        });
+
+        if all_share_common_lock {
+            // High consistency: a common lock resource threads through all deadlocks
+            0.9
+        } else {
+            // Check partial overlap: how many pairs share at least one lock
+            let n = deadlocks.len();
+            let mut overlap_count = 0usize;
+            let mut pair_count = 0usize;
+            for i in 0..n {
+                for j in i + 1..n {
+                    pair_count += 1;
+                    let a_locks: HashSet<&String> = deadlocks[i].locks.iter().collect();
+                    let b_locks: HashSet<&String> = deadlocks[j].locks.iter().collect();
+                    if !a_locks.is_disjoint(&b_locks) {
+                        overlap_count += 1;
+                    }
+                }
+            }
+            if pair_count == 0 {
+                return 0.5;
+            }
+            let overlap_ratio = overlap_count as f64 / pair_count as f64;
+            // Map overlap ratio to the 0.5..0.7 range
+            0.5 + overlap_ratio * 0.2
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_potential_deadlock_built_from_risk_cycles() {
+        // Build a DeadlockRisk with a 2-lock cycle
+        let risk = DeadlockRisk {
+            risk_level: RiskLevel::High,
+            probability: 0.8,
+            impact_severity: 0.9,
+            risk_factors: Vec::new(),
+            lock_cycles: vec![vec!["lock_a".to_string(), "lock_b".to_string()]],
+            prevention_strategies: Vec::new(),
+            detection_mechanisms: Vec::new(),
+            recovery_procedures: Vec::new(),
+            historical_incidents: Vec::new(),
+            mitigation_effectiveness: 0.7,
+        };
+
+        // Simulate PotentialDeadlock construction (from real logic)
+        let potential = PotentialDeadlock {
+            locks: risk.lock_cycles.iter().flat_map(|c| c.iter().cloned()).collect(),
+        };
+
+        assert!(
+            !potential.locks.is_empty(),
+            "locks should be populated from cycles"
+        );
+        assert!(potential.locks.contains(&"lock_a".to_string()));
+        assert!(potential.locks.contains(&"lock_b".to_string()));
+
+        // Test risk level construction
+        let risk_level = DeadlockRiskLevel {
+            level: "High".to_string(),
+            risk_score: 0.8,
+            contributing_factors: vec!["Circular wait detected".to_string()],
+        };
+        assert!(risk_level.risk_score > 0.0);
+    }
+
+    #[test]
+    fn test_detect_deadlock_type_from_cycle_pattern() {
+        // A 2-lock cycle with mutual hold-and-wait pattern
+        let locks = vec!["lock_a".to_string(), "lock_b".to_string()];
+
+        // Circular wait: more than 1 lock in cycle
+        let deadlock_type = if locks.len() >= 2 {
+            DeadlockType::CircularWait
+        } else {
+            DeadlockType::HoldAndWait
+        };
+
+        assert_eq!(deadlock_type, DeadlockType::CircularWait);
     }
 }

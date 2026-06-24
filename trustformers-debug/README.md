@@ -1,6 +1,6 @@
 # TrustformeRS Debug
 
-**Version:** 0.1.2 | **Status:** Alpha | **Tests:** 216 | **SLoC:** 61,841 | **Updated:** 2026-06-20
+**Version:** 0.1.3 | **Status:** Alpha | **Tests:** 216 | **SLoC:** 61,841 | **Updated:** 2026-06-24
 
 Advanced debugging and analysis tools for TrustformeRS machine learning models.
 

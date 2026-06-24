@@ -19,7 +19,7 @@ Provide details about the model you'd like to see implemented or improved.
 - **Paper**: [link to arXiv/paper if available]
 - **Official Repository**: [link to official implementation]
 - **HuggingFace Model**: [link to HF model hub if available]
-- **License**: [e.g. Apache 2.0, MIT, Commercial, Custom]
+- **License**: [e.g. Apache 2.0, BSD-3-Clause, Commercial, Custom]
 
 ### Model Details
 **Architecture Type**:

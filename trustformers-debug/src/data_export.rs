@@ -500,18 +500,45 @@ impl DataExportManager {
         Ok(())
     }
 
-    /// Export to Excel format (simplified implementation)
+    /// Export to Excel (.xlsx) format as a real Office Open XML workbook
     fn export_excel(
         &mut self,
         data: &[ExportableData],
         output_path: &str,
         options: &ExportOptions,
     ) -> Result<()> {
-        // This is a simplified implementation
-        // In a real implementation, you would use a library like xlsxwriter or rust_xlsxwriter
+        use oxiarc_archive::zip::ZipWriter;
 
-        // For now, we'll create a CSV file with .xlsx extension as a placeholder
-        self.export_csv(data, output_path, options)
+        let rows = build_xlsx_rows(data, options)?;
+        let sheet_xml = build_xlsx_sheet(&rows);
+
+        let mut buffer: Vec<u8> = Vec::new();
+        {
+            let mut writer = ZipWriter::new(&mut buffer);
+            writer
+                .add_file("[Content_Types].xml", XLSX_CONTENT_TYPES.as_bytes())
+                .map_err(|e| anyhow::anyhow!("xlsx: failed to write [Content_Types].xml: {e}"))?;
+            writer
+                .add_file("_rels/.rels", XLSX_ROOT_RELS.as_bytes())
+                .map_err(|e| anyhow::anyhow!("xlsx: failed to write _rels/.rels: {e}"))?;
+            writer
+                .add_file("xl/workbook.xml", XLSX_WORKBOOK.as_bytes())
+                .map_err(|e| anyhow::anyhow!("xlsx: failed to write xl/workbook.xml: {e}"))?;
+            writer
+                .add_file("xl/_rels/workbook.xml.rels", XLSX_WORKBOOK_RELS.as_bytes())
+                .map_err(|e| {
+                    anyhow::anyhow!("xlsx: failed to write xl/_rels/workbook.xml.rels: {e}")
+                })?;
+            writer.add_file("xl/worksheets/sheet1.xml", sheet_xml.as_bytes()).map_err(|e| {
+                anyhow::anyhow!("xlsx: failed to write xl/worksheets/sheet1.xml: {e}")
+            })?;
+            writer
+                .finish()
+                .map_err(|e| anyhow::anyhow!("xlsx: failed to finalize workbook package: {e}"))?;
+        }
+
+        std::fs::write(output_path, &buffer)?;
+        Ok(())
     }
 
     /// Export to XML format
@@ -719,6 +746,163 @@ impl DataExportManager {
             active_jobs: self.active_jobs.len(),
         }
     }
+}
+
+/// OOXML `[Content_Types].xml` part declaring the package content types.
+const XLSX_CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#;
+
+/// OOXML `_rels/.rels` package-level relationships part.
+const XLSX_ROOT_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#;
+
+/// OOXML `xl/workbook.xml` part defining a single worksheet.
+const XLSX_WORKBOOK: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+
+/// OOXML `xl/_rels/workbook.xml.rels` part linking the workbook to its worksheet.
+const XLSX_WORKBOOK_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#;
+
+/// A single spreadsheet cell value to emit into a worksheet.
+enum XlsxCell {
+    /// Inline (shared-string-free) text cell, emitted as `<c t="inlineStr">`.
+    Inline(String),
+    /// Numeric cell, emitted as `<c><v>..</v></c>` with the pre-formatted literal.
+    Number(String),
+    /// Empty placeholder cell.
+    Empty,
+}
+
+/// XML-escape `&`, `<`, `>`, `"`, `'` for safe inclusion in OOXML parts.
+fn xlsx_xml_escape(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Convert a zero-based column index to an Excel column name (0 -> "A", 26 -> "AA").
+fn xlsx_column_name(index: usize) -> String {
+    let mut n = index + 1;
+    let mut name = String::new();
+    while n > 0 {
+        let rem = (n - 1) % 26;
+        name.insert(0, (b'A' + rem as u8) as char);
+        n = (n - 1) / 26;
+    }
+    name
+}
+
+/// Map a JSON value to a worksheet cell, mirroring `format_value_for_csv` numeric rules.
+fn xlsx_value_to_cell(value: &serde_json::Value, options: &ExportOptions) -> XlsxCell {
+    match value {
+        serde_json::Value::Number(n) => {
+            if let Some(f) = n.as_f64() {
+                XlsxCell::Number(format!(
+                    "{:.precision$}",
+                    f,
+                    precision = options.float_precision as usize
+                ))
+            } else {
+                XlsxCell::Number(n.to_string())
+            }
+        },
+        serde_json::Value::String(s) => XlsxCell::Inline(s.clone()),
+        _ => XlsxCell::Inline(value.to_string()),
+    }
+}
+
+/// Build the worksheet rows from the export data, mirroring `export_csv` layout.
+fn build_xlsx_rows(data: &[ExportableData], options: &ExportOptions) -> Result<Vec<Vec<XlsxCell>>> {
+    let mut rows: Vec<Vec<XlsxCell>> = Vec::new();
+    for item in data {
+        match &item.content {
+            ExportDataContent::Table(table_data) => {
+                if options.include_headers {
+                    rows.push(
+                        table_data.headers.iter().map(|h| XlsxCell::Inline(h.clone())).collect(),
+                    );
+                }
+                for row in &table_data.rows {
+                    rows.push(row.iter().map(|v| xlsx_value_to_cell(v, options)).collect());
+                }
+            },
+            ExportDataContent::TimeSeries(ts_data) => {
+                if options.include_headers {
+                    let mut header = vec![XlsxCell::Inline("timestamp".to_string())];
+                    header.extend(ts_data.series.keys().map(|k| XlsxCell::Inline(k.clone())));
+                    rows.push(header);
+                }
+                for (i, timestamp) in ts_data.timestamps.iter().enumerate() {
+                    let mut cells = vec![XlsxCell::Inline(
+                        timestamp.format(&options.date_format).to_string(),
+                    )];
+                    for series_name in ts_data.series.keys() {
+                        if let Some(series) = ts_data.series.get(series_name) {
+                            if let Some(value) = series.get(i) {
+                                cells.push(XlsxCell::Number(format!(
+                                    "{:.precision$}",
+                                    value,
+                                    precision = options.float_precision as usize
+                                )));
+                            } else {
+                                cells.push(XlsxCell::Empty);
+                            }
+                        }
+                    }
+                    rows.push(cells);
+                }
+            },
+            _ => {
+                let json_str = serde_json::to_string(&item.content)?;
+                rows.push(vec![XlsxCell::Inline(json_str)]);
+            },
+        }
+    }
+    Ok(rows)
+}
+
+/// Render worksheet rows into the `xl/worksheets/sheet1.xml` OOXML part.
+fn build_xlsx_sheet(rows: &[Vec<XlsxCell>]) -> String {
+    let mut sheet = String::new();
+    sheet.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>");
+    sheet.push_str(
+        "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">",
+    );
+    sheet.push_str("<sheetData>");
+    for (row_idx, row) in rows.iter().enumerate() {
+        let row_num = row_idx + 1;
+        sheet.push_str(&format!("<row r=\"{row_num}\">"));
+        for (col_idx, cell) in row.iter().enumerate() {
+            let cell_ref = format!("{}{row_num}", xlsx_column_name(col_idx));
+            match cell {
+                XlsxCell::Inline(text) => {
+                    sheet.push_str(&format!(
+                        "<c r=\"{cell_ref}\" t=\"inlineStr\"><is><t xml:space=\"preserve\">{}</t></is></c>",
+                        xlsx_xml_escape(text)
+                    ));
+                },
+                XlsxCell::Number(num) => {
+                    sheet.push_str(&format!("<c r=\"{cell_ref}\"><v>{num}</v></c>"));
+                },
+                XlsxCell::Empty => {
+                    sheet.push_str(&format!("<c r=\"{cell_ref}\"/>"));
+                },
+            }
+        }
+        sheet.push_str("</row>");
+    }
+    sheet.push_str("</sheetData></worksheet>");
+    sheet
 }
 
 /// Export statistics
@@ -930,5 +1114,63 @@ mod tests {
         assert_eq!(stats.total_exports, 2);
         assert_eq!(stats.successful_exports, 2);
         assert_eq!(stats.total_size_bytes, 3072);
+    }
+
+    #[test]
+    fn test_excel_export_roundtrip() {
+        use oxiarc_archive::zip::ZipReader;
+        use std::io::Cursor;
+
+        let config = ExportConfig::default();
+        let mut manager = DataExportManager::new(config);
+        let test_data = create_test_data();
+
+        let file_name = format!("trustformers_xlsx_test_{}.xlsx", Uuid::new_v4());
+        let output_path = std::env::temp_dir().join(file_name).to_string_lossy().to_string();
+
+        manager
+            .start_export(
+                "Test Excel Export".to_string(),
+                test_data,
+                ExportFormat::Excel,
+                output_path.clone(),
+                ExportOptions::default(),
+            )
+            .expect("excel export should succeed");
+
+        assert!(std::path::Path::new(&output_path).exists());
+
+        let bytes = std::fs::read(&output_path).expect("read xlsx bytes");
+        let mut reader = ZipReader::new(Cursor::new(bytes)).expect("open xlsx as zip");
+        let entries = reader.entries().to_vec();
+        let names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
+
+        assert!(
+            names.iter().any(|n| n == "[Content_Types].xml"),
+            "missing [Content_Types].xml; entries = {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "xl/workbook.xml"),
+            "missing xl/workbook.xml; entries = {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "xl/worksheets/sheet1.xml"),
+            "missing xl/worksheets/sheet1.xml; entries = {names:?}"
+        );
+
+        let sheet_entry = entries
+            .iter()
+            .find(|e| e.name == "xl/worksheets/sheet1.xml")
+            .expect("sheet1.xml entry");
+        let sheet_bytes = reader.extract(sheet_entry).expect("extract sheet1.xml");
+        let sheet_xml = String::from_utf8(sheet_bytes).expect("sheet1.xml is utf8");
+
+        assert!(sheet_xml.contains("<worksheet"));
+        // Header text from create_test_data(): "id", "value", "timestamp".
+        assert!(sheet_xml.contains("id"), "sheet missing header text");
+        assert!(sheet_xml.contains("value"), "sheet missing header text");
+        assert!(sheet_xml.contains("timestamp"), "sheet missing header text");
+
+        let _ = std::fs::remove_file(&output_path);
     }
 }

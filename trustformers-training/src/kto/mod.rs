@@ -94,11 +94,11 @@ impl KlEstimate {
 /// Result of a KTO loss computation for a batch of examples.
 #[derive(Debug, Clone)]
 pub struct KtoLossResult {
-    /// Total KTO loss: λ_w * E[L_w] + λ_l * E[L_l]
+    /// Total KTO loss: `λ_w * E[L_w] + λ_l * E[L_l]`
     pub total_loss: f32,
-    /// Loss component from preferred examples: E[L_w]
+    /// Loss component from preferred examples: `E[L_w]`
     pub preferred_loss: f32,
-    /// Loss component from rejected examples: E[L_l]
+    /// Loss component from rejected examples: `E[L_l]`
     pub rejected_loss: f32,
     /// Number of preferred examples in the batch
     pub num_preferred: usize,
