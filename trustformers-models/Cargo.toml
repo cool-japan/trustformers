@@ -33,7 +33,6 @@ tokio.workspace = true
 num_cpus.workspace = true
 regex.workspace = true
 approx.workspace = true
-criterion.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true

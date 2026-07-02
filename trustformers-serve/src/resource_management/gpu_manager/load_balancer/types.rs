@@ -1033,7 +1033,7 @@ impl GpuLoadBalancer {
         let mut hasher = DefaultHasher::new();
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .expect("Operation should succeed")
+            .unwrap_or_default()
             .as_nanos()
             .hash(&mut hasher);
         hasher.finish() as usize

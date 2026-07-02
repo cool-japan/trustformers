@@ -16,7 +16,7 @@ pub enum DeviceType {
 
 #[wasm_bindgen]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[allow(non_camel_case_types)]
+#[allow(non_camel_case_types)] // reason: variant names mirror external platform / GGUF spec identifiers
 pub enum OperatingSystem {
     iOS,
     Android,
@@ -55,7 +55,7 @@ pub enum GPUVendor {
 
 #[wasm_bindgen]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[allow(non_camel_case_types)]
+#[allow(non_camel_case_types)] // reason: variant names mirror external platform / GGUF spec identifiers
 pub enum CPUArchitecture {
     ARM64,
     ARM32,

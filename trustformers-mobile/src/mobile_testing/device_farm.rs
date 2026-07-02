@@ -164,10 +164,7 @@ impl DeviceFarmManager {
     /// Start a new device farm session
     pub async fn start_session(&mut self, test_tasks: Vec<TestTask>) -> Result<String> {
         let session_id = {
-            let mut counter = self
-                .session_counter
-                .lock()
-                .expect("session_counter lock should not be poisoned");
+            let mut counter = self.session_counter.lock().unwrap_or_else(|p| p.into_inner());
             *counter += 1;
             format!("session_{:08}", *counter)
         };

@@ -13,6 +13,7 @@
 //! ```no_run
 //! use trustformers_debug::{MemoryProfiler, MemoryProfilingConfig};
 //!
+//! # async fn run() -> anyhow::Result<()> {
 //! let config = MemoryProfilingConfig::default();
 //! let mut profiler = MemoryProfiler::new(config);
 //!
@@ -22,6 +23,8 @@
 //!
 //! println!("Peak memory usage: {} MB", report.peak_memory_mb);
 //! println!("Memory leaks detected: {}", report.potential_leaks.len());
+//! # Ok(())
+//! # }
 //! ```
 
 use anyhow::Result;
@@ -287,7 +290,7 @@ impl MemoryProfiler {
 
     /// Start memory profiling
     pub async fn start(&mut self) -> Result<()> {
-        let mut running = self.running.lock().expect("lock should not be poisoned");
+        let mut running = self.running.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if *running {
             return Err(anyhow::anyhow!("Memory profiler is already running"));
         }
@@ -308,7 +311,7 @@ impl MemoryProfiler {
     /// Stop memory profiling and generate report
     pub async fn stop(&mut self) -> Result<MemoryProfilingReport> {
         {
-            let mut running = self.running.lock().expect("lock should not be poisoned");
+            let mut running = self.running.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if !*running {
                 return Err(anyhow::anyhow!("Memory profiler is not running"));
             }
@@ -343,7 +346,7 @@ impl MemoryProfiler {
         allocation_type: AllocationType,
         tags: Vec<String>,
     ) -> Result<Uuid> {
-        let running = self.running.lock().expect("lock should not be poisoned");
+        let running = self.running.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if !*running {
             return Err(anyhow::anyhow!("Memory profiler is not running"));
         }
@@ -361,7 +364,8 @@ impl MemoryProfiler {
         };
 
         // Store allocation record
-        let mut allocations = self.allocations.lock().expect("lock should not be poisoned");
+        let mut allocations =
+            self.allocations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         allocations.insert(allocation_id, record);
 
         // Update type statistics
@@ -372,12 +376,13 @@ impl MemoryProfiler {
 
     /// Record a deallocation
     pub fn record_deallocation(&self, allocation_id: Uuid) -> Result<()> {
-        let running = self.running.lock().expect("lock should not be poisoned");
+        let running = self.running.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if !*running {
             return Ok(()); // Silently ignore if not running
         }
 
-        let mut allocations = self.allocations.lock().expect("lock should not be poisoned");
+        let mut allocations =
+            self.allocations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(record) = allocations.get_mut(&allocation_id) {
             record.freed = true;
             record.freed_at = Some(SystemTime::now());
@@ -391,7 +396,8 @@ impl MemoryProfiler {
 
     /// Tag an existing allocation
     pub fn tag_allocation(&self, allocation_id: Uuid, tag: String) -> Result<()> {
-        let mut allocations = self.allocations.lock().expect("lock should not be poisoned");
+        let mut allocations =
+            self.allocations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(record) = allocations.get_mut(&allocation_id) {
             record.tags.push(tag);
         }
@@ -400,8 +406,8 @@ impl MemoryProfiler {
 
     /// Get current memory usage snapshot
     pub fn get_memory_snapshot(&self) -> Result<MemorySnapshot> {
-        let allocations = self.allocations.lock().expect("lock should not be poisoned");
-        let _type_stats = self.type_stats.lock().expect("lock should not be poisoned");
+        let allocations = self.allocations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _type_stats = self.type_stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let mut total_heap = 0;
         let mut used_heap = 0;
@@ -450,7 +456,7 @@ impl MemoryProfiler {
 
     /// Detect memory leaks
     pub fn detect_leaks(&self) -> Result<Vec<MemoryLeak>> {
-        let allocations = self.allocations.lock().expect("lock should not be poisoned");
+        let allocations = self.allocations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let now = SystemTime::now();
         let threshold = Duration::from_secs(self.config.leak_detection_threshold_secs);
         let mut leaks = Vec::new();
@@ -558,7 +564,7 @@ impl MemoryProfiler {
 
     /// Analyze GC pressure
     pub fn analyze_gc_pressure(&self) -> Result<GCPressureAnalysis> {
-        let timeline = self.memory_timeline.lock().expect("lock should not be poisoned");
+        let timeline = self.memory_timeline.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let pressure_score = self.calculate_gc_pressure_score();
         let (allocation_rate, deallocation_rate) = self.calculate_allocation_rates(&timeline);
@@ -613,7 +619,8 @@ impl MemoryProfiler {
                 interval.tick().await;
 
                 let is_running = {
-                    let running_guard = running.lock().expect("lock should not be poisoned");
+                    let running_guard =
+                        running.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     *running_guard
                 };
 
@@ -647,9 +654,12 @@ impl MemoryProfiler {
             timeline_snapshot,
             type_stats_snapshot,
         ) = {
-            let allocations = self.allocations.lock().expect("lock should not be poisoned");
-            let timeline = self.memory_timeline.lock().expect("lock should not be poisoned");
-            let type_stats = self.type_stats.lock().expect("lock should not be poisoned");
+            let allocations =
+                self.allocations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let timeline =
+                self.memory_timeline.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let type_stats =
+                self.type_stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
             let total_allocs = allocations.len();
             let total_deallocs = allocations.values().filter(|r| r.freed).count();
@@ -744,7 +754,8 @@ impl MemoryProfiler {
         size: usize,
         is_allocation: bool,
     ) {
-        let mut type_stats = self.type_stats.lock().expect("lock should not be poisoned");
+        let mut type_stats =
+            self.type_stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let stats = type_stats.entry(allocation_type.clone()).or_insert(AllocationTypeStats {
             total_allocations: 0,
             total_deallocations: 0,
@@ -877,7 +888,7 @@ impl MemoryProfiler {
 
     fn detect_churn_pattern(&self) -> Result<AllocationPattern> {
         // Simplified churn detection
-        let allocations = self.allocations.lock().expect("lock should not be poisoned");
+        let allocations = self.allocations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let short_lived_count = allocations
             .values()
             .filter(|record| {
@@ -920,7 +931,7 @@ impl MemoryProfiler {
     }
 
     fn detect_large_allocation_pattern(&self) -> Result<AllocationPattern> {
-        let allocations = self.allocations.lock().expect("lock should not be poisoned");
+        let allocations = self.allocations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let large_allocations: Vec<_> = allocations
             .values()
             .filter(|record| record.size > self.config.large_allocation_threshold)

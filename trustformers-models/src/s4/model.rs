@@ -106,7 +106,6 @@ impl HiPPOMatrix {
         a
     }
 
-    #[allow(deprecated)]
     fn init_random(&self, n: usize) -> Array2<f32> {
         // Random skew-symmetric initialization
         use scirs2_core::random::*; // SciRS2 Integration Policy
@@ -218,7 +217,6 @@ impl Discretization {
 
 /// S4 Layer implementing the diagonal plus low-rank structure
 pub struct S4Layer {
-    #[allow(dead_code)]
     config: S4Config,
     // State space parameters
     a_real: Array2<f32>, // Real part of A matrix

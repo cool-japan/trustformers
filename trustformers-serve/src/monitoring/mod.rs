@@ -205,8 +205,11 @@ impl MetricWindow {
         if self.samples.len() < 2 {
             return 0.0;
         }
-        let (first_ts, first_val) = self.samples.front().expect("len >= 2");
-        let (last_ts, last_val) = self.samples.back().expect("len >= 2");
+        let (Some((first_ts, first_val)), Some((last_ts, last_val))) =
+            (self.samples.front(), self.samples.back())
+        else {
+            return 0.0;
+        };
         let elapsed = last_ts
             .checked_duration_since(*first_ts)
             .unwrap_or(Duration::ZERO)

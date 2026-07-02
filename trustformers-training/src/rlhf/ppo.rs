@@ -12,7 +12,6 @@ pub struct PPOTrainer {
     policy_model: Option<PolicyModel>,
     value_model: Option<ValueModel>,
     reference_model: Option<PolicyModel>,
-    #[allow(dead_code)]
     optimizer: PPOOptimizer,
     statistics: PPOStatistics,
 }

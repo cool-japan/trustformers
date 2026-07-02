@@ -22,21 +22,21 @@ building blocks required by model implementations in trustformers-models and oth
 ## Current Status
 
 ### Implementation Status
-✅ **STABLE** - Version 0.1.0 released 2026-03-21
+✅ **STABLE** - Version 0.1.4 (initial stable release 0.1.0 on 2026-03-21)
 ✅ **ZERO COMPILATION ERRORS** - Clean compilation across all backends
-✅ **COMPREHENSIVE TEST COVERAGE** - 1,140 tests with 100% pass rate
-✅ **ALL TODOS COMPLETED** - Zero stubs (todo!/unimplemented!) remaining
+✅ **COMPREHENSIVE TEST COVERAGE** - ~2,353 tests with 100% pass rate
+✅ **ALL TODOS COMPLETED** - Zero stubs (todo!/unimplemented!) remaining (verified 2026-07-01)
 ✅ **THREAD-SAFE** - Proper synchronization primitives throughout
 ✅ **MEMORY-SAFE** - Zero-copy operations and efficient memory management
 
 ### Code Quality Metrics
-- **Test Count:** 1,140 unit tests, all passing (0 failing)
-- **Stubs:** 0 (no todo! or unimplemented! macros)
-- **Public API Items:** 1,596
-- **SLoC:** 121,799
+- **Test Count:** ~2,353 unit tests, all passing (0 failing)
+- **Stubs:** 0 (no todo! or unimplemented! macros; verified 2026-07-01)
+- **Public API Items:** ~4,533
+- **SLoC:** 155,280
 - **Code Coverage:** Extensive coverage across modules
-- **Clippy Warnings:** 3855+ warnings resolved
-- **File Size Compliance:** All files <2000 lines
+- **Clippy Warnings:** 3855+ warnings resolved historically; 0 clippy and 0 rustdoc warnings workspace-wide as of 2026-07-01
+- **File Size Compliance:** All files <2000 lines (verified 2026-07-01)
 - **Documentation:** Comprehensive rustdoc for all public APIs
 
 ---
@@ -858,35 +858,37 @@ if debugger.is_breakpoint_hit() {
 - **CPU Fallback:** Some operations fall back to CPU when not implemented on specific backend
 - **Small Tensors:** Overhead may dominate for very small tensors on GPU
 
+### Housekeeping
+- **Stray Backup Files:** 6 `.bak2` files remain under `src/` from prior refactors and are not compiled/live code — `layers/sdpa.rs.bak2`, `layers/flash_attention.rs.bak2`, `layers/linear.rs.bak2`, `kernels/simd/matrix_ops.rs.bak2`, `gpu_ops/metal/metalbackend_matmul_f32_group.rs.bak2`, `tensor/math_ops/linear_algebra.rs.bak2` (found 2026-07-01) — safe to delete
+
 ---
 
 ## Future Enhancements
 
-### High Priority (Updated 2026-03-23)
-- [ ] Additional fused kernel patterns
+### High Priority (Updated 2026-07-01)
+- ~~Additional fused kernel patterns~~ ✅ COMPLETED (2026-07-01)
 - ~~Enhanced sparse tensor operations~~ ✅ COMPLETED (2025-11-10)
 - ~~More quantization methods~~ ✅ COMPLETED (FP8, GGUF K-quants - 2025-11-10)
 - ~~RoPE scaling variants (Linear, NTK, Dynamic NTK, YaRN, LongRoPE)~~ ✅ COMPLETED (2026-03-23)
 - ~~Tensor quantization utilities (INT4/INT8/FP16 with scale/zero-point calibration)~~ ✅ COMPLETED (2026-03-23)
 - [ ] INT2 and sub-byte quantization for extreme compression
-- [ ] MX (Microscaling) formats for future hardware
+- ~~MX (Microscaling) formats for future hardware~~ ✅ COMPLETED (2026-07-01)
 
 ### Performance
 - [ ] Further SIMD optimizations via SciRS2
-- [ ] Advanced kernel fusion strategies
+- ~~Advanced kernel fusion strategies~~ ✅ COMPLETED (2026-07-01)
 - ~~Enhanced memory pooling with adaptive strategies~~ ✅ COMPLETED (2025-11-10)
 - ~~Automatic kernel tuning for new hardware~~ ✅ COMPLETED (2025-11-10)
 
 ### Hardware Support
-- [ ] WebGPU backend for browser deployment
-  - **Refinement needed:** API surface? Which GPU compute API — wgpu crate?
+- ~~WebGPU backend for browser deployment~~ ✅ COMPLETED (2026-07-01) — implemented via the `wgpu` crate (v29.0) behind the `wgpu_backend` feature flag
 - [ ] Mobile GPU: Android Vulkan compute optimizations
 - [ ] Mobile GPU: iOS Metal optimizations
 - [ ] Enhanced FPGA support
 
 ### Developer Tools
 - ~~Interactive tensor debugger~~ ✅ COMPLETED (2025-11-10)
-- [ ] Enhanced profiling visualizations
+- ~~Enhanced profiling visualizations~~ ✅ COMPLETED (2026-07-01)
 - [ ] Performance regression dashboard
 
 ---
@@ -946,9 +948,9 @@ cargo doc -p trustformers-core --all-features --no-deps
 
 ---
 
-**Last Updated:** 2026-06-24 - v0.1.3 Development
-**Version:** 0.1.3
+**Last Updated:** 2026-07-02 - v0.1.4 Development
+**Version:** 0.1.4
 **Status:** Stable — production-ready core infrastructure
-**Test Coverage:** 1,140 tests, 100% pass rate, 0 stubs
-**Public API:** 1,596 items
-**SLoC:** 121,799
+**Test Coverage:** ~2,353 tests, 100% pass rate, 0 stubs
+**Public API:** ~4,533 items
+**SLoC:** 155,280

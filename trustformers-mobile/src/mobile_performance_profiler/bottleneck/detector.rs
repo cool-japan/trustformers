@@ -175,7 +175,10 @@ impl BottleneckDetector {
     }
 
     /// Detect bottlenecks in the current metrics snapshot
-    pub fn detect_bottlenecks(&mut self, metrics: &MobileMetricsSnapshot) -> Result<Vec<PerformanceBottleneck>> {
+    pub fn detect_bottlenecks(
+        &mut self,
+        metrics: &MobileMetricsSnapshot,
+    ) -> Result<Vec<PerformanceBottleneck>> {
         let mut detected_bottlenecks = Vec::new();
 
         for rule in &self.detection_rules {
@@ -223,7 +226,8 @@ impl BottleneckDetector {
                     duration_ms: 5000,
                 },
                 severity: BottleneckSeverity::High,
-                suggestion: "Consider reducing batch size or enabling memory optimization".to_string(),
+                suggestion: "Consider reducing batch size or enabling memory optimization"
+                    .to_string(),
                 confidence: 0.9,
                 enabled: true,
             },
@@ -235,7 +239,8 @@ impl BottleneckDetector {
                     duration_ms: 3000,
                 },
                 severity: BottleneckSeverity::High,
-                suggestion: "Consider optimizing model operations or reducing thread count".to_string(),
+                suggestion: "Consider optimizing model operations or reducing thread count"
+                    .to_string(),
                 confidence: 0.85,
                 enabled: true,
             },
@@ -258,7 +263,8 @@ impl BottleneckDetector {
                     severity: ThermalState::Hot,
                 },
                 severity: BottleneckSeverity::Critical,
-                suggestion: "Reduce inference frequency or implement thermal management".to_string(),
+                suggestion: "Reduce inference frequency or implement thermal management"
+                    .to_string(),
                 confidence: 0.95,
                 enabled: true,
             },
@@ -266,20 +272,24 @@ impl BottleneckDetector {
     }
 
     /// Evaluate a detection rule against current metrics
-    fn evaluate_rule(&self, rule: &BottleneckRule, metrics: &MobileMetricsSnapshot) -> Result<bool> {
+    fn evaluate_rule(
+        &self,
+        rule: &BottleneckRule,
+        metrics: &MobileMetricsSnapshot,
+    ) -> Result<bool> {
         match &rule.condition {
-            BottleneckCondition::MemoryUsageHigh { threshold_percent, .. } => {
-                Ok(metrics.memory_usage_percent > *threshold_percent)
-            }
-            BottleneckCondition::CPUUsageHigh { threshold_percent, .. } => {
-                Ok(metrics.cpu_usage_percent > *threshold_percent)
-            }
+            BottleneckCondition::MemoryUsageHigh {
+                threshold_percent, ..
+            } => Ok(metrics.memory_usage_percent > *threshold_percent),
+            BottleneckCondition::CPUUsageHigh {
+                threshold_percent, ..
+            } => Ok(metrics.cpu_usage_percent > *threshold_percent),
             BottleneckCondition::LatencyHigh { threshold_ms, .. } => {
                 Ok(metrics.inference_latency_ms > *threshold_ms)
-            }
+            },
             BottleneckCondition::ThermalThrottling { severity } => {
                 Ok(metrics.thermal_state >= *severity)
-            }
+            },
             _ => Ok(false), // Simplified for other conditions
         }
     }
@@ -319,7 +329,11 @@ impl BottleneckDetector {
     }
 
     /// Extract metric value for the rule condition
-    fn extract_metric_value(&self, rule: &BottleneckRule, metrics: &MobileMetricsSnapshot) -> Result<f32> {
+    fn extract_metric_value(
+        &self,
+        rule: &BottleneckRule,
+        metrics: &MobileMetricsSnapshot,
+    ) -> Result<f32> {
         match &rule.condition {
             BottleneckCondition::MemoryUsageHigh { .. } => Ok(metrics.memory_usage_percent),
             BottleneckCondition::CPUUsageHigh { .. } => Ok(metrics.cpu_usage_percent),
@@ -331,15 +345,23 @@ impl BottleneckDetector {
     /// Extract threshold value for the rule condition
     fn extract_threshold_value(&self, rule: &BottleneckRule) -> Result<f32> {
         match &rule.condition {
-            BottleneckCondition::MemoryUsageHigh { threshold_percent, .. } => Ok(*threshold_percent),
-            BottleneckCondition::CPUUsageHigh { threshold_percent, .. } => Ok(*threshold_percent),
+            BottleneckCondition::MemoryUsageHigh {
+                threshold_percent, ..
+            } => Ok(*threshold_percent),
+            BottleneckCondition::CPUUsageHigh {
+                threshold_percent, ..
+            } => Ok(*threshold_percent),
             BottleneckCondition::LatencyHigh { threshold_ms, .. } => Ok(*threshold_ms),
             _ => Ok(0.0),
         }
     }
 
     /// Calculate impact score for the bottleneck
-    fn calculate_impact_score(&self, rule: &BottleneckRule, metrics: &MobileMetricsSnapshot) -> Result<f32> {
+    fn calculate_impact_score(
+        &self,
+        rule: &BottleneckRule,
+        metrics: &MobileMetricsSnapshot,
+    ) -> Result<f32> {
         // Simplified impact calculation based on severity and deviation from threshold
         let base_score = match rule.severity {
             BottleneckSeverity::Low => 0.3,
@@ -354,7 +376,11 @@ impl BottleneckDetector {
     }
 
     /// Calculate deviation factor from threshold
-    fn calculate_deviation_factor(&self, rule: &BottleneckRule, metrics: &MobileMetricsSnapshot) -> Result<f32> {
+    fn calculate_deviation_factor(
+        &self,
+        rule: &BottleneckRule,
+        metrics: &MobileMetricsSnapshot,
+    ) -> Result<f32> {
         let current_value = self.extract_metric_value(rule, metrics)?;
         let threshold = self.extract_threshold_value(rule)?;
 
@@ -366,18 +392,29 @@ impl BottleneckDetector {
     }
 
     /// Identify affected components for the bottleneck
-    fn identify_affected_components(&self, rule: &BottleneckRule, _metrics: &MobileMetricsSnapshot) -> Vec<String> {
+    fn identify_affected_components(
+        &self,
+        rule: &BottleneckRule,
+        _metrics: &MobileMetricsSnapshot,
+    ) -> Vec<String> {
         match &rule.condition {
             BottleneckCondition::MemoryUsageHigh { .. } => vec!["Memory Manager", "Model Storage"],
             BottleneckCondition::CPUUsageHigh { .. } => vec!["CPU Scheduler", "Inference Engine"],
             BottleneckCondition::LatencyHigh { .. } => vec!["Inference Pipeline", "Model Executor"],
             BottleneckCondition::ThermalThrottling { .. } => vec!["Thermal Manager", "CPU/GPU"],
             _ => vec!["Unknown"],
-        }.into_iter().map(|s| s.to_string()).collect()
+        }
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect()
     }
 
     /// Estimate performance loss percentage
-    fn estimate_performance_loss(&self, rule: &BottleneckRule, metrics: &MobileMetricsSnapshot) -> Result<f32> {
+    fn estimate_performance_loss(
+        &self,
+        rule: &BottleneckRule,
+        metrics: &MobileMetricsSnapshot,
+    ) -> Result<f32> {
         let deviation_factor = self.calculate_deviation_factor(rule, metrics)?;
         let base_loss = match rule.severity {
             BottleneckSeverity::Low => 5.0,
@@ -418,7 +455,9 @@ impl BottleneckDetector {
 
 impl Default for BottleneckDetector {
     fn default() -> Self {
+        // reason: built from a known-valid default config; construction is infallible
+        // for the default config and Default cannot return a Result.
         Self::new(BottleneckDetectionConfig::default())
-            .expect("Failed to create default bottleneck detector")
+            .expect("default BottleneckDetectionConfig must yield a valid detector")
     }
 }

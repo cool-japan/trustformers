@@ -3,6 +3,10 @@
 //! This module provides comprehensive enhanced analysis capabilities including
 //! detailed layer-wise analysis, network-level gradient insights, and optimization
 //! priority ranking for gradient debugging.
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use super::types::*;
 use serde::{Deserialize, Serialize};
@@ -330,7 +334,6 @@ pub enum ImplementationComplexity {
 /// Enhanced gradient analyzer
 #[derive(Debug)]
 pub struct EnhancedGradientAnalyzer {
-    #[allow(dead_code)]
     analysis_depth: AnalysisDepth,
     convergence_window: usize,
     stability_threshold: f64,

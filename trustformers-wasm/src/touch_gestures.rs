@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-
 use core::cell::RefCell;
 use js_sys::{Function, Object, WeakMap};
 use serde::{Deserialize, Serialize};
@@ -396,8 +395,7 @@ impl TouchGestureRecognizer {
             GestureType::Unknown => "unknown",
         };
 
-        js_sys::Reflect::set(&self.callbacks, &JsValue::from_str(gesture_name), callback)
-            .expect("Failed to set gesture callback in callbacks object");
+        let _ = js_sys::Reflect::set(&self.callbacks, &JsValue::from_str(gesture_name), callback);
     }
 
     fn handle_touch_start(&mut self, event: &TouchEvent) {
@@ -516,18 +514,16 @@ impl TouchGestureRecognizer {
             self.last_tap_time = current_time;
 
             // Emit single tap after a delay to check for double tap
-            let window = window().expect("window should be available in browser context");
+            let Some(window) = window() else { return };
             let timeout_callback = Closure::wrap(Box::new(move || {
                 // If no second tap occurred, emit single tap
                 // This would need to be implemented with proper closure handling
             }) as Box<dyn FnMut()>);
 
-            window
-                .set_timeout_with_callback_and_timeout_and_arguments_0(
-                    timeout_callback.as_ref().unchecked_ref(),
-                    self.config.double_tap_interval as i32,
-                )
-                .expect("set_timeout should succeed with valid callback");
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                timeout_callback.as_ref().unchecked_ref(),
+                self.config.double_tap_interval as i32,
+            );
             timeout_callback.forget();
         } else {
             // Check for swipe gesture
@@ -579,8 +575,9 @@ impl TouchGestureRecognizer {
             return;
         }
 
-        let touch1 = touches.item(0).expect("touch list has at least 2 items after length check");
-        let touch2 = touches.item(1).expect("touch list has at least 2 items after length check");
+        let (Some(touch1), Some(touch2)) = (touches.item(0), touches.item(1)) else {
+            return;
+        };
 
         let current_distance = self.calculate_distance(
             touch1.client_x() as f64,
@@ -632,8 +629,9 @@ impl TouchGestureRecognizer {
 
     fn cancel_long_press_timer(&mut self) {
         if let Some(timer_id) = self.long_press_timer.take() {
-            let window = window().expect("window should be available in browser context");
-            window.clear_timeout_with_handle(timer_id);
+            if let Some(window) = window() {
+                window.clear_timeout_with_handle(timer_id);
+            }
         }
     }
 

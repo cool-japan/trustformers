@@ -268,7 +268,10 @@ impl RetNetStateCache {
     pub fn set_state(&mut self, layer_idx: usize, state: Tensor) -> Result<()> {
         // Simple eviction policy - remove oldest entries
         while self.current_size >= self.max_cache_size && !self.states.is_empty() {
-            let oldest_key = *self.states.keys().next().expect("operation failed");
+            // reason: the loop guard guarantees the map is non-empty; break defensively otherwise
+            let Some(&oldest_key) = self.states.keys().next() else {
+                break;
+            };
             self.states.remove(&oldest_key);
             self.current_size -= 1;
         }

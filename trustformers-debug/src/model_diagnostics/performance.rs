@@ -90,15 +90,11 @@ impl PerformanceAnalyzer {
 
     /// Generate a performance summary.
     pub fn generate_performance_summary(&self) -> PerformanceSummary {
-        if self.performance_history.is_empty() {
+        let Some(current_metrics) = self.performance_history.last() else {
             return PerformanceSummary::default();
-        }
+        };
 
         let total_steps = self.performance_history.len();
-        let current_metrics = self
-            .performance_history
-            .last()
-            .expect("performance_history is non-empty after is_empty check");
 
         let losses: Vec<f64> = self.performance_history.iter().map(|m| m.loss).collect();
         let throughputs: Vec<f64> =
@@ -306,8 +302,8 @@ impl PerformanceAnalyzer {
                 detected_at_step: self
                     .performance_history
                     .last()
-                    .expect("performance_history is non-empty after is_empty check")
-                    .training_step,
+                    .map(|m| m.training_step)
+                    .unwrap_or(0),
                 confidence: 0.8,
             })
         } else {
@@ -341,8 +337,8 @@ impl PerformanceAnalyzer {
                 detected_at_step: self
                     .performance_history
                     .last()
-                    .expect("performance_history is non-empty after is_empty check")
-                    .training_step,
+                    .map(|m| m.training_step)
+                    .unwrap_or(0),
                 confidence: 0.9,
             })
         } else {
@@ -368,8 +364,8 @@ impl PerformanceAnalyzer {
                 detected_at_step: self
                     .performance_history
                     .last()
-                    .expect("performance_history is non-empty after is_empty check")
-                    .training_step,
+                    .map(|m| m.training_step)
+                    .unwrap_or(0),
                 confidence: 0.7,
             })
         } else {
@@ -396,8 +392,8 @@ impl PerformanceAnalyzer {
                 detected_at_step: self
                     .performance_history
                     .last()
-                    .expect("performance_history is non-empty after is_empty check")
-                    .training_step,
+                    .map(|m| m.training_step)
+                    .unwrap_or(0),
                 confidence: 0.8,
             })
         } else {

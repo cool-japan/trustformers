@@ -184,7 +184,9 @@ impl WeightAnalyzer {
         };
 
         self.analyses.insert(layer_name.to_string(), analysis);
-        Ok(self.analyses.get(layer_name).expect("analysis should exist after insert"))
+        self.analyses
+            .get(layer_name)
+            .ok_or_else(|| anyhow::anyhow!("analysis should exist after insert"))
     }
 
     /// Compute statistics for weights

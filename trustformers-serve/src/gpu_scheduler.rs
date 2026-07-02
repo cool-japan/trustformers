@@ -814,10 +814,8 @@ impl GpuScheduler {
 
         if let Some(semaphore) = semaphore {
             // Acquire GPU resource
-            let _permit = semaphore
-                .acquire()
-                .await
-                .expect("GPU semaphore should not be closed during task execution");
+            // Permit held for RAII; on a closed semaphore (shutdown) proceed unlimited.
+            let _permit = semaphore.acquire().await.ok();
 
             // Update GPU status
             self.update_gpu_memory_usage(gpu_id, task.required_memory_mb as i64).await;

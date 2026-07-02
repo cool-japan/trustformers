@@ -1,6 +1,7 @@
 use crate::error::{Result, TrustformersError};
 use futures::stream::{self, StreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+#[cfg(feature = "hub")]
 use reqwest::{blocking::Client, Client as AsyncClient};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -282,6 +283,7 @@ pub fn is_cached(model_id: &str, revision: Option<&str>) -> Result<bool> {
 }
 
 /// Enhanced download manager with parallel and resumable downloads
+#[cfg(feature = "hub")]
 pub struct DownloadManager {
     config: DownloadConfig,
     cdn_config: CdnConfig,
@@ -291,12 +293,13 @@ pub struct DownloadManager {
     stats: DownloadStats,
 }
 
+#[cfg(feature = "hub")]
 impl DownloadManager {
     pub fn new(config: DownloadConfig) -> Self {
         let client = AsyncClient::builder()
             .timeout(config.timeout)
             .build()
-            .expect("Failed to build HTTP client with timeout config");
+            .unwrap_or_else(|_| AsyncClient::new());
 
         Self {
             config,
@@ -329,7 +332,7 @@ impl DownloadManager {
                 pb.set_style(
                     ProgressStyle::default_bar()
                         .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} {msg}")
-                        .expect("Progress bar template is valid")
+                        .unwrap_or_else(|_| ProgressStyle::default_bar())
                         .progress_chars("#>-"),
                 );
                 pb.set_message(task.filename.clone());
@@ -347,8 +350,15 @@ impl DownloadManager {
                 let token = token.map(|s| s.to_string());
 
                 async move {
-                    let _permit =
-                        semaphore.acquire().await.expect("semaphore should not be closed");
+                    let _permit = match semaphore.acquire().await {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            return Err(TrustformersError::resource(
+                                "Download semaphore closed unexpectedly",
+                                "semaphore",
+                            ));
+                        },
+                    };
                     Self::download_single_file_async(client, task, token.as_deref(), config, pb)
                         .await
                 }
@@ -756,7 +766,33 @@ pub struct CacheFileInfo {
     pub score: f64,
 }
 
+/// Local-only fallback when the `hub` feature (networking) is disabled.
+///
+/// Callers such as [`download_file_from_hub`] check the on-disk cache first and
+/// only reach this when an actual network download would be required, so local
+/// and pre-cached models keep working; only remote fetches are refused.
+#[cfg(not(feature = "hub"))]
+fn download_file(
+    url: &str,
+    _path: &Path,
+    _token: Option<&str>,
+    _expected_sha: Option<&str>,
+) -> Result<()> {
+    Err(TrustformersError::Hub {
+        message: "Remote model download is disabled: the `hub` feature is not enabled".to_string(),
+        model_id: String::new(),
+        endpoint: Some(url.to_string()),
+        suggestion: Some(
+            "Rebuild with the `hub` feature (e.g. `--features hub`) to download models, \
+             or provide a local path / pre-populate the model cache"
+                .to_string(),
+        ),
+        recovery_actions: vec![],
+    })
+}
+
 /// Legacy synchronous download function (maintained for compatibility)
+#[cfg(feature = "hub")]
 fn download_file(
     url: &str,
     path: &Path,
@@ -785,6 +821,7 @@ fn download_file(
 }
 
 /// List files in a repository
+#[cfg(feature = "hub")]
 fn list_repo_files(model_id: &str, revision: &str, token: Option<&str>) -> Result<Vec<RepoFile>> {
     let client = Client::new();
     let url = format!("{}/api/models/{}/tree/{}", HF_HUB_URL, model_id, revision);
@@ -821,14 +858,16 @@ fn list_repo_files(model_id: &str, revision: &str, token: Option<&str>) -> Resul
 }
 
 /// Download a model from the Hugging Face Hub (legacy implementation)
+#[cfg(feature = "hub")]
 pub fn download_model(model_id: &str, options: Option<HubOptions>) -> Result<PathBuf> {
     let opts = options.unwrap_or_default();
     let revision = opts.revision.as_deref().unwrap_or("main");
 
     // Get cache directory
-    let cache_dir = opts.cache_dir.unwrap_or_else(|| {
-        get_cache_dir().expect("Failed to get cache directory from environment")
-    });
+    let cache_dir = match opts.cache_dir {
+        Some(dir) => dir,
+        None => get_cache_dir()?,
+    };
     let model_dir = cache_dir.join("models").join(model_id.replace('/', "--")).join(revision);
 
     // Check if already cached and not forcing download
@@ -894,6 +933,7 @@ pub fn download_model(model_id: &str, options: Option<HubOptions>) -> Result<Pat
 }
 
 /// Enhanced model download with parallel downloads and advanced features
+#[cfg(feature = "hub")]
 pub async fn download_model_enhanced(
     model_id: &str,
     options: Option<HubOptions>,
@@ -902,9 +942,10 @@ pub async fn download_model_enhanced(
     let revision = opts.revision.as_deref().unwrap_or("main");
 
     // Get cache directory
-    let cache_dir = opts.cache_dir.unwrap_or_else(|| {
-        get_cache_dir().expect("Failed to get cache directory from environment")
-    });
+    let cache_dir = match opts.cache_dir {
+        Some(dir) => dir,
+        None => get_cache_dir()?,
+    };
     let model_dir = cache_dir.join("models").join(model_id.replace('/', "--")).join(revision);
 
     // Check if already cached and not forcing download
@@ -1108,6 +1149,7 @@ pub enum DownloadScenario {
 }
 
 /// Get download statistics for a model
+#[cfg(feature = "hub")]
 pub async fn get_download_stats(
     model_id: &str,
     revision: Option<&str>,
@@ -1212,6 +1254,7 @@ impl ModelDownloadInfo {
 }
 
 /// Check if delta compression is available for a model update
+#[cfg(feature = "hub")]
 pub async fn check_delta_availability(
     model_id: &str,
     from_revision: &str,
@@ -1253,9 +1296,10 @@ pub fn download_file_from_hub(
     let revision = opts.revision.as_deref().unwrap_or("main");
 
     // Get cache directory
-    let cache_dir = opts.cache_dir.unwrap_or_else(|| {
-        get_cache_dir().expect("Failed to get cache directory from environment")
-    });
+    let cache_dir = match opts.cache_dir {
+        Some(dir) => dir,
+        None => get_cache_dir()?,
+    };
     let model_dir = cache_dir.join("models").join(model_id.replace('/', "--")).join(revision);
 
     let file_path = model_dir.join(filename);
@@ -1556,7 +1600,7 @@ mod tests {
     fn test_resume_info_can_resume_recent() {
         let info = ResumeInfo {
             url: "https://example.com/file".to_string(),
-            local_path: PathBuf::from("/tmp/file"),
+            local_path: std::env::temp_dir().join("file"),
             expected_size: 1000,
             downloaded_size: 500,
             checksum: None,
@@ -1570,7 +1614,7 @@ mod tests {
     fn test_resume_info_cannot_resume_zero_downloaded() {
         let info = ResumeInfo {
             url: "https://example.com/file".to_string(),
-            local_path: PathBuf::from("/tmp/file"),
+            local_path: std::env::temp_dir().join("file"),
             expected_size: 1000,
             downloaded_size: 0,
             checksum: None,
@@ -1674,6 +1718,7 @@ mod tests {
         assert_eq!(opts.cdn_urls.len(), 2);
     }
 
+    #[cfg(feature = "hub")]
     #[test]
     fn test_download_manager_creation() {
         let config = DownloadConfig::default();

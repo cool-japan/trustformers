@@ -718,6 +718,9 @@ impl FalconForCausalLM {
         for file_name in &essential_files {
             let file_url = format!("{}/{}", base_url, file_name);
             let file_path = model_path.join(file_name);
+            let file_path_str = file_path.to_str().ok_or_else(|| {
+                TrustformersError::io_error(format!("Non-UTF-8 file path: {}", file_path.display()))
+            })?;
 
             println!("Attempting to download {}", file_url);
 
@@ -727,7 +730,7 @@ impl FalconForCausalLM {
                     "-L", // Follow redirects
                     "-f", // Fail on HTTP errors
                     "-o",
-                    file_path.to_str().expect("operation failed"),
+                    file_path_str,
                     &file_url,
                 ])
                 .output();
@@ -750,13 +753,7 @@ impl FalconForCausalLM {
             }
 
             // Try using wget as fallback
-            let wget_result = Command::new("wget")
-                .args([
-                    "-O",
-                    file_path.to_str().expect("operation failed"),
-                    &file_url,
-                ])
-                .output();
+            let wget_result = Command::new("wget").args(["-O", file_path_str, &file_url]).output();
 
             match wget_result {
                 Ok(output) if output.status.success() => {

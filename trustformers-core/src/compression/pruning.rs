@@ -136,7 +136,7 @@ impl PruningStrategy for MagnitudePruner {
             data.iter().enumerate().map(|(i, &w)| (w.abs(), i)).collect();
 
         // Sort by magnitude
-        abs_weights.sort_by(|a, b| a.0.partial_cmp(&b.0).expect("Partial comparison failed"));
+        abs_weights.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(::std::cmp::Ordering::Equal));
 
         // Calculate cutoff index
         let num_prune = (data.len() as f32 * config.target_sparsity) as usize;
@@ -185,7 +185,7 @@ impl PruningStrategy for StructuredPruner {
         indices.sort_by(|&a, &b| {
             importance_scores[a]
                 .partial_cmp(&importance_scores[b])
-                .expect("Partial comparison failed")
+                .unwrap_or(::std::cmp::Ordering::Equal)
         });
 
         let pruned_indices: HashSet<_> = indices.iter().take(num_prune).cloned().collect();
@@ -413,7 +413,8 @@ impl PruningStrategy for ChannelPruner {
         let num_prune = (num_channels as f32 * config.target_sparsity) as usize;
         let mut sorted_channels: Vec<(f32, usize)> =
             channel_importance.iter().enumerate().map(|(i, &score)| (score, i)).collect();
-        sorted_channels.sort_by(|a, b| a.0.partial_cmp(&b.0).expect("Partial comparison failed"));
+        sorted_channels
+            .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(::std::cmp::Ordering::Equal));
 
         let pruned_channels: HashSet<usize> =
             sorted_channels.iter().take(num_prune).map(|(_, idx)| *idx).collect();
@@ -445,7 +446,8 @@ impl PruningStrategy for ChannelPruner {
         let num_prune = (num_channels as f32 * config.target_sparsity) as usize;
         let mut sorted_channels: Vec<(f32, usize)> =
             channel_importance.iter().enumerate().map(|(i, &score)| (score, i)).collect();
-        sorted_channels.sort_by(|a, b| a.0.partial_cmp(&b.0).expect("Partial comparison failed"));
+        sorted_channels
+            .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(::std::cmp::Ordering::Equal));
 
         let pruned_channels: HashSet<usize> =
             sorted_channels.iter().take(num_prune).map(|(_, idx)| *idx).collect();
@@ -547,7 +549,7 @@ impl PruningStrategy for FilterPruner {
         let num_prune = (num_filters as f32 * config.target_sparsity) as usize;
         let mut sorted_filters: Vec<(f32, usize)> =
             filter_importance.iter().enumerate().map(|(i, &score)| (score, i)).collect();
-        sorted_filters.sort_by(|a, b| a.0.partial_cmp(&b.0).expect("Partial comparison failed"));
+        sorted_filters.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(::std::cmp::Ordering::Equal));
 
         let pruned_filters: HashSet<usize> =
             sorted_filters.iter().take(num_prune).map(|(_, idx)| *idx).collect();
@@ -576,7 +578,7 @@ impl PruningStrategy for FilterPruner {
         let num_prune = (num_filters as f32 * config.target_sparsity) as usize;
         let mut sorted_filters: Vec<(f32, usize)> =
             filter_importance.iter().enumerate().map(|(i, &score)| (score, i)).collect();
-        sorted_filters.sort_by(|a, b| a.0.partial_cmp(&b.0).expect("Partial comparison failed"));
+        sorted_filters.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(::std::cmp::Ordering::Equal));
 
         let pruned_filters: HashSet<usize> =
             sorted_filters.iter().take(num_prune).map(|(_, idx)| *idx).collect();
@@ -665,7 +667,7 @@ impl PruningStrategy for HeadPruner {
 
         let mut sorted_heads: Vec<(f32, usize)> =
             head_importance.iter().enumerate().map(|(i, &score)| (score, i)).collect();
-        sorted_heads.sort_by(|a, b| a.0.partial_cmp(&b.0).expect("Partial comparison failed"));
+        sorted_heads.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(::std::cmp::Ordering::Equal));
 
         let pruned_heads: HashSet<usize> =
             sorted_heads.iter().take(num_prune).map(|(_, idx)| *idx).collect();
@@ -699,7 +701,7 @@ impl PruningStrategy for HeadPruner {
 
         let mut sorted_heads: Vec<(f32, usize)> =
             head_importance.iter().enumerate().map(|(i, &score)| (score, i)).collect();
-        sorted_heads.sort_by(|a, b| a.0.partial_cmp(&b.0).expect("Partial comparison failed"));
+        sorted_heads.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(::std::cmp::Ordering::Equal));
 
         let pruned_heads: HashSet<usize> =
             sorted_heads.iter().take(num_prune).map(|(_, idx)| *idx).collect();
@@ -820,7 +822,7 @@ impl LayerPruner {
             .iter()
             .map(|(name, &score)| (score, name.clone()))
             .collect();
-        sorted_layers.sort_by(|a, b| a.0.partial_cmp(&b.0).expect("Partial comparison failed"));
+        sorted_layers.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(::std::cmp::Ordering::Equal));
 
         let pruned_layers: Vec<String> = sorted_layers
             .iter()

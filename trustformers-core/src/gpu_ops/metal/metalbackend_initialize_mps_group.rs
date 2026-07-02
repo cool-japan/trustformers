@@ -15,28 +15,20 @@ use super::types::{BufferCache, BufferId};
 
 #[cfg(all(target_os = "macos", feature = "metal"))]
 impl MetalBackend {
-    /// Initialize MPS operations by converting metal-rs types to objc2-metal types
+    /// Initialize the Pure-Rust oxicuda-metal compute backend.
     pub(crate) fn initialize_mps(
-        device: &MetalDevice,
-        command_queue: &CommandQueue,
-    ) -> Option<MPSOperations> {
-        #[cfg(all(target_os = "macos", feature = "metal"))]
-        use objc2::rc::Retained;
-        #[cfg(all(target_os = "macos", feature = "metal"))]
-        use objc2::runtime::ProtocolObject;
-        #[cfg(all(target_os = "macos", feature = "metal"))]
-        use objc2_metal::{MTLCommandQueue as ObjC2CommandQueue, MTLDevice as ObjC2Device};
-        let device_ptr = ForeignType::as_ptr(device) as *mut objc2::runtime::AnyObject;
-        let queue_ptr = ForeignType::as_ptr(command_queue) as *mut objc2::runtime::AnyObject;
-        let device_id: Retained<ProtocolObject<dyn ObjC2Device>> =
-            unsafe { Retained::retain(device_ptr as *mut ProtocolObject<dyn ObjC2Device>)? };
-        let queue_id: Retained<ProtocolObject<dyn ObjC2CommandQueue>> =
-            unsafe { Retained::retain(queue_ptr as *mut ProtocolObject<dyn ObjC2CommandQueue>)? };
-        let mps_ops = MPSOperations::new(device_id, queue_id);
-        println!(
-            "✅ MPS (Metal Performance Shaders) initialized - 100-500x matmul speedup enabled"
-        );
-        Some(mps_ops)
+        _device: &MetalDevice,
+        _command_queue: &CommandQueue,
+    ) -> Option<oxicuda_metal::MetalBackend> {
+        use oxicuda_backend::ComputeBackend;
+        let mut backend = oxicuda_metal::MetalBackend::new();
+        match backend.init() {
+            Ok(()) => {
+                println!("✅ oxicuda-metal compute backend initialized");
+                Some(backend)
+            },
+            Err(_) => None,
+        }
     }
     /// Create a persistent GPU buffer and return its ID
     pub fn create_persistent_buffer(&self, data: &[f32]) -> Result<BufferId> {
@@ -73,35 +65,31 @@ impl MetalBackend {
         k: usize,
         n: usize,
     ) -> Result<BufferId> {
-        let mps_ops = self.mps_ops.as_ref().as_ref().ok_or_else(|| {
-            // eprintln!(
-            //     "⚠️  MPS matmul requested but MPS not initialized - falling back to naive kernel"
-            // );
+        let oxi = self.mps_ops.as_ref().as_ref().ok_or_else(|| {
             TrustformersError::hardware_error(
                 "MPS not initialized - GPU-to-GPU matmul unavailable",
                 "matmul_gpu_to_gpu_mps",
             )
         })?;
-        // eprintln!(
-        //     "🚀 Using MPS matmul: {}x{}x{} (expected 100-500x speedup)",
-        //     m, k, n
-        // );
         let a_buffer = self.get_persistent_buffer(a_buffer_id)?;
         let b_buffer = self.get_persistent_buffer(b_buffer_id)?;
-        let result_size = m * n;
+        // Resident output buffer (Shared so callers can read it back directly).
         let c_buffer = Arc::new(self.device.new_buffer(
-            (result_size * mem::size_of::<f32>()) as u64,
+            (m * n * mem::size_of::<f32>()) as u64,
             MTLResourceOptions::StorageModeShared,
         ));
-        let a_objc2 = Self::buffer_to_objc2(&a_buffer)?;
-        let b_objc2 = Self::buffer_to_objc2(&b_buffer)?;
-        let c_objc2 = Self::buffer_to_objc2(&c_buffer)?;
-        mps_ops.matmul_f32(&a_objc2, &b_objc2, &c_objc2, m, k, n).map_err(|e| {
-            TrustformersError::hardware_error(
-                &format!("MPS matmul failed: {:?}", e),
-                "matmul_gpu_to_gpu_mps",
-            )
-        })?;
+        // Zero-copy: GEMM runs directly into the resident buffers, no host round-trip.
+        oxi_resident_gemm(
+            oxi,
+            &a_buffer,
+            &b_buffer,
+            &c_buffer,
+            m,
+            k,
+            n,
+            1.0_f64,
+            "matmul_gpu_to_gpu_mps",
+        )?;
         let result_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
             TrustformersError::hardware_error(
@@ -136,35 +124,31 @@ impl MetalBackend {
         n: usize,
         alpha: f32,
     ) -> Result<BufferId> {
-        let mps_ops = self.mps_ops.as_ref().as_ref().ok_or_else(|| {
-            // eprintln!("⚠️  MPS scaled matmul requested but MPS not initialized");
+        let oxi = self.mps_ops.as_ref().as_ref().ok_or_else(|| {
             TrustformersError::hardware_error(
                 "MPS not initialized - GPU-to-GPU scaled matmul unavailable",
                 "matmul_gpu_to_gpu_mps_scaled",
             )
         })?;
-        // eprintln!(
-        //     "🚀 Using MPS FUSED scaled matmul: {}x{}x{} with alpha={} (1.5-2x faster)",
-        //     m, k, n, alpha
-        // );
         let a_buffer = self.get_persistent_buffer(a_buffer_id)?;
         let b_buffer = self.get_persistent_buffer(b_buffer_id)?;
-        let result_size = m * n;
-        let c_buffer = Arc::new(self.device.new_buffer(
-            (result_size * mem::size_of::<f32>()) as u64,
+        // Resident output buffer (Private; GPU-resident output of the scaled matmul).
+        let c_private = Arc::new(self.device.new_buffer(
+            (m * n * mem::size_of::<f32>()) as u64,
             MTLResourceOptions::StorageModePrivate,
         ));
-        let a_objc2 = Self::buffer_to_objc2(&a_buffer)?;
-        let b_objc2 = Self::buffer_to_objc2(&b_buffer)?;
-        let c_objc2 = Self::buffer_to_objc2(&c_buffer)?;
-        mps_ops
-            .matmul_f32_scaled(&a_objc2, &b_objc2, &c_objc2, m, k, n, alpha)
-            .map_err(|e| {
-                TrustformersError::hardware_error(
-                    &format!("MPS scaled matmul failed: {:?}", e),
-                    "matmul_gpu_to_gpu_mps_scaled",
-                )
-            })?;
+        // Zero-copy: scaled GEMM (alpha) runs directly into the resident buffers.
+        oxi_resident_gemm(
+            oxi,
+            &a_buffer,
+            &b_buffer,
+            &c_private,
+            m,
+            k,
+            n,
+            alpha as f64,
+            "matmul_gpu_to_gpu_mps_scaled",
+        )?;
         let result_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
             TrustformersError::hardware_error(
@@ -172,7 +156,7 @@ impl MetalBackend {
                 "matmul_gpu_to_gpu_mps_scaled",
             )
         })?;
-        cache.insert(result_id, c_buffer);
+        cache.insert(result_id, c_private);
         Ok(result_id)
     }
     /// Execute GELU on GPU buffer → GPU buffer (ZERO CPU TRANSFERS!)
@@ -1696,5 +1680,170 @@ impl MetalBackend {
             self.reshape_from_heads_gpu(&output_heads_id, seq_len, num_heads, head_dim)?;
         // eprintln!("✅ GPU Multi-Head Attention (OPTIMIZED) complete!");
         Ok(final_output)
+    }
+}
+
+/// Zero-copy resident GEMM through the oxicuda-metal backend.
+///
+/// Registers the three already-resident Metal buffers (`A`, `B`, `C`) as
+/// external imports on the oxicuda backend (each `register_external` takes its
+/// own retain and borrows the buffer — it never frees the caller's buffer),
+/// then runs `C = alpha * (A @ B)` directly into the resident output buffer and
+/// releases the three import handles. No host round-trip: the result stays
+/// GPU-resident in `c_buffer`.
+#[cfg(all(target_os = "macos", feature = "metal"))]
+fn oxi_resident_gemm(
+    oxi: &oxicuda_metal::MetalBackend,
+    a_buffer: &Arc<Buffer>,
+    b_buffer: &Arc<Buffer>,
+    c_buffer: &Arc<Buffer>,
+    m: usize,
+    k: usize,
+    n: usize,
+    alpha: f64,
+    op: &'static str,
+) -> Result<()> {
+    use oxicuda_backend::{BackendTranspose, ComputeBackend};
+    let elem = mem::size_of::<f32>();
+    let a_h = oxi.register_external(a_buffer, m * k * elem).map_err(|e| {
+        TrustformersError::hardware_error(&format!("oxicuda-metal register a: {e}"), op)
+    })?;
+    let b_h = oxi.register_external(b_buffer, k * n * elem).map_err(|e| {
+        TrustformersError::hardware_error(&format!("oxicuda-metal register b: {e}"), op)
+    })?;
+    let c_h = oxi.register_external(c_buffer, m * n * elem).map_err(|e| {
+        TrustformersError::hardware_error(&format!("oxicuda-metal register c: {e}"), op)
+    })?;
+    let gemm_res = oxi.gemm(
+        BackendTranspose::NoTrans,
+        BackendTranspose::NoTrans,
+        m,
+        n,
+        k,
+        alpha,
+        a_h,
+        k,
+        b_h,
+        n,
+        0.0_f64,
+        c_h,
+        n,
+    );
+    // Always release the three import handles, even if the GEMM failed, so the
+    // oxicuda-side retains never leak. Freeing an import only drops oxicuda's
+    // own retain; the caller's `Arc<Buffer>` remains valid.
+    let free_a = oxi.free(a_h);
+    let free_b = oxi.free(b_h);
+    let free_c = oxi.free(c_h);
+    gemm_res
+        .map_err(|e| TrustformersError::hardware_error(&format!("oxicuda-metal gemm: {e}"), op))?;
+    free_a.map_err(|e| {
+        TrustformersError::hardware_error(&format!("oxicuda-metal free a: {e}"), op)
+    })?;
+    free_b.map_err(|e| {
+        TrustformersError::hardware_error(&format!("oxicuda-metal free b: {e}"), op)
+    })?;
+    free_c.map_err(|e| {
+        TrustformersError::hardware_error(&format!("oxicuda-metal free c: {e}"), op)
+    })?;
+    Ok(())
+}
+
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    // Read back a GPU-private result buffer by blitting it into a CPU-mappable
+    // staging buffer (the scaled matmul output is StorageModePrivate).
+    fn read_private_result(
+        backend: &MetalBackend,
+        id: &BufferId,
+        n_elems: usize,
+    ) -> Result<Vec<f32>> {
+        let src = backend.get_persistent_buffer(id)?;
+        let bytes = (n_elems * mem::size_of::<f32>()) as u64;
+        let staging = backend.device.new_buffer(bytes, MTLResourceOptions::StorageModeShared);
+        let cb = backend.command_queue.new_command_buffer();
+        let blit = cb.new_blit_command_encoder();
+        blit.copy_from_buffer(&src, 0, &staging, 0, bytes);
+        blit.end_encoding();
+        cb.commit();
+        cb.wait_until_completed();
+        let ptr = staging.contents() as *const f32;
+        // SAFETY: staging is Shared/CPU-mappable and holds n_elems f32 after the blit.
+        let slice = unsafe { std::slice::from_raw_parts(ptr, n_elems) };
+        Ok(slice.to_vec())
+    }
+
+    // Naive CPU triple-loop reference: C(m×n) = scale * (A(m×k) @ B(k×n)), row-major.
+    fn cpu_ref(a: &[f32], b: &[f32], m: usize, k: usize, n: usize, scale: f32) -> Vec<f32> {
+        let mut c = vec![0.0f32; m * n];
+        for i in 0..m {
+            for j in 0..n {
+                let mut acc = 0.0f32;
+                for p in 0..k {
+                    acc += a[i * k + p] * b[p * n + j];
+                }
+                c[i * n + j] = scale * acc;
+            }
+        }
+        c
+    }
+
+    #[test]
+    fn mps_oxicuda_matmul_parity() -> Result<()> {
+        let backend = MetalBackend::new()?;
+
+        // Non-trivial shape; deterministic row-major fills.
+        let (m, k, n) = (12usize, 9usize, 7usize);
+        let mut a = vec![0.0f32; m * k];
+        for i in 0..m {
+            for j in 0..k {
+                a[i * k + j] = ((i * k + j) % 11) as f32 * 0.3 - 1.5;
+            }
+        }
+        let mut b = vec![0.0f32; k * n];
+        for p in 0..k {
+            for q in 0..n {
+                b[p * n + q] = ((p * n + q) % 13) as f32 * 0.2 - 1.0;
+            }
+        }
+
+        let a_id = backend.create_persistent_buffer(&a)?;
+        let b_id = backend.create_persistent_buffer(&b)?;
+
+        // 1) Unscaled path (Shared output → download_buffer_to_vec).
+        let c_id = backend.matmul_gpu_to_gpu_mps(&a_id, &b_id, m, k, n)?;
+        let got_unscaled = backend.download_buffer_to_vec(&c_id)?;
+        let ref_unscaled = cpu_ref(&a, &b, m, k, n, 1.0);
+        assert_eq!(got_unscaled.len(), m * n, "unscaled result length");
+        for idx in 0..(m * n) {
+            assert!(
+                (got_unscaled[idx] - ref_unscaled[idx]).abs() < 1e-3,
+                "unscaled mismatch at {idx}: got {} want {}",
+                got_unscaled[idx],
+                ref_unscaled[idx]
+            );
+        }
+
+        // 2) Scaled path (Private output → blit-readback). Use an attention-like scale.
+        let alpha = 1.0f32 / (k as f32).sqrt();
+        let c_scaled_id = backend.matmul_gpu_to_gpu_mps_scaled(&a_id, &b_id, m, k, n, alpha)?;
+        let got_scaled = read_private_result(&backend, &c_scaled_id, m * n)?;
+        let ref_scaled = cpu_ref(&a, &b, m, k, n, alpha);
+        assert_eq!(got_scaled.len(), m * n, "scaled result length");
+        for idx in 0..(m * n) {
+            assert!(
+                (got_scaled[idx] - ref_scaled[idx]).abs() < 1e-3,
+                "scaled mismatch at {idx}: got {} want {}",
+                got_scaled[idx],
+                ref_scaled[idx]
+            );
+        }
+
+        println!(
+            "mps_oxicuda_matmul_parity PASS (unscaled + scaled, shape {m}x{k}x{n}, alpha={alpha})"
+        );
+        Ok(())
     }
 }

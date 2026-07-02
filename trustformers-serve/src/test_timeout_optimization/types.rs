@@ -1151,9 +1151,11 @@ impl TestProgressTracker {
         if history.len() < 2 {
             return 0.0;
         }
-        let (start_time, start_progress) =
-            history.front().expect("history has at least 2 elements");
-        let (end_time, end_progress) = history.back().expect("history has at least 2 elements");
+        let (Some((start_time, start_progress)), Some((end_time, end_progress))) =
+            (history.front(), history.back())
+        else {
+            return 0.0;
+        };
         let time_diff = end_time.duration_since(*start_time).as_secs_f32();
         let progress_diff = (*end_progress as f32) - (*start_progress as f32);
         if time_diff > 0.0 {

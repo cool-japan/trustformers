@@ -291,14 +291,15 @@ impl WasmTokenizer {
                 let (found_substr, new_end) = self.find_vocab_match(&chars, start, end);
                 let cur_substr = found_substr;
 
-                if let Some(substr) = cur_substr {
-                    tokens.push(
-                        *self.vocab.get(&substr).expect("found substring must exist in vocab"),
-                    );
-                    start = new_end;
-                } else {
-                    is_bad = true;
-                    break;
+                match cur_substr.and_then(|substr| self.vocab.get(&substr).copied()) {
+                    Some(token_id) => {
+                        tokens.push(token_id);
+                        start = new_end;
+                    },
+                    None => {
+                        is_bad = true;
+                        break;
+                    },
                 }
             }
 

@@ -34,15 +34,37 @@
 //! ## Example Usage
 //!
 //! ```rust
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use trustformers_models::code_specialized::{CodeLlamaConfig, CodeLlamaForCausalLM};
+//! use trustformers_models::llama::LlamaConfig;
+//! use trustformers_core::Layer;
 //!
-//! // Create a CodeLlama 7B model
-//! let config = CodeLlamaConfig::code_llama_7b();
+//! // A small custom configuration for this example. (A real preset such as
+//! // `CodeLlamaConfig::code_llama_7b()` describes a genuine ~7B-parameter model
+//! // and is unsuitable for a lightweight, quickly-running example.)
+//! let config = CodeLlamaConfig {
+//!     base_config: LlamaConfig {
+//!         vocab_size: 1000,
+//!         hidden_size: 64,
+//!         intermediate_size: 256,
+//!         num_hidden_layers: 2,
+//!         num_attention_heads: 4,
+//!         max_position_embeddings: 512,
+//!         ..LlamaConfig::default()
+//!     },
+//!     code_context_length: 512,
+//!     ..CodeLlamaConfig::default()
+//! };
 //! let model = CodeLlamaForCausalLM::new(config)?;
 //!
-//! // For code completion
-//! let input = "def fibonacci(n):\n    if n <= 1:\n        return n\n    return";
-//! let completion = model.generate(input, 50)?;
+//! // CodeSpecializedForCausalLM (aka CodeLlamaForCausalLM) implements `Layer`,
+//! // not a text-based `generate` API: it consumes token IDs (as produced by a
+//! // tokenizer) and returns raw logits.
+//! let input_ids: Vec<u32> = vec![1, 2, 3, 4, 5];
+//! let logits = model.forward(input_ids)?;
+//! # let _ = logits;
+//! # Ok(())
+//! # }
 //! ```
 
 use anyhow::Error;

@@ -463,7 +463,7 @@ impl DynamicGpuAllocator {
 
     /// Initialize GPU resources
     pub async fn initialize_resources(&self) -> Result<(), AllocationError> {
-        let mut resources = self.gpu_resources.write().expect("GPU resources RwLock poisoned");
+        let mut resources = self.gpu_resources.write().unwrap_or_else(|p| p.into_inner());
 
         // Detect available GPUs
         let gpu_count = self.detect_gpu_count().await?;
@@ -523,7 +523,7 @@ impl DynamicGpuAllocator {
         request: &AllocationRequest,
     ) -> Result<Option<GpuAllocation>, AllocationError> {
         let device_id = {
-            let resources = self.gpu_resources.read().expect("GPU resources RwLock poisoned");
+            let resources = self.gpu_resources.read().unwrap_or_else(|p| p.into_inner());
 
             let strategy = self.strategies.get(&request.strategy).ok_or(
                 AllocationError::InvalidRequest("Invalid strategy".to_string()),
@@ -547,7 +547,7 @@ impl DynamicGpuAllocator {
         &self,
         request: AllocationRequest,
     ) -> Result<(), AllocationError> {
-        let mut queue = self.allocation_queue.lock().expect("Allocation queue lock poisoned");
+        let mut queue = self.allocation_queue.lock().unwrap_or_else(|p| p.into_inner());
 
         if queue.len() >= self.config.max_queue_size {
             return Err(AllocationError::ResourceContention);
@@ -563,7 +563,7 @@ impl DynamicGpuAllocator {
 
         // Update metrics
         {
-            let mut metrics = self.metrics.lock().expect("Metrics lock poisoned");
+            let mut metrics = self.metrics.lock().unwrap_or_else(|p| p.into_inner());
             metrics.queue_length = queue.len();
         }
 
@@ -579,7 +579,7 @@ impl DynamicGpuAllocator {
         request: &AllocationRequest,
         device_id: u32,
     ) -> Result<GpuAllocation, AllocationError> {
-        let mut resources = self.gpu_resources.write().expect("GPU resources RwLock poisoned");
+        let mut resources = self.gpu_resources.write().unwrap_or_else(|p| p.into_inner());
 
         let resource = resources
             .get_mut(&device_id)
@@ -608,14 +608,13 @@ impl DynamicGpuAllocator {
 
         // Update active allocations
         {
-            let mut active =
-                self.active_allocations.write().expect("Active allocations RwLock poisoned");
+            let mut active = self.active_allocations.write().unwrap_or_else(|p| p.into_inner());
             active.insert(allocation.id, allocation.clone());
         }
 
         // Update metrics
         {
-            let mut metrics = self.metrics.lock().expect("Metrics lock poisoned");
+            let mut metrics = self.metrics.lock().unwrap_or_else(|p| p.into_inner());
             metrics.total_allocations += 1;
             metrics.successful_allocations += 1;
             metrics.memory_utilization.insert(
@@ -633,8 +632,7 @@ impl DynamicGpuAllocator {
         allocation_id: AllocationId,
     ) -> Result<(), AllocationError> {
         let allocation = {
-            let mut active =
-                self.active_allocations.write().expect("Active allocations RwLock poisoned");
+            let mut active = self.active_allocations.write().unwrap_or_else(|p| p.into_inner());
             active.remove(&allocation_id).ok_or(AllocationError::InvalidRequest(
                 "Allocation not found".to_string(),
             ))?
@@ -642,7 +640,7 @@ impl DynamicGpuAllocator {
 
         // Release GPU memory
         {
-            let mut resources = self.gpu_resources.write().expect("GPU resources RwLock poisoned");
+            let mut resources = self.gpu_resources.write().unwrap_or_else(|p| p.into_inner());
             let resource = resources
                 .get_mut(&allocation.device_id)
                 .ok_or(AllocationError::DeviceError("Device not found".to_string()))?;
@@ -653,11 +651,12 @@ impl DynamicGpuAllocator {
 
         // Update metrics
         {
-            let mut metrics = self.metrics.lock().expect("Metrics lock poisoned");
+            let mut metrics = self.metrics.lock().unwrap_or_else(|p| p.into_inner());
             metrics.memory_utilization.insert(allocation.device_id, {
-                let resources = self.gpu_resources.read().expect("GPU resources RwLock poisoned");
-                let resource =
-                    resources.get(&allocation.device_id).expect("Device should exist in resources");
+                let resources = self.gpu_resources.read().unwrap_or_else(|p| p.into_inner());
+                let resource = resources
+                    .get(&allocation.device_id)
+                    .ok_or_else(|| AllocationError::DeviceError("Device not found".to_string()))?;
                 1.0 - (resource.available_memory as f32 / resource.total_memory as f32)
             });
         }
@@ -678,8 +677,7 @@ impl DynamicGpuAllocator {
 
             loop {
                 let request = {
-                    let mut queue =
-                        self.allocation_queue.lock().expect("Allocation queue lock poisoned");
+                    let mut queue = self.allocation_queue.lock().unwrap_or_else(|p| p.into_inner());
                     queue.pop_front()
                 };
 
@@ -723,8 +721,8 @@ impl DynamicGpuAllocator {
 
             // Update queue metrics
             {
-                let mut metrics = self.metrics.lock().expect("Metrics lock poisoned");
-                let queue = self.allocation_queue.lock().expect("Allocation queue lock poisoned");
+                let mut metrics = self.metrics.lock().unwrap_or_else(|p| p.into_inner());
+                let queue = self.allocation_queue.lock().unwrap_or_else(|p| p.into_inner());
                 metrics.queue_length = queue.len();
             }
 
@@ -765,14 +763,14 @@ impl DynamicGpuAllocator {
 
             // Update GPU resource information
             let device_ids: Vec<u32> = {
-                let resources = self.gpu_resources.read().expect("GPU resources RwLock poisoned");
+                let resources = self.gpu_resources.read().unwrap_or_else(|p| p.into_inner());
                 resources.keys().cloned().collect()
             };
 
             for device_id in device_ids {
                 if let Ok(updated_resource) = self.query_gpu_resource(device_id).await {
                     let mut resources =
-                        self.gpu_resources.write().expect("GPU resources RwLock poisoned");
+                        self.gpu_resources.write().unwrap_or_else(|p| p.into_inner());
                     if let Some(resource) = resources.get_mut(&device_id) {
                         // Update utilization and temperature
                         resource.utilization = updated_resource.utilization;
@@ -810,7 +808,7 @@ impl DynamicGpuAllocator {
 
     /// Rebalance allocations across GPUs
     async fn rebalance_allocations(&self) -> Result<(), AllocationError> {
-        let resources = self.gpu_resources.read().expect("GPU resources RwLock poisoned");
+        let resources = self.gpu_resources.read().unwrap_or_else(|p| p.into_inner());
 
         // Calculate load imbalance
         let total_utilization: f32 = resources.values().map(|r| r.utilization).sum();
@@ -837,7 +835,7 @@ impl DynamicGpuAllocator {
 
     /// Get allocation metrics
     pub fn get_metrics(&self) -> AllocationMetrics {
-        let metrics = self.metrics.lock().expect("Metrics lock poisoned");
+        let metrics = self.metrics.lock().unwrap_or_else(|p| p.into_inner());
         metrics.clone()
     }
 

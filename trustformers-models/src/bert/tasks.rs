@@ -10,7 +10,6 @@ use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::{Layer, Model, TokenizedInput};
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct BertForSequenceClassification {
     bert: BertModel,
     classifier: Linear,

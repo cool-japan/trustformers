@@ -349,7 +349,9 @@ impl MlxEngine {
         for (i, node) in nodes.iter().enumerate() {
             if reachable[i] {
                 let mut updated_node = node.clone();
-                updated_node.id = *id_mapping.get(&i).expect("Operation failed");
+                updated_node.id = id_mapping.get(&i).copied().ok_or_else(|| {
+                    TrustformersError::runtime_error("missing node id mapping".to_string())
+                })?;
                 filtered_nodes.push(updated_node);
             }
         }
@@ -359,9 +361,15 @@ impl MlxEngine {
         for edge in &*edges {
             if reachable[edge.source] && reachable[edge.destination] {
                 let mut updated_edge = edge.clone();
-                updated_edge.source = *id_mapping.get(&edge.source).expect("Operation failed");
+                updated_edge.source = id_mapping.get(&edge.source).copied().ok_or_else(|| {
+                    TrustformersError::runtime_error("missing edge source mapping".to_string())
+                })?;
                 updated_edge.destination =
-                    *id_mapping.get(&edge.destination).expect("Operation failed");
+                    id_mapping.get(&edge.destination).copied().ok_or_else(|| {
+                        TrustformersError::runtime_error(
+                            "missing edge destination mapping".to_string(),
+                        )
+                    })?;
                 filtered_edges.push(updated_edge);
             }
         }
@@ -527,7 +535,6 @@ impl MlxEngine {
         &self,
         graph: &OptimizedGraph,
     ) -> Result<ModelPerformanceProfile> {
-        #[allow(dead_code)]
         let mut total_ops = 0;
         let mut estimated_latency_ms = 0.0;
 

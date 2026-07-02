@@ -330,7 +330,7 @@ impl HardwareDevice for CPUDevice {
 
         // Initialize CPU device (minimal setup required)
         {
-            let mut status = self.status.lock().expect("Lock poisoned");
+            let mut status = self.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             status.online = true;
             status.busy = false;
         }
@@ -350,7 +350,7 @@ impl HardwareDevice for CPUDevice {
         }
 
         {
-            let mut status = self.status.lock().expect("Lock poisoned");
+            let mut status = self.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             status.online = false;
             status.busy = false;
         }
@@ -361,22 +361,23 @@ impl HardwareDevice for CPUDevice {
     }
 
     fn is_available(&self) -> bool {
-        self.is_initialized && self.status.lock().expect("Lock poisoned").online
+        self.is_initialized
+            && self.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).online
     }
 
     fn status(&self) -> DeviceStatus {
-        self.status.lock().expect("Lock poisoned").clone()
+        self.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 
     async fn metrics(&self) -> HardwareResult<HardwareMetrics> {
         self.update_metrics()?;
-        Ok(self.metrics.lock().expect("Lock poisoned").clone())
+        Ok(self.metrics.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone())
     }
 
     async fn reset(&mut self) -> HardwareResult<()> {
         // Reset device state
         {
-            let mut status = self.status.lock().expect("Lock poisoned");
+            let mut status = self.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             status.busy = false;
             status.error = None;
         }
@@ -391,7 +392,8 @@ impl HardwareDevice for CPUDevice {
 
     async fn allocate_memory(&mut self, size: usize) -> HardwareResult<DeviceMemory> {
         let memory_id = {
-            let mut id_counter = self.next_memory_id.lock().expect("Lock poisoned");
+            let mut id_counter =
+                self.next_memory_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let id = *id_counter;
             *id_counter += 1;
             id
@@ -401,7 +403,8 @@ impl HardwareDevice for CPUDevice {
         let buffer = vec![0u8; size];
 
         {
-            let mut pools = self.memory_pools.lock().expect("Lock poisoned");
+            let mut pools =
+                self.memory_pools.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             pools.insert(memory_id, buffer);
         }
 
@@ -414,7 +417,7 @@ impl HardwareDevice for CPUDevice {
     }
 
     async fn free_memory(&mut self, memory: DeviceMemory) -> HardwareResult<()> {
-        let mut pools = self.memory_pools.lock().expect("Lock poisoned");
+        let mut pools = self.memory_pools.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         pools.remove(&memory.address);
         Ok(())
     }
@@ -705,7 +708,7 @@ impl HardwareDevice for GPUDevice {
         }
 
         {
-            let mut status = self.status.lock().expect("Lock poisoned");
+            let mut status = self.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             status.online = false;
             status.busy = true;
         }
@@ -727,7 +730,7 @@ impl HardwareDevice for GPUDevice {
 
         self.is_initialized = true;
         {
-            let mut status = self.status.lock().expect("Lock poisoned");
+            let mut status = self.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             status.online = true;
             status.busy = false;
         }
@@ -752,7 +755,7 @@ impl HardwareDevice for GPUDevice {
         }
 
         {
-            let mut status = self.status.lock().expect("Lock poisoned");
+            let mut status = self.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             status.online = false;
             status.busy = false;
         }
@@ -764,7 +767,7 @@ impl HardwareDevice for GPUDevice {
 
     async fn metrics(&self) -> HardwareResult<HardwareMetrics> {
         // Update metrics from GPU
-        let mut metrics = self.metrics.lock().expect("Lock poisoned");
+        let mut metrics = self.metrics.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Update GPU-specific metrics
         metrics.utilization = self.get_gpu_utilization();
@@ -775,17 +778,18 @@ impl HardwareDevice for GPUDevice {
     }
 
     fn is_available(&self) -> bool {
-        self.is_initialized && self.status.lock().expect("Lock poisoned").online
+        self.is_initialized
+            && self.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).online
     }
 
     fn status(&self) -> DeviceStatus {
-        self.status.lock().expect("Lock poisoned").clone()
+        self.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 
     async fn reset(&mut self) -> HardwareResult<()> {
         // Reset device state
         {
-            let mut status = self.status.lock().expect("Lock poisoned");
+            let mut status = self.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             status.busy = false;
             status.error = None;
         }
@@ -800,7 +804,8 @@ impl HardwareDevice for GPUDevice {
 
     async fn allocate_memory(&mut self, size: usize) -> HardwareResult<DeviceMemory> {
         let memory_id = {
-            let mut id_counter = self.next_memory_id.lock().expect("Lock poisoned");
+            let mut id_counter =
+                self.next_memory_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let id = *id_counter;
             *id_counter += 1;
             id
@@ -810,7 +815,8 @@ impl HardwareDevice for GPUDevice {
         let buffer = vec![0u8; size];
 
         {
-            let mut pools = self.memory_pools.lock().expect("Lock poisoned");
+            let mut pools =
+                self.memory_pools.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             pools.insert(memory_id, buffer);
         }
 
@@ -823,7 +829,7 @@ impl HardwareDevice for GPUDevice {
     }
 
     async fn free_memory(&mut self, memory: DeviceMemory) -> HardwareResult<()> {
-        let mut pools = self.memory_pools.lock().expect("Lock poisoned");
+        let mut pools = self.memory_pools.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         pools.remove(&memory.address);
         Ok(())
     }
@@ -1042,7 +1048,6 @@ impl GPUDevice {
         Ok(vec![result])
     }
 
-    #[allow(dead_code)]
     fn execute_gpu_attention(&self, inputs: &[Tensor]) -> HardwareResult<Vec<Tensor>> {
         // CPU fallback for standard scaled dot-product attention
         // inputs: [Q, K, V] each of shape (..., seq_len, d_k)

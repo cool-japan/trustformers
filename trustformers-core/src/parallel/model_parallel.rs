@@ -6,8 +6,10 @@
 
 #![allow(unused_variables)] // Model parallelism implementation
 
-#[allow(unused_imports)] // Used conditionally based on feature gates
-use crate::errors::{runtime_error, tensor_op_error, Result};
+use crate::errors::{tensor_op_error, Result};
+// Only used by the non-nccl fallback path in `create_communicator`
+#[cfg(not(feature = "nccl"))]
+use crate::errors::runtime_error;
 use crate::Tensor;
 use std::sync::Arc;
 

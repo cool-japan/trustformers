@@ -138,7 +138,6 @@ impl CategoricalParameter {
         if self.choices.is_empty() {
             return Err(anyhow::anyhow!("Cannot sample from empty choices list"));
         }
-        #[allow(deprecated)]
         let idx = rng.random_range(0..self.choices.len());
         let choice = self.choices[idx].clone();
         Ok(ParameterValue::String(choice))

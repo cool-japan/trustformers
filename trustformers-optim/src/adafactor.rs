@@ -1,7 +1,7 @@
-use scirs2_core::ndarray::{Array, ArrayD, ArrayViewD, Dimension};  // SciRS2 Integration Policy
+use crate::optimizer::OptimizerState;
+use scirs2_core::ndarray::{Array, ArrayD, ArrayViewD, Dimension}; // SciRS2 Integration Policy
 use std::collections::HashMap;
 use trustformers_core::traits::Optimizer;
-use crate::optimizer::OptimizerState;
 
 /// AdaFactor optimizer implementation
 /// A memory-efficient variant of Adam that factors the second moment estimation matrix
@@ -110,7 +110,11 @@ impl AdaFactor {
         shape.len() >= 2
     }
 
-    fn approximate_sq_grad(&self, exp_avg_sq_row: &ArrayD<f32>, exp_avg_sq_col: &ArrayD<f32>) -> ArrayD<f32> {
+    fn approximate_sq_grad(
+        &self,
+        exp_avg_sq_row: &ArrayD<f32>,
+        exp_avg_sq_col: &ArrayD<f32>,
+    ) -> ArrayD<f32> {
         let shape = exp_avg_sq_row.raw_dim();
         let mut result = ArrayD::zeros(shape);
 
@@ -139,7 +143,11 @@ impl AdaFactor {
 }
 
 impl Optimizer for AdaFactor {
-    fn step(&mut self, params: &mut HashMap<String, ArrayViewD<f32>>, gradients: &HashMap<String, ArrayViewD<f32>>) -> Result<(), Box<dyn std::error::Error>> {
+    fn step(
+        &mut self,
+        params: &mut HashMap<String, ArrayViewD<f32>>,
+        gradients: &HashMap<String, ArrayViewD<f32>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         self.step += 1;
         let lr = self.get_lr();
         let beta1 = self.get_beta1();
@@ -180,8 +188,10 @@ impl Optimizer for AdaFactor {
                     self.state.insert(name.clone(), state);
                 }
 
-                let state = self.state.get_mut(name)
-                    .expect("state must exist after insert");
+                let state = self
+                    .state
+                    .get_mut(name)
+                    .ok_or_else(|| "state must exist after insert".to_string())?;
                 state.step += 1;
 
                 // Compute gradient clipping
@@ -192,13 +202,14 @@ impl Optimizer for AdaFactor {
                 // Update first moment if enabled
                 if let Some(ref mut exp_avg) = state.exp_avg {
                     // exp_avg = beta1 * exp_avg + (1 - beta1) * grad
-                    *exp_avg = exp_avg.mapv(|x| x * beta1) + clipped_grad.mapv(|x| x * (1.0 - beta1));
+                    *exp_avg =
+                        exp_avg.mapv(|x| x * beta1) + clipped_grad.mapv(|x| x * (1.0 - beta1));
                 }
 
                 // Update second moment (factored or full)
                 if let (Some(ref mut exp_avg_sq_row), Some(ref mut exp_avg_sq_col)) =
-                    (&mut state.exp_avg_sq_row, &mut state.exp_avg_sq_col) {
-
+                    (&mut state.exp_avg_sq_row, &mut state.exp_avg_sq_col)
+                {
                     // Factored second moment for 2D tensors
                     if grad_shape.len() == 2 {
                         // Row-wise mean of squared gradients
@@ -212,20 +223,24 @@ impl Optimizer for AdaFactor {
                         });
 
                         // Update row and column second moments
-                        *exp_avg_sq_row = exp_avg_sq_row.mapv(|x| x * beta2) + grad_sq_row.mapv(|x| x * (1.0 - beta2));
-                        *exp_avg_sq_col = exp_avg_sq_col.mapv(|x| x * beta2) + grad_sq_col.mapv(|x| x * (1.0 - beta2));
+                        *exp_avg_sq_row = exp_avg_sq_row.mapv(|x| x * beta2)
+                            + grad_sq_row.mapv(|x| x * (1.0 - beta2));
+                        *exp_avg_sq_col = exp_avg_sq_col.mapv(|x| x * beta2)
+                            + grad_sq_col.mapv(|x| x * (1.0 - beta2));
                     }
                 } else if let Some(ref mut exp_avg_sq) = state.exp_avg_sq {
                     // Full second moment for 1D tensors
-                    *exp_avg_sq = exp_avg_sq.mapv(|x| x * beta2) + clipped_grad.mapv(|x| x * x * (1.0 - beta2));
+                    *exp_avg_sq = exp_avg_sq.mapv(|x| x * beta2)
+                        + clipped_grad.mapv(|x| x * x * (1.0 - beta2));
                 }
 
                 // Compute update
                 let update = if let (Some(ref exp_avg_sq_row), Some(ref exp_avg_sq_col)) =
-                    (&state.exp_avg_sq_row, &state.exp_avg_sq_col) {
-
+                    (&state.exp_avg_sq_row, &state.exp_avg_sq_col)
+                {
                     // Use factored approximation
-                    let exp_avg_sq_approx = self.approximate_sq_grad(exp_avg_sq_row, exp_avg_sq_col);
+                    let exp_avg_sq_approx =
+                        self.approximate_sq_grad(exp_avg_sq_row, exp_avg_sq_col);
                     let denominator = exp_avg_sq_approx.mapv(|x| x.sqrt() + self.epsilon);
 
                     if let Some(ref exp_avg) = state.exp_avg {
@@ -299,8 +314,7 @@ mod tests {
 
     #[test]
     fn test_learning_rate_scaling() {
-        let mut optimizer = AdaFactor::new(1.0)
-            .with_relative_step_size(true);
+        let mut optimizer = AdaFactor::new(1.0).with_relative_step_size(true);
         optimizer.step = 100;
 
         let lr = optimizer.get_lr();
@@ -310,8 +324,7 @@ mod tests {
 
     #[test]
     fn test_beta_decay() {
-        let mut optimizer = AdaFactor::new(0.001)
-            .with_beta1(0.9);
+        let mut optimizer = AdaFactor::new(0.001).with_beta1(0.9);
 
         optimizer.step = 0;
         let beta1_0 = optimizer.get_beta1();

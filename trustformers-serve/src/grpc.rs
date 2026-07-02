@@ -266,7 +266,7 @@ impl InferenceService for InferenceServiceImpl {
         let mut description_parts = vec!["TrustformeRS transformer model".to_string()];
 
         if self._config.gpu_scheduler_config.enabled {
-            let ref gpu_config = self._config.gpu_scheduler_config;
+            let gpu_config = &self._config.gpu_scheduler_config;
             description_parts.push(format!(
                 "GPU scheduling enabled with {} algorithm",
                 match gpu_config.scheduling_algorithm {
@@ -288,7 +288,7 @@ impl InferenceService for InferenceServiceImpl {
         }
 
         // Check if caching is configured with meaningful settings
-        let ref caching = self._config.caching_config;
+        let caching = &self._config.caching_config;
         if caching.result_cache.max_entries > 0 {
             description_parts.push("Result caching enabled".to_string());
         }
@@ -375,7 +375,11 @@ mod tests {
     #[test]
     fn test_get_memory_usage_returns_valid_ratio() {
         let usage = get_memory_usage();
-        assert!(usage >= 0.0, "memory usage should be non-negative, got {}", usage);
+        assert!(
+            usage >= 0.0,
+            "memory usage should be non-negative, got {}",
+            usage
+        );
         assert!(usage <= 1.0, "memory usage should be <= 1.0, got {}", usage);
     }
 
@@ -408,8 +412,8 @@ mod tests {
         // Two calls should both return valid values
         let u1 = get_memory_usage();
         let u2 = get_memory_usage();
-        assert!(u1 >= 0.0 && u1 <= 1.0);
-        assert!(u2 >= 0.0 && u2 <= 1.0);
+        assert!((0.0..=1.0).contains(&u1));
+        assert!((0.0..=1.0).contains(&u2));
     }
 
     #[test]
@@ -441,10 +445,13 @@ mod tests {
     }
 
     #[test]
-    fn test_health_status_serving_is_zero() {
-        // HealthStatus::Serving should correspond to i32 value 0 based on protobuf convention
-        let status = HealthStatus::Serving;
-        assert_eq!(status as i32, 0);
+    fn test_health_status_enum_values_match_proto() {
+        // proto/inference.proto defines the wire values explicitly:
+        //   UNKNOWN = 0; SERVING = 1; NOT_SERVING = 2; SERVICE_UNKNOWN = 3;
+        assert_eq!(HealthStatus::Unknown as i32, 0);
+        assert_eq!(HealthStatus::Serving as i32, 1);
+        assert_eq!(HealthStatus::NotServing as i32, 2);
+        assert_eq!(HealthStatus::ServiceUnknown as i32, 3);
     }
 
     #[test]

@@ -96,8 +96,11 @@ fn create_multi_service_test_config() -> ServerConfig {
         health_check_interval: Duration::from_secs(30),
         cleanup_interval: Duration::from_secs(3600),
         max_versions_per_model: 3,
-        metadata_dir: "/tmp/test_model_registry".to_string(),
-        cache_dir: "/tmp/test_model_cache".to_string(),
+        metadata_dir: std::env::temp_dir()
+            .join("test_model_registry")
+            .to_string_lossy()
+            .into_owned(),
+        cache_dir: std::env::temp_dir().join("test_model_cache").to_string_lossy().into_owned(),
         canary_config: trustformers_serve::model_management::config::CanaryConfig::default(),
         blue_green_config: trustformers_serve::model_management::config::BlueGreenConfig::default(),
         ab_test_config: trustformers_serve::model_management::config::ABTestConfig::default(),

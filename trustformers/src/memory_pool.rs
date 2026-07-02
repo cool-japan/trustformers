@@ -418,20 +418,18 @@ impl MemoryBlock {
             )
         })?;
 
-        let ptr = unsafe { alloc(layout) };
-        if ptr.is_null() {
-            return Err(TrustformersError::Resource {
-                message: "Failed to allocate memory block".to_string(),
-                resource_type: "memory".to_string(),
-                current_usage: Some(format!("requested: {} bytes", size)),
-                suggestion: Some("Check available memory and reduce allocation size".to_string()),
-                recovery_actions: vec![],
-            });
-        }
+        let raw_ptr = unsafe { alloc(layout) };
+        let ptr = NonNull::new(raw_ptr).ok_or_else(|| TrustformersError::Resource {
+            message: "Failed to allocate memory block".to_string(),
+            resource_type: "memory".to_string(),
+            current_usage: Some(format!("requested: {} bytes", size)),
+            suggestion: Some("Check available memory and reduce allocation size".to_string()),
+            recovery_actions: vec![],
+        })?;
 
         let now = Instant::now();
         Ok(Self {
-            ptr: NonNull::new(ptr).expect("allocated pointer should not be null"),
+            ptr,
             size,
             layout,
             allocated_at: now,
@@ -636,8 +634,8 @@ impl MemoryPool {
         match self.config.preallocation_strategy {
             PreallocationStrategy::None => Ok(()),
             _ => {
-                let buckets = self.buckets.read().expect("lock should not be poisoned");
-                let mut blocks = self.blocks.write().expect("lock should not be poisoned");
+                let buckets = self.buckets.read().unwrap_or_else(|p| p.into_inner());
+                let mut blocks = self.blocks.write().unwrap_or_else(|p| p.into_inner());
 
                 // Preallocate a few blocks for each bucket
                 for (bucket_index, bucket) in buckets.iter().enumerate() {
@@ -664,7 +662,7 @@ impl MemoryPool {
         let bucket_index = self.find_bucket_for_size(aligned_size)?;
 
         let block_index = {
-            let mut buckets = self.buckets.write().expect("lock should not be poisoned");
+            let mut buckets = self.buckets.write().unwrap_or_else(|p| p.into_inner());
             let bucket = &mut buckets[bucket_index];
 
             if let Some(index) = bucket.allocate_block() {
@@ -678,19 +676,18 @@ impl MemoryPool {
 
         // Mark block as used
         {
-            let mut blocks = self.blocks.write().expect("lock should not be poisoned");
+            let mut blocks = self.blocks.write().unwrap_or_else(|p| p.into_inner());
             blocks[block_index].mark_used();
             let ptr = blocks[block_index].ptr.as_ptr();
 
             // Update allocation map
-            let mut allocation_map =
-                self.allocation_map.write().expect("lock should not be poisoned");
+            let mut allocation_map = self.allocation_map.write().unwrap_or_else(|p| p.into_inner());
             allocation_map.insert(ptr, block_index);
         }
 
         // Update statistics
         {
-            let mut stats = self.stats.lock().expect("lock should not be poisoned");
+            let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
             stats.total_requests += 1;
             stats.current_usage += aligned_size;
             stats.peak_usage = stats.peak_usage.max(stats.current_usage);
@@ -701,14 +698,14 @@ impl MemoryPool {
                 + allocation_time)
                 / stats.total_requests as f64;
 
-            if block_index < self.blocks.read().expect("lock should not be poisoned").len() {
+            if block_index < self.blocks.read().unwrap_or_else(|p| p.into_inner()).len() {
                 stats.cache_hits += 1;
             } else {
                 stats.cache_misses += 1;
             }
         }
 
-        let blocks = self.blocks.read().expect("lock should not be poisoned");
+        let blocks = self.blocks.read().unwrap_or_else(|p| p.into_inner());
         Ok(blocks[block_index].ptr)
     }
 
@@ -718,8 +715,7 @@ impl MemoryPool {
         let ptr_raw = ptr.as_ptr() as *const u8;
 
         let block_index = {
-            let mut allocation_map =
-                self.allocation_map.write().expect("lock should not be poisoned");
+            let mut allocation_map = self.allocation_map.write().unwrap_or_else(|p| p.into_inner());
             allocation_map.remove(&ptr_raw).ok_or_else(|| {
                 TrustformersError::invalid_input(
                     "Invalid pointer for deallocation",
@@ -731,22 +727,22 @@ impl MemoryPool {
         };
 
         let size = {
-            let mut blocks = self.blocks.write().expect("lock should not be poisoned");
+            let mut blocks = self.blocks.write().unwrap_or_else(|p| p.into_inner());
             blocks[block_index].mark_free();
             blocks[block_index].size
         };
 
         // Return block to appropriate bucket
         {
-            let mut buckets = self.buckets.write().expect("lock should not be poisoned");
-            let blocks = self.blocks.read().expect("lock should not be poisoned");
+            let mut buckets = self.buckets.write().unwrap_or_else(|p| p.into_inner());
+            let blocks = self.blocks.read().unwrap_or_else(|p| p.into_inner());
             let bucket_index = blocks[block_index].bucket_index;
             buckets[bucket_index].deallocate_block(block_index);
         }
 
         // Update statistics
         {
-            let mut stats = self.stats.lock().expect("lock should not be poisoned");
+            let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
             stats.total_freed += size;
             stats.current_usage = stats.current_usage.saturating_sub(size);
 
@@ -768,13 +764,13 @@ impl MemoryPool {
 
     /// Allocate a new block
     fn allocate_new_block(&self, size: usize, bucket_index: usize) -> Result<usize> {
-        let mut blocks = self.blocks.write().expect("lock should not be poisoned");
+        let mut blocks = self.blocks.write().unwrap_or_else(|p| p.into_inner());
         let block = MemoryBlock::new(size, self.config.alignment, bucket_index)?;
         let block_index = blocks.len();
         blocks.push(block);
 
         // Add to bucket's free blocks
-        let mut buckets = self.buckets.write().expect("lock should not be poisoned");
+        let mut buckets = self.buckets.write().unwrap_or_else(|p| p.into_inner());
         buckets[bucket_index].free_blocks.push_back(block_index);
 
         Ok(block_index)
@@ -782,7 +778,7 @@ impl MemoryPool {
 
     /// Find appropriate bucket for given size
     fn find_bucket_for_size(&self, size: usize) -> Result<usize> {
-        let buckets = self.buckets.read().expect("lock should not be poisoned");
+        let buckets = self.buckets.read().unwrap_or_else(|p| p.into_inner());
         for (index, bucket) in buckets.iter().enumerate() {
             if bucket.can_fit(size) {
                 return Ok(index);
@@ -800,7 +796,7 @@ impl MemoryPool {
 
     /// Check if garbage collection should run
     fn should_run_gc(&self) -> bool {
-        let stats = self.stats.lock().expect("lock should not be poisoned");
+        let stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
         stats.fragmentation_ratio > self.config.gc_threshold
     }
 
@@ -813,10 +809,9 @@ impl MemoryPool {
         let mut memory_freed = 0;
 
         {
-            let mut blocks = self.blocks.write().expect("lock should not be poisoned");
-            let mut buckets = self.buckets.write().expect("lock should not be poisoned");
-            let mut allocation_map =
-                self.allocation_map.write().expect("lock should not be poisoned");
+            let mut blocks = self.blocks.write().unwrap_or_else(|p| p.into_inner());
+            let mut buckets = self.buckets.write().unwrap_or_else(|p| p.into_inner());
+            let mut allocation_map = self.allocation_map.write().unwrap_or_else(|p| p.into_inner());
 
             // Find old, unused blocks to free
             let threshold = Instant::now() - std::time::Duration::from_secs(300); // 5 minutes
@@ -872,7 +867,7 @@ impl MemoryPool {
 
         // Update statistics
         {
-            let mut stats = self.stats.lock().expect("lock should not be poisoned");
+            let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
             stats.gc_runs += 1;
             stats.fragmentation_ratio = self.calculate_fragmentation();
         }
@@ -888,7 +883,7 @@ impl MemoryPool {
 
     /// Calculate current fragmentation ratio
     fn calculate_fragmentation(&self) -> f64 {
-        let blocks = self.blocks.read().expect("lock should not be poisoned");
+        let blocks = self.blocks.read().unwrap_or_else(|p| p.into_inner());
         if blocks.is_empty() {
             return 0.0;
         }
@@ -905,11 +900,11 @@ impl MemoryPool {
 
     /// Get current statistics
     pub fn get_stats(&self) -> MemoryPoolStats {
-        let mut stats = self.stats.lock().expect("lock should not be poisoned").clone();
+        let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner()).clone();
         stats.fragmentation_ratio = self.calculate_fragmentation();
 
         // Update blocks per bucket
-        let buckets = self.buckets.read().expect("lock should not be poisoned");
+        let buckets = self.buckets.read().unwrap_or_else(|p| p.into_inner());
         stats.blocks_per_bucket =
             buckets.iter().map(|b| b.free_blocks.len() + b.allocated_blocks.len()).collect();
 
@@ -918,7 +913,7 @@ impl MemoryPool {
 
     /// Reset statistics
     pub fn reset_stats(&self) {
-        let mut stats = self.stats.lock().expect("lock should not be poisoned");
+        let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
         *stats = MemoryPoolStats::default();
     }
 
@@ -930,7 +925,7 @@ impl MemoryPool {
     /// Get memory usage summary
     pub fn memory_usage(&self) -> MemoryUsage {
         let stats = self.get_stats();
-        let blocks = self.blocks.read().expect("lock should not be poisoned");
+        let blocks = self.blocks.read().unwrap_or_else(|p| p.into_inner());
 
         let total_capacity = blocks.iter().map(|b| b.size).sum();
         let allocated_memory = blocks.iter().filter(|b| !b.is_free).map(|b| b.size).sum();
@@ -956,8 +951,8 @@ impl MemoryPool {
         let threshold = Instant::now() - std::time::Duration::from_secs(600); // 10 minutes
 
         {
-            let mut blocks = self.blocks.write().expect("lock should not be poisoned");
-            let mut buckets = self.buckets.write().expect("lock should not be poisoned");
+            let mut blocks = self.blocks.write().unwrap_or_else(|p| p.into_inner());
+            let mut buckets = self.buckets.write().unwrap_or_else(|p| p.into_inner());
 
             blocks.retain(|block| {
                 if block.is_free && block.last_accessed < threshold {
@@ -1037,11 +1032,14 @@ static GLOBAL_POOL_INIT: std::sync::Once = std::sync::Once::new();
 
 /// Initialize global memory pool
 pub fn init_global_pool(config: MemoryPoolConfig) -> Result<()> {
-    GLOBAL_POOL_INIT.call_once(|| unsafe {
-        GLOBAL_POOL =
-            Some(MemoryPool::new(config).expect("Failed to initialize global memory pool"));
+    let mut init_result = Ok(());
+    GLOBAL_POOL_INIT.call_once(|| match MemoryPool::new(config) {
+        Ok(pool) => unsafe {
+            GLOBAL_POOL = Some(pool);
+        },
+        Err(e) => init_result = Err(e),
     });
-    Ok(())
+    init_result
 }
 
 /// Get reference to global memory pool

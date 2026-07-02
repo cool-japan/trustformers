@@ -114,11 +114,9 @@ impl SimdTensorOps {
         let shape = input.shape();
 
         // For simplicity, apply softmax across the last dimension
-        if shape.is_empty() {
-            return Err(JsValue::from_str("Cannot apply softmax to empty tensor"));
-        }
-
-        let last_dim = *shape.last().expect("shape is not empty after emptiness check");
+        let last_dim = *shape
+            .last()
+            .ok_or_else(|| JsValue::from_str("Cannot apply softmax to empty tensor"))?;
         if last_dim == 0 {
             return Err(JsValue::from_str("Last dimension cannot be zero"));
         }
@@ -268,8 +266,8 @@ impl SimdTensorOps {
             result.extend_from_slice(&temp);
         }
 
-        for i in (chunks * 4)..data.len() {
-            result.push(data[i].max(0.0));
+        for &value in data.iter().skip(chunks * 4) {
+            result.push(value.max(0.0));
         }
 
         result

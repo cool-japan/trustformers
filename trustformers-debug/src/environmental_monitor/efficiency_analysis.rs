@@ -1,4 +1,8 @@
 //! Efficiency analysis and optimization for environmental monitoring
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use crate::environmental_monitor::types::*;
 use anyhow::Result;
@@ -7,11 +11,9 @@ use tracing::info;
 
 /// Efficiency analysis and optimization system
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct EfficiencyAnalyzer {
     optimization_opportunities: Vec<EfficiencyOpportunity>,
     energy_waste_detector: EnergyWasteDetector,
-    #[allow(dead_code)]
     scheduling_optimizer: SchedulingOptimizer,
     model_efficiency_analyzer: ModelEfficiencyAnalyzer,
 }
@@ -26,9 +28,7 @@ struct EnergyWasteDetector {
 
 /// Training/inference scheduling optimizer for energy efficiency
 #[derive(Debug)]
-#[allow(dead_code)]
 struct SchedulingOptimizer {
-    #[allow(dead_code)]
     carbon_intensity_forecasts: Vec<CarbonForecast>,
     energy_price_forecasts: Vec<EnergyPriceForecast>,
     optimal_schedules: Vec<OptimalSchedule>,
@@ -36,18 +36,14 @@ struct SchedulingOptimizer {
 
 /// Model-specific efficiency analysis
 #[derive(Debug)]
-#[allow(dead_code)]
 struct ModelEfficiencyAnalyzer {
-    #[allow(dead_code)]
     model_profiles: HashMap<String, ModelEnergyProfile>,
     efficiency_benchmarks: HashMap<String, f64>,
     optimization_recommendations: Vec<ModelOptimizationRecommendation>,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct WastePattern {
-    #[allow(dead_code)]
     pattern_name: String,
     detection_criteria: Vec<String>,
     typical_waste_percentage: f64,
@@ -55,9 +51,7 @@ pub struct WastePattern {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct CarbonForecast {
-    #[allow(dead_code)]
     timestamp: std::time::SystemTime,
     predicted_carbon_intensity: f64,
     renewable_percentage: f64,
@@ -65,9 +59,7 @@ struct CarbonForecast {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct EnergyPriceForecast {
-    #[allow(dead_code)]
     timestamp: std::time::SystemTime,
     predicted_price_per_kwh: f64,
     confidence: f64,

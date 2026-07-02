@@ -165,6 +165,8 @@ pub enum ConcurrentAccessPattern {
     Mixed,
 }
 /// Task result enumeration
+// reason: chaos-testing taxonomy; `Failed` is defined for completeness but not
+// yet constructed by current scenarios.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 enum TaskResult {
@@ -187,6 +189,8 @@ pub struct AsyncMemoryPressureConfig {
     pub pressure_duration: Duration,
 }
 /// Experiment handle for tracking active async experiments
+// reason: handle fields keep the experiment/task alive (RAII) and are retained
+// for future introspection; not all are read yet.
 #[allow(dead_code)]
 struct AsyncExperimentHandle {
     experiment_id: Uuid,
@@ -228,18 +232,18 @@ pub enum PanicType {
     ConditionalPanic,
 }
 /// Async runtime chaos testing framework
+// reason: framework wiring retained for in-development chaos scenarios; several
+// fields are constructed but not yet read.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct AsyncRuntimeChaosFramework {
     /// Base chaos testing framework
-    #[allow(dead_code)]
     base_framework: Arc<ChaosTestingFramework>,
     /// Active async experiments
-    #[allow(dead_code)]
     active_experiments: Arc<RwLock<HashMap<Uuid, AsyncExperimentHandle>>>,
     /// Runtime monitoring
     runtime_monitor: Arc<AsyncRuntimeMonitor>,
     /// Chaos injectors
-    #[allow(dead_code)]
     injectors: Arc<ChaosInjectors>,
 }
 impl AsyncRuntimeChaosFramework {
@@ -958,7 +962,7 @@ impl AsyncRuntimeChaosFramework {
             }));
         }
         for handle in task_handles {
-            handle.await.expect("Task should complete");
+            let _ = handle.await;
         }
         let duration = start_time.elapsed();
         let final_counter = shared_counter.load(Ordering::SeqCst);

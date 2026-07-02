@@ -189,6 +189,82 @@ static FUNCTIONAL_GROUPS: Lazy<HashMap<String, String>> = Lazy::new(|| {
     map
 });
 
+/// Compile a set of compile-time-constant regex patterns.
+///
+/// All callers pass string literals defined in this module, so compilation is a
+/// genuinely infallible invariant. A single documented `expect` per pattern set
+/// guards it (priority-4 last resort: no clean `Result` path from a `static`).
+fn compile_static_patterns(patterns: &[&str], message: &'static str) -> Vec<Regex> {
+    patterns
+        .iter()
+        .map(|p| Regex::new(p))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .expect(message)
+}
+
+/// SMILES tokenization patterns (compiled once from constant expressions).
+static SMILES_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
+    compile_static_patterns(
+        &[
+            // Atomic symbols with properties
+            r"\[[^]]+\]",
+            // Common functional groups (must come before individual atoms)
+            r"COOH|CHO|NH2|CF3|PO4|SO4|NO2",
+            // Two-letter elements (only actual elements, not groups)
+            r"Br|Cl",
+            // Single organic atoms
+            r"[BCNOPSFIbcnops]",
+            // Bonds
+            r"[=#:]",
+            // Ring closures
+            r"%\d+|\d",
+            // Branches
+            r"[()]",
+            // Stereochemistry
+            r"@@?",
+        ],
+        "built-in SMILES regex patterns are compile-time constants and must compile",
+    )
+});
+
+/// InChI tokenization patterns (compiled once from constant expressions).
+static INCHI_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
+    compile_static_patterns(
+        &[
+            // InChI prefix
+            r"InChI=",
+            // Version
+            r"1S?",
+            // Layers
+            r"/[a-z]",
+            // Chemical formula layer
+            r"[A-Z][a-z]?\d*",
+            // Connection layer
+            r"\d+-\d+",
+            // Special characters
+            r"[(),;-]",
+        ],
+        "built-in InChI regex patterns are compile-time constants and must compile",
+    )
+});
+
+/// Chemical formula patterns (compiled once from constant expressions).
+static FORMULA_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
+    compile_static_patterns(
+        &[
+            // Element with count
+            r"[A-Z][a-z]?\d*",
+            // Hydrates
+            r"·\d*H2O",
+            // Ionic charges
+            r"\d*[+-]",
+            // Parentheses with multipliers
+            r"\([^)]+\)\d*",
+        ],
+        "built-in chemical formula regex patterns are compile-time constants and must compile",
+    )
+});
+
 impl Default for ChemicalTokenizer {
     fn default() -> Self {
         Self::new()
@@ -304,56 +380,17 @@ impl ChemicalTokenizer {
 
     /// Create SMILES tokenization patterns
     fn create_smiles_patterns() -> Vec<Regex> {
-        vec![
-            // Atomic symbols with properties
-            Regex::new(r"\[[^]]+\]").expect("valid regex"),
-            // Common functional groups (must come before individual atoms)
-            Regex::new(r"COOH|CHO|NH2|CF3|PO4|SO4|NO2").expect("valid regex"),
-            // Two-letter elements (only actual elements, not groups)
-            Regex::new(r"Br|Cl").expect("valid regex"),
-            // Single organic atoms
-            Regex::new(r"[BCNOPSFIbcnops]").expect("valid regex"),
-            // Bonds
-            Regex::new(r"[=#:]").expect("valid regex"),
-            // Ring closures
-            Regex::new(r"%\d+|\d").expect("valid regex"),
-            // Branches
-            Regex::new(r"[()]").expect("valid regex"),
-            // Stereochemistry
-            Regex::new(r"@@?").expect("valid regex"),
-        ]
+        SMILES_PATTERNS.clone()
     }
 
     /// Create InChI tokenization patterns
     fn create_inchi_patterns() -> Vec<Regex> {
-        vec![
-            // InChI prefix
-            Regex::new(r"InChI=").expect("valid regex"),
-            // Version
-            Regex::new(r"1S?").expect("valid regex"),
-            // Layers
-            Regex::new(r"/[a-z]").expect("valid regex"),
-            // Chemical formula layer
-            Regex::new(r"[A-Z][a-z]?\d*").expect("valid regex"),
-            // Connection layer
-            Regex::new(r"\d+-\d+").expect("valid regex"),
-            // Special characters
-            Regex::new(r"[(),;-]").expect("valid regex"),
-        ]
+        INCHI_PATTERNS.clone()
     }
 
     /// Create chemical formula patterns
     fn create_formula_patterns() -> Vec<Regex> {
-        vec![
-            // Element with count
-            Regex::new(r"[A-Z][a-z]?\d*").expect("valid regex"),
-            // Hydrates
-            Regex::new(r"·\d*H2O").expect("valid regex"),
-            // Ionic charges
-            Regex::new(r"\d*[+-]").expect("valid regex"),
-            // Parentheses with multipliers
-            Regex::new(r"\([^)]+\)\d*").expect("valid regex"),
-        ]
+        FORMULA_PATTERNS.clone()
     }
 
     /// Tokenize chemical text

@@ -15,7 +15,6 @@ pub struct FrameworkIntegrationManager {
     /// Active integrations
     integrations: Arc<Mutex<HashMap<String, Box<dyn ExperimentTracker>>>>,
     /// Configuration
-    #[allow(dead_code)]
     config: IntegrationConfig,
     /// Experiment metadata
     experiment_metadata: Arc<Mutex<ExperimentMetadata>>,
@@ -663,7 +662,6 @@ pub trait ExperimentTracker: Send + Sync {
 
 /// WandB integration implementation
 pub struct WandBTracker {
-    #[allow(dead_code)]
     config: WandBConfig,
     run_id: Option<String>,
     initialized: bool,
@@ -773,7 +771,6 @@ impl ExperimentTracker for WandBTracker {
 
 /// MLflow integration implementation
 pub struct MLflowTracker {
-    #[allow(dead_code)]
     config: MLflowConfig,
     run_id: Option<String>,
     initialized: bool,
@@ -868,7 +865,6 @@ impl ExperimentTracker for MLflowTracker {
 
 /// TensorBoard integration implementation
 pub struct TensorBoardTracker {
-    #[allow(dead_code)]
     config: TensorBoardConfig,
     log_dir: PathBuf,
     initialized: bool,
@@ -1217,7 +1213,8 @@ impl FrameworkIntegrationManager {
     }
 
     pub fn add_integration(&self, integration_type: IntegrationType) -> Result<()> {
-        let mut integrations = self.integrations.lock().expect("lock should not be poisoned");
+        let mut integrations =
+            self.integrations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let tracker: Box<dyn ExperimentTracker> = match integration_type {
             IntegrationType::WandB { config } => Box::new(WandBTracker::new(config)),
@@ -1255,12 +1252,13 @@ impl FrameworkIntegrationManager {
         // Update stored metadata
         {
             let mut stored_metadata =
-                self.experiment_metadata.lock().expect("lock should not be poisoned");
+                self.experiment_metadata.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             *stored_metadata = metadata.clone();
         }
 
         // Start experiment in all integrations
-        let mut integrations = self.integrations.lock().expect("lock should not be poisoned");
+        let mut integrations =
+            self.integrations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         for (_, tracker) in integrations.iter_mut() {
             tracker.start_experiment(&metadata)?;
         }
@@ -1272,12 +1270,13 @@ impl FrameworkIntegrationManager {
         // Update metadata
         {
             let mut metadata =
-                self.experiment_metadata.lock().expect("lock should not be poisoned");
+                self.experiment_metadata.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             metadata.hyperparameters.extend(parameters.clone());
         }
 
         // Log to all integrations
-        let mut integrations = self.integrations.lock().expect("lock should not be poisoned");
+        let mut integrations =
+            self.integrations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         for (_, tracker) in integrations.iter_mut() {
             for (name, value) in &parameters {
                 tracker.log_parameter(name, value.clone())?;
@@ -1291,7 +1290,7 @@ impl FrameworkIntegrationManager {
         // Update metadata
         {
             let mut metadata =
-                self.experiment_metadata.lock().expect("lock should not be poisoned");
+                self.experiment_metadata.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             for (name, value) in &metrics {
                 let metric_value = MetricValue {
                     value: *value,
@@ -1304,7 +1303,8 @@ impl FrameworkIntegrationManager {
         }
 
         // Log to all integrations
-        let mut integrations = self.integrations.lock().expect("lock should not be poisoned");
+        let mut integrations =
+            self.integrations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         for (_, tracker) in integrations.iter_mut() {
             tracker.log_metrics(metrics.clone(), step)?;
         }
@@ -1326,12 +1326,13 @@ impl FrameworkIntegrationManager {
         // Update metadata
         {
             let mut metadata =
-                self.experiment_metadata.lock().expect("lock should not be poisoned");
+                self.experiment_metadata.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             metadata.artifacts.push(artifact.clone());
         }
 
         // Log to all integrations
-        let mut integrations = self.integrations.lock().expect("lock should not be poisoned");
+        let mut integrations =
+            self.integrations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         for (_, tracker) in integrations.iter_mut() {
             tracker.log_artifact(&artifact)?;
         }
@@ -1343,13 +1344,14 @@ impl FrameworkIntegrationManager {
         // Update metadata
         {
             let mut metadata =
-                self.experiment_metadata.lock().expect("lock should not be poisoned");
+                self.experiment_metadata.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             metadata.end_time = Some(SystemTime::now());
             metadata.status = ExperimentStatus::Completed;
         }
 
         // End experiment in all integrations
-        let mut integrations = self.integrations.lock().expect("lock should not be poisoned");
+        let mut integrations =
+            self.integrations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         for (_, tracker) in integrations.iter_mut() {
             tracker.end_experiment()?;
         }
@@ -1358,7 +1360,8 @@ impl FrameworkIntegrationManager {
     }
 
     pub fn sync_all(&self) -> Result<()> {
-        let mut integrations = self.integrations.lock().expect("lock should not be poisoned");
+        let mut integrations =
+            self.integrations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         for (_, tracker) in integrations.iter_mut() {
             tracker.sync()?;
         }
@@ -1401,7 +1404,7 @@ mod tests {
             export_config: ExportConfig {
                 formats: vec![ExportFormat::JSON],
                 frequency: ExportFrequency::EndOfTraining,
-                output_dir: PathBuf::from("/tmp/exports"),
+                output_dir: std::env::temp_dir().join("exports"),
             },
         };
 
@@ -1483,7 +1486,7 @@ mod tests {
     #[test]
     fn test_tensorboard_tracker() {
         let config = TensorBoardConfig {
-            log_dir: PathBuf::from("/tmp/tensorboard"),
+            log_dir: std::env::temp_dir().join("tensorboard"),
             experiment_name: "test-experiment".to_string(),
             update_freq: UpdateFrequency::Steps(100),
             histograms: HistogramConfig {

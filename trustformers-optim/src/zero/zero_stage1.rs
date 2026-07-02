@@ -4,6 +4,10 @@
 //! while keeping parameters and gradients replicated. This provides memory savings
 //! for the optimizer states without affecting the forward/backward pass.
 
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -149,7 +153,6 @@ impl<T: Optimizer> ZeROStage1<T> {
     }
 
     /// Broadcast parameter from owner rank to all other ranks
-    #[allow(dead_code)]
     fn broadcast_parameter(&self, parameter: &mut Tensor, owner_rank: usize) -> Result<()> {
         self.mp_context
             .broadcast(parameter, owner_rank)

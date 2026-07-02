@@ -24,11 +24,14 @@
 //! ```rust,no_run
 //! use trustformers_optim::{
 //!     EnhancedDistributedTrainer,
-//!     AutoScaler, SmartCheckpointManager, PerformanceMLOptimizer
+//!     AutoScaler, AutoScalerConfig, ScalingStrategy,
+//!     PerformanceMLOptimizer, MLOptimizerConfig,
 //! };
+//! # use trustformers_optim::{AveragedAdam, DistributedConfig};
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create auto-scaling configuration
-//! let auto_scaler = AutoScaler::new()
+//! let auto_scaler = AutoScaler::new(AutoScalerConfig::default())
 //!     .with_min_nodes(2)
 //!     .with_max_nodes(64)
 //!     .with_scaling_strategy(ScalingStrategy::Performance)
@@ -36,16 +39,23 @@
 //!     .with_scale_down_threshold(0.6);
 //!
 //! // Enable ML-based performance optimization
-//! let ml_optimizer = PerformanceMLOptimizer::new()
+//! let ml_optimizer = PerformanceMLOptimizer::new(MLOptimizerConfig::default())
 //!     .with_prediction_horizon(100)
 //!     .with_optimization_frequency(50);
 //!
-//! // Advanced distributed trainer with all features
-//! let mut trainer = EnhancedDistributedTrainer::new(config, optimizer)?
-//!     .with_auto_scaling(auto_scaler)
-//!     .with_ml_optimization(ml_optimizer)
-//!     .with_smart_checkpointing(true);
+//! // Advanced distributed trainer; auto-scaling and ML optimization are applied
+//! // to it independently via `update_and_scale` / `optimize_performance`
+//! # let config = DistributedConfig::new();
+//! # let optimizer = AveragedAdam::for_distributed_training();
+//! let trainer = EnhancedDistributedTrainer::new(config, optimizer)?;
+//! # let _ = (auto_scaler, ml_optimizer, trainer);
+//! # Ok(())
+//! # }
 //! ```
+
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
 
 use crate::enhanced_distributed_training::{DistributedConfig, PerformanceMetrics};
 use serde::{Deserialize, Serialize};
@@ -53,7 +63,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
-use trustformers_core::errors::Result;
+use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::tensor::Tensor;
 
 /// Auto-scaling configuration for dynamic node management
@@ -578,7 +588,6 @@ impl SeasonalAnalyzer {
 /// Cost optimizer for cost-performance trade-offs
 pub struct CostOptimizer {
     cost_model: CostModel,
-    #[allow(dead_code)]
     performance_model: PerformanceModel,
 }
 
@@ -783,12 +792,13 @@ impl SmartCheckpointManager {
 
         // Create checkpoint file path
         let filename = if is_differential {
-            format!(
-                "checkpoint_step_{}_diff_{}.ckpt",
-                step,
-                base_checkpoint
-                    .expect("Base checkpoint exists when differential checkpointing is enabled")
-            )
+            let base = base_checkpoint.ok_or_else(|| {
+                TrustformersError::invalid_state(
+                    "Base checkpoint must exist when differential checkpointing is enabled"
+                        .to_string(),
+                )
+            })?;
+            format!("checkpoint_step_{}_diff_{}.ckpt", step, base)
         } else {
             format!("checkpoint_step_{}_full.ckpt", step)
         };
@@ -1033,7 +1043,9 @@ impl PerformanceMLOptimizer {
 
         // Update ML model with current metrics
         {
-            let mut model = self.performance_model.lock().expect("lock should not be poisoned");
+            let mut model = self.performance_model.lock().map_err(|_| {
+                TrustformersError::lock_error("performance model mutex poisoned".to_string())
+            })?;
             model.update_training_data(current_metrics)?;
         }
 
@@ -1072,7 +1084,9 @@ impl PerformanceMLOptimizer {
             metrics.memory_usage.iter().sum::<f32>() / metrics.memory_usage.len() as f32;
 
         // Predict optimal batch size based on utilization and memory
-        let model = self.performance_model.lock().expect("lock should not be poisoned");
+        let model = self.performance_model.lock().map_err(|_| {
+            TrustformersError::lock_error("performance model mutex poisoned".to_string())
+        })?;
         let predicted_optimal_batch =
             model.predict_optimal_batch_size(avg_utilization, avg_memory)?;
 

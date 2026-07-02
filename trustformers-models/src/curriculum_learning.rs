@@ -17,9 +17,29 @@
 //!
 //! ```rust,no_run
 //! use trustformers_models::curriculum_learning::{
-//!     CurriculumLearningTrainer, CurriculumConfig, CurriculumStrategy
+//!     CurriculumLearningTrainer, CurriculumConfig, CurriculumStrategy,
+//!     DifficultyMeasure, PacingFunction, CurriculumExample,
 //! };
+//! use trustformers_core::{traits::{Config, Model}, tensor::Tensor, Result};
+//! use serde::{Deserialize, Serialize};
 //!
+//! # #[derive(Debug, Clone, Serialize, Deserialize)]
+//! # struct DocConfig;
+//! # impl Config for DocConfig {
+//! #     fn architecture(&self) -> &'static str { "doc" }
+//! # }
+//! # struct DocModel;
+//! # impl Model for DocModel {
+//! #     type Config = DocConfig;
+//! #     type Input = Tensor;
+//! #     type Output = Tensor;
+//! #     fn forward(&self, input: Tensor) -> Result<Tensor> { Ok(input) }
+//! #     fn load_pretrained(&mut self, _r: &mut dyn std::io::Read) -> Result<()> { Ok(()) }
+//! #     fn get_config(&self) -> &DocConfig { &DocConfig }
+//! #     fn num_parameters(&self) -> usize { 0 }
+//! # }
+//!
+//! # fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 //! let config = CurriculumConfig {
 //!     strategy: CurriculumStrategy::SelfPaced {
 //!         lambda: 0.5,
@@ -30,8 +50,13 @@
 //!     ..Default::default()
 //! };
 //!
+//! # let model = DocModel;
 //! let mut trainer = CurriculumLearningTrainer::new(model, config)?;
-//! trainer.train_with_curriculum(training_data)?;
+//! # let training_data = vec![CurriculumExample::new(Tensor::zeros(&[1, 4])?, Tensor::zeros(&[1, 4])?, 0.1)];
+//! trainer.add_examples(training_data);
+//! trainer.train_step()?;
+//! # Ok(())
+//! # }
 //! ```
 
 use serde::{Deserialize, Serialize};

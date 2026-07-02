@@ -8,10 +8,8 @@ use crate::losses::Loss;
 use crate::metrics::{Metric, MetricCollection};
 
 /// Simplified trainer interface for easy model training
-#[allow(dead_code)]
 pub struct SimpleTrainer<M, D, L> {
     model: Arc<RwLock<M>>,
-    #[allow(dead_code)]
     train_dataset: D,
     eval_dataset: Option<D>,
     loss_fn: L,
@@ -493,7 +491,7 @@ where
             training_time: self
                 .state
                 .start_time
-                .expect("start_time is set at beginning of train method")
+                .context("start_time was not set before training started")?
                 .elapsed(),
             history: training_history,
         })

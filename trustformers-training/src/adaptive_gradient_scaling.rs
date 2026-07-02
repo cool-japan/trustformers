@@ -211,10 +211,9 @@ impl AdaptiveGradientScaler {
                 }
 
                 {
-                    let layer_stat = self
-                        .layer_stats
-                        .get_mut(layer_name)
-                        .expect("layer stats should exist after insertion at line 206-211");
+                    let layer_stat = self.layer_stats.get_mut(layer_name).ok_or_else(|| {
+                        anyhow::anyhow!("layer stats missing for '{layer_name}' after insertion")
+                    })?;
                     layer_stat.update(layer_norm, self.config.momentum);
 
                     // Check for outliers
@@ -229,19 +228,17 @@ impl AdaptiveGradientScaler {
 
                 // Compute adaptive scale factor (need to get immutable reference)
                 let scale = {
-                    let layer_stat = self
-                        .layer_stats
-                        .get(layer_name)
-                        .expect("layer stats should exist after insertion at line 206-211");
+                    let layer_stat = self.layer_stats.get(layer_name).ok_or_else(|| {
+                        anyhow::anyhow!("layer stats missing for '{layer_name}' after insertion")
+                    })?;
                     self.compute_adaptive_scale(layer_stat)?
                 };
 
                 // Update scale factor
                 {
-                    let layer_stat = self
-                        .layer_stats
-                        .get_mut(layer_name)
-                        .expect("layer stats should exist after insertion at line 206-211");
+                    let layer_stat = self.layer_stats.get_mut(layer_name).ok_or_else(|| {
+                        anyhow::anyhow!("layer stats missing for '{layer_name}' after insertion")
+                    })?;
                     layer_stat.scale_factor = scale;
                 }
                 layer_scales.insert(layer_name.clone(), scale);
@@ -478,9 +475,7 @@ impl AdaptiveGradientScaler {
         };
 
         // Weighted combination of stability factors
-        (cv_score * 0.4 + trend_stability * 0.3 + scale_stability * 0.3)
-            .max(0.0)
-            .min(1.0)
+        (cv_score * 0.4 + trend_stability * 0.3 + scale_stability * 0.3).clamp(0.0, 1.0)
     }
 
     fn compute_average_scale(&self) -> f32 {

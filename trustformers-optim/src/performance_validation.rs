@@ -25,6 +25,7 @@
 //! ```rust,no_run
 //! use trustformers_optim::performance_validation::*;
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create comprehensive validation suite
 //! let mut validator = PerformanceValidator::new()
 //!     .with_statistical_significance(true)
@@ -38,7 +39,13 @@
 //! // Generate detailed report
 //! let report = validator.generate_validation_report(&results)?;
 //! println!("{}", report);
+//! # Ok(())
+//! # }
 //! ```
+
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
 
 use crate::adam::{Adam, AdamW};
 use crate::averaged_adam::AveragedAdam;
@@ -50,7 +57,7 @@ use crate::sgd::SGD;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use trustformers_core::errors::Result;
+use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::Optimizer;
 
@@ -99,9 +106,7 @@ pub struct PerformanceValidator {
     baseline_results: Option<HashMap<String, BenchmarkResult>>,
     validation_history: Vec<ValidationSession>,
     statistical_analyzer: StatisticalAnalyzer,
-    #[allow(dead_code)]
     memory_analyzer: MemoryAnalyzer,
-    #[allow(dead_code)]
     convergence_analyzer: ConvergenceAnalyzer,
     regression_detector: RegressionDetector,
 }
@@ -1044,10 +1049,11 @@ impl PerformanceValidator {
     ) -> Result<RegressionAnalysisResults> {
         println!("   🔍 Detecting performance regressions...");
 
-        let baseline = self
-            .baseline_results
-            .as_ref()
-            .expect("baseline_results must be set before detecting regressions");
+        let baseline = self.baseline_results.as_ref().ok_or_else(|| {
+            TrustformersError::invalid_state(
+                "baseline_results must be set before detecting regressions".to_string(),
+            )
+        })?;
         let mut results = RegressionAnalysisResults::new();
 
         for scenario_result in &current_results.scenario_results {

@@ -631,17 +631,26 @@ pub fn init_blas(config: BlasConfig) -> Result<()> {
 
 /// Optimized matrix multiplication using global BLAS optimizer
 pub fn optimized_gemm(a: &Tensor, b: &Tensor) -> Result<Tensor> {
-    blas_optimizer().lock().expect("Lock poisoned").gemm(a, b, 1.0, 0.0, None)
+    blas_optimizer()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .gemm(a, b, 1.0, 0.0, None)
 }
 
 /// Optimized matrix-vector multiplication using global BLAS optimizer
 pub fn optimized_gemv(a: &Tensor, x: &Tensor) -> Result<Tensor> {
-    blas_optimizer().lock().expect("Lock poisoned").gemv(a, x, 1.0, 0.0, None)
+    blas_optimizer()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .gemv(a, x, 1.0, 0.0, None)
 }
 
 /// Optimized vector dot product using global BLAS optimizer
 pub fn optimized_dot(x: &Tensor, y: &Tensor) -> Result<f32> {
-    blas_optimizer().lock().expect("Lock poisoned").dot(x, y)
+    blas_optimizer()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .dot(x, y)
 }
 
 #[cfg(test)]

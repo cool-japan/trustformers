@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-
 use js_sys::{Array, Function, Object, Promise, Uint8Array};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -308,7 +307,7 @@ impl FrameData {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)] // reason: distinct configuration parameters; a struct would not simplify the wasm-bindgen API
     pub fn new_with_analysis(
         width: u32,
         height: u32,
@@ -678,7 +677,7 @@ impl CameraManager {
     }
 
     fn start_frame_processing_loop(&self) {
-        let window_obj = window().expect("window should be available in browser context");
+        let Some(window_obj) = window() else { return };
 
         // Clone necessary data for the closure
         let video_element = self.video_element.clone();
@@ -918,13 +917,11 @@ impl CameraManager {
     }
 
     pub fn set_frame_callback(&mut self, callback: &Function) {
-        js_sys::Reflect::set(&self.frame_callbacks, &"frame".into(), callback)
-            .expect("Failed to set frame callback on frame_callbacks object");
+        let _ = js_sys::Reflect::set(&self.frame_callbacks, &"frame".into(), callback);
     }
 
     pub fn set_error_callback(&mut self, callback: &Function) {
-        js_sys::Reflect::set(&self.frame_callbacks, &"error".into(), callback)
-            .expect("Failed to set error callback on frame_callbacks object");
+        let _ = js_sys::Reflect::set(&self.frame_callbacks, &"error".into(), callback);
     }
 
     fn call_frame_callbacks(&self, frame_data: &FrameData) {

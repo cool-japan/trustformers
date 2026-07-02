@@ -18,10 +18,6 @@
 //! - Softmax with causal masking
 //! - Persistent buffer caching for zero-copy operations
 
-// Advanced CUDA kernels - temporarily disabled, needs cudarc 0.17.7 API migration
-// #[cfg(feature = "cuda")]
-// pub mod advanced_kernels;
-
 // GPU backend modules
 #[cfg(feature = "cuda")]
 pub mod cuda;
@@ -43,7 +39,7 @@ pub use metal::dispatch_matmul;
 pub use metal::BufferId;
 
 #[cfg(feature = "cuda")]
-pub use cuda::{dispatch_cuda_matmul, BufferId as CudaBufferId};
+pub use cuda::{dispatch_oxicuda_matmul, BufferId as CudaBufferId};
 
 #[cfg(feature = "wgpu_backend")]
 pub use webgpu::{dispatch_webgpu_matmul, BufferId as WebGpuBufferId};

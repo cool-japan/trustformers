@@ -84,7 +84,7 @@ impl DefaultAlertProcessor {
     }
 
     pub fn get_stats(&self) -> ProcessorStats {
-        self.stats.lock().expect("Stats lock poisoned").clone()
+        self.stats.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 }
 
@@ -560,7 +560,7 @@ impl LogNotificationChannel {
     }
 
     pub fn get_stats(&self) -> ChannelStats {
-        self.stats.lock().expect("Stats lock poisoned").clone()
+        self.stats.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 }
 

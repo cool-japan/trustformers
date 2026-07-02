@@ -468,10 +468,8 @@ impl PipelineParallelismManager {
                 let stage_guard = stage.read().await;
                 stage_guard.concurrency_limit.clone()
             };
-            let _permit = semaphore
-                .acquire()
-                .await
-                .expect("pipeline stage semaphore should not be closed");
+            // Permit held for RAII; on a closed semaphore (shutdown) proceed unlimited.
+            let _permit = semaphore.acquire().await.ok();
 
             // Record stage start
             let stage_id = {

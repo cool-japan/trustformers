@@ -24,41 +24,61 @@
 //! ### Text Classification
 //! ```rust,no_run
 //! use trustformers_models::bert::{BertForSequenceClassification, BertConfig};
+//! use trustformers_core::traits::{Model, TokenizedInput};
 //!
-//! let config = BertConfig::bert_base_uncased();
-//! let mut model = BertForSequenceClassification::new(config, num_labels)?;
-//! model.load_from_hub("bert-base-uncased")?;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let config = BertConfig::default();
+//! # let num_labels = 2;
+//! let model = BertForSequenceClassification::new(config, num_labels)?;
 //!
 //! // Perform classification
-//! let outputs = model.forward(input_ids, attention_mask)?;
+//! # let input_ids: Vec<u32> = vec![101, 2054, 2003, 102];
+//! # let attention_mask: Vec<u8> = vec![1, 1, 1, 1];
+//! let outputs = model.forward(TokenizedInput::new(input_ids, attention_mask))?;
 //! let predictions = outputs.logits.argmax(-1)?;
+//! # let _ = predictions;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### Masked Language Modeling
 //! ```rust,no_run
 //! use trustformers_models::bert::{BertForMaskedLM, BertConfig};
+//! use trustformers_core::traits::{Model, TokenizedInput};
 //!
-//! let config = BertConfig::bert_base_uncased();
-//! let mut model = BertForMaskedLM::new(config)?;
-//! model.load_from_hub("bert-base-uncased")?;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let config = BertConfig::default();
+//! let model = BertForMaskedLM::new(config)?;
 //!
 //! // Predict masked tokens
-//! let outputs = model.forward(masked_input_ids, attention_mask)?;
+//! # let masked_input_ids: Vec<u32> = vec![101, 103, 2003, 102];
+//! # let attention_mask: Vec<u8> = vec![1, 1, 1, 1];
+//! let outputs = model.forward(TokenizedInput::new(masked_input_ids, attention_mask))?;
 //! let predictions = outputs.logits.argmax(-1)?;
+//! # let _ = predictions;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### Feature Extraction
 //! ```rust,no_run
 //! use trustformers_models::bert::{BertModel, BertConfig};
+//! use trustformers_core::traits::{Model, TokenizedInput};
 //!
-//! let config = BertConfig::bert_base_uncased();
-//! let mut model = BertModel::new(config)?;
-//! model.load_from_hub("bert-base-uncased")?;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let config = BertConfig::default();
+//! let model = BertModel::new(config)?;
 //!
 //! // Extract features
-//! let outputs = model.forward(input_ids, attention_mask)?;
+//! # let input_ids: Vec<u32> = vec![101, 2054, 2003, 102];
+//! # let attention_mask: Vec<u8> = vec![1, 1, 1, 1];
+//! let outputs = model.forward(TokenizedInput::new(input_ids, attention_mask))?;
 //! let pooled_output = outputs.pooler_output; // [CLS] token representation
 //! let sequence_output = outputs.last_hidden_state; // All token representations
+//! # let _ = pooled_output;
+//! # let _ = sequence_output;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Pre-training Tasks

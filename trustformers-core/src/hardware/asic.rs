@@ -448,7 +448,8 @@ impl AsicDevice {
     async fn update_performance_metrics(&self) -> HardwareResult<()> {
         if let Some(driver) = &self.driver {
             let metrics = driver.get_metrics().await?;
-            let mut monitor = self.performance_monitor.lock().expect("Lock poisoned");
+            let mut monitor =
+                self.performance_monitor.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
             monitor
                 .thermal_history
@@ -473,7 +474,8 @@ impl AsicDevice {
 
     /// Get performance statistics
     pub fn get_performance_statistics(&self) -> HashMap<String, f64> {
-        let monitor = self.performance_monitor.lock().expect("Lock poisoned");
+        let monitor =
+            self.performance_monitor.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut stats = HashMap::new();
 
         // Calculate average utilization
@@ -530,7 +532,7 @@ impl HardwareDevice for AsicDevice {
         }
 
         // Update device status
-        let mut status = self.status.lock().expect("Lock poisoned");
+        let mut status = self.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         status.online = true;
         status.busy = false;
         status.error = None;
@@ -541,7 +543,8 @@ impl HardwareDevice for AsicDevice {
     async fn shutdown(&mut self) -> HardwareResult<()> {
         // Cancel all active operations
         let operations = {
-            let mut ops = self.active_operations.lock().expect("Lock poisoned");
+            let mut ops =
+                self.active_operations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let handles: Vec<_> = ops.keys().cloned().collect();
             ops.clear();
             handles
@@ -549,7 +552,7 @@ impl HardwareDevice for AsicDevice {
 
         // Update device status
         {
-            let mut status = self.status.lock().expect("Lock poisoned");
+            let mut status = self.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             status.online = false;
             status.busy = false;
         }
@@ -563,12 +566,12 @@ impl HardwareDevice for AsicDevice {
     }
 
     fn is_available(&self) -> bool {
-        let status = self.status.lock().expect("Lock poisoned");
+        let status = self.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         status.online && !status.busy
     }
 
     fn status(&self) -> DeviceStatus {
-        self.status.lock().expect("Lock poisoned").clone()
+        self.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 
     async fn metrics(&self) -> HardwareResult<HardwareMetrics> {
@@ -595,13 +598,20 @@ impl HardwareDevice for AsicDevice {
         }
 
         // Clear memory pools
-        self.memory_pools.lock().expect("Lock poisoned").clear();
+        self.memory_pools
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
 
         // Clear active operations
-        self.active_operations.lock().expect("Lock poisoned").clear();
+        self.active_operations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
 
         // Reset performance monitor
-        let mut monitor = self.performance_monitor.lock().expect("Lock poisoned");
+        let mut monitor =
+            self.performance_monitor.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         monitor.operation_counters.clear();
         monitor.thermal_history.clear();
         monitor.power_history.clear();
@@ -622,7 +632,7 @@ impl HardwareDevice for AsicDevice {
         };
 
         // Add to memory pool
-        let mut pools = self.memory_pools.lock().expect("Lock poisoned");
+        let mut pools = self.memory_pools.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         pools.entry("default".to_string()).or_default().push(memory.clone());
 
         Ok(memory)
@@ -630,7 +640,7 @@ impl HardwareDevice for AsicDevice {
 
     async fn free_memory(&mut self, memory: DeviceMemory) -> HardwareResult<()> {
         // Remove from memory pool
-        let mut pools = self.memory_pools.lock().expect("Lock poisoned");
+        let mut pools = self.memory_pools.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(pool) = pools.get_mut("default") {
             pool.retain(|m| m.address != memory.address);
         }
@@ -641,7 +651,8 @@ impl HardwareDevice for AsicDevice {
     async fn synchronize(&self) -> HardwareResult<()> {
         // Wait for all operations to complete
         let has_operations = {
-            let operations = self.active_operations.lock().expect("Lock poisoned");
+            let operations =
+                self.active_operations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             !operations.is_empty()
         };
 

@@ -1,4 +1,8 @@
 //! I/O operation monitoring and bandwidth tracking
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -77,10 +81,8 @@ pub struct IoMonitor {
     pub(crate) io_queue_depth: usize,
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct IoOperation {
-    #[allow(dead_code)]
     pub(crate) operation_id: Uuid,
     pub(crate) start_time: Instant,
     pub(crate) operation_type: IoOperationType,

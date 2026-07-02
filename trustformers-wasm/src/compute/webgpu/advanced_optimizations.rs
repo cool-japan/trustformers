@@ -4,7 +4,6 @@
 //! including memory coalescing, workgroup optimization, and kernel fusion.
 
 #![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::vec::Vec;
 use wasm_bindgen::prelude::*;

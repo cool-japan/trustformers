@@ -44,7 +44,11 @@ once_cell.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 sha2.workspace = true
-reqwest.workspace = true
+hex.workspace = true
+# COOLJAPAN Pure-Rust Policy (Campaign B): reqwest pulls rustls -> aws-lc-rs ->
+# aws-lc-sys (C/C++ via cmake/cc). Keep it OUT of the default tree by making it
+# optional; only the remote leaderboard storage backend needs it.
+reqwest = { workspace = true, optional = true }
 num_cpus.workspace = true
 approx.workspace = true
 tempfile.workspace = true
@@ -55,7 +59,7 @@ tokenizers.workspace = true  # Re-exported for trustformers-tokenizers per SciRS
 # Note: ndarray support provided by scirs2-core
 # Note: linalg feature is optional to support Python bindings (ndarray-linalg requires ndarray 0.17)
 # Note: GPU backends (metal, cuda, opencl, wgpu) should be enabled via scirs2-core for policy compliance
-scirs2-core = { workspace = true, features = ["array", "random", "parallel", "simd", "gpu"] }
+scirs2-core = { workspace = true, features = ["array", "random", "parallel", "simd"] }
 
 # Optional backends
 tch = { workspace = true, optional = true }
@@ -72,7 +76,7 @@ bytemuck = { workspace = true, optional = true }
 # Metal-specific dependencies moved to target-specific section for macOS only
 
 # WebGPU backend (cross-platform)
-wgpu = { version = "29.0", optional = true }
+wgpu = { workspace = true, optional = true }
 pollster = { version = "0.4", optional = true }
 
 # OpenCL backend (universal GPU support)
@@ -80,6 +84,12 @@ opencl3 = { version = "0.12", optional = true }
 
 # Dynamic loading for optional GPU backends (ROCm)
 libloading = { workspace = true, optional = true }
+
+# Campaign C0 spike: oxicuda Pure-Rust CUDA replacement (compile-validation; runtime-loads libcuda)
+oxicuda-blas = { version = "0.4.0", optional = true }
+oxicuda-dnn = { version = "0.4.0", optional = true }
+oxicuda-memory = { version = "0.4.0", optional = true }
+oxicuda-driver = { version = "0.4.0", optional = true }
 
 [dev-dependencies]
 rstest.workspace = true
@@ -92,20 +102,23 @@ criterion.workspace = true
 [features]
 default = ["linalg"]
 linalg = ["scirs2-core/linalg"]  # Linear algebra operations
+# Remote (HTTP) leaderboard storage backend. Opt-in because it pulls reqwest ->
+# rustls -> aws-lc-sys (C/C++). The file/in-memory backends work without it.
+remote-leaderboard = ["dep:reqwest"]
 # torch feature disabled - requires matching libtorch version at runtime
 # Enable only when you have a properly configured libtorch environment
 torch = ["dep:tch"]
 candle = ["dep:candle-core"]
 parallel = []
 mpi = ["dep:mpi"]
-cuda = ["dep:cudarc"]
+cuda = ["dep:oxicuda-blas", "dep:oxicuda-dnn", "dep:oxicuda-memory", "dep:oxicuda-driver"]
 rocm = ["dep:libloading"]
 intel = []
 llvm = []
 cranelift = []
 vulkan = ["dep:vulkano", "dep:vulkano-shaders", "dep:bytemuck"]
 # Note: OxiBLAS is now used for all BLAS/LAPACK operations (pure Rust implementation)
-metal = ["dep:metal", "dep:mpsgraph", "dep:objc2", "dep:objc2-metal"]
+metal = ["dep:metal", "dep:mpsgraph", "dep:objc2", "dep:objc2-metal", "dep:oxicuda-metal", "dep:oxicuda-backend"]
 wgpu_backend = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 opencl = ["dep:opencl3"]
 xla = []
@@ -113,6 +126,9 @@ oneapi = []
 riscv = []
 nccl = []
 backtrace = []
+# --- Campaign C1: oxicuda Pure-Rust CUDA backend ---
+# Deprecated alias: oxicuda is now the `cuda` backend
+cuda-oxicuda = ["cuda"]
 # Full feature set for testing (excludes torch due to libtorch version requirements)
 full = ["linalg", "candle", "parallel", "vulkan", "metal", "wgpu_backend", "opencl", "backtrace"]
 
@@ -129,13 +145,9 @@ name = "naming_checker"
 path = "src/bin/naming_checker.rs"
 
 # Platform-specific dependencies
-# CUDA is only supported on Linux and Windows (not macOS)
-[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
-cudarc = { version = "0.19", optional = true, features = ["nvrtc", "cuda-12000"] }
-
 # Metal is only supported on macOS
 [target.'cfg(target_os = "macos")'.dependencies]
-scirs2-core = { workspace = true, features = ["array", "random", "parallel", "simd", "gpu", "metal", "mpsgraph"] }
+scirs2-core = { workspace = true, features = ["array", "random", "parallel", "simd"] }
 metal = { version = "0.33", optional = true }
 mpsgraph = { version = "0.2", optional = true }
 objc2 = { version = "0.6", optional = true }
@@ -144,3 +156,6 @@ objc2-metal = { version = "0.3", optional = true }
 oxiblas = { workspace = true }
 oxiblas-blas = { workspace = true }
 oxiblas-matrix = { workspace = true }
+# Campaign C0 spike: oxicuda Metal backend + compute-backend trait (macOS only)
+oxicuda-metal = { version = "0.4.0", optional = true }
+oxicuda-backend = { version = "0.4.0", optional = true }

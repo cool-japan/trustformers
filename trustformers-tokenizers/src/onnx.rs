@@ -454,6 +454,8 @@ impl<T: Tokenizer> OnnxTokenizerExporter<T> {
 /// ONNX Runtime integration for inference
 pub struct OnnxTokenizerRuntime {
     model_path: String,
+    // reason: stored from the constructor; reserved for forwarding session tuning
+    // to the ONNX Runtime once full session integration is wired up.
     #[allow(dead_code)]
     session_options: OnnxSessionOptions,
 }

@@ -123,7 +123,7 @@ pub struct PlaygroundExample {
 #[wasm_bindgen]
 impl PlaygroundExample {
     #[wasm_bindgen(constructor)]
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)] // reason: distinct configuration parameters; a struct would not simplify the wasm-bindgen API
     pub fn new(
         id: String,
         title: String,
@@ -1402,8 +1402,9 @@ console.log('TrustformeRS initialized successfully!');
                     let encoded_code = js_sys::encode_uri_component(&code);
 
                     // Get location.href using Reflect
-                    let window =
-                        web_sys::window().expect("window should be available in browser context");
+                    let Some(window) = web_sys::window() else {
+                        return;
+                    };
                     let location = js_sys::Reflect::get(&window, &JsValue::from_str("location"))
                         .ok()
                         .and_then(|loc| js_sys::Reflect::get(&loc, &JsValue::from_str("href")).ok())

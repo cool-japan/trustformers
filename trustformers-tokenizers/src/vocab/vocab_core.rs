@@ -322,28 +322,28 @@ impl LazyVocab {
     /// Get token ID, loading vocabulary if necessary
     pub fn get_id(&self, token: &str) -> Result<Option<u32>> {
         let vocab = self.get_vocab()?;
-        let vocab_guard = vocab.read().expect("lock should not be poisoned");
+        let vocab_guard = vocab.read().map_err(|_| anyhow::anyhow!("vocab lock poisoned"))?;
         Ok(vocab_guard.get_id(token))
     }
 
     /// Get token by ID, loading vocabulary if necessary
     pub fn get_token(&self, id: u32) -> Result<Option<String>> {
         let vocab = self.get_vocab()?;
-        let vocab_guard = vocab.read().expect("lock should not be poisoned");
+        let vocab_guard = vocab.read().map_err(|_| anyhow::anyhow!("vocab lock poisoned"))?;
         Ok(vocab_guard.get_token(id))
     }
 
     /// Check if token exists, loading vocabulary if necessary
     pub fn contains(&self, token: &str) -> Result<bool> {
         let vocab = self.get_vocab()?;
-        let vocab_guard = vocab.read().expect("lock should not be poisoned");
+        let vocab_guard = vocab.read().map_err(|_| anyhow::anyhow!("vocab lock poisoned"))?;
         Ok(vocab_guard.contains(token))
     }
 
     /// Get vocabulary size, loading vocabulary if necessary
     pub fn size(&self) -> Result<usize> {
         let vocab = self.get_vocab()?;
-        let vocab_guard = vocab.read().expect("lock should not be poisoned");
+        let vocab_guard = vocab.read().map_err(|_| anyhow::anyhow!("vocab lock poisoned"))?;
         Ok(vocab_guard.size())
     }
 
@@ -477,7 +477,7 @@ impl TokenStats {
     pub fn new() -> Self {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .expect("SystemTime is before UNIX_EPOCH")
+            .unwrap_or_else(|e| e.duration())
             .as_secs();
         Self {
             frequency: 1,
@@ -491,7 +491,7 @@ impl TokenStats {
         self.frequency += 1;
         self.last_seen = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .expect("SystemTime is before UNIX_EPOCH")
+            .unwrap_or_else(|e| e.duration())
             .as_secs();
 
         if let Some(ctx) = context {
@@ -510,7 +510,7 @@ impl TokenStats {
     pub fn age(&self) -> u64 {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .expect("SystemTime is before UNIX_EPOCH")
+            .unwrap_or_else(|e| e.duration())
             .as_secs();
         now - self.first_seen
     }
@@ -587,7 +587,7 @@ impl DynamicVocab {
     pub fn prune_vocabulary(&mut self) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .expect("SystemTime is before UNIX_EPOCH")
+            .unwrap_or_else(|e| e.duration())
             .as_secs();
 
         // Apply decay to all token frequencies

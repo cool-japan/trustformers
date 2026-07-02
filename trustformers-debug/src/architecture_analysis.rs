@@ -2,6 +2,10 @@
 //!
 //! Comprehensive analysis tools for neural network architectures including
 //! parameter counting, receptive field calculation, and connectivity analysis.
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -302,7 +306,6 @@ impl ArchitectureAnalyzer {
     }
 
     /// Compute receptive field for a convolutional layer
-    #[allow(dead_code)]
     fn compute_receptive_field(&self, layer: &LayerInfo) -> ReceptiveField {
         Self::compute_receptive_field_static(&layer.layer_type)
     }

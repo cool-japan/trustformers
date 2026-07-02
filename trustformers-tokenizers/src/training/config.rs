@@ -173,18 +173,16 @@ mod tests {
             ..Default::default()
         };
 
+        let checkpoint_dir = std::env::temp_dir().join("checkpoints").to_string_lossy().to_string();
         let advanced_config = AdvancedTrainingConfig::from_base_config(base_config)
-            .with_checkpointing("/tmp/checkpoints")
+            .with_checkpointing(checkpoint_dir.clone())
             .with_max_training_time(3600.0)
             .with_early_stopping(5, 0.001)
             .with_validation_split(0.2);
 
         assert_eq!(advanced_config.base_config.vocab_size, 50000);
         assert!(advanced_config.save_checkpoints);
-        assert_eq!(
-            advanced_config.checkpoint_dir,
-            Some("/tmp/checkpoints".to_string())
-        );
+        assert_eq!(advanced_config.checkpoint_dir, Some(checkpoint_dir));
         assert_eq!(advanced_config.max_training_time, Some(3600.0));
         assert_eq!(advanced_config.early_stopping_patience, 5);
         assert_eq!(advanced_config.min_improvement, 0.001);
@@ -232,7 +230,9 @@ mod tests {
             validation_split: 0.2,
             enable_metrics: true,
             save_checkpoints: true,
-            checkpoint_dir: Some("/tmp/checkpoints".to_string()),
+            checkpoint_dir: Some(
+                std::env::temp_dir().join("checkpoints").to_string_lossy().to_string(),
+            ),
             max_training_time: Some(3600.0),
             early_stopping_patience: 5,
             min_improvement: 0.001,

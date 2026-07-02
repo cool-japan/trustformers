@@ -1,8 +1,8 @@
-use crate::errors::{TrustformersError, Result};
+use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
 
-use super::config::{CFGConfig, GenerationConfig};
 use super::cache::KVCache;
+use super::config::{CFGConfig, GenerationConfig};
 
 /// Classifier-Free Guidance generator for improved text generation
 pub struct CFGGenerator {
@@ -128,7 +128,7 @@ impl CFGGenerator {
     ) -> Result<Vec<f32>> {
         // Calculate the percentile threshold
         let mut sorted_abs_logits: Vec<f32> = logits.iter().map(|&x| x.abs()).collect();
-        sorted_abs_logits.sort_by(|a, b| a.partial_cmp(b).expect("Partial comparison failed"));
+        sorted_abs_logits.sort_by(|a, b| a.partial_cmp(b).unwrap_or(::std::cmp::Ordering::Equal));
 
         let threshold_idx = ((sorted_abs_logits.len() as f32 * percentile) as usize)
             .min(sorted_abs_logits.len() - 1);

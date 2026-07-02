@@ -113,7 +113,7 @@ impl TrainingDynamicsAnalyzer {
         let volatility = self.calculate_volatility(&losses);
         let improvement_rate = self.calculate_improvement_rate(&losses);
         let best_loss = losses.iter().fold(f32::INFINITY, |a, &b| a.min(b));
-        let current_loss = *losses.last().expect("losses is non-empty from metrics_history");
+        let current_loss = losses.last().copied().unwrap_or_default();
         let loss_reduction_percentage = if losses.len() > 1 {
             ((losses[0] - current_loss) / losses[0].abs()) * 100.0
         } else {
@@ -325,11 +325,7 @@ impl TrainingDynamicsAnalyzer {
                 recommendations: Vec::new(),
             });
         }
-        let current_lr = self
-            .metrics_history
-            .back()
-            .expect("metrics_history should not be empty after empty check")
-            .learning_rate;
+        let current_lr = self.metrics_history.back().map(|m| m.learning_rate).unwrap_or_default();
         let lr_schedule_type = self.detect_lr_schedule_type();
         let lr_history = self.build_lr_history();
         let lr_impact_score = self.calculate_lr_impact_score(&lr_history);
@@ -515,11 +511,8 @@ impl TrainingDynamicsAnalyzer {
                 recommendations: Vec::new(),
             });
         }
-        let current_batch_size = self
-            .metrics_history
-            .back()
-            .expect("metrics_history should not be empty after empty check")
-            .batch_size;
+        let current_batch_size =
+            self.metrics_history.back().map(|m| m.batch_size).unwrap_or_default();
         let batch_size_history = self.build_batch_size_history();
         let batch_size_efficiency = self.calculate_batch_size_efficiency(&batch_size_history);
         let gradient_noise_level = self.estimate_gradient_noise_level();
@@ -766,7 +759,7 @@ impl TrainingDynamicsAnalyzer {
         if improvement_rate <= 0.0 {
             return None;
         }
-        let current_loss = *losses.last().expect("losses has at least 5 elements after len check");
+        let current_loss = losses.last().copied().unwrap_or_default();
         let target_loss = current_loss * (1.0 - self.config.convergence_tolerance);
         let remaining_improvement = current_loss - target_loss;
         let epochs_needed = (remaining_improvement / improvement_rate).ceil() as usize;
@@ -885,17 +878,14 @@ impl TrainingDynamicsAnalyzer {
         let noise_level = self.calculate_std(plateau_values);
         let gradient_magnitude =
             self.metrics_history.back().and_then(|m| m.gradient_norm).unwrap_or(0.0);
-        let overfitting_risk =
-            if let Some(val_loss) = self.metrics_history.back().and_then(|m| m.validation_loss) {
-                let train_loss = self
-                    .metrics_history
-                    .back()
-                    .expect("metrics_history should not be empty in this branch")
-                    .train_loss;
-                ((val_loss - train_loss) / train_loss.abs().max(1e-8)).max(0.0).min(1.0)
-            } else {
-                0.5
-            };
+        let overfitting_risk = if let Some(val_loss) =
+            self.metrics_history.back().and_then(|m| m.validation_loss)
+        {
+            let train_loss = self.metrics_history.back().map(|m| m.train_loss).unwrap_or_default();
+            ((val_loss - train_loss) / train_loss.abs().max(1e-8)).max(0.0).min(1.0)
+        } else {
+            0.5
+        };
         PlateauCharacteristics {
             stability: stability.max(0.0).min(1.0),
             noise_level: noise_level.min(1.0),

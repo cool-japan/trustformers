@@ -17,16 +17,20 @@
 //! ## Usage
 //!
 //! ```rust
-//! use trustformers_models::mixed_bit_quantization::{
-//!     MixedBitQuantizer, QuantizationConfig, BitAllocationStrategy
-//! };
+//! use trustformers_models::mixed_bit_quantization::{MixedBitQuantizer, MixedBitQuantizationConfig};
 //!
-//! let config = QuantizationConfig::default()
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let config = MixedBitQuantizationConfig::default()
 //!     .with_target_compression(4.0)
 //!     .with_max_accuracy_drop(0.02);
 //!
-//! let quantizer = MixedBitQuantizer::new(config);
-//! let quantized_model = quantizer.quantize_model(model, calibration_data)?;
+//! let mut quantizer = MixedBitQuantizer::new(config);
+//! # let model = ();
+//! # let calibration_data: Vec<trustformers_core::tensor::Tensor> = vec![];
+//! let quantized_model = quantizer.quantize_model(model, &calibration_data)?;
+//! # let _ = quantized_model;
+//! # Ok(())
+//! # }
 //! ```
 
 use anyhow::Result;
@@ -694,7 +698,7 @@ impl BitAllocator {
 
         // Sort layers by sensitivity (highest first)
         let mut sorted_layers: Vec<_> = sensitivity_results.layer_sensitivities.iter().collect();
-        sorted_layers.sort_by(|a, b| b.1.partial_cmp(a.1).expect("operation failed"));
+        sorted_layers.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         for (layer_name, &sensitivity) in sorted_layers {
             // Allocate higher bits to more sensitive layers

@@ -1,47 +1,74 @@
 # trustformers-optim TODO List
 
-**Version:** 0.1.3 | **Status:** Stable | **Tests:** 589 | **SLoC:** ~45,000 | **Updated:** 2026-06-24
+**Version:** 0.1.4 | **Status:** Stable | **Tests:** ~960 | **SLoC:** 52,189 | **Updated:** 2026-07-02
 
 ## Overview
 
-The `trustformers-optim` crate provides comprehensive optimization algorithms and learning rate schedulers
-for training transformer models in the TrustformeRS ecosystem. It implements 20+ state-of-the-art optimizers
-including standard methods (SGD, Adam), modern variants (AdamW, LAMB, RAdam), cutting-edge research algorithms
-(Lion, Muon, CAME, MicroAdam, BGE-Adam, HN-Adam, AdEMAMix), Schedule-Free variants, 4-bit/8-bit quantized
-optimizers, ZeRO stages 1/2/3, and second-order methods.
+The `trustformers-optim` crate provides optimization algorithms, learning rate schedulers, and
+distributed/advanced-training infrastructure for the TrustformeRS ecosystem. It spans over 100 modules
+(~52,200 lines) — from textbook first-order optimizers through 2024/2025 research algorithms, 4-bit/8-bit
+quantized optimizer states, ZeRO/FSDP-style distributed training, federated & continual learning,
+hardware-targeted variants, and PyTorch/JAX/TensorFlow compatibility layers.
 
 **Key Responsibilities:**
-- Optimization algorithms (SGD, Adam, AdamW, Lion, Muon, CAME, MicroAdam, BGE-Adam, HN-Adam, AdEMAMix, etc.)
-- Schedule-Free optimizer variants (eliminate separate LR scheduler)
-- 4-bit and 8-bit quantized optimizer states
-- Learning rate schedulers (Linear, Cosine+Restarts, OneCycle, Polynomial, etc.)
-- ZeRO distributed optimization stages 1, 2, and 3
-- Second-order methods (Sophia, Shampoo)
-- Gradient clipping and normalization
-- Weight decay (L2 regularization and decoupled)
-- Optimizer state management (save/load checkpoints)
-- Parameter groups for layer-wise learning rates
-- Mixed precision training support
+- Standard & research optimizers (SGD, Adam, AdamW, RAdam, NAdam, AdaBelief, LAMB, AdaFactor, AdaFisher,
+  AdaMaxPlus, Adan, Lion, Muon, CAME, MicroAdam, BGE-Adam, HN-Adam, AdEMAMix, Prodigy, NovoGrad, LancBiO,
+  AMacP, EVA, Ranger/AdaBound/AMSBound, etc.)
+- Schedule-Free optimizer variants (`ScheduleFreeAdam`, `ScheduleFreeSGD`)
+- 8-bit and 4-bit quantized optimizer states, plus per-layer bit-width selection
+- Learning rate schedulers (Linear, Cosine[+Restarts], One-Cycle, Polynomial, cyclic-decay, LR finder, ...)
+- Second-order methods (Sophia, L-BFGS, Newton-CG, SSBFGS, SSBroyden)
+- ZeRO distributed optimization stages 1/2/3, FSDP-style sharding, multi-node training
+- Federated learning (FedAvg, FedProx, differential privacy) and continual learning (EWC, PackNet)
+- Hardware-aware variants (GPU/TPU/edge/mobile), kernel fusion, SIMD, cache-friendly layouts
+- Cross-framework compatibility (PyTorch, JAX/Optax, TensorFlow) and a universal config converter
+- Hyperparameter tuning, optimizer monitoring/recommendation, performance validation, ONNX export,
+  optimizer surgery
+- Gradient clipping/scaling utilities and optimizer state checkpointing (`state_dict`/`load_state_dict`)
 
 ---
 
 ## Current Status
 
 ### Implementation Status
-- [x] **PRODUCTION-READY** - All major optimizers implemented and tested
-- [x] **COMPREHENSIVE TEST COVERAGE** - 583 tests with 100% pass rate
-- [x] **CUTTING-EDGE ALGORITHMS** - Latest research optimizers (2023-2025)
-- [x] **ZERO COMPILATION ERRORS** - Clean compilation across all platforms
-- [x] **MEMORY EFFICIENT** - Quantized optimizers, ZeRO stages, and sign-based methods
-- [x] **SCHEDULE-FREE** - Schedule-Free Adam and SGD variants implemented
-- [x] **QUANTIZED OPTIMIZERS** - 4-bit and 8-bit quantized optimizer states
-- [x] **ZERO STAGES 1/2/3** - Full distributed optimizer state partitioning
+- [x] **PRODUCTION-READY** — core optimizers (SGD/Adam/AdamW/LAMB/AdaFactor/RAdam/NAdam/AdaBelief) fully
+      implemented and tested
+- [x] **BROAD RESEARCH COVERAGE** — Lion, Muon, CAME, MicroAdam, BGE-Adam, HN-Adam, AdEMAMix, Prodigy,
+      NovoGrad, LancBiO, AMacP, EVA (2023–2025 algorithms)
+- [x] **ZERO COMPILATION ERRORS/WARNINGS** — 0 clippy warnings, 0 rustdoc warnings workspace-wide
+- [x] **MEMORY EFFICIENT** — 8-bit/4-bit quantized optimizers, per-layer bit-width selection, ZeRO stages,
+      sign-based methods, lazy state allocation
+- [x] **SCHEDULE-FREE** — `ScheduleFreeAdam` / `ScheduleFreeSGD` implemented
+- [x] **ZERO STAGES 1/2/3** — including an async-communication-overlap variant of stage 3
+      (`zero::zero_stage3_overlap`)
+- [x] **FSDP-STYLE SHARDING** — `fsdp` module (not yet re-exported at crate root)
+- [x] **NO UNWRAP POLICY SATISFIED** — 0 occurrences of `.unwrap()` in any real `.rs` source file
+- [ ] **SECOND-ORDER: NO SHAMPOO** — Shampoo/Kronecker-factored preconditioning is not implemented
+      (real second-order coverage: Sophia, L-BFGS, Newton-CG, SSBFGS, SSBroyden)
 
 ### Test Metrics
-- **Test Count:** 583 unit tests
+- **Test Count:** ~960 tests for this crate (workspace-wide `cargo nextest run --workspace --all-features`:
+  18,102 passed / 0 failed / 119 skipped)
+- **Doctests:** 49 passed, 0 failed, 1 ignored
 - **Pass Rate:** 100%
-- **Coverage:** Optimizer convergence, scheduler validation, gradient clipping, state save/load, quantization accuracy, ZeRO round-trip, Schedule-Free equivalence
+- **Coverage:** Optimizer convergence, scheduler validation, gradient clipping, state save/load,
+  quantization accuracy, ZeRO round-trip, Schedule-Free equivalence
 - **Numerical Stability:** Extensive testing with edge cases (NaN, Inf, zero gradients)
+
+### Housekeeping / Verified Policy Compliance
+- [x] No `.unwrap()` anywhere in real `.rs` source (checked via `grep -rn "\.unwrap()" --include="*.rs" src/`)
+- [x] All compiled source files are under the 2000-line refactor threshold — largest is `convergence.rs`
+      at 1,964 lines (worth watching; next largest are `performance_validation.rs` at 1,725 and
+      `enhanced_distributed_training.rs` at 1,678)
+- [ ] Delete 3 stray, uncompiled backup files sitting in `src/` (dated 2025-10-01, not `.rs` so cargo
+      ignores them, but they are dead clutter): `federated.rs.prelude_fix`,
+      `hyperparameter_tuning.rs.prelude_fix`, `quantum_inspired.rs.prelude_fix`
+- [ ] Remove or properly wire up 4 orphaned `.rs` files that are not declared as modules anywhere in the
+      crate (dead code, excluded from the build): `adafactor.rs` (superseded by `adafactor_new.rs`),
+      `adafisher.rs` (superseded by `adafisher_simple.rs`), `advanced_benchmarking.rs` (1,306 lines,
+      never declared in `lib.rs`), `second_order_new.rs` (superseded by the `second_order/` directory)
+- [ ] Re-export `fsdp`, `optimizer_surgery`, and `per_layer_quant` types at the crate root for
+      discoverability (currently only reachable via their full module paths)
 
 ---
 
@@ -51,662 +78,436 @@ optimizers, ZeRO stages 1/2/3, and second-order methods.
 
 #### SGD (Stochastic Gradient Descent)
 
-**Classic first-order optimization**
+- [x] **Algorithm** — `θ ← θ - lr * v` with `v ← momentum * v + ∇L(θ)`, optional Nesterov look-ahead,
+      weight decay
+- [x] **Features** — momentum, Nesterov momentum, weight decay (L2)
 
-- [x] **Algorithm**
-  - Update: `θ ← θ - lr * ∇L(θ)`
-  - With momentum: `v ← β * v + ∇L(θ), θ ← θ - lr * v`
-  - Momentum coefficient β (typically 0.9)
-
-- [x] **Features**
-  - Momentum support for acceleration
-  - Nesterov momentum option
-  - Weight decay (L2 regularization)
-  - Dampening for momentum
-
-- [x] **Use Cases**
-  - Simple baseline
-  - Works well with large batch sizes
-  - Computer vision tasks
-
-**Example:**
+**Real constructor** (`src/sgd.rs`):
 ```rust
 use trustformers_optim::SGD;
 
-let optimizer = SGD::new(
-    model.parameters(),
-    lr: 0.01,
-    momentum: 0.9,
-    weight_decay: 1e-4,
-)?;
+// (lr, momentum, weight_decay, nesterov)
+let optimizer = SGD::new(0.01, 0.9, 1e-4, true);
 ```
 
 ---
 
-#### Adam (Adaptive Moment Estimation)
+#### Adam / AdamW / RAdam / NAdam / AdaBelief
 
-**Adaptive learning rate optimizer with momentum**
+All five live in `src/adam.rs` and share the same `(lr, betas, eps, weight_decay) -> Self` constructor
+shape:
 
-- [x] **Algorithm**
-  - First moment: `m ← β1 * m + (1 - β1) * ∇L`
-  - Second moment: `v ← β2 * v + (1 - β2) * ∇L²`
-  - Bias correction: `m̂ ← m / (1 - β1^t), v̂ ← v / (1 - β2^t)`
-  - Update: `θ ← θ - lr * m̂ / (√v̂ + ε)`
+- [x] **Adam** — first/second moment EMA with bias correction
+- [x] **AdamW** — decoupled weight decay (recommended default for transformers)
+- [x] **RAdam** — rectified variance with automatic warmup
+- [x] **NAdam** — Nesterov-accelerated Adam
+- [x] **AdaBelief** — second moment tracks "belief" in the gradient direction
 
-- [x] **Features**
-  - Per-parameter adaptive learning rates
-  - Momentum on gradients (first moment)
-  - Momentum on squared gradients (second moment)
-  - Bias correction for initial timesteps
-
-**Example:**
 ```rust
-use trustformers_optim::Adam;
+use trustformers_optim::{Adam, AdamW, RAdam, NAdam, AdaBelief};
 
-let optimizer = Adam::new(
-    model.parameters(),
-    lr: 1e-3,
-    betas: (0.9, 0.999),
-    eps: 1e-8,
-    weight_decay: 0.0,
-)?;
-```
-
----
-
-#### AdamW (Adam with Decoupled Weight Decay)
-
-**Adam with proper weight decay — recommended for transformers**
-
-- [x] **Algorithm**
-  - Same as Adam for moment estimates
-  - Decoupled weight decay: `θ ← θ - lr * λ * θ` (applied after Adam update)
-
-- [x] **Features**
-  - Proper weight decay (not L2 regularization)
-  - Better generalization than Adam
-  - Default choice for transformer training
-
-**Example:**
-```rust
-use trustformers_optim::AdamW;
-
-let optimizer = AdamW::new(
-    model.parameters(),
-    lr: 1e-4,
-    betas: (0.9, 0.999),
-    eps: 1e-8,
-    weight_decay: 0.01,
-)?;
-```
-
----
-
-#### RAdam (Rectified Adam)
-
-**Adam with automatic variance warmup**
-
-- [x] **Algorithm**
-  - Rectifies variance estimate in early training steps
-  - Computes maximum length of approximated SMA
-  - Falls back to SGD update when variance not tractable
-
-- [x] **Features**
-  - Automatic warmup (no manual warmup schedule needed)
-  - More stable than Adam in early training
-  - Better convergence on some tasks
-
-**Example:**
-```rust
-use trustformers_optim::RAdam;
-
-let optimizer = RAdam::new(
-    model.parameters(),
-    lr: 1e-3,
-    betas: (0.9, 0.999),
-    eps: 1e-8,
-    weight_decay: 0.0,
-)?;
+let adam    = Adam::new(1e-3, (0.9, 0.999), 1e-8, 0.0);
+let adamw   = AdamW::new(1e-4, (0.9, 0.999), 1e-8, 0.01);
+let radam   = RAdam::new(1e-3, (0.9, 0.999), 1e-8, 0.0);
+let nadam   = NAdam::new(1e-3, (0.9, 0.999), 1e-8, 0.0);
+let adabelief = AdaBelief::new(1e-3, (0.9, 0.999), 1e-8, 0.0);
 ```
 
 ---
 
 #### LAMB (Layer-wise Adaptive Moments)
 
-**Optimizer for very large batch training**
+- [x] Trust-ratio scaled Adam-style update for large-batch training
 
-- [x] **Algorithm**
-  - Compute Adam-like update: `u = m / (√v + ε)`
-  - Layer-wise trust ratio: `r = ||θ|| / ||u||`
-  - Update: `θ ← θ - lr * r * u`
+```rust
+use trustformers_optim::LAMB;
 
-- [x] **Features**
-  - Enables large batch training (32k+)
-  - Layer-wise learning rate adaptation
-  - Maintains accuracy with large batches
+let optimizer = LAMB::new(2e-3, (0.9, 0.999), 1e-6, 0.01);
+```
 
 ---
 
 #### AdaFactor
 
-**Memory-efficient optimizer**
+- [x] Factored second-moment estimate, ~75% memory reduction vs Adam
 
-- [x] **Features**
-  - Factored second moment estimate
-  - ~75% memory reduction vs Adam
-  - Adaptive learning rates without full second moment
+```rust
+use trustformers_optim::AdaFactor;
+
+let optimizer = AdaFactor::new(); // default configuration
+```
 
 ---
 
-#### AdaGrad / RMSProp
+#### AdaFisher, AdaMaxPlus, Adan
 
-- [x] AdaGrad: per-parameter adaptive rates based on accumulated squared gradients
-- [x] RMSProp: exponential moving average variant that fixes AdaGrad's aggressive decay
+- [x] **AdaFisher** — block-diagonal Fisher-information preconditioning (ICLR 2025)
+- [x] **AdaMaxPlus** — infinity-norm-based adaptive learning rate variant
+- [x] **Adan** — Nesterov-accelerated adaptive optimizer
+
+#### ~~AdaGrad / RMSProp~~ — not implemented
+
+Earlier revisions of this document claimed AdaGrad and RMSProp were implemented. Verified against
+source: **neither exists** as a struct or re-export anywhere in the crate. `optimizer_surgery.rs` uses
+"RMSProp" only as a state-snapshot label for migration purposes, not as an actual optimizer
+implementation. Removed from the checklist; add back only if genuinely implemented.
 
 ---
 
 ### Cutting-Edge Research Optimizers
 
 #### Lion (Evolved Sign Momentum)
-
-**Sign-based optimizer from evolutionary search**
-
-- [x] **Algorithm**
-  - Update: `θ ← θ - lr * sign(β1 * m + (1 - β1) * ∇L)`
-  - Momentum: `m ← β2 * m + (1 - β2) * ∇L`
-
-- [x] **Features**
-  - Memory-efficient (only stores first moment, no variance)
-  - Discovered via evolutionary algorithm
-  - Competitive or better than AdamW
-
-**Example:**
+- [x] Sign-based update; only first-moment buffer (no variance state)
 ```rust
 use trustformers_optim::Lion;
-
-let optimizer = Lion::new(
-    model.parameters(),
-    lr: 1e-4,
-    betas: (0.9, 0.99),
-    weight_decay: 0.1,
-)?;
+let optimizer = Lion::new(1e-4, (0.9, 0.99), 0.1); // (lr, betas, weight_decay)
 ```
-
----
 
 #### Muon (Momentum + Orthogonalization)
-
-**Nesterov momentum with Gram-Schmidt orthogonalization**
-
-- [x] **Algorithm**
-  - Applies Nesterov momentum update
-  - Orthogonalizes the update matrix via Newton-Schulz iteration
-  - Improves generalization by encouraging orthogonal weight updates
-
-- [x] **Features**
-  - Reduces gradient interference between filters
-  - Strong results on vision transformers
-  - Per-layer orthogonal projection step
-
-**Example:**
+- [x] Nesterov momentum + Newton-Schulz orthogonalization of 2D updates
 ```rust
 use trustformers_optim::Muon;
-
-let optimizer = Muon::new(
-    model.parameters(),
-    lr: 2e-4,
-    momentum: 0.95,
-    nesterov: true,
-    orthogonalize: true,
-)?;
+let optimizer = Muon::new();                 // default config
+let optimizer = Muon::new_with_lr(2e-4);      // custom learning rate
+let optimizer = Muon::for_nanogpt();          // preset
+let optimizer = Muon::for_large_lm();         // preset
 ```
-
----
 
 #### CAME (Confidence-guided Adaptive Memory-Efficient)
-
-**Confidence-guided second moment with AdaFactor-like memory footprint**
-
-- [x] **Algorithm**
-  - Uses confidence scores to weight second moment updates
-  - Factored representation of the second moment matrix
-  - Confidence metric derived from gradient consistency
-
-- [x] **Features**
-  - Memory footprint similar to AdaFactor
-  - Better convergence than AdaFactor on large models
-  - Confidence-guided adaptation avoids noisy gradient updates
-
-**Example:**
+- [x] Confidence-guided second moment, AdaFactor-sized memory footprint
 ```rust
-use trustformers_optim::Came;
-
-let optimizer = Came::new(
-    model.parameters(),
-    lr: 1e-3,
-    betas: (0.9, 0.999, 0.9999),
-    eps: (1e-30, 1e-16),
-    weight_decay: 0.0,
-)?;
+use trustformers_optim::{CameConfig, CameOptimizer};
+let optimizer = CameOptimizer::new(CameConfig::default());
 ```
-
----
 
 #### MicroAdam
+- [x] Gradient compression with error-feedback accumulation
+```rust
+use trustformers_optim::MicroAdam;
+let optimizer = MicroAdam::new();
+let optimizer = MicroAdam::for_large_models();
+let optimizer = MicroAdam::for_memory_constrained();
+```
 
-**Gradient compression with micro-batch accumulation**
+#### BGE-Adam / OptimizedBGEAdam
+- [x] Entropy-weighted bias correction; `OptimizedBGEAdam` is a reported 3–5x faster reimplementation
+```rust
+use trustformers_optim::{BGEAdam, OptimizedBGEAdam};
+let optimizer = OptimizedBGEAdam::new();              // recommended
+let original  = BGEAdam::new(1e-3, (0.9, 0.999), 1e-8, 0.01, 0.1, 0.05, 0.05);
+```
 
-- [x] **Algorithm**
-  - Compresses gradients with top-k sparsity or quantization
-  - Accumulates error feedback across micro-batches
-  - Updates optimizer state with decompressed gradients
+#### HN-Adam (Hybrid-Norm Adam)
+- [x] Adaptive step size based on update-norm history
+```rust
+use trustformers_optim::HNAdam;
+// (lr, betas, eps, weight_decay, adaptation_threshold)
+let optimizer = HNAdam::new(1e-3, (0.9, 0.999), 1e-8, 0.01, 0.1);
+let optimizer = HNAdam::for_transformers();
+```
 
-- [x] **Features**
-  - Extremely memory-constrained training
-  - Gradient sparsification with error correction
-  - Compatible with ZeRO stage 1
-
----
-
-#### BGE-Adam (Bias-corrected Gradient Estimation Adam)
-
-**Improved bias correction for large-batch regimes**
-
-- [x] **Algorithm**
-  - Enhanced bias correction that accounts for gradient variance at large batch sizes
-  - Corrected moment estimates remain accurate even at step 1
-
-- [x] **Features**
-  - Better large-batch accuracy than standard Adam
-  - Drop-in replacement for Adam in distributed settings
-
----
-
-#### HN-Adam (Hyperbolic Nesterov Adam)
-
-**Nesterov correction in hyperbolic space**
-
-- [x] **Algorithm**
-  - Applies Nesterov lookahead in the hyperbolic tangent-mapped parameter space
-  - Hyperbolic projection prevents update divergence in deep models
-
-- [x] **Features**
-  - Improved stability in very deep transformer models
-  - Compatible with standard AdamW hyperparameters
-
----
-
-#### AdEMAMix (Adaptive EMA Mixture)
-
-**Mixes fast and slow EMA of gradients for long-range memory**
-
-- [x] **Algorithm**
-  - Maintains two EMA buffers: fast (β1) and slow (β3)
-  - Linearly interpolates between fast and slow EMA: `m_mix = α * m_fast + (1-α) * m_slow`
-  - Denominator uses standard second moment estimate
-
-- [x] **Features**
-  - Captures both short-range and long-range gradient trends
-  - Improved convergence on long training runs
-  - Extra α hyperparameter for mixture weight
-
-**Example:**
+#### AdEMAMix
+- [x] Mixes fast (β1) and slow (β3) EMAs of the gradient
 ```rust
 use trustformers_optim::AdEMAMix;
-
-let optimizer = AdEMAMix::new(
-    model.parameters(),
-    lr: 1e-4,
-    betas: (0.9, 0.999, 0.9999), // (β1, β2, β3_slow)
-    alpha: 5.0,                   // mixture weight
-    weight_decay: 0.01,
-)?;
+let optimizer = AdEMAMix::new();
+let optimizer = AdEMAMix::new_with_params(1e-4, 0.01); // (lr, weight_decay)
+let optimizer = AdEMAMix::for_llm_training();
 ```
+
+#### Prodigy, NovoGrad, LancBiO, AMacP, EVA
+- [x] Additional adaptive/variance-reduced optimizers, each with their own `*Config` type
+      (`ProdigyConfig`, `NovoGradConfig`, `LancBiOConfig`, `AMacPConfig`, `EVAConfig`)
+
+#### Research-preview simplified reference implementations: GENIE, LoRA-RITE, SOFO
+- [x] Functional and tested (real momentum-style parameter updates, not `unimplemented!()`/`todo!()`)
+- [ ] **Not yet at full paper fidelity** — `src/genie_stub.rs`, `src/lora_rite_stub.rs`, and
+      `src/sofo_stub.rs` self-document as simplified implementations pending "proper tensor
+      operations"/"full LoRA-specific operations"/"forward-mode differentiation" respectively. Several
+      stats getters (e.g. `GENIE::get_osgr_stats`) currently return empty placeholders.
 
 ---
 
 ### Schedule-Free Optimizer Variants
 
-**Eliminate the need for a separate learning rate scheduler**
+- [x] **`ScheduleFreeAdam`** — folds scheduling into primal-dual iterate averaging
+- [x] **`ScheduleFreeSGD`** — same approach applied to momentum SGD
 
-- [x] **Schedule-Free AdamW**
-  - Folds cosine-like scheduling into primal-dual iterate averaging
-  - No separate scheduler object required
-  - Competitive final loss with properly-tuned scheduled training
+> Earlier revisions of this document referenced a type called `ScheduleFreeAdamW`. It does not exist;
+> the real, exported type is `ScheduleFreeAdam`.
 
-- [x] **Schedule-Free SGD**
-  - Same approach applied to SGD with momentum
-  - Useful for vision tasks without scheduler search
-
-**Example:**
 ```rust
-use trustformers_optim::schedule_free::ScheduleFreeAdamW;
+use trustformers_optim::ScheduleFreeAdam;
 
-let optimizer = ScheduleFreeAdamW::new(
-    model.parameters(),
-    lr: 3e-4,
-    betas: (0.9, 0.999),
-    weight_decay: 0.01,
-    warmup_steps: 1000,
-)?;
-
-// No separate scheduler needed
-for step in 0..num_steps {
-    let loss = model.forward(&batch)?;
-    let gradients = loss.backward()?;
-    optimizer.step(&mut model.parameters(), &gradients)?;
-    optimizer.zero_grad();
-}
+let optimizer = ScheduleFreeAdam::for_language_models();
+// or fully custom: (learning_rate, beta1, beta2, epsilon, weight_decay)
+let optimizer = ScheduleFreeAdam::new(0.5, 0.9, 0.95, 1e-8, 0.1);
 ```
 
 ---
 
 ### Quantized Optimizers
 
-**Reduce optimizer state memory by 4-8x**
-
-#### 8-bit Adam/AdamW
-
-- [x] **Features**
-  - Optimizer states stored in 8-bit quantized format
-  - Dynamic per-block scaling factors (block_size=2048 default)
-  - ~4x memory reduction for optimizer states
-  - Negligible accuracy loss on standard benchmarks
-
-**Example:**
+#### Adam8bit / AdamW8bit
+- [x] 8-bit optimizer state, ~4x memory reduction
 ```rust
-use trustformers_optim::quantized::Adam8bit;
-
-let optimizer = Adam8bit::new(
-    model.parameters(),
-    lr: 1e-4,
-    betas: (0.9, 0.999),
-    eps: 1e-8,
-    weight_decay: 0.01,
-    block_size: 2048,
-)?;
+use trustformers_optim::Adam8bit;
+let optimizer = Adam8bit::new(1e-4); // single-argument constructor (learning_rate)
 ```
 
----
-
-#### 4-bit Adam/AdamW
-
-- [x] **Features**
-  - Optimizer states stored in 4-bit quantized format
-  - NF4 (NormalFloat4) or FP4 quantization schemes
-  - ~8x memory reduction for optimizer states
-  - Recommended for models >= 7B parameters
-
-**Example:**
+#### Adam4bit
+- [x] 4-bit optimizer state via `QuantizationMethod` (e.g. NF4), ~8x memory reduction
+- [ ] There is no separate "AdamW4bit" type — `Adam4bit` is the only 4-bit constructor exported
 ```rust
-use trustformers_optim::quantized::{Adam4bit, QuantScheme};
-
-let optimizer = Adam4bit::new(
-    model.parameters(),
-    lr: 1e-4,
-    betas: (0.9, 0.999),
-    eps: 1e-8,
-    weight_decay: 0.01,
-    quant_scheme: QuantScheme::NF4,
-    block_size: 64,
-)?;
+use trustformers_optim::Adam4bit;
+// (lr, beta1, beta2, eps, weight_decay)
+let optimizer = Adam4bit::new(1e-4, 0.9, 0.999, 1e-8, 0.01);
 ```
+
+#### Per-layer bit-width selection
+- [x] `per_layer_quant.rs` (807 lines) — `BitWidth::{Int2,Int4,Int8,Fp16,Fp32}`, sensitivity analysis,
+      memory-budget-constrained assignment (module exists, not yet re-exported at crate root)
 
 ---
 
 ### Learning Rate Schedulers
 
-#### Linear Scheduler
+All scheduler constructors return `Self` directly (no `Result`/`?`).
 
-- [x] Linear warmup + linear decay
-- [x] Standard for BERT-style pretraining
-
-**Example:**
 ```rust
-use trustformers_optim::schedulers::LinearScheduler;
+use trustformers_optim::{LinearScheduler, CosineWithRestartsScheduler, OneCycleScheduler};
 
-let scheduler = LinearScheduler::new(
-    optimizer,
-    warmup_steps: 10000,
-    total_steps: 100000,
-)?;
+let linear = LinearScheduler::new(5e-5, 10_000, 100_000); // (base_lr, warmup_steps, total_steps)
+
+// (base_lr, min_lr, t_0, t_mult)
+let cosine_restarts = CosineWithRestartsScheduler::new(1e-3, 1e-6, 1000, 2.0);
+
+// (max_lr, total_steps, pct_start, final_lr)
+let one_cycle = OneCycleScheduler::new(1e-3, 10_000, 0.3, 1e-6);
 ```
 
----
-
-#### Cosine Annealing with Warm Restarts (SGDR)
-
-- [x] Cosine decay with periodic restarts
-- [x] Cycle length multiplier for progressive restart spacing
-- [x] Minimum learning rate floor
-
-**Example:**
-```rust
-use trustformers_optim::schedulers::CosineAnnealingWarmRestarts;
-
-let scheduler = CosineAnnealingWarmRestarts::new(WarmRestartConfig {
-    t_0: 1000,
-    t_mult: 2,
-    eta_min: 1e-6,
-    warmup_steps: 100,
-})?;
-```
-
----
-
-#### One-Cycle Policy
-
-- [x] Cycles learning rate from low → max → very low in single training run
-- [x] Inversely cycles momentum
-- [x] SuperConvergence: enables faster convergence with SGD
-
-**Example:**
-```rust
-use trustformers_optim::schedulers::OneCycleLR;
-
-let scheduler = OneCycleLR::new(OneCycleConfig {
-    max_lr: 1e-3,
-    total_steps: 10000,
-    pct_start: 0.3,      // 30% of steps for increasing phase
-    div_factor: 25.0,    // initial_lr = max_lr / div_factor
-    final_div_factor: 1e4,
-})?;
-```
-
----
-
-#### Polynomial Decay
-
-- [x] `lr(t) = lr * (1 - t / T)^power`
-- [x] Power typically 1.0 (linear) or 2.0 (quadratic)
-
----
-
-#### Step Decay / Exponential Decay / Constant
-
-- [x] Step: multiply by gamma every step_size steps
-- [x] Exponential: continuous `lr * gamma^t` decay
-- [x] Constant: fixed LR with optional warmup
+- [x] Linear, Polynomial, Step, Exponential, Constant+Warmup
+- [x] Cosine and Cosine-with-Warm-Restarts (SGDR-style)
+- [x] One-Cycle (`OneCycleScheduler`) plus a separate cyclic-decay implementation
+      (`cyclic_decay::{CyclicLrScheduler, OneCycleLrScheduler}`) with `Triangular` / `Triangular2` /
+      `ExpRange` amplitude modes
+- [x] Adaptive, Composite, Cyclical, Dynamic, Phase-based, Task-specific schedulers
+- [x] **Automatic LR Finder** — `LrFinder` + `LrFinderConfig` + `LrFinderResult` + `find_optimal_lr`
+      (`lr_finder.rs`)
 
 ---
 
 ### Second-Order Methods
 
-#### Sophia
+- [x] **Sophia** — Hutchinson's-estimator Hessian diagonal preconditioning, updated every k steps
+- [x] **L-BFGS** (`LBFGS`) and **Newton-CG** (`NewtonCG`) — classic quasi-Newton / Newton-CG line search
+- [x] **Self-Scaled BFGS / Broyden** (`SSBFGS`, `SSBroyden`, 2025) — with `for_physics_informed()` /
+      `for_non_convex()` presets for PINN-style training
 
-**Scalable second-order optimizer using Hutchinson estimator**
-
-- [x] **Algorithm**
-  - Hutchinson's estimator for Hessian diagonal
-  - Pre-conditioned gradient descent: `θ ← θ - lr * ∇L / (h + ε)`
-  - Hessian estimate updated every k steps (typically 10-100)
-
-- [x] **Features**
-  - Second-order information without full Hessian
-  - Scalable to billion-parameter models
-  - Better sample efficiency than first-order methods
-
----
-
-#### Shampoo
-
-**Matrix preconditioning with Kronecker-factored curvature**
-
-- [x] **Features**
-  - Left and right Kronecker factor preconditioning
-  - Efficient matrix root computation via coupled Newton iterations
-  - Near-second-order convergence with manageable overhead
+> **Correction:** earlier revisions of this document listed "Shampoo" (Kronecker-factored curvature) as
+> implemented. It is not — the only occurrence of the word "Shampoo" in the source tree is a comparison
+> reference in a doc comment (`src/lora_rite.rs`) and in the orphaned, uncompiled `second_order_new.rs`.
 
 ---
 
 ### Advanced Features
 
 #### Gradient Clipping
-
-- [x] **By Global Norm**: `∇L ← ∇L * max_norm / max(||∇L||, max_norm)`
-- [x] **By Value**: element-wise clip to `[-max_val, max_val]`
-
-**Example:**
 ```rust
-optimizer.clip_grad_norm(max_norm: 1.0)?;
-optimizer.clip_grad_value(max_value: 0.5)?;
-```
+use trustformers_optim::GradientProcessor;
 
----
+let mut grad = vec![3.0_f32, 4.0, 0.0];
+GradientProcessor::clip_by_norm(&mut grad, 1.0);        // clip by global L2 norm
+GradientProcessor::clip_by_value(&mut grad, -0.5, 0.5); // element-wise clip
+```
+> These are associated functions operating on `&mut [f32]`, not instance methods on the optimizer types
+> as earlier revisions of this document showed.
 
 #### Weight Decay
-
-- [x] **L2 Regularization**: gradient includes regularization term
-- [x] **Decoupled Weight Decay**: `θ ← θ - lr * λ * θ` (correct for adaptive methods)
-
----
+- [x] L2 regularization and AdamW-style decoupled weight decay (`WeightDecayMode`)
 
 #### Gradient Accumulation
-
-- [x] Accumulate gradients over N steps before optimizer update
-- [x] Effective batch size = `batch_size * accumulation_steps`
-
----
-
-#### Mixed Precision Training
-
-- [x] FP16/BF16 forward/backward, FP32 optimizer state
-- [x] Dynamic loss scaling to prevent FP16 underflow
-- [x] Automatic Mixed Precision (AMP) integration
-
----
+- [x] `Optimizer::accumulate_grad` has a default implementation (delegates to `update`); optimizers may
+      override it for specialized accumulation logic
 
 #### Optimizer State Management
-
-- [x] **Save State**: `optimizer.save_state("checkpoint.pt")?`
-- [x] **Load State**: `optimizer.load_state("checkpoint.pt")?`
-- [x] Includes all buffers: momentum, variance, step count, quantization scales
-
----
+- [x] `StatefulOptimizer::state_dict(&self) -> Result<HashMap<String, Tensor>>` and
+      `load_state_dict(&mut self, state: HashMap<String, Tensor>) -> Result<()>`
+- [ ] There is no built-in file-path convenience method (no `save_state("checkpoint.pt")`/`load_state(...)`
+      as earlier revisions of this document showed) — callers serialize the returned `HashMap` themselves
 
 #### Parameter Groups
-
-- [x] Per-group learning rates, weight decay, and hyperparameters
-- [x] Layer-wise learning rate decay for fine-tuning
+- [x] Per-group learning rates and hyperparameters supported across the standard optimizers
 
 ---
 
-## Distributed Optimization (ZeRO)
+## Distributed & Scaled Training
 
-#### ZeRO Stage 1
+### ZeRO (stages 1/2/3)
+- [x] `ZeROOptimizer<T: Optimizer>` wraps a base optimizer; `ZeROConfig` controls `stage`
+      (`ZeROStage::{Stage1,Stage2,Stage3}`), `bucket_size_mb`, `overlap_comm`, `reduce_bucket_size`,
+      `prefetch_depth`, `max_memory_usage_mb`, `gradient_compression`, `pin_memory`
+- [x] `zero::zero_stage3_overlap` — async prefetch/overlap of communication with backward-pass compute
+      for stage 3 (this substantially satisfies the former "better async communication overlap for ZeRO
+      stage 3" future item — see below)
 
-- [x] Optimizer state partitioned across data-parallel ranks
-- [x] Reduces optimizer memory by `world_size` factor
-
-#### ZeRO Stage 2
-
-- [x] Optimizer state + gradient partitioning
-- [x] Reduce-scatter for gradient aggregation
-
-#### ZeRO Stage 3
-
-- [x] Full parameter partitioning for maximum memory efficiency
-- [x] All-gather before forward pass, re-partition after backward
-- [x] Optional CPU offload of optimizer states
-
-**Example:**
 ```rust
-use trustformers_optim::distributed::{ZeroOptimizer, ZeroConfig, ZeroStage};
+use std::sync::Arc;
+use trustformers_optim::{AdamW, ZeROConfig, ZeROOptimizer, ZeROStage};
 
-let zero_config = ZeroConfig {
-    stage: ZeroStage::Three,
-    partition_gradients: true,
-    contiguous_gradients: true,
-    overlap_comm: true,
-    reduce_scatter: true,
-    cpu_offload: false,
-};
-
-let base_optimizer = AdamW::new(adam_config)?;
-let optimizer = ZeroOptimizer::new(
-    base_optimizer,
-    model,
-    zero_config,
-    process_group,
-)?;
+let zero_config = ZeROConfig { stage: ZeROStage::Stage3, ..Default::default() };
+let base_optimizer = AdamW::new(1e-4, (0.9, 0.999), 1e-8, 0.01);
+let mut optimizer = ZeROOptimizer::new(base_optimizer, zero_config, mp_context)?;
+optimizer.register_parameters(parameters)?;
 ```
+
+> **Correction:** earlier revisions used `ZeroOptimizer`/`ZeroConfig`/`ZeroStage` (wrong casing) and
+> config fields (`partition_gradients`, `contiguous_gradients`, `reduce_scatter`, `cpu_offload`) that do
+> not exist on the real `ZeROConfig`. The constructor also does not take a `model` argument directly;
+> parameters are registered separately via `register_parameters`.
+
+### FSDP-style sharding
+- [x] `fsdp` module: `FsdpConfig`, `ShardingStrategy`, `WrappingPolicy`, `FsdpUnit`, `FsdpState`,
+      `FsdpMemoryAnalyzer` (not yet re-exported at crate root)
+
+### Multi-node training
+- [x] `MultiNodeTrainer` / `MultiNodeConfig` / `MultiNodeStats`
+
+### Enhanced distributed trainer
+- [x] `EnhancedDistributedTrainer` + `DistributedConfig` (builder methods `.with_gpus()`,
+      `.with_gradient_compression(CompressionType::PowerSGD { rank })`, `.with_dynamic_batching()`,
+      `.with_fault_tolerance()`), gradient compression, dynamic batching, fault tolerance
+- [x] `advanced_distributed_features`: `AutoScaler`, `PerformanceMLOptimizer`, `SmartCheckpointManager`
+      (auto-scaling, ML-based performance tuning, differential checkpointing)
+
+### Asynchronous / staleness-tolerant training
+- [x] `Hogwild`, `ElasticAveraging`, `ParameterServer`, `AsyncSGD`, `DelayedGradient` (with configurable
+      `DelayCompensationMethod`)
+
+### Hierarchical aggregation & deep distributed QP
+- [x] `HierarchicalAggregator` (ring / tree / butterfly communication topologies)
+- [x] `DeepDistributedQP`
+
+---
+
+## Federated & Continual Learning
+
+- [x] **FedAvg**, **FedProx** — federated averaging / proximal-term federated optimization
+- [x] **Differential privacy** (`DifferentialPrivacy`, configurable `NoiseMechanism`) and
+      **secure aggregation** (`SecureAggregation`)
+- [x] **EWC**, **PackNet**, **memory replay** (`MemoryReplay`) — catastrophic-forgetting mitigation
+
+## Hardware-Aware & Performance
+
+- [x] GPU / TPU / edge / mobile optimizer variants (`GPUAdam`, `TPUOptimizer`, `EdgeOptimizer`,
+      `MobileOptimizer`)
+- [x] GPU kernel fusion (`kernel_fusion::KernelFusedAdam`) — fused momentum/variance/parameter-update
+      kernels, tensor-core-aware
+- [x] SIMD optimizations, cache-friendly layouts, aligned memory layout (`SIMDOptimizer`,
+      `CacheFriendlyAdam`, `LayoutOptimizedAdam`, `AlignedAllocator`)
+- [x] CPU offload (`CPUOffloadedOptimizer`) and lazy state allocation (`LazyAdam` — allocates moment
+      buffers only once the first gradient is seen, `lazy_state.rs`)
+
+## Cross-Framework Compatibility
+
+- [x] PyTorch-style (`PyTorchAdam`, `PyTorchAdamW`, `PyTorchSGD`, `PyTorchLRScheduler`)
+- [x] JAX/Optax-style (`JAXAdam`, `JAXAdamW`, `JAXSGD`, `JAXGradientTransformation`, `JAXChain`)
+- [x] TensorFlow-style (`TensorFlowAdam`, `TensorFlowAdamW`, `TensorFlowCosineDecay`)
+- [x] Universal cross-framework config converter (`CrossFrameworkConverter`, `UniversalOptimizerConfig`)
+
+## Tooling
+
+- [x] **Hyperparameter tuning** — native `BayesianOptimizer` + `MultiObjectiveOptimizer` +
+      `HyperparameterTuner` (this substantially satisfies the former "automatic hyperparameter tuning
+      integration" future item — see below; it is a built-in implementation, not an Optuna/Ray-Tune
+      integration)
+- [x] **Monitoring & recommendation** — `OptimizerMonitor`, `OptimizerSelector`, `ConvergenceIndicators`
+- [x] **Performance validation harness** — `PerformanceValidator` (correctness, convergence, memory,
+      regression, and distributed-training validation)
+- [x] **ONNX export** — `ONNXOptimizerExporter`
+- [x] **Optimizer surgery** — `optimizer_surgery` module (875 lines): migrates momentum/variance/EMA
+      state between Adam, AdamW, SGD, and Lion mid-training (module exists, not yet re-exported at
+      crate root)
 
 ---
 
 ## Testing
 
 ### Test Coverage
-
-- [x] **583 Unit Tests** - 100% pass rate
-- [x] **Optimizer Convergence** - Verify convergence on toy problems
-- [x] **Scheduler Validation** - Check learning rate schedules
-- [x] **Gradient Clipping** - Verify clipping correctness
-- [x] **State Save/Load** - Round-trip state verification
-- [x] **Memory Leak Detection** - No memory leaks
-- [x] **Numerical Stability** - Edge cases (zero gradients, NaN, Inf)
-- [x] **Quantization Accuracy** - 8-bit and 4-bit optimizer convergence tests
-- [x] **Schedule-Free Equivalence** - Verify Schedule-Free matches scheduled training
-- [x] **ZeRO Round-Trip** - State consistency across ZeRO stage transitions
+- [x] **~960 tests** for this crate — 100% pass rate (workspace-wide: 18,102 passed / 0 failed / 119 skipped)
+- [x] **49 doctests passed, 0 failed, 1 ignored**
+- [x] **0 clippy warnings, 0 rustdoc warnings**
+- [x] **Optimizer Convergence** — verify convergence on toy problems
+- [x] **Scheduler Validation** — check learning rate schedules
+- [x] **Gradient Clipping** — verify clipping correctness
+- [x] **State Save/Load** — round-trip state verification
+- [x] **Numerical Stability** — edge cases (zero gradients, NaN, Inf)
+- [x] **Quantization Accuracy** — 8-bit and 4-bit optimizer convergence tests
+- [x] **Schedule-Free Equivalence** — verify Schedule-Free matches scheduled training
+- [x] **ZeRO Round-Trip** — state consistency across ZeRO stage transitions
 
 ### Test Categories
-
-1. **Correctness Tests** - Optimizer updates match reference implementations
-2. **Convergence Tests** - Optimizers converge on convex problems
-3. **State Tests** - Save/load produces identical state
-4. **Quantization Tests** - Quantized optimizers achieve acceptable accuracy
-5. **Distributed Tests** - ZeRO stages maintain training equivalence
-6. **Edge Case Tests** - Zero gradients, NaN/Inf, empty parameter groups
+1. **Correctness Tests** — optimizer updates match reference implementations
+2. **Convergence Tests** — optimizers converge on convex problems
+3. **State Tests** — save/load produces identical state
+4. **Quantization Tests** — quantized optimizers achieve acceptable accuracy
+5. **Distributed Tests** — ZeRO stages maintain training equivalence
+6. **Edge Case Tests** — zero gradients, NaN/Inf, empty parameter groups
 
 ---
 
 ## Known Limitations
 
-- Shampoo matrix root computation is expensive for very large layers (>4096 dims)
-- ZeRO stage 3 with CPU offload adds host-device transfer overhead
-- 4-bit quantized optimizer may diverge on tasks with very noisy gradients
+- Shampoo-style Kronecker-factored preconditioning is **not implemented** (see Second-Order Methods
+  correction above).
+- `GENIE`, `LoRARITE`, and `SOFO` are simplified reference implementations, not full paper-fidelity
+  ports; some introspection getters return placeholder/empty values.
+- ~27 modules carry an explicit `#[allow(dead_code)]` "research-stage module" annotation (e.g.
+  `kernel_fusion`, `federated`, `hyperparameter_tuning`, `zero::zero_stage1`, `came`, `prodigy`,
+  `advanced_2025_research`) — these compile and are tested, but some fields/methods are scaffolding
+  not yet on every active call path.
+- ZeRO stage 3 with CPU offload adds host-device transfer overhead.
+- 4-bit quantized optimizers may diverge on tasks with very noisy gradients.
+- AdaGrad and RMSProp are **not implemented** despite being listed in earlier revisions of this document.
 
 ---
 
 ## Future Enhancements
 
 ### High Priority
-- [ ] Additional emerging optimizers as they appear (2025+)
-  - **Refinement needed:** List specific optimizers: SOAP, Muon, Adam-mini, Grokfast?
-- [ ] Enhanced distributed optimizer state management with async overlap
-  - **Refinement needed:** async overlap strategy? Overlap with which compute phases?
-- [ ] Automatic hyperparameter tuning integration
-  - **Refinement needed:** which tuning framework? Optuna, Ray Tune, custom Bayesian search?
+- [ ] Additional emerging optimizers as they appear (2025+): SOAP and Adam-mini/Grokfast-style methods
+      are still **not implemented** (Muon, previously on this list, is now done — see above)
+- [x] ~~Enhanced distributed optimizer state management with async overlap~~ — substantially addressed
+      by `zero::zero_stage3_overlap` (async prefetch/overlap of communication with backward-pass compute)
+- [x] ~~Automatic hyperparameter tuning integration~~ — addressed via the native `hyperparameter_tuning`
+      module (Bayesian + multi-objective search); not integrated with external frameworks
+      (Optuna/Ray Tune) if that specific integration is still desired
 
 ### Performance
-- [ ] Fused quantized optimizer kernels for GPU
-- [x] **Lazy optimizer state allocation** — `LazyAdam` allocates moment buffers only when first gradient is seen (`lazy_state.rs`)
-- [ ] Better async communication overlap for ZeRO stage 3
+- [~] Fused quantized optimizer kernels for GPU — `kernel_fusion::KernelFusedAdam` provides fused,
+      tensor-core-aware GPU kernels for the Adam family, but they are not yet specialized for 4-bit/8-bit
+      quantized state specifically
+- [x] **Lazy optimizer state allocation** — `LazyAdam` allocates moment buffers only when first gradient
+      is seen (`lazy_state.rs`)
+- [x] ~~Better async communication overlap for ZeRO stage 3~~ — see `zero::zero_stage3_overlap` above
 
 ### Features
-- [x] **Cyclic LR with decay** — `CyclicLrScheduler` (Triangular/Triangular2/ExpRange) + `OneCycleLrScheduler` (`cyclic_decay.rs`)
-- [x] **Automatic LR Finder** — `LrFinder` + `LrFinderConfig` + `LrFinderResult` + `find_optimal_lr` (`lr_finder.rs`)
-- [ ] Optimizer surgery (change optimizer type mid-training)
-- [ ] Per-layer quantization bit-width selection
+- [x] **Cyclic LR with decay** — `CyclicLrScheduler` (Triangular/Triangular2/ExpRange) +
+      `OneCycleLrScheduler` (`cyclic_decay.rs`)
+- [x] **Automatic LR Finder** — `LrFinder` + `LrFinderConfig` + `LrFinderResult` + `find_optimal_lr`
+      (`lr_finder.rs`)
+- [x] **Optimizer surgery** (change optimizer type mid-training) — `optimizer_surgery.rs` (875 lines);
+      not yet re-exported at crate root
+- [x] **Per-layer quantization bit-width selection** — `per_layer_quant.rs` (807 lines); not yet
+      re-exported at crate root
+
+### Housekeeping (new)
+- [ ] Delete the 3 stray `*.prelude_fix` backup files in `src/`
+- [ ] Remove or re-wire the 4 orphaned `.rs` files not declared as modules anywhere
+      (`adafactor.rs`, `adafisher.rs`, `advanced_benchmarking.rs`, `second_order_new.rs`)
+- [ ] Re-export `fsdp`, `optimizer_surgery`, and `per_layer_quant` at the crate root
+- [ ] Keep an eye on `convergence.rs` (1,964 lines) — closest file to the 2,000-line refactor threshold;
+      consider splitting with `splitrs` if it grows further
 
 ---
 
@@ -714,32 +515,45 @@ let optimizer = ZeroOptimizer::new(
 
 ### Code Standards
 - **Use trustformers-core abstractions only** (no external deps directly)
-- **File size limit:** <2000 lines per file
-- **Error handling:** Use `Result<T, TrustformersError>` (no unwrap)
-- **Testing:** Convergence tests required for new optimizers
+- **File size limit:** <2000 lines per file (currently satisfied crate-wide; see Housekeeping above)
+- **Error handling:** `Result<T, TrustformersError>` from `trustformers-core`; **0 `.unwrap()`** in
+  production or test source, verified today
+- **Testing:** convergence tests required for new optimizers
 - **Naming:** snake_case for all identifiers
 
 ### Adding a New Optimizer
 
 **Checklist:**
 
-1. **Implement Optimizer Trait**
+1. **Implement the trait hierarchy** — the real `StatefulOptimizer` trait (`src/traits.rs`) uses
+   associated types, not the simplified signature shown in earlier revisions of this document:
    ```rust
-   impl StatefulOptimizer for NewOptimizer {
-       fn step(&mut self) -> Result<()>;
-       fn zero_grad(&mut self) -> Result<()>;
-       fn state_dict(&self) -> StateDict;
-       fn load_state_dict(&mut self, state: StateDict) -> Result<()>;
+   pub trait StatefulOptimizer: Optimizer {
+       type Config: Clone + Send + Sync;
+       type State: Send + Sync;
+
+       fn config(&self) -> &Self::Config;
+       fn state(&self) -> &Self::State;
+       fn state_mut(&mut self) -> &mut Self::State;
+       fn state_dict(&self) -> Result<HashMap<String, Tensor>>;
+       fn load_state_dict(&mut self, state: HashMap<String, Tensor>) -> Result<()>;
+       fn memory_usage(&self) -> StateMemoryStats;
+       fn reset_state(&mut self);
+       fn num_parameters(&self) -> usize;
    }
    ```
+   `step`/`zero_grad`/`update`/`get_lr`/`set_lr` come from the supertrait `Optimizer`
+   (`trustformers_core::traits::Optimizer`), which every optimizer must also implement directly.
 
-2. **Add State Buffers** - Momentum buffers, variance buffers, per-parameter state
+2. **Add state buffers** — momentum buffers, variance buffers, per-parameter state (`HashMap<String, Vec<f32>>`
+   is the common pattern used throughout this crate)
 
-3. **Implement Update Rule** - Follow algorithm from paper, handle edge cases
+3. **Implement the update rule** — follow the algorithm from the paper, handle edge cases (NaN/Inf,
+   zero gradients)
 
-4. **Add Tests** - Convergence test, state save/load, reference comparison
+4. **Add tests** — convergence test, state save/load round-trip, reference comparison
 
-5. **Document** - Algorithm, hyperparameter recommendations, use cases, example
+5. **Document** — algorithm, hyperparameter recommendations, use cases, a doctested example
 
 ### Build & Test Commands
 
@@ -759,9 +573,13 @@ cargo check -p trustformers-optim --all-features
 
 ---
 
-**Last Updated:** 2026-06-24 - v0.1.3 Development
-**Status:** Production-ready optimization
-**Tests:** 583 tests, 100% pass rate
-**Optimizers:** SGD, Adam, AdamW, RAdam, LAMB, AdaFactor, Lion, Muon, CAME, MicroAdam, BGE-Adam, HN-Adam, AdEMAMix, Schedule-Free variants, Sophia, Shampoo, and more
-**Quantized:** 4-bit and 8-bit Adam/AdamW
-**Distributed:** ZeRO stages 1, 2, and 3
+**Last Updated:** 2026-07-02 — v0.1.4
+**Status:** Stable
+**Tests:** ~960 tests for this crate (workspace: 18,102 passed / 0 failed / 119 skipped); 49 doctests
+passed, 0 failed, 1 ignored
+**Optimizers:** SGD, Adam, AdamW, RAdam, NAdam, AdaBelief, LAMB, AdaFactor, AdaFisher, AdaMaxPlus, Adan,
+Lion, Muon, CAME, MicroAdam, BGE-Adam, HN-Adam, AdEMAMix, Prodigy, NovoGrad, LancBiO, AMacP, EVA,
+Schedule-Free Adam/SGD, Sophia, L-BFGS, Newton-CG, SSBFGS, SSBroyden, and more (GENIE/LoRA-RITE/SOFO as
+simplified reference implementations)
+**Quantized:** 8-bit Adam/AdamW, 4-bit Adam, per-layer bit-width selection
+**Distributed:** ZeRO stages 1/2/3 (incl. async-overlap stage 3), FSDP-style sharding, multi-node training

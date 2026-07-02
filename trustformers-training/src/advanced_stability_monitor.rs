@@ -167,7 +167,6 @@ pub struct StabilityScore {
 }
 
 /// Advanced stability monitor
-#[allow(dead_code)]
 pub struct AdvancedStabilityMonitor {
     config: AdvancedStabilityConfig,
     loss_history: VecDeque<f32>,
@@ -177,7 +176,6 @@ pub struct AdvancedStabilityMonitor {
     predicted_anomalies: Vec<PredictiveAnomaly>,
     landscape_analyses: VecDeque<LossLandscapeAnalysis>,
     stability_scores: VecDeque<StabilityScore>,
-    #[allow(dead_code)]
     recovery_effectiveness: HashMap<PreventiveAction, f32>,
     pattern_detector: PatternDetector,
 }
@@ -1067,7 +1065,6 @@ impl AdvancedStabilityMonitor {
 
 /// Pattern detector for complex training dynamics
 pub struct PatternDetector {
-    #[allow(dead_code)]
     pattern_library: HashMap<String, Pattern>,
 }
 

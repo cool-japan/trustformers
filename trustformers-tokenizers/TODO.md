@@ -2,42 +2,46 @@
 
 ## Overview
 
-The `trustformers-tokenizers` crate provides comprehensive text tokenization for the TrustformeRS ecosystem.
-It implements multiple tokenization algorithms used by modern transformer models, with support for training
-custom tokenizers, batch processing, and Python bindings for seamless integration with existing workflows.
+The `trustformers-tokenizers` crate provides text tokenization for the TrustformeRS ecosystem.
+It implements 24 concrete tokenizer types (plus a standalone multimodal tokenizer) covering
+general-purpose subword algorithms, language-specific tokenizers, and domain-specific tokenizers,
+along with vocabulary training, batch processing, vocabulary intelligence tooling, and optional
+Python bindings.
 
 **Key Responsibilities:**
-- Tokenizer implementations (BPE, WordPiece, SentencePiece, Character-level)
+- Tokenizer implementations (BPE, WordPiece, SentencePiece/Unigram, TikToken, Fairseq, Character-level, CANINE, Regex, Custom)
 - Encoding (text → token IDs) and decoding (token IDs → text)
-- Vocabulary management and training
+- Vocabulary management and training (`training::{BPETrainer, WordPieceTrainer, UnigramTrainer}`)
 - Special token handling ([CLS], [SEP], [PAD], [MASK], [UNK])
-- Batch processing with padding and truncation
-- Python bindings (PyO3) for drop-in replacement of HuggingFace tokenizers
-- Migration support from other tokenizer libraries
+- Batch processing with padding via `ParallelTokenizer`/`BatchTokenizer`
+- Python bindings (PyO3, `python` feature)
+- Migration reference docs from other tokenizer libraries (`docs/migration/`)
 
 ---
 
 ## Current Status
 
-**Version:** 0.1.3 | **Date:** 2026-06-24 | **Status:** Stable
+**Version:** 0.1.4 | **Date:** 2026-07-02 | **Status:** Stable
 
 ### Implementation Status
-✅ **STABLE** - All major tokenizers implemented and tested
-✅ **COMPREHENSIVE TEST COVERAGE** - 500 tests with 100% pass rate
-✅ **PYTHON BINDINGS** - Complete PyO3 integration with pip-installable package
-✅ **ZERO COMPILATION ERRORS** - Clean compilation across all platforms
-✅ **HUGGINGFACE COMPATIBLE** - Drop-in replacement for HF tokenizers
-✅ **50+ TOKENIZERS** - General-purpose, language-specific, domain-specific
-✅ **ZERO-COPY VOCAB** - Memory-mapped vocabulary access
-✅ **SIMD ACCELERATION** - Vectorized encoding operations
-✅ **ASYNC BATCH PROCESSING** - Non-blocking tokenization via scirs2-core
-✅ **VOCABULARY INTELLIGENCE** - Semantic analysis, cross-lingual coverage
+✅ **STABLE** — 24 tokenizer types implemented and tested, 0 genuine stub/placeholder implementations
+✅ **COMPREHENSIVE TEST COVERAGE** — ~500 tests in this crate, 100% pass rate
+⚠️ **PYTHON BINDINGS** — PyO3 source exists behind the `python` feature (`src/python.rs`) and a Python package exists (`python/trustformers_tokenizers/`), but `Cargo.toml` no longer builds a `cdylib` here (moved to `trustformers-py`), while this crate's own `pyproject.toml` still targets a `maturin` extension build — see Python Bindings below
+✅ **ZERO COMPILATION ERRORS** — clean compilation; workspace-wide 0 clippy warnings, 0 rustdoc warnings (2026-07-01)
+✅ **HUGGINGFACE `.json` COMPATIBLE** — `TokenizerImpl` wraps the real upstream `tokenizers` crate (re-exported via `trustformers-core`), not a reimplementation
+✅ **24 TOKENIZER TYPES + MULTIMODAL** — general-purpose, language-specific (Arabic/Chinese/Japanese/Korean/Thai), domain-specific (Chemical/Music/Math/Code/BIO/Multimodal)
+✅ **ZERO-COPY VOCAB** — memory-mapped vocabulary access (`ZeroCopyTokenizer`, `MmapVocab`, `memmap2`)
+✅ **SIMD ACCELERATION** — AVX2 intrinsics for character classification (x86_64-only; no ARM/NEON path yet)
+✅ **ASYNC TOKENIZATION** — non-blocking encode/decode via `tokio` (`AsyncTokenizer`); CPU-parallel batches separately via `scirs2-core`
+✅ **VOCABULARY INTELLIGENCE** — `VocabIntelligenceAnalyzer` (semantic/compression/cross-lingual/domain/evolution analysis + scoring)
+⚠️ **PURE-RUST HYGIENE FOLLOW-UP** — the `hangul = "0.1.3"` dependency has no references anywhere in `src/` (Korean Hangul decomposition uses inline Unicode code-point arithmetic instead); candidate for removal or wiring-in
 
 ### Test Metrics
-- **Test Count:** 500 unit tests
+- **Test Count:** ~500 tests in this crate (workspace-wide: 18,102 passed / 0 failed / 119 skipped — verified 2026-07-01)
 - **Pass Rate:** 100%
-- **Coverage:** Extensive coverage of encoding/decoding, special tokens, edge cases, language-specific, domain-specific
-- **Performance Tests:** Benchmarks for throughput and memory usage
+- **Public API Surface:** ~1,339 `pub fn`/`struct`/`enum`/`trait` items
+- **SLoC:** 51,372 (`tokei src/`, 68 files, 2026-07-01)
+- **Coverage:** Encoding/decoding, special tokens, edge cases, language-specific, domain-specific
 
 ---
 
@@ -45,17 +49,11 @@ custom tokenizers, batch processing, and Python bindings for seamless integratio
 
 ### TikToken
 
-**Used by:** GPT-4, ChatGPT, Codex, Claude (cl100k_base, p50k_base, r50k_base)
+**Used by:** GPT-4, ChatGPT, Codex, GPT-2/GPT-3 (byte-level BPE)
 
-- ✅ **Algorithm**
-  - Byte-level BPE with tiktoken-compatible encodings
-  - cl100k_base (GPT-4/ChatGPT)
-  - p50k_base / r50k_base (Codex, GPT-3)
-  - o200k_base (latest OpenAI models)
-
-- ✅ **Compatibility**
-  - Drop-in replacement for the `tiktoken` Python library
-  - Exact token count matching
+- ✅ **Built-in presets:** `TiktokenTokenizer::cl100k_base()` (GPT-3.5/GPT-4), `TiktokenTokenizer::r50k_base()` (GPT-2)
+- ✅ **Custom encodings:** `TiktokenTokenizer::from_tiktoken_file(...)` loads any `.tiktoken` merge-rank file — this is how `p50k_base`/`o200k_base`/other encodings can be used; they are **not** shipped as named convenience constructors today
+- ✅ **`encode_with_special_tokens`**, `special_tokens()`, `is_special_token(id)`
 
 ---
 
@@ -63,30 +61,30 @@ custom tokenizers, batch processing, and Python bindings for seamless integratio
 
 **Used by:** fairseq NMT/NLG models
 
-- ✅ **Algorithm**
-  - Dictionary-based tokenization
-  - Moses-style pre-tokenization
-  - Subword NMT integration (BPE merge rules)
+- ✅ **Dictionary loading:** `FairseqTokenizer::from_file` parses fairseq's plain-text `dict.txt` format (`token frequency` per line)
+- ✅ **Special tokens:** fairseq's fixed IDs — `<pad>`=0, `</s>`=1, `<unk>`=2, `<s>`=3
+- Note: this is a dictionary/vocabulary loader, not a full fairseq preprocessing pipeline — there is no Moses tokenizer or subword-nmt BPE-merge step bundled; upstream text must already be pre-segmented the way the dictionary expects
 
 ---
 
 ### Language-Specific Tokenizers
 
-- ✅ **Arabic** — Morphological segmentation, RTL handling, Farasa integration
-- ✅ **Chinese** — Character-based, jieba word segmentation, radical decomposition
-- ✅ **Japanese** — MeCab/SudachiPy, kanji/kana normalization, reading variants (`mecab` feature)
-- ✅ **Korean** — Morpheme-based (Mecab/Komoran), Hangul decomposition
+- ✅ **Arabic** (`ArabicTokenizer`) — diacritic (tashkeel) removal, Arabic letter-form normalization, RTL-aware word segmentation, root/pattern morphological analysis (`analyze_morphology`); no external Farasa dependency
+- ✅ **Chinese** (`ChineseTokenizer`) — in-crate pure-Rust dictionary + character-frequency segmentation; the `jieba-rs` dependency was removed as unused dead weight (COOLJAPAN Pure-Rust hygiene pass)
+- ✅ **Japanese** (`JapaneseTokenizer`) — word/morpheme/character modes, katakana↔hiragana normalization, hiragana/katakana/kanji classification; morpheme mode uses real MeCab under the `mecab` feature, otherwise falls back to word-mode segmentation (no SudachiPy integration)
+- ✅ **Korean** (`KoreanTokenizer`) — syllable/jamo/word modes, Hangul syllable↔jamo decomposition via direct Unicode arithmetic (`0xAC00` base), Hanja detection (no Mecab/Komoran morphological analyzer integration)
+- ✅ **Thai** (`ThaiTokenizer`) — word/syllable/character modes, Thai-numeral normalization, tone-mark handling
 
 ---
 
 ### Domain-Specific Tokenizers
 
-- ✅ **Chemical** — SMILES notation, molecular formulae, IUPAC names
-- ✅ **Music** — ABC notation, MusicXML, chord/tempo symbols
-- ✅ **Math** — LaTeX, MathML, expression tree tokenization
-- ✅ **Code** — Language-aware (Python, Rust, JavaScript, C/C++, SQL)
-- ✅ **BIO** — FASTA/FASTQ, amino acids, gene ontology terms
-- ✅ **Multimodal** — Image patches, audio frames, video token interleaving
+- ✅ **Chemical** (`ChemicalTokenizer`) — SMILES notation, molecular formulae, IUPAC name tokens
+- ✅ **Music** (`MusicTokenizer`) — ABC notation, MusicXML, chord/tempo symbols
+- ✅ **Math** (`MathTokenizer`) — LaTeX, MathML, expression-tree tokenization
+- ✅ **Code** (`CodeTokenizer`) — language-aware tokenization via the `Language` enum (Rust, Python, JavaScript, TypeScript, Java, C#, C++, C, Go, Ruby, PHP, Swift, Kotlin, Scala, Haskell, ...)
+- ✅ **BIO** (`BioTokenizer`) — FASTA/FASTQ, amino acids, gene ontology terms
+- ✅ **Multimodal** (`MultimodalTokenizer`) — image patches, audio frames, video/table/graph token interleaving (standalone API — does not implement the shared `Tokenizer` trait like the other types above)
 
 ---
 
@@ -94,38 +92,21 @@ custom tokenizers, batch processing, and Python bindings for seamless integratio
 
 **Used by:** GPT-2, GPT-Neo, GPT-J, RoBERTa, BART, LLaMA (variants)
 
-- ✅ **Algorithm**
-  - Byte-level encoding (all text representable as bytes)
-  - Merge operations based on frequency
-  - Vocabulary construction from training corpus
-  - Regex-based pre-tokenization (split on spaces, punctuation)
-
-- ✅ **Implementation Details**
-  - Efficient merge table lookup with HashMap
-  - Byte-level fallback for unknown characters
-  - Support for custom regex patterns
-  - Vocabulary size configurable (typically 50k-100k)
-
-- ✅ **Features**
-  - Fast encoding with O(n log n) complexity
-  - Reversible tokenization (perfect decoding)
-  - Handles out-of-vocabulary words gracefully
-  - Unicode-aware with byte-level encoding
-
-- ✅ **Training**
-  - Train from text files or iterators
-  - Configurable vocabulary size
-  - Minimum frequency threshold
-  - Special token preservation
+- ✅ Byte-level encoding, merge-table lookup (`HashMap`), regex-free byte fallback for unknown characters
+- ✅ `from_files(vocab_path, merges_path)` and `from_roberta_files(vocab_path, merges_path)` loaders
+- ✅ `tokenize_with_offsets` for character-offset tracking
+- ✅ Training via `training::BPETrainer`
 
 **Example:**
 ```rust
+use trustformers_core::traits::Tokenizer;
 use trustformers_tokenizers::BPETokenizer;
 
-let tokenizer = BPETokenizer::from_pretrained("gpt2")?;
-let tokens = tokenizer.encode("Hello, world!", true)?;
-let text = tokenizer.decode(&tokens.input_ids, true)?;
+let tokenizer = BPETokenizer::from_files("vocab.json", "merges.txt")?;
+let encoding = tokenizer.encode("Hello, world!")?;
+let text = tokenizer.decode(&encoding.input_ids)?;
 ```
+*(there is no `BPETokenizer::from_pretrained` — load vocab/merges files directly, or use `TokenizerImpl::from_file`/`from_pretrained` for a full `tokenizer.json`)*
 
 ---
 
@@ -133,42 +114,21 @@ let text = tokenizer.decode(&tokens.input_ids, true)?;
 
 **Used by:** BERT, DistilBERT, ELECTRA, ALBERT
 
-- ✅ **Algorithm**
-  - Greedy longest-match-first tokenization
-  - Subword units marked with ## prefix for continuations
-  - Special tokens: [CLS], [SEP], [MASK], [PAD], [UNK]
-  - Maximum input length (typically 512 tokens)
-
-- ✅ **Implementation Details**
-  - Trie-based vocabulary lookup for efficiency
-  - ## prefix for subword continuations (e.g., "playing" → "play", "##ing")
-  - [UNK] token for out-of-vocabulary words
-  - Case sensitivity options (cased vs uncased)
-
-- ✅ **Features**
-  - Segment embeddings support (sentence A vs sentence B)
-  - Token type IDs generation
-  - Attention mask generation
-  - Padding to maximum length or batch maximum
-
-- ✅ **Training**
-  - WordPiece model training from corpus
-  - Vocabulary construction with frequency counting
-  - Special token configuration
-  - Lowercase normalization option
+- ✅ Greedy longest-match-first tokenization, `##` continuation prefix, `[UNK]` fallback
+- ✅ `encode()` automatically wraps input as `[CLS] ... [SEP]` with `token_type_ids = [0, 0, ...]`
+- ✅ `encode_pair()` produces `[CLS] A [SEP] B [SEP]` with `token_type_ids = [0,...,0,1,...,1]`
+- ✅ `from_pretrained(model_name)` checks local vocab-file path conventions first (`{model}/vocab.txt`, `{model}-vocab.txt`, ...), then falls back to small built-in vocabularies for `bert-base-uncased`/`bert-base-cased`/`distilbert-base-uncased` — it does not download from the Hugging Face Hub
+- ✅ `from_vocab_file(path, do_lower_case)` for a real local `vocab.txt`
 
 **Example:**
 ```rust
+use trustformers_core::traits::Tokenizer;
 use trustformers_tokenizers::WordPieceTokenizer;
 
-let tokenizer = WordPieceTokenizer::from_pretrained("bert-base-uncased")?;
-let encoding = tokenizer.encode_pair(
-    "First sentence.",
-    "Second sentence.",
-    true, // add special tokens
-)?;
-// encoding.input_ids: [CLS] First sentence . [SEP] Second sentence . [SEP]
-// encoding.token_type_ids: [0, 0, 0, 0, 0, 1, 1, 1, 1]
+let tokenizer = WordPieceTokenizer::from_vocab_file("vocab.txt", true)?;
+let encoding = tokenizer.encode_pair("First sentence.", "Second sentence.")?;
+// encoding.input_ids:      [CLS] First sentence . [SEP] Second sentence . [SEP]
+// encoding.token_type_ids: Some([0, 0, 0, 0, 0, 1, 1, 1, 1])
 ```
 
 ---
@@ -177,37 +137,17 @@ let encoding = tokenizer.encode_pair(
 
 **Used by:** T5, ALBERT, mBART, mT5, XLM-RoBERTa
 
-- ✅ **Algorithm**
-  - Unigram language model for tokenization
-  - Language-agnostic (no whitespace assumptions)
-  - Reversible tokenization (preserves all information)
-  - Subword regularization for better generalization
-
-- ✅ **Implementation Details**
-  - Probabilistic segmentation based on unigram LM
-  - Viterbi algorithm for most likely segmentation
-  - Sampling for subword regularization during training
-  - Support for both character and byte-level encoding
-
-- ✅ **Features**
-  - Multilingual support (no language-specific rules)
-  - Reversible (perfect round-trip encode/decode)
-  - Handles Chinese, Japanese, Korean without spaces
-  - Configurable sentence piece types (normal, unknown, control, user-defined)
-
-- ✅ **Training**
-  - Train from raw text (no pre-tokenization needed)
-  - EM algorithm for vocabulary construction
-  - Character coverage parameter (0.9995 for multilingual)
-  - Vocabulary pruning based on likelihood
+- ✅ Unigram language-model segmentation via Viterbi decoding
+- ✅ `from_model_file(path)` loads a real SentencePiece `.model` file
+- ⚠️ `from_pretrained(model_name_or_path)` **ignores its argument** and always builds a simplified built-in vocabulary — it does not fetch or parse the named model. Use `from_model_file` for real usage.
 
 **Example:**
 ```rust
+use trustformers_core::traits::Tokenizer;
 use trustformers_tokenizers::SentencePieceTokenizer;
 
-let tokenizer = SentencePieceTokenizer::from_pretrained("t5-base")?;
-let tokens = tokenizer.encode("▁Hello,▁world!", true)?;
-// Note: ▁ represents spaces in SentencePiece
+let tokenizer = SentencePieceTokenizer::from_model_file("t5.model")?;
+let encoding = tokenizer.encode("▁Hello,▁world!")?;
 ```
 
 ---
@@ -216,52 +156,21 @@ let tokens = tokenizer.encode("▁Hello,▁world!", true)?;
 
 **Used by:** Character-aware models, baseline experiments
 
-- ✅ **Algorithm**
-  - Simple character-by-character tokenization
-  - Each character is a token
-  - Optional byte-level encoding
+- ✅ Simple character-by-character tokenization, direct char→ID mapping
+- ✅ `CharTokenizer` — small vocabulary, O(n) encoding
 
-- ✅ **Implementation Details**
-  - Direct character to ID mapping
-  - Fast encoding (O(n) complexity)
-  - Small vocabulary (typically <300 for ASCII, <100k for Unicode)
+### CANINE, Regex, Custom, and Zero-Copy Tokenizers
 
-- ✅ **Use Cases**
-  - Baseline models
-  - Character-aware neural models
-  - Low-resource languages
-  - Morphologically rich languages
+- ✅ **CANINE** (`CanineTokenizer`) — vocabulary-free character-hash tokenizer (CANINE architecture: hashing + downsampling config)
+- ✅ **Regex** (`RegexTokenizer`) — configurable `Regex`/`RegexSet` splitting with custom patterns and priorities
+- ✅ **Custom vocab** (`CustomVocabTokenizer` via `CustomVocabTokenizerBuilder`) — `.vocab_from_map(...)`/`.vocab_from_file(...)`, `.unk_token(...)`, `.special_token(...)`, `.max_length(...)`, `.build()`
+- ✅ **Custom format** (`CustomFormatTokenizer`) — JSON-based tokenizer definitions with configurable normalization/pre-tokenization/post-processing rules
+- ✅ **Zero-copy** (`ZeroCopyTokenizer`, `MmapVocab`) — `memmap2`-backed vocabularies for large-scale, low-memory deployments
 
----
+### HuggingFace-Format Wrapper
 
-### AutoTokenizer
-
-**Automatic tokenizer detection and loading**
-
-- ✅ **Features**
-  - Detect tokenizer type from model name or config
-  - Automatic loading from HuggingFace Hub
-  - Support for local tokenizer files
-  - Fallback to default tokenizer if detection fails
-
-- ✅ **Supported Sources**
-  - HuggingFace model names (e.g., "bert-base-uncased")
-  - Local directories with tokenizer.json
-  - Explicit tokenizer type specification
-
-**Example:**
-```rust
-use trustformers_tokenizers::AutoTokenizer;
-
-// Automatic detection from model name
-let tokenizer = AutoTokenizer::from_pretrained("bert-base-uncased")?;
-
-// Explicit type
-let tokenizer = AutoTokenizer::from_pretrained_with_type(
-    "custom-model",
-    TokenizerType::WordPiece,
-)?;
-```
+- ✅ **`TokenizerImpl`** — thin wrapper around the real upstream `tokenizers` crate (`trustformers_core::tokenizer_backend`); `from_file(path)` loads any real `tokenizer.json`; `from_pretrained(name)` only resolves a local HF cache directory (`$HF_HOME`/`$TRANSFORMERS_CACHE`/`~/.cache/huggingface/transformers`) — no Hub download
+- ✅ **`TokenizerWrapper`** — enum dispatching across `WordPiece`/`BPE`/`Unigram`/`Char`/`HuggingFace` variants behind the shared `Tokenizer` trait
 
 ---
 
@@ -271,106 +180,58 @@ let tokenizer = AutoTokenizer::from_pretrained_with_type(
 
 - ✅ **Single Text Encoding**
   ```rust
-  let encoding = tokenizer.encode("Hello, world!", add_special_tokens)?;
+  let encoding = tokenizer.encode("Hello, world!")?;
   // encoding.input_ids: Vec<u32>
-  // encoding.attention_mask: Vec<u32>
+  // encoding.attention_mask: Vec<u8>
   // encoding.token_type_ids: Option<Vec<u32>>
   ```
+  (the `Tokenizer` trait's `encode` takes only the text — there is no separate `add_special_tokens` boolean parameter; special-token insertion, if any, is baked into each tokenizer's own `encode` implementation)
 
 - ✅ **Text Pair Encoding**
   ```rust
-  let encoding = tokenizer.encode_pair(text_a, text_b, add_special_tokens)?;
-  // For BERT: [CLS] text_a [SEP] text_b [SEP]
-  // token_type_ids: [0, ..., 0, 1, ..., 1]
+  let encoding = tokenizer.encode_pair(text_a, text_b)?;
   ```
 
 - ✅ **Batch Encoding**
   ```rust
-  let encodings = tokenizer.encode_batch(&texts, add_special_tokens)?;
-  // Returns Vec<Encoding> with automatic padding
+  use trustformers_tokenizers::ParallelTokenizer;
+  let parallel = ParallelTokenizer::new(tokenizer);
+  let encodings = parallel.encode_batch(&texts)?;          // Vec<TokenizedInput>
+  let padded = parallel.encode_batch_padded(&texts)?;      // BatchedTokenizedInput
   ```
 
 ### Decoding (Token IDs → Text)
 
 - ✅ **Single Sequence Decoding**
   ```rust
-  let text = tokenizer.decode(&token_ids, skip_special_tokens)?;
-  // Reconstructs original text (or close approximation)
+  let text = tokenizer.decode(&token_ids)?;
   ```
+  (single-argument — there is no `skip_special_tokens` flag on the shared trait; behavior is implementation-defined per tokenizer)
 
 - ✅ **Batch Decoding**
   ```rust
-  let texts = tokenizer.decode_batch(&token_id_sequences, skip_special_tokens)?;
+  let texts = parallel.decode_batch(&ids_batch)?;
   ```
-
-- ✅ **Skip Special Tokens**
-  - Optionally remove [CLS], [SEP], [PAD], [MASK] from output
-  - Useful for generation tasks
 
 ### Padding and Truncation
 
-- ✅ **Padding Strategies**
-  - Pad to maximum length in batch
-  - Pad to fixed length
-  - No padding (variable length)
-  - Pad to multiple of N (for TPU optimization)
-
-- ✅ **Truncation Strategies**
-  - Truncate to maximum length
-  - Longest-first (for text pairs)
-  - Only-first (truncate first sequence only)
-  - Only-second (truncate second sequence only)
-
-- ✅ **Configuration**
-  ```rust
-  let encoding = tokenizer
-      .encode("Long text...", true)?
-      .truncate(max_length, TruncationStrategy::LongestFirst)
-      .pad(max_length, PaddingStrategy::MaxLength);
-  ```
+- ✅ **`BatchedTokenizedInput`** (`input_ids: Vec<Vec<u32>>`, `attention_mask: Vec<Vec<u8>>`, `token_type_ids: Option<Vec<Vec<u32>>>`) — produced by `ParallelTokenizer::encode_batch_padded`
+- ✅ **Framework-specific strategies** — `PaddingStrategy`/`TruncationStrategy` enums exist under the `pytorch` feature (`PyTorchPaddingStrategy`/`TruncationStrategy`), with parallel `GpuPaddingStrategy` (`gpu`), `TfPaddingStrategy`/`TfTruncationStrategy` (`tensorflow`), and `JaxPaddingStrategy`/`JaxTruncationStrategy` (`jax`) — there is **no** default-feature, framework-agnostic `.pad()`/`.truncate()` builder chain on `TokenizedInput` itself
 
 ### Special Token Handling
 
-- ✅ **Standard Special Tokens**
-  - `[CLS]` / `<s>`: Start of sequence (classification token)
-  - `[SEP]` / `</s>`: Separator between sequences
-  - `[PAD]` / `<pad>`: Padding token (ignored in attention)
-  - `[MASK]` / `<mask>`: Masking token for MLM tasks
-  - `[UNK]` / `<unk>`: Unknown token (out-of-vocabulary)
-
-- ✅ **Custom Special Tokens**
-  - Add custom tokens (e.g., `<extra_id_0>` for T5)
-  - Preserve tokens during tokenization
-  - Special token IDs accessible via API
-
-- ✅ **Token Addition**
-  ```rust
-  tokenizer.add_special_tokens(&["<task1>", "<task2>"])?;
-  tokenizer.add_tokens(&["TrustformeRS", "Rust"])?; // regular tokens
-  ```
+- ✅ **Standard Special Tokens** — `[CLS]`/`<s>`, `[SEP]`/`</s>`, `[PAD]`/`<pad>`, `[MASK]`/`<mask>`, `[UNK]`/`<unk>`. Language-specific tokenizers (Japanese/Arabic/Chinese/Korean/Thai/Code/...) expose a dedicated `XxxTokenizerConfig` struct for this; `WordPieceTokenizer`/`BPETokenizer` currently hardcode their special-token strings inside `new()` (not yet exposed as a configurable struct)
+- ✅ **`SpecialTokenManager`** (`special_tokens.rs`) — advanced template rendering with typed placeholders (`PlaceholderToken`/`PlaceholderType`), validation, and transformation hooks
+- Note: the shared `Tokenizer` trait itself has no generic `add_special_tokens`/`add_tokens` methods — extending a vocabulary with new tokens is per-implementation (e.g. `ZeroCopyBuilder::add_tokens_from_map`, or constructing a new vocab/tokenizer)
 
 ### Attention Mask Generation
 
-- ✅ **Automatic Generation**
-  - 1 for real tokens, 0 for padding
-  - Generated automatically during encoding
-  - Compatible with transformer attention
-
-- ✅ **Custom Masks**
-  - Causal masks for autoregressive models
-  - Prefix masks for prefix LM
-  - Bidirectional masks for encoder models
+- ✅ **Automatic Generation** — every built-in `encode`/`encode_pair` implementation fills `attention_mask` with `1`s for the tokens it produces (there is no padding-aware mask generation until a batch is padded via `ParallelTokenizer`/`BatchedTokenizedInput`)
 
 ### Token Type IDs (Segment Embeddings)
 
-- ✅ **Sentence Pair Support**
-  - 0 for first sequence
-  - 1 for second sequence
-  - Used in BERT-style models
-
-- ✅ **Automatic Generation**
-  - Generated during `encode_pair`
-  - Consistent with model expectations
+- ✅ **Sentence Pair Support** — `0` for first sequence, `1` for second sequence (verified real in `WordPieceTokenizer::encode_pair`)
+- ✅ **Automatic Generation** — generated during `encode`/`encode_pair` for WordPiece; other tokenizers may leave `token_type_ids: None` (e.g. `BPETokenizer::encode_pair` just concatenates the two texts with a space and re-encodes as a single sequence — check the specific tokenizer's implementation before relying on segment IDs)
 
 ---
 
@@ -378,69 +239,46 @@ let tokenizer = AutoTokenizer::from_pretrained_with_type(
 
 ### Vocabulary Construction
 
-- ✅ **From Training**
-  - Build vocabulary from corpus
-  - Frequency-based selection
-  - Merge operations (BPE)
-  - Likelihood-based pruning (SentencePiece)
+- ✅ **From Training** — `training::{BPETrainer, WordPieceTrainer, UnigramTrainer}` build a vocabulary from a `&[String]` corpus
+- ✅ **From Files** — `BPETokenizer::from_files`, `WordPieceTokenizer::from_vocab_file`, `SentencePieceTokenizer::from_model_file`, `FairseqTokenizer::from_file`
 
-- ✅ **From Pretrained**
-  - Load vocabulary from file (vocab.txt, vocab.json)
-  - Compatible with HuggingFace format
-  - Automatic format detection
+### Vocabulary Operations (via the `Vocab` type and the `Tokenizer` trait)
 
-### Vocabulary Operations
-
-- ✅ **Lookup**
-  - Token → ID: `token_to_id(token)`
-  - ID → Token: `id_to_token(id)`
-  - Efficient HashMap-based lookup
-
-- ✅ **Modification**
-  - Add tokens: `add_tokens(tokens)`
-  - Add special tokens: `add_special_tokens(tokens)`
-  - Resize embeddings in model after adding tokens
-
-- ✅ **Statistics**
-  - Vocabulary size: `vocab_size()`
-  - Special token IDs: `pad_token_id()`, `unk_token_id()`, etc.
-  - Token frequency (if available)
+- ✅ **Lookup** — `token_to_id(token)` / `id_to_token(id)` on any `Tokenizer` impl
+- ✅ **Statistics** — `vocab_size()`, `get_vocab()` on any `Tokenizer` impl
+- ✅ **Flexible/Lazy vocabularies** — `FlexibleVocab`, `LazyVocab` (`vocab/vocab_extended.rs`) for deferred/streaming vocabulary loading
 
 ---
 
 ## Tokenizer Training
 
-### Training from Files
+### Training API
 
 ```rust
-use trustformers_tokenizers::BPETokenizer;
+use trustformers_tokenizers::training::{BPETrainer, TrainingConfig};
 
-let tokenizer = BPETokenizer::train_from_files(
-    &["corpus1.txt", "corpus2.txt"],
-    vocab_size: 50000,
+let config = TrainingConfig {
+    vocab_size: 30_000,
     min_frequency: 2,
-    special_tokens: vec!["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"],
-)?;
+    special_tokens: vec![
+        "[PAD]".into(), "[UNK]".into(), "[CLS]".into(), "[SEP]".into(), "[MASK]".into(),
+    ],
+    ..Default::default()
+};
+
+let trainer = BPETrainer::new(config);
+let texts: Vec<String> = /* corpus lines */ vec![];
+let tokenizer = trainer.train(&texts)?; // -> BPETokenizer
 ```
 
-### Training from Iterator
+`WordPieceTrainer` and `UnigramTrainer` mirror this `new(TrainingConfig) -> train(&[String]) -> Result<XxxTokenizer>` shape — there is no `TrainerBuilder`/fluent `.vocab_size(...)`/`.build()` API; configuration goes through the `TrainingConfig` struct (`vocab_size`, `min_frequency`, `special_tokens`, `end_of_word_suffix`, `max_input_chars_per_word`).
 
-```rust
-let texts = vec!["text 1", "text 2", ...];
-let tokenizer = BPETokenizer::train_from_iterator(
-    texts.iter(),
-    vocab_size: 30000,
-    min_frequency: 2,
-)?;
-```
+### Training Configuration (`TrainingConfig`)
 
-### Training Configuration
-
-- ✅ **Vocabulary Size** - Target number of tokens (e.g., 30k, 50k, 100k)
-- ✅ **Minimum Frequency** - Ignore rare n-grams below threshold
-- ✅ **Special Tokens** - Tokens never split or merged
-- ✅ **Character Coverage** - For SentencePiece (0.9995 for multilingual)
-- ✅ **Normalization** - Lowercase, unicode normalization (NFKC, NFC)
+- ✅ **Vocabulary Size** (`vocab_size`, default 30,000)
+- ✅ **Minimum Frequency** (`min_frequency`, default 2)
+- ✅ **Special Tokens** (`special_tokens`, default `[PAD]/[UNK]/[CLS]/[SEP]/[MASK]`)
+- ✅ **End-of-word suffix** (`end_of_word_suffix`, default `"##"`) and **max input chars per word** (`max_input_chars_per_word`, default 100)
 
 ---
 
@@ -448,89 +286,31 @@ let tokenizer = BPETokenizer::train_from_iterator(
 
 ### Vocabulary Intelligence
 
-- ✅ **Semantic Analysis**
-  - Cluster semantically similar tokens
-  - Identify redundant vocabulary entries
-  - Suggest vocabulary optimizations
-
-- ✅ **Compression Efficiency**
-  - Measure average tokens per word
-  - Evaluate compression ratio
-  - Compare with other tokenization schemes
-
-- ✅ **Cross-Lingual Analysis**
-  - Measure coverage across languages
-  - Identify language-specific tokens
-  - Evaluate multilingual tokenizers
-
-- ✅ **Domain Adaptability**
-  - Measure vocabulary coverage for domain
-  - Suggest domain-specific tokens
-  - Evaluate generalization
-
-- ✅ **Evolution Tracking**
-  - Track vocabulary changes over training
-  - Monitor token frequency drift
-  - Detect vocabulary staleness
+- ✅ **Single entry point:** `VocabIntelligenceAnalyzer::new(VocabIntelligenceConfig).analyze(&tokenizer, basic_analysis)` returns a `VocabIntelligenceResult` bundling:
+  - `semantic_analysis: Option<SemanticAnalysis>` — clustering, redundant-token groups
+  - `compression_analysis: Option<CompressionAnalysis>` — tokens-per-word, compression opportunities
+  - `cross_lingual_analysis: Option<CrossLingualAnalysis>` — per-language coverage
+  - `domain_analysis: Option<DomainAnalysis>` — domain distribution/fit
+  - `evolution_analysis: Option<EvolutionAnalysis>` — trending/declining tokens over training history
+  - `intelligence_score: f32` (0–100) and `actionable_recommendations: Vec<ActionableRecommendation>`
+  - each analysis is individually toggleable via `VocabIntelligenceConfig` flags
 
 ### Analysis Tools
 
-- ✅ **Coverage Analysis**
-  - Measure unknown token rate
-  - Identify gaps in vocabulary
-  - Suggest vocabulary additions
-
-- ✅ **Benchmarking**
-  - Throughput (tokens/second)
-  - Latency (milliseconds per text)
-  - Memory usage
-  - Comparison with other tokenizers
-
-- ✅ **Memory Profiling**
-  - Vocabulary memory footprint
-  - Encoding buffer usage
-  - Cache utilization
-
-- ✅ **Validation Utilities**
-  - Round-trip encode/decode verification
-  - Special token preservation checks
-  - Consistency validation
+- ✅ **`VocabAnalyzer`** (`vocab_analyzer.rs`) — `analyze_tokenizer`/`analyze_vocabulary`/`analyze_coverage`, character-pattern and subword-pattern detection, issue severity classification
+- ✅ **`CoverageAnalyzer`** (`coverage.rs`) — unknown-token rate, vocabulary coverage, quality metrics, report export
+- ✅ **`TokenizerBenchmark`** (`benchmark_utils.rs`) and **`PerformanceProfiler`** (`performance_profiler.rs`) — throughput/latency/memory measurement helpers
+- ✅ **`TokenizationDebugger`** / **`TokenVisualizer`** — inspect and visualize tokenization output
 
 ### Performance Optimization
 
-- ✅ **Parallel Tokenization**
-  - Multi-threaded batch encoding via scirs2-core
-  - Automatic work distribution
-  - Efficient for large batches
-
-- ✅ **SIMD Acceleration**
-  - Vectorized character scanning and merging
-  - 4x+ throughput on supported hardware
-
-- ✅ **Zero-Copy Vocabulary Access**
-  - Memory-mapped vocabularies (mmap)
-  - Minimal heap allocation for large vocabs (100k+)
-
-- ✅ **Async Batch Processing**
-  - Non-blocking encode_batch via async/await
-  - Streaming tokenization for large corpora
-
-- ✅ **Vocabulary Intelligence**
-  - Semantic analysis of vocabulary tokens
-  - Compression efficiency metrics
-  - Cross-lingual coverage measurement
-  - Domain adaptability scoring
-  - Evolution tracking over training
-
-- ✅ **Efficient Vocabulary Lookups**
-  - HashMap for O(1) token-to-ID
-  - Vector for O(1) ID-to-token
-  - Cached prefix trees for subword matching
-
-- ✅ **Memory-Efficient Encoding**
-  - Reusable buffers
-  - Lazy evaluation where possible
-  - Minimal allocations
+- ✅ **Parallel Tokenization** — `ParallelTokenizer`/`BatchTokenizer` parallelize batch encode/decode via `scirs2-core`'s `parallel` feature
+- ✅ **SIMD Acceleration** — AVX2 intrinsics (`std::arch::x86_64`, `#[target_feature(enable = "avx2")]`) for character scanning; **x86_64-only**, no ARM/NEON path
+- ✅ **Zero-Copy Vocabulary Access** — `memmap2`-backed `MmapVocab`/`ZeroCopyTokenizer`
+- ✅ **Async Tokenization** — `AsyncTokenizer` via `tokio` tasks/channels/timeouts (not `scirs2-core` — that crate powers the *parallel* CPU batch path instead)
+- ✅ **Vocabulary Intelligence** — see above
+- ✅ **Efficient Vocabulary Lookups** — `HashMap`-backed token↔ID lookup; `MinimalPerfectHash`/`MinimalPerfectHashVocab` for compile-time-known vocabularies
+- ✅ **Compressed vocab** — `CompressedVocab`/`PrefixTrie` (`compressed_vocab.rs`)
 
 ---
 
@@ -538,168 +318,35 @@ let tokenizer = BPETokenizer::train_from_iterator(
 
 ### PyO3 Integration
 
-- ✅ **Native Python Extension**
-  - Compiled Rust code callable from Python
-  - No runtime overhead
-  - Pythonic API design
-
-- ✅ **Installation**
-  ```bash
-  pip install trustformers-tokenizers
-  ```
-
-### High-Level Python API
-
-```python
-from trustformers_tokenizers import AutoTokenizer
-
-# Load pretrained tokenizer
-tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-
-# Encode text
-encoding = tokenizer.encode("Hello, world!", add_special_tokens=True)
-print(encoding.input_ids)  # [101, 7592, 1010, 2088, 999, 102]
-
-# Encode batch
-encodings = tokenizer.encode_batch(["Text 1", "Text 2"])
-
-# Decode
-text = tokenizer.decode(encoding.input_ids, skip_special_tokens=True)
-
-# Train custom tokenizer
-from trustformers_tokenizers import BPETokenizer
-
-tokenizer = BPETokenizer.train_from_files(
-    files=["corpus.txt"],
-    vocab_size=30000,
-    special_tokens=["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"]
-)
-tokenizer.save_pretrained("./my-tokenizer")
-```
-
-### TokenizerTrainer
-
-- ✅ **Training Interface**
-  - Simple API for training custom tokenizers
-  - Progress reporting
-  - Checkpointing
-
-- ✅ **Configuration**
-  ```python
-  from trustformers_tokenizers import TokenizerTrainer
-
-  trainer = TokenizerTrainer(
-      tokenizer_type="bpe",
-      vocab_size=50000,
-      min_frequency=2,
-      special_tokens=["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"]
-  )
-
-  tokenizer = trainer.train(files=["corpus.txt"])
-  ```
-
-### Analysis Tools (Python)
-
-```python
-from trustformers_tokenizers import TokenizerAnalyzer
-
-analyzer = TokenizerAnalyzer(tokenizer)
-
-# Coverage analysis
-coverage = analyzer.coverage(test_texts)
-print(f"Unknown token rate: {coverage.unk_rate:.2%}")
-
-# Benchmark
-stats = analyzer.benchmark(test_texts, num_iterations=100)
-print(f"Throughput: {stats.tokens_per_second:.0f} tok/s")
-
-# Memory profiling
-memory = analyzer.profile_memory()
-print(f"Vocabulary size: {memory.vocab_bytes / 1024 / 1024:.2f} MB")
-```
+- ✅ **Native Python Extension source** — `src/python.rs` under the `python`/`pyo3` features; wraps `BPETokenizer`, `CharTokenizer`, `UnigramTokenizer`, `WordPieceTokenizer`, `TokenizerImpl`
+- ✅ **Python package** — `python/trustformers_tokenizers/` (`tokenizers.py`, `training.py`, `utils.py`, `__init__.py`) provides the Python-facing `AutoTokenizer` convenience API (Python-only — there is no Rust-level `AutoTokenizer` type; see `README_PYTHON.md` for the Python API surface)
+- ⚠️ **`pyproject.toml` / `Cargo.toml` mismatch** — this crate's `pyproject.toml` is configured for a `maturin` extension-module build (`module-name = "trustformers_tokenizers"`), but `Cargo.toml`'s `[lib]` only declares `crate-type = ["rlib"]` — the `cdylib` target was intentionally removed (per its own comment: "Python extension building handled by trustformers-py crate"). Running `maturin build` from this crate directory will not currently produce a loadable native module; `python/trustformers_tokenizers/tokenizers.py` already anticipates this and falls back to `unittest.mock.MagicMock` stand-ins when `from .trustformers_tokenizers import (...)` raises `ImportError`
+- ⚠️ **Python test suite** — no `python/tests/` directory exists yet; the previously documented `pytest tests/` command has nothing to run today
 
 ---
 
 ## Migration Guides
 
-### From HuggingFace Transformers
-
-```python
-# Before (HuggingFace)
-from transformers import AutoTokenizer
-tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-
-# After (TrustformeRS)
-from trustformers_tokenizers import AutoTokenizer
-tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-# API is identical!
-```
-
-### From tiktoken (OpenAI)
-
-```python
-# Before (tiktoken)
-import tiktoken
-encoding = tiktoken.get_encoding("cl100k_base")
-tokens = encoding.encode("Hello, world!")
-
-# After (TrustformeRS)
-from trustformers_tokenizers import BPETokenizer
-tokenizer = BPETokenizer.from_pretrained("gpt-4")  # cl100k_base equivalent
-encoding = tokenizer.encode("Hello, world!")
-tokens = encoding.input_ids
-```
-
-### From SentencePiece
-
-```python
-# Before (SentencePiece)
-import sentencepiece as spm
-sp = spm.SentencePieceProcessor(model_file='model.model')
-ids = sp.encode('Hello, world!')
-
-# After (TrustformeRS)
-from trustformers_tokenizers import SentencePieceTokenizer
-tokenizer = SentencePieceTokenizer.from_file('model.model')
-encoding = tokenizer.encode('Hello, world!')
-ids = encoding.input_ids
-```
-
-### From spaCy
-
-```python
-# Before (spaCy)
-import spacy
-nlp = spacy.load("en_core_web_sm")
-doc = nlp("Hello, world!")
-tokens = [token.text for token in doc]
-
-# After (TrustformeRS)
-from trustformers_tokenizers import AutoTokenizer
-tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-tokens = tokenizer.tokenize("Hello, world!")
-```
-
-### From NLTK
-
-See detailed migration guide in `docs/migration/nltk_to_trustformers.md`
-
-### From fairseq
-
-See detailed migration guide in `docs/migration/fairseq_to_trustformers.md`
+Reference docs live under `docs/migration/`:
+- `docs/migration/huggingface-migration.md`
+- `docs/migration/tiktoken-migration.md`
+- `docs/migration/sentencepiece-migration.md`
+- `docs/migration/spacy-migration.md`
+- `docs/migration/nltk-migration.md`
+- `docs/migration/fairseq-migration.md`
 
 ---
 
 ## Documentation
 
-- ✅ **API Reference** - Complete rustdoc for all public APIs
-- ✅ **Usage Examples** - Code snippets for common tasks
-- ✅ **Custom Tokenizer Tutorial** - Step-by-step guide for training
-- ✅ **ML Framework Integration** - TensorFlow, PyTorch, JAX examples
-- ✅ **Tokenizer Selection Guide** - Choose the right tokenizer
-- ✅ **Training Best Practices** - Corpus preparation, hyperparameters
-- ✅ **Performance Tuning** - Optimization techniques
-- ✅ **Troubleshooting Guide** - Common issues and solutions
+- ✅ `docs/api-reference.md`
+- ✅ `docs/examples.md`
+- ✅ `docs/custom-tokenizer-tutorial.md`
+- ✅ `docs/ml-framework-integration.md`
+- ✅ `docs/migration/` (6 guides, see above)
+- ✅ Rustdoc for public APIs (0 rustdoc warnings workspace-wide, verified 2026-07-01)
+- [ ] Tokenizer selection guide (which tokenizer for which model family) — not yet written
+- [ ] Dedicated performance-tuning / troubleshooting guides — not yet written (performance tips currently live only in this README)
 
 ---
 
@@ -707,72 +354,67 @@ See detailed migration guide in `docs/migration/fairseq_to_trustformers.md`
 
 ### Test Coverage
 
-- ✅ **500 Unit Tests** - 100% pass rate
-- ✅ **Encoding/Decoding Correctness** - Round-trip verification
-- ✅ **Special Token Handling** - Proper insertion and preservation
-- ✅ **Edge Cases** - Empty strings, very long texts, Unicode
-- ✅ **Language-Specific Tests** - Arabic, Chinese, Japanese, Korean correctness
-- ✅ **Domain-Specific Tests** - Chemical, Music, Math, Code, BIO
-- ✅ **Performance Benchmarks** - Regression detection
-- ✅ **Memory Leak Detection** - Valgrind integration
-
-### Test Categories
-
-1. **Correctness Tests**
-   - Encoding produces expected token IDs
-   - Decoding reconstructs original text
-   - Special tokens handled correctly
-
-2. **Compatibility Tests**
-   - Match HuggingFace tokenizer outputs
-   - Consistent with reference implementations
-
-3. **Performance Tests**
-   - Throughput benchmarks
-   - Memory usage validation
-   - Scalability tests
-
-4. **Edge Case Tests**
-   - Empty input
-   - Very long sequences (>10k tokens)
-   - Unicode edge cases (emoji, RTL text, combining characters)
-   - Malformed input
+- ✅ **~500 unit tests** in this crate, 100% pass rate (workspace-wide: 18,102 passed / 0 failed / 119 skipped, 2026-07-01)
+- ✅ **Encoding/Decoding Correctness** — round-trip verification
+- ✅ **Special Token Handling** — insertion/preservation checks
+- ✅ **Edge Cases** — empty strings, very long texts, Unicode
+- ✅ **Language-Specific Tests** — Arabic, Chinese, Japanese, Korean, Thai
+- ✅ **Domain-Specific Tests** — Chemical, Music, Math, Code, BIO, Multimodal
+- ✅ **Performance Benchmarks** — `benches/tokenizer_performance.rs` (criterion)
+- ✅ **`test_infrastructure.rs`** — in-crate cross-validation/fuzzing/regression test harness (`TestRunner`, `FuzzingResults`, `CrossValidationRunner`)
 
 ---
 
 ## Known Limitations
 
-- Some advanced HuggingFace tokenizer features not yet implemented (e.g., custom normalizers)
-- ONNX export for tokenizers not yet supported
+- `TokenizerImpl::from_pretrained` and `WordPieceTokenizer::from_pretrained` only resolve local cache paths / a small built-in vocabulary set — neither downloads from the Hugging Face Hub
+- `SentencePieceTokenizer::from_pretrained` ignores its argument and always returns a simplified built-in vocabulary — use `from_model_file` for real `.model` files
+- TikToken ships only `cl100k_base`/`r50k_base` as named presets; other encodings need `from_tiktoken_file`
+- SIMD acceleration is AVX2/x86_64-only (no ARM/NEON path)
+- `gpu`, `jax`, `tensorflow`, `pytorch`, `onnx` features are pure-Rust detection/data-structure/metadata layers — not real CUDA/ROCm/OpenCL/JAX/TensorFlow/PyTorch/ONNX-Runtime execution (each adds zero extra crate dependencies)
+- NFKC/NFKD normalizers are not yet exposed as dedicated `Normalizer` types (only NFC/NFD, plus whitespace/accent/punctuation/digit/case normalizers)
+- The `hangul = "0.1.3"` dependency has no references in `src/`; Korean Hangul decomposition uses inline Unicode arithmetic instead
+- `AutoTokenizer` is Python-only; Rust callers use `TokenizerWrapper` (enum dispatch) or a concrete tokenizer type directly
+- This crate's `pyproject.toml` still targets a `maturin` extension-module build, but `Cargo.toml` no longer declares a `cdylib` target (moved to `trustformers-py`) — `maturin build` here will not currently produce a working native module
+- No `python/tests/` directory exists yet
 
 ---
 
 ## Future Enhancements
 
 ### High Priority
-- [ ] Unigram with sampling / BPE-dropout (stochastic tokenization for data augmentation: Unigram sampling + BPE dropout)
-- Enhanced multilingual support (better handling of non-Latin scripts)
+- [ ] Unigram with sampling / BPE-dropout (stochastic tokenization for data augmentation)
+- [ ] Real Hugging Face Hub download support for `from_pretrained` methods (currently local-cache/built-in-vocab only)
+- [ ] `SentencePieceTokenizer::from_pretrained` should actually resolve/parse the requested model instead of ignoring its argument
+- [ ] Enhanced multilingual support (better handling of non-Latin scripts)
 - [ ] ONNX export for tokenizers (export tokenizer to ONNX for cross-framework compatibility)
-  - **Note:** Use oxionnx crate per COOLJAPAN policy.
+  - **Note:** Use the `oxionnx` crate per COOLJAPAN policy; current `onnx` feature only produces model/graph metadata types, no ONNX Runtime execution
 
 ### Performance
-- Further optimization of vocabulary lookups
-- [ ] GPU-accelerated tokenization for very large batches
+- [ ] ARM/NEON SIMD path (current SIMD acceleration is AVX2/x86_64-only)
+- [ ] Real GPU kernel dispatch for the `gpu` feature (currently device-detection + CPU-executed fallback only)
   - **Refinement needed:** which ops to GPU-accelerate (vocab lookup? regex? both)? Target throughput (tokens/sec)?
 - [ ] Streaming tokenization (tokenize a stream of bytes incrementally without buffering full input)
+- [ ] Further optimization of vocabulary lookups
 
 ### Features
-- [ ] Custom normalizers / pre-tokenizers (plugin API for user-supplied normalizers)
+- [ ] Custom normalizers / pre-tokenizers plugin API for user-supplied normalizers
+- [ ] NFKC/NFKD normalizer types (currently only NFC/NFD are implemented)
 - [ ] Tokenizer alignment visualization (show which input bytes map to which tokens, useful for debugging)
-- Automatic tokenizer repair/optimization
+- [ ] Audit the `hangul = "0.1.3"` dependency — wire it into `korean.rs` or remove it (currently unused)
+- [ ] Automatic tokenizer repair/optimization
+
+### Housekeeping
+- [ ] Add a `python/tests/` suite (referenced in older docs but never created)
+- [ ] Write a tokenizer-selection guide, performance-tuning guide, and troubleshooting guide under `docs/`
 
 ---
 
 ## Development Guidelines
 
 ### Code Standards
-- **Use trustformers-core/scirs2-core abstractions only** (no external deps directly)
-- **File size limit:** <2000 lines per file
+- **Use trustformers-core/scirs2-core abstractions only** (no external deps directly — enforced via `trustformers-core::tokenizer_backend` for the upstream `tokenizers` crate)
+- **File size limit:** <2000 lines per file — currently satisfied; largest file is `src/gpu_tokenization.rs` at 1,616 lines (verified 2026-07-01)
 - **Error handling:** Use `Result<T, TrustformersError>`
 - **Testing:** Comprehensive test coverage required
 - **Naming:** snake_case for all identifiers
@@ -783,21 +425,22 @@ See detailed migration guide in `docs/migration/fairseq_to_trustformers.md`
 # Run all tests
 cargo nextest run -p trustformers-tokenizers --all-features
 
-# Run Python binding tests
-cd trustformers-tokenizers/python
-python -m pytest tests/
-
 # Benchmark
 cargo bench -p trustformers-tokenizers
 
 # Check compilation
 cargo check -p trustformers-tokenizers --all-features
+
+# Format and clippy
+cargo fmt --all
+cargo clippy -p trustformers-tokenizers --all-features -- -D warnings
 ```
 
 ---
 
-**Last Updated:** 2026-06-24
-**Version:** 0.1.3
+**Last Updated:** 2026-07-02
+**Version:** 0.1.4
 **Status:** Stable
-**Test Coverage:** 500 tests, 100% pass rate
-**SLoC:** 51,211
+**Test Coverage:** ~500 tests in this crate, 100% pass rate (workspace: 18,102 passed / 0 failed / 119 skipped)
+**Public API:** ~1,339 items
+**SLoC:** 51,372

@@ -2,11 +2,11 @@
 
 ## Overview
 
-The `trustformers-mobile` crate provides mobile deployment infrastructure for iOS and Android, enabling on-device inference and training with platform-specific hardware acceleration. It includes complete framework integrations for React Native, Flutter, and Unity.
+The `trustformers-mobile` crate provides mobile deployment infrastructure for iOS and Android, enabling on-device inference and training with platform-specific hardware acceleration. It includes framework integrations for React Native, Flutter, and Unity (of varying maturity — see Current Status).
 
 **Key Responsibilities:**
-- iOS deployment (Swift framework, Core ML, Metal)
-- Android deployment (Kotlin, NNAPI, Vulkan)
+- iOS deployment (Swift package, Core ML, Metal)
+- Android deployment (Kotlin/Java, NNAPI, Vulkan)
 - Hardware acceleration (Neural Engine, Edge TPU, GPU)
 - On-device training and federated learning
 - Cross-platform framework integration (React Native, Flutter, Unity)
@@ -17,24 +17,29 @@ The `trustformers-mobile` crate provides mobile deployment infrastructure for iO
 
 ## Current Status
 
-**Version:** 0.1.3 | **Date:** 2026-06-24 | **Status:** Alpha
+**Version:** 0.1.4 | **Date:** 2026-07-02 | **Status:** Alpha
 
 ### Implementation Status
 🔵 **ALPHA** - Core infrastructure implemented; API may change
-✅ **143 RUST INTEGRATION TESTS** - All passing (10 test files added 2026-03-22)
-✅ **ZERO COMPILATION ERRORS** - Clean compilation across all platforms
-✅ **IOS IMPLEMENTED** - Swift framework, Core ML, Metal
-✅ **ANDROID IMPLEMENTED** - Kotlin, NNAPI, Vulkan
-✅ **FRAMEWORKS INTEGRATED** - React Native, Flutter, Unity, Expo
-✅ **ON-DEVICE TRAINING** - Federated learning with differential privacy
-✅ **MOBILE OPTIMIZATIONS** - Battery, thermal, and memory pressure handling
+✅ **~742 CRATE TESTS PASSING** - 0 failed (workspace-wide: 18,102 passed / 0 failed / 119 skipped)
+✅ **ZERO CLIPPY WARNINGS** - Clean lint run across the workspace
+✅ **26 DOCTESTS PASSING** - 0 failed, 2 ignored (22 doctest failures fixed 2026-07-01 in `expo_plugin.rs`, `react_native_fabric.rs`, and the `mobile_performance_profiler` subsystem: `collector.rs`, `profiler/profiler_impl.rs`, `profiler/profiler_types.rs`, `types.rs`)
+✅ **~3,860 PUBLIC API ITEMS** - functions/structs/enums/traits across 187 files in `src/`; 0 `todo!()`/`unimplemented!()` macros remain
+✅ **IOS IMPLEMENTED** - Swift package (`TrustformersKit`), Core ML, Metal
+✅ **ANDROID IMPLEMENTED** - Java/Kotlin AAR, NNAPI, Vulkan
+🟡 **FRAMEWORKS PARTIALLY INTEGRATED** - Flutter and Unity ship real packages; React Native has Rust bridge code + a usage example but no packaged npm module in this repo (see Known Limitations)
+✅ **ON-DEVICE TRAINING** - Federated learning with differential privacy (feature `on-device-training`)
+✅ **MOBILE OPTIMIZATIONS** - Battery, thermal, and network-adaptive handling
+⚠️ **EXPERIMENTAL CRYPTO IS SIMPLIFIED** - `advanced_security.rs` (post-quantum KEM, homomorphic encryption, MPC) is mock/reference code, not audited — see Known Limitations
+
+Checkmarks below indicate "the described capability has corresponding implemented, compiling code in `src/`" — not "independently security-audited" or "benchmarked on physical devices." The items flagged ⚠️ throughout this document are known exceptions verified during the 2026-07-01 documentation pass.
 
 ### Feature Coverage
-- **iOS:** Swift framework, Core ML, Metal, Neural Engine, ARKit
-- **Android:** AAR package, NNAPI, Vulkan, Edge TPU, Wear OS, Android Auto
+- **iOS:** Swift package (`TrustformersKit`), Core ML, Metal, Neural Engine, ARKit
+- **Android:** AAR (`trustformers-android`), NNAPI, Vulkan, Edge TPU, Wear OS, Android Auto
 - **Cross-Platform:** Model management (OTA, INT4/INT8/FP16 quantization), federated learning
-- **Frameworks:** React Native (Turbo Modules/JSI), Flutter (Dart FFI), Unity (IL2CPP), Expo
-- **Optimizations:** Battery-aware, thermal management, memory pressure handling
+- **Frameworks:** React Native (JSI bridge + example, no shipped package), Flutter (Dart FFI), Unity (C# MonoBehaviour), Expo (config-plugin scaffolding)
+- **Optimizations:** Battery-aware, thermal management (incl. predictive throttle model), network-adaptive handling
 
 ---
 
@@ -42,35 +47,31 @@ The `trustformers-mobile` crate provides mobile deployment infrastructure for iO
 
 ### iOS Implementation
 
-#### Swift Framework
+#### Swift Package
 
-**TrustformersKit Swift package**
+**TrustformersKit (`ios-framework/`)**
 
 - ✅ **Architecture**
   - Swift/Rust bridge using C FFI
   - Objective-C compatibility layer
-  - SwiftUI components (TFKInferenceEngine, TFKModelConfig)
-  - Combine integration for reactive programming
+  - `TFKModelConfig`, `TFKInferenceEngine`, `TFKModel` types
+  - Combine integration (`TFKInferenceEngine+Combine.swift`)
   - Modern async/await support
 
 - ✅ **App Extensions**
   - Widget Extension support
   - Siri Shortcuts integration
   - Share Extension for model sharing
-  - Background processing tasks
+  - Background processing tasks (`ios_background.rs`, `ios_app_extensions.rs`)
 
-**Example:**
+**Verified example** (see `ios-framework/TrustformersKit/Sources/TFKInferenceEngine.swift` / `TFKModelConfig.swift`):
 ```swift
 import TrustformersKit
 
-let config = TFKModelConfig(
-    modelPath: Bundle.main.url(forResource: "gpt2", withExtension: "bin")!,
-    device: .neuralEngine,
-    precision: .fp16
-)
-
-let engine = try TFKInferenceEngine(config: config)
-let result = try await engine.generate(prompt: "Once upon a time")
+let config = TFKModelConfig.optimizedConfig()
+let engine = TFKInferenceEngine(config: config)
+let model = try engine.loadModel(at: modelPath, config: config)
+let result = engine.performInference(model, input: inputTensor)
 ```
 
 ---
@@ -79,13 +80,13 @@ let result = try await engine.generate(prompt: "Once upon a time")
 
 **Hardware-accelerated inference on iOS**
 
-- ✅ **Model Conversion**
+- ✅ **Model Conversion** (`coreml_converter.rs`)
   - TrustformeRS → Core ML format
   - Quantization-aware conversion
   - Support for custom ops
   - Optimization for Neural Engine
 
-- ✅ **Core ML Delegate**
+- ✅ **Core ML Delegate** (`coreml.rs`, feature `coreml`)
   - Neural Engine utilization
   - Performance shaders
   - Hybrid execution (Core ML + Metal)
@@ -95,7 +96,6 @@ let result = try await engine.generate(prompt: "Once upon a time")
   - ANE-optimized model graph
   - INT8 quantization for ANE
   - Batch size optimization
-  - Real-time performance
 
 ---
 
@@ -103,28 +103,20 @@ let result = try await engine.generate(prompt: "Once upon a time")
 
 **GPU-accelerated compute on iOS**
 
-- ✅ **Metal Compute Shaders**
+- ✅ **Metal Compute Shaders** (`ios/metal.rs`)
   - Custom Metal kernels for transformer ops
   - Matrix multiplication (SIMD groups)
   - Attention mechanisms
   - Activation functions
 
-- ✅ **Metal Performance Shaders (MPS)**
+- ✅ **Metal Performance Shaders (MPS)** (`ios/mps.rs`, tested in `ios/mps_tests.rs`)
   - MPS graph integration
   - Convolution operations
   - Normalization layers
-  - Memory-efficient execution
 
 - ✅ **Multi-GPU Support**
   - iPad Pro dual GPU utilization
   - Workload distribution
-  - Memory sharing across GPUs
-
-**Example:**
-```swift
-let metalEngine = try TFKMetalEngine()
-let result = try await metalEngine.matmul(a: tensorA, b: tensorB)
-```
 
 ---
 
@@ -132,32 +124,29 @@ let result = try await metalEngine.matmul(a: tensorA, b: tensorB)
 
 #### Android Library
 
-**AAR package for Java/Kotlin**
+**AAR package for Java/Kotlin (`android-lib/`, groupId `com.trustformers`, artifactId `trustformers-android`)**
 
 - ✅ **Package Structure**
-  - AAR creation with Gradle
-  - JNI bindings for Java/Kotlin
-  - Kotlin Multiplatform support
+  - AAR creation with Gradle (`minSdkVersion 21`, `compileSdk`/`targetSdk 33`)
+  - JNI bindings for Java/Kotlin (`src/main/jni/trustformers_jni.cpp`)
   - ProGuard rules for release builds
 
-- ✅ **Jetpack Compose UI**
-  - TrustformersEngine composable
-  - TrustformersKt Kotlin DSL
-  - Coroutines integration
-  - Flow-based API
+- ✅ **Kotlin Coroutine Support**
+  - `TrustformersKt` coroutine wrapper (`com.trustformers.TrustformersKt`)
+  - `trustformersEngine { }` DSL builder
+  - Coroutines integration via `suspend fun`
 
-**Example:**
+**Verified example** (see `android-lib/src/main/java/com/trustformers/TrustformersEngine.java` and `TrustformersKt.kt`):
 ```kotlin
-import com.trustformers.mobile.TrustformersEngine
+import com.trustformers.trustformersEngine
+import com.trustformers.TrustformersEngine
 
-val engine = TrustformersEngine.Builder()
-    .modelPath(modelPath)
-    .device(Device.NNAPI)
-    .precision(Precision.FP16)
-    .build()
-
-val result = engine.generate(prompt = "Hello, world!")
-    .collect { token -> println(token) }
+val engine = trustformersEngine(context) {
+    setBackend(TrustformersEngine.EngineConfig.Backend.NNAPI)
+    setUseFP16(true)
+}
+val model = engine.loadModel(modelPath)
+val output = engine.inference(model, inputTensor)
 ```
 
 ---
@@ -166,39 +155,28 @@ val result = engine.generate(prompt = "Hello, world!")
 
 **Android Neural Networks API**
 
-- ✅ **Hardware Acceleration**
-  - Automatic backend detection (NPU, GPU, DSP)
-  - Vendor extensions (Qualcomm Hexagon, MediaTek APU)
-  - TensorFlow Lite delegate
+- ✅ **Hardware Acceleration** (`nnapi.rs`, feature `nnapi`)
+  - Backend detection (NPU, GPU, DSP)
+  - TensorFlow Lite delegate (`tflite_nnapi_delegate.rs`, feature `tflite-nnapi`)
   - Fallback strategies
 
 - ✅ **Optimization**
   - Model compilation for NNAPI
   - Quantization (INT8, FP16)
-  - Burst mode for low latency
-  - Shared memory execution
 
 ---
 
 #### GPU Acceleration
 
-**OpenGL ES and Vulkan compute**
-
-- ✅ **OpenGL ES Compute**
-  - Compute shaders for transformer ops
-  - Texture-based memory management
-  - Multi-pass rendering
+**OpenGL ES and Vulkan compute, plus legacy RenderScript**
 
 - ✅ **Vulkan Compute**
   - Vulkan compute pipelines
   - Descriptor sets for memory
   - Command buffer optimization
-  - Memory barriers and synchronization
 
-- ✅ **RenderScript (Legacy)**
-  - RenderScript kernels
-  - ScriptIntrinsics for BLAS
-  - Migration path to modern APIs
+- ⚠️ **RenderScript (Legacy)** (`android_renderscript.rs`)
+  - RenderScript kernels present, but several bindings (context/script/allocation pointers) are placeholder null-pointer stand-ins, not a working RenderScript backend — treat as scaffolding for a future migration, not a functional path
 
 ---
 
@@ -206,77 +184,80 @@ val result = engine.generate(prompt = "Hello, world!")
 
 #### Model Management
 
-**OTA updates and versioning**
+**OTA updates and versioning (`model_management.rs`)**
 
 - ✅ **Over-the-Air Updates**
-  - Incremental model downloads
-  - Differential updates (binary diff)
-  - Model versioning system
+  - Incremental model downloads (`ModelManager::download_model`)
+  - Differential updates (`apply_differential_update`)
   - Rollback support
 
 - ✅ **Compression**
   - Model quantization (INT4, INT8, FP16)
-  - Weight pruning
-  - Knowledge distillation
-  - GZIP/Brotli compression
+  - Weight pruning, knowledge distillation (`optimization/knowledge_distillation.rs` — reference implementation, see ⚠️ note in Known Limitations)
 
 - ✅ **Caching**
-  - LRU cache for models
-  - Memory-mapped files
-  - Shared cache across apps
-  - Cache eviction policies
+  - Storage cleanup (`cleanup_storage`), cancelable downloads (`cancel_download`)
+  - `get_model_path` / `list_models` / `get_storage_stats`
 
-**Example:**
+**Verified example** (see `src/model_management.rs`):
 ```rust
-let manager = ModelManager::new()?;
+use trustformers_mobile::model_management::{ModelManager, ModelManagerConfig};
 
-// Download with progress callback
-manager.download_model("gpt2-medium", |progress| {
-    println!("Download: {:.1}%", progress * 100.0);
+let mut manager = ModelManager::new(ModelManagerConfig {
+    storage_directory: "/data/local/models".into(),
+    ..Default::default()
 })?;
 
-// Load model with caching
-let model = manager.load_model("gpt2-medium", CachePolicy::PreferCache)?;
+manager.download_model("gpt2-medium", Some(Box::new(|progress| {
+    let pct = progress.downloaded_bytes as f64 / progress.total_bytes as f64 * 100.0;
+    println!("Download: {pct:.1}%");
+}))).await?;
+
+let model_path = manager.get_model_path("gpt2-medium");
 ```
 
 ---
 
 #### On-Device Training
 
-**Federated learning and incremental training**
+**Federated learning and incremental training (feature `on-device-training`)**
 
-- ✅ **Federated Learning**
-  - Federated client implementation
-  - Differential privacy (ε,δ-DP)
-  - Secure aggregation
-  - Homomorphic encryption
-  - Zero-knowledge proofs
+⚠️ **Two federated-learning implementations exist on disk.** Only `federated.rs`'s `FederatedLearningClient` is declared as a module in `lib.rs` and actually compiles. `federated_learning.rs` and `federated_learning_v2/` (with a similarly-named `FederatedLearningClient`) are **not** mounted anywhere in `lib.rs` and are unreachable dead code as of 2026-07-01. Use `federated::FederatedLearningClient` — do not rely on the orphaned files.
 
-- ✅ **Incremental Learning**
-  - Efficient backpropagation on mobile
-  - Gradient compression
-  - LoRA (Low-Rank Adaptation)
-  - Adapter-based fine-tuning
+- ✅ **Federated Learning** (`federated.rs`)
+  - `FederatedLearningClient::new/train_local_model/apply_global_update/get_fl_stats`
+  - Differential privacy (`DifferentialPrivacyConfig { epsilon, delta, clipping_norm, noise_mechanism, per_layer_budget }`)
+  - `SecureAggregator` (threshold-based share aggregation)
+  - ⚠️ Homomorphic encryption, zero-knowledge proofs, and post-quantum KEMs referenced elsewhere in the crate live in `advanced_security.rs` as **simplified/mock implementations** (e.g. literal comments "Placeholder Kyber encryption", "Placeholder McEliece encryption", "Simplified reconstruction (placeholder)") — not audited cryptography
 
-- ✅ **Privacy**
-  - Local differential privacy
-  - Gradient clipping
-  - Noise injection
-  - Secure multi-party computation (MPC)
+- ✅ **Incremental Learning** (`training.rs`)
+  - On-device training loop (`OnDeviceTrainer`, `OnDeviceTrainingConfig`)
+  - LoRA (Low-Rank Adaptation) / adapter-based fine-tuning
 
-**Example:**
+- ⚠️ **Privacy**
+  - Local differential privacy and gradient clipping are implemented and real (`differential_privacy.rs`, `federated.rs`'s `DifferentialPrivacyConfig`)
+  - Secure multi-party computation (MPC) and homomorphic encryption are present only as simplified reference code in `advanced_security.rs`
+
+**Verified example** (see `src/federated.rs`):
 ```rust
-let fed_client = FederatedClient::new(config)?;
+use trustformers_mobile::federated::{
+    FederatedLearningClient, FederatedLearningConfig, DifferentialPrivacyConfig, NoiseMechanism,
+};
 
-// Train locally with privacy
-let local_update = fed_client.train_local(data, PrivacyConfig {
-    epsilon: 1.0,
-    delta: 1e-5,
-    clip_norm: 1.0,
-})?;
+let fl_config = FederatedLearningConfig {
+    enable_differential_privacy: true,
+    dp_config: Some(DifferentialPrivacyConfig {
+        epsilon: 1.0,
+        delta: 1e-5,
+        clipping_norm: 1.0,
+        noise_mechanism: NoiseMechanism::Gaussian,
+        per_layer_budget: false,
+    }),
+    ..Default::default()
+};
 
-// Send encrypted update to server
-fed_client.send_update(local_update)?;
+let mut client = FederatedLearningClient::new(fl_config, training_config, mobile_config)?;
+let result = client.train_local_model(&local_examples)?;
 ```
 
 ---
@@ -285,83 +266,73 @@ fed_client.send_update(local_update)?;
 
 #### React Native
 
-**Native modules for RN apps**
+**Native modules for RN apps — bridge code + example, not yet a packaged module**
 
-- ✅ **Turbo Modules**
-  - Modern Turbo Module architecture
-  - Fabric renderer integration
-  - JSI (JavaScript Interface) support
-  - Type-safe TypeScript bindings
+- ✅ **Rust-side bridge** (`react_native.rs`, `react_native_turbo.rs`, `react_native_fabric.rs`; features `react-native`/`expo`)
+  - Turbo Module / JSI plumbing on the Rust side
+  - Fabric renderer integration points
 
-- ✅ **Expo Plugin**
-  - Expo config plugin
-  - Managed workflow support
-  - EAS Build integration
-  - Prebuild configuration
+- ⚠️ **Packaging gap**: `react-native-plugin/` in this repository contains only `example/TrustformersCompleteExample.tsx` — there is no `package.json` or module source here, so `npm install trustformers-react-native` (or `@trustformers/react-native`, the name actually used by the example's imports) is **not** installable from this repo today
 
-**Example:**
+**Verified example** (from `react-native-plugin/example/TrustformersCompleteExample.tsx`):
 ```typescript
-import { TrustformersModule } from 'trustformers-react-native';
+import { TrustformersEngine } from '@trustformers/react-native';
 
-const model = await TrustformersModule.loadModel('gpt2');
-const result = await TrustformersModule.generate(model, 'Hello');
+const deviceInfo = await TrustformersEngine.getDeviceInfo();
+const engine = await TrustformersEngine.initialize({ enablePerformanceMonitoring: true });
+const models = await engine.getAvailableModels();
 ```
 
 ---
 
 #### Flutter
 
-**Dart FFI bindings**
+**Dart FFI bindings (`flutter-plugin/`, pub package `trustformers_flutter`, currently version `1.0.0`)**
 
 - ✅ **Platform Channels**
-  - Method channel implementation
-  - Event channel for streaming
-  - Optimized binary codec
-  - Platform views support
+  - `MethodChannel('trustformers_flutter')` + `EventChannel` for streaming
+  - Platform views support (`trustformers_platform_view.dart`)
 
 - ✅ **Dart FFI**
-  - Direct Rust FFI bindings
-  - Zero-copy data transfer
-  - Async Dart/Rust bridge
-  - Type-safe generated bindings
+  - `dart:ffi` bindings via the `ffi` package
+  - Async Dart/Rust bridge (`TrustformersEngine.create(...)`)
 
-**Example:**
+**Verified example** (see `flutter-plugin/lib/src/trustformers_engine.dart`, `trustformers_inference.dart`):
 ```dart
-import 'package:trustformers_flutter/trustformers.dart';
+import 'package:trustformers_flutter/trustformers_flutter.dart';
 
-final engine = TrustformersEngine(modelPath: 'gpt2.bin');
-await engine.load();
+final config = TrustformersConfig(engineId: 'main', modelPath: 'gpt2.bin');
+final engine = await TrustformersEngine.create(config);
+await engine.loadModel(config.modelPath);
 
-final result = await engine.generate('Once upon a time');
-print(result);
+final result = await engine.inference(
+  TrustformersInferenceRequest.textGeneration(inputIds: tokenIds),
+);
 ```
 
 ---
 
 #### Unity
 
-**C# bindings for Unity**
+**C# bindings for Unity (`unity-package/`, UPM package `com.trustformers.mobile`, currently version `1.0.0`)**
 
 - ✅ **Unity Package**
-  - UPM (Unity Package Manager) package
-  - C# bindings with P/Invoke
-  - IL2CPP compatibility
-  - AR Foundation integration
+  - `TrustformersEngine : MonoBehaviour` component (attach to a GameObject, not a plain POCO)
+  - IL2CPP compatibility (`IL2CPPSupport.cs`)
+  - AR Foundation integration (`TrustformersARManager.cs`)
 
 - ✅ **Performance**
-  - Job System integration
-  - Burst compiler compatibility
-  - ECS (Entity Component System) support
+  - `TrustformersPerformanceOptimizer.cs`
 
-**Example:**
+**Verified example** (see `unity-package/Runtime/TrustformersEngine.cs`):
 ```csharp
 using Trustformers;
 
-var model = new TrustformersModel("gpt2.bin");
-model.Load();
-
-string result = model.Generate("Hello, world!");
-Debug.Log(result);
+// TrustformersEngine is a MonoBehaviour — attach it to a GameObject
+var engine = gameObject.AddComponent<TrustformersEngine>();
+engine.modelPath = "gpt2.bin";
+engine.InitializeEngine();
+float[] output = engine.Inference(inputTensor);
 ```
 
 ---
@@ -370,67 +341,55 @@ Debug.Log(result);
 
 #### Battery Management
 
-**Power-aware execution**
+**Power-aware execution (`battery.rs`, always compiled)**
 
 - ✅ **Battery Monitoring**
-  - Real-time battery level tracking
-  - Charging state detection
-  - Power consumption estimation
-  - Thermal state monitoring
+  - `MobileBatteryManager::get_current_reading` / `get_current_battery_level`
+  - `BatteryMonitor`, `PowerPredictor`
 
 - ✅ **Adaptive Execution**
-  - Battery-aware model selection
-  - Dynamic batch sizing
-  - CPU/GPU switching based on battery
-  - Deferred execution when low battery
+  - `AdaptiveInferenceScheduler`, `BatteryOptimizer`
+  - `predict_power_consumption`, `get_optimization_recommendations`
 
-**Example:**
+**Verified example** (see `src/battery.rs`, `src/device_info.rs`):
 ```rust
-let battery_mgr = MobileBatteryManager::new(config)?;
+use trustformers_mobile::{MobileBatteryManager, BatteryConfig};
+use trustformers_mobile::device_info::MobileDeviceDetector;
 
-// Check battery before inference
-if battery_mgr.should_run_inference()? {
-    let result = model.forward(input)?;
-} else {
-    // Defer to later or use smaller model
-    let result = fallback_model.forward(input)?;
-}
+let device_info = MobileDeviceDetector::detect()?;
+let mut battery_mgr = MobileBatteryManager::new(BatteryConfig::default(), &device_info)?;
+battery_mgr.start()?;
+
+let level = battery_mgr.get_current_battery_level();
+let recommendations = battery_mgr.get_optimization_recommendations();
 ```
 
 ---
 
 #### Thermal Management
 
-**Prevent thermal throttling**
+**Prevent thermal throttling (`thermal/`, incl. `thermal/predictive.rs`)**
 
 - ✅ **Thermal Monitoring**
   - CPU/GPU temperature tracking
-  - Thermal pressure detection
-  - Throttle prediction
-  - Cooling state estimation
+  - Linear-regression-based predictive throttle model (`thermal/predictive.rs`)
 
 - ✅ **Adaptive Optimization**
   - Reduce precision when hot (FP32→FP16→INT8)
-  - Lower batch size
-  - Increase sleep between operations
   - CPU-only fallback during thermal stress
 
 ---
 
 #### Memory Pressure Handling
 
-**Low-memory mode**
+**Low-memory mode (`optimization/enhanced_memory_manager.rs`, `optimization/memory_pool.rs`)**
 
 - ✅ **Memory Management**
   - Memory pressure monitoring
-  - Aggressive GC during low memory
-  - Model unloading strategies
-  - Shared memory pools
+  - Model unloading strategies, shared memory pools
 
 - ✅ **Optimization**
-  - Model swapping (keep only active layers in memory)
   - Quantization under memory pressure
-  - Reduce cache size
   - Emergency OOM handling
 
 ---
@@ -441,21 +400,14 @@ if battery_mgr.should_run_inference()? {
 
 **ARKit, iCloud, Privacy**
 
-- ✅ **ARKit Integration**
-  - AR object detection
-  - Real-time scene understanding
-  - 3D object recognition
-  - Spatial mapping
+- ✅ **ARKit Integration** (`arkit_integration.rs`, compiled only for `target_os = "ios"`)
+  - AR object detection, scene understanding
 
-- ✅ **iCloud Model Sync**
-  - Sync models across devices
-  - CloudKit integration
-  - Encrypted model storage
+- ✅ **iCloud Model Sync** (`ios_icloud.rs`)
+  - Sync models across devices, CloudKit integration
 
 - ✅ **Privacy**
-  - Privacy-preserving inference
-  - On-device only processing
-  - Privacy manifest compliance
+  - On-device only processing, privacy manifest compliance
 
 ---
 
@@ -463,25 +415,18 @@ if battery_mgr.should_run_inference()? {
 
 **Work Manager, Wear OS, Android Auto**
 
-- ✅ **Work Manager**
-  - Background model updates
-  - Periodic training jobs
-  - Constraint-based execution
+- ✅ **Work Manager** (`android_work_manager.rs`)
+  - Background model updates, periodic training jobs
 
-- ✅ **Wear OS**
-  - Wear OS app support
-  - Health & fitness integration
-  - Complication providers
+- ✅ **Wear OS** (`wear_os_support.rs`)
+  - Wear OS app support, health & fitness integration
+  - Note: several supporting types in this module are explicitly marked in-source as scaffolding ("Additional type stubs for completeness (would be fully implemented)")
 
-- ✅ **Android Auto**
-  - Voice assistant integration
-  - In-car inference
-  - CarAppLibrary support
+- ✅ **Android Auto** (`android_auto_support.rs`)
+  - Voice assistant integration, in-car inference
 
-- ✅ **Edge TPU**
-  - Google Coral support
-  - Edge TPU delegate
-  - Quantized model compilation
+- ✅ **Edge TPU** (`edge_tpu_support.rs`, compiled only for `target_os = "android"`)
+  - Google Coral support, quantized model compilation
 
 ---
 
@@ -489,25 +434,16 @@ if battery_mgr.should_run_inference()? {
 
 #### Mobile Testing Framework
 
-**Comprehensive test infrastructure**
+**Test infrastructure (`mobile_testing/`)**
 
-- ✅ **Device Farm Integration**
-  - AWS Device Farm
-  - Firebase Test Lab
-  - Local device farm
+- ✅ **Device Farm Integration** (`mobile_testing/device_farm.rs`, `providers.rs`)
+  - AWS Device Farm, Firebase Test Lab, local device-farm providers
 
-- ✅ **Performance Benchmarks**
-  - Latency benchmarks
-  - Memory usage tests
-  - Battery consumption tests
-  - Thermal stress tests
+- ✅ **Performance Benchmarks** (`benchmarks/`, `benchmarks/performance_targets.rs`)
+  - Latency/memory/battery/thermal targets (`PerformanceTargets::default()`: <100ms latency, <5%/hr battery drain, 90% device coverage, <50MB framework size)
 
 - ✅ **Testing Tools**
-  - Mobile performance profiler
-  - Memory leak detector
-  - Model debugger
-  - Inference visualizer
-  - Crash reporting integration
+  - Mobile performance profiler (`mobile_performance_profiler/`), memory leak detector (`memory_leak_detector.rs`), model debugger (`model_debugger.rs`), inference visualizer (`inference_visualizer.rs`), crash reporter (`crash_reporter.rs`)
 
 ---
 
@@ -517,33 +453,26 @@ if battery_mgr.should_run_inference()? {
 
 **Multi-platform distribution**
 
-- ✅ **iOS Distribution**
-  - CocoaPods support
-  - Swift Package Manager
-  - XCFramework distribution
-
-- ✅ **Android Distribution**
-  - Maven Central publishing
-  - JitPack support
-  - AAR distribution
-
-- ✅ **App Store Compliance**
-  - Privacy manifest
-  - App thinning support
-  - Bitcode compatibility (legacy)
-  - Export compliance
-  - Security guidelines
+- ✅ **iOS Distribution**: CocoaPods (`TrustformersKit.podspec`, v1.0.0), Swift Package Manager, XCFramework
+- ✅ **Android Distribution**: `com.trustformers:trustformers-android:1.0.0` (Gradle `maven-publish` block in `android-lib/build.gradle`)
+- ✅ **App Store Compliance**: privacy manifest, app thinning, export compliance notes present in `ios-framework/`
 
 ---
 
 ## Known Limitations
 
-- Core ML Neural Engine requires iOS 16+
+- Core ML Neural Engine requires iOS 16+ for latest features
 - NNAPI varies significantly across Android devices
 - Large models require quantization for mobile deployment
 - Federated learning requires network connectivity
 - ARKit requires iPhone XS or newer
 - Some features iOS 16+/Android 12+ only
+- ⚠️ `advanced_security.rs` implements post-quantum KEM (Kyber/McEliece stand-ins), homomorphic encryption, and secure multi-party computation as simplified/mock reference code, not audited cryptography
+- ⚠️ `federated_learning.rs` and `federated_learning_v2/` are orphaned (not declared in `lib.rs`) and do not compile into the crate; use `federated::FederatedLearningClient` instead
+- ⚠️ `react-native-plugin/` ships an example only — no installable npm package source is present in this repository
+- ⚠️ `ios`, `android`, and `mobile-optimized` Cargo features currently have no `#[cfg(feature = ...)]` gates in `src/`
+- ⚠️ Flutter/Unity/iOS/Android sub-packages version independently at `1.0.0` and do not track the workspace `0.1.4` release
+- ⚠️ `android_renderscript.rs` targets a deprecated Android API and several of its bindings are placeholder null-pointer stand-ins, not a working backend
 
 ---
 
@@ -555,6 +484,8 @@ if battery_mgr.should_run_inference()? {
 - ✅ **WebNN integration (IR + export)** — W3C WebNN IR, graph builder, JSON/compact-JSON export, structural validation (`webnn/mod.rs`)
 - [ ] Improved model compression techniques
   - **Refinement needed:** target compression ratio? Which techniques: GPTQ, AWQ, SqueezeLLM?
+- [ ] Replace the `advanced_security.rs` placeholder cryptography (post-quantum KEM, homomorphic encryption, MPC) with audited implementations before advertising real confidentiality guarantees
+- [ ] Reconcile or remove the orphaned `federated_learning.rs` / `federated_learning_v2/` modules (dead code as of 2026-07-01; duplicate the `FederatedLearningClient` name used by the real, compiled `federated.rs`)
 
 ### Performance
 - [ ] Further memory optimizations
@@ -567,17 +498,20 @@ if battery_mgr.should_run_inference()? {
 - [ ] Hardware optimization: Android NPU via NNAPI/QNN
 - [ ] Hardware optimization: Android Hexagon DSP acceleration
 - [ ] Hardware optimization: Qualcomm AI Engine Direct (QAI-Hub integration)
+- [ ] Replace the placeholder RenderScript bindings in `android_renderscript.rs` with a working backend, or drop the module given RenderScript's deprecation
 
 ### Features
 - [ ] More AR/VR integrations
   - **Refinement needed:** VisionOS? ARCore extensions? Specific spatial AI use case?
 - [ ] Enhanced privacy features
   - **Refinement needed:** what delta beyond existing DP/MPC/HE? Specific threat model?
-- [ ] Cross-platform: .NET MAUI bindings for C# mobile apps
+- [ ] Cross-platform: .NET MAUI bindings for C# mobile apps (note: a standalone `csharp-wrapper/` P/Invoke wrapper already exists, separate from `unity-package/`)
 - [ ] Cross-platform: Capacitor.js plugin for Ionic/Angular apps
 - [ ] Cross-platform: Kotlin Multiplatform Mobile (KMM) module
 - [ ] Real-time collaboration
   - **Refinement needed:** protocol (WebRTC? CRDT? operational transform?), transport, use-case definition.
+- [ ] Publish `react-native-plugin` as an actual npm package (currently example-only; see Known Limitations)
+- [ ] Wire up or remove the `ios`/`android`/`mobile-optimized` Cargo features (currently inert markers with no `#[cfg(feature = ...)]` gates)
 
 ---
 
@@ -598,17 +532,21 @@ cargo build --target aarch64-apple-ios --release --features ios
 # Build for Android
 cargo build --target aarch64-linux-android --release --features android
 
-# Run tests (250 tests)
-cargo test --all-features
+# Run tests (~742 passing, all features, verified 2026-07-01)
+cargo nextest run --all-features -p trustformers-mobile
 
-# Build Swift framework
-./scripts/build_ios_framework.sh
+# Run doctests (26 passing, 0 failed, 2 ignored)
+cargo test --doc -p trustformers-mobile --all-features
+
+# CLI tools shipped with the crate
+cargo run --bin abi-checker
+cargo run --bin trustformers-profiler
+
+# Build Swift package
+./build-ios.sh
 
 # Build Android AAR
-./scripts/build_android_aar.sh
-
-# Run on device farm
-cargo test --features device-farm-integration
+./build-android.sh
 ```
 
 ### Platform-Specific Setup
@@ -625,9 +563,9 @@ rustup target add x86_64-apple-ios  # Simulator
 
 # Build framework
 cd trustformers-mobile
-./scripts/build_ios_framework.sh
+./build-ios.sh
 
-# The framework will be at: target/TrustformersKit.xcframework
+# The framework will be at: ios-framework/TrustformersKit.xcframework
 ```
 
 #### Android Setup
@@ -642,88 +580,60 @@ rustup target add armv7-linux-androideabi
 rustup target add x86_64-linux-android
 
 # Build AAR
-./scripts/build_android_aar.sh
+./build-android.sh
 
-# The AAR will be at: target/trustformers-mobile.aar
+# The AAR will be at: android-lib/build/outputs/aar/ (via Gradle)
 ```
 
 ---
 
 ## Sample Applications
 
-### iOS Demo (SwiftUI)
+Real, more complete sample apps live in `examples/`:
+- `examples/ios_demo_app/` — SwiftUI app with text classification, object detection, and ARKit tabs (`ContentView.swift`, `ViewModels.swift`)
+- `examples/android_demo_app/` — Jetpack Compose / Kotlin activities: `MainActivity`, `CameraTranslationActivity`, `RealTimeTranslationActivity`, `SmartCameraActivity`, `CodeCompletionKeyboard`, `AccessibilityFeaturesActivity`
+- `examples/*.rs` — 5 Rust examples: `integration_test_example.rs`, `mobile_inference_demo.rs`, `mobile_optimization_demo.rs`, `on_device_finetuning_demo.rs`, `platform_apis_demo.rs`
+
+Minimal, API-verified snippets:
+
+### iOS (SwiftUI, minimal)
 
 ```swift
 import SwiftUI
 import TrustformersKit
 
 struct ContentView: View {
-    @State private var prompt = ""
     @State private var result = ""
-    @State private var isGenerating = false
-
-    let engine = try! TFKInferenceEngine(
-        config: TFKModelConfig(modelPath: modelURL, device: .neuralEngine)
-    )
+    let engine = TFKInferenceEngine(config: .optimizedConfig())
 
     var body: some View {
         VStack {
-            TextField("Enter prompt", text: $prompt)
-                .textFieldStyle(.roundedBorder)
-                .padding()
-
-            Button("Generate") {
-                Task {
-                    isGenerating = true
-                    result = try await engine.generate(prompt: prompt)
-                    isGenerating = false
+            Text(result)
+            Button("Run inference") {
+                if let model = try? engine.loadModel(at: modelURL.path, config: .optimizedConfig()) {
+                    result = "\(engine.performInference(model, input: inputTensor))"
                 }
             }
-            .disabled(isGenerating)
-
-            Text(result)
-                .padding()
         }
     }
 }
 ```
 
-### Android Demo (Jetpack Compose)
+### Android (Jetpack Compose, minimal)
 
 ```kotlin
+import com.trustformers.trustformersEngine
+
 @Composable
 fun TrustformersDemo() {
-    var prompt by remember { mutableStateOf("") }
     var result by remember { mutableStateOf("") }
-    var isGenerating by remember { mutableStateOf(false) }
+    val engine = remember { trustformersEngine(context) { setUseFP16(true) } }
 
-    val engine = remember {
-        TrustformersEngine.Builder()
-            .modelPath(modelPath)
-            .device(Device.NNAPI)
-            .build()
-    }
-
-    Column(modifier = Modifier.padding(16.dp)) {
-        TextField(
-            value = prompt,
-            onValueChange = { prompt = it },
-            label = { Text("Enter prompt") }
-        )
-
-        Button(
-            onClick = {
-                isGenerating = true
-                CoroutineScope(Dispatchers.IO).launch {
-                    result = engine.generate(prompt)
-                    isGenerating = false
-                }
-            },
-            enabled = !isGenerating
-        ) {
-            Text("Generate")
-        }
-
+    Column {
+        Button(onClick = {
+            val model = engine.loadModel(modelPath)
+            result = engine.inference(model, inputTensor).toString()
+        }) { Text("Run inference") }
         Text(result)
     }
 }
@@ -731,9 +641,9 @@ fun TrustformersDemo() {
 
 ---
 
-**Last Updated:** 2026-06-24
-**Version:** 0.1.3
+**Last Updated:** 2026-07-02
+**Version:** 0.1.4
 **Status:** Alpha
-**Test Suite:** 1 Rust integration test
-**SLoC:** 131,187
-**Platforms:** iOS 14+, Android 8.0+ (API 26+)
+**Test Suite:** ~742 crate tests passing · 26 doctests passing (0 failed, 2 ignored)
+**SLoC:** ~103,900 (Rust, `src/`) · ~124,000 (full repo incl. Swift/Kotlin/C#/Dart/TS bindings, via tokei)
+**Platforms:** iOS 11+ (Neural Engine/Core ML require iOS 14+/16+), Android 5.0+ / API 21+ (NNAPI requires API 27+)

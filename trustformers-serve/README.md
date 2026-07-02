@@ -1,10 +1,24 @@
 # TrustformeRS Serve
 
-**Version:** 0.1.3 | **Status:** Stable | **Tests:** 216 | **SLoC:** 206,636 | **Updated:** 2026-06-24
+**Version:** 0.1.4 | **Status:** Stable | **Tests:** ~4,321 | **Public API Items:** 7,319 | **SLoC:** 283,692 | **Updated:** 2026-07-02
 
 High-performance inference server for TrustformeRS models with advanced batching, multi-protocol APIs, cloud-native deployment, and comprehensive observability.
 
 ## Features
+
+### Cargo Features
+
+Only three things in this crate are actually opt-in Cargo features:
+
+```toml
+[features]
+default = []
+kafka = ["dep:rdkafka"]       # requires cmake + system librdkafka
+lambda = ["dep:lambda-web"]   # kept opt-in: lambda-web depends on banned brotli/brotli-decompressor
+swagger-ui = ["dep:utoipa-swagger-ui"]  # kept opt-in: build-dep pulls banned `zip` crate; CDN-hosted /docs Swagger UI works without this feature
+```
+
+`default = []` does **not** mean a minimal/lightweight build — it only means these three extras are off by default. Everything else is an unconditional dependency compiled in regardless of feature flags: all AWS SDK crates (SageMaker, SQS, CloudWatch, Lambda client), all Azure crates (`azure_core`, `azure_identity`, `azure_mgmt_machinelearningservices`, `azure_mgmt_web`), all GCP crates (`google-cloud-functions-v2`, `google-cloud-gax`), `async-nats`, `lapin` (RabbitMQ), `redis`, the full OpenTelemetry stack, `tonic`/`tonic-prost` (gRPC), `async-graphql`, `axum` (REST), and `utoipa` (OpenAPI spec generation). There is no `aws`, `gcp`, or `azure` feature to enable — the cloud SDKs are always compiled in.
 
 ### Dynamic Batching System
 
@@ -53,7 +67,7 @@ let config = BatchingConfig {
 ### Multi-Protocol APIs
 
 - **REST (Axum)**: HTTP/1.1 and HTTP/2, streaming via SSE and WebSockets
-- **gRPC (Tonic)**: High-throughput binary protocol with bidirectional streaming
+- **gRPC (Tonic)**: High-throughput binary protocol with bidirectional streaming (proto compilation and serving restored in 0.1.4, migrated to the tonic 0.14 split `tonic-build`/`tonic-prost-build` API)
 - **GraphQL (async-graphql)**: Flexible query API with subscriptions
 
 ### SLO Monitoring and Observability
@@ -119,18 +133,20 @@ GPU kernel optimization to reduce memory bandwidth pressure:
 
 ### Message Queue Integration
 
-Asynchronous request ingestion via:
+Asynchronous request ingestion via a shared `MessageQueueProducer`/`MessageQueueConsumer` trait abstraction:
 
-- **Apache Kafka**: High-throughput topic-based routing, consumer groups, exactly-once semantics
-- **RabbitMQ**: AMQP protocol, priority queues, dead-letter exchanges, TTL-based expiry
+- **Apache Kafka** (`kafka` feature, requires system librdkafka): production-ready wire-protocol implementation — high-throughput topic-based routing, consumer groups, exactly-once semantics.
+- **RabbitMQ, Redis Streams, NATS, AWS SQS**: complete trait-based interface/scaffold, useful today for testing the orchestration and routing layer. These do not yet talk to a real broker — `send`/`poll` currently fabricate success/return empty without any network I/O. Real backend wiring (AMQP protocol, dead-letter exchanges, publisher confirms, etc.) is an open item; see [TODO.md](TODO.md).
 
 ### Cloud Provider Support
 
-Native integrations for major cloud platforms:
+A unified multi-cloud provider abstraction (`CloudProvider` trait) with health-check orchestration and unified request/response types is implemented and tested across AWS, GCP, and Azure. Deployment-side integrations are real; per-provider **inference/deployment calls** are currently simulated pending real SDK wiring:
 
-- **AWS**: EKS deployment, SageMaker endpoint compatibility, S3 model storage, CloudWatch metrics
-- **GCP**: GKE autopilot, Vertex AI serving, GCS model storage, Cloud Monitoring
-- **Azure**: AKS deployment, Azure ML serving, Blob Storage, Azure Monitor
+- **AWS**: EKS deployment, S3 model storage, CloudWatch metrics. SageMaker inference calls go through the provider abstraction but currently return a simulated response.
+- **GCP**: GKE autopilot, GCS model storage, Cloud Monitoring. Vertex AI inference calls are likewise simulated.
+- **Azure**: AKS deployment, Blob Storage, Azure Monitor. Azure ML inference calls are likewise simulated.
+
+See [TODO.md](TODO.md) for the current mock-vs-real boundary for message queues and cloud providers.
 
 ### GDPR Compliance
 

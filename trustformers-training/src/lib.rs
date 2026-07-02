@@ -110,6 +110,12 @@
 //! - `wandb`: Weights & Biases integration
 //! - `tensorboard`: TensorBoard logging
 
+// reason: this crate ships a large amount of forward-looking training infrastructure
+// (distributed/tensor/sequence/3D parallelism, RLHF, NAS, elastic training, ...) whose
+// struct fields and helper methods are intentionally part of the public-facing scaffolding
+// but are not all wired into an active code path yet. A single consolidated allow keeps the
+// build warning-free without scattering ~110 per-item `#[allow(dead_code)]` attributes.
+#![allow(dead_code)]
 // Allow large error types in Result (TrustformersError is large by design)
 #![allow(clippy::result_large_err)]
 // Allow common patterns in training code
@@ -119,10 +125,6 @@
 // Allow training-specific patterns
 #![allow(clippy::await_holding_lock)]
 #![allow(clippy::needless_range_loop)]
-#![allow(clippy::empty_line_after_doc_comments)]
-#![allow(clippy::manual_clamp)]
-#![allow(clippy::derivable_impls)]
-#![allow(clippy::vec_init_then_push)]
 #![allow(clippy::ptr_arg)]
 
 #[cfg(test)]

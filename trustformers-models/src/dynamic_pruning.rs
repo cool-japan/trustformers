@@ -15,11 +15,13 @@
 //!
 //! # Example
 //!
-//! ```no_run
+//! ```
 //! use trustformers_models::dynamic_pruning::{
 //!     DynamicPruner, AttentionBasedPruningConfig
 //! };
+//! use trustformers_core::tensor::Tensor;
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = AttentionBasedPruningConfig {
 //!     attention_threshold: 0.1,
 //!     min_tokens_ratio: 0.3,
@@ -27,7 +29,13 @@
 //! };
 //!
 //! let pruner = DynamicPruner::attention_based(config);
-//! let (pruned_tokens, mask) = pruner.prune_tokens(&hidden_states, &attention_scores);
+//! # let hidden_states = Tensor::randn(&[1, 4, 8])?;
+//! # let attention_scores = Tensor::randn(&[1, 2, 4, 4])?;
+//! let result = pruner.prune_tokens(&hidden_states, Some(&attention_scores), None, None)?;
+//! let pruned_tokens = result.pruned_hidden_states;
+//! # let _ = pruned_tokens;
+//! # Ok(())
+//! # }
 //! ```
 
 use serde::{Deserialize, Serialize};

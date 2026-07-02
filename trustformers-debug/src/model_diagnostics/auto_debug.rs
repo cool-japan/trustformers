@@ -3,6 +3,10 @@
 //! This module provides intelligent debugging capabilities that automatically
 //! analyze model behavior, identify potential issues, and generate actionable
 //! recommendations for optimization and problem resolution.
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use anyhow::Result;
 use std::collections::{HashMap, VecDeque};
@@ -23,7 +27,6 @@ pub struct AutoDebugger {
     /// Training dynamics history
     dynamics_history: VecDeque<TrainingDynamics>,
     /// Known issue patterns and solutions
-    #[allow(dead_code)]
     issue_patterns: IssuePatternDatabase,
     /// Current debugging session state
     session_state: DebuggingSession,

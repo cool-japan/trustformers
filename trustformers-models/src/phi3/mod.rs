@@ -30,68 +30,81 @@
 //! ### Text Generation with Phi-3 Mini
 //! ```rust,no_run
 //! use trustformers_models::phi3::{Phi3ForCausalLM, Phi3Config};
-//! use trustformers_core::generation::{GenerationConfig, SamplingStrategy};
+//! use trustformers_core::traits::Model;
+//! use trustformers_core::tensor::Tensor;
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = Phi3Config::phi3_mini_4k_instruct();
-//! let mut model = Phi3ForCausalLM::new(config)?;
-//! model.load_from_hub("microsoft/Phi-3-mini-4k-instruct")?;
+//! let model = Phi3ForCausalLM::new(config)?;
 //!
-//! // Generate with sampling
-//! let gen_config = GenerationConfig {
-//!     max_new_tokens: 150,
-//!     temperature: 0.7,
-//!     top_p: 0.9,
-//!     do_sample: true,
-//!     ..Default::default()
-//! };
-//!
-//! let generated = model.generate(input_ids, gen_config)?;
+//! // Run a forward pass to obtain next-token logits
+//! # let input_ids = Tensor::from_vec_i64(vec![1, 2, 3, 4, 5], &[5])?;
+//! let output = model.forward(input_ids)?;
+//! # let _ = output;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### Instruction Following
 //! ```rust,no_run
 //! use trustformers_models::phi3::{Phi3ForCausalLM, Phi3Config};
+//! use trustformers_core::traits::Model;
+//! use trustformers_core::tensor::Tensor;
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = Phi3Config::phi3_small_8k_instruct();
-//! let mut model = Phi3ForCausalLM::new(config)?;
-//! model.load_from_hub("microsoft/Phi-3-small-8k-instruct")?;
+//! let model = Phi3ForCausalLM::new(config)?;
 //!
-//! // Format instruction with Phi-3 chat template
+//! // Format instruction with Phi-3 chat template, then tokenize (tokenization not shown here)
 //! let instruction = "<|user|>\nExplain machine learning in simple terms.<|end|>\n<|assistant|>\n";
-//! let input_ids = tokenizer.encode(instruction)?;
+//! # let _ = instruction;
+//! # let input_ids = Tensor::from_vec_i64(vec![1, 2, 3, 4, 5], &[5])?;
 //!
-//! let response = model.generate(input_ids, max_length: 400)?;
+//! let response = model.forward(input_ids)?;
+//! # let _ = response;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### Long Context Processing
 //! ```rust,no_run
 //! use trustformers_models::phi3::{Phi3ForCausalLM, Phi3Config};
+//! use trustformers_core::traits::Model;
+//! use trustformers_core::tensor::Tensor;
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Use 128K context model for long documents
 //! let config = Phi3Config::phi3_mini_128k_instruct();
-//! let mut model = Phi3ForCausalLM::new(config)?;
-//! model.load_from_hub("microsoft/Phi-3-mini-128k-instruct")?;
+//! let model = Phi3ForCausalLM::new(config)?;
 //!
-//! // Process long document (up to 128K tokens)
-//! let long_input = tokenizer.encode(&very_long_document)?;
-//! let summary = model.generate(long_input, max_length: 1000)?;
+//! // Process long document (token ids shown here would normally come from a tokenizer)
+//! # let long_input = Tensor::from_vec_i64(vec![1, 2, 3, 4, 5], &[5])?;
+//! let summary = model.forward(long_input)?;
+//! # let _ = summary;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### Efficient Mobile Deployment
 //! ```rust,no_run
 //! use trustformers_models::phi3::{Phi3ForCausalLM, Phi3Config};
+//! use trustformers_core::traits::Model;
+//! use trustformers_core::tensor::Tensor;
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = Phi3Config {
-//!     use_flash_attention: true,   // Enable memory-efficient attention
 //!     attention_dropout: 0.0,      // Disable dropout for inference
 //!     ..Phi3Config::phi3_mini_4k_instruct()
 //! };
 //!
-//! let mut model = Phi3ForCausalLM::new(config)?;
-//! model.load_quantized("phi3-mini-4bit.gguf")?;  // Load quantized weights
+//! let model = Phi3ForCausalLM::new(config)?;
 //!
 //! // Optimized inference for mobile
+//! # let input_ids = Tensor::from_vec_i64(vec![1, 2, 3], &[3])?;
 //! let result = model.forward(input_ids)?;
+//! # let _ = result;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Key Components

@@ -166,7 +166,6 @@ impl RLHFTrainer {
         }
 
         let mut total_accuracy = 0.0;
-        #[allow(unused_variables)]
         let mut _total_loss = 0.0;
         let num_batches = self.preference_pairs.len().div_ceil(self.config.batch_size);
 
@@ -253,7 +252,6 @@ impl RLHFTrainer {
 
         let mut total_ppo_objective = 0.0;
         let mut total_kl_divergence = 0.0;
-        #[allow(unused_variables)]
         let mut _total_value_loss = 0.0;
         let clip_epsilon = 0.2; // PPO clip parameter
 
@@ -344,7 +342,6 @@ impl RLHFTrainer {
             ));
         }
 
-        #[allow(unused_variables)]
         let mut _total_dpo_loss = 0.0;
         let mut total_reward = 0.0;
         let beta = 0.1; // Temperature parameter for DPO
@@ -455,7 +452,6 @@ impl RLHFTrainer {
         }
 
         let mut total_violations = 0;
-        #[allow(unused_variables)]
         let mut _total_constitutional_loss = 0.0;
 
         // Simulate Constitutional AI training epochs

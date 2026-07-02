@@ -228,11 +228,9 @@ impl InContextLearner {
         query: &str,
         num: usize,
     ) -> Result<Vec<ICLExample>> {
-        if self.embedder.is_none() {
+        let Some(embedder) = self.embedder.as_ref() else {
             return Ok(self.select_random(examples, num));
-        }
-
-        let embedder = self.embedder.as_ref().expect("embedder checked as Some above");
+        };
         let query_embedding = embedder(query);
 
         let mut similarities: Vec<(usize, f32)> = examples

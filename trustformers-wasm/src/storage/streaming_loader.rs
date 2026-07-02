@@ -4,7 +4,6 @@
 //! by loading and compiling WASM modules progressively.
 
 #![allow(dead_code)]
-
 use js_sys::{ArrayBuffer, Promise, Uint8Array, WebAssembly};
 use std::format;
 use std::string::String;

@@ -12,7 +12,6 @@ pub struct RewardModel {
     config: RewardModelConfig,
     model_type: RewardModelType,
     parameters: HashMap<String, Array2<f32>>,
-    #[allow(dead_code)]
     tokenizer: Option<RewardTokenizer>,
     training_data: Vec<PreferencePair>,
     statistics: RewardModelStatistics,
@@ -20,9 +19,7 @@ pub struct RewardModel {
 
 /// Simplified tokenizer for reward model
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct RewardTokenizer {
-    #[allow(dead_code)]
     vocab_size: usize,
     max_length: usize,
 }

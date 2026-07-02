@@ -33,7 +33,7 @@ impl EmbeddingEntry {
     pub fn new(embedding: Vec<f32>) -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("System time before UNIX_EPOCH")
+            .unwrap_or_default()
             .as_secs();
 
         Self {
@@ -49,7 +49,7 @@ impl EmbeddingEntry {
         self.access_count += 1;
         self.last_accessed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("System time before UNIX_EPOCH")
+            .unwrap_or_default()
             .as_secs();
     }
 }
@@ -228,7 +228,7 @@ impl EmbeddingCacheService {
     async fn cleanup_old_entries(&self) -> Result<()> {
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("System time before UNIX_EPOCH")
+            .unwrap_or_default()
             .as_secs();
 
         let mut cache = self.cache.write().await;
@@ -269,7 +269,7 @@ impl EmbeddingCacheService {
         {
             let current_time = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("System time before UNIX_EPOCH")
+                .unwrap_or_default()
                 .as_secs();
 
             let mut cache = self.cache.write().await;

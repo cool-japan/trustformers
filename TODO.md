@@ -4,21 +4,22 @@
 
 TrustformeRS is a high-performance, memory-safe Rust implementation of Hugging Face Transformers.
 The project provides a comprehensive ecosystem for transformer model development, training, and deployment
-with support for 21+ architectures and multiple deployment targets.
+with support for 49+ architectures and multiple deployment targets.
 
 ### Version Information
-- **Current Version:** 0.1.3 (Unreleased)
-- **Previous Release:** 0.1.2 (Released 2026-06-20)
-- **Status:** Active Development (v0.1.3)
+- **Current Version:** 0.1.4 (Unreleased — CHANGELOG finalized 2026-07-02)
+- **Previous Release:** 0.1.3 (Released 2026-06-25)
+- **Status:** Active Development (v0.1.4)
 - **License:** Apache-2.0
 - **Repository:** https://github.com/cool-japan/trustformers
 
-### Project Health (corrected 2026-06-19 — see Code-Quality Audit below)
-- ✅ **Compiles cleanly** across all crates (no-warnings policy enforced where checked)
-- ✅ **Large test suite** — ~23,700 `#[test]`/`#[tokio::test]` functions (run locally with `cargo nextest`; a Rust CI gate is being restored, so the "100% pass" claim is not yet machine-verified — Task 9 below)
+### Project Health (updated 2026-07-01 — full local workspace verification)
+- ✅ **Compiles cleanly** across all crates — `cargo clippy --workspace --all-features --all-targets -- -D warnings` = 0 warnings/errors
+- ✅ **Full test suite passes, machine-verified locally** — `cargo nextest run --workspace --all-features` = **18,102 passed, 0 failed** (119 skipped), ~565s, verified 2026-07-01. (No GitHub Actions Rust CI — intentionally not added, billable, per user policy — but the "100% pass" claim is now freshly and completely locally verified end-to-end, superseding Task 9's "not yet machine-verified" caveat below.)
+- ✅ **0 rustdoc warnings** — `cargo doc --workspace --all-features --no-deps` with `RUSTDOCFLAGS="-D warnings"` = clean; `cargo fmt --all -- --check` = clean
 - 🟡 **49+ architectures for CPU inference** — maturity varies; a batch of "fake implementation" defects was fixed 2026-06-19 (see audit), others may remain
-- 🟡 **Compute is CPU / `f32`** — F16/BF16 are storage-only (upcast for math); GPU is wired only for GPT-2/RetNet (see audit Tasks 4 & 5)
-- ✅ **100% Pure Rust** source (~1.4M SLoC; GPU backends bind to system libraries via Rust crates)
+- 🟡 **Compute is CPU / `f32`** — F16/BF16 are storage-only (upcast for math); GPU is wired only for GPT-2/RetNet, now via the Pure-Rust `oxicuda`/`oxicuda-metal` backends (the `cudarc` backend was fully removed in 0.1.4 — see audit Tasks 4 & 5, now historical)
+- ✅ **100% Pure Rust** default-feature source for every crate except `trustformers-serve` (accepted exception: rustls/aws-lc-rs TLS); 2,983 Rust files, ~1.42M lines / ~1.18M lines of code (via `tokei`, 2026-07-01); optional GPU/hardware backends remain feature-gated FFI
 
 ---
 
@@ -35,6 +36,8 @@ substantively correct** in several areas. Evidence-backed verdicts:
 | Stubs / `todo!()` | **Partially true** | Only 12 `todo!()` (mostly in doc-comments) + 0 `unimplemented!()`, BUT ~15–25 genuinely *fake* functions returned wrong/placeholder results in real compute paths. |
 | Allocation-heavy / non-idiomatic | **Partially true (~50%)** | Real `Vec` round-trips in matmul/SDPA hot loops; stringly-typed activation dispatch in 20+ models. (`[T;N]` const-generic critique does **not** apply to dynamic tensors.) |
 | README false advertising ("看板倒れ") | **Several FALSE claims** | Fabricated LLaMA-7B GPU benchmark numbers, a non-compiling GPU code example, overstated test count, TPU listed as supported (empty feature flag). |
+
+> **Update (2026-07-01):** the GPU row above is historical (as of 2026-06-19) and now stale on backend naming — the `cudarc` CUDA backend referenced there was **fully removed** in 0.1.4, replaced by the Pure-Rust `oxicuda` (`oxicuda-blas`/`-dnn`/`-memory`/`-driver`); Metal similarly moved from scirs2 MPS to `oxicuda-metal`, dropping the `scirs2-core` GPU dependency. Both backends now carry 12 CPU↔CUDA golden-parity tests, runtime-verified on a real NVIDIA RTX A4000 (CUDA 12.0). GPU is still wired into per-model `forward` for GPT-2/RetNet only (2 of ~58+ models) — that part of the criticism still stands; see the 0.1.4 CHANGELOG and README's GPU Acceleration section for the current picture.
 
 ### ✅ Resolved 2026-06-19
 - **README & this file**: removed fabricated GPU benchmarks, fixed the non-compiling GPU example, corrected GPU/precision/test/TPU claims, added honest maturity notes.
@@ -95,13 +98,17 @@ Read this before touching anything; these are non-obvious and cost time to redis
   touch, e.g. `--features "mamba,starcoder2,phi3,flamingo"`, or `--features all` for everything.
   This is why a default check can finish in <1s while silently skipping your file.
 - **Two GPU systems, don't confuse them.** The *real* backends are in
-  `trustformers-core/src/gpu_ops/` (`cuda/` via `cudarc`, `metal/` via `objc2`/MPS, `webgpu.rs`,
-  `opencl.rs`, `rocm.rs`) — feature-gated, off by default. The high-level
+  `trustformers-core/src/gpu_ops/` (`cuda/oxicuda/` via the Pure-Rust `oxicuda` — **not** `cudarc`,
+  which was fully removed in 0.1.4 — `metal/` via `objc2`/`oxicuda-metal`, `webgpu.rs`, `opencl.rs`,
+  `rocm.rs`) — feature-gated, off by default. The high-level
   `trustformers-core/src/gpu.rs` (`GpuContext`, `GpuMemoryPool`, `detect_*_devices`) is a **CPU
   simulation**: `allocate()` just increments a counter and device detection returns hard-coded
   placeholder devices. Core `Tensor::matmul` **now dispatches** to `gpu_ops` for `Tensor::CUDA`/
   `Tensor::Metal` operands (added 2026-06-20, `#[cfg(feature=…)]`-gated) — but per-model `forward` GPU
-  wiring is still only `gpt2`/`retnet`, and `gpu.rs` remains a CPU simulation.
+  wiring is still only `gpt2`/`retnet`, and `gpu.rs` remains a CPU simulation. (Updated 2026-07-01:
+  the CUDA path is now `gpu_ops/cuda/oxicuda/mod.rs`, carrying 10 `_parity`-suffixed CPU↔CUDA
+  golden-parity unit tests plus 2 more counted in the 0.1.4 CHANGELOG's "12 golden-parity tests"
+  figure; `cargo test -p trustformers-core --features cuda --lib gpu_ops::cuda::oxicuda`.)
 - **Working reference implementations to copy** for attention/RoPE work:
   `trustformers-models/src/mistral/model.rs` and `…/starcoder2/model.rs` (the latter was fixed in
   this campaign and is rank-agnostic for 2D `[seq,h]` and 3D `[batch,seq,h]`). NOTE: mistral leaves
@@ -201,8 +208,8 @@ Fix under Task 2/3 follow-up — triaged 2026-06-20:
   consumes are now real (resolved above), but actually executing a path needs a real model wired in — a feature.
 - `trustformers-wasm/src/layers.rs:194` — dropout disabled ("return input as dropout requires RNG");
   fine for inference but should use `scirs2_core::random` if training on WASM.
-- `trustformers/src/profiler.rs:334` — returns a mock dashboard URL (benign, but labelled "in a real
-  implementation…").
+- `trustformers/src/profiler.rs:368` (line drifted from :334; still open as of 2026-07-01) — `get_dashboard_url`
+  returns a mock dashboard URL (benign, but labelled "in a real implementation…").
 - `trustformers-c/src/cuda.rs` (legacy, excluded from workspace) — CUDA matmul copies via host memory
   as a placeholder; `cloud/aws_lambda.rs` returns `{"task":"placeholder"}`. Lower priority (legacy crate).
 - Re-run the sweep periodically: `grep -rniE "placeholder|return input|simplified|in a real implementation|dummy|hardcoded" --include=*.rs | grep -v /target/` and triage real-compute hits vs. benign error strings.
@@ -226,7 +233,34 @@ cargo check -p trustformers-models --lib --features all
 
 TrustformeRS is organized as a Cargo workspace of specialized crates:
 
-### Per-Crate Status (v0.1.3, 2026-06-24)
+### Per-Crate Status (v0.1.4, 2026-07-01)
+
+| Crate | Tests (approx.) | Status | SLoC |
+|-------|-------|--------|------|
+| trustformers-core | ~2,353 | Stable | 189,922 |
+| trustformers-models | ~4,479 | Alpha | 185,954 |
+| trustformers-training | ~930 | Stable | 87,017 |
+| trustformers-tokenizers | ~500 | Stable | 48,701 |
+| trustformers-optim | ~960 | Stable | 76,662 |
+| trustformers-serve | ~4,321 | Stable | 331,151 |
+| trustformers-debug | ~899 | Alpha | 100,417 |
+| trustformers-wasm | ~130 | Stable | 53,361 |
+| trustformers-mobile | ~742 | Alpha | 125,131 |
+| trustformers | ~2,261 | Alpha | 131,961 |
+| **Sum of per-crate figures above** | **~17,575** | | **~1,330,277** |
+| **Full workspace** (`cargo nextest run --workspace --all-features`) | **18,102 passed**, 0 failed, 119 skipped | | 2,983 files / ~1.42M lines / ~1.18M lines of code |
+
+Per-crate test counts are approximate (derived from the full workspace run, attributed per crate;
+some integration/cross-crate tests aren't cleanly attributable to one row, hence the ~3% gap between
+the per-crate sum and the full-workspace total — this is expected and not a discrepancy to chase).
+SLoC is per-crate `tokei` line count (code+comments+blanks); the full-workspace row additionally
+covers root-level examples/benches/tests/docs/bindings and the non-member `trustformers-c`/`-js`/`-py`
+crates, hence it exceeds the sum of the 10 rows above. **This full-workspace count (18,102 passed, 0
+failed) is machine-verified locally, 2026-07-01** — see Project Health above.
+
+*(v0.1.0 baseline: 5,007 tests / ~900,000+ SLoC)*
+
+### Per-Crate Status (v0.1.3, 2026-06-24) — historical
 
 | Crate | Tests | Status | SLoC |
 |-------|-------|--------|------|
@@ -242,16 +276,16 @@ TrustformeRS is organized as a Cargo workspace of specialized crates:
 | trustformers | 675 | Alpha | 134,295 |
 | **Total** | **5,358** | | **~1,408,134** |
 
-*(v0.1.0 baseline: 5,007 tests / ~900,000+ SLoC)*
-
 > **Correction (2026-06-19 audit):** the "5,358" figure is a stale/curated snapshot. The actual
-> in-tree count is **~23,700** `#[test]` + `#[tokio::test]` functions, but there is currently **no
-> Rust CI** to substantiate a "100% pass" claim (CI is archived — see Task 9 in the Code-Quality
-> Audit above). Treat per-crate numbers in this table as historical until CI is restored.
+> in-tree count is **~23,700** `#[test]` + `#[tokio::test]` functions. **Update (2026-07-01): this is
+> now resolved** — a full `cargo nextest run --workspace --all-features` was run end-to-end and
+> passed completely (18,102 passed, 0 failed, 119 skipped; see the v0.1.4 table above), so the
+> "100% pass" claim is machine-verified locally even though no GitHub Actions Rust CI exists (by
+> policy, not by gap — see Task 9 in the Code-Quality Audit above).
 
 ### Core Crates
 1. **trustformers-core** - Fundamental tensor operations, layers, hardware acceleration (Stable)
-2. **trustformers-models** - 27+ transformer model implementations (Alpha)
+2. **trustformers-models** - 49+ transformer model implementations (Alpha)
 3. **trustformers-tokenizers** - BPE, WordPiece, SentencePiece tokenizers (Stable)
 4. **trustformers-optim** - 20+ optimization algorithms and learning rate schedulers (Stable)
 5. **trustformers-training** - Complete training infrastructure, RLHF/DPO support (Stable)
@@ -339,7 +373,15 @@ TrustformeRS is organized as a Cargo workspace of specialized crates:
 
 ---
 
-### Model Architectures (27+ Models)
+### Model Architectures (49+ Models)
+
+> **Note (2026-07-01):** the count in this heading was corrected from the original "27+" to the
+> current "49+" (confirmed via `trustformers-models/src/*` module directories and the README Model
+> Zoo table). The detailed per-model bullets below only cover the original ~27; the ~22 added since
+> (Falcon2, Gemma2, Granite, Hyena, InternLM2, Jamba, Jamba2, Linformer, LLaMA3.2, Mamba2, Nemotron,
+> Performer, Phi4, Qwen2.5, RetNet, SD3, StarCoder2, Whisper, xLSTM, Yi, DeiT, Swin — see the v0.1.1/
+> v0.1.2 release summaries below) exist and are feature-gated per-model but aren't individually
+> written up here yet.
 
 #### Encoder Models (BERT Family)
 - ✅ **BERT** - Bidirectional Encoder Representations from Transformers
@@ -526,6 +568,30 @@ TrustformeRS is organized as a Cargo workspace of specialized crates:
 
 ### Hardware Acceleration
 
+> **⚠️ Accuracy correction (2026-07-01):** the "✅ done" bullets in this whole subsection predate the
+> 2026-06-19 Code-Quality Audit and the 0.1.4 oxicuda migration, and several are now known-inaccurate —
+> do not treat this list at face value; the honest, current status is the README's "Honest maturity
+> note" + "GPU Acceleration" section, and the Campaign C/D/E entries elsewhere in this file. Known
+> corrections, verified while updating this file (2026-07-01):
+> - **TPU Backend**: **not just unimplemented — the `tpu` feature and `kernels/tpu_impl.rs` have been
+>   removed from `trustformers-core` entirely** (no file, no feature flag found in `Cargo.toml`). The
+>   "Multi-Generation v2-v5e / Systolic Array / HBM Management" bullets below never reflected a real
+>   TPU backend (matches the audit's "TPU listed as supported, empty feature flag" finding).
+> - **ROCm/HIP Backend**: real backend scaffolding exists (`gpu_ops/rocm.rs`, `rocm = ["dep:libloading"]`)
+>   but kernel execution still falls back to CPU pending Pure-Rust HIP bindings
+>   (`gpu_ops/rocm.rs:131`, tracked as externally-blocked) — "Full ROCm/HIP integration" overstates it.
+> - **Vulkan Compute**: real deps (`vulkano`/`vulkano-shaders`) and code exist, but per the README this
+>   backend is feature-gated and experimental, not wired into model `forward`.
+> - **Google XLA / Intel oneAPI / RISC-V Vector Extensions**: `xla = []`, `oneapi = []`, `riscv = []`
+>   are all **empty feature flags with zero external dependencies** in `trustformers-core/Cargo.toml`
+>   — the same red flag the audit used to catch the fake TPU feature. In-tree code exists
+>   (`kernels/{xla_impl,oneapi_impl,riscv_impl}.rs`) but, unlike CUDA/Metal, none of it is mentioned as
+>   "real" anywhere in the README or the audited GPU status — treat as unverified/likely-simulated
+>   until a dedicated stub-check confirms otherwise; not re-audited line-by-line in this pass.
+> - **CUDA Backend / Flash Attention** below are also stale on naming (`cudarc`/cuBLAS) — the real,
+>   current, runtime-verified backend is the Pure-Rust `oxicuda` (see Campaign C/D/E and the 0.1.4
+>   CHANGELOG); Flash Attention is verified for CUDA/Metal only, not "all backends."
+
 #### CUDA Backend
 - ✅ **Custom Fused Kernels**
   - Fused GELU activation (exact and approximate)
@@ -653,7 +719,20 @@ TrustformeRS is organized as a Cargo workspace of specialized crates:
 
 ### 🚨 CRITICAL PRIORITY: SciRS2 Policy Compliance & Performance (2025-12-19)
 
-**Status**: ✅ **100% Policy Compliant** - 🔴 **Performance Blocked on SciRS2-Core MPSGraph**
+> **SUPERSEDED (2026-07-01):** the "blocked on scirs2-core MPSGraph" premise below no longer applies.
+> In 0.1.4, Metal GPU compute (matmul + resident attention) was migrated from scirs2 MPS to the
+> Pure-Rust `oxicuda-metal` backend, and `trustformers-core`'s `scirs2-core` dependency no longer
+> requests any GPU-related feature at all (`Cargo.toml`: `features = ["array", "random", "parallel",
+> "simd"]`, plus an optional `linalg` — no `gpu`/`metal`/`mpsgraph`). Track A (waiting on the
+> scirs2-core team) is therefore moot: TrustformeRS is no longer depending on scirs2-core for Metal
+> GPU acceleration at all, and this is not tracked as an open blocker upstream. GPU-resident matmul on
+> both CUDA (`oxicuda`) and Metal (`oxicuda-metal`) is now zero-copy and CPU-parity-tested (see the
+> Code-Quality Audit update above and the 0.1.4 CHANGELOG). No verified end-to-end tok/sec figure on
+> the new oxicuda-metal path exists yet in this repo's docs — do not assume the old "~1 tok/sec" or
+> "50-200 tok/sec target" numbers below still apply; re-benchmark before citing a number. The
+> historical record below (2025-12-19) is kept for context only.
+
+**Status**: ✅ **100% Policy Compliant** - 🔴 **Performance Blocked on SciRS2-Core MPSGraph** *(historical — see superseded note above)*
 
 **Performance Status**: ~1 tok/sec vs 50-200 tok/sec target (PyTorch+MPS parity)
 
@@ -765,9 +844,10 @@ TrustformeRS is organized as a Cargo workspace of specialized crates:
 ---
 
 ## Proposed follow-ups
-- **scirs2-core 0.3.0 MPSGraph (externally blocked):** The 3 checkbox items under Track A are awaiting upstream scirs2-core 0.3.0 release.
-- **`trustformers-js` workspace governance gap:** The `trustformers-js/` directory is not declared in root `Cargo.toml` workspace `members` or `exclude`. Consider: add to `exclude` (explicit), or create a bridge Cargo.toml for the npm monorepo.
-- **Branch/version gap:** Resolved — workspace `Cargo.toml` and all package files are now at version `0.1.3`.
+- **scirs2-core 0.3.0 MPSGraph — SUPERSEDED (2026-07-01):** no longer a follow-up. 0.1.4 migrated Metal GPU compute to `oxicuda-metal` and dropped the `scirs2-core` GPU dependency entirely, so the 3 checkbox items under Track A are moot rather than "awaiting upstream release." See the SciRS2 Policy Compliance section above.
+- **`trustformers-js` workspace governance gap:** still open as of 2026-07-01 — the `trustformers-js/` directory is not declared in root `Cargo.toml` workspace `members` or `exclude`. Consider: add to `exclude` (explicit), or create a bridge Cargo.toml for the npm monorepo.
+- **Branch/version gap:** Resolved — workspace `Cargo.toml` and all package files are now at version `0.1.4`.
+- **Broader oxicuda GPU coverage (new, 2026-07-01):** GPU-resident `forward` is still GPT-2/RetNet-only; the fused CUDA megakernel (CUDA-6) and on-device GPT-NeoX attention residency (CUDA-7) remain future work — see "Deferred stubs" below.
 
 ---
 
@@ -877,8 +957,8 @@ cargo run -p trustformers --example clip_multimodal_example --features "clip,vit
 
 ---
 
-**Last Updated:** 2026-06-24 - v0.1.3 Development
-**Next Milestone:** Beta 1.0 Release (pending scirs2-core 0.3.0 with MPSGraph for 50-200x Metal performance)
+**Last Updated:** 2026-07-02 - v0.1.4 Development
+**Next Milestone:** Beta 1.0 Release — no longer pending scirs2-core/MPSGraph (superseded by the 0.1.4 `oxicuda`/`oxicuda-metal` migration, see the SciRS2 Policy Compliance section above); remaining work is broadening GPU-resident `forward` coverage beyond GPT-2/RetNet and re-benchmarking end-to-end tok/sec on the new backend
 **Target Audience:** ML engineers, researchers, and production deployment teams
 
 ---
@@ -962,11 +1042,15 @@ cargo run -p trustformers --example clip_multimodal_example --features "clip,vit
 
 ## Stubs to implement (added 2026-06-12 by /cooljapan-stub-check)
 
-- [ ] `trustformers-serve`: `build.rs:2` — Proto compilation is disabled because `tonic-build` 0.14 API changed; investigate new builder pattern or pre-generated proto files and restore gRPC stub generation.
-  - Priority: P2 | Scope: medium | Hint: none
+> **Deferred-stubs campaign — DONE (2026-06-29 session):** Implemented 4 of 6 long-deferred stubs — gRPC proto + serving (`build.rs:2`, `lib.rs:81,335`), Metal fused matmul+bias+GELU (`trustformers-models` gpt2 `model_blocks.rs:953`), WebGPU init (`trustformers-wasm` `gpu_tensor.rs:52,85`), and Python RWKV/Mamba (`trustformers-py` `auto.rs:96`). The remaining 2 stay `[DEFERRED]` pending an NVIDIA-GPU box / real hardware: the fused CUDA transformer kernel (`cuda_backend_ext.rs:457`, tracked under Campaign C / C3) and the `trustformers-c` device/cloud bindings (`src/cloud/*`). **Verification:** `cargo nextest run --workspace` = **14,560 passed, 58 skipped, 0 failed** (+20 vs the prior 14,540 — the re-enabled gRPC tests).
 
-- [ ] `trustformers-serve`: `src/lib.rs:81,335` — Two proto-generated modules are commented out pending build.rs fix; re-enable once proto compilation is restored.
+- [x] `trustformers-serve`: `build.rs:2` — Proto compilation is disabled because `tonic-build` 0.14 API changed; investigate new builder pattern or pre-generated proto files and restore gRPC stub generation.
+  - Priority: P2 | Scope: medium | Hint: none
+  - **DONE (2026-06-29 session):** `build.rs` rewritten for the tonic 0.14 split API (`tonic-prost-build::configure().compile_protos(...)`); added the new `tonic-prost` codec dep — proto compilation restored.
+
+- [x] `trustformers-serve`: `src/lib.rs:81,335` — Two proto-generated modules are commented out pending build.rs fix; re-enable once proto compilation is restored.
   - Priority: P2 | Scope: trivial | Hint: none
+  - **DONE (2026-06-29 session):** re-enabled `pub mod grpc;` (lib.rs:81) + the re-export (lib.rs:335); 20 gRPC tests now run (also fixed a wrong test — `HealthStatus::Serving` is wire value 1, not 0). 4388 serve tests pass.
 
 - [x] `trustformers-serve`: `src/resource_management/gpu_manager.rs` — Entire GPU manager module is commented-out because types (`GpuDeviceCapability`, `GpuLoadBalancer`, `GpuPerformanceTrend`, `GpuMonitoringSystem`, etc.) do not exist at the expected import paths; resolve import paths or define the missing types and uncomment.
   - Priority: P2 | Scope: large | Hint: none
@@ -1014,18 +1098,20 @@ cargo run -p trustformers --example clip_multimodal_example --features "clip,vit
 - [ ] `trustformers-c`: `src/containers/deployment.rs:57` — `DockerImageConfig` conversion from `containers::types::DockerImageConfig` to `docker::DockerImageConfig` is a placeholder; implement the struct field mapping.
   - Priority: P2 | Scope: small | Hint: none
 
-- [ ] `trustformers-c`: `src/cloud/aws_lambda.rs,azure_functions.rs,google_cloud_functions.rs` — Cloud function handlers set `TrustformersModel` and `TrustformersPipeline` handles to `0` (null) and return placeholder JSON; wire real model loading and pipeline execution.
+- [ ] **[DEFERRED — needs NVIDIA GPU box / real hardware]** `trustformers-c`: `src/cloud/aws_lambda.rs,azure_functions.rs,google_cloud_functions.rs` — Cloud function handlers set `TrustformersModel` and `TrustformersPipeline` handles to `0` (null) and return placeholder JSON; wire real model loading and pipeline execution.
   - Priority: P2 | Scope: large | Hint: none
   - Locations: aws_lambda.rs:204,208,324,342,358,383 / azure_functions.rs:285,289,418,424,528 / google_cloud_functions.rs:271,274,431,437,494
+  - **DEFERRED (2026-06-29 session):** the `trustformers-c` ASIC/cloud device + cloud-function bindings need FFI to real ASIC/cloud hardware/SDKs that aren't present here (and should follow the Pure-Rust/noffi policy); needs real hardware.
 
 - [ ] `trustformers-c`: `src/utils.rs:236` and `src/utils_impl/mod.rs:184` — Tests reference old `validate_string_comprehensive` / `validate_string` / `safe_c_string` signatures that no longer exist; update tests to current API or restore the functions.
   - Priority: P2 | Scope: small | Hint: none
 
-- [ ] `trustformers-core`: `src/gpu_ops/cuda/cuda_split/cuda_backend_ext.rs:457` — `run_fused_transformer_layer` executes operations individually instead of fused; implement a fully fused LayerNorm+QKV+RoPE+Attention+Proj+Residual CUDA kernel path.
-  - Priority: P2 | Scope: large | Hint: none
+- [ ] **[CUDA-6 — oxicuda fused megakernel, future work]** `trustformers-core` — fully fused LayerNorm+QKV+RoPE+Attention+Proj+Residual kernel path. **PATH SUPERSEDED (2026-06-29, Campaign E):** the old cudarc file `src/gpu_ops/cuda/cuda_split/cuda_backend_ext.rs:457` was **deleted** with the cudarc backend; the current oxicuda path executes ops individually (correct). A fused megakernel is now an oxicuda-backend (`oxicuda-dnn`) task, not a cudarc one.
+  - Priority: P2 | Scope: large | Hint: implement via oxicuda-ptx template + a resident `*_gpu_to_gpu` chain; optimization only, not a correctness gap.
 
-- [ ] `trustformers-wasm`: `src/compute/gpu_tensor.rs:52,85` — WebGPU backend initialization is a stub (no device creation); `Rc<RefCell<>>` wrapper for interior mutability not applied; implement WebGPU device/queue setup and wrap backend.
+- [x] `trustformers-wasm`: `src/compute/gpu_tensor.rs:52,85` — WebGPU backend initialization is a stub (no device creation); `Rc<RefCell<>>` wrapper for interior mutability not applied; implement WebGPU device/queue setup and wrap backend.
   - Priority: P2 | Scope: medium | Hint: none
+  - **DONE (2026-06-29 session):** implemented WebGPU device/queue setup via the crate's web-sys/js_sys path (`navigator.gpu` → request_adapter → request_device) and wrapped the backend in `Rc<RefCell<>>`. Host + wasm32 builds/clippy clean; runtime device creation needs a browser (compile-validated; falls back to CPU when no adapter).
 
 - [x] `trustformers`: `tests/compatibility_tests.rs:34,107,203,349` — Four tests are `#[ignore]`d waiting for `GlobalMemoryPool`, `ZeroCopyTensorView`, and `GlobalProfiler`; either implement these types or delete the placeholder tests.
   - Priority: P2 | Scope: medium | Hint: none
@@ -1036,10 +1122,11 @@ cargo run -p trustformers --example clip_multimodal_example --features "clip,vit
 
 ## Stubs to implement (added 2026-06-22 by /cooljapan-stub-check)
 
-- [ ] **trustformers** `trustformers-py`: `src/auto.rs:96` — `TODO`: `"rwkv" | "mamba" => { // State-space models - for now use BERT as fallback`
+- [x] **trustformers** `trustformers-py`: `src/auto.rs:96` — `TODO`: `"rwkv" | "mamba" => { // State-space models - for now use BERT as fallback`
   - **Priority:** P2  **Scope:** large  **Cross-project:** none
   - **Approach:** Route the `rwkv`/`mamba` arm to the real state-space loaders (`PyRwkvModel`/`PyMambaModel`) instead of the BERT fallback; wire `from_pretrained` to load state-space weights.
   - **Risk:** Known-wrong correctness bug — silently returns a BERT model for RWKV/Mamba checkpoints, producing garbage outputs; needs the model crates' loaders to exist and be Python-exposed.
+  - **DONE (2026-06-29 session):** found the entire Python binding layer had been disabled since v0.1.0 (pyo3 0.26→0.28 API drift); modernized + re-enabled it, created real `PyRwkvModel`/`PyMambaModel` classes, and routed the arm to them instead of the BERT fallback. (Weight loading uses the same pre-existing stubbed path as all py model classes.)
 
 - [ ] **trustformers** `trustformers-core`: `src/ops/activations.rs:42` — `TODO`: `let device_id = 0; // TODO: Get from tensor metadata`
   - **Priority:** P2  **Scope:** small  **Cross-project:** none
@@ -1076,17 +1163,19 @@ cargo run -p trustformers --example clip_multimodal_example --features "clip,vit
   - **Approach:** Refactor `active_models` storage from `Box<dyn PerformanceModel>` to `Arc<dyn PerformanceModel>`, then insert the freshly trained model instead of returning a default placeholder.
   - **Risk:** Training succeeds but the model is discarded (a default is returned), so trained performance models are never actually served.
 
-- [ ] **trustformers** `trustformers-models`: `src/gpt2/model/model_blocks.rs:953` — `TODO`: `// TODO: Fused matmul+bias+GELU kernel for Metal GPU`
+- [x] **trustformers** `trustformers-models`: `src/gpt2/model/model_blocks.rs:953` — `TODO`: `// TODO: Fused matmul+bias+GELU kernel for Metal GPU`
   - **Priority:** P2  **Scope:** medium  **Cross-project:** none
   - **Approach:** Integrate the existing Metal fused matmul+bias+GELU kernel (`gpu_ops/metal/metalbackend_matmul_gelu_f32_group.rs`) into the Linear layer with GPU-resident buffers, replacing the current MPS/Accelerate path.
   - **Risk:** Perf only (current MPS/Accelerate path is correct); integration requires GPU-resident buffer ops in the Linear layer.
+  - **DONE (2026-06-29 session):** wired the existing `MetalBackend::matmul_bias_gelu_f32` kernel into `Gpt2MLP` (gated `metal,gpt2`), collapsing matmul→bias→GELU into one GPU dispatch. GPU parity test on Apple Silicon: bit-identical (max diff 0) vs the separate-ops path.
 
 - [ ] **trustformers** `trustformers-models`: `src/gpt_neox/model.rs:165` — `TODO`: `// Temporary fallback: Convert Metal/CUDA tensors to F32 // TODO: Implement full Tensor::Metal/CUDA support in Attention`
   - **Priority:** P2  **Scope:** medium  **Cross-project:** none
   - **Approach:** Implement native Metal/CUDA tensor support in GPT-NeoX attention (QKV split + RoPE on-device) instead of downcasting GPU tensors to CPU F32.
   - **Risk:** Perf/correctness — GPU GPT-NeoX attention silently round-trips to CPU F32, losing GPU residency and precision flexibility.
+  - **PARTIAL (2026-06-29, Campaign E CUDA-7):** the CPU-download fallback is now **honestly documented** (oxicuda host-in/host-out; attention downloads to CPU; parity-correct). On-device CUDA attention residency (QKV split + RoPE resident on the oxicuda device, no host round-trip) remains the open future-work item — keep this unchecked until residency lands.
 
-- [ ] **trustformers** `trustformers-serve`: `src/resource_management/gpu_manager/manager.rs:259` — `TODO`: `// TODO: In production, add real GPU discovery:`
+- [x] **trustformers** `trustformers-serve`: `src/resource_management/gpu_manager/manager.rs:259` — `TODO`: `// TODO: In production, add real GPU discovery:` — **DONE (2026-06-29, Campaign E Tier-2):** real `nvidia-smi`-based GPU discovery with an honest empty fallback when no GPUs are present (Pure-Rust probe, no FFI).
   - **Priority:** P2  **Scope:** medium  **Cross-project:** none
   - **Approach:** Implement real GPU discovery (NVIDIA via NVML/Pure-Rust probe, AMD via ROCm, cross-vendor via the project's compute backends) and driver-compatibility checks instead of the placeholder enumeration.
   - **Risk:** Serve cannot see actual GPUs in production; scheduling/placement runs on stubbed device info. (Real bindings should follow the Pure-Rust/noffi policy.)
@@ -1098,10 +1187,10 @@ cargo run -p trustformers --example clip_multimodal_example --features "clip,vit
 
 ### Known external-blocked placeholders (not actionable)
 
-- `trustformers-serve` `build.rs:2` — Proto compilation disabled: `tonic-build`/`tonic-prost-build` 0.14 API changed; blocked on settling the new builder pattern (also gates `src/lib.rs:81,335` proto module re-enables). Tracked in the 2026-06-12 section.
+- ~~`trustformers-serve` `build.rs:2` — Proto compilation disabled: `tonic-build`/`tonic-prost-build` 0.14 API changed~~ — **RESOLVED (2026-06-29 session):** migrated to the tonic 0.14 split `tonic-prost-build` API; proto compilation and the `src/lib.rs:81,335` re-enables are done (see the 2026-06-12 section).
 - `trustformers-core` `src/gpu_ops/rocm.rs:131` — `// TODO: Implement actual HIP kernel execution when HIP bindings are available`; falls back to CPU. Blocked on Pure-Rust/HIP bindings.
-- `trustformers-core` `src/gpu_ops/cuda/cuda_split/cuda_backend_ext.rs:457` — `// TODO: Implement fully fused transformer kernel`; needs a hand-written fused CUDA kernel. Already tracked (large) in the 2026-06-12 section.
-- `trustformers-wasm` `src/compute/gpu_tensor.rs:52,85` — WebGPU device creation + `Rc<RefCell<>>` interior-mutability wiring; blocked on the WebGPU backend. Already tracked (medium) in the 2026-06-12 section.
+- ~~`trustformers-core` `src/gpu_ops/cuda/cuda_split/cuda_backend_ext.rs:457` — fused transformer kernel~~ — **PATH DELETED (2026-06-29, Campaign E):** this cudarc file was removed with the cudarc backend. Fused megakernel is now CUDA-6 (oxicuda-backend) future work — see the 2026-06-12 section.
+- ~~`trustformers-wasm` `src/compute/gpu_tensor.rs:52,85` — WebGPU device creation + `Rc<RefCell<>>` interior-mutability wiring~~ — **RESOLVED (2026-06-29 session):** WebGPU device/queue setup + `Rc<RefCell<>>` wrapping implemented (see the 2026-06-12 section).
 
 ## Deferred stubs surfaced by /stub-check (2026-06-24)
 
@@ -1110,18 +1199,18 @@ Real but non-actionable-now stubs found in workspace member crates during nagare
 - [ ] `trustformers-serve`: `src/openai_compat/mod.rs:742,769` — route_chat/route_completion return hardcoded stub responses; need real model inference wired through serve (reason: crosscut, needs inference path + weights)
 - [ ] `trustformers-serve`: `src/graphql.rs:181` — models() returns a single hardcoded entry; model_service not wired into GraphQL context (reason: crosscut)
 - [ ] `trustformers-serve`: `src/model_management/manager.rs:47,56` — ModelInstance::infer() returns a placeholder string (reason: crosscut, needs inference)
-- [ ] `trustformers-serve`: `src/performance_optimizer/real_time_metrics/optimization/advanced_algorithms.rs:150,285,406,523,651,707,777` — update_with_feedback is a no-op across 7 algorithms; AlgorithmStatistics lost feedback_count/positive_feedback/negative_feedback fields (reason: crosscut, type API drift)
+- [x] `trustformers-serve`: `src/performance_optimizer/real_time_metrics/optimization/advanced_algorithms.rs:150,285,406,523,651,707,777` — update_with_feedback is a no-op across 7 algorithms; AlgorithmStatistics lost feedback_count/positive_feedback/negative_feedback fields (reason: crosscut, type API drift) — **DONE (2026-06-29, Campaign E Tier-2):** restored the three `AlgorithmStatistics` feedback fields and implemented real `update_with_feedback` across all 7 algorithms.
 - [ ] `trustformers-serve`: `src/performance_optimizer/real_time_metrics/mod.rs:167` — threshold module disabled (only stub impls); comment cites 1,700+ compile errors to restore from .bak2 (reason: oversized)
 - [ ] `trustformers-serve`: `src/test_performance_monitoring/types/storage.rs:35` — StorageManager::get_report returns a stub Report (reason: crosscut)
 - [ ] `trustformers-serve`: `src/test_performance_monitoring/types/reporting.rs:36` — ReportExporter::export_report returns a stub ExportResult without writing a file (reason: crosscut)
 - [ ] `trustformers-serve`: `src/test_performance_monitoring/mod.rs:205-207,223` and `src/test_performance_monitoring/service.rs:111,115,120` — config fields (compliance_reporting/historical_data_config/event_config/alert_config) absent on the config types; API drift (reason: external/crosscut)
 - [ ] `trustformers`: `src/auto/feature_extractors/vision.rs:251,291` — preprocess_image and extract_visual_features return zero vectors (reason: crosscut)
 - [ ] `trustformers`: `src/hub_offline_packs.rs:356` — get_model_info returns a mock ModelInfo; needs a HuggingFace Hub HTTP call (reason: external)
-- [ ] `trustformers`: `src/pipeline/conversational/config/presets.rs:409,462,488` — references AnalysisConfigBuilder/ReasoningConfigBuilder that may not exist; verify whether live or dead before implementing (reason: needs-clarification)
+- [x] `trustformers`: `src/pipeline/conversational/config/presets.rs:409,462,488` — references AnalysisConfigBuilder/ReasoningConfigBuilder that may not exist; verify whether live or dead before implementing (reason: needs-clarification) — **DONE (2026-06-29, Campaign E Tier-2):** verified dead; removed the references to the non-existent `AnalysisConfigBuilder`/`ReasoningConfigBuilder`.
 - [ ] `trustformers-mobile`: `src/react_native_fabric.rs:410` — execute_standard_inference returns a placeholder vec (reason: crosscut)
 - [ ] `trustformers-optim`: `src/genie_stub.rs`, `src/sofo_stub.rs`, `src/lora_rite_stub.rs` — simplified GENIE/SOFO/LoRA-RITE optimizer steps; full research algorithms pending API-compat resolution (reason: research/needs-clarification)
-- [ ] `trustformers-debug`: `src/data_export.rs:608` — export_sqlite falls back to JSON instead of a real SQLite file; should use oxisql-sqlite-compat per COOLJAPAN policy (reason: small-medium, deferred)
-- [ ] `trustformers-debug`: `src/kernel_optimizer.rs:987,1035,1101,1180` — GPU kernel analyzers (LaunchConfig/MemoryAccess/ComputeUtilization/KernelFusion) return empty results (reason: gpu)
+- [x] `trustformers-debug`: `src/data_export.rs:608` — export_sqlite falls back to JSON instead of a real SQLite file; should use oxisql-sqlite-compat per COOLJAPAN policy (reason: small-medium, deferred) — **DONE (2026-06-29, Campaign E Tier-2):** real SQLite export via `oxisql-sqlite-compat` 0.3 (added to the workspace), replacing the JSON fallback.
+- [x] `trustformers-debug`: `src/kernel_optimizer.rs:987,1035,1101,1180` — GPU kernel analyzers (LaunchConfig/MemoryAccess/ComputeUtilization/KernelFusion) return empty results (reason: gpu) — **DONE (2026-06-29, Campaign E Tier-2):** real occupancy / memory-coalescing / roofline / fusion analyzers implemented in new `src/kernel_optimizer/analysis.rs`; analyzers now return computed recommendations.
 
 > **Skipped as already-tracked:** `trustformers-core` `src/gpu_ops/rocm.rs:131` (HIP kernel execution pending Pure-Rust HIP bindings, reason: external/gpu) — already documented under "Known external-blocked placeholders" in the 2026-06-22 section above.
 
@@ -1129,9 +1218,9 @@ Real but non-actionable-now stubs found in workspace member crates during nagare
 
 Two dedicated campaigns for pre-existing debt (not introduced by 0.1.3). Each is large and must run as a focused, per-crate, verify-as-you-go pass — NOT a quick fix. Sized from the nagare 0.1.3 policy-check + purity audit.
 
-### Campaign A — No-unwrap + dead-code elimination
+### Campaign A — No-unwrap + dead-code elimination ✅ DONE (2026-06-29 session)
 
-- [ ] **Campaign A — No-unwrap + dead-code elimination**
+- [x] **Campaign A — No-unwrap + dead-code elimination** — ✅ DONE (2026-06-29 session); results below
   - **Goal:** eliminate 1,844 `#[allow(...)]` (1,337 `dead_code`, 104 `unused_variables`, 61 `unused_imports`, 41 `unreachable_patterns`, 32 `deprecated`, ~160 clippy) and drive 2,421 production `unwrap`/`expect` (73 unwrap + 2,348 expect) toward zero, per the No-warnings + No-unwrap policies. Build/tests currently pass only because the allows silence the warnings.
   - **Scope:** workspace member `src/` only (exclude `#[cfg(test)]`/`tests/`). Per-crate `#[allow]` counts: debug 484, core 467, models 329, training 127, optim 110, serve 102, wasm 81, trustformers 62, mobile 42, tokenizers 30. Worst `unwrap`/`expect` files: mobile `profiler_impl.rs` 48, mobile `profiler_split/types.rs` 48, core `memory_leak_detector.rs` 41, mobile `adaptive_cache_manager.rs` 36, core `checkpoint/mapping.rs` 36, wasm `webgpu/types.rs` 35, core `hardware/registry.rs` 34, mobile `optimization/memory_pool.rs` 33, debug `realtime_dashboard.rs` 32, trustformers `memory_pool.rs` 31.
   - **Approach (phased, per-crate, leaf-first):** A1 — remove `#[allow(dead_code)]`; for each surfaced item: delete if truly dead, wire it up if it should be used, or make it `pub` if it's intended API. A2 — remove remaining `#[allow(unused_*/unreachable/deprecated/clippy)]`, fix root causes (unused imports/vars, update deprecated APIs). A3 — replace `unwrap()`/`expect()` in src with `Result`/`?`/`ok_or_else`/`unwrap_or_else`; keep a documented `expect` ONLY where the invariant is provably infallible.
@@ -1139,12 +1228,255 @@ Two dedicated campaigns for pre-existing debt (not introduced by 0.1.3). Each is
   - **Verify:** per crate `cargo clippy -p <crate> --all-features --all-targets -- -D warnings` clean WITHOUT the removed allows; `cargo nextest run -p <crate> --all-features` green.
   - **Suggested execution:** a dedicated `/recursive` or `/loop` campaign, one crate per slice, leaf-of-dep-graph first, capped iterations, never re-adding an `#[allow]`.
 
-### Campaign B — Pure-Rust default-features dependency hygiene
+#### Results — Campaign A ✅ DONE (2026-06-29 session)
 
-- [ ] **Campaign B — Pure-Rust default-features dependency hygiene**
+Across all 10 workspace crates, production-code `unwrap()`/`expect()` was driven to ~0 — only documented genuinely-infallible invariants remain, each carrying a `// reason:` comment. `#[allow]` was reduced wherever the underlying lint could be fixed; genuine load-bearing survivors were kept and documented. Tests and doc-examples keep their `unwrap`/`expect` (policy permits). No public API signatures changed.
+
+| Crate | prod `unwrap`/`expect` before → after | `#[allow]` before → after |
+|-------|----------------------------------------|---------------------------|
+| tokenizers | 104 → 11 (documented) | 22 → 15 |
+| optim | 165 → 0 (+4 documented `expect`) | 105 → 28 |
+| mobile | 498 → 10 (documented) | 9 → 5 |
+| debug | 80 → 0 | 460 → 35 |
+| wasm | 213 → 0 | 81 → 65 |
+| training | 123 → 6 (documented) | 127 → 10 |
+| trustformers (umbrella) | 208 → 0 | 35 → 30 |
+| serve | 301 → 0 | 26 → 17 |
+| core | 459 → 0 (+4 documented; default + metal + cuda-oxicuda) | 372 → 367 (survivors verified load-bearing) |
+| models | edited; clippy-clean | clippy-clean |
+
+**Replacement patterns used:** lock-poisoning `.lock()/.read()/.write().unwrap()/.expect()` → `.unwrap_or_else(|p| p.into_inner())` (poison recovery); `SystemTime`/`Instant` → `.unwrap_or_default()`; `partial_cmp` → `.unwrap_or(Ordering::Equal)`; `?` / `.map_err(...)` / `.ok_or_else(...)?` propagation to `TrustformersError` in `Result` fns; `unwrap_or` / `match` / `let-else` for `Option` invariants; fire-and-forget sends → `let _ = ...`.
+
+**Survivors are documented, not hidden:** the genuine `#[allow]` that remain (notably ~367 in `core`) are documented load-bearing scaffolding (the lint cannot be fixed without changing real behavior/API); the remaining `expect` are documented infallible invariants, each with a `// reason:` comment.
+
+**Verification (workspace-wide, this session):** `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo nextest run --workspace` = **14,561 passed, 58 skipped, 0 failed** — identical to the pre-campaign baseline, i.e. zero behavior regression.
+
+### Campaign B — Pure-Rust default-features dependency hygiene ✅ DONE (2026-06-29 session)
+
+- [x] **Campaign B — Pure-Rust default-features dependency hygiene** — ✅ DONE (2026-06-29 session); results below
   - **Goal:** make DEFAULT features 100% Pure Rust (COOLJAPAN policy). Today every non-wasm member transitively compiles C libs in its default tree; only `trustformers-wasm` is clean. Our own crates are already compliant (use `oxiarc-*`, gate all heavy C backends) — this is third-party transitive leakage.
   - **Scope (default-tree offenders + who pulls them):** `aws-lc-sys` via `reqwest`→`rustls` (reqwest is a non-optional dep of `trustformers-core`); `onig_sys` via `tokenizers` (non-optional dep of core); `zstd-sys`/`zstd` via `jieba-rs`→`include-flate` (tokenizers); banned compression `flate2`+`miniz_oxide` via `plotters`/`image`/`png` (debug `visual`) and cloud-SDK HTTP stacks (serve); `brotli` via `lambda-web` (serve); `zip` (build-dep) via `utoipa-swagger-ui` (serve). NOTE: torch/cuda/opencl/vulkan/mpi/ffmpeg/kafka C deps are ALREADY correctly feature-gated (non-default) — leave them.
   - **Approach:** (1) `reqwest`/`rustls`: switch the default crypto provider off `aws-lc-rs` to a pure-Rust path (e.g. `reqwest` default-features=false + rustls with a RustCrypto provider), dropping `aws-lc-sys`. (2) `tokenizers`: disable its default `onig` feature, use the pure-Rust `fancy-regex` backend, dropping `onig_sys`. (3) `jieba-rs`/`include-flate`: replace or feature-gate so `zstd-sys` leaves default (or store data uncompressed / via `oxiarc`). (4) debug `visual` (plotters/image): move behind a non-default feature, or use a pure-Rust raster backend, dropping `flate2`/`miniz_oxide`. (5) serve: gate `lambda-web` behind a non-default `lambda` feature (drops `brotli`) and `utoipa-swagger-ui` behind a non-default `swagger-ui` feature (drops the `zip` build-dep).
   - **Risk:** changing the TLS crypto provider can affect HTTPS behavior; disabling `onig` can change tokenizer regex semantics for some models; gating debug-visual / serve lambda+swagger changes the default API/feature surface. Each change needs build+test verification and a default-vs-all-features tree diff.
   - **Verify:** `cargo tree -p <member> -e normal,build` shows no `-sys`/banned-compression in the DEFAULT tree for every member; `cargo build`/`cargo nextest run` green on default features; `--all-features` still green.
   - **Suggested execution:** a focused dependency-surgery pass, one offender at a time with a `cargo tree` diff + build/test gate after each; use `trustformers-wasm` (already pure) as the reference.
+
+#### Results — Campaign B ✅ DONE (2026-06-29 session)
+
+Every workspace crate now has a Pure-Rust (C/C++/Fortran-free) default dependency tree **except `trustformers-serve`** — an accepted exception: it is the HTTP server and keeps `aws-lc-sys` for rustls TLS, plus pure-Rust `flate2`/`miniz_oxide` pulled transitively by the AWS/Azure cloud SDKs. No default public API broke; the dropped functionality moved behind opt-in features.
+
+| Offender (lang) | Pulled via | Resolution |
+|-----------------|------------|------------|
+| `onig`/`onig_sys` (C) + `esaxx_fast`/`esaxx-rs` (C++) | `tokenizers` dep of `trustformers-tokenizers` | `tokenizers` set to `default-features=false, features=["fancy-regex","progressbar"]` — pure-Rust regex backend, drop-in, zero code changes |
+| `zstd-sys` (C) | `jieba-rs` (`trustformers-tokenizers`) | `jieba-rs` removed — it was entirely unused (`chinese.rs` has its own pure-Rust segmenter) |
+| `flate2`/`miniz_oxide` (banned compression) | `trustformers-debug` `visual` (plotters/ratatui/crossterm) | `default = ["visual"]` → `default = []`; those deps were already optional + unreferenced, so `visual` is now opt-in |
+| `brotli` + `zip` (banned) | `trustformers-serve` (`lambda-web`, `utoipa-swagger-ui`) | `lambda-web` → `lambda` feature; `utoipa-swagger-ui` → `swagger-ui` feature (both unreferenced in code, now opt-in). The CDN-based `/docs` Swagger page stays default |
+| `aws-lc-sys` (C, via reqwest→rustls→aws-lc-rs) | all crates | `reqwest` made optional; core's remote-leaderboard gated behind a `remote-leaderboard` feature, the umbrella's HuggingFace hub downloads behind a `hub` feature. Local/cached model loading still works without `hub`. **`trustformers-serve` keeps reqwest/aws-lc-sys** (accepted) |
+| `cc`/`alloca` (C) | `criterion` (`trustformers-models`) | `criterion` was a dead dependency (its "uses" were a local variable + benchmark string-templates) — removed |
+
+Also fixed a pre-existing `--all-features`-only unused-import warning (`trustformers-core/src/parallel/model_parallel.rs:10`).
+
+**New non-default (opt-in) features:** `hub` + `remote-leaderboard` (core/umbrella networking), `visual` (debug visualization — now off by default), `lambda` + `swagger-ui` (serve adapters).
+
+**Accepted serve exception:** `trustformers-serve` (the HTTP server) keeps `aws-lc-sys` (rustls TLS) plus pure-Rust `flate2`/`miniz_oxide` from the AWS/Azure cloud SDKs — accepted, not a regression.
+
+**Verification (this session):** C-free audit — 0 C/banned deps in every default tree except serve. `cargo clippy --workspace --all-targets -- -D warnings` (default) clean. `cargo nextest run --workspace` (default) = **14,540 passed, 58 skipped, 0 failed** (21 fewer than the 14,561 baseline = the now-opt-in feature tests, which run under their own features — not lost coverage). `--all-features` compiles.
+
+## Planned campaign — oxicuda GPU migration (scheduled 2026-06-25)
+
+Migrate the CUDA/GPU compute backend off `cudarc` (plus the lone scirs2 GPU touchpoint) onto **oxicuda** — the COOLJAPAN Pure-Rust CUDA replacement at `~/work/oxicuda`. **Version target (2026-06-25): oxicuda 0.4.0** (path dep `path = "../oxicuda"` during dev; oxicuda was advanced to 0.4.0 this session with the enhancements listed under Progress below; those enhancements are now **committed** in `~/work/oxicuda` (branch `0.4.0`: `1c1d23a bump-040`, `c01abfa "Add PTX kernel templates for bias-add and causal softmax operations"`, `abd66b9 "fmt"` — working tree clean), committed outside the delegated subagent flow). oxicuda needs no CUDA SDK / `nvcc` / `cudarc`; it loads `libcuda.so` at runtime via `libloading`, so this migration is a net **Pure-Rust policy win**.
+
+**Scope decisions:**
+- **GPU/CUDA + Metal.** Today's CUDA backend uses `cudarc` (NOT scirs2); scirs2's only *GPU* use is the macOS Metal `MPSOperations` call. So "use oxicuda instead of scirs2-* for GPU" = replace `cudarc` with oxicuda for CUDA AND replace the scirs2 Metal touchpoint with `oxicuda-metal`. [Q1 resolved]
+- **Out of scope (do NOT touch):** `scirs2_core::ndarray` (~102 sites), `scirs2_core::random` (~50 sites), `scirs2-linalg`, `oxiblas` — mandatory SciRS2-Integration-Policy substrate, unrelated to GPU. [Q2 resolved]
+- **Resolved (owner, 2026-06-25):** Metal IS in scope — `scirs2 MPSOperations` -> `oxicuda-metal` [Q3]. Integration tier = **phased**: low-level `DeviceBuffer`+`oxicuda-blas` FIRST for 1:1 parity with today's cudarc primitives, THEN adopt the purpose-built `transformer_backend` (PagedKvCache/FlashAttention) on the serving path as a net-new capability uplift [Q4 — owner deferred to recommendation]. Toolchain fits — trustformers rust 1.89 >= oxicuda 1.85; edition-2021 may depend on an edition-2024 crate [Q5].
+- **Resolved by investigation (2026-06-25) [Q7]:** delete the hand-written PTX — every kernel has a direct oxicuda library equivalent. GEMM -> `oxicuda-blas` `BlasHandle::gemm`; activations (gelu/silu/relu) + softmax -> `oxicuda-blas` (`elementwise`/`reduction`); layernorm/rmsnorm + flash/paged attention + RoPE -> `oxicuda-dnn` (`DnnHandle`, which wraps a `BlasHandle`). The four trustformers PTX kernels (gelu/layernorm/rope/causal-softmax) all map 1:1. Only numeric parity remains, verified by C1 golden tests — not an open design question. **All of Q1-Q7 are now resolved.**
+- **Crate map (oxicuda 0.4.0, verified 2026-06-25):** GPU GEMM = `oxicuda-blas`; GPU activations/softmax = `oxicuda-blas` (`elementwise`/`reduction`); GPU norm/attention/RoPE/conv/MoE = `oxicuda-dnn`; Metal = `oxicuda-metal` (`MetalBackend`: MPS `MpsMatrixMultiply` or MSL `simdgroup_gemm_msl`); KV-cache/scheduler/speculative/sampling = `oxicuda` root crate + `transformer-backend` feature (a module, NOT a standalone crate; compute delegates to `oxicuda-dnn::attn`). **OxiBLAS is CPU-only (v0.2.1, no GPU backend) — it stays the CPU substrate; the GPU GEMM path is `oxicuda-blas`, not OxiBLAS.**
+
+### Campaign C — oxicuda CUDA + Metal backend migration
+
+- [x] **Campaign C — oxicuda CUDA + Metal backend migration** — **DONE (2026-06-29, Campaign D + E; see those sections below for the full runtime-verified account).** Metal (C4) GPU-verified on Apple Silicon; CUDA runtime-verified 12/12 on a real NVIDIA RTX A4000 (Campaign D+E); `cudarc` fully removed and `cuda-oxicuda` promoted to be the `cuda` feature itself (C3, done); feature propagated to `trustformers-models` + the `trustformers` umbrella crate (C5, done). Only **C6** (the net-new `transformer_backend` uplift — `PagedKvCache`/`AttentionDispatch`/`ContinuousBatchScheduler`/`SpeculativeDecoder`/`TokenSampler`) remains not started — that is additional capability beyond parity, not a blocker for the migration itself.
+  - **Goal:** replace the `cudarc::{driver,nvrtc}` CUDA backend with oxicuda 0.4.0 (`oxicuda-driver`/`-memory`/`-launch` + `oxicuda-blas`/`-dnn`), replace the scirs2 Metal `MPSOperations` touchpoint with `oxicuda-metal`, re-enable the kernels currently disabled "pending cudarc API migration", and drop the `cudarc` dependency and the dormant `scirs2-core/"gpu"` feature.
+  - **Scope (cudarc surface, all in `trustformers-core` unless noted):** real backend `src/gpu_ops/cuda/cuda_split/` (cuda_backend.rs 1386, cuda_backend_ext.rs 527, cuda_dispatch.rs 318, cuda_types.rs 73); legacy dupes `gpu_ops/cuda/{backend,types,buffer_ops}.rs`; disabled `gpu_ops/advanced_kernels.rs` + `kernels/{mod,cuda_impl}.rs`; dispatch in `tensor/math_ops/linear_algebra.rs:186-205` + `layers/linear.rs`; Cargo `cuda=["dep:cudarc"]` + `cudarc 0.19` target dep (`Cargo.toml:101,134`). Metal touchpoint `gpu_ops/metal/common.rs:27` (`scirs2_core::gpu::backends::MPSOperations`). Pass-through only: `trustformers-models`/`trustformers` `cuda`/`metal` features. Out-of-workspace legacy `trustformers-c` (cudarc 0.17) handled last. `gpu.rs` is a CPU sim — leave it.
+  - **Approach (phased, verify-as-you-go) — tier = low-level parity FIRST, transformer_backend uplift SECOND [Q4]:**
+    - **C0 [DONE]** API-fit spike against `../oxicuda` 0.4.0 (the `oxicuda-blas`/`-dnn`/`-metal` APIs compile + link; Q1-Q7 resolved).
+    - **C1 [DONE — delivered as an additive `cuda-oxicuda` feature, NOT in-place behind `cuda`]** low-level CUDA backend: built a side-by-side `OxicudaCudaBackend` (`trustformers-core/src/gpu_ops/cuda/oxicuda/`) — GEMM via `oxicuda-blas`, activations/softmax via `oxicuda-blas`, layernorm/rmsnorm + attention + RoPE via `oxicuda-dnn`, plus three new PTX kernels added to oxicuda this session (`causal_softmax`, `rope_neox_half_split`, `bias_add`). Full op-surface parity to the cudarc backend's 18 public ops. GPU-gated golden-parity tests written. **Compile + clippy validated on macOS via oxicuda runtime-loading `libcuda`; NOT runtime-verified (no NVIDIA GPU here).**
+    - **C2 [DONE — additive routing]** per-device `OXICUDA_BACKENDS` singleton + dispatch routing wired under the `cuda-oxicuda` feature; the cudarc `cuda` arm (`dispatch_cuda_matmul`/`Tensor::matmul`) is untouched and remains the default CUDA path. (advanced_kernels / kernels/cuda_impl re-enable deferred to the runtime-verification pass.)
+    - **C3 [DONE — Campaign E, 2026-06-29, runtime-verified on RTX A4000]** cudarc + legacy dupes deleted (`gpu_ops/cuda/cuda_split/`, `gpu_ops/advanced_kernels.rs`, `kernels/cuda_impl.rs`, fake `kernels/cuda_kernels.rs`, legacy `gpu_ops/cuda/{backend,types,buffer_ops}.rs`); `cuda = ["dep:oxicuda-blas", "dep:oxicuda-dnn", "dep:oxicuda-memory", "dep:oxicuda-driver"]`, `cuda-oxicuda = ["cuda"]` kept only as a deprecated alias. `rg cudarc trustformers-core/src` = comments only.
+    - **C4 [DONE — GPU-verified on Apple Silicon]** Metal: `scirs2_core::gpu::backends::MPSOperations` (`gpu_ops/metal/common.rs`) -> `oxicuda-metal`. Stateless `matmul_f32` rerouted from the CPU-OxiBLAS path to oxicuda-metal `ComputeBackend::gemm` (genuine GPU compute); the GPU-resident MPS attention path (`matmul_gpu_to_gpu_mps[_scaled]`) migrated to oxicuda-metal and made zero-copy via oxicuda-metal's new `register_external` (no host round-trip). `scirs2-core/"gpu"` (and `"metal"`/`"mpsgraph"`) DROPPED — the Metal GPU stack no longer uses scirs2. Parity tests pass on the actual GPU.
+    - **C5 [DONE — Campaign E]** docs/CHANGELOG updated (CHANGELOG `[0.1.4]`); `cuda` feature propagated to `trustformers-models` and the `trustformers` umbrella crate (confirmed: both crates' `Cargo.toml` now expose `cuda = ["trustformers-core/cuda"]`-style passthrough).
+    - **C6 [NOT STARTED]** transformer_backend uplift [Q4 phase 2]: once C1-C5 parity is green, adopt oxicuda's `transformer-backend` (a feature/module of the `oxicuda` root crate, NOT a standalone crate): `PagedKvCache`, `AttentionDispatch` (Flash/Paged/SlidingWindow), `ContinuousBatchScheduler`, `SpeculativeDecoder`, `TokenSampler` — compute delegates to `oxicuda-dnn::attn`; CUDA-only (no Metal path). Wire it on the serving/generation path; net-new capability beyond today's cudarc backend; done as its own phase so a capability regression can't hide behind the backend swap.
+  - **Risk:** kernel numeric parity (gelu/layernorm-eps/rope-theta/causal-softmax) must match existing PTX — golden tests mandatory. GPU is Linux/Windows-only + off-by-default, so CI builds but cannot execute kernels (same as today); needs a real NVIDIA box for runtime verification. oxicuda macOS CUDA = UnsupportedPlatform at runtime (Metal path is the macOS story). Metal (C4) is the most-used GPU path — treat as its own benchmarked slice. transformer_backend (C6) changes the serving compute path — bench latency/throughput vs the C2 baseline.
+  - **Verify:** per phase — `cargo build -p trustformers-core --features cuda` + `cargo clippy -p trustformers-core --features cuda --all-targets -- -D warnings` (Linux); `cargo build -p trustformers-core` (default) and `--features metal` (macOS) stay green; `grep -rn cudarc trustformers-core/src` empty after C3; `grep -rn 'scirs2.*gpu\|MPSOperations' trustformers-core/src` empty after C4; `cargo tree -p trustformers-core --features cuda -e normal` shows oxicuda and no cudarc; `cargo nextest run -p trustformers-core --features cuda` (on GPU host) with CPU-parity assertions; workspace `--all-features` green.
+  - **Suggested execution:** focused per-file campaign on `trustformers-core`, C0->C6 in order, parity-test gated after each kernel; all design questions (Q1-Q7) resolved — C0 is now just an API-fit spike against `../oxicuda` 0.4.0; C4 (Metal) and C6 (transformer_backend) are each their own benchmarked slice.
+
+### Progress (2026-06-25 session)
+
+**Done**
+- **Metal — fully migrated off scirs2, GPU-verified on this Apple Silicon Mac.** Stateless `matmul_f32` rerouted from a CPU-OxiBLAS path to oxicuda-metal `ComputeBackend::gemm` (genuine GPU compute). The GPU-resident MPS attention path (`matmul_gpu_to_gpu_mps[_scaled]`) migrated off `scirs2_core::gpu::backends::MPSOperations` to oxicuda-metal, then made zero-copy via oxicuda-metal's new `register_external` (no host round-trip). `scirs2-core/"gpu"` (plus `"metal"`/`"mpsgraph"` from the macOS override) DROPPED — trustformers' Metal GPU stack no longer depends on scirs2. Parity tests pass on the real GPU. (= phase C4 + the Metal half of the C3 `scirs2-core/"gpu"` removal.)
+- **oxicuda enhanced to 0.4.0** (in `~/work/oxicuda`, **committed** on branch `0.4.0` — `1c1d23a bump-040` + `c01abfa "Add PTX kernel templates…"` + `abd66b9 "fmt"`, working tree clean): `DeviceBuffer::from_raw` (non-owning import); oxicuda-metal `register_external`/`import_buffer`/`copy_dtod` (GPU-verified); three new PTX kernels — `causal_softmax` (oxicuda-blas), `rope_neox_half_split` (oxicuda-dnn), `bias_add` (oxicuda-blas).
+- **CUDA `cuda-oxicuda` backend at full op parity, compile-validated.** New cudarc-free, opt-in `cuda-oxicuda` feature + `OxicudaCudaBackend` (`trustformers-core/src/gpu_ops/cuda/oxicuda/`) with full op-surface parity to the cudarc backend's 18 public ops: host-facing matmul/gelu/layernorm/rope/softmax_causal; resident-buffer cache + matmul/gelu/layernorm/add_bias `_gpu_to_gpu`, `matmul_with_cached_weight`, `device_info`, persistent-buffer management. Validated by `cargo build` + `clippy` on macOS (oxicuda runtime-loads `libcuda`). (= phase C1, delivered additively rather than in-place.)
+- **C2 dispatch wired (additive).** Per-device `OXICUDA_BACKENDS` singleton + dispatch routing under the `cuda-oxicuda` feature; the cudarc `cuda` path is fully intact, untouched, and side-by-side (additive). GPU-gated parity tests written.
+
+**Remaining (needs an NVIDIA GPU box) — RESOLVED 2026-06-29, see Campaign D and Campaign E below**
+- ~~Runtime parity verification of the whole `cuda-oxicuda` backend against the cudarc path / CPU reference~~ — **DONE**: an NVIDIA RTX A4000 became available (Campaign D), and Campaign E achieved 12/12 oxicuda parity tests passing on it.
+- ~~C3 (cudarc removal): DEFERRED pending NVIDIA-GPU verification~~ — **DONE (Campaign E)**: cudarc fully removed; oxicuda is now the `cuda` backend itself, with feature propagation to models/umbrella also complete.
+
+**Follow-ups (separate from Campaign C)**
+- **Latent trustformers RoPE bug:** trustformers' RoPE is internally inconsistent — its CPU reference (`rope/mod.rs`) is INTERLEAVED while its CUDA kernel is GPT-NeoX HALF-SPLIT, so CPU vs CUDA rope produce different results. Worth a dedicated fix (the new oxicuda `rope_neox_half_split` kernel matches the CUDA half-split convention, not the CPU interleaved one).
+- **Stale refactor clutter:** ✅ DONE (2026-06-29) — removed the leftover `*.backup`/`*.bak` files under `trustformers-core/src/` (`gpu_ops/metal/`, `layers/`, `kernels/simd/`, `tensor/math_ops/`).
+
+## Hardware-gated remaining work — consolidated status (2026-06-29)
+
+> **The CUDA / NVIDIA subset has its own actionable checklist: [`TODO-CUDA.md`](TODO-CUDA.md).**
+
+As of the 2026-06-29 session, **all four planned 0.1.4 campaigns are complete and verified on this hardware**: Campaign C Metal slice (C4 — GPU-verified on Apple Silicon), Campaign A (no-unwrap + dead-code), Campaign B (Pure-Rust default features, `trustformers-serve` excepted), and the deferred-stubs campaign (4 of 6 implemented). Workspace default `cargo nextest run --workspace` = **14,560 passed, 58 skipped, 0 failed**; `cargo clippy --workspace --all-targets -- -D warnings` clean. trustformers' 0.1.4 working tree is intentionally uncommitted (the user's "keep uncommitted" choice). The oxicuda 0.4.0 enhancements are **committed** in `~/work/oxicuda` (branch `0.4.0`: `1c1d23a bump-040`, `c01abfa "Add PTX kernel templates for bias-add and causal softmax operations"`, `abd66b9 "fmt"`; working tree clean) — committed outside the delegated subagent flow (the subagents were instructed to run no git).
+
+**UPDATE 2026-06-29 (Campaign D):** an **NVIDIA RTX A4000 + CUDA 12.0 box is now available**,
+so the CUDA rows below are no longer blocked. Items **#1, #2, #3, #4 are RESOLVED** (Campaign D
+established #1/#4; **Campaign E (2026-06-29) completed the full oxicuda migration: #1, #2, #3** —
+cudarc removed, oxicuda is the `cuda` backend, 12/12 parity on the A4000; see "Campaign E" below).
+The AMD/ROCm (#5) and cloud/ASIC (#6) rows remain genuinely hardware/SDK-gated.
+
+| # | Remaining work | Blocked on | Status |
+|---|----------------|-----------|----------------|
+| 1 | ~~Runtime parity verification of the `cuda-oxicuda` backend~~ | ~~NVIDIA CUDA GPU~~ | ✅ **DONE (Campaign D + E)** — **12/12 oxicuda parity tests pass on A4000**. Both root-caused bugs FIXED in Campaign E: layernorm PTX (oxicuda-dnn `.maxntid` placement + f16/bf16 `.b16`); GEMM RowMajor (fixed by the oxicuda repo owner's in-progress `gemm/` rewrite) |
+| 2 | ~~cudarc removal + `cuda-oxicuda` feature propagation~~ | ~~NVIDIA GPU~~ | ✅ **DONE (Campaign E)** — cudarc fully removed (`cuda`→oxicuda; `cuda-oxicuda`=deprecated alias; cudarc dep + `cuda_split/`+`advanced_kernels`+`cuda_impl`+fake `cuda_kernels`+legacy dupes all deleted); feature propagated to models+umbrella. (`gpu_accelerated`/`hardware_acceleration` re-enable on oxicuda = noted follow-up — TODO-CUDA.md CUDA-3.) |
+| 3 | ~~CUDA GPU-residency zero-copy via `DeviceBuffer::from_raw` in `matmul_gpu_to_gpu`~~ | ~~NVIDIA GPU~~ | ✅ **DONE (Campaign E)** — resident `matmul_gpu_to_gpu` confirmed on-device (`DeviceBuffer` cache, no host round-trip); resident parity tests green |
+| 4 | ~~Fused CUDA transformer-layer kernel — `cuda_backend_ext.rs`~~ | ~~NVIDIA CUDA GPU~~ | ✅ **DONE (Campaign D)** — real GPU-resident layer + CPU-parity test (max diff 5.96e-8) |
+| 5 | HIP/ROCm real kernel execution — `gpu_ops/rocm.rs:131` (currently falls back to CPU) | AMD ROCm GPU + Pure-Rust HIP bindings | 🔒 still gated (no AMD GPU here) |
+| 6 | `trustformers-c` cloud-function handlers + ASIC/device bindings — return placeholder handles/JSON | Real cloud/ASIC hardware + Pure-Rust/noffi-compliant SDKs | 🔒 still gated |
+
+**Non-hardware follow-up still open (doable here, not blocked):**
+- ~~**RoPE CPU/CUDA convention mismatch**~~ — **RESOLVED / re-characterized 2026-06-29 (Campaign D).** Not a live bug: `rope/mod.rs` is an **orphaned, uncompiled file** (no `mod rope;` mounts the `rope/` dir; nothing imports its `RopeFrequencies`/`apply_yarn_rope`/…). The **compiled** CPU RoPE is `kernels/rope.rs` (`VectorizedRoPE`), already GPT-NeoX HALF-SPLIT and matching the CUDA kernel. Aligned the orphaned file to half-split anyway (hygiene) + added a live CPU↔CUDA `rope_f32` parity test. **RESOLVED (Campaign E): the orphaned `rope/mod.rs` (~1693 lines dead) was DELETED** — confirmed no `mod rope;` mount + no `crate::rope::` importers; live `kernels/rope.rs` tests stay 34/34 green.
+
+---
+
+## Campaign D — NVIDIA CUDA runtime verification & enablement (2026-06-29, RTX A4000)
+
+**Environment changed:** this session ran on **Linux x86_64 with a real NVIDIA RTX A4000
+(16 GB, Ampere sm_86) + CUDA 12.0 (`nvcc`) + driver 550 + libcuda/cublas/cudnn8/nvrtc12**.
+The "everything remaining is hardware-gated, no NVIDIA GPU here" premise above no longer
+holds — the CUDA work is now actionable and was runtime-verified on hardware. Scope this run
+(user-approved "Verify + fix core"): D1 + D2 + D3 + D6 + cleanup. cudarc stays the default
+backend; CPU-default + macOS builds stay green; cudarc NOT removed.
+
+- **Baseline (now verified on hardware):** `cargo build/test -p trustformers-core --features cuda`
+  builds (cudarc 0.19 + `cuda-12000` ↔ system CUDA 12.0) and the cudarc backend the TODO
+  called "compile-validated, NOT runtime-verified" **passes on the A4000**. The TODO's
+  hardware-gated table items #1 (cudarc runtime) and #4 (fused kernel) are RESOLVED below.
+
+- **D1 — CUDA runtime parity suite (DONE).** Added **8 CPU↔CUDA golden-parity tests** in
+  `gpu_ops/cuda/cuda_split/cuda_dispatch.rs` (graceful-skip) for the previously-untested ops:
+  `rope_f32` (+ partial-rotary), `softmax_causal_f32`, `add_bias_gpu_to_gpu`,
+  `matmul_with_cached_weight`, `matmul_gpu_to_gpu`, `layernorm_gpu_to_gpu`, and a large
+  non-square (64×96×48) matmul. Each uses an inline CPU reference mirroring the kernel's
+  documented math. `cargo test -p trustformers-core --features cuda --lib gpu_ops::cuda` =
+  **18 passed, 0 failed** on the A4000 (was 9; +8 new +1 from D3).
+
+- **D2 — RoPE convention (DONE / re-characterized).** See the resolved follow-up above:
+  the flagged mismatch was against an **orphaned** file; the live path is half-split and is
+  now locked by the D1 `rope_f32` parity test. Orphaned `rope/mod.rs` aligned to half-split.
+
+- **D3 — fused transformer-layer (DONE).** Resolves table item #4. Replaced the
+  `cuda_backend_ext.rs` `transformer_layer_forward_optimized` placeholder (was `eprintln!` +
+  returns input unchanged) with a **real GPU-resident pre-norm causal self-attention layer**:
+  LayerNorm→QKV→bias chained via `BufferId` with no host round-trips, then RoPE + per-head
+  causal-softmax attention + output proj + residual. CPU-parity test
+  `test_transformer_layer_forward_optimized_matches_cpu` → **max abs diff 5.96e-8**. (A single
+  fully-fused megakernel remains a future optimization — the disabled-kernel re-enable D5 was
+  deferred this run.)
+
+- **D6 — `cuda-oxicuda` runtime-verified on hardware (DONE, WITH FINDINGS).** Resolves table
+  item #1. First-ever execution of the oxicuda backend on NVIDIA hardware:
+  **7 / 12 parity tests PASS** (gelu, rope, softmax_causal, add_bias resident, resident gelu,
+  device_info, singleton) — these oxicuda ops are now confirmed numerically correct on the
+  A4000. **5 fail, two real kernel bugs found + root-caused (in committed oxicuda 0.4.0):**
+  1. **oxicuda-blas GEMM layout bug** (3 tests): RowMajor C output partially unwritten
+     (`C[1,0]` returns 0, expected 139). Root cause: `oxicuda-blas/src/level3/gemm_api.rs`
+     `gemm()` builds `GemmProblem` and dispatches with only `a.ptr/b.ptr/c.ptr` — it **drops
+     the `MatrixDesc` `Layout`/leading-dimension**, so RowMajor inputs are mishandled. The
+     trustformers call is correct (verified: proper RowMajor `MatrixDesc`, NoTrans, α=1/β=0).
+  2. **oxicuda-dnn layer_norm PTX bug** (2 tests): `generate_layer_norm_ptx`
+     (`oxicuda-dnn/src/norm/layer_norm.rs:188`) emits PTX that fails to load on sm_86/CUDA12
+     (`CUDA: invalid PTX`); the blas-sourced gelu/rope/softmax PTX all load fine.
+  The 5 failing tests are now `#[ignore = "BLOCKED on oxicuda … — see Campaign D"]` so the
+  opt-in suite is green (7 pass / 5 ignored / 0 failed) and the bugs are documented in-code.
+  These are oxicuda-repo defects, NOT trustformers-side — documented, not silently edited.
+
+- **Cleanup (DONE).** `println!` at `cuda_backend.rs:41` → `tracing::debug!`; the misleading
+  `eprintln!` fallback notices in `cuda_backend_ext.rs` (which falsely claimed tensor-cores /
+  cudarc-streams unavailable — this box is CC 8.6, cudarc 0.19 has streams) → truthful
+  `tracing::debug!`; feature-conditional `unused_mut` in `gpu.rs:246` `#[allow]`-annotated.
+  Clippy `--features cuda --all-targets -D warnings` = clean; default clippy = clean.
+
+### ⚠️ Blocker flag for the user (NOT caused this session)
+The **oxicuda repo at `oxicuda/` has substantial pre-existing UNCOMMITTED changes**
+(1106 insertions across 6 files: `oxicuda-ptx/{ir/types.rs,templates/gemm.rs}`,
+`oxicuda-dnn/conv/fprop/direct.rs`, `oxicuda-solver/.../cholesky.rs`, `oxicuda-sparse/…`) — a
+**half-finished refactor that does NOT compile from scratch** (`templates/gemm.rs` references
+undefined `cvt_to_acc`/`cvt_to_out`, E0425). A *clean* `cargo …--features cuda-oxicuda` build
+is currently blocked by this; the D6 run above succeeded only by reusing a cached good
+`oxicuda-ptx.rlib`. **Left untouched** (it is your in-progress work). Recommend finishing or
+`git stash`-ing it; afterward the oxicuda suite will report 7 pass / 5 ignored.
+
+### Campaign D — remaining / recommended follow-ups (next NVIDIA session)
+- **Fix the 2 oxicuda kernel bugs** (GEMM layout propagation in `gemm_api.rs`; layer_norm PTX
+  in `oxicuda-dnn`), then un-`#[ignore]` the 5 oxicuda parity tests → 12/12 green.
+- **D5 (deferred):** re-enable `advanced_kernels.rs` (cudarc 0.17→0.19 migration: `load_ptx`→
+  `compile_ptx`+`load_module`, `htod_copy`→`clone_htod`, `get_func`→`load_function`) and port
+  Flash-Attention-v2 from disabled `kernels/cuda_impl.rs`; **delete** the fake stub
+  `kernels/cuda_kernels.rs` (hardcoded "RTX 4090" device, todo!/zero returns).
+- **D4 (deferred):** add `device_id` to `CudaTensorData` (currently only buffer_id/shape/dtype)
+  + real CUDA→CUDA copy (`tensor/utils.rs:561` clones) + stop hardcoding device 0 — needs ≥2
+  GPUs to fully verify.
+- **Mount-or-delete the orphaned `rope/mod.rs`** (~1670 lines, not in the module tree).
+
+---
+
+## Campaign E — full oxicuda CUDA migration: cudarc DROPPED (2026-06-29, RTX A4000)
+
+**`/ucont` orchestration loop.** After re-reading `TODO-CUDA.md` the CUDA goal was re-centered from
+"extend cudarc" to its real intent: **migrate the CUDA compute path OFF `cudarc` ONTO the Pure-Rust
+`oxicuda` and delete cudarc** (COOLJAPAN policy). Run on Linux x86_64 + **RTX A4000 (sm_86) + CUDA
+12.0**. User decisions: *fix the oxicuda kernels directly* + *drop cudarc this session*.
+
+- **CUDA-1 — oxicuda parity GREEN (12/12 on A4000).** Ground-truth build+test (with the oxicuda repo
+  owner's in-progress `gemm/` rewrite present) showed **10/12 pass, only the 2 layernorm tests fail**
+  — the **GEMM RowMajor bug was already fixed by the owner's rewrite** (3/3 GEMM parity green). The
+  remaining bug was layernorm "invalid PTX": real cause = **`.maxntid N,1,1;` emitted inside the
+  kernel body with a trailing `;`** (must be a directive between `)` and `{`) — fixed in
+  `oxicuda-dnn/src/norm/layer_norm.rs`; also fixed the f16/bf16 `ld/st.global.f16`→`.b16`+`cvt`
+  defect. Un-`#[ignore]`'d all 5 tests → **12/12 pass by default**. (oxicuda edit confined to
+  `layer_norm.rs`; no git; owner's WIP untouched.)
+- **CUDA-2/3 — cudarc removed.** `cuda = [oxicuda-blas/dnn/memory/driver]`; `cuda-oxicuda = ["cuda"]`
+  (deprecated alias); cudarc dep deleted; all `feature="cuda-oxicuda"` cfgs renamed to `cuda`; the
+  oxicuda dispatch unified under `cuda`; `crate::gpu_ops::cuda::{BufferId, get_cuda_backend}`
+  re-exported from oxicuda (resident layer paths in `layers/{linear,layernorm}.rs`,
+  `tensor/utils.rs`, `ops/activations.rs` now oxicuda-backed, no call-site edits). **Deleted:**
+  `gpu_ops/cuda/cuda_split/` (whole dir), `gpu_ops/advanced_kernels.rs`, `kernels/cuda_impl.rs`,
+  fake `kernels/cuda_kernels.rs`, legacy dupes `gpu_ops/cuda/{backend,types,buffer_ops}.rs`.
+  `rg cudarc trustformers-core/src` = comments only; `cargo tree --features cuda | grep cudarc` empty.
+  `gpu_accelerated`/`hardware_acceleration` stay `#[cfg(not(feature="cuda"))]` (they call the removed
+  cudarc kernel API; oxicuda port = follow-up; stale "cudarc 0.17.7" comments corrected).
+- **CUDA-4** — resident `matmul_gpu_to_gpu` confirmed genuinely on-device (`DeviceBuffer` cache, no
+  host round-trip). **CUDA-5** — `cuda` feature propagated to `trustformers-models` + umbrella
+  `trustformers`. **CUDA-7** — gpt_neox: oxicuda is host-in/host-out, so GPU operands download to CPU
+  F32 for attention (correct, not a stub); misleading TODO replaced with honest status; on-device
+  residency = future work. **CUDA-8** — orphaned `rope/mod.rs` (~1693 L) DELETED; live
+  `kernels/rope.rs` tests 34/34.
+- **Verification:** `cuda` build + clippy `-D warnings` clean (cuda + default); **12/12 oxicuda
+  parity on A4000**; trustformers workspace `cargo fmt --check` clean (the 42 fmt diffs are all in the
+  oxicuda repo owner's uncommitted WIP — gemm/conv/solver/sparse — left untouched). **Workspace
+  default regression GREEN: `cargo clippy --workspace --all-targets -- -D warnings` exit 0;
+  `cargo nextest run --workspace` = 14,553 passed / 57 skipped / 0 failed** (within the
+  14,540–14,561 baseline band — no regression). trustformers working tree left uncommitted.
+
+### Campaign E — remaining CUDA follow-ups (not blockers)
+- **CUDA-6** fused transformer-layer megakernel (perf optimization; the cudarc fused path from
+  Campaign D was deleted with `cuda_split` — oxicuda runs the layer as individual ops, correct/unfused).
+- **CUDA-7** real on-device gpt_neox attention residency (needs oxicuda-dnn resident QKV-split/RoPE/attn).
+- **CUDA-3 follow-up** port `gpu_accelerated`/`hardware_acceleration` onto oxicuda (re-enable under `cuda`).
+- **CUDA-9** legacy `trustformers-c` (excluded crate, cudarc 0.17).
+- The oxicuda repo (`oxicuda/`) retains the owner's large uncommitted in-progress rewrite
+  (gemm/conv/solver/sparse) with `cargo fmt` diffs — **left untouched; the owner finishes/commits it.**

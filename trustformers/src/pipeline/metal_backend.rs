@@ -633,8 +633,8 @@ mod tests {
     fn test_load_shaders_sets_pipeline_state() {
         let config = MetalBackendConfig::for_apple_silicon();
         let mut backend = MetalBackend::new(config).expect("backend creation failed");
-        let dummy_path = std::path::Path::new("/tmp/dummy.metallib");
-        let result = backend.load_shaders(dummy_path);
+        let dummy_path = std::env::temp_dir().join("dummy.metallib");
+        let result = backend.load_shaders(&dummy_path);
         assert!(result.is_ok(), "load_shaders should succeed (mock impl)");
         assert!(
             backend.compute_pipeline.is_some(),
@@ -652,8 +652,8 @@ mod tests {
     fn test_compile_model_ok() {
         let config = MetalBackendConfig::for_apple_silicon();
         let mut backend = MetalBackend::new(config).expect("backend creation failed");
-        let dummy_path = std::path::Path::new("/tmp/model.onnx");
-        let result = backend.compile_model(dummy_path);
+        let dummy_path = std::env::temp_dir().join("model.onnx");
+        let result = backend.compile_model(&dummy_path);
         assert!(result.is_ok(), "compile_model should succeed (mock impl)");
     }
 

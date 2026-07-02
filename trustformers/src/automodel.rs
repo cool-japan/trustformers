@@ -49,8 +49,8 @@ impl AutoConfig {
             AutoConfig::T5(config) => config.vocab_size as u32,
             #[cfg(feature = "albert")]
             AutoConfig::Albert(config) => config.vocab_size as u32,
-            #[allow(unreachable_patterns)]
-            _ => unreachable!("No model features enabled"),
+            // reason: catch-all is unreachable when model features are enabled, but
+            // required so the match stays exhaustive across arbitrary feature subsets.
             #[allow(unreachable_patterns)]
             _ => unreachable!("No model features enabled"),
         }
@@ -72,8 +72,8 @@ impl AutoConfig {
             AutoConfig::T5(config) => config.d_model as u32,
             #[cfg(feature = "albert")]
             AutoConfig::Albert(config) => config.hidden_size as u32,
-            #[allow(unreachable_patterns)]
-            _ => unreachable!("No model features enabled"),
+            // reason: catch-all is unreachable when model features are enabled, but
+            // required so the match stays exhaustive across arbitrary feature subsets.
             #[allow(unreachable_patterns)]
             _ => unreachable!("No model features enabled"),
         }
@@ -95,8 +95,8 @@ impl AutoConfig {
             AutoConfig::T5(config) => config.num_layers as u32,
             #[cfg(feature = "albert")]
             AutoConfig::Albert(config) => config.num_hidden_layers as u32,
-            #[allow(unreachable_patterns)]
-            _ => unreachable!("No model features enabled"),
+            // reason: catch-all is unreachable when model features are enabled, but
+            // required so the match stays exhaustive across arbitrary feature subsets.
             #[allow(unreachable_patterns)]
             _ => unreachable!("No model features enabled"),
         }
@@ -118,8 +118,8 @@ impl AutoConfig {
             AutoConfig::T5(config) => config.num_heads as u32,
             #[cfg(feature = "albert")]
             AutoConfig::Albert(config) => config.num_attention_heads as u32,
-            #[allow(unreachable_patterns)]
-            _ => unreachable!("No model features enabled"),
+            // reason: catch-all is unreachable when model features are enabled, but
+            // required so the match stays exhaustive across arbitrary feature subsets.
             #[allow(unreachable_patterns)]
             _ => unreachable!("No model features enabled"),
         }
@@ -141,8 +141,8 @@ impl AutoConfig {
             AutoConfig::T5(config) => 512, // T5 typical default
             #[cfg(feature = "albert")]
             AutoConfig::Albert(config) => config.max_position_embeddings as u32,
-            #[allow(unreachable_patterns)]
-            _ => unreachable!("No model features enabled"),
+            // reason: catch-all is unreachable when model features are enabled, but
+            // required so the match stays exhaustive across arbitrary feature subsets.
             #[allow(unreachable_patterns)]
             _ => unreachable!("No model features enabled"),
         }
@@ -164,6 +164,8 @@ impl AutoConfig {
             AutoConfig::T5(_) => "t5",
             #[cfg(feature = "albert")]
             AutoConfig::Albert(_) => "albert",
+            // reason: catch-all is unreachable when model features are enabled, but
+            // required so the match stays exhaustive across arbitrary feature subsets.
             #[allow(unreachable_patterns)]
             _ => unreachable!("No model features enabled"),
         }
@@ -357,6 +359,8 @@ impl Config for AutoConfig {
             AutoConfig::T5(_config) => Ok(()),
             #[cfg(feature = "albert")]
             AutoConfig::Albert(_config) => Ok(()),
+            // reason: catch-all is unreachable when model features are enabled, but
+            // required so the match stays exhaustive across arbitrary feature subsets.
             #[allow(unreachable_patterns)]
             _ => unreachable!("No model features enabled"),
         }
@@ -378,6 +382,8 @@ impl Config for AutoConfig {
             AutoConfig::T5(_) => "t5",
             #[cfg(feature = "albert")]
             AutoConfig::Albert(_) => "albert",
+            // reason: catch-all is unreachable when model features are enabled, but
+            // required so the match stays exhaustive across arbitrary feature subsets.
             #[allow(unreachable_patterns)]
             _ => unreachable!("No model features enabled"),
         }
@@ -459,6 +465,8 @@ impl AutoModel {
             AutoConfig::Albert(albert_config) => AutoModelType::Albert(
                 crate::models::albert::AlbertModel::new(albert_config.clone())?,
             ),
+            // reason: catch-all is unreachable when model features are enabled, but
+            // required so the match stays exhaustive across arbitrary feature subsets.
             #[allow(unreachable_patterns)]
             _ => unreachable!("No model features enabled"),
         };
@@ -716,6 +724,8 @@ impl Tokenizer for AutoTokenizer {
             AutoTokenizer::BPE(t) => t.encode(text),
             AutoTokenizer::SentencePiece(t) => t.encode(text),
             AutoTokenizer::HuggingFace(t) => t.encode(text),
+            // reason: catch-all is unreachable when model features are enabled, but
+            // required so the match stays exhaustive across arbitrary feature subsets.
             #[allow(unreachable_patterns)]
             _ => unreachable!("No model features enabled"),
         }
@@ -731,6 +741,8 @@ impl Tokenizer for AutoTokenizer {
             AutoTokenizer::BPE(t) => t.encode_pair(text, text2),
             AutoTokenizer::SentencePiece(t) => t.encode_pair(text, text2),
             AutoTokenizer::HuggingFace(t) => t.encode_pair(text, text2),
+            // reason: catch-all is unreachable when model features are enabled, but
+            // required so the match stays exhaustive across arbitrary feature subsets.
             #[allow(unreachable_patterns)]
             _ => unreachable!("No model features enabled"),
         }
@@ -742,6 +754,8 @@ impl Tokenizer for AutoTokenizer {
             AutoTokenizer::BPE(t) => t.decode(ids),
             AutoTokenizer::SentencePiece(t) => t.decode(ids),
             AutoTokenizer::HuggingFace(t) => t.decode(ids),
+            // reason: catch-all is unreachable when model features are enabled, but
+            // required so the match stays exhaustive across arbitrary feature subsets.
             #[allow(unreachable_patterns)]
             _ => unreachable!("No model features enabled"),
         }
@@ -753,6 +767,8 @@ impl Tokenizer for AutoTokenizer {
             AutoTokenizer::BPE(t) => t.vocab_size(),
             AutoTokenizer::SentencePiece(t) => t.vocab_size(),
             AutoTokenizer::HuggingFace(t) => t.vocab_size(),
+            // reason: catch-all is unreachable when model features are enabled, but
+            // required so the match stays exhaustive across arbitrary feature subsets.
             #[allow(unreachable_patterns)]
             _ => unreachable!("No model features enabled"),
         }
@@ -764,6 +780,8 @@ impl Tokenizer for AutoTokenizer {
             AutoTokenizer::BPE(t) => t.get_vocab(),
             AutoTokenizer::SentencePiece(t) => t.get_vocab(),
             AutoTokenizer::HuggingFace(t) => t.get_vocab(),
+            // reason: catch-all is unreachable when model features are enabled, but
+            // required so the match stays exhaustive across arbitrary feature subsets.
             #[allow(unreachable_patterns)]
             _ => unreachable!("No model features enabled"),
         }
@@ -775,6 +793,8 @@ impl Tokenizer for AutoTokenizer {
             AutoTokenizer::BPE(t) => t.token_to_id(token),
             AutoTokenizer::SentencePiece(t) => t.token_to_id(token),
             AutoTokenizer::HuggingFace(t) => t.token_to_id(token),
+            // reason: catch-all is unreachable when model features are enabled, but
+            // required so the match stays exhaustive across arbitrary feature subsets.
             #[allow(unreachable_patterns)]
             _ => unreachable!("No model features enabled"),
         }
@@ -786,6 +806,8 @@ impl Tokenizer for AutoTokenizer {
             AutoTokenizer::BPE(t) => t.id_to_token(id),
             AutoTokenizer::SentencePiece(t) => t.id_to_token(id),
             AutoTokenizer::HuggingFace(t) => t.id_to_token(id),
+            // reason: catch-all is unreachable when model features are enabled, but
+            // required so the match stays exhaustive across arbitrary feature subsets.
             #[allow(unreachable_patterns)]
             _ => unreachable!("No model features enabled"),
         }

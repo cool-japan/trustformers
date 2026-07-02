@@ -20,16 +20,22 @@
 //!
 //! ## Usage
 //!
-//! ```rust
+//! ```rust,no_run
 //! use trustformers_models::xlstm::{XLSTMConfig, XLSTMModel};
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create a base xLSTM model
 //! let config = XLSTMConfig::base();
 //! let model = XLSTMModel::new(config)?;
+//! # let _ = model;
 //!
-//! // Create a large 7B parameter model
+//! // Create a large 7B parameter model (marked `no_run`: constructing this
+//! // allocates full-size weights for a genuine ~7B-parameter model)
 //! let large_config = XLSTMConfig::xlstm_7b();
 //! let large_model = XLSTMModel::new(large_config)?;
+//! # let _ = large_model;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Architecture Variants

@@ -36,16 +36,22 @@
 //!
 //! ## Example Usage
 //!
-//! ```rust
+//! ```rust,no_run
 //! use trustformers_models::math_specialized::{MathSpecializedConfig, MathSpecializedForCausalLM};
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create a mathematical reasoning model
+//! // (`math_llama_7b()` is a genuine ~7B-parameter preset; this example is
+//! // marked `no_run` since constructing it allocates full-size weights.)
 //! let config = MathSpecializedConfig::math_llama_7b();
-//! let model = MathSpecializedForCausalLM::new(config)?;
+//! let mut model = MathSpecializedForCausalLM::new(config)?;
 //!
 //! // Solve a mathematical problem
 //! let problem = "Find the derivative of f(x) = x^2 + 3x + 1";
 //! let solution = model.solve_step_by_step(problem)?;
+//! # let _ = solution;
+//! # Ok(())
+//! # }
 //! ```
 
 use serde::{Deserialize, Serialize};

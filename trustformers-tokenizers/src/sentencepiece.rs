@@ -40,6 +40,8 @@ pub enum ModelType {
     Char,
 }
 
+// reason: fields are populated by serde during model deserialization for
+// round-trip fidelity; they are not all read directly by the loader.
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 struct SentencePieceConfig {

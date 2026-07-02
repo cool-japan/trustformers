@@ -3,6 +3,10 @@
 //! This module provides comprehensive layer-level diagnostics including
 //! activation analysis, weight distribution monitoring, attention visualization,
 //! and layer health assessment for deep learning models.
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 
@@ -56,7 +60,6 @@ struct LayerState {
     /// Health score history
     health_scores: Vec<f64>,
     /// Issues detected in the layer
-    #[allow(dead_code)]
     detected_issues: Vec<String>,
     /// Last analysis timestamp
     last_analysis_step: usize,

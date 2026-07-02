@@ -22,6 +22,7 @@ const GGUF_MAGIC: u32 = 0x4655_4747;
 
 /// GGUF quantization type as defined in the GGML spec.
 // The _K suffix is part of the official spec naming and must be preserved.
+// reason: variants mirror the GGUF file-format quantization type names (e.g. Q4_K_M).
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GgufQuantType {
@@ -130,12 +131,14 @@ impl GgufMetadataValue {
             3 => Ok(GgufMetadataValue::Int16(read_u16_le(cur)? as i16)),
             4 => Ok(GgufMetadataValue::Uint32(read_u32_le(cur)?)),
             5 => Ok(GgufMetadataValue::Int32(read_u32_le(cur)? as i32)),
-            6 => Ok(GgufMetadataValue::Float32(f32::from_bits(read_u32_le(cur)?))),
+            6 => Ok(GgufMetadataValue::Float32(f32::from_bits(read_u32_le(
+                cur,
+            )?))),
             7 => Ok(GgufMetadataValue::Bool(read_u8(cur)? != 0)),
             8 => {
                 let s = read_gguf_string(cur)?;
                 Ok(GgufMetadataValue::String(s))
-            }
+            },
             9 => {
                 let elem_type = read_u32_le(cur)?;
                 let count = read_u64_le(cur)?;
@@ -144,10 +147,12 @@ impl GgufMetadataValue {
                     arr.push(GgufMetadataValue::parse(elem_type, cur)?);
                 }
                 Ok(GgufMetadataValue::Array(arr))
-            }
+            },
             10 => Ok(GgufMetadataValue::Uint64(read_u64_le(cur)?)),
             11 => Ok(GgufMetadataValue::Int64(read_u64_le(cur)? as i64)),
-            12 => Ok(GgufMetadataValue::Float64(f64::from_bits(read_u64_le(cur)?))),
+            12 => Ok(GgufMetadataValue::Float64(f64::from_bits(read_u64_le(
+                cur,
+            )?))),
             other => Err(TrustformersError::invalid_input(format!(
                 "unknown GGUF metadata type id: {other}"
             ))),
@@ -220,7 +225,10 @@ impl GgufReader {
     /// Parse a GGUF file from the filesystem.
     pub fn from_file(path: &Path) -> Result<Self> {
         let data = std::fs::read(path).map_err(|e| {
-            TrustformersError::invalid_input(format!("cannot read GGUF file '{}': {e}", path.display()))
+            TrustformersError::invalid_input(format!(
+                "cannot read GGUF file '{}': {e}",
+                path.display()
+            ))
         })?;
         Self::from_bytes(&data)
     }
@@ -256,8 +264,7 @@ impl GgufReader {
         }
 
         // Tensor infos
-        let mut tensors: Vec<GgufTensorInfo> =
-            Vec::with_capacity(tensor_count.min(65536) as usize);
+        let mut tensors: Vec<GgufTensorInfo> = Vec::with_capacity(tensor_count.min(65536) as usize);
         for _ in 0..tensor_count {
             let name = read_gguf_string(cur)?;
             let n_dims = read_u32_le(cur)?;
@@ -312,10 +319,7 @@ impl GgufReader {
 
     /// Model architecture string from metadata (`general.architecture`).
     pub fn architecture(&self) -> Option<&str> {
-        self.header
-            .metadata
-            .get("general.architecture")
-            .and_then(|v| v.as_str())
+        self.header.metadata.get("general.architecture").and_then(|v| v.as_str())
     }
 
     /// Total model size estimate in megabytes.
@@ -349,10 +353,12 @@ impl GgufReader {
 /// Map a GGUF quantization type to the best matching mobile precision.
 pub fn gguf_to_mobile_precision(quant_type: GgufQuantType) -> MobilePrecision {
     match quant_type {
-        GgufQuantType::F32 => MobilePrecision::FP16,    // downcast for mobile
+        GgufQuantType::F32 => MobilePrecision::FP16, // downcast for mobile
         GgufQuantType::F16 => MobilePrecision::FP16,
         GgufQuantType::Q4_0 | GgufQuantType::Q4_1 | GgufQuantType::Q4_K => MobilePrecision::INT4,
-        GgufQuantType::Q5_0 | GgufQuantType::Q5_1 | GgufQuantType::Q5_K => MobilePrecision::Mixed4_8,
+        GgufQuantType::Q5_0 | GgufQuantType::Q5_1 | GgufQuantType::Q5_K => {
+            MobilePrecision::Mixed4_8
+        },
         GgufQuantType::Q6_K => MobilePrecision::Mixed8_16,
         GgufQuantType::Q8_0 => MobilePrecision::INT8,
     }
@@ -362,33 +368,29 @@ pub fn gguf_to_mobile_precision(quant_type: GgufQuantType) -> MobilePrecision {
 
 fn read_u8(cur: &mut Cursor<&[u8]>) -> Result<u8> {
     let mut buf = [0u8; 1];
-    cur.read_exact(&mut buf).map_err(|e| {
-        TrustformersError::invalid_input(format!("GGUF read_u8 failed: {e}"))
-    })?;
+    cur.read_exact(&mut buf)
+        .map_err(|e| TrustformersError::invalid_input(format!("GGUF read_u8 failed: {e}")))?;
     Ok(buf[0])
 }
 
 fn read_u16_le(cur: &mut Cursor<&[u8]>) -> Result<u16> {
     let mut buf = [0u8; 2];
-    cur.read_exact(&mut buf).map_err(|e| {
-        TrustformersError::invalid_input(format!("GGUF read_u16 failed: {e}"))
-    })?;
+    cur.read_exact(&mut buf)
+        .map_err(|e| TrustformersError::invalid_input(format!("GGUF read_u16 failed: {e}")))?;
     Ok(u16::from_le_bytes(buf))
 }
 
 fn read_u32_le(cur: &mut Cursor<&[u8]>) -> Result<u32> {
     let mut buf = [0u8; 4];
-    cur.read_exact(&mut buf).map_err(|e| {
-        TrustformersError::invalid_input(format!("GGUF read_u32 failed: {e}"))
-    })?;
+    cur.read_exact(&mut buf)
+        .map_err(|e| TrustformersError::invalid_input(format!("GGUF read_u32 failed: {e}")))?;
     Ok(u32::from_le_bytes(buf))
 }
 
 fn read_u64_le(cur: &mut Cursor<&[u8]>) -> Result<u64> {
     let mut buf = [0u8; 8];
-    cur.read_exact(&mut buf).map_err(|e| {
-        TrustformersError::invalid_input(format!("GGUF read_u64 failed: {e}"))
-    })?;
+    cur.read_exact(&mut buf)
+        .map_err(|e| TrustformersError::invalid_input(format!("GGUF read_u64 failed: {e}")))?;
     Ok(u64::from_le_bytes(buf))
 }
 
@@ -401,9 +403,8 @@ fn read_gguf_string(cur: &mut Cursor<&[u8]>) -> Result<String> {
         )));
     }
     let mut buf = vec![0u8; len as usize];
-    cur.read_exact(&mut buf).map_err(|e| {
-        TrustformersError::invalid_input(format!("GGUF string read failed: {e}"))
-    })?;
+    cur.read_exact(&mut buf)
+        .map_err(|e| TrustformersError::invalid_input(format!("GGUF string read failed: {e}")))?;
     String::from_utf8(buf).map_err(|e| {
         TrustformersError::invalid_input(format!("GGUF string is not valid UTF-8: {e}"))
     })
@@ -447,7 +448,12 @@ pub struct GgufLayerInfo {
 
 impl GgufLayerInfo {
     /// Construct a layer info record.
-    pub fn new(name: impl Into<String>, quant_type: GgufQuantType, size_bytes: usize, tensor_shape: Vec<usize>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        quant_type: GgufQuantType,
+        size_bytes: usize,
+        tensor_shape: Vec<usize>,
+    ) -> Self {
         Self {
             name: name.into(),
             quant_type,
@@ -631,10 +637,22 @@ mod tests {
 
     #[test]
     fn test_gguf_to_mobile_precision() {
-        assert_eq!(gguf_to_mobile_precision(GgufQuantType::Q4_K), MobilePrecision::INT4);
-        assert_eq!(gguf_to_mobile_precision(GgufQuantType::Q8_0), MobilePrecision::INT8);
-        assert_eq!(gguf_to_mobile_precision(GgufQuantType::F16), MobilePrecision::FP16);
-        assert_eq!(gguf_to_mobile_precision(GgufQuantType::Q5_K), MobilePrecision::Mixed4_8);
+        assert_eq!(
+            gguf_to_mobile_precision(GgufQuantType::Q4_K),
+            MobilePrecision::INT4
+        );
+        assert_eq!(
+            gguf_to_mobile_precision(GgufQuantType::Q8_0),
+            MobilePrecision::INT8
+        );
+        assert_eq!(
+            gguf_to_mobile_precision(GgufQuantType::F16),
+            MobilePrecision::FP16
+        );
+        assert_eq!(
+            gguf_to_mobile_precision(GgufQuantType::Q5_K),
+            MobilePrecision::Mixed4_8
+        );
     }
 
     #[test]

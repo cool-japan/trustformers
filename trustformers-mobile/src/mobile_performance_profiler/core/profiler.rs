@@ -108,15 +108,19 @@ pub struct ProfilingStats {
 impl MobilePerformanceProfiler {
     /// Create a new mobile performance profiler
     pub fn new(config: MobileProfilerConfig) -> Result<Self> {
-        let device_info = MobileDeviceDetector::detect()
-            .context("Failed to detect mobile device information")?;
+        let device_info =
+            MobileDeviceDetector::detect().context("Failed to detect mobile device information")?;
 
         let metrics_collector = MobileMetricsCollector::new(config.collector_config.clone())?;
-        let bottleneck_detector = BottleneckDetector::new(config.bottleneck_detection_config.clone())?;
-        let optimization_engine = OptimizationEngine::new(config.optimization_engine_config.clone())?;
+        let bottleneck_detector =
+            BottleneckDetector::new(config.bottleneck_detection_config.clone())?;
+        let optimization_engine =
+            OptimizationEngine::new(config.optimization_engine_config.clone())?;
 
         let real_time_monitor = if config.enable_real_time_monitoring {
-            Some(RealTimeMonitor::new(config.real_time_monitoring_config.clone())?)
+            Some(RealTimeMonitor::new(
+                config.real_time_monitoring_config.clone(),
+            )?)
         } else {
             None
         };
@@ -146,8 +150,7 @@ impl MobilePerformanceProfiler {
 
         // Update profiling state
         {
-            let mut state = self.profiling_state.lock()
-                .expect("profiling_state lock should not be poisoned");
+            let mut state = self.profiling_state.lock().unwrap_or_else(|p| p.into_inner());
             state.is_active = true;
             state.session_id = Some(session_id.clone());
             state.start_time = Some(Instant::now());
@@ -169,8 +172,9 @@ impl MobilePerformanceProfiler {
     pub fn stop_profiling(&mut self) -> Result<ProfilingData> {
         info!("Stopping profiling session");
 
-        let session = self.current_session.take()
-            .ok_or_else(|| TrustformersError::runtime_error("No active profiling session", "stop_profiling"))?;
+        let session = self.current_session.take().ok_or_else(|| {
+            TrustformersError::runtime_error("No active profiling session", "stop_profiling")
+        })?;
 
         // Stop metrics collection
         self.metrics_collector.stop_collection()?;
@@ -182,8 +186,7 @@ impl MobilePerformanceProfiler {
 
         // Update profiling state
         {
-            let mut state = self.profiling_state.lock()
-                .expect("profiling_state lock should not be poisoned");
+            let mut state = self.profiling_state.lock().unwrap_or_else(|p| p.into_inner());
             state.is_active = false;
             state.session_id = None;
 
@@ -203,7 +206,11 @@ impl MobilePerformanceProfiler {
     }
 
     /// Record a profiling event during inference
-    pub fn record_inference_event(&mut self, event_name: &str, duration_ms: Option<f32>) -> Result<()> {
+    pub fn record_inference_event(
+        &mut self,
+        event_name: &str,
+        duration_ms: Option<f32>,
+    ) -> Result<()> {
         if let Some(ref mut session) = self.current_session {
             let event = ProfilingEvent {
                 event_type: EventType::InferenceEvent,
@@ -249,17 +256,21 @@ impl MobilePerformanceProfiler {
     }
 
     /// Get real-time monitoring state
-    pub fn get_real_time_state(&self) -> Option<&crate::mobile_performance_profiler::realtime::RealTimeState> {
+    pub fn get_real_time_state(
+        &self,
+    ) -> Option<&crate::mobile_performance_profiler::realtime::RealTimeState> {
         self.real_time_monitor.as_ref().map(|m| m.get_current_state())
     }
 
     /// Export profiling data
     pub fn export_data(&self, format: ExportFormat) -> Result<String> {
-        let session = self.current_session.as_ref()
-            .ok_or_else(|| TrustformersError::runtime_error("No active profiling session", "export_data"))?;
+        let session = self.current_session.as_ref().ok_or_else(|| {
+            TrustformersError::runtime_error("No active profiling session", "export_data")
+        })?;
 
         // Simplified export - in practice, you'd use ProfilerExportManager
-        let export_path = format!("/tmp/claude/profiling_data.{}",
+        let export_path = format!(
+            "/tmp/claude/profiling_data.{}",
             match format {
                 ExportFormat::JSON => "json",
                 ExportFormat::CSV => "csv",
@@ -294,8 +305,7 @@ impl MobilePerformanceProfiler {
 
     /// Check if profiling is currently active
     pub fn is_profiling_active(&self) -> bool {
-        let state = self.profiling_state.lock()
-            .expect("profiling_state lock should not be poisoned");
+        let state = self.profiling_state.lock().unwrap_or_else(|p| p.into_inner());
         state.is_active
     }
 }
@@ -340,7 +350,10 @@ impl ProfilingSession {
 
 impl Default for MobilePerformanceProfiler {
     fn default() -> Self {
+        // reason: built from a known-valid default config; the Default convenience
+        // constructor cannot return a Result, so a descriptive expect documents the
+        // construction invariant (only fails if device detection is impossible).
         Self::new(MobileProfilerConfig::default())
-            .expect("Failed to create default mobile performance profiler")
+            .expect("default MobileProfilerConfig must yield a valid profiler")
     }
 }

@@ -239,16 +239,36 @@ impl LiveOptimizationAlgorithm for ParallelismOptimizationAlgorithm {
 
     fn update_with_feedback(
         &mut self,
-        _feedback: &PerformanceFeedback,
+        feedback: &PerformanceFeedback,
     ) -> Result<(), RealTimeMetricsError> {
-        // TODO: AlgorithmStatistics no longer has feedback_count, positive_feedback, negative_feedback fields
-        // Need to implement feedback tracking differently or add these fields back to AlgorithmStatistics
-        // self.stats.feedback_count += 1;
-        // match feedback.feedback_type {
-        //     FeedbackType::Positive => self.stats.positive_feedback += 1,
-        //     FeedbackType::Negative => self.stats.negative_feedback += 1,
-        //     FeedbackType::Neutral => {},
-        // }
+        self.stats.feedback_count += 1;
+
+        // Positive feedback (value >= 0.5) means the parallelism change improved
+        // performance; negative means it degraded performance or had no effect.
+        if feedback.value >= 0.5 {
+            self.stats.positive_feedback += 1;
+        } else {
+            self.stats.negative_feedback += 1;
+        }
+
+        if self.stats.feedback_count > 0 {
+            self.stats.accuracy =
+                self.stats.positive_feedback as f32 / self.stats.feedback_count as f32;
+        }
+
+        // Update the historical parallelism data with the observed outcome.
+        // Negative feedback (value < 0.5) is encoded as elevated contention.
+        let contention_score = if feedback.value < 0.5 { 1.0 - feedback.value as f32 } else { 0.0 };
+        self.historical_data.push_back(ParallelismMetrics {
+            timestamp: chrono::Utc::now(),
+            cpu_utilization: feedback.value as f32,
+            throughput: feedback.value,
+            parallelism_level: feedback.parallelism_level,
+            contention_score,
+        });
+        while self.historical_data.len() > 100 {
+            self.historical_data.pop_front();
+        }
 
         Ok(())
     }
@@ -559,16 +579,40 @@ impl LiveOptimizationAlgorithm for ResourceOptimizationAlgorithm {
 
     fn update_with_feedback(
         &mut self,
-        _feedback: &PerformanceFeedback,
+        feedback: &PerformanceFeedback,
     ) -> Result<(), RealTimeMetricsError> {
-        // TODO: AlgorithmStatistics no longer has feedback_count, positive_feedback, negative_feedback fields
-        // Need to implement feedback tracking differently or add these fields back to AlgorithmStatistics
-        // self.stats.feedback_count += 1;
-        // match feedback.feedback_type {
-        //     FeedbackType::Positive => self.stats.positive_feedback += 1,
-        //     FeedbackType::Negative => self.stats.negative_feedback += 1,
-        //     FeedbackType::Neutral => {},
-        // }
+        self.stats.feedback_count += 1;
+
+        // Positive feedback means the resource re-allocation improved the observed metric;
+        // negative means it did not help (or made things worse).
+        if feedback.value >= 0.5 {
+            self.stats.positive_feedback += 1;
+        } else {
+            self.stats.negative_feedback += 1;
+        }
+
+        if self.stats.feedback_count > 0 {
+            self.stats.accuracy =
+                self.stats.positive_feedback as f32 / self.stats.feedback_count as f32;
+        }
+
+        // Record a resource snapshot derived from the feedback signal so that future
+        // `optimize()` calls can identify patterns leading to ineffective recommendations.
+        let memory_utilization = if feedback.value < 0.5 {
+            0.9 - feedback.value as f32 * 0.4
+        } else {
+            feedback.value as f32 * 0.6
+        };
+        self.resource_history.push_back(ResourceSnapshot {
+            timestamp: chrono::Utc::now(),
+            memory_utilization,
+            cpu_utilization: feedback.value as f32,
+            io_utilization: 0.0,
+            network_utilization: 0.0,
+        });
+        while self.resource_history.len() > 100 {
+            self.resource_history.pop_front();
+        }
 
         Ok(())
     }
@@ -638,5 +682,112 @@ impl ResourceOptimizationAlgorithm {
         }
 
         risks
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::performance_optimizer::types::{
+        FeedbackContext, FeedbackSource, FeedbackType, PerformanceFeedback, SystemState,
+        TestCharacteristics,
+    };
+    use std::collections::HashMap;
+
+    fn make_feedback(value: f64) -> PerformanceFeedback {
+        PerformanceFeedback {
+            source: FeedbackSource::PerformanceMonitor,
+            feedback_type: FeedbackType::Throughput,
+            value,
+            timestamp: chrono::Utc::now(),
+            parallelism_level: 4,
+            context: FeedbackContext {
+                test_characteristics: TestCharacteristics::default(),
+                system_state: SystemState::default(),
+                additional_context: HashMap::new(),
+            },
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // ParallelismOptimizationAlgorithm
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parallelism_feedback_positive_increments_count() {
+        let mut algo = ParallelismOptimizationAlgorithm::new();
+        algo.update_with_feedback(&make_feedback(0.8)).expect("should not error");
+        let stats = algo.statistics();
+        assert_eq!(stats.feedback_count, 1);
+        assert_eq!(stats.positive_feedback, 1);
+        assert_eq!(stats.negative_feedback, 0);
+    }
+
+    #[test]
+    fn test_parallelism_feedback_negative_increments_count() {
+        let mut algo = ParallelismOptimizationAlgorithm::new();
+        algo.update_with_feedback(&make_feedback(0.3)).expect("should not error");
+        let stats = algo.statistics();
+        assert_eq!(stats.feedback_count, 1);
+        assert_eq!(stats.positive_feedback, 0);
+        assert_eq!(stats.negative_feedback, 1);
+    }
+
+    #[test]
+    fn test_parallelism_feedback_boundary_is_positive() {
+        let mut algo = ParallelismOptimizationAlgorithm::new();
+        algo.update_with_feedback(&make_feedback(0.5)).expect("ok");
+        assert_eq!(algo.statistics().positive_feedback, 1);
+    }
+
+    #[test]
+    fn test_parallelism_feedback_accuracy_tracks_ratio() {
+        let mut algo = ParallelismOptimizationAlgorithm::new();
+        algo.update_with_feedback(&make_feedback(0.9)).expect("ok"); // positive
+        algo.update_with_feedback(&make_feedback(0.1)).expect("ok"); // negative
+        algo.update_with_feedback(&make_feedback(0.7)).expect("ok"); // positive
+        let stats = algo.statistics();
+        assert_eq!(stats.feedback_count, 3);
+        assert_eq!(stats.positive_feedback, 2);
+        assert_eq!(stats.negative_feedback, 1);
+        // accuracy = 2/3
+        assert!((stats.accuracy - 2.0 / 3.0).abs() < 1e-5);
+    }
+
+    // -------------------------------------------------------------------------
+    // ResourceOptimizationAlgorithm
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_resource_feedback_positive_increments_count() {
+        let mut algo = ResourceOptimizationAlgorithm::new();
+        algo.update_with_feedback(&make_feedback(0.9)).expect("ok");
+        let stats = algo.statistics();
+        assert_eq!(stats.feedback_count, 1);
+        assert_eq!(stats.positive_feedback, 1);
+        assert_eq!(stats.negative_feedback, 0);
+    }
+
+    #[test]
+    fn test_resource_feedback_negative_increments_count() {
+        let mut algo = ResourceOptimizationAlgorithm::new();
+        algo.update_with_feedback(&make_feedback(0.0)).expect("ok");
+        let stats = algo.statistics();
+        assert_eq!(stats.feedback_count, 1);
+        assert_eq!(stats.positive_feedback, 0);
+        assert_eq!(stats.negative_feedback, 1);
+    }
+
+    #[test]
+    fn test_resource_feedback_accumulates_across_calls() {
+        let mut algo = ResourceOptimizationAlgorithm::new();
+        for _ in 0..10 {
+            algo.update_with_feedback(&make_feedback(0.6)).expect("ok");
+        }
+        let stats = algo.statistics();
+        assert_eq!(stats.feedback_count, 10);
+        assert_eq!(stats.positive_feedback, 10);
+        assert_eq!(stats.negative_feedback, 0);
+        assert!((stats.accuracy - 1.0).abs() < 1e-6);
     }
 }

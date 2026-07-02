@@ -2,113 +2,199 @@
 
 Mobile deployment infrastructure for running transformer models on iOS and Android devices with hardware acceleration and cross-platform framework support.
 
-**Version:** 0.1.3 | **Status:** Alpha | **Tests:** 1 | **SLoC:** 131,187 | **Last Updated:** 2026-06-24
+**Version:** 0.1.4 | **Status:** Alpha | **Tests:** ~742 passing (crate) · 18,102 passing workspace-wide (0 failed, 119 skipped) | **SLoC:** ~103,900 (Rust, `src/`) | **Last Updated:** 2026-07-02
 
 ## Status
 
-**Alpha**: Infrastructure is in active development. Core iOS and Android bindings are implemented; cross-platform framework integrations and on-device training are at alpha stability. 1 Rust integration test passing.
+**Alpha**: Core mobile infrastructure — device detection, battery/thermal/network-aware adaptation, OTA model management, quantization, and the mobile performance profiler — is implemented and covered by ~742 passing crate-level tests (0 clippy warnings, 26 doctests passing / 0 failed / 2 ignored). iOS (Core ML/Metal via `TrustformersKit`) and Android (JNI/NNAPI via the `trustformers-android` AAR) native bridges are implemented and exercised by real Swift/Java/Kotlin source. Cross-platform framework integration is uneven: Flutter (`trustformers_flutter`) and Unity (`com.trustformers.mobile`) ship real Dart/C# packages backed by this crate's FFI; React Native currently has Rust-side JSI/Turbo Module bridge code and a detailed usage example, but no packaged npm module lives in this repository yet. A small number of advanced/experimental modules (post-quantum and homomorphic-encryption primitives in `advanced_security.rs`, one of two on-disk federated-learning implementations) are simplified reference code rather than production-grade — see [Known Limitations](#known-limitations).
+
+Public API surface: **~3,860 public items** (functions, structs, enums, traits — including impl-block methods) across 187 files in `src/`. No `todo!()`/`unimplemented!()` macros remain in the crate; where simplified/placeholder logic does exist (see below), it returns a working value rather than panicking.
 
 ## Features
 
 ### iOS Support
 
-- **TrustformersKit**: Native Swift framework for iOS/iPadOS/macOS
-- **Core ML Integration**: Leverage Apple's Neural Engine for hardware acceleration
-- **Metal Performance Shaders**: GPU acceleration via Metal compute shaders
-- **SwiftUI Components**: Ready-to-use UI components for ML features
-- **ARKit Integration**: AR object detection and scene understanding
-- **Privacy-First**: On-device processing with no data leaving the device
+- **TrustformersKit**: Native Swift package (`ios-framework/`, SwiftPM + CocoaPods) — `TFKModelConfig`, `TFKInferenceEngine`
+- **Core ML Integration**: `coreml.rs` / `coreml_converter.rs` (feature `coreml`) — Neural Engine acceleration
+- **Metal Acceleration**: `ios/metal.rs`, `ios/mps.rs` — Metal compute shaders and Metal Performance Shaders
+- **ARKit Integration**: `arkit_integration.rs` (compiled for `target_os = "ios"` only) — AR object detection
+- **iCloud sync / App extensions**: `ios_icloud.rs`, `ios_app_extensions.rs`, `ios_background.rs`
+- **Privacy-First**: on-device processing; see privacy caveats under Known Limitations
 
 ### Android Support
 
-- **Native Android Library**: AAR package for easy Gradle integration
-- **NNAPI Integration**: Android Neural Networks API for NPU/GPU/DSP acceleration
-- **Vulkan Compute**: GPU acceleration with Vulkan compute pipelines
-- **Kotlin Support**: First-class Kotlin APIs with coroutines
-- **Jetpack Compose**: Modern UI components and reactive programming
-- **Edge TPU Support**: Google Coral Edge TPU acceleration
+- **Native Android Library**: `trustformers-android` AAR (`android-lib/`) — Java `TrustformersEngine` + Kotlin `TrustformersKt` coroutine wrapper and DSL builder
+- **NNAPI Integration**: `nnapi.rs` / `nnapi_converter.rs` (feature `nnapi`, Android target only)
+- **TFLite NNAPI delegate**: `tflite_nnapi_delegate.rs` (feature `tflite-nnapi`)
+- **Edge TPU Support**: `edge_tpu_support.rs` (compiled for `target_os = "android"` only) — Google Coral acceleration
+- **Work Manager / Doze / Content Provider / Android Auto / RenderScript**: `android_work_manager.rs`, `android_doze_compatibility.rs`, `android_content_provider.rs`, `android_auto_support.rs`, `android_renderscript.rs` (RenderScript path targets the legacy API and contains placeholder bindings — see Known Limitations)
 
 ### Cross-Platform Features
 
-- **Model Management**: OTA updates with differential downloads and rollback support
-- **Quantization**: INT4, INT8, FP16 quantization for mobile efficiency
-- **Battery Optimization**: Adaptive inference based on battery level and thermal state
-- **Memory Management**: Efficient memory usage with automatic pressure handling
-- **Offline Support**: Full functionality without internet connection
-- **On-Device Training**: Federated learning with differential privacy
+- **Model Management**: `model_management.rs` — OTA downloads, differential updates, signature verification, storage cleanup, cancelable downloads
+- **Quantization**: `quantization/` (nibble-packed INT4 + pure-Rust GGUF reader), `optimization/` (enhanced INT4, knowledge distillation, size/kernel/cache optimizers)
+- **Battery / Thermal / Network Adaptation**: `battery.rs`, `thermal/` (incl. a predictive throttle model), `network_adaptation/`
+- **Memory Management**: `optimization/enhanced_memory_manager.rs`, `optimization/memory_pool.rs`
+- **On-Device Training**: `training.rs`, `federated.rs` (both behind the `on-device-training` feature)
 
 ### Framework Integration
 
-- **React Native**: Turbo Modules with JSI support
-- **Flutter**: Dart FFI bindings with platform channels
-- **Unity**: C# bindings for AR/VR applications with IL2CPP compatibility
-- **Expo**: Config plugin for managed workflow
+- **React Native**: Rust-side JSI/Turbo Module bridge (`react_native.rs`, `react_native_turbo.rs`, `react_native_fabric.rs`; features `react-native`/`expo`) plus a complete usage example (`react-native-plugin/example/TrustformersCompleteExample.tsx`). No npm package source ships in this repo yet.
+- **Flutter**: `trustformers_flutter` pub package (`flutter-plugin/`, Dart FFI + platform channels) backed by `flutter.rs` (feature `flutter`)
+- **Unity**: `com.trustformers.mobile` UPM package (`unity-package/`, `TrustformersEngine` MonoBehaviour) backed by `unity_interop.rs` (feature `unity`)
+- **Expo**: config-plugin scaffolding backed by `expo_plugin.rs` (feature `expo`, implies `react-native`)
+- **.NET / C#**: standalone P/Invoke wrapper in `csharp-wrapper/` (separate from the Unity package)
+
+## API Overview
+
+Key modules (see `cargo doc -p trustformers-mobile --all-features --open` for the full generated reference):
+
+| Module | Purpose |
+|---|---|
+| `model_management` | OTA model downloads, differential updates, signature verification, storage/cache management |
+| `battery`, `thermal`, `network_adaptation` | Battery-, thermal-, and network-aware adaptive inference |
+| `device_info` | Device capability detection (`MobileDeviceDetector::detect()`) |
+| `quantization`, `optimization` | INT4/INT8/FP16 quantization, GGUF loading, knowledge distillation, memory/kernel/cache optimizers |
+| `ios` (+ `ios/`), `android` (+ `android_*` siblings) | Platform FFI/JNI bindings |
+| `coreml`, `nnapi`, `tflite_nnapi_delegate` | Hardware-accelerated inference delegates |
+| `federated`, `training`, `differential_privacy` | On-device / federated learning (feature `on-device-training`) |
+| `mobile_performance_profiler` | Profiling, bottleneck detection, real-time monitoring, export |
+| `react_native`, `flutter`, `unity_interop`, `expo_plugin` | Cross-platform framework bridges |
+| `webnn`, `mlx_integration`, `hardware` | WebNN IR/export, Apple-Silicon MLX integration, next-gen accelerator abstractions |
+| `advanced_security`, `advanced_privacy_mechanisms` | Experimental PQ-crypto / HE / MPC / DP research code (see Known Limitations) |
 
 ## Quick Start
+
+All platform bindings below operate at the token/tensor level (`Tensor`/`float[]`/token IDs in, structured results out) — text tokenization and detokenization is expected to happen in the host app or via `trustformers-tokenizers`, not inside these bindings.
+
+### Rust
+
+```rust
+use trustformers_mobile::model_management::{ModelManager, ModelManagerConfig};
+
+let mut manager = ModelManager::new(ModelManagerConfig {
+    storage_directory: "/data/local/models".into(),
+    ..Default::default()
+})?;
+
+manager.download_model("gpt2-medium", Some(Box::new(|progress| {
+    let pct = progress.downloaded_bytes as f64 / progress.total_bytes as f64 * 100.0;
+    println!("Download: {pct:.1}%");
+}))).await?;
+
+let model_path = manager.get_model_path("gpt2-medium");
+```
+
+Battery-aware scheduling (`battery.rs`, always compiled):
+
+```rust
+use trustformers_mobile::{MobileBatteryManager, BatteryConfig};
+use trustformers_mobile::device_info::MobileDeviceDetector;
+
+let device_info = MobileDeviceDetector::detect()?;
+let mut battery_mgr = MobileBatteryManager::new(BatteryConfig::default(), &device_info)?;
+battery_mgr.start()?;
+let level = battery_mgr.get_current_battery_level();
+```
+
+Federated learning (requires `--features on-device-training`; real, compiled implementation lives in `federated.rs`):
+
+```rust
+use trustformers_mobile::federated::{
+    FederatedLearningClient, FederatedLearningConfig, DifferentialPrivacyConfig, NoiseMechanism,
+};
+
+let fl_config = FederatedLearningConfig {
+    enable_differential_privacy: true,
+    dp_config: Some(DifferentialPrivacyConfig {
+        epsilon: 1.0,
+        delta: 1e-5,
+        clipping_norm: 1.0,
+        noise_mechanism: NoiseMechanism::Gaussian,
+        per_layer_budget: false,
+    }),
+    ..Default::default()
+};
+
+let mut client = FederatedLearningClient::new(fl_config, training_config, mobile_config)?;
+let result = client.train_local_model(&local_examples)?;
+```
 
 ### iOS (Swift)
 
 ```swift
 import TrustformersKit
 
-let config = TFKModelConfig(
-    modelPath: Bundle.main.url(forResource: "gpt2", withExtension: "bin")!,
-    device: .neuralEngine,
-    precision: .fp16
-)
-
-let engine = try TFKInferenceEngine(config: config)
-let result = try await engine.generate(prompt: "Once upon a time")
+let config = TFKModelConfig.optimizedConfig()
+let engine = TFKInferenceEngine(config: config)
+let model = try engine.loadModel(at: modelPath, config: config)
+let result = engine.performInference(model, input: inputTensor)
 ```
 
 ### Android (Kotlin)
 
 ```kotlin
-import com.trustformers.mobile.TrustformersEngine
+import com.trustformers.trustformersEngine
+import com.trustformers.TrustformersEngine
 
-val engine = TrustformersEngine.Builder()
-    .modelPath(modelPath)
-    .device(Device.NNAPI)
-    .precision(Precision.FP16)
-    .build()
-
-val result = engine.generate(prompt = "Hello, world!")
-    .collect { token -> println(token) }
-```
-
-### React Native
-
-```typescript
-import { TrustformersModule } from 'trustformers-react-native';
-
-const model = await TrustformersModule.loadModel('gpt2');
-const result = await TrustformersModule.generate(model, 'Hello');
+val engine = trustformersEngine(context) {
+    setBackend(TrustformersEngine.EngineConfig.Backend.NNAPI)
+    setUseFP16(true)
+}
+val model = engine.loadModel(modelPath)
+val output = engine.inference(model, inputTensor)
 ```
 
 ### Flutter
 
 ```dart
-import 'package:trustformers_flutter/trustformers.dart';
+import 'package:trustformers_flutter/trustformers_flutter.dart';
 
-final engine = TrustformersEngine(modelPath: 'gpt2.bin');
-await engine.load();
+final config = TrustformersConfig(engineId: 'main', modelPath: 'gpt2.bin');
+final engine = await TrustformersEngine.create(config);
+await engine.loadModel(config.modelPath);
 
-final result = await engine.generate('Once upon a time');
+final result = await engine.inference(
+  TrustformersInferenceRequest.textGeneration(inputIds: tokenIds),
+);
+```
+
+### React Native (example only — see Known Limitations)
+
+```typescript
+// react-native-plugin/example/TrustformersCompleteExample.tsx
+import { TrustformersEngine } from '@trustformers/react-native';
+
+const deviceInfo = await TrustformersEngine.getDeviceInfo();
+const engine = await TrustformersEngine.initialize({ enablePerformanceMonitoring: true });
+const models = await engine.getAvailableModels();
+```
+
+### Unity (C#)
+
+```csharp
+// TrustformersEngine is a MonoBehaviour — attach it to a GameObject
+var engine = gameObject.AddComponent<TrustformersEngine>();
+engine.modelPath = "gpt2.bin";
+engine.InitializeEngine();
+float[] output = engine.Inference(inputTensor);
 ```
 
 ## Installation
 
+Sub-packages currently version independently (`1.0.0`) and do not track the workspace's `0.1.4` release; verify against each package's own manifest before pinning.
+
 ### iOS (CocoaPods)
 
 ```ruby
-pod 'TrustformersKit', '~> 0.1.3'
+pod 'TrustformersKit', '~> 1.0'
 ```
 
 ### iOS (Swift Package Manager)
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/cool-japan/trustformers-ios", from: "0.1.3")
+    .package(url: "https://github.com/cool-japan/trustformers", from: "1.0.0")
 ]
 ```
 
@@ -116,47 +202,69 @@ dependencies: [
 
 ```gradle
 dependencies {
-    implementation 'com.trustformers:mobile:0.1.3'
+    implementation 'com.trustformers:trustformers-android:1.0.0'
 }
-```
-
-### React Native
-
-```bash
-npm install trustformers-react-native
 ```
 
 ### Flutter
 
 ```yaml
 dependencies:
-  trustformers_flutter: ^0.1.3
+  trustformers_flutter: ^1.0.0
+```
+
+### Unity
+
+Add `com.trustformers.mobile` via the Unity Package Manager (Git URL or local `unity-package/` path).
+
+### Rust crate
+
+```toml
+[dependencies]
+trustformers-mobile = { version = "0.1.4", features = ["ios", "on-device-training"] }
 ```
 
 ## Architecture
 
 ```
 trustformers-mobile/
-├── ios-framework/          # iOS Swift framework (TrustformersKit)
-├── android-lib/            # Android AAR library
-├── react-native-plugin/    # React Native Turbo Module
-├── flutter-plugin/         # Flutter Dart FFI plugin
-├── unity-package/          # Unity package (C# / IL2CPP)
-├── src/                    # Shared Rust core
-│   ├── ios.rs             # iOS FFI bindings
-│   ├── android.rs         # Android JNI bindings
-│   ├── model_manager.rs   # Model lifecycle management
-│   ├── battery.rs         # Battery-aware optimization
-│   └── federated.rs       # Federated learning
+├── ios-framework/           # iOS Swift package (TrustformersKit; SwiftPM + CocoaPods)
+├── android-lib/             # Android AAR (Java TrustformersEngine + Kotlin TrustformersKt wrapper)
+├── react-native-plugin/     # React Native bridge example (@trustformers/react-native; example-only)
+├── flutter-plugin/          # Flutter package `trustformers_flutter` (Dart FFI + platform channels)
+├── unity-package/           # Unity UPM package `com.trustformers.mobile` (C# MonoBehaviour)
+├── csharp-wrapper/          # Standalone .NET/C# P/Invoke wrapper
+├── codegen/                 # Python binding-generation tooling
+├── trustformers-dashboard/  # Python performance-monitoring dashboard
+├── tutorials/                # Integration guides and production tutorials
+├── src/                     # Shared Rust core (187 files, ~103,900 SLoC)
+│   ├── ios.rs, ios/          # iOS FFI bindings (engine, metal, mps)
+│   ├── android/, android_*.rs # Android JNI/NNAPI/WorkManager/Doze/RenderScript bindings
+│   ├── model_management.rs   # OTA model lifecycle management
+│   ├── battery.rs             # Battery-aware optimization
+│   ├── federated.rs            # Federated learning (feature `on-device-training`)
+│   └── mobile_performance_profiler/ # Profiling/collector/analysis subsystem
+├── tests/                   # 11 integration test files
 └── examples/
-    ├── ios_demo_app/      # SwiftUI demo app
-    ├── android_demo_app/  # Jetpack Compose demo app
-    └── react_native_app/  # React Native demo
+    ├── ios_demo_app/        # SwiftUI demo app
+    ├── android_demo_app/    # Jetpack Compose / Kotlin demo activities
+    └── *.rs                 # 5 Rust examples (inference, optimization, fine-tuning, platform APIs)
 ```
 
-## Performance
+## Performance (Illustrative Targets)
 
-### iOS Benchmarks
+`src/benchmarks/performance_targets.rs` defines the crate's actual, code-level performance targets (`PerformanceTargets::default()`):
+
+| Target | Value |
+|--------|-------|
+| Max inference latency | < 100 ms |
+| Max battery drain | < 5% / hour |
+| Min device coverage | 90% |
+| Max framework size | < 50 MB |
+
+The per-model tables below are illustrative reference figures and are **not** yet backed by an automated on-device CI benchmark in this repository — treat them as design targets, not measured results.
+
+### iOS (illustrative)
 
 | Model | Device | Latency | Memory |
 |-------|--------|---------|--------|
@@ -164,7 +272,7 @@ trustformers-mobile/
 | BERT-base | A15 Neural Engine | 12ms | 350MB |
 | LLaMA-2-7B (INT4) | A15 Neural Engine | 45ms/token | 1.2GB |
 
-### Android Benchmarks
+### Android (illustrative)
 
 | Model | Device | Latency | Memory |
 |-------|--------|---------|--------|
@@ -175,44 +283,53 @@ trustformers-mobile/
 ## Hardware Support
 
 ### iOS
-- **Neural Engine**: A12+ (iPhone XS and newer)
-- **Metal**: All devices with iOS 14+
-- **Core ML**: iOS 14+ for optimized inference
+- **Base framework**: iOS 11+ / macOS 10.13+ / watchOS 4+ / tvOS 11+ (`Package.swift`, podspec); the crate's own `[package.metadata.ios]` targets deployment target 12.0
+- **Neural Engine**: A12+ (iPhone XS and newer) via Core ML (feature `coreml`)
+- **Metal**: Metal Performance Shaders path recommended on iOS 14+
 
 ### Android
-- **NNAPI**: Android 8.0+ (API 27+)
-- **Vulkan**: Android 7.0+ on supported devices
-- **Edge TPU**: Devices with Google Coral
+- **Base library**: `minSdkVersion 21` (Android 5.0+), `targetSdk`/`compileSdk` 33 (`android-lib/build.gradle`)
+- **NNAPI**: Android 8.1+ (API 27+) — features `nnapi` / `tflite-nnapi`
+- **Edge TPU**: devices with Google Coral (`target_os = "android"` only)
 
 ## Feature Flags
 
-- `ios` — iOS Swift framework and Core ML bindings
-- `android` — Android JNI/NNAPI bindings
-- `coreml` — Core ML model conversion and inference
-- `nnapi` — Android Neural Networks API delegate
-- `tflite-nnapi` — TensorFlow Lite NNAPI backend
-- `on-device-training` — Federated learning and LoRA training
-- `web` — WebAssembly/WebView bridge
-- `react-native` — Turbo Modules / JSI bindings
-- `flutter` — Dart FFI plugin
-- `unity` — C# / IL2CPP bindings
-- `expo` — Expo config plugin
-- `mobile-optimized` — Battery, thermal, and memory pressure optimizations
+Verified against `Cargo.toml` and `#[cfg(feature = ...)]` usage in `src/`:
+
+- `mobile-optimized` (**default**) — currently a marker feature; no `#[cfg(feature = "mobile-optimized")]` gate exists in `src/` yet
+- `ios` — currently a marker feature; iOS-only code is gated by `target_os = "ios"` directly, not this flag
+- `android` — currently a marker feature; Android-only code is gated by `target_os = "android"` directly, not this flag
+- `coreml` — gates `coreml.rs` / `coreml_converter.rs` (also requires `target_os = "ios"`)
+- `nnapi` — gates `nnapi.rs` / `nnapi_converter.rs` (also requires `target_os = "android"`)
+- `tflite-nnapi` — implies `nnapi`; gates `tflite_nnapi_delegate.rs`
+- `on-device-training` — gates `training.rs`, `federated.rs`, `differential_privacy.rs`, `advanced_training.rs`, `advanced_privacy_mechanisms.rs`
+- `web` — gates `wasm.rs` (also requires `target_arch = "wasm32"`)
+- `react-native` — gates `react_native.rs` / `react_native_turbo.rs` / `react_native_fabric.rs` re-exports
+- `flutter` — gates `flutter.rs`
+- `unity` — gates `unity_interop.rs`
+- `expo` — implies `react-native`; gates `expo_plugin.rs`
 
 ## Testing
 
 ```bash
-# Run Rust tests
-cargo test --all-features -p trustformers-mobile
+# Run Rust tests (crate-level, default features)
+cargo test -p trustformers-mobile
+
+# Run with all features (matches the ~742 passing count verified 2026-07-01)
+cargo nextest run --all-features -p trustformers-mobile
+
+# Run doctests (26 passing, 0 failed, 2 ignored)
+cargo test --doc -p trustformers-mobile --all-features
+
+# CLI tools shipped with the crate
+cargo run --bin abi-checker
+cargo run --bin trustformers-profiler
 
 # Test iOS framework
 cd ios-framework && swift test
 
 # Test Android library
 cd android-lib && ./gradlew test
-
-# Device farm integration
-cargo test --features device-farm-integration
 ```
 
 ## Development
@@ -221,19 +338,24 @@ cargo test --features device-farm-integration
 
 ```bash
 ./build-ios.sh
-# Output: target/TrustformersKit.xcframework
+# Output: ios-framework/TrustformersKit.xcframework
 ```
 
 ### Building Android AAR
 
 ```bash
 ./build-android.sh
-# Output: target/trustformers-mobile.aar
+# Output (via Gradle): android-lib/build/outputs/aar/
 ```
 
 ## Known Limitations
 
 - Alpha status: API surface may change before 0.2.0
+- `advanced_security.rs` implements post-quantum KEM (Kyber/McEliece stand-ins), homomorphic encryption, and secure multi-party computation as **simplified/mock reference code**, not audited cryptography — do not depend on it for real confidentiality guarantees yet
+- Two federated-learning implementations exist under `src/`: only `federated.rs`'s `FederatedLearningClient` (feature `on-device-training`) is declared in `lib.rs` and compiled; `federated_learning.rs` and `federated_learning_v2/` are currently orphaned (not mounted as modules) and are unreachable dead code
+- `react-native-plugin/` in this repository contains a usage example (`TrustformersCompleteExample.tsx`) only — there is no `package.json` or module source here, so React Native integration is not yet an installable package from this repo
+- `ios`, `android`, and `mobile-optimized` Cargo features currently have no `#[cfg(feature = ...)]` gates in `src/` (platform code is gated by `target_os` directly instead)
+- Flutter, Unity, iOS, and Android sub-packages version independently at `1.0.0` and do not track the workspace's `0.1.4` release
 - Core ML Neural Engine requires iOS 16+ for latest features
 - NNAPI performance varies significantly across Android devices
 - Large models require quantization for mobile deployment
@@ -241,21 +363,24 @@ cargo test --features device-farm-integration
 
 ## Future Enhancements
 
-- Enhanced quantization methods (INT2, GGUF)
+- Enhanced quantization methods (INT2, further GGUF coverage)
 - Better thermal management algorithms
 - More AR/VR integrations
 - Real-time collaboration features
 - WebNN integration for future platforms
+- Replace the `advanced_security.rs` placeholder cryptography with audited implementations
+- Reconcile or remove the orphaned `federated_learning.rs` / `federated_learning_v2/` modules
+- Publish an actual npm package for the React Native bridge
 
 ## License
 
-Licensed under Apache License, Version 2.0 ([LICENSE](LICENSE)).
+Licensed under Apache License, Version 2.0 ([LICENSE](../LICENSE)).
 
 ---
 
-**Last Updated:** 2026-06-24
-**Version:** 0.1.3
+**Last Updated:** 2026-07-02
+**Version:** 0.1.4
 **Status:** Alpha
-**Test Suite:** 1 Rust integration test
-**SLoC:** 131,187
-**Platforms:** iOS 14+, Android 8.0+ (API 26+)
+**Test Suite:** ~742 crate tests passing · 26 doctests passing (0 failed, 2 ignored)
+**SLoC:** ~103,900 (Rust, `src/`) · ~124,000 (full repo incl. Swift/Kotlin/C#/Dart/TS bindings, via tokei)
+**Platforms:** iOS 11+ (Neural Engine/Core ML require iOS 14+/16+), Android 5.0+ / API 21+ (NNAPI requires API 27+)

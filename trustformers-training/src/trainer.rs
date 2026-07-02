@@ -714,8 +714,11 @@ impl<M: Model> Trainer<M> {
             "save_attempted": true,
             "note": "For full model saving, implement ModelSaveLoad trait on your model type"
         });
-        let json_str = serde_json::to_string_pretty(&model_info)
-            .expect("model_info json serialization should not fail");
+        let json_str = serde_json::to_string_pretty(&model_info).map_err(|e| {
+            trustformers_core::TrustformersError::serialization_error(format!(
+                "Failed to serialize model config: {e}"
+            ))
+        })?;
         fs::write(model_info_path, json_str)
             .map_err(|e| file_not_found(format!("Failed to write model config: {}", e)))?;
 
@@ -1325,7 +1328,7 @@ mod tests {
             epoch: 2.0,
             global_step: 500,
             best_metric: Some(0.85),
-            best_model_checkpoint: Some(PathBuf::from("/tmp/best_ckpt")),
+            best_model_checkpoint: Some(std::env::temp_dir().join("best_ckpt")),
             log_history: vec![LogEntry {
                 step: 500,
                 epoch: 2.0,

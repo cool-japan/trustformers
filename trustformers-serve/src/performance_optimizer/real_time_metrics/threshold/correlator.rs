@@ -211,7 +211,7 @@ impl AlertCorrelator {
         self.stats.total_processed.fetch_add(1, Ordering::Relaxed);
 
         let rules_snapshot = {
-            let rules = self.rules.read().expect("Rules RwLock poisoned");
+            let rules = self.rules.read().unwrap_or_else(|p| p.into_inner());
             rules.clone()
         };
 
@@ -338,8 +338,8 @@ impl AlertCorrelator {
     ) -> bool {
         // Check time window
         let time_diff = alert.timestamp.signed_duration_since(correlation.updated_at);
-        let time_window =
-            chrono::Duration::from_std(rule.time_window).expect("Duration conversion failed");
+        let time_window = chrono::Duration::from_std(rule.time_window)
+            .unwrap_or_else(|_| chrono::Duration::zero());
 
         if time_diff > time_window {
             return false;
@@ -352,7 +352,7 @@ impl AlertCorrelator {
 
         // Check maximum correlations per alert
         let max_correlations =
-            self.config.read().expect("Config RwLock poisoned").max_correlations_per_alert;
+            self.config.read().unwrap_or_else(|p| p.into_inner()).max_correlations_per_alert;
         if correlation.correlated_alerts.len() >= max_correlations {
             return false;
         }
@@ -375,32 +375,29 @@ impl AlertCorrelator {
     /// Update correlation statistics
     fn update_correlation_stats(&self, rule_type: &CorrelationRuleType) {
         let type_name = format!("{:?}", rule_type);
-        let mut stats = self
-            .stats
-            .correlations_by_type
-            .lock()
-            .expect("Correlations stats lock poisoned");
+        let mut stats = self.stats.correlations_by_type.lock().unwrap_or_else(|p| p.into_inner());
         *stats.entry(type_name).or_insert(0) += 1;
     }
 
     /// Clean up old correlations
     async fn cleanup_old_correlations(&self, correlations: &mut HashMap<String, AlertCorrelation>) {
-        let max_window = self.config.read().expect("Config RwLock poisoned").max_correlation_window;
+        let max_window =
+            self.config.read().unwrap_or_else(|p| p.into_inner()).max_correlation_window;
         let cutoff_time = Utc::now()
-            - chrono::Duration::from_std(max_window).expect("Duration conversion failed");
+            - chrono::Duration::from_std(max_window).unwrap_or_else(|_| chrono::Duration::zero());
 
         correlations.retain(|_, correlation| correlation.updated_at > cutoff_time);
     }
 
     /// Add correlation rule
     pub fn add_rule(&self, rule: CorrelationRule) {
-        let mut rules = self.rules.write().expect("Rules RwLock poisoned");
+        let mut rules = self.rules.write().unwrap_or_else(|p| p.into_inner());
         rules.push(rule);
     }
 
     /// Remove correlation rule
     pub fn remove_rule(&self, rule_id: &str) {
-        let mut rules = self.rules.write().expect("Rules RwLock poisoned");
+        let mut rules = self.rules.write().unwrap_or_else(|p| p.into_inner());
         rules.retain(|rule| rule.id != rule_id);
     }
 
@@ -415,15 +412,11 @@ impl AlertCorrelator {
                 self.stats
                     .correlations_by_type
                     .lock()
-                    .expect("Correlations stats lock poisoned")
+                    .unwrap_or_else(|p| p.into_inner())
                     .clone(),
             )),
             avg_correlation_strength: Arc::new(Mutex::new(
-                *self
-                    .stats
-                    .avg_correlation_strength
-                    .lock()
-                    .expect("Avg correlation strength lock poisoned"),
+                *self.stats.avg_correlation_strength.lock().unwrap_or_else(|p| p.into_inner()),
             )),
             active_correlations: AtomicU64::new(
                 self.stats.active_correlations.load(Ordering::Relaxed),

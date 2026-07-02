@@ -159,7 +159,6 @@ pub struct CommunicationRequirement {
 }
 
 /// Tensor parallelism coordinator
-#[allow(dead_code)]
 pub struct TensorParallelism {
     config: TensorParallelismConfig,
     global_rank: usize,
@@ -175,7 +174,6 @@ pub struct TensorParallelism {
     row_group: Option<Arc<dyn ProcessGroup>>,
 
     // Operation scheduling
-    #[allow(dead_code)]
     operation_scheduler: Arc<RwLock<OperationScheduler>>,
 
     // Communication optimization
@@ -187,9 +185,7 @@ pub struct TensorParallelism {
 
 /// Operation scheduler for tensor operations
 #[derive(Debug, Default)]
-#[allow(dead_code)]
 struct OperationScheduler {
-    #[allow(dead_code)]
     pending_operations: Vec<TensorOperation>,
     running_operations: Vec<TensorOperation>,
     completed_operations: Vec<TensorOperation>,
@@ -198,9 +194,7 @@ struct OperationScheduler {
 
 /// Communication optimizer for reducing communication overhead
 #[derive(Debug, Default)]
-#[allow(dead_code)]
 struct CommunicationOptimizer {
-    #[allow(dead_code)]
     fusion_buffer: Vec<CommunicationRequirement>,
     communication_schedule: Vec<Vec<CommunicationRequirement>>, // Batched communications
     async_handles: Vec<AsyncCommHandle>,
@@ -210,9 +204,7 @@ struct CommunicationOptimizer {
 
 /// Async communication handle (placeholder)
 #[derive(Debug)]
-#[allow(dead_code)]
 struct AsyncCommHandle {
-    #[allow(dead_code)]
     id: usize,
     completion_time: Instant,
 }
@@ -628,7 +620,7 @@ impl TensorParallelism {
 
         // Update statistics
         {
-            let mut stats = self.statistics.lock().expect("statistics lock should not be poisoned");
+            let mut stats = self.statistics.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             stats.computation_time += start_time.elapsed();
             *stats.operation_count.entry(operation.operation_type.clone()).or_insert(0) += 1;
         }
@@ -796,7 +788,7 @@ impl TensorParallelism {
 
         // Update communication statistics
         {
-            let mut stats = self.statistics.lock().expect("statistics lock should not be poisoned");
+            let mut stats = self.statistics.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             stats.total_communication_time += start_time.elapsed();
             stats.communication_volume +=
                 requirements.iter().map(|r| r.data_size as u64).sum::<u64>();
@@ -1077,7 +1069,7 @@ impl TensorParallelism {
 
     /// Get tensor parallelism statistics
     pub fn get_statistics(&self) -> TensorParallelismStatistics {
-        let stats = self.statistics.lock().expect("lock should not be poisoned");
+        let stats = self.statistics.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         TensorParallelismStatistics {
             total_partitions: self.tensor_partitions.values().map(|v| v.len()).sum(),

@@ -1086,7 +1086,11 @@ impl AdvancedOptimizer {
                         step: 0,
                     };
                     self.state.insert(name.clone(), new_state);
-                    self.state.get_mut(name).expect("just inserted")
+                    self.state.get_mut(name).ok_or_else(|| {
+                        TrustformersError::runtime_error(
+                            "optimizer state missing immediately after insert".to_string(),
+                        )
+                    })?
                 };
 
                 state.step += 1;

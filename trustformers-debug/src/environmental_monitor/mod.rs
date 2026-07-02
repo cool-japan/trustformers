@@ -3,6 +3,10 @@
 //! This module provides comprehensive monitoring of environmental impact during model
 //! training and inference, including carbon footprint tracking, energy consumption
 //! analysis, and sustainability recommendations.
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 pub mod carbon_tracking;
 pub mod config;
@@ -415,19 +419,15 @@ impl EnvironmentalMonitor {
 
 // Supporting data structures
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct CarbonForecast {
     timestamp: std::time::SystemTime,
     predicted_carbon_intensity: f64,
-    #[allow(dead_code)]
     renewable_percentage: f64,
     confidence: f64,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct EnergyPriceForecast {
-    #[allow(dead_code)]
     timestamp: std::time::SystemTime,
     predicted_price_per_kwh: f64,
     confidence: f64,

@@ -627,8 +627,8 @@ mod tests {
         // We deliberately skip loading to verify None case.
         // Reset model to None manually isn't possible via public API, so we
         // just test that after loading the description is Some.
-        let dummy = Path::new("/tmp/dummy.mlmodel");
-        backend.load_model(dummy).expect("load_model mock should succeed");
+        let dummy = std::env::temp_dir().join("dummy.mlmodel");
+        backend.load_model(&dummy).expect("load_model mock should succeed");
         let desc = backend.model_description();
         assert!(
             desc.is_some(),
@@ -640,8 +640,8 @@ mod tests {
     fn test_model_description_fields_after_load() {
         let config = CoreMLBackendConfig::for_ios();
         let mut backend = CoreMLBackend::new(config).expect("backend creation failed");
-        let dummy = Path::new("/tmp/test.mlpackage");
-        backend.load_model(dummy).expect("load_model should succeed");
+        let dummy = std::env::temp_dir().join("test.mlpackage");
+        backend.load_model(&dummy).expect("load_model should succeed");
         let desc = backend.model_description().expect("description should be Some");
         assert!(!desc.name.is_empty());
         assert!(!desc.version.is_empty());
@@ -669,7 +669,7 @@ mod tests {
     fn test_predict_after_load_succeeds() {
         let config = CoreMLBackendConfig::for_ios();
         let mut backend = CoreMLBackend::new(config).expect("backend creation failed");
-        backend.load_model(Path::new("/tmp/m.mlmodel")).expect("load ok");
+        backend.load_model(&std::env::temp_dir().join("m.mlmodel")).expect("load ok");
         // Provide a dummy input tensor
         let input_tensor =
             trustformers_core::tensor::Tensor::zeros(&[1, 10]).expect("tensor creation ok");

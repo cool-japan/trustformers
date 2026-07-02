@@ -271,6 +271,12 @@ impl HierarchicalTransformer {
                 model_name, file
             );
             let output_path = model_path.join(file);
+            let output_path_str = output_path.to_str().ok_or_else(|| {
+                trustformers_core::errors::TrustformersError::io_error(format!(
+                    "Non-UTF-8 output path: {}",
+                    output_path.display()
+                ))
+            })?;
 
             // Try curl first
             let curl_result = Command::new("curl")
@@ -278,7 +284,7 @@ impl HierarchicalTransformer {
                     "-L", // Follow redirects
                     "-f", // Fail silently on HTTP errors
                     "-o",
-                    output_path.to_str().expect("operation failed"),
+                    output_path_str,
                     &url,
                 ])
                 .output();
@@ -291,7 +297,7 @@ impl HierarchicalTransformer {
                         .args([
                             "-q", // Quiet mode
                             "-O",
-                            output_path.to_str().expect("operation failed"),
+                            output_path_str,
                             &url,
                         ])
                         .output();
@@ -375,7 +381,13 @@ impl Model for HierarchicalTransformer {
         })?;
 
         // Use the enhanced loading system
-        let result = self.load_from_path(temp_file.to_str().expect("operation failed"));
+        let temp_file_str = temp_file.to_str().ok_or_else(|| {
+            trustformers_core::errors::TrustformersError::io_error(format!(
+                "Non-UTF-8 temporary file path: {}",
+                temp_file.display()
+            ))
+        })?;
+        let result = self.load_from_path(temp_file_str);
 
         // Clean up temporary file
         let _ = std::fs::remove_file(&temp_file);

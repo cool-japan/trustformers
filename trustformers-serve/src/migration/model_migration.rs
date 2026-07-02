@@ -325,7 +325,7 @@ impl ModelMigrator {
         let content = fs::read(path).await?;
         let mut hasher = Sha256::new();
         hasher.update(content);
-        Ok(format!("{:x}", hasher.finalize()))
+        Ok(hex::encode(hasher.finalize()))
     }
 
     pub async fn rollback_model_migration(

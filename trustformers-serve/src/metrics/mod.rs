@@ -18,60 +18,67 @@ use std::sync::Arc;
 static REGISTRY: Lazy<Registry> = Lazy::new(Registry::new);
 
 static REQUEST_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(opts!(
+    let opts = opts!(
         "inference_requests_total",
         "Total number of inference requests"
-    ))
-    .expect("failed to register REQUEST_COUNTER metric")
+    );
+    // Registration only fails on duplicate registration; fall back to an
+    // unregistered counter (compile-time-valid opts) so the server keeps running.
+    register_int_counter!(opts.clone()).unwrap_or_else(|_| {
+        IntCounter::with_opts(opts).unwrap_or_else(|_| unreachable!("static metric opts are valid"))
+    })
 });
 
 static REQUEST_DURATION: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(HistogramOpts::new(
+    let opts = HistogramOpts::new(
         "inference_request_duration_seconds",
-        "Request duration in seconds"
-    ))
-    .expect("failed to register REQUEST_DURATION metric")
+        "Request duration in seconds",
+    );
+    register_histogram!(opts.clone()).unwrap_or_else(|_| {
+        Histogram::with_opts(opts).unwrap_or_else(|_| unreachable!("static metric opts are valid"))
+    })
 });
 
 static BATCH_SIZE: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(HistogramOpts::new(
-        "inference_batch_size",
-        "Batch size for inference requests"
-    )
-    .buckets(vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]))
-    .expect("failed to register BATCH_SIZE metric")
+    let opts = HistogramOpts::new("inference_batch_size", "Batch size for inference requests")
+        .buckets(vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]);
+    register_histogram!(opts.clone()).unwrap_or_else(|_| {
+        Histogram::with_opts(opts).unwrap_or_else(|_| unreachable!("static metric opts are valid"))
+    })
 });
 
 static ACTIVE_REQUESTS: Lazy<IntGauge> = Lazy::new(|| {
-    register_int_gauge!(opts!(
+    let opts = opts!(
         "inference_active_requests",
         "Number of active inference requests"
-    ))
-    .expect("failed to register ACTIVE_REQUESTS metric")
+    );
+    register_int_gauge!(opts.clone()).unwrap_or_else(|_| {
+        IntGauge::with_opts(opts).unwrap_or_else(|_| unreachable!("static metric opts are valid"))
+    })
 });
 
 static MODEL_LOADS: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(opts!(
-        "inference_model_loads_total",
-        "Total number of model loads"
-    ))
-    .expect("failed to register MODEL_LOADS metric")
+    let opts = opts!("inference_model_loads_total", "Total number of model loads");
+    register_int_counter!(opts.clone()).unwrap_or_else(|_| {
+        IntCounter::with_opts(opts).unwrap_or_else(|_| unreachable!("static metric opts are valid"))
+    })
 });
 
 static ERRORS: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(opts!(
-        "inference_errors_total",
-        "Total number of inference errors"
-    ))
-    .expect("failed to register ERRORS metric")
+    let opts = opts!("inference_errors_total", "Total number of inference errors");
+    register_int_counter!(opts.clone()).unwrap_or_else(|_| {
+        IntCounter::with_opts(opts).unwrap_or_else(|_| unreachable!("static metric opts are valid"))
+    })
 });
 
 static QUEUE_SIZE: Lazy<IntGauge> = Lazy::new(|| {
-    register_int_gauge!(opts!(
+    let opts = opts!(
         "inference_queue_size",
         "Current size of the inference queue"
-    ))
-    .expect("failed to register QUEUE_SIZE metric")
+    );
+    register_int_gauge!(opts.clone()).unwrap_or_else(|_| {
+        IntGauge::with_opts(opts).unwrap_or_else(|_| unreachable!("static metric opts are valid"))
+    })
 });
 
 #[derive(Clone)]

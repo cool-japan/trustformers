@@ -142,7 +142,6 @@ pub struct TrainingOrchestrator {
     nodes: Arc<RwLock<HashMap<String, ResourceNode>>>,
     scheduler: Arc<Mutex<JobScheduler>>,
     job_sender: mpsc::UnboundedSender<JobEvent>,
-    #[allow(dead_code)]
     job_receiver: Arc<Mutex<mpsc::UnboundedReceiver<JobEvent>>>,
     statistics: Arc<RwLock<OrchestrationStatistics>>,
 }
@@ -225,10 +224,7 @@ impl TrainingOrchestrator {
     pub fn submit_job(&self, mut job: TrainingJob) -> Result<String> {
         job.job_id = Uuid::new_v4().to_string();
         job.status = JobStatus::Pending;
-        job.created_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("SystemTime should be after UNIX_EPOCH")
-            .as_secs();
+        job.created_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
 
         // Add to jobs registry
         {
@@ -283,10 +279,7 @@ impl TrainingOrchestrator {
                 JobStatus::Pending | JobStatus::Queued | JobStatus::Running | JobStatus::Paused => {
                     job.status = JobStatus::Cancelled;
                     job.completed_at = Some(
-                        SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .expect("SystemTime should be after UNIX_EPOCH")
-                            .as_secs(),
+                        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
                     );
 
                     // Remove from queue if still queued
@@ -481,10 +474,7 @@ impl TrainingOrchestrator {
             if let Some(job) = jobs.get_mut(job_id) {
                 job.status = JobStatus::Running;
                 job.started_at = Some(
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .expect("SystemTime should be after UNIX_EPOCH")
-                        .as_secs(),
+                    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
                 );
             } else {
                 return Err(anyhow::anyhow!("Job not found: {}", job_id));
@@ -541,10 +531,8 @@ impl TrainingOrchestrator {
     }
 
     pub fn complete_job(&self, job_id: &str) -> Result<()> {
-        let completion_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("SystemTime should be after UNIX_EPOCH")
-            .as_secs();
+        let completion_time =
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
 
         // Update job status
         let (node_id, job_duration) = {
@@ -649,10 +637,7 @@ impl TrainingOrchestrator {
                 } else {
                     job.status = JobStatus::Failed;
                     job.completed_at = Some(
-                        SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .expect("SystemTime should be after UNIX_EPOCH")
-                            .as_secs(),
+                        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
                     );
                 }
 

@@ -709,9 +709,8 @@ impl CodeTokenizer {
     ) -> Result<Option<CodeToken>> {
         // Check for line comments
         if let Some(line_comment) = patterns.line_comment {
-            if first_char
-                == line_comment.chars().next().expect("line_comment pattern must be non-empty")
-            {
+            // An empty pattern simply does not match, instead of panicking.
+            if line_comment.starts_with(first_char) {
                 if let Some(token) = self.try_parse_line_comment(
                     char_indices,
                     start_offset,
@@ -727,12 +726,8 @@ impl CodeTokenizer {
 
         // Check for block comments
         if let Some((start_delim, end_delim)) = patterns.block_comment {
-            if first_char
-                == start_delim
-                    .chars()
-                    .next()
-                    .expect("block comment start delimiter must be non-empty")
-            {
+            // An empty delimiter simply does not match, instead of panicking.
+            if start_delim.starts_with(first_char) {
                 if let Some(token) = self.try_parse_block_comment(
                     char_indices,
                     start_offset,
@@ -1059,19 +1054,6 @@ impl CodeTokenizer {
             },
             language,
         })
-    }
-
-    /// Get or create token ID
-    #[allow(dead_code)]
-    fn get_or_create_token_id(&mut self, token: &str) -> u32 {
-        if let Some(&id) = self.token_to_id.get(token) {
-            id
-        } else {
-            let id = self.token_to_id.len() as u32;
-            self.token_to_id.insert(token.to_string(), id);
-            self.id_to_token.insert(id, token.to_string());
-            id
-        }
     }
 
     /// Get vocabulary size

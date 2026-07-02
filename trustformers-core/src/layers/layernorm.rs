@@ -69,6 +69,10 @@ impl LayerNorm {
 
     /// Creates a simple 1D LayerNorm on CPU
     pub fn new_simple(normalized_shape: usize, eps: f32) -> Self {
+        // reason: `Self::new` only fails for an empty normalized-shape, which a
+        // single-dimension `vec![normalized_shape]` can never be; this public
+        // `-> Self` constructor has no fallible alternative without an API break.
+        #[allow(clippy::expect_used)]
         Self::new(vec![normalized_shape], eps)
             .expect("LayerNorm::new should not fail with valid shape")
     }
@@ -283,7 +287,12 @@ impl Layer for LayerNorm {
                 for &axis in axes.iter().rev() {
                     mean = mean
                         .mean_axis(Axis(axis))
-                        .expect("axis must be valid for normalization")
+                        .ok_or_else(|| {
+                            crate::errors::compute_error(
+                                "forward",
+                                "axis must be valid for normalization",
+                            )
+                        })?
                         .insert_axis(Axis(axis));
                 }
 
@@ -293,7 +302,12 @@ impl Layer for LayerNorm {
                 for &axis in axes.iter().rev() {
                     var = var
                         .mean_axis(Axis(axis))
-                        .expect("axis must be valid for normalization")
+                        .ok_or_else(|| {
+                            crate::errors::compute_error(
+                                "forward",
+                                "axis must be valid for normalization",
+                            )
+                        })?
                         .insert_axis(Axis(axis));
                 }
 
@@ -414,7 +428,12 @@ impl Layer for LayerNorm {
                 for &axis in axes.iter().rev() {
                     mean = mean
                         .mean_axis(Axis(axis))
-                        .expect("axis must be valid for normalization")
+                        .ok_or_else(|| {
+                            crate::errors::compute_error(
+                                "forward",
+                                "axis must be valid for normalization",
+                            )
+                        })?
                         .insert_axis(Axis(axis));
                 }
 
@@ -424,7 +443,12 @@ impl Layer for LayerNorm {
                 for &axis in axes.iter().rev() {
                     var = var
                         .mean_axis(Axis(axis))
-                        .expect("axis must be valid for normalization")
+                        .ok_or_else(|| {
+                            crate::errors::compute_error(
+                                "forward",
+                                "axis must be valid for normalization",
+                            )
+                        })?
                         .insert_axis(Axis(axis));
                 }
 
@@ -607,7 +631,12 @@ impl Layer for LayerNorm {
                 for &axis in axes.iter().rev() {
                     mean = mean
                         .mean_axis(Axis(axis))
-                        .expect("axis must be valid for normalization")
+                        .ok_or_else(|| {
+                            crate::errors::compute_error(
+                                "forward",
+                                "axis must be valid for normalization",
+                            )
+                        })?
                         .insert_axis(Axis(axis));
                 }
 
@@ -617,7 +646,12 @@ impl Layer for LayerNorm {
                 for &axis in axes.iter().rev() {
                     var = var
                         .mean_axis(Axis(axis))
-                        .expect("axis must be valid for normalization")
+                        .ok_or_else(|| {
+                            crate::errors::compute_error(
+                                "forward",
+                                "axis must be valid for normalization",
+                            )
+                        })?
                         .insert_axis(Axis(axis));
                 }
 
@@ -873,7 +907,9 @@ impl Layer for RMSNorm {
                 let squares = arr.mapv(|x| x * x);
                 let mean_squares = squares
                     .mean_axis(Axis(last_dim))
-                    .expect("last_dim must be valid axis")
+                    .ok_or_else(|| {
+                        crate::errors::compute_error("forward", "last_dim must be valid axis")
+                    })?
                     .insert_axis(Axis(last_dim));
                 let rms = mean_squares.mapv(|x| (x + self.eps).sqrt());
 

@@ -120,7 +120,11 @@ impl HopfieldLayer {
         // Project input to query, key, value
         let query = self.query_projection.forward(input.clone())?;
         let (key, value) = {
-            let memory_state = self.memory_state.as_ref().expect("operation failed");
+            let memory_state = self.memory_state.as_ref().ok_or_else(|| {
+                trustformers_core::errors::TrustformersError::model_error(
+                    "Hopfield memory state not initialized".to_string(),
+                )
+            })?;
             let key = self.key_projection.forward(memory_state.patterns.clone())?;
             let value = self.value_projection.forward(memory_state.patterns.clone())?;
             (key, value)
@@ -135,7 +139,11 @@ impl HopfieldLayer {
 
         // Update memory state (simplified)
         {
-            let memory_state = self.memory_state.as_mut().expect("operation failed");
+            let memory_state = self.memory_state.as_mut().ok_or_else(|| {
+                trustformers_core::errors::TrustformersError::model_error(
+                    "Hopfield memory state not initialized".to_string(),
+                )
+            })?;
 
             // Simple memory update - add current pattern to memory
             let pattern_update = input.mul_scalar(0.1)?; // learning rate

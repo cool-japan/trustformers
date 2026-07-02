@@ -913,10 +913,7 @@ impl ComputationGraphAnalyzer {
                                 .unwrap_or(0),
                         },
                     );
-                } else {
-                    let lifetime = variable_lifetimes
-                        .get_mut(dep)
-                        .expect("variable lifetime should exist for previously seen dependency");
+                } else if let Some(lifetime) = variable_lifetimes.get_mut(dep) {
                     lifetime.death_node = node_id.clone();
                     lifetime.usage_nodes.push(node_id.clone());
                 }

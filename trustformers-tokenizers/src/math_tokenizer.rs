@@ -1,8 +1,27 @@
+use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::traits::{TokenizedInput, Tokenizer};
+
+/// Number-matching regex (compiled once from a constant expression).
+static NUMBER_REGEX: Lazy<Regex> = Lazy::new(|| {
+    // reason: compile-time-constant pattern; compilation is infallible.
+    Regex::new(r"^\d+\.?\d*$").expect("built-in number regex must compile")
+});
+
+/// Scientific-notation regex (compiled once from a constant expression).
+static SCIENTIFIC_REGEX: Lazy<Regex> = Lazy::new(|| {
+    // reason: compile-time-constant pattern; compilation is infallible.
+    Regex::new(r"^\d+\.?\d*[eE][+-]?\d+$").expect("built-in scientific-notation regex must compile")
+});
+
+/// LaTeX-command regex (compiled once from a constant expression).
+static LATEX_COMMAND_REGEX: Lazy<Regex> = Lazy::new(|| {
+    // reason: compile-time-constant pattern; compilation is infallible.
+    Regex::new(r"^\\[a-zA-Z]+$").expect("built-in LaTeX-command regex must compile")
+});
 
 /// Types of mathematical tokens
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -152,9 +171,9 @@ impl MathTokenizer {
 
     /// Create a new math tokenizer with custom configuration
     pub fn with_config(config: MathTokenizerConfig) -> Result<Self> {
-        let number_regex = Regex::new(r"^\d+\.?\d*$").expect("valid regex");
-        let scientific_regex = Regex::new(r"^\d+\.?\d*[eE][+-]?\d+$").expect("valid regex");
-        let latex_command_regex = Regex::new(r"^\\[a-zA-Z]+$").expect("valid regex");
+        let number_regex = NUMBER_REGEX.clone();
+        let scientific_regex = SCIENTIFIC_REGEX.clone();
+        let latex_command_regex = LATEX_COMMAND_REGEX.clone();
 
         // Build Greek letters set
         let greek_letters = [
@@ -734,7 +753,10 @@ impl MathTokenizer {
 
 impl Default for MathTokenizer {
     fn default() -> Self {
-        Self::new().expect("MathTokenizer::new() should not fail with default config")
+        // reason: `new()` only compiles compile-time-constant regexes (now shared
+        // `Lazy` statics) and builds in-memory maps, so it cannot fail in practice;
+        // `Default` has no fallible channel to propagate an error through.
+        Self::new().expect("MathTokenizer construction with the default config is infallible")
     }
 }
 
@@ -828,9 +850,9 @@ impl Clone for MathTokenizer {
     fn clone(&self) -> Self {
         Self {
             config: self.config.clone(),
-            number_regex: Regex::new(r"^\d+\.?\d*$").expect("valid regex"),
-            scientific_regex: Regex::new(r"^\d+\.?\d*[eE][+-]?\d+$").expect("valid regex"),
-            latex_command_regex: Regex::new(r"^\\[a-zA-Z]+$").expect("valid regex"),
+            number_regex: NUMBER_REGEX.clone(),
+            scientific_regex: SCIENTIFIC_REGEX.clone(),
+            latex_command_regex: LATEX_COMMAND_REGEX.clone(),
             greek_letters: self.greek_letters.clone(),
             math_functions: self.math_functions.clone(),
             math_constants: self.math_constants.clone(),

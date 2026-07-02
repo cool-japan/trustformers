@@ -12,7 +12,8 @@ mod tests {
 
     #[test]
     fn test_auto_config_from_pretrained_nonexistent_unknown_name_errors() {
-        let result = AutoConfig::from_pretrained("/tmp/totally_nonexistent_model_path_xyz_abc");
+        let path = std::env::temp_dir().join("totally_nonexistent_model_path_xyz_abc");
+        let result = AutoConfig::from_pretrained(path.to_str().unwrap_or(""));
         // Should fail because neither the path exists nor the name is recognizable
         assert!(
             result.is_err(),
@@ -194,7 +195,8 @@ mod tests {
 
     #[test]
     fn test_auto_model_from_pretrained_nonexistent_path_errors() {
-        let result = AutoModel::from_pretrained("/tmp/totally_nonexistent_model_99999");
+        let path = std::env::temp_dir().join("totally_nonexistent_model_99999");
+        let result = AutoModel::from_pretrained(path.to_str().unwrap_or(""));
         assert!(
             result.is_err(),
             "from_pretrained with nonexistent path should error"
@@ -203,8 +205,9 @@ mod tests {
 
     #[test]
     fn test_auto_model_from_pretrained_with_revision_errors_on_bad_path() {
+        let path = std::env::temp_dir().join("nonexistent_model_revision");
         let result =
-            AutoModel::from_pretrained_with_revision("/tmp/nonexistent_model_revision", Some("v1"));
+            AutoModel::from_pretrained_with_revision(path.to_str().unwrap_or(""), Some("v1"));
         assert!(
             result.is_err(),
             "from_pretrained_with_revision should error for bad path"
@@ -223,8 +226,9 @@ mod tests {
 
     #[test]
     fn test_auto_config_from_pretrained_with_revision_errors_on_bad_path() {
+        let path = std::env::temp_dir().join("nonexistent_model_99999");
         let result =
-            AutoConfig::from_pretrained_with_revision("/tmp/nonexistent_model_99999", Some("main"));
+            AutoConfig::from_pretrained_with_revision(path.to_str().unwrap_or(""), Some("main"));
         assert!(
             result.is_err(),
             "Should error for nonexistent path with revision"
@@ -299,7 +303,8 @@ mod tests {
 
     #[test]
     fn test_auto_tokenizer_from_pretrained_nonexistent_errors() {
-        let result = AutoTokenizer::from_pretrained("/tmp/nonexistent_tokenizer_abc_xyz");
+        let path = std::env::temp_dir().join("nonexistent_tokenizer_abc_xyz");
+        let result = AutoTokenizer::from_pretrained(path.to_str().unwrap_or(""));
         assert!(
             result.is_err(),
             "AutoTokenizer from nonexistent path should error"
@@ -308,10 +313,9 @@ mod tests {
 
     #[test]
     fn test_auto_tokenizer_from_pretrained_with_revision_errors() {
-        let result = AutoTokenizer::from_pretrained_with_revision(
-            "/tmp/nonexistent_tokenizer_abc_xyz",
-            Some("main"),
-        );
+        let path = std::env::temp_dir().join("nonexistent_tokenizer_abc_xyz");
+        let result =
+            AutoTokenizer::from_pretrained_with_revision(path.to_str().unwrap_or(""), Some("main"));
         assert!(
             result.is_err(),
             "AutoTokenizer with revision from bad path should error"

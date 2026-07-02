@@ -441,6 +441,8 @@ pub(super) async fn get_config(
     Ok(Json(state.config.clone()))
 }
 /// Force failover endpoint
+// reason: HTTP handler retained for the failover API surface; not yet wired into
+// the active router.
 #[allow(dead_code)]
 async fn force_failover(
     Extension(_state): Extension<Arc<TrustformerServer>>,

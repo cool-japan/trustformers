@@ -621,7 +621,7 @@ impl TokenizerWrapper {
                 std::fs::write(
                     config_path,
                     serde_json::to_string_pretty(&config)
-                        .expect("hardcoded JSON config must serialize"),
+                        .map_err(|e| TrustformersError::serialization_error(e.to_string()))?,
                 )
                 .map_err(|e| TrustformersError::other(format!("I/O error: {}", e)))?;
 
@@ -640,7 +640,7 @@ impl TokenizerWrapper {
                 std::fs::write(
                     config_path,
                     serde_json::to_string_pretty(&config)
-                        .expect("hardcoded JSON config must serialize"),
+                        .map_err(|e| TrustformersError::serialization_error(e.to_string()))?,
                 )
                 .map_err(|e| TrustformersError::other(format!("I/O error: {}", e)))?;
                 Ok(())
@@ -656,7 +656,7 @@ impl TokenizerWrapper {
                 std::fs::write(
                     config_path,
                     serde_json::to_string_pretty(&config)
-                        .expect("hardcoded JSON config must serialize"),
+                        .map_err(|e| TrustformersError::serialization_error(e.to_string()))?,
                 )
                 .map_err(|e| TrustformersError::other(format!("I/O error: {}", e)))?;
                 Ok(())
@@ -672,7 +672,7 @@ impl TokenizerWrapper {
                 std::fs::write(
                     config_path,
                     serde_json::to_string_pretty(&config)
-                        .expect("hardcoded JSON config must serialize"),
+                        .map_err(|e| TrustformersError::serialization_error(e.to_string()))?,
                 )
                 .map_err(|e| TrustformersError::other(format!("I/O error: {}", e)))?;
                 Ok(())

@@ -63,6 +63,15 @@ pub struct AlgorithmStatistics {
 
     /// Processing time statistics
     pub processing_time: ProcessorStatistics,
+
+    /// Total number of feedback signals received
+    pub feedback_count: u64,
+
+    /// Number of positive feedback signals (feedback.value >= 0.5)
+    pub positive_feedback: u64,
+
+    /// Number of negative feedback signals (feedback.value < 0.5)
+    pub negative_feedback: u64,
 }
 
 /// Statistics for quality checkers

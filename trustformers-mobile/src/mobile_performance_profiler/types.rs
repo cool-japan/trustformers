@@ -18,12 +18,14 @@
 //!
 //! ```rust
 //! use trustformers_mobile::mobile_performance_profiler::types::*;
+//! use trustformers_mobile::mobile_performance_profiler::MobileProfilerConfig;
 //!
 //! // Create a profiler configuration
 //! let config = MobileProfilerConfig::default();
 //!
 //! // Create a metrics snapshot
 //! let snapshot = MobileMetricsSnapshot::default();
+//! # let _ = (config, snapshot);
 //! ```
 
 use crate::device_info::ThermalState;

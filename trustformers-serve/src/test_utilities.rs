@@ -276,6 +276,8 @@ macro_rules! optimized_test_with_progress {
 }
 
 /// Helper trait for adding timeout optimization to existing test functions
+// reason: internal test-helper trait consumed only within this crate, where the
+// auto-Send-bound caveat that motivates the async_fn_in_trait lint does not apply.
 #[allow(async_fn_in_trait)]
 pub trait TimeoutOptimized<T> {
     async fn with_timeout_optimization(
@@ -495,7 +497,7 @@ pub mod grouping {
 
                 join_set.spawn(async move {
                     let _permit = if let Some(ref sem) = semaphore_clone {
-                        Some(sem.acquire().await.expect("semaphore should not be closed"))
+                        sem.acquire().await.ok()
                     } else {
                         None
                     };

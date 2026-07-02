@@ -115,8 +115,12 @@ impl LeaderboardStats {
         // Date range
         let dates: Vec<_> = entries.iter().map(|e| e.timestamp).collect();
         let date_range = DateRange {
-            start: *dates.iter().min().expect("Min failed"),
-            end: *dates.iter().max().expect("Max failed"),
+            start: *dates.iter().min().ok_or_else(|| {
+                crate::errors::runtime_error(format!("{} in from_entries", "Min failed"))
+            })?,
+            end: *dates.iter().max().ok_or_else(|| {
+                crate::errors::runtime_error(format!("{} in from_entries", "Max failed"))
+            })?,
         };
 
         // Top submitters
@@ -284,14 +288,7 @@ impl LeaderboardStats {
 
             // Highest throughput
             if let Some(throughput) = entry.metrics.throughput {
-                if best.highest_throughput.is_none()
-                    || throughput
-                        > best
-                            .highest_throughput
-                            .as_ref()
-                            .expect("highest_throughput must be initialized")
-                            .value
-                {
+                if best.highest_throughput.as_ref().is_none_or(|r| throughput > r.value) {
                     best.highest_throughput = Some(MetricRecord {
                         value: throughput,
                         model_name: entry.model_name.clone(),
@@ -304,14 +301,7 @@ impl LeaderboardStats {
 
             // Highest tokens per second
             if let Some(tps) = entry.metrics.tokens_per_second {
-                if best.highest_tokens_per_second.is_none()
-                    || tps
-                        > best
-                            .highest_tokens_per_second
-                            .as_ref()
-                            .expect("highest_tokens_per_second must be initialized")
-                            .value
-                {
+                if best.highest_tokens_per_second.as_ref().is_none_or(|r| tps > r.value) {
                     best.highest_tokens_per_second = Some(MetricRecord {
                         value: tps,
                         model_name: entry.model_name.clone(),
@@ -324,14 +314,7 @@ impl LeaderboardStats {
 
             // Lowest memory
             if let Some(memory) = entry.metrics.memory_mb {
-                if best.lowest_memory.is_none()
-                    || memory
-                        < best
-                            .lowest_memory
-                            .as_ref()
-                            .expect("lowest_memory must be initialized")
-                            .value
-                {
+                if best.lowest_memory.as_ref().is_none_or(|r| memory < r.value) {
                     best.lowest_memory = Some(MetricRecord {
                         value: memory,
                         model_name: entry.model_name.clone(),
@@ -344,14 +327,7 @@ impl LeaderboardStats {
 
             // Highest accuracy
             if let Some(accuracy) = entry.metrics.accuracy {
-                if best.highest_accuracy.is_none()
-                    || accuracy
-                        > best
-                            .highest_accuracy
-                            .as_ref()
-                            .expect("highest_accuracy must be initialized")
-                            .value
-                {
+                if best.highest_accuracy.as_ref().is_none_or(|r| accuracy > r.value) {
                     best.highest_accuracy = Some(MetricRecord {
                         value: accuracy,
                         model_name: entry.model_name.clone(),
@@ -364,14 +340,7 @@ impl LeaderboardStats {
 
             // Lowest energy
             if let Some(energy) = entry.metrics.energy_watts {
-                if best.lowest_energy.is_none()
-                    || energy
-                        < best
-                            .lowest_energy
-                            .as_ref()
-                            .expect("lowest_energy must be initialized")
-                            .value
-                {
+                if best.lowest_energy.as_ref().is_none_or(|r| energy < r.value) {
                     best.lowest_energy = Some(MetricRecord {
                         value: energy,
                         model_name: entry.model_name.clone(),
@@ -477,11 +446,21 @@ impl TrendAnalysis {
         // Calculate period
         let start = data_points
             .first()
-            .expect("data_points must have at least one element")
+            .ok_or_else(|| {
+                crate::errors::runtime_error(format!(
+                    "{} in analyze",
+                    "data_points must have at least one element"
+                ))
+            })?
             .timestamp;
         let end = data_points
             .last()
-            .expect("data_points must have at least one element")
+            .ok_or_else(|| {
+                crate::errors::runtime_error(format!(
+                    "{} in analyze",
+                    "data_points must have at least one element"
+                ))
+            })?
             .timestamp;
         let period_days = (end - start).num_days() as usize;
 
@@ -510,10 +489,24 @@ impl TrendAnalysis {
         };
 
         // Calculate daily change percentage
-        let first_value =
-            data_points.first().expect("data_points must have at least one element").value;
-        let last_value =
-            data_points.last().expect("data_points must have at least one element").value;
+        let first_value = data_points
+            .first()
+            .ok_or_else(|| {
+                crate::errors::runtime_error(format!(
+                    "{} in analyze",
+                    "data_points must have at least one element"
+                ))
+            })?
+            .value;
+        let last_value = data_points
+            .last()
+            .ok_or_else(|| {
+                crate::errors::runtime_error(format!(
+                    "{} in analyze",
+                    "data_points must have at least one element"
+                ))
+            })?
+            .value;
         let total_change_percent = ((last_value - first_value) / first_value) * 100.0;
         let daily_change_percent =
             if period_days > 0 { total_change_percent / period_days as f64 } else { 0.0 };

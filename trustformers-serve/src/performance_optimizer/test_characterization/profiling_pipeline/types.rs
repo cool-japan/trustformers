@@ -520,7 +520,7 @@ impl ProfilingSessionManager {
                 }
             }
         });
-        *self.cleanup_handle.lock().expect("Lock poisoned") = Some(handle);
+        *self.cleanup_handle.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
     }
     /// Update completion metrics
     async fn update_completion_metrics(&self, final_state: &ProfilingSessionState) {

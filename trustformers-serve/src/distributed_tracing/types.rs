@@ -699,12 +699,9 @@ impl ActiveSpan {
     /// Finish the span
     pub fn finish(self) {
         let mut span = self.span.lock();
-        span.end_time = Some(Utc::now());
-        let duration = span
-            .end_time
-            .expect("Span should have end time")
-            .signed_duration_since(span.start_time)
-            .num_milliseconds() as f64;
+        let end_time = Utc::now();
+        span.end_time = Some(end_time);
+        let duration = end_time.signed_duration_since(span.start_time).num_milliseconds() as f64;
         if self
             .manager
             .event_sender

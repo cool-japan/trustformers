@@ -12,6 +12,10 @@
 //! - **Memory Replay**: Gradient-based memory replay optimization
 //! - **Meta-Learning**: Model-Agnostic Meta-Learning for continual adaptation
 
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
+
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -288,7 +292,6 @@ impl EWC {
 pub struct PackNet {
     config: PackNetConfig,
     parameters: Vec<Tensor>,
-    #[allow(dead_code)]
     parameter_masks: Vec<Tensor>,
     task_allocations: HashMap<usize, Vec<Tensor>>,
     current_task: usize,

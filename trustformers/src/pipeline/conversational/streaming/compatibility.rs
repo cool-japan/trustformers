@@ -128,6 +128,8 @@ pub struct StreamingManager {
     advanced_config: AdvancedStreamingConfig,
 }
 
+// reason: backward-compat shim for the deprecated StreamingManager API;
+// the allow is required because it implements/uses an intentionally deprecated type.
 #[allow(deprecated)]
 impl StreamingManager {
     /// Create a new streaming manager
@@ -544,6 +546,8 @@ impl StreamingManager {
     }
 }
 
+// reason: backward-compat shim for the deprecated StreamingManager API;
+// the allow is required because it implements/uses an intentionally deprecated type.
 #[allow(deprecated)]
 impl Default for StreamingManager {
     fn default() -> Self {
@@ -615,6 +619,8 @@ pub struct StreamingSession {
     pub stats: Option<StreamingStats>,
 }
 
+// reason: backward-compat shim for the deprecated StreamingManager API;
+// the allow is required because it implements/uses an intentionally deprecated type.
 #[allow(deprecated)]
 impl StreamingSession {
     /// Create a new streaming session
@@ -713,6 +719,8 @@ pub mod conversion {
     ///
     /// This utility helps convert old streaming statistics to the new comprehensive
     /// quality analysis format.
+    // reason: backward-compat shim for the deprecated StreamingManager API;
+    // the allow is required because it implements/uses an intentionally deprecated type.
     #[allow(deprecated)]
     pub fn upgrade_stats_to_quality_analysis(
         legacy_stats: StreamingStats,
@@ -780,6 +788,8 @@ mod tests {
     #[test]
     fn test_legacy_type_aliases() {
         // Test that legacy type aliases still work for backward compatibility
+        // reason: backward-compat shim for the deprecated StreamingManager API;
+        // the allow is required because it implements/uses an intentionally deprecated type.
         #[allow(deprecated)]
         {
             let _config: LegacyStreamingConfig = StreamingConfig::default();

@@ -180,27 +180,33 @@ impl Tensor {
         // then the dispatch function executes the matmul on the GPU and returns a host
         // tensor. These arms are `#[cfg]`-gated behind the respective GPU features, so
         // the default (CPU-only) build is completely unaffected.
-        // CUDA-resident operands are downloaded with device 0 by default (matching the
-        // `to_device_enum` CUDA->CPU download convention), then dispatched to the CUDA
-        // matmul kernel which returns a host `Tensor::F32`.
+        // The `cuda` feature is the Pure-Rust oxicuda backend. 2D F32 matmuls are uploaded,
+        // multiplied via oxicuda-blas GEMM, and returned as a host `Tensor::F32`; device 0 is
+        // used by default. oxicuda never constructs a `Tensor::CUDA` variant, so the operands
+        // here are always host `Tensor::F32` (there is no GPU-resident operand to download).
+        //
+        // Unlike the tag-gated GPU arms elsewhere in this crate (which only activate for an
+        // already GPU-resident `Tensor::CUDA`/`Tensor::Metal`, i.e. a tensor that could only
+        // exist if a prior runtime-checked upload succeeded), this arm operates on plain host
+        // `Tensor::F32` operands that exist on *every* build, CUDA-capable hardware or not. So
+        // `#[cfg(feature = "cuda")]` alone (a compile-time check) is not a sufficient guard here
+        // — it must also be confirmed with a genuine runtime probe via `oxicuda_cuda_available()`
+        // (cached after the first call, so this stays cheap on this hot path). Without that
+        // check, any 2D F32 matmul on a `cuda`-enabled build with no actual GPU present would
+        // unconditionally hard-error instead of falling through to the CPU path below.
         #[cfg(feature = "cuda")]
         {
-            if matches!(self, Tensor::CUDA(_)) || matches!(other, Tensor::CUDA(_)) {
-                const CUDA_DEVICE_ID: usize = 0;
-                // Download GPU-resident operands to host F32; leave host tensors as-is.
-                let a_host = match self {
-                    Tensor::CUDA(_) => self.to_device_enum(&crate::device::Device::CPU)?,
-                    _ => self.clone(),
-                };
-                let b_host = match other {
-                    Tensor::CUDA(_) => other.to_device_enum(&crate::device::Device::CPU)?,
-                    _ => other.clone(),
-                };
-                return crate::gpu_ops::cuda::dispatch_cuda_matmul(
-                    &a_host,
-                    &b_host,
-                    CUDA_DEVICE_ID,
-                );
+            if matches!(self, Tensor::F32(_)) && matches!(other, Tensor::F32(_)) {
+                let a_2d = matches!(self, Tensor::F32(a) if a.ndim() == 2);
+                let b_2d = matches!(other, Tensor::F32(b) if b.ndim() == 2);
+                if a_2d && b_2d && crate::gpu_ops::cuda::oxicuda_cuda_available() {
+                    const OXICUDA_DEVICE_ID: usize = 0;
+                    return crate::gpu_ops::cuda::dispatch_oxicuda_matmul(
+                        self,
+                        other,
+                        OXICUDA_DEVICE_ID,
+                    );
+                }
             }
         }
 
@@ -383,16 +389,29 @@ impl Tensor {
                                 // Direct BLAS (Accelerate on macOS)
                                 // Arrays are standard-layout (from as_standard_layout above),
                                 // so borrow their backing slices directly — no Vec round-trip.
-                                let a_data = a_2d
-                                    .as_slice()
-                                    .expect("standard layout after as_standard_layout");
-                                let b_data = b_2d
-                                    .as_slice()
-                                    .expect("standard layout after as_standard_layout");
+                                let a_data = a_2d.as_slice().ok_or_else(|| {
+                                    crate::errors::compute_error(
+                                        "matmul",
+                                        "standard layout after as_standard_layout",
+                                    )
+                                })?;
+                                let b_data = b_2d.as_slice().ok_or_else(|| {
+                                    crate::errors::compute_error(
+                                        "matmul",
+                                        "standard layout after as_standard_layout",
+                                    )
+                                })?;
                                 let mut result_vec = vec![0.0f32; rows * cols];
                                 blas_sgemm(a_data, b_data, &mut result_vec, rows, inner, cols);
-                                Array2::from_shape_vec((rows, cols), result_vec)
-                                    .expect("matrix dimensions must match result_vec length")
+                                Array2::from_shape_vec((rows, cols), result_vec).map_err(|e| {
+                                    crate::errors::compute_error(
+                                        "matmul",
+                                        format!(
+                                            "{}: {e}",
+                                            "matrix dimensions must match result_vec length"
+                                        ),
+                                    )
+                                })?
                             };
                             result.slice_mut(s![i, .., ..]).assign(&batch_result);
                         }
@@ -436,12 +455,18 @@ impl Tensor {
                                 } else {
                                     // Direct BLAS (Accelerate on macOS)
                                     // Standard-layout (from as_standard_layout above): borrow slices.
-                                    let a_data = a_2d
-                                        .as_slice()
-                                        .expect("standard layout after as_standard_layout");
-                                    let b_data = b_2d
-                                        .as_slice()
-                                        .expect("standard layout after as_standard_layout");
+                                    let a_data = a_2d.as_slice().ok_or_else(|| {
+                                        crate::errors::compute_error(
+                                            "matmul",
+                                            "standard layout after as_standard_layout",
+                                        )
+                                    })?;
+                                    let b_data = b_2d.as_slice().ok_or_else(|| {
+                                        crate::errors::compute_error(
+                                            "matmul",
+                                            "standard layout after as_standard_layout",
+                                        )
+                                    })?;
                                     let mut result_vec = vec![0.0f32; seq_len_a * seq_len_b];
                                     blas_sgemm(
                                         a_data,
@@ -452,7 +477,15 @@ impl Tensor {
                                         seq_len_b,
                                     );
                                     Array2::from_shape_vec((seq_len_a, seq_len_b), result_vec)
-                                        .expect("result_vec has correct size for shape")
+                                        .map_err(|e| {
+                                            crate::errors::compute_error(
+                                                "matmul",
+                                                format!(
+                                                    "{}: {e}",
+                                                    "result_vec has correct size for shape"
+                                                ),
+                                            )
+                                        })?
                                 };
 
                                 // Assign result back to 4D tensor
@@ -760,7 +793,9 @@ impl Tensor {
             return Tensor::from_vec(vec![global_norm], &[1]);
         }
 
-        let dims = dims.expect("dims checked as Some above");
+        let dims = dims.ok_or_else(|| {
+            crate::errors::compute_error("norm_dim", "dims checked as Some above")
+        })?;
 
         match self {
             Tensor::F32(arr) => {

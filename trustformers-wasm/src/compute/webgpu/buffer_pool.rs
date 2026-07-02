@@ -1,7 +1,5 @@
 //! Advanced GPU buffer pool with memory coalescing and intelligent allocation strategies
 
-#![allow(clippy::missing_enforced_import_renames)]
-
 use super::types::{GpuBuffer, GpuDevice, GpuDeviceExt};
 use crate::{track_gpu_allocation, track_gpu_deallocation};
 use core::cmp::max;
@@ -273,42 +271,36 @@ impl BufferPool {
     /// Get buffer pool statistics
     pub fn get_stats(&self) -> js_sys::Object {
         let stats = js_sys::Object::new();
-        js_sys::Reflect::set(
+        let _ = js_sys::Reflect::set(
             &stats,
             &"total_allocations".into(),
             &self.stats.total_allocations.into(),
-        )
-        .expect("Failed to set buffer pool stats property");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &stats,
             &"coalesced_allocations".into(),
             &self.stats.coalesced_allocations.into(),
-        )
-        .expect("Failed to set buffer pool stats property");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &stats,
             &"memory_saved_bytes".into(),
             &self.stats.memory_saved_bytes.into(),
-        )
-        .expect("Failed to set buffer pool stats property");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &stats,
             &"fragmentation_ratio".into(),
             &self.stats.fragmentation_ratio.into(),
-        )
-        .expect("Failed to set buffer pool stats property");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &stats,
             &"allocated_bytes".into(),
             &self.allocated_bytes.into(),
-        )
-        .expect("Failed to set buffer pool stats property");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &stats,
             &"peak_allocated_bytes".into(),
             &self.peak_allocated_bytes.into(),
-        )
-        .expect("Failed to set buffer pool stats property");
+        );
         stats
     }
 
@@ -790,94 +782,81 @@ impl BufferPool {
         let analytics = js_sys::Object::new();
 
         // Basic stats
-        js_sys::Reflect::set(
+        let _ = js_sys::Reflect::set(
             &analytics,
             &"total_allocations".into(),
             &self.stats.total_allocations.into(),
-        )
-        .expect("Failed to set buffer pool stats property");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &analytics,
             &"coalesced_allocations".into(),
             &self.stats.coalesced_allocations.into(),
-        )
-        .expect("Failed to set buffer pool stats property");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &analytics,
             &"memory_saved_bytes".into(),
             &self.stats.memory_saved_bytes.into(),
-        )
-        .expect("Failed to set buffer pool stats property");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &analytics,
             &"fragmentation_ratio".into(),
             &self.fragmentation_ratio().into(),
-        )
-        .expect("Failed to set buffer pool stats property");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &analytics,
             &"allocated_bytes".into(),
             &self.allocated_bytes.into(),
-        )
-        .expect("Failed to set buffer pool stats property");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &analytics,
             &"peak_allocated_bytes".into(),
             &self.peak_allocated_bytes.into(),
-        )
-        .expect("Failed to set buffer pool stats property");
+        );
 
         // Advanced analytics
-        js_sys::Reflect::set(
+        let _ = js_sys::Reflect::set(
             &analytics,
             &"dynamic_coalescing_threshold".into(),
             &self.coalescing_threshold.into(),
-        )
-        .expect("Failed to set buffer pool stats property");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &analytics,
             &"dynamic_defrag_threshold".into(),
             &self.defragmentation_threshold.into(),
-        )
-        .expect("Failed to set buffer pool stats property");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &analytics,
             &"workload_factor".into(),
             &self.dynamic_thresholds.workload_factor.into(),
-        )
-        .expect("Failed to set buffer pool stats property");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &analytics,
             &"prediction_confidence".into(),
             &self.access_predictor.prediction_confidence.into(),
-        )
-        .expect("Failed to set buffer pool stats property");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &analytics,
             &"bandwidth_utilization".into(),
             &self.memory_bandwidth_optimizer.bandwidth_utilization.into(),
-        )
-        .expect("Failed to set buffer pool stats property");
+        );
 
         // Memory bank load balancing
         let bank_loads = js_sys::Array::new();
         for load in &self.memory_bandwidth_optimizer.bank_load_balancing {
             bank_loads.push(&(*load).into());
         }
-        js_sys::Reflect::set(&analytics, &"memory_bank_loads".into(), &bank_loads.into())
-            .expect("Failed to set buffer pool stats property");
+        let _ = js_sys::Reflect::set(&analytics, &"memory_bank_loads".into(), &bank_loads.into());
 
         // Predicted buffer sizes
         let predicted = js_sys::Array::new();
         for &size in &self.access_predictor.predicted_sizes {
             predicted.push(&size.into());
         }
-        js_sys::Reflect::set(
+        let _ = js_sys::Reflect::set(
             &analytics,
             &"predicted_buffer_sizes".into(),
             &predicted.into(),
-        )
-        .expect("Failed to set buffer pool stats property");
+        );
 
         analytics
     }

@@ -204,7 +204,7 @@ impl BlockSparsity {
         }
 
         // Sort blocks by importance
-        block_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("Partial comparison failed"));
+        block_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(::std::cmp::Ordering::Equal));
 
         // Keep top blocks
         let num_blocks_to_keep = ((block_scores.len() as f32) * self.keep_ratio) as usize;
@@ -720,7 +720,7 @@ pub mod pruning {
             .map(|(i, (&w, &g))| (i, (w * g).abs()))
             .collect();
 
-        scores.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("Partial comparison failed"));
+        scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(::std::cmp::Ordering::Equal));
 
         let num_keep = ((weights.len() as f32) * keep_ratio) as usize;
         let keep_indices: HashSet<usize> =

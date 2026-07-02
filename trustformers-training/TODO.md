@@ -1,601 +1,210 @@
 # trustformers-training TODO List
 
+**Version:** 0.1.4 | **Last reviewed:** 2026-07-02
+
 ## Overview
 
-The `trustformers-training` crate provides comprehensive training infrastructure for the TrustformeRS ecosystem.
-It implements distributed training strategies, mixed precision training, quantization-aware training (QAT),
-hyperparameter tuning, and advanced training methods like RLHF and continual learning.
-
-**Key Responsibilities:**
-- Trainer API for high-level training orchestration
-- Distributed training (Data Parallelism, Model Parallelism, Pipeline Parallelism)
-- ZeRO optimization (Stages 1/2/3)
-- Mixed precision training (FP16, BF16, AMP)
-- Quantization-Aware Training (QAT)
-- Hyperparameter tuning (Grid search, Random search, Bayesian optimization)
-- Advanced training methods (RLHF, Continual learning, Curriculum learning)
-- Multi-node training with MPI
-- Checkpoint management and resumption
+The `trustformers-training` crate provides training infrastructure for the TrustformeRS ecosystem: a
+core `Trainer`/`SimpleTrainer` loop, mixed precision/QAT, RLHF (PPO/DPO), few-shot and continual learning,
+hyperparameter optimization, a large data-pipeline/augmentation system, training-stability monitoring, and
+a family of distributed/parallel-training abstractions (tensor/sequence/3D/expert/ring-attention parallelism
+plus elastic and multi-cloud orchestration).
 
 ---
 
-## Current Status
+## Current Status (verified 2026-07-01)
 
-### Implementation Status
-✅ **PRODUCTION-READY** - Complete training infrastructure
-✅ **DISTRIBUTED TRAINING** - MPI, NCCL, Gloo backends
-✅ **ZERO OPTIMIZATION** - Stages 1/2/3 implemented
-✅ **MIXED PRECISION** - FP16, BF16, AMP support
-✅ **QAT** - Quantization-aware training infrastructure
-✅ **ZERO COMPILATION ERRORS** - Clean compilation
+- **~930 tests passing** (workspace-wide: 18,102 passed / 0 failed, 0 clippy warnings, 0 rustdoc warnings)
+- **1,673 public API items** reachable from `lib.rs` (69 compiled `.rs` files, 59,720 SLoC; the full `src/` tree on disk is 89,914 lines across 102 files, ~30,194 of which are orphaned/unwired)
+- **0 stub/placeholder implementations** (`todo!()`/`unimplemented!()`/TODO/FIXME/HACK/XXX/"placeholder") in compiled code
+- **0 `.unwrap()` calls** in compiled production code
+- No file in the compiled tree exceeds the workspace's 2000-line refactor threshold (largest: `auto_parallelism.rs` at 1,610 lines)
+- Status: **Alpha** — see "Known Issues" below for why this crate is not labeled Stable despite the test count
 
-### Feature Coverage
-- **Distributed Training:** Data/Model/Pipeline Parallelism, ZeRO (Stages 1/2/3)
-- **Precision:** Mixed precision (FP16/BF16), Automatic Mixed Precision (AMP)
-- **Advanced Methods:** RLHF, Continual learning, Curriculum learning, Meta-learning
-- **Hyperparameter Tuning:** Grid/Random/Bayesian/Hyperband/Population-based
-- **Multi-Node:** Complete MPI communicator with all collective operations
+This file replaces the previous TODO.md's checklist with one re-verified against the actual source
+(`grep`/module-tree audit), rather than carrying forward unverified checkmarks.
 
 ---
 
-## Completed Features
+## Known Issues (found during 2026-07-01 documentation pass)
+
+These are genuine findings from auditing `src/` against `lib.rs`'s module tree — not present in earlier
+drafts of this document.
+
+- [ ] **~30,000 lines of orphaned/unwired code.** 21 top-level directories (`dpo/`, `ppo/`, `kto/`, `lora/`,
+  `ewc/`, `curriculum/`, `hpo/`, `orpo/`, `simpo/`, `ipo/`, `spin/`, `grpo/`, `raft/`, `reinforce/`,
+  `distillation/`, `model_merging/`, `constitutional_ai/`, `contrastive_search/`, `token_dpo/`, `online_dpo/`,
+  `reward_modeling/`) plus 6 top-level files (`async_checkpoint.rs`, `distributed_overlap.rs`,
+  `losses_tests.rs`, `metrics_tests.rs`, `training_args_tests.rs`, `mod.rs`) are not referenced by any `mod`
+  declaration in `lib.rs` and are therefore not compiled into the crate at all. Their functionality generally
+  looks superseded by wired-in equivalents (`rlhf::ppo`/`rlhf::dpo` vs. the orphaned `ppo/`/`dpo/`;
+  `data_pipeline`'s curriculum types vs. the orphaned `curriculum/`). Action needed: either wire the useful
+  ones in (e.g. `grpo/`, which looks like it might add real GRPO support not otherwise present) or delete the
+  rest so the tree reflects what's actually shipped.
+- [ ] **No ZeRO optimizer.** Earlier documentation for this crate advertised "ZeRO stages 1/2/3" as a
+  flagship feature; there is no `ZeroStage`/sharded-optimizer implementation anywhere in the source. If ZeRO
+  is wanted, it needs to be implemented from scratch.
+- [ ] **`NCCL`/`Gloo`/`MPI` process groups are in-process simulations, not real backends.** In
+  `src/distributed.rs`, `NCCLProcessGroup`/`GlooProcessGroup`/`MPIProcessGroup::{all_reduce, broadcast,
+  reduce, barrier}` all scale/mutate tensors locally (e.g. `tensor.scalar_mul(1.0)`) with source comments
+  reading "In a real implementation, this would call `ncclAllReduce`/`MPI_Allreduce`/...". There is no real
+  networking (no `TcpStream`/sockets) and no FFI dependency on libnccl/OpenMPI/gloo in `Cargo.toml`. Only
+  `SimulatedProcessGroup` is honestly named; the other three should either get real bindings or be renamed/
+  documented as simulations to avoid misleading users planning real multi-node training.
+- [ ] **`DPOLossType::Kto` is currently identical to `DPOLossType::Sigmoid`** (`rlhf/dpo.rs`): both compute
+  `-log(sigmoid(logits))`. This is not yet a distinct prospect-theory-based KTO loss.
+- [ ] **`DPOTrainer::get_batch_logps` uses a simplified approximation**: per its own source comment, it
+  currently averages log-probabilities over the whole tensor rather than gathering per-token log-probs
+  indexed by `labels`, because tensor indexing for this case isn't wired up yet.
+- [ ] **`examples/basic_training/simple_classification.rs` references a stale API**: it imports
+  `trainer::TrainerConfig`, `training_args::TrainingArgs`, and `metrics::MetricResult`, none of which exist
+  in the current crate (the real names are `Trainer`, `TrainingArguments`, `MetricCollection`/`Metric`).
+  The example likely predates a `Trainer`/`TrainingArguments` API rename and needs updating; it is not
+  covered by `cargo nextest` since examples aren't compiled by a plain `--all-features` test run.
+- [ ] **5 stray `*.rs.prelude_fix` backup files** (`gradient_anomaly_recovery.rs.prelude_fix`,
+  `hyperopt/auto_tuner.rs.prelude_fix`, `hyperopt/search_space.rs.prelude_fix`,
+  `continual/memory_replay.rs.prelude_fix`, `hyperopt/sampler.rs.prelude_fix`) are leftover, non-compiled
+  debris sitting next to their real counterparts. Low priority, but worth deleting.
+
+---
+
+## Completed Features (verified against source)
 
 ### Core Training Infrastructure
-
-#### Trainer API
-
-**High-level training orchestration**
-
-- ✅ **Features**
-  - Simple API for training transformers
-  - Automatic device management
-  - Gradient accumulation
-  - Checkpoint saving/loading
-  - Early stopping
-  - Metrics logging (TensorBoard, W&B, Neptune, ClearML)
-
-- ✅ **Training Loop**
-  - Forward pass
-  - Backward pass
-  - Optimizer step
-  - Learning rate scheduling
-  - Gradient clipping
-  - Validation
-
-**Example:**
-```rust
-use trustformers_training::Trainer;
-
-let trainer = Trainer::new(
-    model,
-    train_dataset,
-    val_dataset,
-    optimizer,
-    args,
-)?;
-
-trainer.train()?;
-```
-
----
-
-#### Training Arguments
-
-**Comprehensive configuration**
-
-- ✅ **Basic Settings**
-  - Number of epochs
-  - Batch size (train/eval)
-  - Learning rate
-  - Weight decay
-  - Warmup steps
-
-- ✅ **Advanced Settings**
-  - Gradient accumulation steps
-  - Max gradient norm (clipping)
-  - Logging frequency
-  - Evaluation frequency
-  - Save frequency
-
-- ✅ **Distributed Settings**
-  - Local rank, world size
-  - Backend (nccl, gloo, mpi)
-  - Gradient sync frequency
-
-**Example:**
-```rust
-let args = TrainingArguments {
-    num_epochs: 3,
-    train_batch_size: 32,
-    eval_batch_size: 64,
-    learning_rate: 1e-4,
-    warmup_steps: 1000,
-    gradient_accumulation_steps: 4,
-    max_grad_norm: 1.0,
-    logging_steps: 100,
-    eval_steps: 500,
-    save_steps: 1000,
-    ..Default::default()
-};
-```
-
----
-
-### Distributed Training
-
-#### Data Parallelism
-
-**Replicate model across GPUs, partition data**
-
-- ✅ **Implementation**
-  - Distribute data across devices
-  - Synchronize gradients with AllReduce
-  - Average gradients across devices
-
-- ✅ **Features**
-  - Linear scalability with number of GPUs
-  - Automatic data distribution
-  - Gradient synchronization
-
-**Example:**
-```rust
-let trainer = Trainer::new(model, data, optimizer, args)?
-    .with_data_parallel()?;
-```
-
----
-
-#### Model Parallelism
-
-**Split model across devices**
-
-- ✅ **Tensor Parallelism**
-  - Split individual layers across devices
-  - Column parallelism (split columns of weight matrices)
-  - Row parallelism (split rows of weight matrices)
-  - Optimal for large layers (attention, FFN)
-
-- ✅ **Pipeline Parallelism**
-  - Split model vertically (layers across devices)
-  - Microbatching for pipeline efficiency
-  - GPipe-style pipeline scheduling
-  - Reduces bubble time
-
-**Example:**
-```rust
-let config = ModelParallelConfig {
-    tensor_parallel_size: 4,
-    pipeline_parallel_size: 2,
-    ..Default::default()
-};
-
-let trainer = Trainer::new(model, data, optimizer, args)?
-    .with_model_parallel(config)?;
-```
-
----
-
-#### ZeRO Optimization
-
-**Zero Redundancy Optimizer - memory-efficient distributed training**
-
-- ✅ **Stage 1: Optimizer State Partitioning**
-  - Partition optimizer state (momentum, variance) across devices
-  - Reduces memory by N (number of devices)
-  - No communication overhead during forward/backward
-
-- ✅ **Stage 2: Gradient Partitioning**
-  - Partition gradients across devices
-  - Further memory reduction
-  - Communication during gradient reduction
-
-- ✅ **Stage 3: Parameter Partitioning**
-  - Partition model parameters across devices
-  - Maximum memory reduction
-  - Communication during forward/backward
-
-**Example:**
-```rust
-let zero_config = ZeROConfig {
-    stage: 3,  // Stage 1, 2, or 3
-    offload_optimizer: true,  // CPU offload for optimizer
-    offload_params: false,
-    ..Default::default()
-};
-
-let trainer = Trainer::new(model, data, optimizer, args)?
-    .with_zero(zero_config)?;
-```
-
----
-
-#### Communication Backends
-
-- ✅ **NCCL** - NVIDIA Collective Communications Library
-  - Optimized for NVIDIA GPUs
-  - Best performance for multi-GPU training
-  - All-reduce, broadcast, reduce, all-gather
-
-- ✅ **Gloo** - Facebook's collective communications
-  - CPU and GPU support
-  - Cross-platform (Linux, macOS, Windows)
-  - Good for heterogeneous clusters
-
-- ✅ **MPI** - Message Passing Interface
-  - Multi-node training
-  - Complete collective operations
-  - Standard for HPC
-
----
-
-### Mixed Precision Training
-
-#### FP16 (Half Precision)
-
-**16-bit floating point training**
-
-- ✅ **Features**
-  - 2x memory reduction
-  - 2-3x faster training (on modern GPUs)
-  - Loss scaling to prevent underflow
-
-- ✅ **Implementation**
-  - Forward/backward in FP16
-  - Optimizer state in FP32
-  - Dynamic or static loss scaling
-
-**Example:**
-```rust
-let args = TrainingArguments {
-    fp16: true,
-    fp16_opt_level: "O2",  // Optimization level
-    fp16_loss_scale: 128.0,  // Static loss scale
-    ..Default::default()
-};
-```
-
----
-
-#### BF16 (Brain Float 16)
-
-**16-bit format with FP32 range**
-
-- ✅ **Features**
-  - Same dynamic range as FP32
-  - No loss scaling needed
-  - Better numerical stability than FP16
-
-- ✅ **Use Cases**
-  - TPU training
-  - Modern GPUs (Ampere, Ada)
-  - More stable than FP16
-
----
-
-#### Automatic Mixed Precision (AMP)
-
-**Dynamic precision management**
-
-- ✅ **Features**
-  - Automatic loss scaling (dynamic)
-  - Per-operation precision selection
-  - Gradient scaler for numerical stability
-
-- ✅ **Implementation**
-  - Monitor gradient magnitudes
-  - Adjust loss scale dynamically
-  - Skip updates on overflow/underflow
-
----
-
-### Quantization-Aware Training (QAT)
-
-**Train with quantization in the loop**
-
-- ✅ **Fake Quantization**
-  - Simulate quantization during training
-  - Quantize then dequantize (fake quantize)
-  - Model learns to be robust to quantization
-
-- ✅ **Observer System**
-  - Collect activation/weight statistics
-  - Calibrate quantization parameters
-  - Min/max tracking
-
-- ✅ **Quantization Schemes**
-  - Per-tensor quantization
-  - Per-channel quantization
-  - Symmetric and asymmetric
-
-**Example:**
-```rust
-let qat_config = QATConfig {
-    observer_type: ObserverType::MinMaxObserver,
-    quantization_scheme: QuantizationScheme::PerChannel,
-    fake_quantize: true,
-    ..Default::default()
-};
-
-let trainer = Trainer::new(model, data, optimizer, args)?
-    .with_qat(qat_config)?;
-```
-
----
-
-### Advanced Training Methods
-
-#### RLHF (Reinforcement Learning from Human Feedback)
-
-**Align models with human preferences**
-
-- ✅ **Components**
-  - Reward model training
-  - Proximal Policy Optimization (PPO)
-  - KL divergence constraint
-  - Reference model for stability
-
-- ✅ **Pipeline**
-  1. Supervised fine-tuning (SFT)
-  2. Reward model training from human preferences
-  3. RL optimization with PPO
-  4. KL penalty to prevent drift
-
-**Example:**
-```rust
-let rlhf_config = RLHFConfig {
-    reward_model_path: "path/to/reward_model",
-    kl_coef: 0.1,
-    gamma: 0.99,
-    lam: 0.95,
-    ..Default::default()
-};
-
-let trainer = Trainer::new(model, data, optimizer, args)?
-    .with_rlhf(rlhf_config)?;
-```
-
----
-
-#### Continual Learning
-
-**Learn incrementally without forgetting**
-
-- ✅ **Strategies**
-  - Elastic Weight Consolidation (EWC)
-  - Progressive Neural Networks
-  - Learning without Forgetting (LwF)
-  - Replay buffers
-
-- ✅ **Features**
-  - Task boundaries
-  - Importance weights for parameters
-  - Regularization to prevent forgetting
-
----
-
-#### Curriculum Learning
-
-**Train with progressively harder examples**
-
-- ✅ **Strategies**
-  - Length-based curriculum (short → long sequences)
-  - Difficulty-based curriculum
-  - Self-paced learning
-
-- ✅ **Implementation**
-  - Data ordering based on curriculum
-  - Dynamic difficulty adjustment
-  - Performance-based progression
-
----
-
-#### Meta-Learning
-
-**Learn to learn**
-
-- ✅ **Algorithms**
-  - Model-Agnostic Meta-Learning (MAML)
-  - First-order MAML (FOMAML)
-  - Reptile
-
-- ✅ **Use Cases**
-  - Few-shot learning
-  - Fast adaptation to new tasks
-  - Domain adaptation
-
----
-
-### Hyperparameter Tuning
-
-#### Grid Search
-
-- ✅ **Features**
-  - Exhaustive search over hyperparameter grid
-  - Parallel execution
-  - Best parameters selection
-
-**Example:**
-```rust
-let param_grid = ParamGrid {
-    learning_rate: vec![1e-5, 1e-4, 1e-3],
-    batch_size: vec![16, 32, 64],
-    warmup_steps: vec![500, 1000, 2000],
-};
-
-let best_params = grid_search(model, data, param_grid)?;
-```
-
----
-
-#### Random Search
-
-- ✅ **Features**
-  - Random sampling from hyperparameter distributions
-  - More efficient than grid search
-  - Configurable number of trials
-
----
-
-#### Bayesian Optimization
-
-- ✅ **Features**
-  - Gaussian Process surrogate model
-  - Acquisition function (Expected Improvement, UCB)
-  - Sequential optimization
-  - Sample-efficient
-
-**Example:**
-```rust
-let bayes_config = BayesianOptConfig {
-    n_trials: 50,
-    acquisition_fn: AcquisitionFunction::ExpectedImprovement,
-    ..Default::default()
-};
-
-let best_params = bayesian_optimization(model, data, bayes_config)?;
-```
-
----
-
-#### Hyperband
-
-- ✅ **Features**
-  - Successive halving with multiple brackets
-  - Early stopping for poor configurations
-  - Resource-efficient
-
----
-
-#### Population-Based Training (PBT)
-
-- ✅ **Features**
-  - Evolution-based hyperparameter search
-  - Online hyperparameter adaptation
-  - Exploit and explore
-
----
-
-### Multi-Node Training
-
-#### MPI Communicator
-
-**Complete MPI integration**
-
-- ✅ **Collective Operations**
-  - All-Reduce (sum gradients across nodes)
-  - All-Gather (collect tensors from all nodes)
-  - Reduce-Scatter (reduce then scatter results)
-  - Send/Recv (point-to-point communication)
-  - Broadcast (send tensor from root to all)
-
-- ✅ **Process Management**
-  - Rank and world size tracking
-  - Process group creation
-  - Barrier synchronization
-
-- ✅ **Fault Tolerance**
-  - Checkpoint recovery
-  - Graceful degradation
-
-**Example:**
-```rust
-let mpi_config = MPIConfig {
-    backend: MPIBackend::MPICH,
-    init_method: "tcp://node0:23456",
-    world_size: 8,
-    rank: 0,
-};
-
-let trainer = Trainer::new(model, data, optimizer, args)?
-    .with_mpi(mpi_config)?;
-```
-
----
-
-### Checkpoint Management
-
-- ✅ **Save Checkpoints**
-  - Model state
-  - Optimizer state
-  - Scheduler state
-  - Training metadata (epoch, step, best metric)
-
-- ✅ **Load Checkpoints**
-  - Resume training from checkpoint
-  - Load for inference
-  - Load for fine-tuning
-
-- ✅ **Checkpoint Strategy**
-  - Save best model (based on validation metric)
-  - Save every N steps
-  - Keep last K checkpoints
-  - Automatic cleanup of old checkpoints
-
-**Example:**
-```rust
-trainer.save_checkpoint("checkpoint-1000.pt")?;
-trainer.load_checkpoint("checkpoint-1000.pt")?;
-```
-
----
-
-### Metrics and Logging
-
-#### Experiment Trackers
-
-- ✅ **TensorBoard** - Visualization dashboard
-- ✅ **Weights & Biases (W&B)** - Experiment tracking
-- ✅ **Neptune.ai** - ML metadata store
-- ✅ **ClearML** - Experiment management
-- ✅ **MLflow** - ML lifecycle platform
-
-#### Logged Metrics
-
-- ✅ Training loss, validation loss
-- ✅ Learning rate
-- ✅ Gradient norm
-- ✅ Task-specific metrics (accuracy, F1, BLEU, etc.)
-- ✅ System metrics (GPU utilization, memory usage)
-
----
-
-## Testing & Documentation
-
-- ✅ Comprehensive test suite
-- ✅ Multi-node training guide
-- ✅ RLHF documentation
-- ✅ QAT best practices
-- ✅ Distributed training tutorial
-
----
-
-## Known Limitations
-
-- [ ] Recent training techniques: implement missing techniques
-  - **Refinement needed:** which specific techniques? (e.g. DoRA, GaLore, spectrum-regularized LoRA, AdaLoRA?)
-- [ ] Fault tolerance: checkpoint-on-preemption for SLURM/cloud spot instances
-- [ ] Fault tolerance: worker failure recovery in distributed training without full restart
+- [x] `Trainer` main training loop, `TrainerCallback` trait, `EarlyStoppingCallback` (`trainer.rs`)
+- [x] `SimpleTrainer`/`SimpleTrainerBuilder` alternative builder-style API with `CheckpointCallback`,
+  `LoggingCallback`, `MetricsCallback`, `ProgressCallback` (`simplified_trainer.rs`)
+- [x] `TrainingArguments` with `EvaluationStrategy`/`SaveStrategy` (`training_args.rs`)
+- [x] Losses: `CrossEntropyLoss` (incl. `with_label_smoothing()`), `MSELoss` (`losses.rs`)
+- [x] Metrics: `Accuracy`, `F1Score`, `Perplexity`, `MetricCollection` (`metrics.rs`)
+- [x] Config validation framework: `ConfigValidator`/`ConfigSchema`/`Constraint` (`config_validation.rs`)
+- [x] Structured error handling with recovery suggestions: `ErrorManager`, `ErrorCodeRegistry`
+  (`error_codes.rs`, `error_handling.rs`)
+- [x] Training orchestration / job scheduling: `TrainingOrchestrator`, `JobScheduler`, `TrainingJob`,
+  `CheckpointConfig`/`CheckpointInfo` (`training_orchestration.rs`)
+
+### Distributed & Parallel Training
+- [x] Data-parallel training abstraction: `DataParallelTrainer`, `ProcessGroup` trait (`distributed.rs`)
+- [ ] ZeRO optimizer (stages 1/2/3) — **not implemented** (see Known Issues)
+- [~] NCCL/Gloo/MPI backends — process-group types and a `DistributedBackend` selector exist, but the
+  collective operations are in-process simulations, not real network/FFI implementations (see Known Issues)
+- [x] Tensor parallelism: `TensorParallelism`, `TensorPartitioningStrategy` (`tensor_parallelism.rs`)
+- [x] Sequence parallelism: `SequenceParallelism`, `SequenceSplittingStrategy` (`sequence_parallelism.rs`)
+- [x] 3D parallelism with pipeline scheduling variants `GPipe`/`PipeDream`/`PipeDream2BW`/
+  `Interleaved1F1B`/`Adaptive` (`parallelism_3d.rs`)
+- [x] Expert parallelism (MoE-style routing): `ExpertParallelism`, `TokenRouting` (`expert_parallelism.rs`)
+- [x] Ring attention for long-sequence distributed attention (`ring_attention.rs`)
+- [x] Hardware-aware automatic parallelism strategy selection: `AutoParallelismSelector` from
+  `HardwareConstraints`/`ModelConstraints`/`NetworkTopology` (`auto_parallelism.rs`) — note this is strategy
+  *selection*, not general hyperparameter tuning from hardware
+- [x] Elastic training coordinator: worker heartbeats, scaling decisions, mid-training checkpoints
+  (`elastic_training.rs`)
+- [x] Multi-cloud orchestration: `MultiCloudOrchestrator`, `CloudScheduler`, cost-aware scheduling
+  (`multicloud.rs`)
+- [x] Resource scheduling: `ResourceScheduler`, `ResourcePool` (`resource_scheduling.rs`)
+- [~] Fault tolerance / checkpoint-on-preemption for spot instances: `multicloud.rs`/`cost_tracking.rs`/
+  `resource_scheduling.rs` model spot-instance and preemption concepts at the config/cost level, but an
+  end-to-end "detect preemption signal → auto-checkpoint" pipeline is not confirmed
+- [~] Worker-failure recovery without a full restart: `elastic_training::ElasticTrainingCoordinator` has
+  real worker-monitoring/scaling-decision/checkpoint logic, but true zero-downtime replacement of a failed
+  worker is not independently verified
+
+### Mixed Precision & Quantization
+- [x] AMP: `AMPManager`, `MixedPrecisionConfig`, `LossScaler`, `DynamicBatchingManager` (`mixed_precision.rs`)
+- [x] Quantization-Aware Training: `QATTrainer`, per-tensor/per-channel schemes, `MixedBitQATTrainer`,
+  `fake_quantize`/`fake_quantize_mixed_bit` (`qat.rs`)
+
+### RLHF and Alignment (`rlhf` module)
+- [x] PPO: `PPOTrainer`, `PPOConfig`, `PPOStepResult`, `PolicyModel`, `ValueModel` (`rlhf/ppo.rs`)
+- [x] DPO: `DPOTrainer`, `DPOConfig`, distinct `Sigmoid`/`Hinge`/`Ipo` loss formulas (`rlhf/dpo.rs`)
+- [ ] KTO as a *distinct* prospect-theory loss — currently aliases the Sigmoid DPO formula (see Known Issues)
+- [~] Faithful per-token log-probability computation in `get_batch_logps` — currently a simplified
+  whole-sequence-mean approximation (see Known Issues)
+- [x] Reward modeling: `RewardModel`, `RewardModelConfig`, `RewardPrediction` (`rlhf/reward_model.rs`)
+- [x] Human feedback / preference data: `HumanFeedback`, `PreferencePair`, `ConstitutionalPrinciple`
+  (`rlhf/feedback.rs`, `rlhf/mod.rs`)
+
+### Few-Shot and Meta-Learning (`few_shot` module)
+- [x] MAML and Reptile: `MAMLTrainer`/`MAMLConfig`, `ReptileTrainer`/`ReptileConfig` (`few_shot/meta_learning.rs`)
+- [x] In-context learning: `InContextLearner`, `ICLExample` (`few_shot/in_context.rs`)
+- [x] Prompt tuning: `PromptTuner`, `SoftPrompt` (`few_shot/prompt_tuning.rs`)
+- [x] Cross-task generalization / task adaptation (`few_shot/cross_task.rs`, `few_shot/task_adaptation.rs`)
+
+### Continual Learning (`continual` module)
+- [x] EWC: `EWCTrainer`, `EWCConfig`, `FisherInformation` (`continual/ewc.rs`)
+- [x] Progressive Neural Networks (`continual/progressive_networks.rs`)
+- [x] Replay buffers / memory replay (`continual/memory_replay.rs`, `continual/replay_buffer.rs`)
+- [x] Task-boundary detection (`continual/task_boundary.rs`)
+
+### Curriculum Learning & Data Pipeline
+- [x] Curriculum learning (length/difficulty/self-paced): `CurriculumLearningManager`, `PacingFunction` —
+  lives in `data_pipeline.rs`, **not** the orphaned top-level `curriculum/` directory
+- [x] Active learning: `ActiveLearningManager`, `QueryStrategy` (`data_pipeline.rs`)
+- [x] Augmentation (image/text/audio/token) with adaptive scheduling (`data_pipeline.rs`)
+- [x] Multi-modal handling and data validation (`data_pipeline.rs`)
+
+### Hyperparameter Tuning (`hyperopt` module)
+- [x] Grid search, random search (`GridSearch`, `RandomSearch`)
+- [x] Bayesian optimization with GP and TPE samplers (`BayesianOptimization`, `GPSampler`, `TPESampler`)
+- [x] Hyperband / successive halving (`Hyperband`, `SuccessiveHalving`)
+- [x] Population-Based Training (`PopulationBasedTraining`, `PBTConfig`)
+- [x] Bandit-based optimization (`BanditOptimizer`)
+- [~] Multi-objective optimization — supported as an early-stopping/reward-composition criterion
+  (`hyperopt::efficiency::EarlyStoppingStrategy::MultiObjective`), not as a standalone Pareto-front
+  optimizer; the more fully-featured `hpo::multi_objective` on disk is orphaned/unwired (see Known Issues)
+
+### Experiment Management & Tracking
+- [x] Native experiment tracking, A/B testing, data/model lineage and provenance
+  (`experiment_management.rs`)
+- [x] External tracker integrations: TensorBoard, Weights & Biases, Neptune.ai, ClearML, MLflow
+  (`framework_integration.rs`)
+
+### Training Stability & Monitoring
+- [x] `AdvancedStabilityMonitor`: loss-landscape analysis, anomaly prediction, risk scoring
+  (`advanced_stability_monitor.rs`)
+- [x] `GradientRecoveryManager`: gradient-anomaly detection and recovery strategies
+  (`gradient_anomaly_recovery.rs`)
+- [x] `AdaptiveGradientScaler` / `AdaptiveLearningRateScheduler` (`adaptive_gradient_scaling.rs`,
+  `adaptive_learning_rate.rs`)
+- [x] `TrainingDynamicsAnalyzer` / `TrainingMonitor`: convergence, gradient flow, weight evolution, health
+  status (`training_dynamics.rs`, `training_monitor.rs`)
+
+### Other Production-Adjacent Modules
+- [x] Model registry/versioning: `ModelRegistry`, `ModelVersion` (`model_versioning.rs`)
+- [x] Online learning with concept-drift detection (`online_learning.rs`)
+- [x] Cost tracking / budgeting / forecasting: `CostTracker`, `Budget`, `CostForecastingModel`
+  (`cost_tracking.rs`)
+- [x] Neural Architecture Search: `NASController`, `NASAlgorithm`, `SearchSpaceConfig`
+  (`nas_integration.rs`)
 
 ---
 
 ## Future Enhancements
 
 ### High Priority
-- [x] Enhanced fault tolerance (auto-resume on failure)
-- [x] More advanced RLHF techniques (DPO, KTO) — sigmoid DPO/KTO loss, log_softmax in get_batch_logps, preference accuracy metric
-- [x] Additional meta-learning algorithms (MAML, FOMAML, Reptile)
-- [x] **PPO standalone module** (`src/ppo/mod.rs`) — GAE advantage estimation, clipped surrogate objective, entropy bonus, PpoTrainer with history and early-stop
-- [x] **DPO standalone module** (`src/dpo/mod.rs`) — Sigmoid / Hinge / IPO / SigmoidWithShift variants, label smoothing, DpoRewardStats with percentile_margin, DpoTrainer
+- [ ] Decide the fate of the ~30,000 lines of orphaned modules: wire in (`grpo/` in particular looks like
+  it could add real GRPO support) or delete
+- [ ] Implement a real ZeRO optimizer (stage 1 at minimum) if distributed memory sharding is still a goal
+- [ ] Give `NCCLProcessGroup`/`GlooProcessGroup`/`MPIProcessGroup` real backend bindings, or rename/document
+  them clearly as simulations until they do
+- [ ] Fix `examples/basic_training/simple_classification.rs` to use the current `Trainer`/`TrainingArguments`
+  API (and consider adding a `cargo check --examples` step to CI so this doesn't recur silently)
+- [ ] Implement a distinct KTO loss (prospect-theory utility, asymmetric loss aversion) rather than aliasing
+  Sigmoid DPO
+- [ ] Wire up proper per-token indexed log-probability gathering in `DPOTrainer::get_batch_logps`
+- [ ] Recent PEFT/alignment techniques not yet present anywhere in the tree: DoRA, GaLore, AdaLoRA (the
+  orphaned `lora/` directory has *some* LoRA-family code, but it is unwired and none of these newer variants
+  were found in it)
 
 ### Performance
-- [x] Communication optimization (gradient compression)
-- [x] Faster checkpoint saving/loading
-- [x] Better pipeline scheduling (GPipe-style microbatching)
+- [ ] Verify/benchmark the `gradient_compression` flag on `DistributedConfig` — the field exists but its
+  runtime effect wasn't independently verified during this pass
+- [ ] Add a `benches/` directory with `criterion` benchmarks; none currently exist for this crate (the
+  previous README's benchmark table had no backing harness and has been removed)
 
-### Features
-- [x] Automatic hyperparameter tuning based on hardware
-- [x] Multi-objective hyperparameter optimization
-- [x] Enhanced curriculum learning strategies
+### Housekeeping
+- [ ] Delete the 5 stray `*.rs.prelude_fix` backup files
+- [ ] Delete or wire in the legacy `src/mod.rs` (currently dead; a minimal alternate `lib.rs`-shaped file)
 
 ---
 
@@ -603,10 +212,11 @@ trainer.load_checkpoint("checkpoint-1000.pt")?;
 
 ### Code Standards
 - **Use trustformers-core abstractions only**
-- **File size limit:** <2000 lines per file
-- **Error handling:** Use `Result<T, TrustformersError>`
+- **File size limit:** <2000 lines per file (currently satisfied — largest reachable file is 1,610 lines)
+- **Error handling:** Use `Result<T, TrustformersError>` / the crate's own `TrainingError`/`TrainingResult`
 - **Testing:** Integration tests for distributed training
 - **Naming:** snake_case for all identifiers
+- **No `unwrap()` in production code** (currently satisfied in the compiled tree)
 
 ### Build & Test Commands
 
@@ -614,19 +224,13 @@ trainer.load_checkpoint("checkpoint-1000.pt")?;
 # Run all tests
 cargo nextest run -p trustformers-training --all-features
 
-# Test distributed training (requires multiple GPUs)
-cargo test -p trustformers-training --features distributed
-
-# Test multi-node (requires MPI)
-mpirun -np 4 cargo test -p trustformers-training test_mpi
-
 # Check compilation
 cargo check -p trustformers-training --all-features
 ```
 
 ---
 
-**Last Updated:** 2026-06-24 - v0.1.3 Development
-**Version:** 0.1.3
-**Status:** Stable — 333 passing tests, 846 public API items, 38,667 SLoC, 0 stubs
-**Multi-Node:** Full MPI support with all collective operations
+**Last Updated:** 2026-07-02 — v0.1.4
+**Version:** 0.1.4
+**Status:** Alpha — ~930 tests passing, 1,673 reachable public API items, 0 stubs, but see "Known Issues"
+for the distributed-training and orphaned-module caveats that keep this crate from being labeled Stable.

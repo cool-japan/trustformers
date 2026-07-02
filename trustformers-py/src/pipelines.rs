@@ -1,9 +1,10 @@
-use crate::models::{PyBertModel, PyGPT2Model};
-use crate::tensor::PyTensor;
-use crate::tokenizers::{PyBPETokenizer, PyWordPieceTokenizer};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::{IntoPy, PyObject};
+use pyo3::IntoPyObjectExt;
+
+/// Owned Python reference alias (pyo3 0.28 removed the `PyObject` type alias from
+/// the crate root; it is equivalent to `Py<PyAny>`).
+type PyObject = Py<PyAny>;
 // Pipeline implementations are already available here
 // In the future, these could be moved to trustformers-models for code reuse
 // Currently implemented: Pipeline, TextGenerationPipeline, TextClassificationPipeline,
@@ -43,14 +44,14 @@ impl PyTextGenerationPipeline {
     /// Create a new text generation pipeline
     #[new]
     pub fn new(
-        py: Python<'_>,
+        _py: Python<'_>,
         model: &Bound<'_, PyAny>,
         tokenizer: &Bound<'_, PyAny>,
         device: Option<&str>,
     ) -> PyResult<(Self, PyPipeline)> {
         let base = PyPipeline {
-            model: model.unbind(),
-            tokenizer: tokenizer.unbind(),
+            model: model.clone().unbind(),
+            tokenizer: tokenizer.clone().unbind(),
             device: device.unwrap_or("cpu").to_string(),
         };
 
@@ -72,6 +73,9 @@ impl PyTextGenerationPipeline {
         num_return_sequences: usize,
         kwargs: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyObject> {
+        // Generation controls are accepted for HF API parity; this placeholder
+        // generator does not yet consume them.
+        let _ = (max_length, min_length, do_sample, temperature, top_k, top_p, kwargs);
         match text_inputs {
             TextInputs::Single(text) => {
                 // Single text generation
@@ -79,7 +83,7 @@ impl PyTextGenerationPipeline {
                     generated_text: format!("{} [Generated continuation]", text),
                     score: 0.95,
                 }];
-                Ok(result.into_py(py))
+                result.into_py_any(py)
             },
             TextInputs::Batch(texts) => {
                 // Batch generation
@@ -94,7 +98,7 @@ impl PyTextGenerationPipeline {
                             .collect()
                     })
                     .collect();
-                Ok(results.into_py(py))
+                results.into_py_any(py)
             },
         }
     }
@@ -111,14 +115,14 @@ impl PyTextClassificationPipeline {
     /// Create a new text classification pipeline
     #[new]
     pub fn new(
-        py: Python<'_>,
+        _py: Python<'_>,
         model: &Bound<'_, PyAny>,
         tokenizer: &Bound<'_, PyAny>,
         device: Option<&str>,
     ) -> PyResult<(Self, PyPipeline)> {
         let base = PyPipeline {
-            model: model.unbind(),
-            tokenizer: tokenizer.unbind(),
+            model: model.clone().unbind(),
+            tokenizer: tokenizer.clone().unbind(),
             device: device.unwrap_or("cpu").to_string(),
         };
 
@@ -133,8 +137,9 @@ impl PyTextClassificationPipeline {
         text_inputs: TextInputs,
         kwargs: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyObject> {
+        let _ = kwargs;
         match text_inputs {
-            TextInputs::Single(text) => {
+            TextInputs::Single(_text) => {
                 let result = vec![
                     ClassificationResult {
                         label: "POSITIVE".to_string(),
@@ -145,7 +150,7 @@ impl PyTextClassificationPipeline {
                         score: 0.3,
                     },
                 ];
-                Ok(result.into_py(py))
+                result.into_py_any(py)
             },
             TextInputs::Batch(texts) => {
                 let results: Vec<Vec<ClassificationResult>> = texts
@@ -163,7 +168,7 @@ impl PyTextClassificationPipeline {
                         ]
                     })
                     .collect();
-                Ok(results.into_py(py))
+                results.into_py_any(py)
             },
         }
     }
@@ -178,14 +183,14 @@ impl PyTokenClassificationPipeline {
     /// Create a new token classification pipeline
     #[new]
     pub fn new(
-        py: Python<'_>,
+        _py: Python<'_>,
         model: &Bound<'_, PyAny>,
         tokenizer: &Bound<'_, PyAny>,
         device: Option<&str>,
     ) -> PyResult<(Self, PyPipeline)> {
         let base = PyPipeline {
-            model: model.unbind(),
-            tokenizer: tokenizer.unbind(),
+            model: model.clone().unbind(),
+            tokenizer: tokenizer.clone().unbind(),
             device: device.unwrap_or("cpu").to_string(),
         };
 
@@ -200,8 +205,9 @@ impl PyTokenClassificationPipeline {
         text_inputs: TextInputs,
         kwargs: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyObject> {
+        let _ = kwargs;
         match text_inputs {
-            TextInputs::Single(text) => {
+            TextInputs::Single(_text) => {
                 let result = vec![EntityResult {
                     entity: "B-PER".to_string(),
                     score: 0.95,
@@ -210,7 +216,7 @@ impl PyTokenClassificationPipeline {
                     start: 0,
                     end: 4,
                 }];
-                Ok(result.into_py(py))
+                result.into_py_any(py)
             },
             TextInputs::Batch(texts) => {
                 let results: Vec<Vec<EntityResult>> = texts
@@ -226,7 +232,7 @@ impl PyTokenClassificationPipeline {
                         }]
                     })
                     .collect();
-                Ok(results.into_py(py))
+                results.into_py_any(py)
             },
         }
     }
@@ -241,14 +247,14 @@ impl PyQuestionAnsweringPipeline {
     /// Create a new QA pipeline
     #[new]
     pub fn new(
-        py: Python<'_>,
+        _py: Python<'_>,
         model: &Bound<'_, PyAny>,
         tokenizer: &Bound<'_, PyAny>,
         device: Option<&str>,
     ) -> PyResult<(Self, PyPipeline)> {
         let base = PyPipeline {
-            model: model.unbind(),
-            tokenizer: tokenizer.unbind(),
+            model: model.clone().unbind(),
+            tokenizer: tokenizer.clone().unbind(),
             device: device.unwrap_or("cpu").to_string(),
         };
 
@@ -264,12 +270,13 @@ impl PyQuestionAnsweringPipeline {
         context: Option<String>,
         kwargs: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyObject> {
+        let _ = kwargs;
         match question {
             QuestionInput::Single {
-                question,
+                question: _question,
                 context: ctx,
             } => {
-                let context =
+                let _context =
                     context.or(ctx).ok_or_else(|| PyValueError::new_err("Context is required"))?;
 
                 let result = QAResult {
@@ -278,7 +285,7 @@ impl PyQuestionAnsweringPipeline {
                     start: 10,
                     end: 23,
                 };
-                Ok(result.into_py(py))
+                result.into_py_any(py)
             },
             QuestionInput::Batch(inputs) => {
                 let results: Vec<QAResult> = inputs
@@ -290,7 +297,7 @@ impl PyQuestionAnsweringPipeline {
                         end: 23,
                     })
                     .collect();
-                Ok(results.into_py(py))
+                results.into_py_any(py)
             },
         }
     }
@@ -306,11 +313,12 @@ pub fn pipeline(
     tokenizer: Option<&Bound<'_, PyAny>>,
     kwargs: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<PyObject> {
+    let _ = kwargs;
     match task {
         "text-generation" => {
             if let (Some(m), Some(t)) = (model, tokenizer) {
                 let pipe = PyTextGenerationPipeline::new(py, m, t, None)?;
-                Py::new(py, pipe).map(|p| p.into_py(py))
+                Py::new(py, pipe).and_then(|p| p.into_py_any(py))
             } else {
                 Err(PyValueError::new_err("Model and tokenizer are required"))
             }
@@ -318,7 +326,7 @@ pub fn pipeline(
         "text-classification" | "sentiment-analysis" => {
             if let (Some(m), Some(t)) = (model, tokenizer) {
                 let pipe = PyTextClassificationPipeline::new(py, m, t, None)?;
-                Py::new(py, pipe).map(|p| p.into_py(py))
+                Py::new(py, pipe).and_then(|p| p.into_py_any(py))
             } else {
                 Err(PyValueError::new_err("Model and tokenizer are required"))
             }
@@ -326,7 +334,7 @@ pub fn pipeline(
         "token-classification" | "ner" => {
             if let (Some(m), Some(t)) = (model, tokenizer) {
                 let pipe = PyTokenClassificationPipeline::new(py, m, t, None)?;
-                Py::new(py, pipe).map(|p| p.into_py(py))
+                Py::new(py, pipe).and_then(|p| p.into_py_any(py))
             } else {
                 Err(PyValueError::new_err("Model and tokenizer are required"))
             }
@@ -334,7 +342,7 @@ pub fn pipeline(
         "question-answering" => {
             if let (Some(m), Some(t)) = (model, tokenizer) {
                 let pipe = PyQuestionAnsweringPipeline::new(py, m, t, None)?;
-                Py::new(py, pipe).map(|p| p.into_py(py))
+                Py::new(py, pipe).and_then(|p| p.into_py_any(py))
             } else {
                 Err(PyValueError::new_err("Model and tokenizer are required"))
             }
@@ -365,14 +373,16 @@ struct GenerationResult {
     score: f32,
 }
 
-impl IntoPy<PyObject> for GenerationResult {
-    fn into_py(self, py: Python<'_>) -> PyObject {
+impl<'py> IntoPyObject<'py> for GenerationResult {
+    type Target = pyo3::types::PyDict;
+    type Output = Bound<'py, Self::Target>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         let dict = pyo3::types::PyDict::new(py);
-        dict.set_item("generated_text", self.generated_text)
-            .expect("Failed to set generated_text in PyDict");
-        dict.set_item("score", self.score)
-            .expect("Failed to set score in PyDict");
-        dict.into()
+        dict.set_item("generated_text", self.generated_text)?;
+        dict.set_item("score", self.score)?;
+        Ok(dict)
     }
 }
 
@@ -382,14 +392,16 @@ struct ClassificationResult {
     score: f32,
 }
 
-impl IntoPy<PyObject> for ClassificationResult {
-    fn into_py(self, py: Python<'_>) -> PyObject {
+impl<'py> IntoPyObject<'py> for ClassificationResult {
+    type Target = pyo3::types::PyDict;
+    type Output = Bound<'py, Self::Target>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         let dict = pyo3::types::PyDict::new(py);
-        dict.set_item("label", self.label)
-            .expect("Failed to set label in PyDict");
-        dict.set_item("score", self.score)
-            .expect("Failed to set score in PyDict");
-        dict.into()
+        dict.set_item("label", self.label)?;
+        dict.set_item("score", self.score)?;
+        Ok(dict)
     }
 }
 
@@ -403,22 +415,20 @@ struct EntityResult {
     end: usize,
 }
 
-impl IntoPy<PyObject> for EntityResult {
-    fn into_py(self, py: Python<'_>) -> PyObject {
+impl<'py> IntoPyObject<'py> for EntityResult {
+    type Target = pyo3::types::PyDict;
+    type Output = Bound<'py, Self::Target>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         let dict = pyo3::types::PyDict::new(py);
-        dict.set_item("entity", self.entity)
-            .expect("Failed to set entity in PyDict");
-        dict.set_item("score", self.score)
-            .expect("Failed to set score in PyDict");
-        dict.set_item("index", self.index)
-            .expect("Failed to set index in PyDict");
-        dict.set_item("word", self.word)
-            .expect("Failed to set word in PyDict");
-        dict.set_item("start", self.start)
-            .expect("Failed to set start in PyDict");
-        dict.set_item("end", self.end)
-            .expect("Failed to set end in PyDict");
-        dict.into()
+        dict.set_item("entity", self.entity)?;
+        dict.set_item("score", self.score)?;
+        dict.set_item("index", self.index)?;
+        dict.set_item("word", self.word)?;
+        dict.set_item("start", self.start)?;
+        dict.set_item("end", self.end)?;
+        Ok(dict)
     }
 }
 
@@ -430,17 +440,17 @@ struct QAResult {
     end: usize,
 }
 
-impl IntoPy<PyObject> for QAResult {
-    fn into_py(self, py: Python<'_>) -> PyObject {
+impl<'py> IntoPyObject<'py> for QAResult {
+    type Target = pyo3::types::PyDict;
+    type Output = Bound<'py, Self::Target>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         let dict = pyo3::types::PyDict::new(py);
-        dict.set_item("answer", self.answer)
-            .expect("Failed to set answer in PyDict");
-        dict.set_item("score", self.score)
-            .expect("Failed to set score in PyDict");
-        dict.set_item("start", self.start)
-            .expect("Failed to set start in PyDict");
-        dict.set_item("end", self.end)
-            .expect("Failed to set end in PyDict");
-        dict.into()
+        dict.set_item("answer", self.answer)?;
+        dict.set_item("score", self.score)?;
+        dict.set_item("start", self.start)?;
+        dict.set_item("end", self.end)?;
+        Ok(dict)
     }
 }

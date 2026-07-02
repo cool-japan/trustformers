@@ -378,24 +378,24 @@ impl VersionedModel {
 
         // Semver pattern
         if regex::Regex::new(r"^\d+\.\d+\.\d+(-[a-zA-Z0-9.-]+)?(\+[a-zA-Z0-9.-]+)?$")
-            .expect("semver regex pattern is valid")
-            .is_match(version)
+            .map(|re| re.is_match(version))
+            .unwrap_or(false)
         {
             return true;
         }
 
         // Git tag pattern
         if regex::Regex::new(r"^v?\d+\.\d+(\.\d+)?(-[a-zA-Z0-9.-]+)?$")
-            .expect("git tag regex pattern is valid")
-            .is_match(version)
+            .map(|re| re.is_match(version))
+            .unwrap_or(false)
         {
             return true;
         }
 
         // Custom format (alphanumeric, dots, dashes, underscores)
         if regex::Regex::new(r"^[a-zA-Z0-9._-]+$")
-            .expect("Regex compilation failed")
-            .is_match(version)
+            .map(|re| re.is_match(version))
+            .unwrap_or(false)
         {
             return true;
         }

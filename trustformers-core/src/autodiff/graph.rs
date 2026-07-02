@@ -265,9 +265,11 @@ impl ComputationGraph {
 
         // Initialize gradient for output node
         if let Some(output_node) = self.nodes.get_mut(&output_id) {
-            output_node.gradient = Some(grad_output.unwrap_or_else(|| {
-                Tensor::ones(&output_node.shape).expect("Failed to create ones tensor")
-            }));
+            let grad = match grad_output {
+                Some(g) => g,
+                None => Tensor::ones(&output_node.shape)?,
+            };
+            output_node.gradient = Some(grad);
         } else {
             return Err(TrustformersError::tensor_op_error(
                 &format!("Output node {} not found", output_id),
@@ -519,10 +521,8 @@ impl ComputationGraph {
                 // For unimplemented operations, return zero gradients
                 let zero_grads = parent_values
                     .iter()
-                    .map(|input| {
-                        Tensor::zeros(&input.shape()).expect("Failed to create zeros tensor")
-                    })
-                    .collect();
+                    .map(|input| Tensor::zeros(&input.shape()))
+                    .collect::<Result<Vec<_>>>()?;
                 Ok(zero_grads)
             },
         }

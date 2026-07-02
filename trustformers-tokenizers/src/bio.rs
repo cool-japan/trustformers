@@ -4,7 +4,6 @@
 //! including DNA, RNA, and protein sequences used in bioinformatics.
 
 use once_cell::sync::Lazy;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use trustformers_core::errors::Result;
@@ -129,31 +128,31 @@ pub struct BioTokenizer {
     amino_acids: HashMap<char, AminoAcidInfo>,
     nucleotides: HashMap<char, NucleotideInfo>,
     genetic_code: HashMap<String, char>,
-    #[allow(dead_code)]
-    structure_patterns: Vec<Regex>,
 }
 
 /// Amino acid information
+// reason: complete reference data model — `name`/`single_letter`/`three_letter`
+// are part of the biochemical record even though current tokenization logic only
+// reads the numeric properties.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct AminoAcidInfo {
-    #[allow(dead_code)]
     name: String,
     molecular_weight: f64,
     hydrophobicity: f64,
     charge: i8,
-    #[allow(dead_code)]
     single_letter: char,
-    #[allow(dead_code)]
     three_letter: String,
 }
 
 /// Nucleotide information
+// reason: complete reference data model — `name`/`is_purine` document the
+// nucleotide even though current logic only reads `complement`/`molecular_weight`.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct NucleotideInfo {
-    #[allow(dead_code)]
     name: String,
     complement: char,
-    #[allow(dead_code)]
     is_purine: bool,
     molecular_weight: f64,
 }
@@ -580,7 +579,6 @@ impl BioTokenizer {
             amino_acids: AMINO_ACIDS.clone(),
             nucleotides: NUCLEOTIDES.clone(),
             genetic_code: GENETIC_CODE.clone(),
-            structure_patterns: Self::create_structure_patterns(),
         };
 
         tokenizer.initialize_vocab();
@@ -687,14 +685,6 @@ impl BioTokenizer {
         self.id_to_token.insert(id, token.to_string());
         self.next_id += 1;
         id
-    }
-
-    /// Create secondary structure patterns
-    fn create_structure_patterns() -> Vec<Regex> {
-        vec![
-            Regex::new(r"[HEC]+").expect("valid regex"), // Secondary structure annotations
-            Regex::new(r"[αβ]+").expect("valid regex"),  // Greek letter annotations
-        ]
     }
 
     /// Tokenize biological sequence
@@ -1048,6 +1038,8 @@ impl BioTokenizer {
 }
 
 /// Sequence type detection
+// reason: DNA/RNA are standard scientific acronyms; the clippy-preferred
+// `Dna`/`Rna` spellings would obscure the domain terminology.
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::upper_case_acronyms)]
 enum SequenceType {
@@ -1183,11 +1175,11 @@ impl BioTokenizer {
             *token_types.entry(token.token_type.clone()).or_insert(0) += 1;
 
             if token.text.len() == 1 {
-                let c = token
-                    .text
-                    .chars()
-                    .next()
-                    .expect("token.text with len()==1 must have at least one char");
+                // `len() == 1` guarantees at least one char; skip defensively
+                // instead of panicking on the impossible empty case.
+                let Some(c) = token.text.chars().next() else {
+                    continue;
+                };
 
                 match token.token_type {
                     BioTokenType::AminoAcid => {

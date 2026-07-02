@@ -96,7 +96,12 @@ impl HardwareAccelerator {
                 Self::new_cpu_fallback()
             })
         });
-        Ok(ACCELERATOR.get().expect("accelerator should be initialized after get_or_init"))
+        ACCELERATOR.get().ok_or_else(|| {
+            crate::errors::runtime_error(format!(
+                "{} in initialize",
+                "accelerator should be initialized after get_or_init"
+            ))
+        })
     }
 
     /// Get global hardware accelerator instance

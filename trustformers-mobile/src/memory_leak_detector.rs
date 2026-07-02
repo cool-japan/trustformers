@@ -593,8 +593,11 @@ impl MobileMemoryLeakDetector {
         } else if max_size > avg_size * 10 {
             // Large size variations
             LeakPatternType::BurstLeak
-        } else if timestamps.last().expect("Operation failed")
-            - timestamps.first().expect("Operation failed")
+        } else if timestamps
+            .last()
+            .zip(timestamps.first())
+            .map(|(last, first)| last.saturating_sub(*first))
+            .unwrap_or(0)
             > 3600
         {
             // Long time span

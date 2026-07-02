@@ -313,8 +313,12 @@ impl IntelligentConfigOptimizer {
             None
         };
 
-        let mut base_config =
-            self.best_config.lock().expect("Operation failed").clone().unwrap_or_default();
+        let mut base_config = self
+            .best_config
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+            .unwrap_or_default();
 
         // Apply tuning based on insights
         if let Some(insights) = insights {
@@ -805,7 +809,9 @@ impl IntelligentConfigOptimizer {
                     history.iter().filter(|entry| entry.success_score > 0.8).collect();
 
                 best_configs.sort_by(|a, b| {
-                    b.success_score.partial_cmp(&a.success_score).expect("Operation failed")
+                    b.success_score
+                        .partial_cmp(&a.success_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 });
 
                 if !best_configs.is_empty() {

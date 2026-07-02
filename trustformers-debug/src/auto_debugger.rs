@@ -1,4 +1,8 @@
 //! Automated debugging system for common issues and optimization suggestions
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -11,9 +15,7 @@ use crate::{
 
 /// Automated debugging system
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct AutoDebugger {
-    #[allow(dead_code)]
     config: DebugConfig,
     issue_detectors: Vec<Box<dyn IssueDetector>>,
     fix_suggestions: HashMap<IssueType, Vec<FixSuggestion>>,
@@ -165,9 +167,7 @@ pub struct OptimizationAttempt {
 
 /// Knowledge base for common patterns and solutions
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct KnowledgeBase {
-    #[allow(dead_code)]
     issue_patterns: HashMap<IssueType, IssuePattern>,
     hyperparameter_recommendations: HashMap<String, HyperparameterAdvice>,
     architecture_patterns: Vec<ArchitecturePattern>,

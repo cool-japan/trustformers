@@ -17,10 +17,9 @@
 //! ## Usage
 //!
 //! ```rust
-//! use trustformers_models::error_recovery::{
-//!     ErrorRecoveryManager, RecoveryConfig, RecoveryStrategy
-//! };
+//! use trustformers_models::error_recovery::{ErrorRecoveryManager, RecoveryConfig};
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = RecoveryConfig::default()
 //!     .with_max_retries(3)
 //!     .with_fallback_enabled(true);
@@ -28,10 +27,13 @@
 //! let mut manager = ErrorRecoveryManager::new(config);
 //!
 //! // Execute with automatic recovery
-//! let result = manager.execute_with_recovery(|| {
+//! let result = manager.execute_with_recovery(|| -> anyhow::Result<i32> {
 //!     // Your model operation here
-//!     model.forward(&input)
+//!     Ok(42)
 //! })?;
+//! # let _ = result;
+//! # Ok(())
+//! # }
 //! ```
 
 use anyhow::{Error, Result};
@@ -774,7 +776,7 @@ impl ErrorRecoveryManager {
 
     /// Get current recovery metrics
     pub fn get_metrics(&self) -> RecoveryMetrics {
-        self.metrics.lock().expect("operation failed").clone()
+        self.metrics.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     /// Generate recovery report

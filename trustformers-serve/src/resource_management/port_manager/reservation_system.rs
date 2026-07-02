@@ -232,7 +232,9 @@ impl PortReservationSystem {
                     "Insufficient ports available ({} requested, {} available), queuing reservation for test {}",
                     count, available.len(), test_id
                 );
-                return self.queue_reservation(count, test_id, reservation_duration, usage_type).await;
+                return self
+                    .queue_reservation(count, test_id, reservation_duration, usage_type)
+                    .await;
             } else {
                 return Err(PortManagementError::InsufficientPorts {
                     requested: count,
@@ -243,8 +245,9 @@ impl PortReservationSystem {
 
         let mut reserved_ports = Vec::new();
         let now = Utc::now();
-        let expiry_time = now + chrono::Duration::from_std(reservation_duration)
-            .expect("Valid duration for conversion");
+        let expiry_time = now
+            + chrono::Duration::from_std(reservation_duration)
+                .unwrap_or_else(|_| chrono::Duration::zero());
 
         // Reserve ports by finding available ports that aren't already reserved
         for _ in 0..count {
@@ -271,8 +274,9 @@ impl PortReservationSystem {
                     ReservationEventType::Created,
                     port,
                     test_id,
-                    HashMap::new()
-                ).await;
+                    HashMap::new(),
+                )
+                .await;
             } else {
                 // Rollback partial reservation on failure
                 for &port in &reserved_ports {
@@ -281,7 +285,8 @@ impl PortReservationSystem {
                     expiry_times.remove(&port);
                 }
                 return Err(PortManagementError::InternalError {
-                    message: "Failed to reserve sufficient ports despite availability check".to_string(),
+                    message: "Failed to reserve sufficient ports despite availability check"
+                        .to_string(),
                 });
             }
         }
@@ -364,12 +369,15 @@ impl PortReservationSystem {
             HashMap::from([
                 ("queue_position".to_string(), queue.len().to_string()),
                 ("requested_count".to_string(), count.to_string()),
-            ])
-        ).await;
+            ]),
+        )
+        .await;
 
         info!(
             "Queued reservation for {} ports for test {} (queue position: {})",
-            count, test_id, queue.len()
+            count,
+            test_id,
+            queue.len()
         );
 
         // Return empty vector as ports will be assigned when queue is processed
@@ -417,10 +425,9 @@ impl PortReservationSystem {
                     ReservationEventType::Cancelled,
                     *port,
                     test_id,
-                    HashMap::from([
-                        ("reason".to_string(), "test_cancelled".to_string()),
-                    ])
-                ).await;
+                    HashMap::from([("reason".to_string(), "test_cancelled".to_string())]),
+                )
+                .await;
             }
             ports
         } else {
@@ -539,8 +546,9 @@ impl PortReservationSystem {
                     HashMap::from([
                         ("expiry_reason".to_string(), "timeout".to_string()),
                         ("duration_exceeded".to_string(), "true".to_string()),
-                    ])
-                ).await;
+                    ]),
+                )
+                .await;
 
                 warn!(
                     "Expired port reservation: port {} from test {} (reserved at {}, expired at {})",
@@ -599,23 +607,38 @@ impl PortReservationSystem {
         // Log the event based on its type and importance
         match event_type {
             ReservationEventType::Created => {
-                debug!("Reservation event: Created port {} for test {}", port, test_id);
-            }
+                debug!(
+                    "Reservation event: Created port {} for test {}",
+                    port, test_id
+                );
+            },
             ReservationEventType::Fulfilled => {
-                info!("Reservation event: Fulfilled port {} for test {}", port, test_id);
-            }
+                info!(
+                    "Reservation event: Fulfilled port {} for test {}",
+                    port, test_id
+                );
+            },
             ReservationEventType::Cancelled => {
-                debug!("Reservation event: Cancelled port {} for test {}", port, test_id);
-            }
+                debug!(
+                    "Reservation event: Cancelled port {} for test {}",
+                    port, test_id
+                );
+            },
             ReservationEventType::Expired => {
-                warn!("Reservation event: Expired port {} for test {}", port, test_id);
-            }
+                warn!(
+                    "Reservation event: Expired port {} for test {}",
+                    port, test_id
+                );
+            },
             ReservationEventType::Queued => {
                 debug!("Reservation event: Queued reservation for test {}", test_id);
-            }
+            },
             ReservationEventType::Conflict => {
-                warn!("Reservation event: Conflict detected for port {} by test {}", port, test_id);
-            }
+                warn!(
+                    "Reservation event: Conflict detected for port {} by test {}",
+                    port, test_id
+                );
+            },
         }
     }
 
@@ -679,10 +702,7 @@ impl PortReservationSystem {
     /// Vector of port numbers reserved by the test
     pub fn get_reservations_for_test(&self, test_id: &str) -> Vec<u16> {
         let reservations_by_test = self.reservations_by_test.lock();
-        reservations_by_test
-            .get(test_id)
-            .cloned()
-            .unwrap_or_default()
+        reservations_by_test.get(test_id).cloned().unwrap_or_default()
     }
 
     /// Check if a specific port is reserved
@@ -734,11 +754,7 @@ impl PortReservationSystem {
     /// Vector of reservation events for the specified test
     pub fn get_reservation_history_for_test(&self, test_id: &str) -> Vec<PortReservationEvent> {
         let history = self.reservation_history.lock();
-        history
-            .iter()
-            .filter(|event| event.test_id == test_id)
-            .cloned()
-            .collect()
+        history.iter().filter(|event| event.test_id == test_id).cloned().collect()
     }
 
     /// Update reservation system configuration
@@ -750,7 +766,10 @@ impl PortReservationSystem {
     /// # Returns
     ///
     /// Success or error if configuration is invalid
-    pub async fn update_config(&self, new_config: PortReservationConfig) -> PortManagementResult<()> {
+    pub async fn update_config(
+        &self,
+        new_config: PortReservationConfig,
+    ) -> PortManagementResult<()> {
         let mut config = self.config.write();
         *config = new_config;
         info!("Updated port reservation system configuration");

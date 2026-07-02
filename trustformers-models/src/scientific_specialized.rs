@@ -36,16 +36,22 @@
 //!
 //! ## Example Usage
 //!
-//! ```rust
+//! ```rust,no_run
 //! use trustformers_models::scientific_specialized::{ScientificConfig, ScientificForCausalLM};
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create a scientific model for physics research
+//! // (`physics_7b()` is a genuine ~7B-parameter preset; this example is marked
+//! // `no_run` since constructing it allocates full-size weights.)
 //! let config = ScientificConfig::physics_7b();
 //! let model = ScientificForCausalLM::new(config)?;
 //!
 //! // For scientific text generation
 //! let input = "The quantum mechanical behavior of electrons in superconductors";
 //! let response = model.generate(input, 200)?;
+//! # let _ = response;
+//! # Ok(())
+//! # }
 //! ```
 
 use crate::common_patterns::GenerationConfig;

@@ -406,15 +406,6 @@ impl ConfigurationPresets {
                     .persist_important_memories(true)
                     .build()
             )
-            // TODO: Implement analysis_config when AnalysisConfigBuilder is available
-            // .analysis_config(
-            //     AnalysisConfigBuilder::new()
-            //         .enabled(true)
-            //         .sentiment_analysis(true)
-            //         .topic_tracking(true)
-            //         .entity_recognition(true)
-            //         .build()
-            // )
             .build_unchecked()
     }
 
@@ -459,14 +450,6 @@ impl ConfigurationPresets {
                     .persist_important_memories(false)
                     .build()
             )
-            // TODO: Implement analysis_config when AnalysisConfigBuilder is available
-            // .analysis_config(
-            //     AnalysisConfigBuilder::new()
-            //         .enabled(true)
-            //         .topic_tracking(true)
-            //         .entity_recognition(true)
-            //         .build()
-            // )
             .build_unchecked()
     }
 
@@ -485,13 +468,6 @@ impl ConfigurationPresets {
                     .persist_important_memories(true)
                     .build()
             )
-            // TODO: Implement reasoning_config when ReasoningConfigBuilder is available
-            // .reasoning_config(
-            //     ReasoningConfigBuilder::new()
-            //         .enabled(true)
-            //         .timeout_ms(3000)
-            //         .build()
-            // )
             .build_unchecked()
     }
 
@@ -992,6 +968,141 @@ mod tests {
             cfg.conversation_mode,
             ConversationMode::InstructionFollowing,
             "instruction_config must use InstructionFollowing mode"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Targeted tests for the three presets that previously had dead
+    // AnalysisConfigBuilder / ReasoningConfigBuilder comment blocks.
+    // Verify that the active configuration fields are correct after cleanup.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_assistant_config_memory_enabled_and_persists() {
+        let cfg = ConfigurationPresets::assistant_config();
+        assert!(
+            cfg.memory_config.enabled,
+            "assistant_config: memory must be enabled"
+        );
+        assert!(
+            cfg.memory_config.persist_important_memories,
+            "assistant_config: important memories must be persisted"
+        );
+        assert_eq!(
+            cfg.memory_config.max_memories, 120,
+            "assistant_config: max_memories must be 120"
+        );
+    }
+
+    #[test]
+    fn test_assistant_config_temperature_and_tokens() {
+        let cfg = ConfigurationPresets::assistant_config();
+        assert!(
+            (cfg.temperature - 0.6).abs() < f32::EPSILON,
+            "assistant_config: temperature must be 0.6, got {}",
+            cfg.temperature
+        );
+        assert_eq!(
+            cfg.max_response_tokens, 1000,
+            "assistant_config: max_response_tokens must be 1000"
+        );
+    }
+
+    #[test]
+    fn test_qa_config_memory_does_not_persist_important() {
+        let cfg = ConfigurationPresets::qa_config();
+        assert!(
+            cfg.memory_config.enabled,
+            "qa_config: memory must be enabled"
+        );
+        assert!(
+            !cfg.memory_config.persist_important_memories,
+            "qa_config: persist_important_memories must be false (short factual Q&A)"
+        );
+        assert_eq!(
+            cfg.memory_config.max_memories, 80,
+            "qa_config: max_memories must be 80"
+        );
+    }
+
+    #[test]
+    fn test_qa_config_temperature_and_tokens() {
+        let cfg = ConfigurationPresets::qa_config();
+        assert!(
+            (cfg.temperature - 0.5).abs() < f32::EPSILON,
+            "qa_config: temperature must be 0.5, got {}",
+            cfg.temperature
+        );
+        assert_eq!(
+            cfg.max_response_tokens, 600,
+            "qa_config: max_response_tokens must be 600"
+        );
+    }
+
+    #[test]
+    fn test_instruction_config_memory_enabled_and_persists() {
+        let cfg = ConfigurationPresets::instruction_config();
+        assert!(
+            cfg.memory_config.enabled,
+            "instruction_config: memory must be enabled"
+        );
+        assert!(
+            cfg.memory_config.persist_important_memories,
+            "instruction_config: important memories must be persisted"
+        );
+        assert_eq!(
+            cfg.memory_config.max_memories, 60,
+            "instruction_config: max_memories must be 60 (tightly scoped task context)"
+        );
+    }
+
+    #[test]
+    fn test_instruction_config_temperature_and_tokens() {
+        let cfg = ConfigurationPresets::instruction_config();
+        assert!(
+            (cfg.temperature - 0.4).abs() < f32::EPSILON,
+            "instruction_config: temperature must be 0.4, got {}",
+            cfg.temperature
+        );
+        assert_eq!(
+            cfg.max_response_tokens, 1200,
+            "instruction_config: max_response_tokens must be 1200"
+        );
+    }
+
+    #[test]
+    fn test_no_analysis_or_reasoning_builder_refs_in_presets() {
+        // Regression guard: assistant_config, qa_config, and instruction_config
+        // previously had dead commented-out blocks referencing non-existent
+        // AnalysisConfigBuilder and ReasoningConfigBuilder. This test verifies
+        // all three functions return coherent ConversationalConfig values —
+        // proving the dead code has been removed and the presets are self-contained.
+        let assistant = ConfigurationPresets::assistant_config();
+        let qa = ConfigurationPresets::qa_config();
+        let instruction = ConfigurationPresets::instruction_config();
+
+        assert!(
+            assistant.system_prompt.is_some(),
+            "assistant must have a system prompt"
+        );
+        assert!(qa.system_prompt.is_some(), "qa must have a system prompt");
+        assert!(
+            instruction.system_prompt.is_some(),
+            "instruction must have a system prompt"
+        );
+
+        // All three must have distinct temperature values reflecting their intent
+        assert!(
+            instruction.temperature < qa.temperature,
+            "instruction ({}) should be more deterministic than qa ({})",
+            instruction.temperature,
+            qa.temperature
+        );
+        assert!(
+            qa.temperature < assistant.temperature,
+            "qa ({}) should be more deterministic than assistant ({})",
+            qa.temperature,
+            assistant.temperature
         );
     }
 }

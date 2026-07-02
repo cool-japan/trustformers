@@ -23,7 +23,7 @@ use crate::common::{OptimizerState, StateMemoryStats};
 use crate::traits::StatefulOptimizer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use trustformers_core::errors::Result;
+use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::Optimizer;
 
@@ -425,10 +425,9 @@ impl Optimizer for CAME {
         let should_factorize = self.should_factorize(&param_id, param_size, rows, cols);
 
         // Update first moment
-        let momentum = self
-            .momentum
-            .get_mut(&param_id)
-            .expect("momentum must exist after initialization");
+        let momentum = self.momentum.get_mut(&param_id).ok_or_else(|| {
+            TrustformersError::invalid_state("momentum must exist after initialization".to_string())
+        })?;
         for i in 0..param_size {
             momentum[i] =
                 self.config.beta1 * momentum[i] + (1.0 - self.config.beta1) * grad_data[i];
@@ -437,14 +436,16 @@ impl Optimizer for CAME {
         // Update second moment (factorized or full)
         if should_factorize {
             // Factorized update
-            let row_factors = self
-                .row_factors
-                .get_mut(&param_id)
-                .expect("row_factors must exist after initialization");
-            let col_factors = self
-                .col_factors
-                .get_mut(&param_id)
-                .expect("col_factors must exist after initialization");
+            let row_factors = self.row_factors.get_mut(&param_id).ok_or_else(|| {
+                TrustformersError::invalid_state(
+                    "row_factors must exist after initialization".to_string(),
+                )
+            })?;
+            let col_factors = self.col_factors.get_mut(&param_id).ok_or_else(|| {
+                TrustformersError::invalid_state(
+                    "col_factors must exist after initialization".to_string(),
+                )
+            })?;
 
             // Update row factors
             for i in 0..rows {
@@ -486,10 +487,11 @@ impl Optimizer for CAME {
             }
         } else {
             // Full second moment update
-            let variance = self
-                .variance
-                .get_mut(&param_id)
-                .expect("variance must exist after initialization");
+            let variance = self.variance.get_mut(&param_id).ok_or_else(|| {
+                TrustformersError::invalid_state(
+                    "variance must exist after initialization".to_string(),
+                )
+            })?;
             for i in 0..param_size {
                 variance[i] = self.config.beta2 * variance[i]
                     + (1.0 - self.config.beta2) * grad_data[i] * grad_data[i];

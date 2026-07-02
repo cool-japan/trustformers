@@ -350,20 +350,20 @@ impl HubUiState {
 
     /// Add a model repository
     pub fn add_repository(&self, repository: ModelRepository) -> Result<(), TrustformersError> {
-        let mut repos = self.repositories.lock().expect("lock should not be poisoned");
+        let mut repos = self.repositories.lock().unwrap_or_else(|p| p.into_inner());
         repos.insert(repository.model_id.clone(), repository);
         Ok(())
     }
 
     /// Get a model repository
     pub fn get_repository(&self, model_id: &str) -> Option<ModelRepository> {
-        let repos = self.repositories.lock().expect("lock should not be poisoned");
+        let repos = self.repositories.lock().unwrap_or_else(|p| p.into_inner());
         repos.get(model_id).cloned()
     }
 
     /// List all repositories
     pub fn list_repositories(&self) -> Vec<ModelRepository> {
-        let repos = self.repositories.lock().expect("lock should not be poisoned");
+        let repos = self.repositories.lock().unwrap_or_else(|p| p.into_inner());
         repos.values().cloned().collect()
     }
 
@@ -373,19 +373,17 @@ impl HubUiState {
         model_id: &str,
         version: ModelVersion,
     ) -> Result<(), TrustformersError> {
-        let mut repos = self.repositories.lock().expect("lock should not be poisoned");
+        let mut repos = self.repositories.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(repo) = repos.get_mut(model_id) {
             repo.versions.insert(version.version.clone(), version.clone());
             repo.version_history.push(version.version);
             repo.version_history.sort_by(|a, b| {
-                let a_version = repo.versions.get(a).expect("version in history must exist");
-                let b_version = repo.versions.get(b).expect("version in history must exist");
-                a_version.created_at.cmp(&b_version.created_at)
+                let a_created = repo.versions.get(a).map(|v| v.created_at);
+                let b_created = repo.versions.get(b).map(|v| v.created_at);
+                a_created.cmp(&b_created)
             });
-            repo.metadata.updated_at = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("SystemTime should be after UNIX_EPOCH")
-                .as_secs();
+            repo.metadata.updated_at =
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
             repo.metadata.stats.version_count = repo.versions.len();
             Ok(())
         } else {
@@ -402,12 +400,9 @@ impl HubUiState {
         model_id: &str,
         metadata: RepositoryMetadata,
     ) -> Result<ModelRepository, TrustformersError> {
-        let mut repos = self.repositories.lock().expect("lock should not be poisoned");
+        let mut repos = self.repositories.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(repo) = repos.get_mut(model_id) {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("SystemTime should be after UNIX_EPOCH")
-                .as_secs();
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
             repo.metadata = metadata;
             repo.metadata.updated_at = now;
             repo.metadata.stats.last_activity = now;
@@ -422,7 +417,7 @@ impl HubUiState {
 
     /// Delete a repository
     pub fn delete_repository(&self, model_id: &str) -> Result<(), TrustformersError> {
-        let mut repos = self.repositories.lock().expect("lock should not be poisoned");
+        let mut repos = self.repositories.lock().unwrap_or_else(|p| p.into_inner());
         if repos.remove(model_id).is_some() {
             Ok(())
         } else {
@@ -440,14 +435,12 @@ impl HubUiState {
         version_id: &str,
         updated_version: ModelVersion,
     ) -> Result<ModelVersion, TrustformersError> {
-        let mut repos = self.repositories.lock().expect("lock should not be poisoned");
+        let mut repos = self.repositories.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(repo) = repos.get_mut(model_id) {
             if repo.versions.contains_key(version_id) {
                 repo.versions.insert(version_id.to_string(), updated_version.clone());
-                repo.metadata.updated_at = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .expect("SystemTime should be after UNIX_EPOCH")
-                    .as_secs();
+                repo.metadata.updated_at =
+                    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
                 Ok(updated_version)
             } else {
                 Err(TrustformersError::hub(
@@ -469,14 +462,12 @@ impl HubUiState {
         model_id: &str,
         version_id: &str,
     ) -> Result<(), TrustformersError> {
-        let mut repos = self.repositories.lock().expect("lock should not be poisoned");
+        let mut repos = self.repositories.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(repo) = repos.get_mut(model_id) {
             if repo.versions.remove(version_id).is_some() {
                 repo.version_history.retain(|v| v != version_id);
-                repo.metadata.updated_at = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .expect("SystemTime should be after UNIX_EPOCH")
-                    .as_secs();
+                repo.metadata.updated_at =
+                    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
                 repo.metadata.stats.version_count = repo.versions.len();
                 Ok(())
             } else {
@@ -497,10 +488,7 @@ impl HubUiState {
 impl ModelRepository {
     /// Create a new model repository
     pub fn new(model_id: String, owner: String) -> Self {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("SystemTime should be after UNIX_EPOCH")
-            .as_secs();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
         Self {
             model_id: model_id.clone(),
             versions: HashMap::new(),
@@ -558,10 +546,7 @@ impl ModelRepository {
             size_diff: to_version.size_bytes as i64 - from_version.size_bytes as i64,
             changes: self.compute_changes(from_version, to_version),
             performance_diff: self.compute_performance_diff(from_version, to_version),
-            created_at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("SystemTime should be after UNIX_EPOCH")
-                .as_secs(),
+            created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
         })
     }
 
@@ -1588,11 +1573,8 @@ fn generate_css(theme: &ThemeConfig) -> String {
 
 fn format_timestamp(timestamp: u64) -> String {
     // Simple timestamp formatting - in production would use proper date formatting
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("SystemTime should be after UNIX_EPOCH")
-        .as_secs()
-        - timestamp;
+    let duration =
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() - timestamp;
 
     if duration < 60 {
         "Just now".to_string()

@@ -144,9 +144,8 @@ impl TimeSeriesAggregationStrategy {
         smoothed.push(values[0]);
 
         for &value in values.iter().skip(1) {
-            // Safe: we pushed values[0] above
-            let last_smoothed =
-                *smoothed.last().expect("smoothed should not be empty after initial push");
+            // Safe: we pushed values[0] above, and values is non-empty here.
+            let last_smoothed = *smoothed.last().unwrap_or(&values[0]);
             let new_smoothed = (self.smoothing_factor as f64) * value
                 + (1.0 - (self.smoothing_factor as f64)) * last_smoothed;
             smoothed.push(new_smoothed);

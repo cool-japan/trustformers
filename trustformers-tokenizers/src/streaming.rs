@@ -266,6 +266,8 @@ pub struct TextFileIterator<R: BufRead> {
     reader: R,
     buffer: String,
     chunk_size: usize,
+    // reason: captured from the constructor for parity with the chunker config;
+    // this low-level iterator does not itself apply chunk overlap.
     #[allow(dead_code)]
     overlap_size: usize,
     eof: bool,

@@ -347,20 +347,17 @@ impl Memory64Manager {
 
         for chunk in &self.allocation_chunks {
             let chunk_info = js_sys::Object::new();
-            js_sys::Reflect::set(&chunk_info, &"id".into(), &(chunk.id as f64).into())
-                .expect("Failed to set chunk id property");
-            js_sys::Reflect::set(
+            let _ = js_sys::Reflect::set(&chunk_info, &"id".into(), &(chunk.id as f64).into());
+            let _ = js_sys::Reflect::set(
                 &chunk_info,
                 &"size_gb".into(),
                 &((chunk.size_bytes as f64) / (1024.0 * 1024.0 * 1024.0)).into(),
-            )
-            .expect("Failed to set memory64 allocation chunk info property");
-            js_sys::Reflect::set(
+            );
+            let _ = js_sys::Reflect::set(
                 &chunk_info,
                 &"purpose".into(),
                 &chunk.purpose.clone().into(),
-            )
-            .expect("Failed to set memory64 allocation chunk info property");
+            );
             details.push(&chunk_info);
         }
 

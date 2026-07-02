@@ -1,4 +1,8 @@
 //! Sustainability advisor and goal tracking for environmental monitoring
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use crate::environmental_monitor::types::*;
 use anyhow::Result;
@@ -22,10 +26,8 @@ pub struct ProgressTracker {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct CertificationRequirement {
     certification_name: String,
-    #[allow(dead_code)]
     requirements: Vec<String>,
     current_compliance: f64,
     required_compliance: f64,

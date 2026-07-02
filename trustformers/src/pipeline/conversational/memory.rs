@@ -268,7 +268,7 @@ impl MemoryManager {
             .max_by(|a, b| {
                 a.importance.partial_cmp(&b.importance).unwrap_or(std::cmp::Ordering::Equal)
             })
-            .expect("memories list should not be empty");
+            .unwrap_or(&memories[0]);
 
         // Combine content
         let mut combined_content = base_memory.content.clone();
@@ -292,11 +292,8 @@ impl MemoryManager {
         let combined_importance = (max_importance + avg_importance) / 2.0;
 
         // Use the most recent access time
-        let last_accessed = memories
-            .iter()
-            .map(|m| m.last_accessed)
-            .max()
-            .expect("memories should have at least one element");
+        let last_accessed =
+            memories.iter().map(|m| m.last_accessed).max().unwrap_or_else(chrono::Utc::now);
 
         // Sum access counts
         let total_access_count = memories.iter().map(|m| m.access_count).sum();
@@ -383,11 +380,12 @@ impl MemoryManager {
         conversation_id: &str,
         memories: &[ConversationMemory],
     ) -> Result<()> {
-        if !self.config.persist_important_memories || self.storage_path.is_none() {
+        if !self.config.persist_important_memories {
             return Ok(());
         }
-
-        let storage_path = self.storage_path.as_ref().expect("storage_path checked as Some above");
+        let Some(storage_path) = self.storage_path.as_ref() else {
+            return Ok(());
+        };
         let file_path = format!("{}/memories_{}.json", storage_path, conversation_id);
 
         // Filter important memories to persist
@@ -431,11 +429,12 @@ impl MemoryManager {
 
     /// Load memories from persistent storage
     pub async fn load_memories(&self, conversation_id: &str) -> Result<Vec<ConversationMemory>> {
-        if !self.config.persist_important_memories || self.storage_path.is_none() {
+        if !self.config.persist_important_memories {
             return Ok(Vec::new());
         }
-
-        let storage_path = self.storage_path.as_ref().expect("storage_path checked as Some above");
+        let Some(storage_path) = self.storage_path.as_ref() else {
+            return Ok(Vec::new());
+        };
         let file_path = format!("{}/memories_{}.json", storage_path, conversation_id);
 
         if !Path::new(&file_path).exists() {
@@ -471,11 +470,9 @@ impl MemoryManager {
 
     /// Delete persistent memories for a conversation
     pub async fn delete_memories(&self, conversation_id: &str) -> Result<()> {
-        if self.storage_path.is_none() {
+        let Some(storage_path) = self.storage_path.as_ref() else {
             return Ok(());
-        }
-
-        let storage_path = self.storage_path.as_ref().expect("storage_path checked as Some above");
+        };
         let file_path = format!("{}/memories_{}.json", storage_path, conversation_id);
 
         if Path::new(&file_path).exists() {
@@ -997,13 +994,13 @@ mod tests {
     #[test]
     fn test_memory_manager_with_storage() {
         let config = create_test_memory_config();
-        let storage_path = "/tmp/test_memories";
-        let manager = MemoryManager::with_storage(config, storage_path);
+        let storage_path = std::env::temp_dir().join("test_memories");
+        let manager = MemoryManager::with_storage(config, storage_path.clone());
 
         assert!(manager.storage_path.is_some());
         assert_eq!(
             manager.storage_path.expect("operation failed in test"),
-            storage_path
+            storage_path.to_string_lossy().into_owned()
         );
     }
 

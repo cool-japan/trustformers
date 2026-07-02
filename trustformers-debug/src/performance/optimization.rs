@@ -3,6 +3,10 @@
 //! This module provides advanced performance optimizations including low overhead
 //! sessions, lazy evaluation, incremental processing, background processing,
 //! and selective debugging capabilities for production environments.
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use crate::core::session::{DebugConfig, DebugSession};
 use anyhow::Result;
@@ -380,7 +384,6 @@ pub enum IncrementalData {
 pub struct BackgroundProcessor {
     batch_size: usize,
     task_queue: Vec<BackgroundTask>,
-    #[allow(dead_code)]
     processed_count: usize,
     worker_handle: Option<tokio::task::JoinHandle<()>>,
 }

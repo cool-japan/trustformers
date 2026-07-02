@@ -46,6 +46,10 @@ pub mod monitoring;
 pub mod performance_tracker;
 pub mod types;
 
+// Manager tests (unit tests exercising the GpuResourceManager directly)
+#[cfg(test)]
+mod manager_tests;
+
 // Re-export everything to maintain backward compatibility
 // Note: We use explicit imports for submodules that have conflicting `functions` module names
 // to avoid ambiguous glob re-export warnings.

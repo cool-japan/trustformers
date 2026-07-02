@@ -506,7 +506,7 @@ impl DRPrometheusMetrics {
                 prometheus::opts!("dr_site_health", "Disaster recovery site health status"),
                 &["site_id", "site_type"],
             )
-            .expect("static prometheus opts should be valid")
+            .unwrap_or_else(|_| unreachable!("static prometheus opts are valid"))
         })
         .with_label_values(&["", ""]);
         let failover_duration = register_histogram_vec!(
@@ -522,7 +522,7 @@ impl DRPrometheusMetrics {
                 ),
                 &["from_site", "to_site"],
             )
-            .expect("static prometheus opts should be valid")
+            .unwrap_or_else(|_| unreachable!("static prometheus opts are valid"))
         })
         .with_label_values(&["", ""]);
         let replication_lag = register_gauge_vec!(
@@ -538,7 +538,7 @@ impl DRPrometheusMetrics {
                 ),
                 &["target_id"],
             )
-            .expect("static prometheus opts should be valid")
+            .unwrap_or_else(|_| unreachable!("static prometheus opts are valid"))
         })
         .with_label_values(&[""]);
         let backup_success_rate = register_gauge_vec!(
@@ -554,7 +554,7 @@ impl DRPrometheusMetrics {
                 ),
                 &["backup_type"],
             )
-            .expect("static prometheus opts should be valid")
+            .unwrap_or_else(|_| unreachable!("static prometheus opts are valid"))
         })
         .with_label_values(&[""]);
         let rto_seconds =
@@ -564,7 +564,7 @@ impl DRPrometheusMetrics {
                         prometheus::opts!("dr_rto_seconds", "Recovery Time Objective in seconds"),
                         &[] as &[&str],
                     )
-                    .expect("static prometheus opts should be valid")
+                    .unwrap_or_else(|_| unreachable!("static prometheus opts are valid"))
                 })
                 .with_label_values(&[] as &[&str]);
         let rpo_seconds =
@@ -574,7 +574,7 @@ impl DRPrometheusMetrics {
                         prometheus::opts!("dr_rpo_seconds", "Recovery Point Objective in seconds"),
                         &[] as &[&str],
                     )
-                    .expect("static prometheus opts should be valid")
+                    .unwrap_or_else(|_| unreachable!("static prometheus opts are valid"))
                 })
                 .with_label_values(&[] as &[&str]);
         let dr_events = register_counter_vec!(
@@ -587,7 +587,7 @@ impl DRPrometheusMetrics {
                 prometheus::opts!("dr_events_total", "Total disaster recovery events"),
                 &["event_type", "severity"],
             )
-            .expect("static prometheus opts should be valid")
+            .unwrap_or_else(|_| unreachable!("static prometheus opts are valid"))
         })
         .with_label_values(&["", ""]);
         Ok(Self {

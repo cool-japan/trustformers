@@ -215,7 +215,6 @@ impl DeviceSelector {
     }
 
     /// Detect if running on a mobile device
-    #[allow(clippy::excessive_nesting)]
     fn detect_mobile_device() -> bool {
         if let Some(window) = web_sys::window() {
             if let Ok(navigator) = js_sys::Reflect::get(&window, &JsValue::from_str("navigator")) {

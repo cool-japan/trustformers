@@ -447,7 +447,8 @@ impl HyperparameterTuner for BayesianOptimizationTuner {
         let y_train: Vec<f64> = history.iter().map(|r| r.primary_metric).collect();
 
         {
-            let mut gp = self.gaussian_process.write().expect("lock should not be poisoned");
+            let mut gp =
+                self.gaussian_process.write().unwrap_or_else(|poisoned| poisoned.into_inner());
             gp.fit(x_train, y_train);
         }
 
@@ -520,7 +521,8 @@ impl BayesianOptimizationTuner {
             let x = config_to_vector(&candidate, space)?;
 
             let (mean, std) = {
-                let gp = self.gaussian_process.read().expect("lock should not be poisoned");
+                let gp =
+                    self.gaussian_process.read().unwrap_or_else(|poisoned| poisoned.into_inner());
                 gp.predict(&x)
             };
 
@@ -613,7 +615,6 @@ impl AutomatedHyperparameterTuner {
         );
 
         let mut iteration = 0;
-        #[allow(unused_variables)]
         let mut _trials_without_improvement = 0;
 
         while iteration < self.config.max_trials {
@@ -626,7 +627,7 @@ impl AutomatedHyperparameterTuner {
             }
 
             let results_snapshot = {
-                let results = self.results.read().expect("lock should not be poisoned");
+                let results = self.results.read().unwrap_or_else(|poisoned| poisoned.into_inner());
                 results.clone()
             };
 
@@ -704,7 +705,7 @@ impl AutomatedHyperparameterTuner {
                                         > self
                                             .results
                                             .read()
-                                            .expect("RwLock should not be poisoned")
+                                            .unwrap_or_else(|poisoned| poisoned.into_inner())
                                             .iter()
                                             .map(|r| r.primary_metric)
                                             .fold(f64::NEG_INFINITY, f64::max)
@@ -716,7 +717,7 @@ impl AutomatedHyperparameterTuner {
                                         < self
                                             .results
                                             .read()
-                                            .expect("RwLock should not be poisoned")
+                                            .unwrap_or_else(|poisoned| poisoned.into_inner())
                                             .iter()
                                             .map(|r| r.primary_metric)
                                             .fold(f64::INFINITY, f64::min)
@@ -732,8 +733,10 @@ impl AutomatedHyperparameterTuner {
 
                         self.tuner.update_with_result(&trial_result)?;
                         {
-                            let mut results =
-                                self.results.write().expect("lock should not be poisoned");
+                            let mut results = self
+                                .results
+                                .write()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
                             results.push(trial_result);
                         }
                     },
@@ -754,7 +757,7 @@ impl AutomatedHyperparameterTuner {
         }
 
         // Return best result
-        let results = self.results.read().expect("lock should not be poisoned");
+        let results = self.results.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         let best_result = match self.config.optimization_direction {
             OptimizationDirection::Maximize => results.iter().max_by(|a, b| {
                 a.primary_metric
@@ -772,7 +775,7 @@ impl AutomatedHyperparameterTuner {
     }
 
     fn print_progress(&self, completed_trials: usize) {
-        let results = self.results.read().expect("lock should not be poisoned");
+        let results = self.results.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         if results.is_empty() {
             return;
         }
@@ -803,12 +806,12 @@ impl AutomatedHyperparameterTuner {
     }
 
     pub fn get_optimization_history(&self) -> Vec<TuningResult> {
-        let results = self.results.read().expect("lock should not be poisoned");
+        let results = self.results.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         results.clone()
     }
 
     pub fn export_results(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let results = self.results.read().expect("lock should not be poisoned");
+        let results = self.results.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         let json = serde_json::to_string_pretty(&*results)?;
         std::fs::write(path, json)?;
         Ok(())

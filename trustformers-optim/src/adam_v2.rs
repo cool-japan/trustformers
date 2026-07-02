@@ -149,16 +149,16 @@ impl StandardizedAdam {
         self.state.get_or_create_variance(param_id.clone(), size);
 
         // Get references to the state buffers and ensure correct size
-        let momentum = self
-            .state
-            .momentum
-            .get_mut(&param_id)
-            .expect("momentum buffer must exist after get_or_create");
-        let variance = self
-            .state
-            .variance
-            .get_mut(&param_id)
-            .expect("variance buffer must exist after get_or_create");
+        let momentum = self.state.momentum.get_mut(&param_id).ok_or_else(|| {
+            TrustformersError::invalid_state(
+                "momentum buffer must exist after get_or_create".to_string(),
+            )
+        })?;
+        let variance = self.state.variance.get_mut(&param_id).ok_or_else(|| {
+            TrustformersError::invalid_state(
+                "variance buffer must exist after get_or_create".to_string(),
+            )
+        })?;
 
         // Ensure buffers have correct size (resize if needed)
         if momentum.len() != size {
@@ -247,8 +247,16 @@ impl Optimizer for StandardizedAdam {
         let param_id = ParameterIds::from_tensor(parameter)?;
         match (parameter, grad) {
             (Tensor::F32(param), Tensor::F32(grad_arr)) => self.update_parameter(
-                param.as_slice_mut().expect("parameter array must be contiguous"),
-                grad_arr.as_slice().expect("gradient array must be contiguous"),
+                param.as_slice_mut().ok_or_else(|| {
+                    TrustformersError::invalid_state(
+                        "parameter array must be contiguous".to_string(),
+                    )
+                })?,
+                grad_arr.as_slice().ok_or_else(|| {
+                    TrustformersError::invalid_state(
+                        "gradient array must be contiguous".to_string(),
+                    )
+                })?,
                 param_id,
             ),
             _ => Err(TrustformersError::tensor_op_error(

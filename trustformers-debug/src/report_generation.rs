@@ -3,6 +3,10 @@
 //! This module provides comprehensive reporting capabilities for debugging,
 //! analysis, and documentation. Supports multiple output formats including
 //! PDF, Markdown, HTML, JSON, and Jupyter notebooks.
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use crate::{
     gradient_debugger::GradientDebugReport,
@@ -179,7 +183,6 @@ pub struct ReportGenerator {
     /// Profiling data
     profiling_data: Option<ProfilerReport>,
     /// Visualizer
-    #[allow(dead_code)]
     visualizer: DebugVisualizer,
 }
 
@@ -558,7 +561,7 @@ impl ReportGenerator {
             data.insert(
                 "memory_stats".to_string(),
                 serde_json::to_value(&profiling_data.memory_efficiency)
-                    .expect("memory_efficiency should always serialize to JSON"),
+                    .map_err(|e| ReportError::SerializationError(e.to_string()))?,
             );
         } else {
             content.push_str("No memory data available.\n");
@@ -617,7 +620,7 @@ impl ReportGenerator {
             data.insert(
                 "gradient_analysis".to_string(),
                 serde_json::to_value(debug_data)
-                    .expect("debug_data should always serialize to JSON"),
+                    .map_err(|e| ReportError::SerializationError(e.to_string()))?,
             );
         } else {
             content.push_str("No gradient data available.\n");
@@ -765,7 +768,7 @@ impl ReportGenerator {
             raw_data.insert(
                 "debug_data".to_string(),
                 serde_json::to_value(debug_data)
-                    .expect("debug_data should always serialize to JSON"),
+                    .map_err(|e| ReportError::SerializationError(e.to_string()))?,
             );
         }
 
@@ -773,7 +776,7 @@ impl ReportGenerator {
             raw_data.insert(
                 "profiling_data".to_string(),
                 serde_json::to_value(profiling_data)
-                    .expect("profiling_data should always serialize to JSON"),
+                    .map_err(|e| ReportError::SerializationError(e.to_string()))?,
             );
         }
 
@@ -888,7 +891,9 @@ impl ReportGenerator {
                 report.metadata.title,
                 report.generated_at.format("%Y-%m-%d %H:%M:%S UTC"))]
         });
-        let cells = notebook["cells"].as_array_mut().expect("notebook cells should be an array");
+        let cells = notebook["cells"].as_array_mut().ok_or_else(|| {
+            ReportError::SerializationError("notebook cells should be an array".to_string())
+        })?;
         cells.push(title_cell);
 
         // Add content cells

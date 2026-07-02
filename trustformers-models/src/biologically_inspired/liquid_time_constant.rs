@@ -116,7 +116,11 @@ impl LTCLayer {
 
     /// Forward pass for a single timestep
     fn forward_timestep(&mut self, input: &Tensor) -> Result<Tensor> {
-        let neuron_state = self.neuron_state.as_mut().expect("operation failed");
+        let neuron_state = self.neuron_state.as_mut().ok_or_else(|| {
+            trustformers_core::errors::TrustformersError::model_error(
+                "Liquid time-constant neuron state not initialized".to_string(),
+            )
+        })?;
         let dt = self.config.dt;
 
         // Project input

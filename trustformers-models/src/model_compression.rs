@@ -16,20 +16,43 @@
 //!
 //! ```rust,no_run
 //! use trustformers_models::model_compression::{
-//!     CompressionPipeline, CompressionConfig, CompressionStrategy
+//!     CompressionPipeline, CompressionConfig, CompressionStrategy, PruningStrategy
 //! };
+//! use trustformers_core::traits::{Config, Model};
+//! use serde::{Deserialize, Serialize};
 //!
+//! # #[derive(Debug, Clone, Serialize, Deserialize)]
+//! # struct DocConfig;
+//! # impl Config for DocConfig {
+//! #     fn architecture(&self) -> &'static str { "doc" }
+//! # }
+//! # struct DocModel;
+//! # impl Model for DocModel {
+//! #     type Config = DocConfig;
+//! #     type Input = ();
+//! #     type Output = ();
+//! #     fn forward(&self, input: ()) -> trustformers_core::Result<()> { Ok(input) }
+//! #     fn load_pretrained(&mut self, _r: &mut dyn std::io::Read) -> trustformers_core::Result<()> { Ok(()) }
+//! #     fn get_config(&self) -> &DocConfig { &DocConfig }
+//! #     fn num_parameters(&self) -> usize { 0 }
+//! # }
+//!
+//! # fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 //! let config = CompressionConfig {
 //!     target_compression_ratio: 0.25, // 4x compression
 //!     strategies: vec![
-//!         CompressionStrategy::Quantization { bits: 8 },
-//!         CompressionStrategy::UnstructuredPruning { sparsity: 0.5 },
+//!         CompressionStrategy::Quantization { bits: 8, signed: true, symmetric: true },
+//!         CompressionStrategy::UnstructuredPruning { sparsity: 0.5, strategy: PruningStrategy::Magnitude },
 //!     ],
 //!     ..Default::default()
 //! };
 //!
 //! let pipeline = CompressionPipeline::new(config)?;
+//! # let model = DocModel;
 //! let compressed_model = pipeline.compress(model)?;
+//! # let _ = compressed_model;
+//! # Ok(())
+//! # }
 //! ```
 
 use serde::{Deserialize, Serialize};

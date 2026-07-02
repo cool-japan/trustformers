@@ -95,27 +95,30 @@ impl MemoryProfiler {
 
     /// Enable profiling
     pub fn enable(&self) {
-        *self.enabled.lock().expect("Lock poisoned") = true;
+        *self.enabled.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
     }
 
     /// Disable profiling
     pub fn disable(&self) {
-        *self.enabled.lock().expect("Lock poisoned") = false;
+        *self.enabled.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
     }
 
     /// Check if profiling is enabled
     pub fn is_enabled(&self) -> bool {
-        *self.enabled.lock().expect("Lock poisoned")
+        *self.enabled.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Push a context tag
     pub fn push_tag(&self, tag: String) {
-        self.context_tags.lock().expect("Lock poisoned").push(tag);
+        self.context_tags
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(tag);
     }
 
     /// Pop a context tag
     pub fn pop_tag(&self) {
-        self.context_tags.lock().expect("Lock poisoned").pop();
+        self.context_tags.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).pop();
     }
 
     /// Record an allocation
@@ -125,13 +128,18 @@ impl MemoryProfiler {
         }
 
         let id = {
-            let mut next_id = self.next_id.lock().expect("Lock poisoned");
+            let mut next_id = self.next_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let id = *next_id;
             *next_id += 1;
             id
         };
 
-        let tag = self.context_tags.lock().expect("Lock poisoned").last().cloned();
+        let tag = self
+            .context_tags
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .last()
+            .cloned();
 
         let event = AllocationEvent {
             size,
@@ -141,7 +149,10 @@ impl MemoryProfiler {
             tag,
         };
 
-        self.allocations.lock().expect("Lock poisoned").insert(id, event);
+        self.allocations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id, event);
         id
     }
 
@@ -151,12 +162,15 @@ impl MemoryProfiler {
             return;
         }
 
-        self.allocations.lock().expect("Lock poisoned").remove(&id);
+        self.allocations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&id);
     }
 
     /// Take a memory snapshot
     pub fn take_snapshot(&self) -> MemorySnapshot {
-        let allocations = self.allocations.lock().expect("Lock poisoned");
+        let allocations = self.allocations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let allocated_bytes: usize = allocations.values().map(|a| a.size).sum();
         let num_allocations = allocations.len();
@@ -193,12 +207,12 @@ impl MemoryProfiler {
 
     /// Clear all allocations
     pub fn clear(&self) {
-        self.allocations.lock().expect("Lock poisoned").clear();
+        self.allocations.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
     }
 
     /// Get memory statistics
     pub fn get_stats(&self) -> MemoryStats {
-        let allocations = self.allocations.lock().expect("Lock poisoned");
+        let allocations = self.allocations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let total_size: usize = allocations.values().map(|a| a.size).sum();
         let count = allocations.len();

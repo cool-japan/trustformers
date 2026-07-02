@@ -20,7 +20,7 @@ use crate::common::{OptimizerState, StateMemoryStats};
 use crate::traits::StatefulOptimizer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use trustformers_core::errors::Result;
+use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::Optimizer;
 
@@ -215,18 +215,21 @@ impl Optimizer for AdEMAMix {
         let effective_lr = self.effective_learning_rate(self.state.step);
 
         // Get mutable references to buffers (safe: init_param_state ensures they exist)
-        let short_momentum = self
-            .short_momentum
-            .get_mut(&param_id)
-            .expect("short_momentum should exist after init_param_state");
-        let long_momentum = self
-            .long_momentum
-            .get_mut(&param_id)
-            .expect("long_momentum should exist after init_param_state");
-        let variance = self
-            .variance
-            .get_mut(&param_id)
-            .expect("variance should exist after init_param_state");
+        let short_momentum = self.short_momentum.get_mut(&param_id).ok_or_else(|| {
+            TrustformersError::invalid_state(
+                "short_momentum should exist after init_param_state".to_string(),
+            )
+        })?;
+        let long_momentum = self.long_momentum.get_mut(&param_id).ok_or_else(|| {
+            TrustformersError::invalid_state(
+                "long_momentum should exist after init_param_state".to_string(),
+            )
+        })?;
+        let variance = self.variance.get_mut(&param_id).ok_or_else(|| {
+            TrustformersError::invalid_state(
+                "variance should exist after init_param_state".to_string(),
+            )
+        })?;
 
         // Apply weight decay
         if self.config.weight_decay > 0.0 {

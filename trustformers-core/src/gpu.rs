@@ -242,7 +242,9 @@ impl GpuManager {
     /// Detect available GPU devices
     fn detect_devices() -> Vec<GpuDevice> {
         // Always start with CPU as the fallback device. `mut` is used only when a
-        // GPU-backend feature (metal/cuda/rocm/vulkan/…) appends to the list below.
+        // GPU-backend feature (metal/cuda/rocm/vulkan/…) appends to the list below;
+        // with no such feature active (e.g. `cuda-oxicuda` alone) the list is never
+        // appended to, so the `mut` is conditionally unused.
         #[allow(unused_mut)]
         let mut devices = vec![GpuDevice::cpu()];
 
@@ -439,7 +441,7 @@ pub fn gpu_manager() -> Arc<Mutex<GpuManager>> {
 /// Initialize GPU subsystem with optional device preference
 pub fn init_gpu(preferred_backend: Option<GpuBackend>) -> Result<Arc<GpuContext>> {
     let manager = gpu_manager();
-    let manager_lock = manager.lock().expect("Lock poisoned");
+    let manager_lock = manager.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let device_id = if let Some(backend) = preferred_backend {
         manager_lock
@@ -454,7 +456,7 @@ pub fn init_gpu(preferred_backend: Option<GpuBackend>) -> Result<Arc<GpuContext>
     let device_id = device_id.unwrap_or_else(|| manager_lock.best_device().id);
     drop(manager_lock); // Release the lock before calling get_or_create_context
 
-    let mut manager_lock = manager.lock().expect("Lock poisoned");
+    let mut manager_lock = manager.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     manager_lock.get_or_create_context(Some(device_id))
 }
 

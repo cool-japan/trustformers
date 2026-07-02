@@ -949,11 +949,114 @@ impl Gpt2MLP {
         self.c_fc.parameter_count() + self.c_proj.parameter_count()
     }
 
+    /// Fused `matmul + bias + GELU` for the `c_fc` projection on the Metal GPU.
+    ///
+    /// Collapses the three separate operations performed by `c_fc.forward`
+    /// (matmul, bias-add) followed by the GELU activation into a single
+    /// `MetalBackend::matmul_bias_gelu_f32` kernel dispatch (defined in
+    /// `trustformers-core/src/gpu_ops/metal/metalbackend_matmul_gelu_f32_group.rs`).
+    /// The Metal kernel uses the exact same tanh GELU approximation as the CPU
+    /// `gelu` op, so the result is numerically equivalent (within f32 rounding)
+    /// to the separate path.
+    ///
+    /// Returns `Ok(Some(out))` when the fused GPU path ran, or `Ok(None)` when it
+    /// is not applicable (non-Metal device, non-GELU activation, missing bias, or
+    /// non-F32 data) and the caller should fall back to the separate ops.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    fn try_fused_c_fc_gelu(&self, hidden_states: &Tensor) -> Result<Option<Tensor>> {
+        use trustformers_core::gpu_ops::metal::get_metal_backend;
+
+        // The fused kernel computes GELU(A @ B + bias); only valid for the GELU
+        // activation with a bias present, running on a Metal device.
+        if !matches!(self.act_fn, ActivationType::Gelu) {
+            return Ok(None);
+        }
+        if !matches!(self.c_fc.device(), Device::Metal(_)) {
+            return Ok(None);
+        }
+        let bias = match self.c_fc.bias() {
+            Some(bias) => bias,
+            None => return Ok(None),
+        };
+
+        // Materialize the input as a contiguous f32 CPU array (no copy for F32).
+        let input_cpu;
+        let input_arr = match hidden_states {
+            Tensor::F32(arr) => arr,
+            Tensor::Metal(_) => {
+                input_cpu = hidden_states.to_device_enum(&Device::CPU)?;
+                match &input_cpu {
+                    Tensor::F32(arr) => arr,
+                    _ => return Ok(None),
+                }
+            },
+            _ => return Ok(None),
+        };
+        let input_shape = input_arr.shape().to_vec();
+        if input_shape.len() < 2 {
+            return Ok(None);
+        }
+        let k = input_shape[input_shape.len() - 1]; // in_features
+        let m: usize = input_shape[..input_shape.len() - 1].iter().product();
+
+        // Weight is stored as [out_features, in_features]; the fused kernel expects
+        // B = [K, N] = [in_features, out_features], i.e. the transposed weight.
+        let weight_t = self.c_fc.weight().transpose(0, 1)?;
+        let weight_arr = match &weight_t {
+            Tensor::F32(arr) => arr,
+            _ => return Ok(None),
+        };
+        if weight_arr.ndim() != 2 || weight_arr.shape()[0] != k {
+            return Ok(None);
+        }
+        let n = weight_arr.shape()[1]; // out_features
+
+        // Bias as a contiguous f32 [N] slice.
+        let bias_cpu = bias.to_device_enum(&Device::CPU)?;
+        let bias_arr = match &bias_cpu {
+            Tensor::F32(arr) => arr,
+            _ => return Ok(None),
+        };
+        if bias_arr.len() != n {
+            return Ok(None);
+        }
+
+        // Contiguous, row-major data for the GPU upload.
+        let input_std = input_arr.as_standard_layout();
+        let input_data: Vec<f32> = input_std.iter().copied().collect();
+        let weight_std = weight_arr.as_standard_layout();
+        let weight_data: Vec<f32> = weight_std.iter().copied().collect();
+        let bias_data: Vec<f32> = bias_arr.iter().copied().collect();
+
+        // Single fused GPU dispatch: GELU(input @ weightᵀ + bias).
+        let backend = get_metal_backend()?;
+        let result =
+            backend.matmul_bias_gelu_f32(&input_data, &weight_data, &bias_data, m, k, n)?;
+
+        // Restore the leading (batch) dimensions, replacing the feature dim with N.
+        let mut output_shape = input_shape[..input_shape.len() - 1].to_vec();
+        output_shape.push(n);
+        let output_arr = ArrayD::from_shape_vec(IxDyn(&output_shape), result).map_err(|e| {
+            tensor_op_error(
+                "Gpt2MLP::try_fused_c_fc_gelu",
+                format!("failed to reshape fused matmul+bias+GELU result: {e}"),
+            )
+        })?;
+
+        Ok(Some(Tensor::F32(output_arr)))
+    }
+
     fn forward(&self, hidden_states: Tensor) -> Result<Tensor> {
-        // TODO: Fused matmul+bias+GELU kernel for Metal GPU
-        // The kernel is implemented and tested (trustformers-core/src/gpu_ops/metal/metalbackend_matmul_gelu_f32_group.rs)
-        // Full integration requires GPU-resident buffer operations in Linear layer
-        // Current implementation uses MPS/Accelerate which is already highly optimized
+        // Metal GPU fast path: fuse the `c_fc` matmul + bias + GELU into a single
+        // kernel dispatch (matmul_bias_gelu_f32) when the activation is GELU and a
+        // bias is present. Falls back to the separate ops below when not applicable.
+        #[cfg(all(target_os = "macos", feature = "metal"))]
+        {
+            if let Some(fused) = self.try_fused_c_fc_gelu(&hidden_states)? {
+                return self.c_proj.forward(fused);
+            }
+        }
+
         let hidden_states = self.c_fc.forward(hidden_states)?;
         let hidden_states = self.act_fn.apply(hidden_states)?;
         self.c_proj.forward(hidden_states)
@@ -1508,5 +1611,120 @@ mod tests {
                 arr[0]
             );
         }
+    }
+}
+
+/// Parity tests for the fused Metal `matmul + bias + GELU` MLP path.
+///
+/// These assert that `Gpt2MLP::forward` running the fused single-kernel Metal
+/// path produces the same result (within f32 tolerance) as the separate
+/// matmul -> bias -> GELU ops on CPU. They run on the actual GPU.
+#[cfg(all(test, target_os = "macos", feature = "metal"))]
+mod metal_fused_mlp_tests {
+    use super::*;
+    use crate::gpt2::config::Gpt2Config;
+    use scirs2_core::ndarray::{ArrayD, IxDyn};
+    use trustformers_core::device::Device;
+    use trustformers_core::tensor::Tensor;
+
+    // Deterministic LCG so the comparison is fully reproducible.
+    fn lcg_next(state: &mut u64) -> u64 {
+        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *state
+    }
+
+    /// Build a deterministic array with values in `[-scale, scale)`.
+    fn small_array(shape: &[usize], seed: u64, scale: f32) -> ArrayD<f32> {
+        let mut state = seed;
+        let n: usize = shape.iter().product();
+        let data: Vec<f32> = (0..n)
+            .map(|_| {
+                let raw = (lcg_next(&mut state) >> 11) as f32 / (1u64 << 53) as f32; // [0, 1)
+                (raw - 0.5) * 2.0 * scale
+            })
+            .collect();
+        ArrayD::from_shape_vec(IxDyn(shape), data).expect("array shape must match data length")
+    }
+
+    /// Build a GPT-2 MLP with identical deterministic weights on the given device.
+    fn build_mlp(device: Device) -> Result<Gpt2MLP> {
+        let config = Gpt2Config {
+            n_embd: 16,
+            n_inner: Some(64),
+            n_head: 4,
+            ..Default::default()
+        };
+        let mut mlp = Gpt2MLP::new_with_device(&config, device)?;
+        // Small weights (~GPT-2 init scale) keep f32 accumulation error well below tol.
+        mlp.c_fc.set_weight(Tensor::F32(small_array(&[64, 16], 0x1111_1111, 0.1)))?;
+        mlp.c_fc.set_bias(Tensor::F32(small_array(&[64], 0x2222_2222, 0.1)))?;
+        mlp.c_proj.set_weight(Tensor::F32(small_array(&[16, 64], 0x3333_3333, 0.1)))?;
+        mlp.c_proj.set_bias(Tensor::F32(small_array(&[16], 0x4444_4444, 0.1)))?;
+        Ok(mlp)
+    }
+
+    fn assert_close(fused: &Tensor, separate: &Tensor, tol: f32) -> Result<()> {
+        let a = fused.data()?;
+        let b = separate.data()?;
+        assert_eq!(a.len(), b.len(), "output length mismatch");
+        let mut max_diff = 0.0f32;
+        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            let diff = (x - y).abs();
+            if diff > max_diff {
+                max_diff = diff;
+            }
+            assert!(
+                diff <= tol,
+                "element {i} differs: fused={x} separate={y} (diff={diff} > tol={tol})"
+            );
+        }
+        println!("fused-vs-separate max abs diff = {max_diff}");
+        Ok(())
+    }
+
+    #[test]
+    fn test_fused_mlp_matches_separate_ops_2d() -> Result<()> {
+        let mlp_cpu = build_mlp(Device::CPU)?;
+        let mlp_metal = build_mlp(Device::Metal(0))?;
+
+        // 2D input: [seq, n_embd].
+        let input = Tensor::F32(small_array(&[8, 16], 0x00AB_CDEF, 1.0));
+
+        // The fused Metal kernel must actually engage on the Metal device ...
+        assert!(
+            mlp_metal.try_fused_c_fc_gelu(&input)?.is_some(),
+            "fused matmul+bias+GELU Metal path should engage (GELU + bias on Metal device)"
+        );
+        // ... and must NOT engage for the CPU reference (separate ops path).
+        assert!(
+            mlp_cpu.try_fused_c_fc_gelu(&input)?.is_none(),
+            "CPU MLP must use the separate (non-fused) ops path"
+        );
+
+        let out_metal = mlp_metal.forward(input.clone())?; // fused single-kernel path
+        let out_cpu = mlp_cpu.forward(input)?; // separate matmul -> bias -> GELU
+        assert_eq!(out_metal.shape(), vec![8, 16]);
+        assert_close(&out_metal, &out_cpu, 1e-3)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_fused_mlp_matches_separate_ops_3d() -> Result<()> {
+        let mlp_cpu = build_mlp(Device::CPU)?;
+        let mlp_metal = build_mlp(Device::Metal(0))?;
+
+        // 3D input: [batch, seq, n_embd].
+        let input = Tensor::F32(small_array(&[2, 5, 16], 0x0012_3456, 1.0));
+
+        assert!(
+            mlp_metal.try_fused_c_fc_gelu(&input)?.is_some(),
+            "fused matmul+bias+GELU Metal path should engage for 3D input"
+        );
+
+        let out_metal = mlp_metal.forward(input.clone())?;
+        let out_cpu = mlp_cpu.forward(input)?;
+        assert_eq!(out_metal.shape(), vec![2, 5, 16]);
+        assert_close(&out_metal, &out_cpu, 1e-3)?;
+        Ok(())
     }
 }

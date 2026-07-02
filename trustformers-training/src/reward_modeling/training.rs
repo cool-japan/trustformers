@@ -156,7 +156,7 @@ impl fmt::Display for RewardTrainError {
             Self::InvalidScore => write!(f, "Computed reward score is NaN or Inf"),
             Self::MissingScalarLabel => {
                 write!(f, "Regression loss requires scalar_label but it is None")
-            }
+            },
             Self::ZeroHiddenSize => write!(f, "hidden_size must be > 0"),
             Self::ZeroSeqLen => write!(f, "Sequence length must be > 0"),
         }
@@ -209,7 +209,7 @@ pub fn pool_hidden_states(
         PoolingType::LastToken => {
             let start = (seq_len - 1) * hidden_size;
             Ok(hidden[start..start + hidden_size].to_vec())
-        }
+        },
 
         PoolingType::Mean => {
             let mut out = vec![0.0_f32; hidden_size];
@@ -224,7 +224,7 @@ pub fn pool_hidden_states(
                 *val /= n;
             }
             Ok(out)
-        }
+        },
 
         PoolingType::Max => {
             let mut out = vec![f32::NEG_INFINITY; hidden_size];
@@ -238,7 +238,7 @@ pub fn pool_hidden_states(
                 }
             }
             Ok(out)
-        }
+        },
 
         PoolingType::WeightedMean => {
             // weight[t] = t / (seq_len - 1) for t = 0 .. seq_len-1
@@ -252,11 +252,7 @@ pub fn pool_hidden_states(
             };
 
             for t in 0..seq_len {
-                let weight = if seq_len == 1 {
-                    1.0_f32
-                } else {
-                    t as f32 / (seq_len - 1) as f32
-                };
+                let weight = if seq_len == 1 { 1.0_f32 } else { t as f32 / (seq_len - 1) as f32 };
                 let offset = t * hidden_size;
                 for (i, val) in out.iter_mut().enumerate() {
                     *val += weight * hidden[offset + i];
@@ -266,7 +262,7 @@ pub fn pool_hidden_states(
                 *val /= weight_sum;
             }
             Ok(out)
-        }
+        },
     }
 }
 
@@ -294,11 +290,7 @@ pub fn compute_reward_score(
             actual: hidden_state.len().min(reward_head.len()),
         });
     }
-    let score: f32 = hidden_state
-        .iter()
-        .zip(reward_head.iter())
-        .map(|(h, w)| h * w)
-        .sum();
+    let score: f32 = hidden_state.iter().zip(reward_head.iter()).map(|(h, w)| h * w).sum();
     if !score.is_finite() {
         return Err(RewardTrainError::InvalidScore);
     }
@@ -323,24 +315,24 @@ pub fn reward_loss(
         RewardLossType::BradleyTerry => {
             let diff = chosen_score - rejected_score;
             -sigmoid_f32(diff).ln()
-        }
+        },
 
         RewardLossType::Hinge => {
             let diff = chosen_score - rejected_score;
             (config.margin - diff).max(0.0)
-        }
+        },
 
         RewardLossType::InstructGpt => {
             let diff = chosen_score - rejected_score;
             let s = config.label_smoothing;
             // InstructGPT: −(1 − s) log σ(diff) + s log 2
             -(1.0 - s) * sigmoid_f32(diff).ln() + s * 2.0_f32.ln()
-        }
+        },
 
         RewardLossType::Regression => {
             let label = scalar_label.ok_or(RewardTrainError::MissingScalarLabel)?;
             (chosen_score - label).powi(2)
-        }
+        },
     };
 
     if !loss.is_finite() {
@@ -472,7 +464,12 @@ mod tests {
         let config = bt_config(4);
         let loss = reward_loss(1.0, 0.0, &config, None).expect("bt loss");
         let expected = -(sigmoid_f32(1.0).ln());
-        assert!((loss - expected).abs() < 1e-6, "BT loss = {}, expected {}", loss, expected);
+        assert!(
+            (loss - expected).abs() < 1e-6,
+            "BT loss = {}, expected {}",
+            loss,
+            expected
+        );
     }
 
     // ── Test 2: BradleyTerry loss is positive ─────────────────────────────
@@ -498,7 +495,11 @@ mod tests {
 
         // diff = 2.0 → max(0, 1.0 − 2.0) = 0
         let loss_zero = reward_loss(3.0, 1.0, &config, None).expect("hinge zero");
-        assert!(loss_zero.abs() < 1e-6, "Hinge should be 0, got {}", loss_zero);
+        assert!(
+            loss_zero.abs() < 1e-6,
+            "Hinge should be 0, got {}",
+            loss_zero
+        );
     }
 
     // ── Test 4: InstructGPT label smoothing ───────────────────────────────
@@ -543,10 +544,13 @@ mod tests {
         let hidden_size = 8;
         let seq_len = 5;
         let hidden: Vec<f32> = (0..(seq_len * hidden_size) as i32).map(|x| x as f32).collect();
-        let pooled =
-            pool_hidden_states(&hidden, seq_len, hidden_size, PoolingType::LastToken)
-                .expect("pool");
-        assert_eq!(pooled.len(), hidden_size, "LastToken pool length should be hidden_size");
+        let pooled = pool_hidden_states(&hidden, seq_len, hidden_size, PoolingType::LastToken)
+            .expect("pool");
+        assert_eq!(
+            pooled.len(),
+            hidden_size,
+            "LastToken pool length should be hidden_size"
+        );
         // Last token starts at (seq_len-1)*hidden_size
         let start = (seq_len - 1) * hidden_size;
         for (i, &v) in pooled.iter().enumerate() {
@@ -590,9 +594,8 @@ mod tests {
         let config = bt_config(hidden_size);
         let reward_head = vec![1.0_f32; hidden_size];
 
-        let examples: Vec<_> = (0..5)
-            .map(|_| make_example(2, hidden_size, 1.0, -1.0, None))
-            .collect();
+        let examples: Vec<_> =
+            (0..5).map(|_| make_example(2, hidden_size, 1.0, -1.0, None)).collect();
 
         let out = batch_reward_loss(&examples, &reward_head, &config).expect("batch");
         assert!(
@@ -615,7 +618,11 @@ mod tests {
         ];
 
         let out = batch_reward_loss(&examples, &reward_head, &config).expect("batch");
-        assert!(out.total_loss > 0.0, "total_loss should be > 0, got {}", out.total_loss);
+        assert!(
+            out.total_loss > 0.0,
+            "total_loss should be > 0, got {}",
+            out.total_loss
+        );
         assert!(out.mean_chosen_score > out.mean_rejected_score);
     }
 
@@ -728,9 +735,18 @@ mod tests {
         ];
         let out = batch_reward_loss(&examples, &reward_head, &config).expect("out");
         assert!(out.total_loss.is_finite(), "total_loss should be finite");
-        assert!(out.mean_chosen_score.is_finite(), "mean_chosen_score should be finite");
-        assert!(out.mean_rejected_score.is_finite(), "mean_rejected_score should be finite");
-        assert!(out.accuracy >= 0.0 && out.accuracy <= 1.0, "accuracy in [0,1]");
+        assert!(
+            out.mean_chosen_score.is_finite(),
+            "mean_chosen_score should be finite"
+        );
+        assert!(
+            out.mean_rejected_score.is_finite(),
+            "mean_rejected_score should be finite"
+        );
+        assert!(
+            out.accuracy >= 0.0 && out.accuracy <= 1.0,
+            "accuracy in [0,1]"
+        );
         assert!(out.mean_margin.is_finite(), "mean_margin should be finite");
     }
 
@@ -742,9 +758,8 @@ mod tests {
         let reward_head = vec![1.0_f32; hidden_size];
 
         // chosen_val=2.0 > rejected_val=0.0 → score_chosen > score_rejected always
-        let examples: Vec<_> = (0..8)
-            .map(|_| make_example(1, hidden_size, 2.0, 0.0, None))
-            .collect();
+        let examples: Vec<_> =
+            (0..8).map(|_| make_example(1, hidden_size, 2.0, 0.0, None)).collect();
 
         let out = batch_reward_loss(&examples, &reward_head, &config).expect("out");
         assert!(
@@ -761,20 +776,23 @@ mod tests {
         let reward_head = vec![1.0_f32; hidden_size];
 
         // Batch A: all chosen > rejected → accuracy=1.0
-        let examples_a: Vec<_> = (0..4)
-            .map(|_| make_example(1, hidden_size, 1.0, -1.0, None))
-            .collect();
+        let examples_a: Vec<_> =
+            (0..4).map(|_| make_example(1, hidden_size, 1.0, -1.0, None)).collect();
         // Batch B: all chosen < rejected (reversed) → accuracy=0.0
-        let examples_b: Vec<_> = (0..4)
-            .map(|_| make_example(1, hidden_size, -1.0, 1.0, None))
-            .collect();
+        let examples_b: Vec<_> =
+            (0..4).map(|_| make_example(1, hidden_size, -1.0, 1.0, None)).collect();
 
-        let out_a = batch_reward_loss(&examples_a, &reward_head, &bt_config(hidden_size)).expect("a");
-        let out_b = batch_reward_loss(&examples_b, &reward_head, &bt_config(hidden_size)).expect("b");
+        let out_a =
+            batch_reward_loss(&examples_a, &reward_head, &bt_config(hidden_size)).expect("a");
+        let out_b =
+            batch_reward_loss(&examples_b, &reward_head, &bt_config(hidden_size)).expect("b");
 
-        assert!(out_a.accuracy > out_b.accuracy,
+        assert!(
+            out_a.accuracy > out_b.accuracy,
             "batch A accuracy ({}) should be > batch B accuracy ({})",
-            out_a.accuracy, out_b.accuracy);
+            out_a.accuracy,
+            out_b.accuracy
+        );
     }
 
     // 19. Learning rate schedule simulation: loss decreases when margin is large
@@ -785,13 +803,11 @@ mod tests {
         let config = bt_config(hidden_size);
 
         // Large margin: chosen=10, rejected=-10
-        let examples_large: Vec<_> = (0..4)
-            .map(|_| make_example(1, hidden_size, 10.0, -10.0, None))
-            .collect();
+        let examples_large: Vec<_> =
+            (0..4).map(|_| make_example(1, hidden_size, 10.0, -10.0, None)).collect();
         // Small margin: chosen=0.1, rejected=-0.1
-        let examples_small: Vec<_> = (0..4)
-            .map(|_| make_example(1, hidden_size, 0.1, -0.1, None))
-            .collect();
+        let examples_small: Vec<_> =
+            (0..4).map(|_| make_example(1, hidden_size, 0.1, -0.1, None)).collect();
 
         let out_large = batch_reward_loss(&examples_large, &reward_head, &config).expect("large");
         let out_small = batch_reward_loss(&examples_small, &reward_head, &config).expect("small");
@@ -799,7 +815,8 @@ mod tests {
         assert!(
             out_large.total_loss < out_small.total_loss,
             "larger margin should give lower BT loss: {} vs {}",
-            out_large.total_loss, out_small.total_loss
+            out_large.total_loss,
+            out_small.total_loss
         );
     }
 
@@ -816,8 +833,11 @@ mod tests {
         let reward_head = vec![1.0_f32; 2];
         let examples = vec![make_example(1, 2, 2.0, 0.0, None)];
         let out = batch_reward_loss(&examples, &reward_head, &config).expect("hinge");
-        assert!(out.total_loss.abs() < 1e-5,
-            "Hinge loss should be 0 when diff > margin, got {}", out.total_loss);
+        assert!(
+            out.total_loss.abs() < 1e-5,
+            "Hinge loss should be 0 when diff > margin, got {}",
+            out.total_loss
+        );
     }
 
     // 21. Hinge loss: positive when margin not satisfied
@@ -832,8 +852,11 @@ mod tests {
         let reward_head = vec![0.1_f32; 2]; // small reward head
         let examples = vec![make_example(1, 2, 1.0, 0.0, None)];
         let out = batch_reward_loss(&examples, &reward_head, &config).expect("hinge");
-        assert!(out.total_loss > 0.0,
-            "Hinge loss should be > 0 when margin not satisfied, got {}", out.total_loss);
+        assert!(
+            out.total_loss > 0.0,
+            "Hinge loss should be > 0 when margin not satisfied, got {}",
+            out.total_loss
+        );
     }
 
     // 22. Regression loss: (chosen_score - label)^2
@@ -856,8 +879,11 @@ mod tests {
         };
         let out = batch_reward_loss(&[example], &reward_head, &config).expect("regression");
         // chosen_score = 1*1 + 1*1 = 2.0; (2.0 - 3.0)^2 = 1.0
-        assert!((out.total_loss - 1.0).abs() < 1e-5,
-            "regression loss (2-3)^2 = 1.0, got {}", out.total_loss);
+        assert!(
+            (out.total_loss - 1.0).abs() < 1e-5,
+            "regression loss (2-3)^2 = 1.0, got {}",
+            out.total_loss
+        );
     }
 
     // 23. InstructGPT loss with smoothing=0.1 differs from BT loss
@@ -879,7 +905,8 @@ mod tests {
         assert!(
             (out_bt.total_loss - out_ig.total_loss).abs() > 1e-5,
             "InstructGPT loss with smoothing should differ from BT: bt={} ig={}",
-            out_bt.total_loss, out_ig.total_loss
+            out_bt.total_loss,
+            out_ig.total_loss
         );
     }
 
@@ -906,8 +933,10 @@ mod tests {
         let pooled = pool_hidden_states(&hidden, 1, 3, PoolingType::WeightedMean).expect("wm");
         assert_eq!(pooled.len(), 3);
         for (p, h) in pooled.iter().zip(hidden.iter()) {
-            assert!((p - h).abs() < 1e-5,
-                "single-token WeightedMean should equal the token itself: {p} vs {h}");
+            assert!(
+                (p - h).abs() < 1e-5,
+                "single-token WeightedMean should equal the token itself: {p} vs {h}"
+            );
         }
     }
 
@@ -944,8 +973,14 @@ mod tests {
             make_example(1, hidden_size, 2.0, 0.0, Some(1.5)),
         ];
         let out = batch_reward_loss(&examples, &reward_head, &config).expect("regression batch");
-        assert!(out.total_loss >= 0.0, "regression loss should be non-negative");
-        assert!(out.total_loss.is_finite(), "regression loss should be finite");
+        assert!(
+            out.total_loss >= 0.0,
+            "regression loss should be non-negative"
+        );
+        assert!(
+            out.total_loss.is_finite(),
+            "regression loss should be finite"
+        );
     }
 
     // 30. center_rewards penalty is zero when chosen and rejected are symmetric
@@ -971,12 +1006,14 @@ mod tests {
             make_example(1, hidden_size, -1.0, 1.0, None),
         ];
         let out_no = batch_reward_loss(&examples, &reward_head, &config_no_penalty).expect("no");
-        let out_with = batch_reward_loss(&examples, &reward_head, &config_with_penalty).expect("with");
+        let out_with =
+            batch_reward_loss(&examples, &reward_head, &config_with_penalty).expect("with");
         // Center reward = 0 when mean is 0 → both losses should be equal
         assert!(
             (out_no.total_loss - out_with.total_loss).abs() < 1e-4,
             "symmetric rewards → center penalty≈0: no={} with={}",
-            out_no.total_loss, out_with.total_loss
+            out_no.total_loss,
+            out_with.total_loss
         );
     }
 
@@ -984,26 +1021,52 @@ mod tests {
     #[test]
     fn test_reward_train_error_display_messages() {
         let e = RewardTrainError::EmptyBatch;
-        assert!(e.to_string().to_lowercase().contains("empty"), "EmptyBatch display: {}", e);
+        assert!(
+            e.to_string().to_lowercase().contains("empty"),
+            "EmptyBatch display: {}",
+            e
+        );
 
-        let e = RewardTrainError::HiddenSizeMismatch { expected: 8, actual: 4 };
+        let e = RewardTrainError::HiddenSizeMismatch {
+            expected: 8,
+            actual: 4,
+        };
         let s = e.to_string();
-        assert!(s.contains("8") && s.contains("4"), "HiddenSizeMismatch display: {s}");
+        assert!(
+            s.contains("8") && s.contains("4"),
+            "HiddenSizeMismatch display: {s}"
+        );
 
         let e = RewardTrainError::InvalidScore;
-        assert!(e.to_string().to_lowercase().contains("nan") || e.to_string().to_lowercase().contains("inf"),
-            "InvalidScore display: {}", e);
+        assert!(
+            e.to_string().to_lowercase().contains("nan")
+                || e.to_string().to_lowercase().contains("inf"),
+            "InvalidScore display: {}",
+            e
+        );
 
         let e = RewardTrainError::MissingScalarLabel;
-        assert!(e.to_string().to_lowercase().contains("label"), "MissingScalarLabel display: {}", e);
+        assert!(
+            e.to_string().to_lowercase().contains("label"),
+            "MissingScalarLabel display: {}",
+            e
+        );
 
         let e = RewardTrainError::ZeroHiddenSize;
-        assert!(e.to_string().to_lowercase().contains("hidden") || e.to_string().to_lowercase().contains("size"),
-            "ZeroHiddenSize display: {}", e);
+        assert!(
+            e.to_string().to_lowercase().contains("hidden")
+                || e.to_string().to_lowercase().contains("size"),
+            "ZeroHiddenSize display: {}",
+            e
+        );
 
         let e = RewardTrainError::ZeroSeqLen;
-        assert!(e.to_string().to_lowercase().contains("seq") || e.to_string().to_lowercase().contains("len"),
-            "ZeroSeqLen display: {}", e);
+        assert!(
+            e.to_string().to_lowercase().contains("seq")
+                || e.to_string().to_lowercase().contains("len"),
+            "ZeroSeqLen display: {}",
+            e
+        );
     }
 
     // 32. batch_reward_loss mean_margin is positive when chosen consistently higher
@@ -1012,12 +1075,14 @@ mod tests {
         let hidden_size = 2;
         let reward_head = vec![1.0_f32; hidden_size];
         let config = bt_config(hidden_size);
-        let examples: Vec<_> = (0..4)
-            .map(|_| make_example(1, hidden_size, 2.0, -1.0, None))
-            .collect();
+        let examples: Vec<_> =
+            (0..4).map(|_| make_example(1, hidden_size, 2.0, -1.0, None)).collect();
         let out = batch_reward_loss(&examples, &reward_head, &config).expect("out");
-        assert!(out.mean_margin > 0.0,
-            "mean_margin should be positive when chosen > rejected, got {}", out.mean_margin);
+        assert!(
+            out.mean_margin > 0.0,
+            "mean_margin should be positive when chosen > rejected, got {}",
+            out.mean_margin
+        );
     }
 
     // 33. RewardModelConfig default has num_labels=1
@@ -1034,11 +1099,13 @@ mod tests {
         let reward_head = vec![1.0_f32; hidden_size];
         let config = bt_config(hidden_size);
         // chosen_val < rejected_val → after dot product, score_chosen < score_rejected
-        let examples: Vec<_> = (0..4)
-            .map(|_| make_example(1, hidden_size, -2.0, 2.0, None))
-            .collect();
+        let examples: Vec<_> =
+            (0..4).map(|_| make_example(1, hidden_size, -2.0, 2.0, None)).collect();
         let out = batch_reward_loss(&examples, &reward_head, &config).expect("out");
-        assert!((out.accuracy).abs() < 1e-5,
-            "accuracy should be 0 when all rejected score higher, got {}", out.accuracy);
+        assert!(
+            (out.accuracy).abs() < 1e-5,
+            "accuracy should be 0 when all rejected score higher, got {}",
+            out.accuracy
+        );
     }
 }

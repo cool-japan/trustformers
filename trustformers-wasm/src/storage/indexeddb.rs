@@ -17,20 +17,23 @@ use super::StorageError;
 fn request_to_promise(request: &IdbRequest) -> js_sys::Promise {
     js_sys::Promise::new(&mut |resolve, reject| {
         let success_callback = Closure::wrap(Box::new(move |event: web_sys::Event| {
-            let target = event.target().expect("Event should have a target");
-            let request: IdbRequest = target.dyn_into().expect("Target should be IdbRequest");
-            let result = request.result().expect("Request should have a result");
-            resolve.call1(&JsValue::NULL, &result).expect("Resolve callback should succeed");
+            let Some(target) = event.target() else { return };
+            let Ok(request) = target.dyn_into::<IdbRequest>() else {
+                return;
+            };
+            let Ok(result) = request.result() else { return };
+            let _ = resolve.call1(&JsValue::NULL, &result);
         }) as Box<dyn FnMut(_)>);
 
         let error_callback = Closure::wrap(Box::new(move |event: web_sys::Event| {
-            let target = event.target().expect("Event should have a target");
-            let request: IdbRequest = target.dyn_into().expect("Target should be IdbRequest");
-            let error = request
-                .error()
-                .expect("Request should have error method")
-                .expect("Error should be present in error event");
-            reject.call1(&JsValue::NULL, &error).expect("Reject callback should succeed");
+            let Some(target) = event.target() else { return };
+            let Ok(request) = target.dyn_into::<IdbRequest>() else {
+                return;
+            };
+            let Ok(Some(error)) = request.error() else {
+                return;
+            };
+            let _ = reject.call1(&JsValue::NULL, &error);
         }) as Box<dyn FnMut(_)>);
 
         request.set_onsuccess(Some(success_callback.as_ref().unchecked_ref()));
@@ -45,22 +48,23 @@ fn request_to_promise(request: &IdbRequest) -> js_sys::Promise {
 fn open_request_to_promise(request: &IdbOpenDbRequest) -> js_sys::Promise {
     js_sys::Promise::new(&mut |resolve, reject| {
         let success_callback = Closure::wrap(Box::new(move |event: web_sys::Event| {
-            let target = event.target().expect("Event should have a target");
-            let request: IdbOpenDbRequest =
-                target.dyn_into().expect("Target should be IdbOpenDbRequest");
-            let result = request.result().expect("Request should have a result");
-            resolve.call1(&JsValue::NULL, &result).expect("Resolve callback should succeed");
+            let Some(target) = event.target() else { return };
+            let Ok(request) = target.dyn_into::<IdbOpenDbRequest>() else {
+                return;
+            };
+            let Ok(result) = request.result() else { return };
+            let _ = resolve.call1(&JsValue::NULL, &result);
         }) as Box<dyn FnMut(_)>);
 
         let error_callback = Closure::wrap(Box::new(move |event: web_sys::Event| {
-            let target = event.target().expect("Event should have a target");
-            let request: IdbOpenDbRequest =
-                target.dyn_into().expect("Target should be IdbOpenDbRequest");
-            let error = request
-                .error()
-                .expect("Request should have error method")
-                .expect("Error should be present in error event");
-            reject.call1(&JsValue::NULL, &error).expect("Reject callback should succeed");
+            let Some(target) = event.target() else { return };
+            let Ok(request) = target.dyn_into::<IdbOpenDbRequest>() else {
+                return;
+            };
+            let Ok(Some(error)) = request.error() else {
+                return;
+            };
+            let _ = reject.call1(&JsValue::NULL, &error);
         }) as Box<dyn FnMut(_)>);
 
         request.set_onsuccess(Some(success_callback.as_ref().unchecked_ref()));
@@ -173,14 +177,14 @@ impl ModelStorage {
 
         // Set up database upgrade handler
         let upgrade_callback = Closure::wrap(Box::new(move |event: IdbVersionChangeEvent| {
-            let target = event.target().expect("Event should have a target");
-            let request: IdbOpenDbRequest =
-                target.dyn_into().expect("Target should be IdbOpenDbRequest");
-            let db = request
-                .result()
-                .expect("Request should have a result")
-                .dyn_into::<IdbDatabase>()
-                .expect("Result should be IdbDatabase");
+            let Some(target) = event.target() else { return };
+            let Ok(request) = target.dyn_into::<IdbOpenDbRequest>() else {
+                return;
+            };
+            let Ok(result) = request.result() else { return };
+            let Ok(db) = result.dyn_into::<IdbDatabase>() else {
+                return;
+            };
 
             // Create object stores
             // Use Reflect to access objectStoreNames property
@@ -206,29 +210,28 @@ impl ModelStorage {
 
             if !has_models {
                 // IdbObjectStoreParameters not available in web-sys 0.3.81 - using default
-                let model_store =
-                    db.create_object_store("models").expect("Failed to create models object store");
-
-                // Create indices - use Reflect to call createIndex
-                let create_index_fn =
-                    js_sys::Reflect::get(&model_store, &JsValue::from_str("createIndex"))
-                        .expect("Object store should have createIndex method");
-                let create_index_fn: &js_sys::Function = create_index_fn.unchecked_ref();
-                let _ = create_index_fn.call2(
-                    &model_store,
-                    &JsValue::from_str("name"),
-                    &JsValue::from_str("name"),
-                );
-                let _ = create_index_fn.call2(
-                    &model_store,
-                    &JsValue::from_str("last_accessed"),
-                    &JsValue::from_str("last_accessed"),
-                );
-                let _ = create_index_fn.call2(
-                    &model_store,
-                    &JsValue::from_str("size_bytes"),
-                    &JsValue::from_str("size_bytes"),
-                );
+                if let Ok(model_store) = db.create_object_store("models") {
+                    // Create indices - use Reflect to call createIndex
+                    let create_index_fn =
+                        js_sys::Reflect::get(&model_store, &JsValue::from_str("createIndex"))
+                            .unwrap_or(JsValue::UNDEFINED);
+                    let create_index_fn: &js_sys::Function = create_index_fn.unchecked_ref();
+                    let _ = create_index_fn.call2(
+                        &model_store,
+                        &JsValue::from_str("name"),
+                        &JsValue::from_str("name"),
+                    );
+                    let _ = create_index_fn.call2(
+                        &model_store,
+                        &JsValue::from_str("last_accessed"),
+                        &JsValue::from_str("last_accessed"),
+                    );
+                    let _ = create_index_fn.call2(
+                        &model_store,
+                        &JsValue::from_str("size_bytes"),
+                        &JsValue::from_str("size_bytes"),
+                    );
+                }
             }
 
             let has_metadata = if !store_names_obj.is_null() && !store_names_obj.is_undefined() {
@@ -251,8 +254,7 @@ impl ModelStorage {
 
             if !has_metadata {
                 // IdbObjectStoreParameters not available in web-sys 0.3.81 - using default
-                db.create_object_store("metadata")
-                    .expect("Failed to create metadata object store");
+                let _ = db.create_object_store("metadata");
             }
         }) as Box<dyn FnMut(_)>);
 

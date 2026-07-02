@@ -658,9 +658,10 @@ mod tests {
     #[test]
     fn test_trace_exporter_empty_returns_error() {
         let trace = ProfilingTrace::new();
+        let path = std::env::temp_dir().join("should_not_exist.csv");
         let config = ExportConfig {
             format: ExportFormat::Csv,
-            output_path: "/tmp/should_not_exist.csv".to_string(),
+            output_path: path.to_string_lossy().into_owned(),
             compress: false,
         };
         let result = TraceExporter::export_all(&trace, &config);

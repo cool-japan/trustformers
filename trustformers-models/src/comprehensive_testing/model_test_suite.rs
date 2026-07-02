@@ -128,24 +128,22 @@ impl ModelTestSuite {
             let input = self.create_test_input(test_input)?;
 
             // Run forward pass
-            let result = model.forward(input);
-
-            // Check if forward pass succeeded
-            if result.is_err() {
-                return Ok(TestResult {
-                    name: "forward_pass_stability".to_string(),
-                    passed: false,
-                    error_message: Some(format!(
-                        "Forward pass failed for input {}: {:?}",
-                        test_input.name,
-                        result.err()
-                    )),
-                    numerical_differences: None,
-                    execution_time: start_time.elapsed(),
-                });
-            }
-
-            let output = result.expect("operation failed");
+            let output = match model.forward(input) {
+                Ok(output) => output,
+                Err(e) => {
+                    return Ok(TestResult {
+                        name: "forward_pass_stability".to_string(),
+                        passed: false,
+                        error_message: Some(format!(
+                            "Forward pass failed for input {}: {:?}",
+                            test_input.name,
+                            Some(e)
+                        )),
+                        numerical_differences: None,
+                        execution_time: start_time.elapsed(),
+                    });
+                },
+            };
 
             // Validate output
             if !self.validate_output(&output) {

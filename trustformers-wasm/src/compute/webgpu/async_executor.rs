@@ -4,7 +4,6 @@
 //! with proper queuing, scheduling, and progress tracking.
 
 #![allow(dead_code)]
-
 use js_sys::Function;
 use std::collections::{BTreeMap, VecDeque};
 use std::format;
@@ -239,24 +238,21 @@ impl AsyncExecutor {
     /// Get queue status
     pub fn get_queue_status(&self) -> js_sys::Object {
         let status = js_sys::Object::new();
-        js_sys::Reflect::set(
+        let _ = js_sys::Reflect::set(
             &status,
             &"queue_length".into(),
             &self.operation_queue.len().into(),
-        )
-        .expect("Failed to set executor status property");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &status,
             &"running_operations".into(),
             &self.running_operations.len().into(),
-        )
-        .expect("Failed to set executor status property");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &status,
             &"completed_operations".into(),
             &self.completed_operations.len().into(),
-        )
-        .expect("Failed to set executor status property");
+        );
         status
     }
 

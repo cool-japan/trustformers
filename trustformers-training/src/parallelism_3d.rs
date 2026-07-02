@@ -97,10 +97,8 @@ pub enum MemoryOptimization {
 ///
 /// Manages the coordination between different parallelism strategies
 /// and handles communication between process groups.
-#[allow(dead_code)]
 pub struct Parallelism3D {
     config: ParallelismConfig,
-    #[allow(dead_code)]
     global_rank: usize,
     world_size: usize,
 
@@ -126,9 +124,7 @@ pub struct Parallelism3D {
 
 /// Pipeline execution state
 #[derive(Debug, Default)]
-#[allow(dead_code)]
 struct PipelineState {
-    #[allow(dead_code)]
     current_micro_batch: usize,
     forward_passes_completed: usize,
     backward_passes_completed: usize,
@@ -139,12 +135,10 @@ struct PipelineState {
 
 /// Communication statistics for 3D parallelism
 #[derive(Debug, Default)]
-#[allow(dead_code)]
 struct CommunicationStats {
     dp_all_reduce_time: Duration,
     mp_all_reduce_time: Duration,
     pp_send_recv_time: Duration,
-    #[allow(dead_code)]
     total_bytes_communicated: u64,
     communication_efficiency: f32,
     bandwidth_utilization: f32,
@@ -152,9 +146,7 @@ struct CommunicationStats {
 
 /// Memory management for 3D parallelism
 #[derive(Debug)]
-#[allow(dead_code)]
 struct MemoryManager {
-    #[allow(dead_code)]
     activation_memory_pool: HashMap<String, Vec<Tensor>>,
     gradient_memory_pool: HashMap<String, Vec<Tensor>>,
     peak_memory_usage: u64,
@@ -288,7 +280,7 @@ impl Parallelism3D {
         }
 
         // Update communication statistics
-        let mut stats = self.comm_stats.lock().expect("lock should not be poisoned");
+        let mut stats = self.comm_stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         stats.dp_all_reduce_time += start_time.elapsed();
 
         Ok(())
@@ -296,7 +288,8 @@ impl Parallelism3D {
 
     /// Optimize memory usage based on configuration
     pub fn optimize_memory(&self, tensors: &mut [Tensor]) -> Result<()> {
-        let memory_manager = self.memory_manager.lock().expect("lock should not be poisoned");
+        let memory_manager =
+            self.memory_manager.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         match memory_manager.memory_optimization_level {
             MemoryOptimization::None => {
@@ -327,7 +320,7 @@ impl Parallelism3D {
 
     /// Handle pipeline bubble optimization
     pub fn optimize_pipeline_bubbles(&self) -> Result<()> {
-        let state = self.pipeline_state.write().expect("lock should not be poisoned");
+        let state = self.pipeline_state.write().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Analyze pipeline timing patterns
         let total_stages = self.config.pp_size;
@@ -360,9 +353,11 @@ impl Parallelism3D {
 
     /// Get comprehensive 3D parallelism statistics
     pub fn get_statistics(&self) -> Result<Parallelism3DStats> {
-        let pipeline_state = self.pipeline_state.read().expect("lock should not be poisoned");
-        let comm_stats = self.comm_stats.lock().expect("lock should not be poisoned");
-        let memory_manager = self.memory_manager.lock().expect("lock should not be poisoned");
+        let pipeline_state =
+            self.pipeline_state.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let comm_stats = self.comm_stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let memory_manager =
+            self.memory_manager.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         Ok(Parallelism3DStats {
             dp_rank: self.dp_rank,
@@ -453,7 +448,7 @@ impl Parallelism3D {
         // Adaptive scheduling based on runtime characteristics
 
         // Choose strategy based on current performance metrics
-        let stats = self.comm_stats.lock().expect("lock should not be poisoned");
+        let stats = self.comm_stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let communication_time_ratio = stats.pp_send_recv_time.as_millis() as f32
             / (stats.dp_all_reduce_time.as_millis() + stats.mp_all_reduce_time.as_millis() + 1)
                 as f32;
@@ -574,7 +569,8 @@ impl Parallelism3D {
         tensors: &mut [Tensor],
         checkpoint_ratio: usize,
     ) -> Result<()> {
-        let mut memory_manager = self.memory_manager.lock().expect("lock should not be poisoned");
+        let mut memory_manager =
+            self.memory_manager.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Save every Nth activation for checkpointing
         for (i, tensor) in tensors.iter().enumerate() {
@@ -664,9 +660,7 @@ pub struct Parallelism3DManager {
 }
 
 #[derive(Debug, Default)]
-#[allow(dead_code)]
 struct PerformanceTracker {
-    #[allow(dead_code)]
     iteration_times: Vec<Duration>,
     communication_times: Vec<Duration>,
     memory_usage_samples: Vec<u64>,
@@ -717,7 +711,8 @@ impl Parallelism3DManager {
 
     /// Optimize configuration based on performance metrics
     pub fn optimize_configuration(&mut self) -> Result<ParallelismConfig> {
-        let tracker = self.performance_tracker.lock().expect("lock should not be poisoned");
+        let tracker =
+            self.performance_tracker.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         if tracker.efficiency_scores.is_empty() {
             return Ok(self.global_config.clone());

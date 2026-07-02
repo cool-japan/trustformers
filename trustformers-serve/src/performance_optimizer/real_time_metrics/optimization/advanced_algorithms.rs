@@ -145,16 +145,40 @@ impl LiveOptimizationAlgorithm for BatchingOptimizationAlgorithm {
 
     fn update_with_feedback(
         &mut self,
-        _feedback: &PerformanceFeedback,
+        feedback: &PerformanceFeedback,
     ) -> Result<(), RealTimeMetricsError> {
-        // TODO: AlgorithmStatistics no longer has feedback_count, positive_feedback, negative_feedback fields
-        // Need to implement feedback tracking differently or add these fields back to AlgorithmStatistics
-        // self.stats.feedback_count += 1;
-        // match feedback.feedback_type {
-        //     FeedbackType::Positive => self.stats.positive_feedback += 1,
-        //     FeedbackType::Negative => self.stats.negative_feedback += 1,
-        //     FeedbackType::Neutral => {},
-        // }
+        self.stats.feedback_count += 1;
+
+        // A value >= 0.5 indicates that the recommendation was beneficial
+        // (e.g. throughput improved, latency decreased, quality is high);
+        // a value < 0.5 indicates a neutral or adverse outcome.
+        if feedback.value >= 0.5 {
+            self.stats.positive_feedback += 1;
+        } else {
+            self.stats.negative_feedback += 1;
+        }
+
+        // Recompute a running accuracy estimate as the positive ratio.
+        if self.stats.feedback_count > 0 {
+            self.stats.accuracy =
+                self.stats.positive_feedback as f32 / self.stats.feedback_count as f32;
+        }
+
+        // For batching specifically: track recent batch metrics so we can steer the
+        // optimal batch size estimate in a future optimize() call.  Here we record
+        // an efficiency signal derived from the feedback value.
+        let efficiency = feedback.value as f32;
+        self.batch_history.push_back(BatchMetrics {
+            timestamp: chrono::Utc::now(),
+            batch_size: 0, // unknown at feedback time
+            throughput: feedback.value,
+            latency: std::time::Duration::from_millis(0),
+            efficiency,
+        });
+        // Keep history bounded.
+        while self.batch_history.len() > 100 {
+            self.batch_history.pop_front();
+        }
 
         Ok(())
     }
@@ -280,16 +304,34 @@ impl LiveOptimizationAlgorithm for PerformanceTuningAlgorithm {
 
     fn update_with_feedback(
         &mut self,
-        _feedback: &PerformanceFeedback,
+        feedback: &PerformanceFeedback,
     ) -> Result<(), RealTimeMetricsError> {
-        // TODO: AlgorithmStatistics no longer has feedback_count, positive_feedback, negative_feedback fields
-        // Need to implement feedback tracking differently or add these fields back to AlgorithmStatistics
-        // self.stats.feedback_count += 1;
-        // match feedback.feedback_type {
-        //     FeedbackType::Positive => self.stats.positive_feedback += 1,
-        //     FeedbackType::Negative => self.stats.negative_feedback += 1,
-        //     FeedbackType::Neutral => {},
-        // }
+        self.stats.feedback_count += 1;
+
+        if feedback.value >= 0.5 {
+            self.stats.positive_feedback += 1;
+        } else {
+            self.stats.negative_feedback += 1;
+        }
+
+        if self.stats.feedback_count > 0 {
+            self.stats.accuracy =
+                self.stats.positive_feedback as f32 / self.stats.feedback_count as f32;
+        }
+
+        // Record the tuning outcome in history so that future optimize() calls can
+        // avoid recently-rejected parameter choices.
+        let performance_delta = (feedback.value as f32) - 0.5;
+        self.tuning_history.push_back(TuningRecord {
+            timestamp: chrono::Utc::now(),
+            parameter: format!("{:?}", feedback.feedback_type),
+            old_value: String::new(),
+            new_value: String::new(),
+            performance_delta,
+        });
+        while self.tuning_history.len() > 100 {
+            self.tuning_history.pop_front();
+        }
 
         Ok(())
     }
@@ -401,16 +443,34 @@ impl LiveOptimizationAlgorithm for MemoryOptimizationAlgorithm {
 
     fn update_with_feedback(
         &mut self,
-        _feedback: &PerformanceFeedback,
+        feedback: &PerformanceFeedback,
     ) -> Result<(), RealTimeMetricsError> {
-        // TODO: AlgorithmStatistics no longer has feedback_count, positive_feedback, negative_feedback fields
-        // Need to implement feedback tracking differently or add these fields back to AlgorithmStatistics
-        // self.stats.feedback_count += 1;
-        // match feedback.feedback_type {
-        //     FeedbackType::Positive => self.stats.positive_feedback += 1,
-        //     FeedbackType::Negative => self.stats.negative_feedback += 1,
-        //     FeedbackType::Neutral => {},
-        // }
+        self.stats.feedback_count += 1;
+
+        if feedback.value >= 0.5 {
+            self.stats.positive_feedback += 1;
+        } else {
+            self.stats.negative_feedback += 1;
+        }
+
+        if self.stats.feedback_count > 0 {
+            self.stats.accuracy =
+                self.stats.positive_feedback as f32 / self.stats.feedback_count as f32;
+        }
+
+        // Record a memory pattern derived from the feedback signal; negative feedback
+        // suggests that GC pressure is still elevated after the recommendation was applied.
+        let gc_pressure = if feedback.value < 0.5 { 1.0 - feedback.value as f32 } else { 0.0 };
+        self.memory_patterns.push_back(MemoryPattern {
+            timestamp: chrono::Utc::now(),
+            allocation_rate: 0.0,
+            deallocation_rate: 0.0,
+            fragmentation_level: 0.0,
+            gc_pressure,
+        });
+        while self.memory_patterns.len() > 100 {
+            self.memory_patterns.pop_front();
+        }
 
         Ok(())
     }
@@ -518,16 +578,38 @@ impl LiveOptimizationAlgorithm for IOOptimizationAlgorithm {
 
     fn update_with_feedback(
         &mut self,
-        _feedback: &PerformanceFeedback,
+        feedback: &PerformanceFeedback,
     ) -> Result<(), RealTimeMetricsError> {
-        // TODO: AlgorithmStatistics no longer has feedback_count, positive_feedback, negative_feedback fields
-        // Need to implement feedback tracking differently or add these fields back to AlgorithmStatistics
-        // self.stats.feedback_count += 1;
-        // match feedback.feedback_type {
-        //     FeedbackType::Positive => self.stats.positive_feedback += 1,
-        //     FeedbackType::Negative => self.stats.negative_feedback += 1,
-        //     FeedbackType::Neutral => {},
-        // }
+        self.stats.feedback_count += 1;
+
+        if feedback.value >= 0.5 {
+            self.stats.positive_feedback += 1;
+        } else {
+            self.stats.negative_feedback += 1;
+        }
+
+        if self.stats.feedback_count > 0 {
+            self.stats.accuracy =
+                self.stats.positive_feedback as f32 / self.stats.feedback_count as f32;
+        }
+
+        // Record an I/O pattern from the feedback.  Negative feedback implies that
+        // latency is still elevated; encode this as a longer average latency observation.
+        let avg_latency = if feedback.value < 0.5 {
+            std::time::Duration::from_millis(((1.0 - feedback.value) * 2000.0) as u64)
+        } else {
+            std::time::Duration::from_millis((feedback.value * 100.0) as u64)
+        };
+        self.io_patterns.push_back(IOPattern {
+            timestamp: chrono::Utc::now(),
+            read_ops_per_sec: 0.0,
+            write_ops_per_sec: 0.0,
+            avg_latency,
+            queue_depth: 0,
+        });
+        while self.io_patterns.len() > 100 {
+            self.io_patterns.pop_front();
+        }
 
         Ok(())
     }
@@ -646,16 +728,38 @@ impl LiveOptimizationAlgorithm for NetworkOptimizationAlgorithm {
 
     fn update_with_feedback(
         &mut self,
-        _feedback: &PerformanceFeedback,
+        feedback: &PerformanceFeedback,
     ) -> Result<(), RealTimeMetricsError> {
-        // TODO: AlgorithmStatistics no longer has feedback_count, positive_feedback, negative_feedback fields
-        // Need to implement feedback tracking differently or add these fields back to AlgorithmStatistics
-        // self.stats.feedback_count += 1;
-        // match feedback.feedback_type {
-        //     FeedbackType::Positive => self.stats.positive_feedback += 1,
-        //     FeedbackType::Negative => self.stats.negative_feedback += 1,
-        //     FeedbackType::Neutral => {},
-        // }
+        self.stats.feedback_count += 1;
+
+        if feedback.value >= 0.5 {
+            self.stats.positive_feedback += 1;
+        } else {
+            self.stats.negative_feedback += 1;
+        }
+
+        if self.stats.feedback_count > 0 {
+            self.stats.accuracy =
+                self.stats.positive_feedback as f32 / self.stats.feedback_count as f32;
+        }
+
+        // Record a network pattern derived from the feedback value.
+        // Low feedback value implies continued high bandwidth utilization.
+        let bandwidth_utilization = if feedback.value < 0.5 {
+            0.8 + (0.5 - feedback.value) as f32 * 0.4
+        } else {
+            (1.0 - feedback.value) as f32 * 0.5
+        };
+        self.network_patterns.push_back(NetworkPattern {
+            timestamp: chrono::Utc::now(),
+            bandwidth_utilization,
+            connection_count: 0,
+            packet_loss: 0.0,
+            round_trip_time: std::time::Duration::from_millis(0),
+        });
+        while self.network_patterns.len() > 100 {
+            self.network_patterns.pop_front();
+        }
 
         Ok(())
     }
@@ -772,21 +876,231 @@ impl LiveOptimizationAlgorithm for ThreadPoolOptimizationAlgorithm {
 
     fn update_with_feedback(
         &mut self,
-        _feedback: &PerformanceFeedback,
+        feedback: &PerformanceFeedback,
     ) -> Result<(), RealTimeMetricsError> {
-        // TODO: AlgorithmStatistics no longer has feedback_count, positive_feedback, negative_feedback fields
-        // Need to implement feedback tracking differently or add these fields back to AlgorithmStatistics
-        // self.stats.feedback_count += 1;
-        // match feedback.feedback_type {
-        //     FeedbackType::Positive => self.stats.positive_feedback += 1,
-        //     FeedbackType::Negative => self.stats.negative_feedback += 1,
-        //     FeedbackType::Neutral => {},
-        // }
+        self.stats.feedback_count += 1;
+
+        if feedback.value >= 0.5 {
+            self.stats.positive_feedback += 1;
+        } else {
+            self.stats.negative_feedback += 1;
+        }
+
+        if self.stats.feedback_count > 0 {
+            self.stats.accuracy =
+                self.stats.positive_feedback as f32 / self.stats.feedback_count as f32;
+        }
+
+        // Encode feedback as a thread pattern observation.
+        // Negative feedback suggests thread starvation or over-subscription;
+        // use the feedback value to estimate the number of idle threads.
+        let idle_estimate = if feedback.value < 0.5 { 0_usize } else { 2 };
+        self.thread_patterns.push_back(ThreadPattern {
+            timestamp: chrono::Utc::now(),
+            active_threads: 0,
+            idle_threads: idle_estimate,
+            queue_length: 0,
+            avg_task_duration: std::time::Duration::from_millis(0),
+        });
+        while self.thread_patterns.len() > 100 {
+            self.thread_patterns.pop_front();
+        }
 
         Ok(())
     }
 
     fn statistics(&self) -> AlgorithmStatistics {
         self.stats.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::performance_optimizer::types::{
+        FeedbackContext, FeedbackSource, FeedbackType, PerformanceFeedback, SystemState,
+        TestCharacteristics,
+    };
+    use std::collections::HashMap;
+
+    /// Build a minimal `PerformanceFeedback` with the given value.
+    fn make_feedback(value: f64) -> PerformanceFeedback {
+        PerformanceFeedback {
+            source: FeedbackSource::PerformanceMonitor,
+            feedback_type: FeedbackType::Throughput,
+            value,
+            timestamp: chrono::Utc::now(),
+            parallelism_level: 1,
+            context: FeedbackContext {
+                test_characteristics: TestCharacteristics::default(),
+                system_state: SystemState::default(),
+                additional_context: HashMap::new(),
+            },
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // BatchingOptimizationAlgorithm
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_batching_feedback_positive_increments_count() {
+        let mut algo = BatchingOptimizationAlgorithm::new();
+        algo.update_with_feedback(&make_feedback(0.8)).expect("should not error");
+        let stats = algo.statistics();
+        assert_eq!(stats.feedback_count, 1);
+        assert_eq!(stats.positive_feedback, 1);
+        assert_eq!(stats.negative_feedback, 0);
+    }
+
+    #[test]
+    fn test_batching_feedback_negative_increments_count() {
+        let mut algo = BatchingOptimizationAlgorithm::new();
+        algo.update_with_feedback(&make_feedback(0.3)).expect("should not error");
+        let stats = algo.statistics();
+        assert_eq!(stats.feedback_count, 1);
+        assert_eq!(stats.positive_feedback, 0);
+        assert_eq!(stats.negative_feedback, 1);
+    }
+
+    #[test]
+    fn test_batching_feedback_boundary_value_is_positive() {
+        let mut algo = BatchingOptimizationAlgorithm::new();
+        algo.update_with_feedback(&make_feedback(0.5)).expect("should not error");
+        let stats = algo.statistics();
+        assert_eq!(stats.positive_feedback, 1);
+    }
+
+    #[test]
+    fn test_batching_feedback_accuracy_tracks_positive_ratio() {
+        let mut algo = BatchingOptimizationAlgorithm::new();
+        algo.update_with_feedback(&make_feedback(0.8)).expect("ok");
+        algo.update_with_feedback(&make_feedback(0.2)).expect("ok");
+        let stats = algo.statistics();
+        assert_eq!(stats.feedback_count, 2);
+        // 1 positive out of 2 = 0.5 accuracy
+        assert!((stats.accuracy - 0.5).abs() < 1e-6);
+    }
+
+    // -------------------------------------------------------------------------
+    // PerformanceTuningAlgorithm
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_tuning_feedback_positive_increments_count() {
+        let mut algo = PerformanceTuningAlgorithm::new();
+        algo.update_with_feedback(&make_feedback(0.9)).expect("ok");
+        let stats = algo.statistics();
+        assert_eq!(stats.feedback_count, 1);
+        assert_eq!(stats.positive_feedback, 1);
+        assert_eq!(stats.negative_feedback, 0);
+    }
+
+    #[test]
+    fn test_tuning_feedback_negative_increments_count() {
+        let mut algo = PerformanceTuningAlgorithm::new();
+        algo.update_with_feedback(&make_feedback(0.1)).expect("ok");
+        let stats = algo.statistics();
+        assert_eq!(stats.feedback_count, 1);
+        assert_eq!(stats.positive_feedback, 0);
+        assert_eq!(stats.negative_feedback, 1);
+    }
+
+    #[test]
+    fn test_tuning_feedback_accumulates_across_calls() {
+        let mut algo = PerformanceTuningAlgorithm::new();
+        for _ in 0..5 {
+            algo.update_with_feedback(&make_feedback(0.7)).expect("ok");
+        }
+        let stats = algo.statistics();
+        assert_eq!(stats.feedback_count, 5);
+        assert_eq!(stats.positive_feedback, 5);
+        assert_eq!(stats.negative_feedback, 0);
+        assert!((stats.accuracy - 1.0).abs() < 1e-6);
+    }
+
+    // -------------------------------------------------------------------------
+    // MemoryOptimizationAlgorithm
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_memory_feedback_positive_increments_count() {
+        let mut algo = MemoryOptimizationAlgorithm::new();
+        algo.update_with_feedback(&make_feedback(0.6)).expect("ok");
+        assert_eq!(algo.statistics().positive_feedback, 1);
+    }
+
+    #[test]
+    fn test_memory_feedback_negative_increments_count() {
+        let mut algo = MemoryOptimizationAlgorithm::new();
+        algo.update_with_feedback(&make_feedback(0.4)).expect("ok");
+        assert_eq!(algo.statistics().negative_feedback, 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // IOOptimizationAlgorithm
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_io_feedback_positive_increments_count() {
+        let mut algo = IOOptimizationAlgorithm::new();
+        algo.update_with_feedback(&make_feedback(0.75)).expect("ok");
+        assert_eq!(algo.statistics().positive_feedback, 1);
+        assert_eq!(algo.statistics().negative_feedback, 0);
+    }
+
+    #[test]
+    fn test_io_feedback_negative_increments_count() {
+        let mut algo = IOOptimizationAlgorithm::new();
+        algo.update_with_feedback(&make_feedback(0.25)).expect("ok");
+        assert_eq!(algo.statistics().negative_feedback, 1);
+        assert_eq!(algo.statistics().positive_feedback, 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // NetworkOptimizationAlgorithm
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_network_feedback_positive_increments_count() {
+        let mut algo = NetworkOptimizationAlgorithm::new();
+        algo.update_with_feedback(&make_feedback(0.8)).expect("ok");
+        assert_eq!(algo.statistics().positive_feedback, 1);
+    }
+
+    #[test]
+    fn test_network_feedback_negative_increments_count() {
+        let mut algo = NetworkOptimizationAlgorithm::new();
+        algo.update_with_feedback(&make_feedback(0.1)).expect("ok");
+        assert_eq!(algo.statistics().negative_feedback, 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // ThreadPoolOptimizationAlgorithm
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_threadpool_feedback_positive_increments_count() {
+        let mut algo = ThreadPoolOptimizationAlgorithm::new();
+        algo.update_with_feedback(&make_feedback(0.9)).expect("ok");
+        assert_eq!(algo.statistics().positive_feedback, 1);
+        assert_eq!(algo.statistics().negative_feedback, 0);
+    }
+
+    #[test]
+    fn test_threadpool_feedback_negative_increments_count() {
+        let mut algo = ThreadPoolOptimizationAlgorithm::new();
+        algo.update_with_feedback(&make_feedback(0.2)).expect("ok");
+        assert_eq!(algo.statistics().negative_feedback, 1);
+        assert_eq!(algo.statistics().positive_feedback, 0);
+    }
+
+    #[test]
+    fn test_threadpool_feedback_count_increments_each_call() {
+        let mut algo = ThreadPoolOptimizationAlgorithm::new();
+        algo.update_with_feedback(&make_feedback(0.8)).expect("ok");
+        algo.update_with_feedback(&make_feedback(0.3)).expect("ok");
+        algo.update_with_feedback(&make_feedback(0.6)).expect("ok");
+        assert_eq!(algo.statistics().feedback_count, 3);
     }
 }

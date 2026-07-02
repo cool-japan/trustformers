@@ -33,6 +33,10 @@
 //! );
 //! ```
 
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
+
 use crate::common::{OptimizerState, StateMemoryStats};
 use crate::traits::StatefulOptimizer;
 use std::collections::HashMap;
@@ -151,9 +155,7 @@ impl EVA {
     /// Gets memory statistics for the optimizer state.
     pub fn memory_stats(&self) -> StateMemoryStats {
         let mut total_parameters = 0;
-        #[allow(dead_code)]
         let mut _total_buffers = 0;
-        #[allow(unused_assignments)]
         for buffer in self.exp_avg.values() {
             total_parameters += buffer.len();
             _total_buffers += 1;
@@ -185,7 +187,6 @@ impl EVA {
     }
 
     /// Computes variance adaptation factor.
-    #[allow(dead_code)]
     fn compute_variance_adaptation(&self, grad_var: f32, step: usize) -> f32 {
         if !self.config.variance_adaptation || step == 0 {
             return 1.0;
@@ -408,7 +409,13 @@ impl StatefulOptimizer for EVA {
                 if let Tensor::F32(data) = value {
                     self.exp_avg.insert(
                         param_key.to_string(),
-                        data.as_slice().expect("F32 tensor should have valid slice").to_vec(),
+                        data.as_slice()
+                            .ok_or_else(|| {
+                                TrustformersError::invalid_state(
+                                    "F32 tensor should have valid slice".to_string(),
+                                )
+                            })?
+                            .to_vec(),
                     );
                 }
             }
@@ -420,7 +427,13 @@ impl StatefulOptimizer for EVA {
                 if let Tensor::F32(data) = value {
                     self.exp_avg_sq.insert(
                         param_key.to_string(),
-                        data.as_slice().expect("F32 tensor should have valid slice").to_vec(),
+                        data.as_slice()
+                            .ok_or_else(|| {
+                                TrustformersError::invalid_state(
+                                    "F32 tensor should have valid slice".to_string(),
+                                )
+                            })?
+                            .to_vec(),
                     );
                 }
             }
@@ -433,7 +446,13 @@ impl StatefulOptimizer for EVA {
                     if let Tensor::F32(data) = value {
                         self.var_adaptation.insert(
                             param_key.to_string(),
-                            data.as_slice().expect("F32 tensor should have valid slice").to_vec(),
+                            data.as_slice()
+                                .ok_or_else(|| {
+                                    TrustformersError::invalid_state(
+                                        "F32 tensor should have valid slice".to_string(),
+                                    )
+                                })?
+                                .to_vec(),
                         );
                     }
                 }

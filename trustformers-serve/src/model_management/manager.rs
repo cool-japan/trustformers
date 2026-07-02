@@ -415,8 +415,7 @@ impl ModelManager {
 
         // Add to loaded models
         {
-            let mut loaded_models =
-                self.loaded_models.write().expect("loaded_models lock should not be poisoned");
+            let mut loaded_models = self.loaded_models.write().unwrap_or_else(|p| p.into_inner());
             loaded_models.insert(model_id.to_string(), loaded_model);
         }
 
@@ -431,8 +430,7 @@ impl ModelManager {
     async fn unload_model_impl(&self, model_id: &str) -> ModelResult<()> {
         // Remove from loaded models
         let loaded_model = {
-            let mut loaded_models =
-                self.loaded_models.write().expect("loaded_models lock should not be poisoned");
+            let mut loaded_models = self.loaded_models.write().unwrap_or_else(|p| p.into_inner());
             loaded_models.remove(model_id)
         };
 
@@ -533,7 +531,7 @@ impl ModelManager {
             let should_unload = self
                 .loaded_models
                 .read()
-                .expect("loaded_models lock should not be poisoned")
+                .unwrap_or_else(|p| p.into_inner())
                 .contains_key(&model_id);
             if should_unload {
                 self.unload_model(&model_id, UnloadingStrategy::Immediate).await?;

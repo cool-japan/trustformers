@@ -1,7 +1,5 @@
 //! Modern quantization algorithms (HQQ, SpQR, AQLM, QAT)
 
-#![allow(clippy::missing_enforced_import_renames)]
-
 use crate::optimization::quantization::config::*;
 use std::collections::HashMap;
 use std::vec::Vec;
@@ -432,7 +430,7 @@ impl QATQuantizer {
                 self.training_stats.iter().map(|s| s.quantization_loss).sum::<f32>()
                     / self.training_stats.len() as f32;
             let final_sparsity =
-                self.training_stats.last().expect("training_stats is non-empty").weight_sparsity;
+                self.training_stats.last().map_or(0.0, |stats| stats.weight_sparsity);
 
             js_sys::Reflect::set(
                 &summary,

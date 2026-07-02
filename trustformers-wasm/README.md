@@ -1,12 +1,12 @@
 # TrustformeRS WebAssembly
 
-WebAssembly bindings for the TrustformeRS transformer library, enabling transformer models to run directly in web browsers and Node.js environments with full WebGPU hardware acceleration.
+WebAssembly bindings for the TrustformeRS transformer library, enabling transformer models to run directly in web browsers and Node.js environments with WebGPU hardware acceleration.
 
-**Version:** 0.1.3 | **Status:** Stable | **Tests:** 128 | **SLoC:** 55,504 | **Last Updated:** 2026-06-24
+**Version:** 0.1.4 | **Status:** Stable | **Tests:** ~130 | **SLoC:** 55,721 | **Last Updated:** 2026-07-02
 
 ## Features
 
-- **WebGPU Backend**: 50-100x speedup over CPU via GPU compute shaders (wgpu 29.0 API)
+- **WebGPU Backend**: GPU compute via direct `web-sys`/`js-sys` bindings to the browser WebGPU API (no `wgpu` crate dependency), with automatic CPU fallback — see "WebGPU Notes" below for current dispatch-path coverage
 - **Web Workers Parallelism**: Multi-threaded inference via SharedArrayBuffer
 - **IndexedDB Caching**: Persistent model and KV-cache storage in the browser
 - **BERT WASM Model**: Complete BERT implementation running in-browser
@@ -14,7 +14,7 @@ WebAssembly bindings for the TrustformeRS transformer library, enabling transfor
 - **Streaming Inference**: Token-by-token generation with streaming API
 - **SIMD Support**: Hardware-accelerated tensor ops where available
 - **Mobile Optimization**: Battery-aware, network-adaptive loading
-- **SciRS2 Integration**: scirs2-core tensor operations in WASM
+- **SciRS2 (optional)**: `scirs2-core` wired in as an optional dependency behind the `scirs2` feature for future tensor-op acceleration (not yet called from any in-crate tensor op)
 
 ## Building
 
@@ -47,7 +47,7 @@ async function run() {
     await init();
 
     const tf = new TrustformersWasm();
-    console.log('Version:', tf.version);  // "0.1.3"
+    console.log('Version:', tf.version);  // "0.1.4"
 
     // Create and manipulate tensors
     const tensor = WasmTensor.new([1, 2, 3, 4], [2, 2]);
@@ -84,6 +84,8 @@ async function run() {
 
 ## API Overview
 
+This crate exposes roughly **2,276 public items** (functions, structs, enums, and traits, including trait/impl-block methods) across 102 source files under `src/`; about 621 of those are top-level module-level declarations.
+
 ### Core Classes
 
 #### `TrustformersWasm`
@@ -91,7 +93,7 @@ Main entry point for the library.
 
 ```javascript
 const tf = new TrustformersWasm();
-console.log(tf.version);     // "0.1.3"
+console.log(tf.version);     // "0.1.4"
 console.log(tf.initialized); // true
 ```
 
@@ -136,16 +138,17 @@ const output = model.forward(input_ids, attention_mask);
 ### WebGPU Backend
 
 ```javascript
-import { WebGpuInference, StreamingGenerator } from './pkg-web/trustformers_wasm.js';
+import { is_webgpu_available, GpuTensorFactory } from './pkg-web/trustformers_wasm.js';
 
-// Initialize WebGPU (50-100x speedup vs CPU)
-const inference = await WebGpuInference.new();
+// Check whether the browser exposes navigator.gpu at all
+console.log('WebGPU available:', is_webgpu_available());
 
-// Streaming token generation
-const generator = new StreamingGenerator(inference, model_id);
-for await (const token of generator.stream(prompt)) {
-    process.stdout.write(token);
-}
+// create_tensor() tries WebGPU first and falls back to CPU automatically
+// (see "WebGPU Notes" below for current dispatch-path coverage)
+const a = await GpuTensorFactory.create_tensor([1, 2, 3, 4], [2, 2]);
+const b = await GpuTensorFactory.create_tensor([1, 1, 1, 1], [2, 2]);
+const sum = await a.add(b);
+console.log('Result:', sum.data, 'backend:', sum.backend_info());
 ```
 
 ### Framework Bindings
@@ -220,30 +223,43 @@ console.log(`Features: ${features()}`);
 
 ## Feature Flags
 
-- `webgpu` — WebGPU compute shader backend (wgpu 29.0)
-- `web-workers` — Web Workers parallelism (SharedArrayBuffer)
-- `shared-memory` — Shared memory for multi-threaded WASM
-- `kernel-fusion` — Fused transformer kernels (MHA, FFN, LayerNorm+Residual)
-- `async-executor` — Async Rust executor for WASM
-- `indexeddb` — IndexedDB model and KV-cache persistence
-- `memory64` — WASM memory64 for models >4GB
-- `streaming-loader` — Progressive chunked model loading
-- `react-components` — React hooks and component library
-- `vue-components` — Vue composables and plugin
-- `angular-components` — Angular services and directives
-- `web-components` — Framework-agnostic custom elements
-- `playground` — Interactive browser playground
-- `streaming-generation` — Token-by-token streaming inference
-- `mobile-optimization` — Battery/network-adaptive loading
-- `scirs2` — SciRS2-core tensor operations
+- `webgpu` — WebGPU compute backend via direct `web-sys`/`js-sys` bindings to the browser API (no `wgpu` crate dependency); gates `compute::webgpu`, `compute::gpu_tensor`, `compute::webgpu_simple`
+- `web-workers` — Web Workers-based multi-threaded execution (`src/compute/web_workers.rs`)
+- `shared-memory` — SharedArrayBuffer-backed cross-thread shared memory (`src/compute/threads.rs`)
+- `kernel-fusion` — Fused transformer kernel patterns (MHA, FFN, LayerNorm+Residual, RMSNorm, SwiGLU) in `compute/webgpu/kernel_fusion.rs` + `advanced_fusion_patterns.rs`; note these modules currently compile whenever `webgpu` is enabled, so this flag is not yet an independent source-level gate
+- `async-executor` — Async task executor for WebGPU dispatch (`compute/webgpu/async_executor.rs`); like `kernel-fusion`, currently compiles under `webgpu` regardless of this flag
+- `indexeddb` — IndexedDB model/KV-cache persistence; also gates the top-level `storage` module itself, so `memory64`/`streaming-loader`/`model-splitting` below need this enabled too
+- `memory64` — WASM memory64 addressing for models >4GB (`src/storage/memory64.rs`)
+- `streaming-loader` — Progressive chunked model loading (`src/storage/streaming_loader.rs`, `progressive_loader.rs`)
+- `model-splitting` — Splits large models into chunks for loading (`src/storage/model_splitting.rs`)
+- `react-components` — React hooks and component library (`src/react_components.rs`)
+- `vue-components` — Vue composables and plugin (`src/vue_components.rs`)
+- `angular-components` — Angular services and directives (`src/angular_components.rs`)
+- `web-components` — Framework-agnostic custom elements (`src/web_components/`)
+- `playground` — Interactive browser playground (`src/playground.rs`)
+- `streaming-generation` — Token-by-token streaming inference (`src/streaming_generation.rs`)
+- `mobile-optimization` — Battery/network-adaptive loading, touch gestures, camera integration, device-capability detection (`src/mobile.rs`, `touch_gestures.rs`, `camera_integration.rs`, `device_capability*`)
+- `scirs2` — Enables the optional `scirs2-core` dependency; not yet consumed by any tensor op in this crate (reserved for future acceleration)
+- `console_panic` — Routes Rust panics to the browser console via `console_error_panic_hook` (part of `default`)
+- `dlmalloc-alloc` — Swaps the global allocator to `dlmalloc` (`src/allocator.rs`) for wasm32 (part of `default`)
+- `default` — `console_panic` + `dlmalloc-alloc`
+- `size-optimized` — Same composition as `default` today (`dlmalloc-alloc` + `console_panic`)
+- `performance-optimized` — `dlmalloc-alloc` + `kernel-fusion` + `async-executor` + `scirs2`; does **not** include `webgpu` itself, so the fusion/executor code (gated behind `webgpu` at the module level) won't actually compile in unless `webgpu` is enabled too
+- `minimal` — Smallest viable build: `dlmalloc-alloc` only
+- `full` — Enables every additive feature except `webgpu` and `console_panic` (web-workers, shared-memory, kernel-fusion, async-executor, indexeddb, memory64, streaming-loader, model-splitting, react-components, vue-components, angular-components, web-components, playground, streaming-generation, mobile-optimization, scirs2, dlmalloc-alloc); combine with `--features full,webgpu` for GPU support too
 
-## WebGPU Notes (wgpu 29.0)
+## WebGPU Notes
 
-This crate targets wgpu 29.0 with the following API specifics:
+This crate has **no dependency on the native `wgpu` crate**. WebGPU support is implemented by calling the browser's WebGPU API directly through hand-written `web-sys`/`js-sys` bindings:
 
-- `InstanceDescriptor::new_without_display_handle()` — headless instance creation
-- `bind_group_layouts` accepts `&[Option<&BindGroupLayout>]` for sparse layouts
-- Kernel fusion enabled for MHA (2.5x), FFN (1.8x), LayerNorm+Residual (1.5x)
+- **Types**: `GpuAdapter`, `GpuDevice`, `GpuQueue`, etc. are `js_sys::Object` aliases (`src/compute/webgpu/types.rs`), with extension traits (`GpuDeviceExt`, `GpuAdapterExt`, `GpuQueueExt`, `GpuBufferExt`) that use JS reflection for methods web-sys doesn't bind natively.
+- **Device negotiation**: `navigator.gpu` → `requestAdapter()` → `requestDevice()`, each awaited via `wasm_bindgen_futures::JsFuture` with explicit null/undefined checks (`GpuTensor::init_webgpu` in `src/compute/gpu_tensor.rs`; `WebGPUOps::initialize` in `src/compute/webgpu_simple.rs`).
+- **Shared backend handle**: the negotiated backend is wrapped in `Rc<RefCell<WebGPUBackend>>` (`src/compute/gpu_tensor.rs`) for cheap sharing across derived tensors plus interior mutability for pipeline caching; `RefCell` borrows are scoped so none is ever held across an `.await`.
+- **CPU fallback is real** at multiple levels: `WebGPUBackend::is_available()` probes for `navigator.gpu` before attempting GPU init; `GpuTensorFactory::create_tensor` falls back silently on any initialization error; per-op methods on `GpuTensor` (`matmul`/`add`/`relu`) route to CPU tensor math whenever no GPU backend is active.
+- **Two dispatch paths of different completeness** coexist — know which one you're using:
+  - `WebGPUOps` (`src/compute/webgpu_simple.rs`) is fully wired end-to-end: it compiles 7 real WGSL compute shaders (matmul, add, relu, sigmoid, tanh, gelu, softmax), builds storage buffers/bind groups/command encoders, dispatches compute passes, and reads results back via a staging buffer + `map_async`/`getMappedRange`.
+  - `WebGPUBackend`/`SimpleGpuOps` (`src/compute/webgpu/backend.rs`, `simple_ops.rs`) — the path behind the `Rc<RefCell>`-wrapped `GpuTensor` — allocate real GPU buffers and pipelines, but their dispatch methods (`dispatch_add`/`dispatch_relu`/`dispatch_matmul`, and `SimpleGpuOps::matmul`/`softmax`/`layer_norm`/`attention`) currently execute the CPU fallback path by explicit documented design; GPU dispatch for these ops isn't wired in yet.
+  - **Recommendation**: use `WebGPUOps` directly if you need guaranteed end-to-end GPU execution today; `GpuTensor` is convenient but currently CPU-backed for most ops even when a GPU device was successfully acquired.
 
 ## Examples
 
@@ -264,18 +280,28 @@ See the `examples/` directory for complete examples:
 
 ## Testing
 
+This crate has two distinct test layers:
+
+- **Rust unit tests** — in-source tests use plain `#[test]` attributes (163 occurrences across 39 files; 0 `#[wasm_bindgen_test]`, despite `wasm-bindgen-test` being a dev-dependency), so they compile and run as ordinary host-target Rust tests; no browser or `wasm-pack` runner is required for this layer.
+- **Browser/E2E tests** — a separate JS-driven suite under `tests/*.js` (Playwright + Jest: cross-browser, e2e, performance, visual-regression, memory-leak checks), run via `npm test` / `npx playwright test` from `tests/package.json`, independent of the Rust test binary.
+
 ```bash
-# Run WASM tests
-wasm-pack test --headless --firefox --chrome
+# Run the Rust unit tests (host target)
+cargo test
+cargo nextest run
 
 # Run with specific features
-cargo test --target wasm32-unknown-unknown --features webgpu
+cargo test --features webgpu
 
-# Check compilation
+# Check that the actual wasm32 build compiles
 cargo check --target wasm32-unknown-unknown
+
+# Run the browser/E2E JS suite
+cd tests && npm test               # Jest-based suite
+cd tests && npx playwright test    # Playwright cross-browser/e2e suite
 ```
 
-128 unit tests with 100% pass rate, covering:
+~130 unit tests with 100% pass rate for this crate, covering:
 - Core tensor operations
 - WebGPU backend (mock device)
 - BERT forward pass
@@ -283,12 +309,16 @@ cargo check --target wasm32-unknown-unknown
 - Streaming generation
 - IndexedDB model cache
 
+Workspace-wide (`cargo nextest run --workspace --all-features`, 2026-07-01): 18,102 passed / 0 failed / 119 skipped; 0 clippy warnings; 0 rustdoc warnings.
+
 ## Limitations
 
 - WebGPU requires Chrome 113+, Edge 113+, or Safari (experimental)
 - SharedArrayBuffer requires cross-origin isolation headers
 - SIMD requires WASM SIMD128 browser support
 - Memory typically capped at 2-4GB (use `memory64` + quantization for large models)
+- `WebGPUBackend`/`SimpleGpuOps` (the dispatch path behind `GpuTensor`) currently execute the CPU fallback for matmul/add/relu/softmax/layer_norm/attention by documented design — use `WebGPUOps` (`compute::webgpu_simple`) directly for guaranteed end-to-end GPU dispatch today (see "WebGPU Notes")
+- 0 `todo!()`/`unimplemented!()` macros in source, but several documented simplifications remain (none block compilation or panic): a no-op cache-clear recovery action (`src/error.rs`), fixed-bytes-per-element quantization stats (`src/optimization/quantization/quantizer.rs`), hardcoded device-capability probes (`src/device_capability/detector.rs`), fixed-constant (non-bit-width-aware) basic quantization math (`src/optimization/quantization/algorithms/basic.rs`), synthesized `blob:`/`data:` URLs in place of `URL.createObjectURL()` (`src/storage/model_splitting.rs`, `src/compute/threads.rs`), and default (non-queried) device capabilities (`src/compute/webgpu/mod.rs`)
 
 ## License
 

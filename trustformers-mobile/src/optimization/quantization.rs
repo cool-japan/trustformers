@@ -17,6 +17,7 @@ use trustformers_core::Tensor;
 
 /// Quantization scheme types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+// reason: variants mirror standard ML dtype spellings (e.g. FP16, INT8).
 #[allow(non_camel_case_types)]
 pub enum QuantizationScheme {
     Int4,
@@ -331,7 +332,7 @@ impl MobileQuantizer for Int4Quantizer {
     }
 
     fn calibrate(&self, data: &[Tensor]) -> Result<()> {
-        let mut calibration = self.calibration.write().expect("RwLock poisoned");
+        let mut calibration = self.calibration.write().unwrap_or_else(|p| p.into_inner());
 
         for tensor in data {
             let tensor_data = tensor.data()?;
@@ -351,14 +352,17 @@ impl MobileQuantizer for Int4Quantizer {
     }
 
     fn quantize_tensor(&self, tensor: &Tensor) -> Result<Tensor> {
-        let calibration = self.calibration.read().expect("RwLock poisoned");
+        let calibration = self.calibration.read().unwrap_or_else(|p| p.into_inner());
         let tensor_data = tensor.data()?;
 
         // Get or compute scale and zero point
         let (scale, zero_point) = if let Some(&scale) = calibration.scales.get("global") {
             (
                 scale,
-                *calibration.zero_points.get("global").expect("No global zero point"),
+                *calibration
+                    .zero_points
+                    .get("global")
+                    .ok_or_else(|| runtime_error("missing global zero point".to_string()))?,
             )
         } else {
             // Compute on the fly if not calibrated
@@ -383,14 +387,17 @@ impl MobileQuantizer for Int4Quantizer {
     }
 
     fn dequantize_tensor(&self, tensor: &Tensor) -> Result<Tensor> {
-        let calibration = self.calibration.read().expect("RwLock poisoned");
+        let calibration = self.calibration.read().unwrap_or_else(|p| p.into_inner());
         let tensor_data = tensor.data()?;
 
         // Get quantization parameters from calibration data
         let (scale, zero_point) = if let Some(&scale) = calibration.scales.get("global") {
             (
                 scale,
-                *calibration.zero_points.get("global").expect("No global zero point"),
+                *calibration
+                    .zero_points
+                    .get("global")
+                    .ok_or_else(|| runtime_error("missing global zero point".to_string()))?,
             )
         } else {
             // Fallback: estimate from quantized data range
@@ -460,7 +467,7 @@ impl MobileQuantizer for Int8Quantizer {
     }
 
     fn calibrate(&self, data: &[Tensor]) -> Result<()> {
-        let mut calibration = self.calibration.write().expect("RwLock poisoned");
+        let mut calibration = self.calibration.write().unwrap_or_else(|p| p.into_inner());
 
         for tensor in data {
             let tensor_data = tensor.data()?;
@@ -504,13 +511,16 @@ impl MobileQuantizer for Int8Quantizer {
     }
 
     fn quantize_tensor(&self, tensor: &Tensor) -> Result<Tensor> {
-        let calibration = self.calibration.read().expect("RwLock poisoned");
+        let calibration = self.calibration.read().unwrap_or_else(|p| p.into_inner());
         let tensor_data = tensor.data()?;
 
         let (scale, zero_point) = if let Some(&scale) = calibration.scales.get("global") {
             (
                 scale,
-                *calibration.zero_points.get("global").expect("No global zero point"),
+                *calibration
+                    .zero_points
+                    .get("global")
+                    .ok_or_else(|| runtime_error("missing global zero point".to_string()))?,
             )
         } else {
             let min_val = tensor_data.iter().fold(f32::INFINITY, |a, &b| a.min(b));
@@ -536,14 +546,17 @@ impl MobileQuantizer for Int8Quantizer {
     }
 
     fn dequantize_tensor(&self, tensor: &Tensor) -> Result<Tensor> {
-        let calibration = self.calibration.read().expect("RwLock poisoned");
+        let calibration = self.calibration.read().unwrap_or_else(|p| p.into_inner());
         let tensor_data = tensor.data()?;
 
         // Get quantization parameters from calibration data
         let (scale, zero_point) = if let Some(&scale) = calibration.scales.get("global") {
             (
                 scale,
-                *calibration.zero_points.get("global").expect("No global zero point"),
+                *calibration
+                    .zero_points
+                    .get("global")
+                    .ok_or_else(|| runtime_error("missing global zero point".to_string()))?,
             )
         } else {
             // Fallback: estimate from quantized data range

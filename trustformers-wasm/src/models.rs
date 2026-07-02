@@ -184,7 +184,10 @@ impl MultiHeadAttention {
         }
 
         if head_outputs.len() == 1 {
-            return Ok(head_outputs.into_iter().next().expect("len == 1"));
+            return head_outputs
+                .into_iter()
+                .next()
+                .ok_or_else(|| JsValue::from_str("expected exactly one head output"));
         }
 
         // Get shape of first tensor to validate compatibility
@@ -305,7 +308,7 @@ impl BertEmbeddings {
     pub fn forward(
         &self,
         input_ids: &[usize],
-        #[allow(unused_variables)] use_token_type_ids: bool,
+        _use_token_type_ids: bool,
     ) -> Result<WasmTensor, JsValue> {
         let seq_length = input_ids.len();
 

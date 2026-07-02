@@ -474,7 +474,7 @@ impl PerformanceAnalyticsEngine {
             return Err(TrustformersError::invalid_input("Export is disabled".to_string()).into());
         }
 
-        let metrics_data = self.metrics_data.lock().expect("Operation failed");
+        let metrics_data = self.metrics_data.lock().unwrap_or_else(|p| p.into_inner());
 
         match format {
             ExportFormat::Json => {
@@ -648,7 +648,7 @@ impl PerformanceAnalyticsEngine {
         }
 
         let mut sorted_values = values.to_vec();
-        sorted_values.sort_by(|a, b| a.partial_cmp(b).expect("Operation failed"));
+        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let index = (percentile * (sorted_values.len() - 1) as f64) as usize;
         sorted_values[index.min(sorted_values.len() - 1)]
@@ -797,8 +797,12 @@ impl ForecastingModel {
         }
 
         // Calculate simple trend
-        let first_point = recent_data.last().expect("Operation failed");
-        let last_point = recent_data.first().expect("Operation failed");
+        let first_point = recent_data
+            .last()
+            .ok_or_else(|| TrustformersError::invalid_input("empty recent data".to_string()))?;
+        let last_point = recent_data
+            .first()
+            .ok_or_else(|| TrustformersError::invalid_input("empty recent data".to_string()))?;
         let time_diff = (last_point.timestamp - first_point.timestamp) as f64;
         let value_diff = last_point.value - first_point.value;
         let slope = if time_diff > 0.0 { value_diff / time_diff } else { 0.0 };

@@ -265,7 +265,7 @@ impl NumaAllocator {
         access_pattern: AccessPattern,
     ) -> Result<NumaAllocation> {
         let policy = if let Some(name) = policy_name {
-            let policies = self.policies.read().expect("lock should not be poisoned");
+            let policies = self.policies.read().unwrap_or_else(|poisoned| poisoned.into_inner());
             policies.get(name).cloned().unwrap_or_default()
         } else {
             NumaPolicy::default()
@@ -288,7 +288,8 @@ impl NumaAllocator {
 
         // Track allocation
         {
-            let mut allocations = self.allocations.lock().expect("lock should not be poisoned");
+            let mut allocations =
+                self.allocations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             allocations.insert(allocation_id, allocation.clone());
         }
 
@@ -305,7 +306,7 @@ impl NumaAllocator {
         size: usize,
         access_pattern: &AccessPattern,
     ) -> Result<u32> {
-        let topology = self.topology.read().expect("lock should not be poisoned");
+        let topology = self.topology.read().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         match &policy.strategy {
             NumaStrategy::LocalNode => self.get_current_node(),
@@ -332,7 +333,7 @@ impl NumaAllocator {
         // In a real implementation, this would detect which NUMA node the current thread is running on
         // For now, we'll use a simple heuristic based on thread ID
         let thread_id = thread::current().id();
-        let topology = self.topology.read().expect("lock should not be poisoned");
+        let topology = self.topology.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         let node_count = topology.total_nodes;
 
         // Simple hash-based selection
@@ -341,7 +342,8 @@ impl NumaAllocator {
     }
 
     fn select_least_loaded_node(&self, topology: &NumaTopology) -> Result<u32> {
-        let monitor = self.performance_monitor.lock().expect("lock should not be poisoned");
+        let monitor =
+            self.performance_monitor.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let least_loaded = topology
             .nodes
@@ -389,7 +391,8 @@ impl NumaAllocator {
         access_pattern: &AccessPattern,
     ) -> Result<u32> {
         let mut scores = HashMap::new();
-        let monitor = self.performance_monitor.lock().expect("lock should not be poisoned");
+        let monitor =
+            self.performance_monitor.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         for (&node_id, node) in &topology.nodes {
             if !node.is_available {
@@ -456,7 +459,7 @@ impl NumaAllocator {
         // In a real implementation, this would use NUMA-specific allocation APIs
         // For now, we'll simulate allocation
 
-        let topology = self.topology.read().expect("lock should not be poisoned");
+        let topology = self.topology.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         if !topology.nodes.contains_key(&node_id) {
             return Err(TrustformersError::other(format!(
                 "Invalid NUMA node: {}",
@@ -471,13 +474,15 @@ impl NumaAllocator {
     }
 
     fn generate_allocation_id(&self) -> String {
-        let mut counter = self.allocation_counter.lock().expect("lock should not be poisoned");
+        let mut counter =
+            self.allocation_counter.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         *counter += 1;
         format!("numa_alloc_{}", *counter)
     }
 
     fn update_allocation_stats(&self, node_id: u32, size: usize) {
-        let mut monitor = self.performance_monitor.lock().expect("lock should not be poisoned");
+        let mut monitor =
+            self.performance_monitor.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let stats = monitor.allocation_stats.entry(node_id).or_default();
 
         stats.total_allocations += 1;
@@ -528,7 +533,8 @@ impl NumaAllocator {
     /// Free NUMA-aware allocated memory
     pub fn deallocate(&self, allocation_id: &str) -> Result<()> {
         let allocation = {
-            let mut allocations = self.allocations.lock().expect("lock should not be poisoned");
+            let mut allocations =
+                self.allocations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             allocations.remove(allocation_id).ok_or_else(|| {
                 TrustformersError::other(format!("Allocation not found: {}", allocation_id))
             })?
@@ -536,7 +542,8 @@ impl NumaAllocator {
 
         // Update statistics
         {
-            let mut monitor = self.performance_monitor.lock().expect("lock should not be poisoned");
+            let mut monitor =
+                self.performance_monitor.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(stats) = monitor.allocation_stats.get_mut(&allocation.node_id) {
                 stats.current_memory_usage =
                     stats.current_memory_usage.saturating_sub(allocation.size_bytes as u64);
@@ -556,19 +563,20 @@ impl NumaAllocator {
 
     /// Register a custom NUMA policy
     pub fn register_policy(&self, name: String, policy: NumaPolicy) {
-        let mut policies = self.policies.write().expect("lock should not be poisoned");
+        let mut policies = self.policies.write().unwrap_or_else(|poisoned| poisoned.into_inner());
         policies.insert(name, policy);
     }
 
     /// Get NUMA topology information
     pub fn get_topology(&self) -> NumaTopology {
-        let topology = self.topology.read().expect("lock should not be poisoned");
+        let topology = self.topology.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         (*topology).clone()
     }
 
     /// Get performance statistics
     pub fn get_performance_stats(&self) -> NumaPerformanceMonitor {
-        let monitor = self.performance_monitor.lock().expect("lock should not be poisoned");
+        let monitor =
+            self.performance_monitor.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         (*monitor).clone()
     }
 
@@ -579,7 +587,8 @@ impl NumaAllocator {
         access_pattern: AccessPattern,
     ) -> Result<Vec<String>> {
         let mut optimized_allocations = Vec::new();
-        let allocations_map = self.allocations.lock().expect("Lock poisoned");
+        let allocations_map =
+            self.allocations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         match access_pattern {
             AccessPattern::Sequential => {
@@ -604,7 +613,8 @@ impl NumaAllocator {
             },
             AccessPattern::Interleaved => {
                 // For interleaved access, spread allocations across nodes
-                let topology = self.topology.read().expect("lock should not be poisoned");
+                let topology =
+                    self.topology.read().unwrap_or_else(|poisoned| poisoned.into_inner());
                 let available_nodes: Vec<u32> = topology.nodes.keys().copied().collect();
 
                 for (node_index, alloc_id) in allocations.iter().enumerate() {
@@ -631,8 +641,9 @@ impl NumaAllocator {
 
     /// Monitor cross-NUMA traffic and suggest optimizations
     pub fn analyze_numa_traffic(&self) -> NumaTrafficAnalysis {
-        let monitor = self.performance_monitor.lock().expect("lock should not be poisoned");
-        let topology = self.topology.read().expect("lock should not be poisoned");
+        let monitor =
+            self.performance_monitor.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let topology = self.topology.read().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let mut analysis = NumaTrafficAnalysis {
             total_cross_node_traffic: 0,

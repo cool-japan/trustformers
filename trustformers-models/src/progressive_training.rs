@@ -20,6 +20,7 @@ use trustformers_models::progressive_training::{
     ProgressiveTrainer, ProgressiveConfig, GrowthStrategy, GrowthDimension
 };
 
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
 let config = ProgressiveConfig {
     growth_dimension: GrowthDimension::Layers,
     growth_strategy: GrowthStrategy::Linear,
@@ -27,9 +28,13 @@ let config = ProgressiveConfig {
     final_size: 12,
     growth_epochs: vec![10, 20, 30],
     warmup_steps: 1000,
+    ..Default::default()
 };
 
-let mut trainer = ProgressiveTrainer::new(config)?;
+let trainer = ProgressiveTrainer::new(config)?;
+# let _ = trainer;
+# Ok(())
+# }
 ```
 */
 

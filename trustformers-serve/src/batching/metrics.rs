@@ -281,10 +281,10 @@ impl ThroughputMonitor {
             return 0.0;
         }
 
-        let duration = times
-            .back()
-            .expect("times has at least 2 elements")
-            .duration_since(*times.front().expect("times has at least 2 elements"));
+        let (Some(back), Some(front)) = (times.back(), times.front()) else {
+            return 0.0;
+        };
+        let duration = back.duration_since(*front);
         if duration.as_secs_f32() > 0.0 {
             times.len() as f32 / duration.as_secs_f32()
         } else {

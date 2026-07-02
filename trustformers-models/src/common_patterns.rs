@@ -26,6 +26,7 @@
 //! ## Example Usage
 //!
 //! ```rust
+//! use anyhow::Result;
 //! use trustformers_models::common_patterns::{ModelFamily, GenerativeModel, GenerationConfig};
 //!
 //! // Use any model through common interface

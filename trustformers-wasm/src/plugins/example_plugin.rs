@@ -1,8 +1,6 @@
 // Example plugin implementation for TrustformeRS WASM
 // Demonstrates how to create community plugins
 
-#![allow(clippy::missing_enforced_import_renames)]
-
 use crate::plugin_framework::{
     ExecutionMetrics, Plugin, PluginConfig, PluginContext, PluginError, PluginErrorCode,
     PluginMetadata, PluginPermission, PluginResult, PluginType,

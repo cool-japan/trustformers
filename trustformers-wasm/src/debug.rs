@@ -323,13 +323,11 @@ impl DebugLogger {
         let total_time: f64 = self.performance_metrics.iter().map(|m| m.duration_ms).sum();
         let avg_time = total_time / total_operations as f64;
 
-        let slowest = self
-            .performance_metrics
-            .iter()
-            .max_by(|a, b| {
-                a.duration_ms.partial_cmp(&b.duration_ms).unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .expect("performance_metrics is not empty after length check");
+        let Some(slowest) = self.performance_metrics.iter().max_by(|a, b| {
+            a.duration_ms.partial_cmp(&b.duration_ms).unwrap_or(std::cmp::Ordering::Equal)
+        }) else {
+            return "No performance metrics available".to_string();
+        };
 
         format!(
             "Performance Summary:\n\

@@ -4,7 +4,6 @@
 //! heavy tensor computations to background threads, keeping the main thread responsive.
 
 #![allow(dead_code)]
-
 use crate::core::tensor::WasmTensor;
 use js_sys::{Function, Object, Promise};
 use serde::{Deserialize, Serialize};
@@ -203,7 +202,6 @@ impl WorkerPool {
 
     /// Wait for a specific task to complete
     pub async fn wait_for_task(&mut self, task_id: usize) -> Result<JsValue, JsValue> {
-        #[allow(clippy::excessive_nesting)]
         loop {
             let results_array = self.process_tasks().await?;
 
@@ -363,7 +361,6 @@ impl WorkerPool {
         let mut results = Vec::new();
 
         // Check for messages from workers
-        #[allow(clippy::excessive_nesting)]
         for worker_instance in &mut self.workers {
             if let Some(task_id) = worker_instance.current_task_id {
                 // Check if worker has completed the task

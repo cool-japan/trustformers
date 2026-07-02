@@ -183,10 +183,12 @@ impl TensorParallelOps {
 
         // Concatenate along concat_dim
         let result = if non_empty_chunks.len() == 1 {
-            non_empty_chunks
-                .into_iter()
-                .next()
-                .expect("non_empty_chunks validated to have exactly 1 element")
+            non_empty_chunks.into_iter().next().ok_or_else(|| {
+                crate::errors::runtime_error(format!(
+                    "{} in all_to_all",
+                    "non_empty_chunks validated to have exactly 1 element"
+                ))
+            })?
         } else {
             self.concatenate_tensors(&non_empty_chunks, concat_dim)?
         };

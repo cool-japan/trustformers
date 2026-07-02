@@ -802,7 +802,7 @@ impl FederatedLearningClient {
             Ok(ModelParameters {
                 parameters: updates,
                 shapes,
-                version: format!("update_{}", SystemTime::now().duration_since(UNIX_EPOCH).expect("Operation failed").as_secs()),
+                version: format!("update_{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()),
                 checksum: "placeholder_checksum".to_string(),
             })
         } else {
@@ -832,7 +832,7 @@ impl FederatedLearningClient {
             if params.len() > k {
                 // Find indices of top-k largest values by magnitude
                 let mut indexed_params: Vec<(usize, f32)> = params.iter().enumerate().map(|(i, &v)| (i, v)).collect();
-                indexed_params.sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).expect("Operation failed").into());
+                indexed_params.sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap_or(std::cmp::Ordering::Equal));
 
                 // Zero out all but top-k
                 let mut new_params = vec![0.0; params.len()];
@@ -1095,7 +1095,7 @@ impl CommunicationManager {
                 preferred_device_types: Vec::new(),
                 region_preferences: None,
             },
-            deadline: SystemTime::now().duration_since(UNIX_EPOCH).expect("Operation failed").as_secs() + 3600,
+            deadline: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() + 3600,
         })
     }
 

@@ -115,7 +115,7 @@ impl ModelVersioningManager {
         // Calculate model hash
         let mut hasher = Sha256::new();
         hasher.update(model_data);
-        let model_hash = format!("{:x}", hasher.finalize());
+        let model_hash = hex::encode(hasher.finalize());
 
         // Create file path
         let file_name = format!("{}.model", version_id);
@@ -130,10 +130,7 @@ impl ModelVersioningManager {
         std::fs::write(&file_path, model_data).context("Failed to save model data")?;
 
         // Get current timestamp
-        let created_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("SystemTime should be after UNIX_EPOCH")
-            .as_secs();
+        let created_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
 
         // Get parent version (latest version of the same model)
         let parent_version = self.registry.latest_versions.get(&model_name).cloned();

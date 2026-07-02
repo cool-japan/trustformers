@@ -25,49 +25,55 @@
 //! ### Text Generation
 //! ```rust,no_run
 //! use trustformers_models::gpt2::{Gpt2LMHeadModel, Gpt2Config};
-//! use trustformers_core::generation::{GenerationConfig, SamplingStrategy};
 //!
-//! let config = Gpt2Config::gpt2_medium();
-//! let mut model = Gpt2LMHeadModel::new(config)?;
-//! model.load_from_hub("gpt2-medium")?;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let config = Gpt2Config::medium();
+//! let model = Gpt2LMHeadModel::new(config)?;
 //!
-//! // Generate text
-//! let gen_config = GenerationConfig {
-//!     max_length: 100,
-//!     temperature: 0.8,
-//!     top_p: 0.9,
-//!     sampling_strategy: SamplingStrategy::TopPNucleus,
-//!     ..Default::default()
-//! };
-//!
-//! let generated_ids = model.generate(input_ids, gen_config)?;
+//! // Generate text (temperature 0.8, nucleus sampling with top_p 0.9)
+//! # let input_ids: Vec<u32> = vec![464, 2003, 286, 9552, 318];
+//! let generated_ids = model.generate(input_ids, 100, 0.8, None, Some(0.9))?;
+//! # let _ = generated_ids;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### Feature Extraction
 //! ```rust,no_run
 //! use trustformers_models::gpt2::{Gpt2Model, Gpt2Config};
+//! use trustformers_core::traits::{Model, TokenizedInput};
 //!
-//! let config = Gpt2Config::gpt2_base();
-//! let mut model = Gpt2Model::new(config)?;
-//! model.load_from_hub("gpt2")?;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let config = Gpt2Config::small();
+//! let model = Gpt2Model::new(config)?;
 //!
 //! // Extract hidden states
-//! let outputs = model.forward(input_ids, None, None)?;
+//! # let input_ids: Vec<u32> = vec![464, 2003, 286, 9552, 318];
+//! # let attention_mask: Vec<u8> = vec![1, 1, 1, 1, 1];
+//! let outputs = model.forward(TokenizedInput::new(input_ids, attention_mask))?;
 //! let hidden_states = outputs.last_hidden_state;
+//! # let _ = hidden_states;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### Text Completion
 //! ```rust,no_run
 //! use trustformers_models::gpt2::{Gpt2LMHeadModel, Gpt2Config};
 //!
-//! let config = Gpt2Config::gpt2_base();
-//! let mut model = Gpt2LMHeadModel::new(config)?;
-//! model.load_from_hub("gpt2")?;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let config = Gpt2Config::small();
+//! let model = Gpt2LMHeadModel::new(config)?;
 //!
-//! // Complete text with greedy decoding
+//! // Complete text with greedy decoding (token ids shown here would normally
+//! // come from a tokenizer, e.g. from the `trustformers-tokenizers` crate)
 //! let prompt = "The future of AI is";
-//! let input_ids = tokenizer.encode(prompt)?;
-//! let completed = model.generate_greedy(input_ids, max_length: 50)?;
+//! # let _ = prompt;
+//! # let input_ids: Vec<u32> = vec![464, 2003, 286, 9552, 318];
+//! let completed = model.generate_greedy(input_ids, 50)?;
+//! # let _ = completed;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Generation Strategies

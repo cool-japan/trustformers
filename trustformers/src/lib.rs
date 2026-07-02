@@ -49,6 +49,9 @@ pub mod error;
 pub mod evaluation;
 pub mod hub;
 pub mod hub_differential;
+// hub_local_mirror is a networking module (reqwest-backed Hub mirror); gate it
+// behind `hub` so the default tree stays free of reqwest -> aws-lc-sys (C/C++).
+#[cfg(feature = "hub")]
 pub mod hub_local_mirror;
 pub mod hub_model_card;
 pub mod hub_offline_packs;
@@ -157,6 +160,7 @@ pub use enhanced_profiler::{
     SessionSummary,
 };
 pub use evaluation::bridge::{NlpAdapter, TensorAdapter};
+#[cfg(feature = "hub")]
 pub use hub_local_mirror::{
     get_hub_mirror, get_model_from_mirror, init_hub_mirror, CachedModel, DownloadProgress,
     DownloadStatus, HubMirror, MirrorConfig, MirrorStats, ModelMetadata,
@@ -254,21 +258,27 @@ pub use zero_copy::{GlobalMemoryPool, ZeroCopyTensorView};
 
 pub mod prelude {
     pub use crate::{
-        compose_pipelines, get_hub_mirror, get_model_from_mirror, global_pool, init_global_pool,
-        init_hub_mirror, pipeline, pool_allocate, pool_deallocate, profile_async, profile_fn,
-        AudioMetadata, AutoConfig, AutoDataCollator, AutoFeatureExtractor, AutoMetric, AutoModel,
-        AutoModelForCausalLM, AutoModelForMaskedLM, AutoModelForQuestionAnswering,
-        AutoModelForSeq2SeqLM, AutoModelForSequenceClassification, AutoModelForTokenClassification,
-        AutoOptimizer, AutoProcessor, AutoTokenizer, BenchmarkSuite, CollatedBatch,
-        ComposedPipeline, Config, DataCollator, DataExample, DocumentFormat, DocumentMetadata,
-        DownloadProgress, FeatureExtractor, FeatureInput, FeatureOutput, HubMirror, ImageFormat,
-        ImageMetadata, MemoryPool, MemoryPoolConfig, MemoryPoolStats, MemoryUsage, Metric,
-        MirrorConfig, MirrorStats, Modality, Model, MultimodalMetadata, OptimizationAdvisor,
-        Optimizer, OutputValidator, PaddingStrategy, PerformanceProfiler, PipelineChain,
-        PipelineComposer, PreallocationStrategy, ProcessorConfig, ProfileResult, ProfileResults,
-        Profiler, RecoveryAction, RecoveryContext, Result, SpecialToken, TextMetadata,
-        TextOutputValidator, Tokenizer, TrustformersError, ValidationError, ValidationManager,
-        ValidationManagerConfig, ValidationMetrics, ValidationResult,
+        compose_pipelines, global_pool, init_global_pool, pipeline, pool_allocate, pool_deallocate,
+        profile_async, profile_fn, AudioMetadata, AutoConfig, AutoDataCollator,
+        AutoFeatureExtractor, AutoMetric, AutoModel, AutoModelForCausalLM, AutoModelForMaskedLM,
+        AutoModelForQuestionAnswering, AutoModelForSeq2SeqLM, AutoModelForSequenceClassification,
+        AutoModelForTokenClassification, AutoOptimizer, AutoProcessor, AutoTokenizer,
+        BenchmarkSuite, CollatedBatch, ComposedPipeline, Config, DataCollator, DataExample,
+        DocumentFormat, DocumentMetadata, FeatureExtractor, FeatureInput, FeatureOutput,
+        ImageFormat, ImageMetadata, MemoryPool, MemoryPoolConfig, MemoryPoolStats, MemoryUsage,
+        Metric, Modality, Model, MultimodalMetadata, OptimizationAdvisor, Optimizer,
+        OutputValidator, PaddingStrategy, PerformanceProfiler, PipelineChain, PipelineComposer,
+        PreallocationStrategy, ProcessorConfig, ProfileResult, ProfileResults, Profiler,
+        RecoveryAction, RecoveryContext, Result, SpecialToken, TextMetadata, TextOutputValidator,
+        Tokenizer, TrustformersError, ValidationError, ValidationManager, ValidationManagerConfig,
+        ValidationMetrics, ValidationResult,
+    };
+
+    // Hub mirror APIs are only present with the `hub` feature (networking).
+    #[cfg(feature = "hub")]
+    pub use crate::{
+        get_hub_mirror, get_model_from_mirror, init_hub_mirror, DownloadProgress, HubMirror,
+        MirrorConfig, MirrorStats,
     };
 
     #[cfg(feature = "async")]

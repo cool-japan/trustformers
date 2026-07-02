@@ -672,7 +672,7 @@ impl SustainableModelCompression {
 
         // Calculate magnitude-based pruning threshold
         let mut magnitudes: Vec<f32> = data_vec.iter().map(|x| x.abs()).collect();
-        magnitudes.sort_by(|a, b| a.partial_cmp(b).expect("Operation failed"));
+        magnitudes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let pruning_threshold = magnitudes[data_vec.len() * 30 / 100]; // Prune bottom 30%
 
@@ -818,7 +818,7 @@ impl EnergyOptimalBatchProcessor {
                 let b_efficiency = b.estimated_energy / b.data.len() as f32;
                 a_efficiency
                     .partial_cmp(&b_efficiency)
-                    .expect("Operation failed")
+                    .unwrap_or(std::cmp::Ordering::Equal)
                     .then(a.deadline.cmp(&b.deadline))
             });
         }

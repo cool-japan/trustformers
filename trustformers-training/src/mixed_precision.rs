@@ -720,10 +720,9 @@ impl AdvancedMixedPrecisionManager {
             // Get scale factor before mutably borrowing
             let enable_per_layer_scaling = self.config.enable_per_layer_scaling;
 
-            let layer_config = self
-                .layer_configs
-                .get_mut(layer_name)
-                .expect("layer config should exist after insertion at line 710-715");
+            let layer_config = self.layer_configs.get_mut(layer_name).ok_or_else(|| {
+                anyhow::anyhow!("layer config missing for '{layer_name}' after insertion")
+            })?;
             layer_config.gradient_norm_history.push(grad_norm);
 
             // Keep only recent history
@@ -766,10 +765,9 @@ impl AdvancedMixedPrecisionManager {
             let has_overflow = self.has_overflow(gradient)?;
 
             // Re-acquire mutable borrow to update counters
-            let layer_config = self
-                .layer_configs
-                .get_mut(layer_name)
-                .expect("layer config should exist after insertion at line 710-715");
+            let layer_config = self.layer_configs.get_mut(layer_name).ok_or_else(|| {
+                anyhow::anyhow!("layer config missing for '{layer_name}' after insertion")
+            })?;
             if has_overflow {
                 layer_config.overflow_count += 1;
                 global_overflow = true;
@@ -782,7 +780,6 @@ impl AdvancedMixedPrecisionManager {
     }
 
     /// Adapt scaling for a specific layer
-    #[allow(dead_code)]
     fn adapt_layer_scaling(&mut self, layer_config: &mut LayerScalingConfig) {
         if layer_config.gradient_norm_history.len() < 5 {
             return;

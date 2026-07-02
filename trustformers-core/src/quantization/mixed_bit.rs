@@ -250,8 +250,9 @@ impl MixedBitQuantizer {
                         .enumerate()
                         .map(|(i, &score)| (i, score))
                         .collect();
-                    indexed_scores
-                        .sort_by(|a, b| b.1.partial_cmp(&a.1).expect("Partial comparison failed"));
+                    indexed_scores.sort_by(|a, b| {
+                        b.1.partial_cmp(&a.1).unwrap_or(::std::cmp::Ordering::Equal)
+                    });
 
                     // Calculate target total bits
                     let total_elements = sensitivity_scores.len();
@@ -319,7 +320,7 @@ impl MixedBitQuantizer {
 
         // Find sensitivity percentiles
         let mut sorted_scores = sensitivity_scores.to_vec();
-        sorted_scores.sort_by(|a, b| a.partial_cmp(b).expect("Partial comparison failed"));
+        sorted_scores.sort_by(|a, b| a.partial_cmp(b).unwrap_or(::std::cmp::Ordering::Equal));
 
         let high_sensitivity_threshold =
             sorted_scores[(sorted_scores.len() * 90 / 100).min(sorted_scores.len() - 1)];
@@ -374,7 +375,7 @@ impl MixedBitQuantizer {
         // Sort elements by sensitivity to prioritize important layers
         let mut indexed_scores: Vec<(usize, f32)> =
             sensitivity_scores.iter().enumerate().map(|(i, &score)| (i, score)).collect();
-        indexed_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("Partial comparison failed"));
+        indexed_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(::std::cmp::Ordering::Equal));
 
         // Start with lowest bits for maximum performance
         let mut current_bits = vec![2u8; total_elements];

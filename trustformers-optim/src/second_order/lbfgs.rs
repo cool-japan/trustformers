@@ -114,7 +114,10 @@ impl LBFGS {
         // Compute parameter and gradient differences
         for (name, param) in parameters.iter() {
             let param_data = param.data()?;
-            let prev_param = self.prev_params.get(name).expect("prev_params must exist for name");
+            let prev_param = self
+                .prev_params
+                .get(name)
+                .ok_or_else(|| anyhow::anyhow!("prev_params must exist for name"))?;
 
             let s: Vec<f32> =
                 param_data.iter().zip(prev_param.iter()).map(|(p, prev_p)| p - prev_p).collect();
@@ -123,7 +126,10 @@ impl LBFGS {
 
         for (name, grad) in gradients.iter() {
             let grad_data = grad.data()?;
-            let prev_grad = self.prev_grads.get(name).expect("prev_grads must exist for name");
+            let prev_grad = self
+                .prev_grads
+                .get(name)
+                .ok_or_else(|| anyhow::anyhow!("prev_grads must exist for name"))?;
 
             let y: Vec<f32> =
                 grad_data.iter().zip(prev_grad.iter()).map(|(g, prev_g)| g - prev_g).collect();
@@ -133,8 +139,8 @@ impl LBFGS {
         // Compute rho = 1 / (y^T s)
         let mut rho = 0.0;
         for name in parameters.keys() {
-            let s = s_k.get(name).expect("s_k must exist for name");
-            let y = y_k.get(name).expect("y_k must exist for name");
+            let s = s_k.get(name).ok_or_else(|| anyhow::anyhow!("s_k must exist for name"))?;
+            let y = y_k.get(name).ok_or_else(|| anyhow::anyhow!("y_k must exist for name"))?;
 
             rho += s.iter().zip(y.iter()).map(|(s_i, y_i)| s_i * y_i).sum::<f32>();
         }
@@ -164,8 +170,9 @@ impl LBFGS {
 
         // Apply update
         for (name, param) in parameters.iter_mut() {
-            let direction =
-                search_direction.get(name).expect("search_direction must exist for name");
+            let direction = search_direction
+                .get(name)
+                .ok_or_else(|| anyhow::anyhow!("search_direction must exist for name"))?;
             let mut param_data = param.data()?;
 
             for i in 0..param_data.len() {
@@ -208,8 +215,10 @@ impl LBFGS {
 
             let mut alpha_i = 0.0;
             for name in gradients.keys() {
-                let s_i_param = s_i.get(name).expect("s_i must exist for name");
-                let q_param = q.get(name).expect("q must exist for name");
+                let s_i_param =
+                    s_i.get(name).ok_or_else(|| anyhow::anyhow!("s_i must exist for name"))?;
+                let q_param =
+                    q.get(name).ok_or_else(|| anyhow::anyhow!("q must exist for name"))?;
 
                 alpha_i +=
                     s_i_param.iter().zip(q_param.iter()).map(|(s, q_val)| s * q_val).sum::<f32>();
@@ -219,9 +228,11 @@ impl LBFGS {
 
             // Update q
             for name in gradients.keys() {
-                let y_i_param =
-                    self.y_history[i].get(name).expect("y_history must have all gradient keys");
-                let q_param = q.get_mut(name).expect("q must exist for name");
+                let y_i_param = self.y_history[i]
+                    .get(name)
+                    .ok_or_else(|| anyhow::anyhow!("y_history must have all gradient keys"))?;
+                let q_param =
+                    q.get_mut(name).ok_or_else(|| anyhow::anyhow!("q must exist for name"))?;
 
                 for j in 0..q_param.len() {
                     q_param[j] -= alpha_i * y_i_param[j];
@@ -239,8 +250,12 @@ impl LBFGS {
             let mut y_dot_y = 0.0;
 
             for name in gradients.keys() {
-                let s_param = recent_s.get(name).expect("recent_s must exist for name");
-                let y_param = recent_y.get(name).expect("recent_y must exist for name");
+                let s_param = recent_s
+                    .get(name)
+                    .ok_or_else(|| anyhow::anyhow!("recent_s must exist for name"))?;
+                let y_param = recent_y
+                    .get(name)
+                    .ok_or_else(|| anyhow::anyhow!("recent_y must exist for name"))?;
 
                 s_dot_y += s_param.iter().zip(y_param.iter()).map(|(s, y)| s * y).sum::<f32>();
                 y_dot_y += y_param.iter().map(|y| y * y).sum::<f32>();
@@ -263,8 +278,10 @@ impl LBFGS {
 
             let mut beta = 0.0;
             for name in gradients.keys() {
-                let y_i_param = y_i.get(name).expect("y_i must exist for name");
-                let q_param = q.get(name).expect("q must exist for name");
+                let y_i_param =
+                    y_i.get(name).ok_or_else(|| anyhow::anyhow!("y_i must exist for name"))?;
+                let q_param =
+                    q.get(name).ok_or_else(|| anyhow::anyhow!("q must exist for name"))?;
 
                 beta +=
                     y_i_param.iter().zip(q_param.iter()).map(|(y, q_val)| y * q_val).sum::<f32>();
@@ -275,9 +292,11 @@ impl LBFGS {
 
             // Update q
             for name in gradients.keys() {
-                let s_i_param =
-                    self.s_history[i].get(name).expect("s_history must have all gradient keys");
-                let q_param = q.get_mut(name).expect("q must exist for name");
+                let s_i_param = self.s_history[i]
+                    .get(name)
+                    .ok_or_else(|| anyhow::anyhow!("s_history must have all gradient keys"))?;
+                let q_param =
+                    q.get_mut(name).ok_or_else(|| anyhow::anyhow!("q must exist for name"))?;
 
                 for j in 0..q_param.len() {
                     q_param[j] += correction * s_i_param[j];

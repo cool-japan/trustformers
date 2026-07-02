@@ -2,6 +2,10 @@
 //!
 //! Detects unusual patterns in model execution, tensor values, and gradients
 //! to help identify potential issues during training and inference.
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -19,7 +23,6 @@ pub struct AnomalyDetector {
     recovery_attempts: Vec<RecoveryAttempt>,
     monitoring_stats: MonitoringStats,
     performance_history: VecDeque<f64>,
-    #[allow(dead_code)]
     gradient_history: HashMap<String, VecDeque<f64>>,
     loss_history: VecDeque<f64>,
     weight_baseline: HashMap<String, Vec<f32>>,
@@ -550,10 +553,9 @@ impl AnomalyDetector {
             return Ok(());
         }
 
-        let baseline = self
-            .weight_baseline
-            .get(layer_name)
-            .expect("baseline should exist after contains_key check");
+        let Some(baseline) = self.weight_baseline.get(layer_name) else {
+            return Ok(());
+        };
         if baseline.len() != current_weights.len() {
             return Ok(()); // Skip if dimensions don't match
         }

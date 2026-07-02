@@ -17,12 +17,14 @@ and concurrent features.
 ## Usage
 
 ```rust
-use trustformers_mobile::react_native_fabric::{
-    FabricRenderer, FabricConfig, TrustformersHostComponent
-};
+# fn main() -> trustformers_core::Result<()> {
+use trustformers_mobile::react_native_fabric::{FabricRenderer, FabricConfig};
 
 let config = FabricConfig::default();
 let renderer = FabricRenderer::new(config)?;
+# let _ = renderer;
+# Ok(())
+# }
 ```
 */
 

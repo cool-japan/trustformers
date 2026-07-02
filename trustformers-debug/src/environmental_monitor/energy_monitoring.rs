@@ -1,4 +1,8 @@
 //! Energy consumption monitoring and analysis
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use crate::environmental_monitor::types::*;
 use anyhow::Result;
@@ -16,11 +20,9 @@ pub struct EnergyConsumptionMonitor {
 
 /// Device-specific energy monitor
 #[derive(Debug)]
-#[allow(dead_code)]
 struct DeviceEnergyMonitor {
     device_id: String,
     device_type: DeviceType,
-    #[allow(dead_code)]
     power_measurement_method: PowerMeasurementMethod,
     baseline_power: f64,  // Watts
     current_power: f64,   // Watts
@@ -29,10 +31,8 @@ struct DeviceEnergyMonitor {
 }
 
 /// Power profile for different device types
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct PowerProfile {
-    #[allow(dead_code)]
     device_type: DeviceType,
     idle_power: f64,
     max_power: f64,

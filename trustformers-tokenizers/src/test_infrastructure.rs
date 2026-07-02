@@ -189,6 +189,9 @@ pub struct TestCaseGenerator {
     config: TestConfig,
 }
 
+// reason: `scirs2_core::random::thread_rng` is deprecated in favor of a new RNG
+// constructor; migrating the seeding path is an ecosystem-wide change tracked
+// separately, so the deprecated call is retained for now.
 #[allow(deprecated)]
 impl TestCaseGenerator {
     /// Create a new test case generator
@@ -819,6 +822,8 @@ impl TestRunner {
 
 /// Cross-tokenizer validation runner
 pub struct CrossValidationRunner {
+    // reason: retained so the runner owns its configuration for API symmetry with
+    // the other runners; the current cross-validation path does not read it.
     #[allow(dead_code)]
     config: TestConfig,
 }

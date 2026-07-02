@@ -829,7 +829,7 @@ impl ContextSummarizer {
         }
 
         let initial_sentiment = &sentiment_progression[0];
-        let final_sentiment = sentiment_progression.last().expect("len >= 2 checked above");
+        let final_sentiment = sentiment_progression.last()?;
 
         if initial_sentiment != final_sentiment {
             Some(format!(

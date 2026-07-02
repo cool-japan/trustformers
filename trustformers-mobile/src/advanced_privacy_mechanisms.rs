@@ -1109,9 +1109,9 @@ impl AdvancedPrivacyMechanisms {
 
     /// Get comprehensive privacy report
     pub async fn get_privacy_report(&self) -> Result<PrivacyReport> {
-        let state = self.privacy_state.read().expect("Operation failed").clone();
+        let state = self.privacy_state.read().unwrap_or_else(|p| p.into_inner()).clone();
         let performance_metrics = self.performance_monitor.get_metrics().await?;
-        let audit_entries = self.audit_log.lock().expect("Operation failed").clone();
+        let audit_entries = self.audit_log.lock().unwrap_or_else(|p| p.into_inner()).clone();
 
         Ok(PrivacyReport {
             current_state: state,
@@ -1147,7 +1147,7 @@ impl AdvancedPrivacyMechanisms {
             success: true,
         };
 
-        self.audit_log.lock().expect("Operation failed").push(entry);
+        self.audit_log.lock().unwrap_or_else(|p| p.into_inner()).push(entry);
         Ok(())
     }
 
@@ -1156,7 +1156,7 @@ impl AdvancedPrivacyMechanisms {
         client_id: &str,
         budget_allocation: &BudgetAllocation,
     ) -> Result<()> {
-        let mut state = self.privacy_state.write().expect("Operation failed");
+        let mut state = self.privacy_state.write().unwrap_or_else(|p| p.into_inner());
         state.update_client_budget(client_id, budget_allocation);
         Ok(())
     }

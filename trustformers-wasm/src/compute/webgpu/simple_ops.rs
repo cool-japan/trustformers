@@ -1,7 +1,6 @@
 //! Enhanced WebGPU operations with shared memory optimization
 
 #![allow(dead_code)]
-
 use super::types::{GpuComputePipeline, GpuDevice, GpuDeviceExt};
 use crate::core::tensor::WasmTensor;
 use crate::webgpu::shaders::*;
@@ -100,7 +99,9 @@ impl SimpleGpuOps {
             self.pipelines.insert(key.clone(), pipeline);
         }
 
-        Ok(self.pipelines.get(&key).expect("pipeline just inserted with key"))
+        self.pipelines
+            .get(&key)
+            .ok_or_else(|| JsValue::from_str("pipeline missing immediately after insertion"))
     }
 
     /// Determine if shared memory should be used based on tensor dimensions

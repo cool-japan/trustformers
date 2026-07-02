@@ -9,12 +9,16 @@
 //! - **AdaWin (Adaptive Window)**: Dynamic window-based momentum with gradient history adaptation
 //! - **QuasiNewton-Lite**: Lightweight second-order approximation with minimal memory overhead
 
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
+
 use crate::common::{GradientProcessor, OptimizerState, StateMemoryStats};
 use crate::traits::StatefulOptimizer;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use trustformers_core::errors::Result;
+use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::{traits::Optimizer, Tensor};
 
 /// DiWo (Discriminative Weight Orthogonalization) Optimizer
@@ -51,7 +55,6 @@ pub struct DiWo {
     /// Orthogonalization history
     ortho_history: HashMap<String, OrthogonalizationState>,
     /// Gradient processor
-    #[allow(dead_code)]
     gradient_processor: GradientProcessor,
 }
 
@@ -59,7 +62,6 @@ pub struct DiWo {
 #[derive(Debug, Clone)]
 struct OrthogonalizationState {
     /// Previous orthogonal basis
-    #[allow(dead_code)]
     previous_basis: Option<Tensor>,
     /// Orthogonality violation history
     violation_history: Vec<f32>,
@@ -275,10 +277,11 @@ impl DiWo {
         let violation = self.calculate_orthogonality_violation(&param_data, orthogonal_update)?;
 
         // Get mutable reference after immutable borrow is done
-        let ortho_state = self
-            .ortho_history
-            .get_mut(param_name)
-            .expect("ortho_history state must exist after initialization");
+        let ortho_state = self.ortho_history.get_mut(param_name).ok_or_else(|| {
+            TrustformersError::invalid_state(
+                "ortho_history state must exist after initialization".to_string(),
+            )
+        })?;
         ortho_state.violation_history.push(violation);
 
         // Keep only recent history
@@ -360,14 +363,16 @@ impl Optimizer for DiWo {
         }
 
         // Get momentum and velocity states
-        let momentum = self
-            .momentum_states
-            .get_mut(&param_id)
-            .expect("momentum_states must exist after initialization");
-        let velocity = self
-            .velocity_states
-            .get_mut(&param_id)
-            .expect("velocity_states must exist after initialization");
+        let momentum = self.momentum_states.get_mut(&param_id).ok_or_else(|| {
+            TrustformersError::invalid_state(
+                "momentum_states must exist after initialization".to_string(),
+            )
+        })?;
+        let velocity = self.velocity_states.get_mut(&param_id).ok_or_else(|| {
+            TrustformersError::invalid_state(
+                "velocity_states must exist after initialization".to_string(),
+            )
+        })?;
 
         let momentum_data = momentum.data()?;
         let velocity_data = velocity.data()?;
@@ -646,7 +651,6 @@ pub struct MeZOV2 {
     /// Perturbation magnitude for finite differences
     perturbation_scale: f32,
     /// Number of gradient estimation samples
-    #[allow(dead_code)]
     num_samples: usize,
     /// Adaptive perturbation adjustment
     adaptive_perturbation: bool,
@@ -725,7 +729,6 @@ impl MeZOV2 {
     }
 
     /// Estimate gradient using zeroth-order method
-    #[allow(dead_code)]
     fn estimate_gradient(
         &mut self,
         param: &Tensor,
@@ -917,7 +920,6 @@ pub struct AdaWin {
     /// Base momentum coefficient
     beta: f32,
     /// Window size adaptation rate
-    #[allow(dead_code)]
     adaptation_rate: f32,
     /// Maximum window size
     max_window_size: usize,
@@ -1145,10 +1147,11 @@ impl Optimizer for AdaWin {
 
         // Add gradient to history and maintain circular buffer
         {
-            let param_state = self
-                .parameter_states
-                .get_mut(&param_id)
-                .expect("parameter_states must exist after step");
+            let param_state = self.parameter_states.get_mut(&param_id).ok_or_else(|| {
+                TrustformersError::invalid_state(
+                    "parameter_states must exist after step".to_string(),
+                )
+            })?;
             param_state.gradient_history.push(gradient.clone());
 
             if param_state.gradient_history.len() > self.max_window_size {
@@ -1158,29 +1161,32 @@ impl Optimizer for AdaWin {
 
         // Adapt window size based on gradient correlations
         {
-            let mut param_state = self
-                .parameter_states
-                .remove(&param_id)
-                .expect("parameter_states must exist for param_id");
+            let mut param_state = self.parameter_states.remove(&param_id).ok_or_else(|| {
+                TrustformersError::invalid_state(
+                    "parameter_states must exist for param_id".to_string(),
+                )
+            })?;
             self.adapt_window_size(&mut param_state)?;
             self.parameter_states.insert(param_id.clone(), param_state);
         }
 
         // Calculate weighted momentum
         let weighted_momentum = {
-            let param_state = self
-                .parameter_states
-                .get(&param_id)
-                .expect("parameter_states must exist for param_id");
+            let param_state = self.parameter_states.get(&param_id).ok_or_else(|| {
+                TrustformersError::invalid_state(
+                    "parameter_states must exist for param_id".to_string(),
+                )
+            })?;
             self.calculate_weighted_momentum(param_state)?
         };
 
         // Update cumulative momentum
         let momentum_data = {
-            let param_state = self
-                .parameter_states
-                .get(&param_id)
-                .expect("parameter_states must exist for param_id");
+            let param_state = self.parameter_states.get(&param_id).ok_or_else(|| {
+                TrustformersError::invalid_state(
+                    "parameter_states must exist for param_id".to_string(),
+                )
+            })?;
             param_state.momentum.data()?
         };
         let weighted_data = weighted_momentum.data()?;
@@ -1192,10 +1198,11 @@ impl Optimizer for AdaWin {
 
         // Update momentum
         {
-            let param_state = self
-                .parameter_states
-                .get_mut(&param_id)
-                .expect("parameter_states must exist after step");
+            let param_state = self.parameter_states.get_mut(&param_id).ok_or_else(|| {
+                TrustformersError::invalid_state(
+                    "parameter_states must exist after step".to_string(),
+                )
+            })?;
             param_state.momentum = Tensor::new(new_momentum_data.clone())?;
         }
 

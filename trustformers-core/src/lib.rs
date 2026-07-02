@@ -79,12 +79,16 @@ pub mod evaluation;
 pub mod export;
 pub mod generation;
 pub mod gpu;
-// Temporarily disabled when CUDA feature is enabled - needs cudarc 0.17.7 API migration
+// Disabled under the `cuda` feature: these modules call the removed cudarc kernel API
+// (kernels::cuda_impl / cuda_kernels). Re-enabling them on the oxicuda backend is tracked
+// as a follow-up. They remain available for non-CUDA builds.
 #[cfg(not(feature = "cuda"))]
 pub mod gpu_accelerated;
 pub mod gpu_ops;
 pub mod hardware;
-// Temporarily disabled when CUDA feature is enabled - needs cudarc 0.17.7 API migration
+// Disabled under the `cuda` feature: these modules call the removed cudarc kernel API
+// (kernels::cuda_impl / cuda_kernels). Re-enabling them on the oxicuda backend is tracked
+// as a follow-up. They remain available for non-CUDA builds.
 #[cfg(test)]
 mod error_tests;
 pub mod grad_checkpoint;

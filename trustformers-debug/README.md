@@ -1,6 +1,6 @@
 # TrustformeRS Debug
 
-**Version:** 0.1.3 | **Status:** Alpha | **Tests:** 216 | **SLoC:** 61,841 | **Updated:** 2026-06-24
+**Version:** 0.1.4 | **Status:** Alpha | **Tests:** ~899 | **SLoC:** ~101,000 | **Updated:** 2026-07-02
 
 Advanced debugging and analysis tools for TrustformeRS machine learning models.
 
@@ -8,16 +8,23 @@ Advanced debugging and analysis tools for TrustformeRS machine learning models.
 
 | Feature | Description |
 |---------|-------------|
-| `visual` | Enable graphical plot output via Plotters |
+| `visual` | Enable graphical plot output via Plotters (opt-in — see note below) |
 | `video` | Enable video frame export for training animations |
 | `gif` | Enable animated GIF export for visualization sequences |
 | `wasm` | Enable WebAssembly-compatible debugging (no filesystem I/O) |
 | `atomics` | Enable atomic counters for lock-free profiling in multi-threaded contexts |
 | `headless` | Enable terminal/ASCII visualization for server environments (Ratatui) |
+| `cuda` | Reserved for a future NVIDIA CUDA GPU backend (see note below) |
+| `rocm` | Reserved for a future AMD ROCm GPU backend (see note below) |
+| `tpu` | Reserved for a future Google TPU backend (see note below) |
+
+`default = []` — this crate is Pure-Rust by default (COOLJAPAN Pure-Rust policy). `visual` is deliberately **not** part of `default`: it pulls in `plotters` → `image` → `png` → `flate2`/`miniz_oxide`, and compression crates other than `oxiarc-archive` are policy-banned in default builds. Enable it explicitly with `--features visual` when graphical (PNG/SVG) plot output is needed.
+
+`cuda`/`rocm`/`tpu` are placeholder flags for future GPU/TPU backend work — no GPU/TPU kernels are compiled or executed anywhere in the crate today. The only place they currently have any effect is the Performance Profiler's `performance_tuning::PerformanceTuner`, whose compile-time `detect_hardware()` check picks which hardware-specific tuning recommendations to surface (`HardwareType::NvidiaGpu`/`AmdGpu`/`Tpu` vs. the `Cpu`/`AppleSilicon` defaults).
 
 ## Overview
 
-TrustformeRS Debug provides comprehensive debugging capabilities for deep learning models, including tensor inspection, gradient flow analysis, model diagnostics, performance profiling, and automated debugging hooks. These tools help identify training issues, performance bottlenecks, and model problems early in the development process.
+TrustformeRS Debug provides comprehensive debugging capabilities for deep learning models, including tensor inspection, gradient flow analysis, model diagnostics, performance profiling, automated debugging hooks, model interpretability (SHAP/LIME/attention analysis), and simulation-based robustness testing. These tools help identify training issues, performance bottlenecks, and model problems early in the development process.
 
 ## Features
 
@@ -86,6 +93,38 @@ Language Server Protocol (LSP)-compatible diagnostic output:
 - Emit structured JSON diagnostics consumable by the VS Code Rust Analyzer extension
 - Breakpoint-compatible debug session with DAP (Debug Adapter Protocol) event emission
 - In-editor tensor shape annotations via hover provider protocol
+
+### Interpretability
+
+Feature-attribution and explainability toolkit (`InterpretabilityAnalyzer`) for model predictions:
+
+- **SHAP Analysis**: Shapley-value feature contributions with background-dataset sampling
+- **LIME Analysis**: local surrogate-model explanations via perturbation-based neighborhood sampling
+- **Feature Attribution**: Integrated Gradients, Gradient×Input, SmoothGrad, Gradient SHAP, DeepLIFT, LRP, Guided Backprop, Grad-CAM/Grad-CAM++/Score-CAM, Expected Gradients, Attention Rollout, Path Integrated Gradients
+- **Counterfactual Analysis**: minimal-change counterfactual generation, feature-sensitivity and decision-boundary analysis, actionable insights
+- **Attention Pattern Analysis**: per-layer/per-head attention statistics, head-specialization classification, attention-flow tracing
+
+### Simulation & Robustness Testing
+
+Systematic model-behavior probing (`SimulationAnalyzer` in `simulation_tools`):
+
+- **What-If Analysis**: scenario generation, impact analysis, feature-sensitivity and decision-boundary exploration
+- **Perturbation Testing**: robustness scoring across perturbation intensities, sensitivity-hotspot identification, failure-mode analysis
+- **Adversarial Probing**: adversarial-example generation (FGSM/PGD/CW/DeepFool), attack-success analysis, certified-robustness estimation, defense recommendations
+- **Edge Case Discovery**: automated edge-case search, classification, coverage analysis, and risk assessment
+
+### Guided Debugging
+
+Step-by-step debugging wizard (`GuidedDebugger`) that walks through health check, gradient analysis, architecture analysis, memory profiling, performance profiling, and anomaly detection in sequence, with progress tracking and per-step skip/reset control.
+
+### Interactive Tutorial
+
+Lesson-based walkthrough mode (`TutorialMode`) for onboarding new users to the debugging toolkit, with per-lesson objectives, example code, tips, and progress tracking.
+
+### Export and Integration
+
+- **Netron Export**: ONNX-compatible export for the [Netron](https://netron.app) model visualizer
+- **Excel (.xlsx) Export**: genuine Office Open XML (OOXML) workbook generation — `[Content_Types].xml`, relationships, workbook, and worksheet parts written via COOLJAPAN's pure-Rust `oxiarc-archive` crate (`oxiarc_archive::zip::ZipWriter`), replacing the previous CSV-with-`.xlsx`-extension placeholder
 
 ## Quick Start
 
@@ -204,6 +243,37 @@ builder.record_frame("forward/ffn", "feed_forward", 5_400);
 // Write Inferno-compatible collapsed stack format
 builder.write_to_file("/tmp/trustformers_flame.txt")?;
 // Run: inferno-flamegraph < /tmp/trustformers_flame.txt > flame.svg
+```
+
+### Interpretability Analysis (SHAP)
+
+```rust
+use std::collections::HashMap;
+use trustformers_debug::{InterpretabilityAnalyzer, InterpretabilityConfig};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let mut analyzer = InterpretabilityAnalyzer::new(InterpretabilityConfig::default());
+
+    let mut instance: HashMap<String, f64> = HashMap::new();
+    instance.insert("feature_a".to_string(), 0.7);
+    instance.insert("feature_b".to_string(), 1.2);
+
+    let model_predictions = vec![0.65, 0.70, 0.68];
+    let background_data = vec![instance.clone()];
+
+    // SHAP feature attribution for this instance
+    let shap_result = analyzer
+        .analyze_shap(&instance, &model_predictions, &background_data)
+        .await?;
+    println!("Top SHAP feature: {:?}", shap_result.top_positive_features.first());
+
+    // Aggregate report across all analyses run so far
+    let report = analyzer.generate_report().await?;
+    println!("SHAP analyses recorded: {}", report.shap_analyses_count);
+
+    Ok(())
+}
 ```
 
 ## Key Components

@@ -325,7 +325,7 @@ impl RetryStats {
             success_rate: 0.0,
             created_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("SystemTime should be after UNIX_EPOCH")
+                .unwrap_or_default()
                 .as_secs(),
         }
     }

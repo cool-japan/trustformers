@@ -52,39 +52,46 @@
 //! - **Parallel**: Multi-threaded via Rayon
 //! - **GPU**: CUDA/Metal acceleration when available
 
+// `TrustformersError` is an intentionally detailed (large) shared error type, and
+// several `#[pymethods]` deliberately mirror the multi-argument HuggingFace API
+// surface. Both lints are accepted project-wide for the binding layer.
+#![allow(clippy::result_large_err, clippy::too_many_arguments)]
+
 use pyo3::prelude::*;
 
-// pub mod auto;  // Temporarily disabled due to dependency issues
+pub mod auto;
 pub mod complex_tensor;
-// pub mod config_utils;  // Temporarily disabled due to dependency issues
+pub mod config_utils;
 pub mod errors;
 pub mod memory_manager;
-// pub mod models;  // Temporarily disabled due to dependency issues
+pub mod models;
 pub mod performance;
-// pub mod pipelines;  // Temporarily disabled due to dependency issues
+pub mod pipelines;
 pub mod tensor;
 pub mod tensor_optimized;
-// pub mod tokenizers;  // Temporarily disabled due to dependency issues
-// pub mod training;  // Temporarily disabled due to dependency issues
+pub mod tokenizers;
+pub mod training;
 pub mod utils;
 
-// Temporarily disabled imports due to dependency issues
-// use crate::auto::{
-//     pipeline, PyAutoModel, PyAutoModelForCausalLM, PyAutoModelForMaskedLM,
-//     PyAutoModelForQuestionAnswering, PyAutoModelForSequenceClassification,
-//     PyAutoModelForTokenClassification, PyAutoTokenizer,
-// };
-// use crate::models::{
-//     PyBertForSequenceClassification, PyBertModel, PyGPT2LMHeadModel, PyGPT2Model, PyLlamaModel,
-//     PyPreTrainedModel, PyT5Model,
-// };
-// use crate::pipelines::{PyTextClassificationPipeline, PyTextGenerationPipeline};
+use crate::auto::{
+    pipeline, PyAutoModel, PyAutoModelForCausalLM, PyAutoModelForMaskedLM,
+    PyAutoModelForQuestionAnswering, PyAutoModelForSequenceClassification,
+    PyAutoModelForTokenClassification, PyAutoTokenizer,
+};
+use crate::models::{
+    PyBertForSequenceClassification, PyBertModel, PyGPT2LMHeadModel, PyGPT2Model, PyLlamaModel,
+    PyMambaModel, PyPreTrainedModel, PyRwkvModel, PyT5Model,
+};
+use crate::pipelines::{
+    PyPipeline, PyQuestionAnsweringPipeline, PyTextClassificationPipeline, PyTextGenerationPipeline,
+    PyTokenClassificationPipeline,
+};
 // use crate::complex_tensor::PyComplexTensor;
 // use crate::performance::{MemoryTracker, PerformanceProfiler, PerformanceUtils, ProfilerContext};
 use crate::tensor::PyTensor;
 use crate::tensor_optimized::{PyAdvancedActivations, PyTensorOptimized};
-// use crate::tokenizers::{PyBPETokenizer, PyWordPieceTokenizer};
-// use crate::training::{PyTrainer, PyTrainingArguments};
+use crate::tokenizers::{PyBPETokenizer, PyPreTrainedTokenizer, PyWordPieceTokenizer};
+use crate::training::{PyTrainer, PyTrainingArguments};
 
 /// TrustformeRS Python Module
 ///
@@ -106,29 +113,34 @@ fn _trustformers(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // m.add_class::<PerformanceUtils>()?;
     // m.add_class::<ProfilerContext>()?;
 
-    // Temporarily disabled due to dependency issues
-    // // Models
-    // m.add_class::<PyPreTrainedModel>()?;
-    // m.add_class::<PyBertModel>()?;
-    // m.add_class::<PyGPT2Model>()?;
-    // m.add_class::<PyT5Model>()?;
-    // m.add_class::<PyLlamaModel>()?;
+    // Models
+    m.add_class::<PyPreTrainedModel>()?;
+    m.add_class::<PyBertModel>()?;
+    m.add_class::<PyGPT2Model>()?;
+    m.add_class::<PyT5Model>()?;
+    m.add_class::<PyLlamaModel>()?;
+    m.add_class::<PyRwkvModel>()?;
+    m.add_class::<PyMambaModel>()?;
 
-    // // Task-specific models
-    // m.add_class::<PyBertForSequenceClassification>()?;
-    // m.add_class::<PyGPT2LMHeadModel>()?;
+    // Task-specific models
+    m.add_class::<PyBertForSequenceClassification>()?;
+    m.add_class::<PyGPT2LMHeadModel>()?;
 
-    // // Tokenizers
-    // m.add_class::<PyWordPieceTokenizer>()?;
-    // m.add_class::<PyBPETokenizer>()?;
+    // Tokenizers
+    m.add_class::<PyPreTrainedTokenizer>()?;
+    m.add_class::<PyWordPieceTokenizer>()?;
+    m.add_class::<PyBPETokenizer>()?;
 
-    // // Pipelines
-    // m.add_class::<PyTextGenerationPipeline>()?;
-    // m.add_class::<PyTextClassificationPipeline>()?;
+    // Pipelines
+    m.add_class::<PyPipeline>()?;
+    m.add_class::<PyTextGenerationPipeline>()?;
+    m.add_class::<PyTextClassificationPipeline>()?;
+    m.add_class::<PyTokenClassificationPipeline>()?;
+    m.add_class::<PyQuestionAnsweringPipeline>()?;
 
-    // // Training
-    // m.add_class::<PyTrainer>()?;
-    // m.add_class::<PyTrainingArguments>()?;
+    // Training
+    m.add_class::<PyTrainer>()?;
+    m.add_class::<PyTrainingArguments>()?;
 
     // Utility functions
     m.add_function(wrap_pyfunction!(utils::get_device, m)?)?;
@@ -136,18 +148,17 @@ fn _trustformers(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(utils::enable_grad, m)?)?;
     m.add_function(wrap_pyfunction!(utils::no_grad, m)?)?;
 
-    // Temporarily disabled due to dependency issues
-    // // Auto classes
-    // m.add_class::<PyAutoModel>()?;
-    // m.add_class::<PyAutoTokenizer>()?;
-    // m.add_class::<PyAutoModelForSequenceClassification>()?;
-    // m.add_class::<PyAutoModelForTokenClassification>()?;
-    // m.add_class::<PyAutoModelForQuestionAnswering>()?;
-    // m.add_class::<PyAutoModelForCausalLM>()?;
-    // m.add_class::<PyAutoModelForMaskedLM>()?;
+    // Auto classes
+    m.add_class::<PyAutoModel>()?;
+    m.add_class::<PyAutoTokenizer>()?;
+    m.add_class::<PyAutoModelForSequenceClassification>()?;
+    m.add_class::<PyAutoModelForTokenClassification>()?;
+    m.add_class::<PyAutoModelForQuestionAnswering>()?;
+    m.add_class::<PyAutoModelForCausalLM>()?;
+    m.add_class::<PyAutoModelForMaskedLM>()?;
 
-    // // Pipeline factory
-    // m.add_function(wrap_pyfunction!(pipeline, m)?)?;
+    // Pipeline factory
+    m.add_function(wrap_pyfunction!(pipeline, m)?)?;
 
     // Add custom exception classes
     errors::add_exceptions(m)?;

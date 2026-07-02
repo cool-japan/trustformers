@@ -18,12 +18,13 @@
 //! # Usage
 //!
 //! ```rust
+//! # fn main() -> trustformers_core::error::Result<()> {
 //! use trustformers_mobile::mobile_performance_profiler::collector::MobileMetricsCollector;
-//! use trustformers_mobile::mobile_performance_profiler::types::MobileProfilerConfig;
+//! use trustformers_mobile::mobile_performance_profiler::config::MobileProfilerConfig;
 //!
 //! // Create collector with configuration
 //! let config = MobileProfilerConfig::default();
-//! let mut collector = MobileMetricsCollector::new(config)?;
+//! let collector = MobileMetricsCollector::new(config)?;
 //!
 //! // Start collection
 //! collector.start_collection()?;
@@ -33,6 +34,9 @@
 //!
 //! // Stop collection
 //! collector.stop_collection()?;
+//! # let _ = snapshot;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Platform-specific Features
@@ -354,8 +358,14 @@ impl MobileMetricsCollector {
     /// # Example
     ///
     /// ```rust
+    /// # fn main() -> trustformers_core::error::Result<()> {
+    /// # use trustformers_mobile::mobile_performance_profiler::collector::MobileMetricsCollector;
+    /// # use trustformers_mobile::mobile_performance_profiler::config::MobileProfilerConfig;
     /// let config = MobileProfilerConfig::default();
     /// let collector = MobileMetricsCollector::new(config)?;
+    /// # let _ = collector;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn new(config: MobileProfilerConfig) -> Result<Self> {
         // Validate configuration
@@ -433,7 +443,14 @@ impl MobileMetricsCollector {
     /// # Example
     ///
     /// ```rust
+    /// # fn main() -> trustformers_core::error::Result<()> {
+    /// # use trustformers_mobile::mobile_performance_profiler::collector::MobileMetricsCollector;
+    /// # use trustformers_mobile::mobile_performance_profiler::config::MobileProfilerConfig;
+    /// # let config = MobileProfilerConfig::default();
+    /// # let collector = MobileMetricsCollector::new(config)?;
     /// collector.start_collection()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn start_collection(&self) -> Result<()> {
         {
@@ -486,7 +503,14 @@ impl MobileMetricsCollector {
     /// # Example
     ///
     /// ```rust
+    /// # fn main() -> trustformers_core::error::Result<()> {
+    /// # use trustformers_mobile::mobile_performance_profiler::collector::MobileMetricsCollector;
+    /// # use trustformers_mobile::mobile_performance_profiler::config::MobileProfilerConfig;
+    /// # let config = MobileProfilerConfig::default();
+    /// # let collector = MobileMetricsCollector::new(config)?;
     /// collector.stop_collection()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn stop_collection(&self) -> Result<()> {
         let mut state = self
@@ -588,8 +612,15 @@ impl MobileMetricsCollector {
     /// # Example
     ///
     /// ```rust
+    /// # fn main() -> trustformers_core::error::Result<()> {
+    /// # use trustformers_mobile::mobile_performance_profiler::collector::MobileMetricsCollector;
+    /// # use trustformers_mobile::mobile_performance_profiler::config::MobileProfilerConfig;
+    /// # let config = MobileProfilerConfig::default();
+    /// # let collector = MobileMetricsCollector::new(config)?;
     /// let snapshot = collector.get_current_snapshot()?;
     /// println!("Current CPU usage: {}%", snapshot.cpu.usage_percent);
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn get_current_snapshot(&self) -> Result<MobileMetricsSnapshot> {
         let snapshot = self
@@ -612,8 +643,15 @@ impl MobileMetricsCollector {
     /// # Example
     ///
     /// ```rust
+    /// # fn main() -> trustformers_core::error::Result<()> {
+    /// # use trustformers_mobile::mobile_performance_profiler::collector::MobileMetricsCollector;
+    /// # use trustformers_mobile::mobile_performance_profiler::config::MobileProfilerConfig;
+    /// # let config = MobileProfilerConfig::default();
+    /// # let collector = MobileMetricsCollector::new(config)?;
     /// let history = collector.get_all_snapshots();
-    /// println!("Collected {} historical snapshots", history.len().into());
+    /// println!("Collected {} historical snapshots", history.len());
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn get_all_snapshots(&self) -> Vec<MobileMetricsSnapshot> {
         self.metrics_history
@@ -638,8 +676,16 @@ impl MobileMetricsCollector {
     /// # Example
     ///
     /// ```rust
+    /// # fn main() -> trustformers_core::error::Result<()> {
+    /// # use trustformers_mobile::mobile_performance_profiler::collector::MobileMetricsCollector;
+    /// # use trustformers_mobile::mobile_performance_profiler::config::MobileProfilerConfig;
+    /// # let config = MobileProfilerConfig::default();
+    /// # let collector = MobileMetricsCollector::new(config)?;
     /// collector.collect_metrics()?;
     /// let snapshot = collector.get_current_snapshot()?;
+    /// # let _ = snapshot;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn collect_metrics(&self) -> Result<()> {
         self.collect_metrics_internal()
@@ -662,9 +708,16 @@ impl MobileMetricsCollector {
     /// # Example
     ///
     /// ```rust
+    /// # fn main() -> trustformers_core::error::Result<()> {
+    /// # use trustformers_mobile::mobile_performance_profiler::collector::MobileMetricsCollector;
+    /// # use trustformers_mobile::mobile_performance_profiler::config::MobileProfilerConfig;
+    /// # let config = MobileProfilerConfig::default();
+    /// # let collector = MobileMetricsCollector::new(config)?;
     /// collector.start_inference_tracking("session_1", "my_model")?;
     /// // ... perform inference ...
     /// collector.end_inference_tracking("session_1", true)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn start_inference_tracking(&self, session_id: &str, model_name: &str) -> Result<()> {
         let mut tracker = self
@@ -710,7 +763,14 @@ impl MobileMetricsCollector {
     /// # Example
     ///
     /// ```rust
+    /// # fn main() -> trustformers_core::error::Result<()> {
+    /// # use trustformers_mobile::mobile_performance_profiler::collector::MobileMetricsCollector;
+    /// # use trustformers_mobile::mobile_performance_profiler::config::MobileProfilerConfig;
+    /// # let config = MobileProfilerConfig::default();
+    /// # let collector = MobileMetricsCollector::new(config)?;
     /// collector.end_inference_tracking("session_1", true)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn end_inference_tracking(&self, session_id: &str, success: bool) -> Result<()> {
         let mut tracker = self
@@ -772,7 +832,14 @@ impl MobileMetricsCollector {
     /// # Example
     ///
     /// ```rust
+    /// # fn main() -> trustformers_core::error::Result<()> {
+    /// # use trustformers_mobile::mobile_performance_profiler::collector::MobileMetricsCollector;
+    /// # use trustformers_mobile::mobile_performance_profiler::config::MobileProfilerConfig;
+    /// # let config = MobileProfilerConfig::default();
+    /// # let collector = MobileMetricsCollector::new(config)?;
     /// collector.record_model_load_time("my_model", 1500.0)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn record_model_load_time(&self, model_name: &str, load_time_ms: f64) -> Result<()> {
         let mut tracker = self
@@ -801,7 +868,14 @@ impl MobileMetricsCollector {
     /// # Example
     ///
     /// ```rust
+    /// # fn main() -> trustformers_core::error::Result<()> {
+    /// # use trustformers_mobile::mobile_performance_profiler::collector::MobileMetricsCollector;
+    /// # use trustformers_mobile::mobile_performance_profiler::config::MobileProfilerConfig;
+    /// # let config = MobileProfilerConfig::default();
+    /// # let collector = MobileMetricsCollector::new(config)?;
     /// collector.record_cache_hit(2.5)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn record_cache_hit(&self, latency_ms: f64) -> Result<()> {
         let mut tracker = self
@@ -831,7 +905,14 @@ impl MobileMetricsCollector {
     /// # Example
     ///
     /// ```rust
+    /// # fn main() -> trustformers_core::error::Result<()> {
+    /// # use trustformers_mobile::mobile_performance_profiler::collector::MobileMetricsCollector;
+    /// # use trustformers_mobile::mobile_performance_profiler::config::MobileProfilerConfig;
+    /// # let config = MobileProfilerConfig::default();
+    /// # let collector = MobileMetricsCollector::new(config)?;
     /// collector.record_cache_miss(15.7)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn record_cache_miss(&self, latency_ms: f64) -> Result<()> {
         let mut tracker = self
@@ -863,9 +944,16 @@ impl MobileMetricsCollector {
     /// # Example
     ///
     /// ```rust
+    /// # fn main() -> trustformers_core::error::Result<()> {
+    /// # use trustformers_mobile::mobile_performance_profiler::collector::MobileMetricsCollector;
+    /// # use trustformers_mobile::mobile_performance_profiler::config::MobileProfilerConfig;
+    /// # let config = MobileProfilerConfig::default();
+    /// # let collector = MobileMetricsCollector::new(config)?;
     /// let stats = collector.get_collection_statistics();
     /// println!("Collected {} samples at {:.1} samples/sec",
     ///     stats.total_samples, stats.average_sampling_rate);
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn get_collection_statistics(&self) -> CollectionStatistics {
         let mut stats = self.statistics.lock().map(|s| s.clone()).unwrap_or_default();
@@ -914,9 +1002,16 @@ impl MobileMetricsCollector {
     /// # Example
     ///
     /// ```rust
+    /// # fn main() -> trustformers_core::error::Result<()> {
+    /// # use trustformers_mobile::mobile_performance_profiler::collector::MobileMetricsCollector;
+    /// # use trustformers_mobile::mobile_performance_profiler::config::MobileProfilerConfig;
+    /// # let config = MobileProfilerConfig::default();
+    /// # let collector = MobileMetricsCollector::new(config)?;
     /// let mut config = collector.get_config();
     /// config.sampling.interval_ms = 50;
     /// collector.update_config(config)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn update_config(&self, new_config: MobileProfilerConfig) -> Result<()> {
         Self::validate_config(&new_config)?;

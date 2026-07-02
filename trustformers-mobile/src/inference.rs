@@ -816,8 +816,7 @@ impl InferenceCache {
     fn evict_lru(&mut self) {
         // Simple eviction strategy - remove oldest entries
         // In practice, would use a proper LRU implementation
-        if !self.cache.is_empty() {
-            let first_key = self.cache.keys().next().expect("Cache is empty").clone();
+        if let Some(first_key) = self.cache.keys().next().cloned() {
             self.cache.remove(&first_key);
             self.current_size_bytes = self.current_size_bytes.saturating_sub(1024 * 1024);
             // Approximate

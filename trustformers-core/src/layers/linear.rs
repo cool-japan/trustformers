@@ -188,8 +188,13 @@ impl Linear {
         bias: bool,
         device: Device,
     ) -> Self {
+        // reason: tensor construction here only fails for invalid shapes, and the
+        // shapes are derived from the (valid) feature counts; this public `-> Self`
+        // constructor has no fallible alternative without an API break.
+        #[allow(clippy::expect_used)]
         let weight =
             Tensor::randn(&[out_features, in_features]).expect("Failed to create random tensor");
+        #[allow(clippy::expect_used)]
         let bias = if bias {
             Some(Tensor::zeros(&[out_features]).expect("Failed to create zero tensor"))
         } else {
@@ -955,8 +960,12 @@ impl Layer for Linear {
                         if !inp_slice.is_empty() && !w_slice.is_empty() {
                             let mut result_vec = vec![0.0f32; m * n];
                             blas_sgemm(inp_slice, w_slice, &mut result_vec, m, k, n);
-                            Array2::from_shape_vec((m, n), result_vec)
-                                .expect("BLAS result shape must match m x n")
+                            Array2::from_shape_vec((m, n), result_vec).map_err(|e| {
+                                crate::errors::compute_error(
+                                    "forward",
+                                    format!("{}: {e}", "BLAS result shape must match m x n"),
+                                )
+                            })?
                         } else {
                             // Fallback to ndarray dot if slices aren't contiguous
                             inp_2d.dot(&w_2d)
@@ -1018,8 +1027,12 @@ impl Layer for Linear {
                         if !inp_slice.is_empty() && !w_slice.is_empty() {
                             let mut result_vec = vec![0.0f64; m * n];
                             blas_dgemm(inp_slice, w_slice, &mut result_vec, m, k, n);
-                            Array2::from_shape_vec((m, n), result_vec)
-                                .expect("BLAS result shape must match m x n")
+                            Array2::from_shape_vec((m, n), result_vec).map_err(|e| {
+                                crate::errors::compute_error(
+                                    "forward",
+                                    format!("{}: {e}", "BLAS result shape must match m x n"),
+                                )
+                            })?
                         } else {
                             // Fallback to ndarray dot if slices aren't contiguous
                             inp_2d.dot(&w_2d)

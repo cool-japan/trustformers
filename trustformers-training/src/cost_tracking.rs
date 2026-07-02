@@ -226,7 +226,6 @@ pub struct CostStatistics {
 pub struct CostForecastingModel {
     historical_data: VecDeque<CostDataPoint>,
     model_parameters: ForecastingParameters,
-    #[allow(dead_code)]
     accuracy_metrics: ForecastingAccuracy,
 }
 
@@ -282,10 +281,7 @@ impl CostTracker {
         tags: HashMap<String, String>,
     ) -> Result<String> {
         let entry_id = uuid::Uuid::new_v4().to_string();
-        let start_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("SystemTime should be after UNIX_EPOCH")
-            .as_secs();
+        let start_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
 
         // Calculate cost based on billing model and rates
         let cost_per_unit =
@@ -416,10 +412,8 @@ impl CostTracker {
         }
 
         // Update daily and monthly costs (simplified)
-        let current_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("SystemTime should be after UNIX_EPOCH")
-            .as_secs();
+        let current_time =
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
 
         let day_start = current_time - (current_time % 86400);
         let month_start = current_time - (current_time % (86400 * 30));
@@ -477,10 +471,8 @@ impl CostTracker {
             .write()
             .map_err(|_| anyhow::anyhow!("Failed to acquire write lock on budgets"))?;
 
-        let current_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("SystemTime should be after UNIX_EPOCH")
-            .as_secs();
+        let current_time =
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
 
         for budget in budgets.values_mut() {
             let usage_percentage = (budget.spent_amount / budget.total_amount) * 100.0;

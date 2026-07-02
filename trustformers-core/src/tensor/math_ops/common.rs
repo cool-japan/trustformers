@@ -3,13 +3,13 @@
 use super::super::Tensor;
 
 /// Numerical stability constants for mathematical operations
-#[allow(dead_code)] // Public API utility constant
+// Public API utility constant
 pub const STABILITY_EPSILON_F32: f32 = 1e-7;
-#[allow(dead_code)] // Public API utility constant
+// Public API utility constant
 pub const STABILITY_EPSILON_F64: f64 = 1e-15;
-#[allow(dead_code)] // Public API utility constant
+// Public API utility constant
 pub const MAX_SAFE_VALUE_F32: f32 = 1e30;
-#[allow(dead_code)] // Public API utility constant
+// Public API utility constant
 pub const MAX_SAFE_VALUE_F64: f64 = 1e300;
 
 /// Check if a float value is numerically stable

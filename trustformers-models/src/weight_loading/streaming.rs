@@ -321,7 +321,9 @@ impl WeightLoader for StreamingLoader {
         self.total_memory_usage = 0;
 
         // Close underlying loader
-        if let Some(mut loader) = self.underlying_loader.lock().expect("operation failed").take() {
+        if let Some(mut loader) =
+            self.underlying_loader.lock().unwrap_or_else(|p| p.into_inner()).take()
+        {
             loader.close()?;
         }
 

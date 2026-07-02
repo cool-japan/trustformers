@@ -321,7 +321,6 @@ pub struct GeneticIndividual {
 /// Automatic parallelism selector
 pub struct AutoParallelismSelector {
     config: AutoParallelismConfig,
-    #[allow(dead_code)]
     strategy_cache: HashMap<String, ParallelismStrategy>,
     performance_history: Vec<(ParallelismStrategy, PerformanceMetrics)>,
     current_strategy: Option<ParallelismStrategy>,
@@ -1140,7 +1139,10 @@ impl AutoParallelismSelector {
         strategies
             .sort_by(|a, b| self.compare_strategies(a, b).unwrap_or(std::cmp::Ordering::Equal));
 
-        Ok(strategies.into_iter().next().expect("strategies is not empty"))
+        strategies
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("No strategies available for selection"))
     }
 
     /// Compare strategies based on optimization objective

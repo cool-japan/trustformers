@@ -302,7 +302,7 @@ impl DefaultCacheManager {
         };
 
         if let Some(size) = removed_size {
-            let mut stats = self.stats.lock().expect("lock should not be poisoned");
+            let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
             stats.total_entries = stats.total_entries.saturating_sub(1);
             stats.total_size = stats.total_size.saturating_sub(size);
             stats.evictions += 1;
@@ -313,18 +313,18 @@ impl DefaultCacheManager {
 
     /// Record cache access
     pub fn record_access(&self, key: &str) {
-        let mut entries = self.entries.lock().expect("lock should not be poisoned");
+        let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(metadata) = entries.get_mut(key) {
             metadata.record_access();
         }
 
-        let mut stats = self.stats.lock().expect("lock should not be poisoned");
+        let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
         stats.total_accesses += 1;
     }
 
     /// Get cache statistics
     pub fn get_stats(&self) -> CacheStats {
-        self.stats.lock().expect("lock should not be poisoned").clone()
+        self.stats.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     /// Select entries for eviction based on strategy
@@ -371,7 +371,7 @@ impl DefaultCacheManager {
     /// Evict expired entries
     fn evict_expired_entries(&self) -> u64 {
         let expired_keys: Vec<String> = {
-            let entries = self.entries.lock().expect("lock should not be poisoned");
+            let entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
             entries
                 .iter()
                 .filter(|(_, metadata)| metadata.is_expired())
@@ -401,7 +401,7 @@ impl DefaultCacheManager {
 
         // Update statistics
         {
-            let mut stats = self.stats.lock().expect("lock should not be poisoned");
+            let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
             stats.last_maintenance = Some(Instant::now());
         }
 
@@ -435,7 +435,7 @@ impl CacheManager for DefaultCacheManager {
 
         if target_bytes > 0 {
             let entries_to_evict = {
-                let entries = self.entries.lock().expect("lock should not be poisoned");
+                let entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
                 self.select_entries_for_eviction(target_bytes, &entries)
             };
 
@@ -455,11 +455,11 @@ impl CacheManager for DefaultCacheManager {
     }
 
     fn get_cache_size(&self) -> u64 {
-        self.stats.lock().expect("lock should not be poisoned").total_size
+        self.stats.lock().unwrap_or_else(|p| p.into_inner()).total_size
     }
 
     fn get_evictable_size(&self) -> u64 {
-        let entries = self.entries.lock().expect("lock should not be poisoned");
+        let entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         entries
             .values()
             .filter(|metadata| metadata.evictable)
@@ -468,7 +468,7 @@ impl CacheManager for DefaultCacheManager {
     }
 
     fn get_hit_rate(&self) -> f32 {
-        let stats = self.stats.lock().expect("lock should not be poisoned");
+        let stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
         if stats.total_accesses == 0 {
             0.0
         } else {
@@ -477,7 +477,7 @@ impl CacheManager for DefaultCacheManager {
     }
 
     fn get_entry_count(&self) -> usize {
-        self.entries.lock().expect("lock should not be poisoned").len()
+        self.entries.lock().unwrap_or_else(|p| p.into_inner()).len()
     }
 }
 
@@ -585,7 +585,7 @@ impl ModelCacheManager {
 
     /// Set priority for a specific model
     pub fn set_model_priority(&self, model_name: &str, priority: u32) {
-        let mut priorities = self.model_priorities.lock().expect("lock should not be poisoned");
+        let mut priorities = self.model_priorities.lock().unwrap_or_else(|p| p.into_inner());
         priorities.insert(model_name.to_string(), priority);
     }
 

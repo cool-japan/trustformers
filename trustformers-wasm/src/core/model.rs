@@ -1615,38 +1615,33 @@ impl WasmModel {
         let metadata_obj = js_sys::Object::new();
 
         for (key, value) in &self.model_metadata {
-            js_sys::Reflect::set(&metadata_obj, &key.into(), &value.into())
-                .expect("Failed to set metadata property");
+            let _ = js_sys::Reflect::set(&metadata_obj, &key.into(), &value.into());
         }
 
         // Add additional computed metadata
         if let Some(format) = self.model_format {
-            js_sys::Reflect::set(
+            let _ = js_sys::Reflect::set(
                 &metadata_obj,
                 &"format".into(),
                 &format!("{format:?}").into(),
-            )
-            .expect("Failed to set metadata property");
+            );
         }
 
-        js_sys::Reflect::set(
+        let _ = js_sys::Reflect::set(
             &metadata_obj,
             &"weight_count".into(),
             &self.weights.len().into(),
-        )
-        .expect("Failed to set metadata property");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &metadata_obj,
             &"memory_usage_mb".into(),
             &self.memory_usage_mb().into(),
-        )
-        .expect("Failed to set metadata property");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &metadata_obj,
             &"architecture".into(),
             &format!("{arch:?}", arch = self.config.architecture).into(),
-        )
-        .expect("Failed to set metadata property");
+        );
 
         metadata_obj
     }
@@ -1684,24 +1679,21 @@ impl WasmModel {
         let result_obj = js_sys::Object::new();
 
         if let Some(detection) = manager.detect_format(data) {
-            js_sys::Reflect::set(
+            let _ = js_sys::Reflect::set(
                 &result_obj,
                 &"format".into(),
                 &format!("{format:?}", format = detection.format).into(),
-            )
-            .expect("Failed to set metadata property");
-            js_sys::Reflect::set(
+            );
+            let _ = js_sys::Reflect::set(
                 &result_obj,
                 &"confidence".into(),
                 &detection.confidence.into(),
-            )
-            .expect("Failed to set metadata property");
+            );
 
             // Add metadata
             let metadata_obj = js_sys::Object::new();
             for (key, value) in detection.metadata {
-                js_sys::Reflect::set(&metadata_obj, &key.into(), &value.into())
-                    .expect("Failed to set metadata property");
+                let _ = js_sys::Reflect::set(&metadata_obj, &key.into(), &value.into());
             }
             let _ = js_sys::Reflect::set(&result_obj, &"metadata".into(), &metadata_obj.into());
 

@@ -1,4 +1,8 @@
 //! Environmental reporting engine for generating comprehensive impact reports
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use crate::environmental_monitor::types::*;
 use anyhow::Result;
@@ -8,37 +12,29 @@ use tracing::info;
 
 /// Environmental reporting engine
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct EnvironmentalReportingEngine {
-    #[allow(dead_code)]
     report_templates: HashMap<String, ReportTemplate>,
     automated_reports: Vec<AutomatedReport>,
     dashboard_metrics: EnvironmentalDashboardMetrics,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct ReportTemplate {
-    #[allow(dead_code)]
     template_name: String,
     sections: Vec<ReportSection>,
     target_audience: String,
     frequency: ReportFrequency,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct ReportSection {
-    #[allow(dead_code)]
     section_name: String,
     metrics_included: Vec<String>,
     visualization_type: VisualizationType,
 }
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AutomatedReport {
     report_id: String,
-    #[allow(dead_code)]
     generated_at: SystemTime,
     report_type: String,
     content: String,

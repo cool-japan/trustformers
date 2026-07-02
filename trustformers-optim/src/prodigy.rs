@@ -39,6 +39,10 @@
 //! let optimizer = Prodigy::with_config(config);
 //! ```
 
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
+
 use crate::traits::StatefulOptimizer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -340,7 +344,6 @@ impl Prodigy {
     }
 
     /// Compute bias correction factors.
-    #[allow(dead_code)]
     fn bias_correction(&self, step: usize) -> (f64, f64) {
         if self.config.bias_correction && step > 0 {
             let beta1_correction = 1.0 - self.config.beta1.powi(step as i32);
@@ -352,7 +355,6 @@ impl Prodigy {
     }
 
     /// Apply warmup scaling to learning rate.
-    #[allow(dead_code)]
     fn warmup_scaling(&self, step: usize) -> f64 {
         if self.config.warmup_steps > 0 && step < self.config.warmup_steps {
             (step as f64 + 1.0) / (self.config.warmup_steps as f64)

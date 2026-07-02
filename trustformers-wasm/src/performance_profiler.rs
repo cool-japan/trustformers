@@ -279,24 +279,18 @@ impl PerformanceProfiler {
 
         for profile in &self.operation_profiles {
             let obj = Object::new();
-            js_sys::Reflect::set(&obj, &"name".into(), &profile.operation_name.clone().into())
-                .expect("Failed to set operation name property");
-            js_sys::Reflect::set(
+            let _ =
+                js_sys::Reflect::set(&obj, &"name".into(), &profile.operation_name.clone().into());
+            let _ = js_sys::Reflect::set(
                 &obj,
                 &"type".into(),
                 &format!("{op_type:?}", op_type = profile.operation_type).into(),
-            )
-            .expect("Failed to set operation type property");
-            js_sys::Reflect::set(&obj, &"duration".into(), &profile.duration_ms.into())
-                .expect("Failed to set duration property");
-            js_sys::Reflect::set(&obj, &"start_time".into(), &profile.start_time.into())
-                .expect("Failed to set start_time property");
-            js_sys::Reflect::set(&obj, &"cpu_time".into(), &profile.cpu_time_ms.into())
-                .expect("Failed to set cpu_time property");
-            js_sys::Reflect::set(&obj, &"gpu_time".into(), &profile.gpu_time_ms.into())
-                .expect("Failed to set gpu_time property");
-            js_sys::Reflect::set(&obj, &"memory".into(), &profile.memory_allocated.into())
-                .expect("Failed to set memory property");
+            );
+            let _ = js_sys::Reflect::set(&obj, &"duration".into(), &profile.duration_ms.into());
+            let _ = js_sys::Reflect::set(&obj, &"start_time".into(), &profile.start_time.into());
+            let _ = js_sys::Reflect::set(&obj, &"cpu_time".into(), &profile.cpu_time_ms.into());
+            let _ = js_sys::Reflect::set(&obj, &"gpu_time".into(), &profile.gpu_time_ms.into());
+            let _ = js_sys::Reflect::set(&obj, &"memory".into(), &profile.memory_allocated.into());
             array.push(&obj);
         }
 
@@ -309,16 +303,11 @@ impl PerformanceProfiler {
 
         for sample in &self.resource_samples {
             let obj = Object::new();
-            js_sys::Reflect::set(&obj, &"timestamp".into(), &sample.timestamp.into())
-                .expect("Failed to set timestamp property");
-            js_sys::Reflect::set(&obj, &"cpu".into(), &sample.cpu_usage.into())
-                .expect("Failed to set cpu property");
-            js_sys::Reflect::set(&obj, &"gpu".into(), &sample.gpu_usage.into())
-                .expect("Failed to set gpu property");
-            js_sys::Reflect::set(&obj, &"memory".into(), &sample.wasm_memory.into())
-                .expect("Failed to set memory property");
-            js_sys::Reflect::set(&obj, &"gpu_memory".into(), &sample.gpu_memory.into())
-                .expect("Failed to set gpu_memory property");
+            let _ = js_sys::Reflect::set(&obj, &"timestamp".into(), &sample.timestamp.into());
+            let _ = js_sys::Reflect::set(&obj, &"cpu".into(), &sample.cpu_usage.into());
+            let _ = js_sys::Reflect::set(&obj, &"gpu".into(), &sample.gpu_usage.into());
+            let _ = js_sys::Reflect::set(&obj, &"memory".into(), &sample.wasm_memory.into());
+            let _ = js_sys::Reflect::set(&obj, &"gpu_memory".into(), &sample.gpu_memory.into());
             array.push(&obj);
         }
 
@@ -674,27 +663,23 @@ impl PerformanceProfiler {
                 timestamps_array.push(&timestamp.into());
             }
 
-            js_sys::Reflect::set(&trend_obj, &"values".into(), &values_array)
-                .expect("Failed to set trend values property");
-            js_sys::Reflect::set(&trend_obj, &"timestamps".into(), &timestamps_array)
-                .expect("Failed to set trend timestamps property");
-            js_sys::Reflect::set(
+            let _ = js_sys::Reflect::set(&trend_obj, &"values".into(), &values_array);
+            let _ = js_sys::Reflect::set(&trend_obj, &"timestamps".into(), &timestamps_array);
+            let _ = js_sys::Reflect::set(
                 &trend_obj,
                 &"direction".into(),
                 &format!("{direction:?}", direction = trend.trend_direction).into(),
-            )
-            .expect("Failed to set trend direction property");
-            js_sys::Reflect::set(&trend_obj, &"strength".into(), &trend.trend_strength.into())
-                .expect("Failed to set trend strength property");
-            js_sys::Reflect::set(
+            );
+            let _ =
+                js_sys::Reflect::set(&trend_obj, &"strength".into(), &trend.trend_strength.into());
+            let _ = js_sys::Reflect::set(
                 &trend_obj,
                 &"predicted_next".into(),
                 &trend.predicted_next_value.into(),
-            )
-            .expect("Failed to set trend predicted_next property");
+            );
 
-            js_sys::Reflect::set(&trends_obj, &trend.metric_name.clone().into(), &trend_obj)
-                .expect("Failed to set trend metric in trends object");
+            let _ =
+                js_sys::Reflect::set(&trends_obj, &trend.metric_name.clone().into(), &trend_obj);
         }
 
         trends_obj
@@ -706,40 +691,35 @@ impl PerformanceProfiler {
 
         for anomaly in &self.detected_anomalies {
             let anomaly_obj = js_sys::Object::new();
-            js_sys::Reflect::set(&anomaly_obj, &"timestamp".into(), &anomaly.timestamp.into())
-                .expect("Failed to set anomaly timestamp property");
-            js_sys::Reflect::set(
+            let _ =
+                js_sys::Reflect::set(&anomaly_obj, &"timestamp".into(), &anomaly.timestamp.into());
+            let _ = js_sys::Reflect::set(
                 &anomaly_obj,
                 &"metric".into(),
                 &anomaly.metric_name.clone().into(),
-            )
-            .expect("Failed to set anomaly metric property");
-            js_sys::Reflect::set(
+            );
+            let _ = js_sys::Reflect::set(
                 &anomaly_obj,
                 &"expected".into(),
                 &anomaly.expected_value.into(),
-            )
-            .expect("Failed to set anomaly expected property");
-            js_sys::Reflect::set(&anomaly_obj, &"actual".into(), &anomaly.actual_value.into())
-                .expect("Failed to set anomaly actual property");
-            js_sys::Reflect::set(
+            );
+            let _ =
+                js_sys::Reflect::set(&anomaly_obj, &"actual".into(), &anomaly.actual_value.into());
+            let _ = js_sys::Reflect::set(
                 &anomaly_obj,
                 &"severity".into(),
                 &format!("{severity:?}", severity = anomaly.severity).into(),
-            )
-            .expect("Failed to set anomaly severity property");
-            js_sys::Reflect::set(
+            );
+            let _ = js_sys::Reflect::set(
                 &anomaly_obj,
                 &"description".into(),
                 &anomaly.description.clone().into(),
-            )
-            .expect("Failed to set anomaly description property");
-            js_sys::Reflect::set(
+            );
+            let _ = js_sys::Reflect::set(
                 &anomaly_obj,
                 &"suggested_action".into(),
                 &anomaly.suggested_action.clone().into(),
-            )
-            .expect("Failed to set anomaly suggested_action property");
+            );
 
             anomalies_array.push(&anomaly_obj);
         }
@@ -751,19 +731,17 @@ impl PerformanceProfiler {
     pub fn get_adaptive_state(&self) -> js_sys::Object {
         let state_obj = js_sys::Object::new();
 
-        js_sys::Reflect::set(
+        let _ = js_sys::Reflect::set(
             &state_obj,
             &"enabled".into(),
             &self.adaptive_optimizer.enabled.into(),
-        )
-        .expect("Failed to set adaptive state enabled property");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &state_obj,
             &"learning_rate".into(),
             &self.adaptive_optimizer.learning_rate.into(),
-        )
-        .expect("Failed to set adaptive state learning_rate property");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &state_obj,
             &"current_strategy".into(),
             &format!(
@@ -771,22 +749,19 @@ impl PerformanceProfiler {
                 strategy = self.adaptive_optimizer.current_strategy
             )
             .into(),
-        )
-        .expect("Failed to set adaptive state current_strategy property");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &state_obj,
             &"adaptation_count".into(),
             &self.adaptive_optimizer.adaptation_history.len().into(),
-        )
-        .expect("Failed to set adaptive state adaptation_count property");
+        );
 
         // Add optimization targets
         let targets_array = js_sys::Array::new();
         for target in &self.adaptive_optimizer.optimization_targets {
             targets_array.push(&format!("{target:?}").into());
         }
-        js_sys::Reflect::set(&state_obj, &"optimization_targets".into(), &targets_array)
-            .expect("Failed to set adaptive state optimization_targets property");
+        let _ = js_sys::Reflect::set(&state_obj, &"optimization_targets".into(), &targets_array);
 
         state_obj
     }
@@ -848,23 +823,23 @@ impl PerformanceProfiler {
 
     fn update_performance_trend(&mut self, metric_name: &str, value: f64, timestamp: f64) {
         // Find existing trend or create new one
-        let trend_index = self.performance_trends.iter().position(|t| t.metric_name == metric_name);
+        let trend_index =
+            match self.performance_trends.iter().position(|t| t.metric_name == metric_name) {
+                Some(index) => index,
+                None => {
+                    self.performance_trends.push(PerformanceTrend {
+                        metric_name: metric_name.to_string(),
+                        values: Vec::new(),
+                        timestamps: Vec::new(),
+                        trend_direction: TrendDirection::Stable,
+                        trend_strength: 0.0,
+                        predicted_next_value: value,
+                    });
+                    self.performance_trends.len() - 1
+                },
+            };
 
-        let trend = if let Some(index) = trend_index {
-            &mut self.performance_trends[index]
-        } else {
-            self.performance_trends.push(PerformanceTrend {
-                metric_name: metric_name.to_string(),
-                values: Vec::new(),
-                timestamps: Vec::new(),
-                trend_direction: TrendDirection::Stable,
-                trend_strength: 0.0,
-                predicted_next_value: value,
-            });
-            self.performance_trends
-                .last_mut()
-                .expect("trend just pushed to performance_trends")
-        };
+        let trend = &mut self.performance_trends[trend_index];
 
         // Add new data point
         trend.values.push(value);

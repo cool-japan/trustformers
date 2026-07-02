@@ -12,6 +12,10 @@
 //! - **Quantum Superposition SGD (QS-SGD)**: SGD with superposition states
 //! - **Quantum Entanglement Optimizer (QEO)**: Parameter entanglement for coordination
 
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
+
 use crate::{
     common::{OptimizerState, StateMemoryStats},
     traits::StatefulOptimizer,
@@ -26,7 +30,11 @@ use std::{
         Arc,
     },
 };
-use trustformers_core::{errors::Result, tensor::Tensor, traits::Optimizer};
+use trustformers_core::{
+    errors::{Result, TrustformersError},
+    tensor::Tensor,
+    traits::Optimizer,
+};
 
 /// Configuration for Quantum Annealing Optimizer
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,14 +90,16 @@ struct QuantumState {
     /// Energy levels of each state
     energy_levels: Vec<f32>,
     /// Entanglement connections with other parameters
-    #[allow(dead_code)]
     entanglements: HashMap<String, f32>,
 }
 
 impl QuantumState {
     fn new(superposition_states: usize) -> Self {
         let mut rng = thread_rng();
-        let uniform = Uniform::new(0.0, 1.0).expect("Failed to create uniform distribution");
+        // reason: bounds are compile-time constants with 0.0 < 1.0, so
+        // `Uniform::new` is infallible here.
+        let uniform =
+            Uniform::new(0.0, 1.0).expect("uniform distribution over [0.0, 1.0) is valid");
 
         let amplitudes: Vec<f32> =
             (0..superposition_states).map(|_| uniform.sample(&mut rng)).collect();
@@ -239,7 +249,6 @@ impl QuantumAnnealingOptimizer {
     }
 
     /// Calculate total system energy for quantum state monitoring
-    #[allow(dead_code)]
     fn calculate_system_energy(&self, gradients: &HashMap<String, Tensor>) -> f32 {
         let quantum_states = self.quantum_states.read();
         let mut total_energy = 0.0;
@@ -269,7 +278,6 @@ impl QuantumAnnealingOptimizer {
     }
 
     /// Apply quantum entanglement effects between parameters
-    #[allow(dead_code)]
     fn apply_entanglement_effects(&self, param_name: &str, gradient: &mut Tensor) -> Result<()> {
         let quantum_states = self.quantum_states.read();
 
@@ -331,9 +339,11 @@ impl Optimizer for QuantumAnnealingOptimizer {
                 momentum_states.insert(param_name.to_string(), zero_momentum);
             }
 
-            let momentum = momentum_states
-                .get_mut(param_name)
-                .expect("Momentum state must exist after initialization");
+            let momentum = momentum_states.get_mut(param_name).ok_or_else(|| {
+                TrustformersError::invalid_state(
+                    "Momentum state must exist after initialization".to_string(),
+                )
+            })?;
 
             // Update momentum with quantum correction
             let quantum_correction = self.quantum_measurement(param_name).unwrap_or(0.0);

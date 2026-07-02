@@ -490,10 +490,8 @@ impl ModelManager {
             .filter(|model| {
                 // Remove deprecated models
                 if let Some(deprecation_time) = model.deprecation_timestamp {
-                    let now = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .expect("SystemTime should be after UNIX_EPOCH")
-                        .as_secs();
+                    let now =
+                        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
                     now > deprecation_time
                 } else {
                     false

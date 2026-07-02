@@ -855,11 +855,8 @@ impl SpeculativeBatchProcessor {
             }
 
             // If a rejection occurred: add corrected token.
-            if step.rejected_at.is_some() {
+            if let Some(rej_idx) = step.rejected_at {
                 // Recompute corrected token from step data.
-                let rej_idx = step
-                    .rejected_at
-                    .expect("rejected_at must be Some because is_some() was verified above");
                 let dt = &draft_tokens[rej_idx];
                 let corrected = if request.config.fallback_to_greedy_on_rejection {
                     sample_from_logits(&target_logits[rej_idx], 0.0, 1.0)

@@ -313,8 +313,8 @@ impl LoadBalancer {
         devices
             .iter()
             .min_by_key(|device| self.connections.get(*device).unwrap_or(&0))
-            .expect("devices slice must be non-empty (checked by caller)")
-            .clone()
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn least_utilization_select(&self, devices: &[String]) -> String {

@@ -225,7 +225,7 @@ impl ExporterFactory {
             }
         }
 
-        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("Partial comparison failed"));
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(::std::cmp::Ordering::Equal));
 
         candidates
             .first()

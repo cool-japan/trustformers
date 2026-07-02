@@ -45,16 +45,24 @@
 //!
 //! ## Example Usage
 //!
-//! ```rust
+//! ```rust,no_run
 //! use trustformers_models::legal_medical_specialized::{LegalMedicalConfig, LegalMedicalForCausalLM};
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create a legal model
+//! // (`legal_contract_7b()` / `medical_clinical_7b()` are genuine ~7B-parameter
+//! // presets; this example is marked `no_run` since constructing them allocates
+//! // full-size weights, twice over.)
 //! let config = LegalMedicalConfig::legal_contract_7b();
 //! let model = LegalMedicalForCausalLM::new(config)?;
+//! # let _ = model;
 //!
 //! // Create a medical model
 //! let config = LegalMedicalConfig::medical_clinical_7b();
 //! let model = LegalMedicalForCausalLM::new(config)?;
+//! # let _ = model;
+//! # Ok(())
+//! # }
 //! ```
 
 use crate::common_patterns::GenerationConfig;

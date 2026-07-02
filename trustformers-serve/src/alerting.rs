@@ -681,7 +681,7 @@ impl AlertingService {
             rule.id,
             SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
-                .expect("System time before UNIX_EPOCH")
+                .unwrap_or_default()
                 .as_secs()
         );
 

@@ -122,8 +122,9 @@ impl AnalysisCache {
         let access_time = start_time.elapsed();
         let mut stats = self.statistics.lock();
         stats.update_after_access(false, access_time); // Store operation is a miss
-        stats.memory_usage +=
-            self.estimate_entry_size(&cache.get(key).expect("Entry just inserted"));
+        if let Some(entry) = cache.get(key) {
+            stats.memory_usage += self.estimate_entry_size(entry);
+        }
         *stats.entries_by_type.entry("dependency".to_string()).or_insert(0) += 1;
 
         debug!(
@@ -210,8 +211,9 @@ impl AnalysisCache {
         let access_time = start_time.elapsed();
         let mut stats = self.statistics.lock();
         stats.update_after_access(false, access_time);
-        stats.memory_usage +=
-            self.estimate_entry_size(&cache.get(key).expect("Entry just inserted"));
+        if let Some(entry) = cache.get(key) {
+            stats.memory_usage += self.estimate_entry_size(entry);
+        }
         *stats.entries_by_type.entry("conflict".to_string()).or_insert(0) += 1;
 
         debug!(
@@ -298,8 +300,9 @@ impl AnalysisCache {
         let access_time = start_time.elapsed();
         let mut stats = self.statistics.lock();
         stats.update_after_access(false, access_time);
-        stats.memory_usage +=
-            self.estimate_entry_size(&cache.get(key).expect("Entry just inserted"));
+        if let Some(entry) = cache.get(key) {
+            stats.memory_usage += self.estimate_entry_size(entry);
+        }
         *stats.entries_by_type.entry("grouping".to_string()).or_insert(0) += 1;
 
         debug!(
@@ -798,6 +801,7 @@ enum EvictionPolicyImpl {
     Lfu(LfuEvictionPolicy),
     Ttl(TtlEvictionPolicy),
     /// Custom policy that falls back to LRU eviction
+    // reason: policy name retained for diagnostics; not read after the fallback warning.
     CustomLruFallback(#[allow(dead_code)] String, LruEvictionPolicy),
 }
 

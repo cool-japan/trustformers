@@ -187,11 +187,17 @@ impl PagedAttention {
 
     /// Free all pages for a sequence
     pub fn free_sequence(&self, sequence_id: usize) {
-        if let Some(page_ids) =
-            self.block_tables.write().expect("Lock poisoned").remove(&sequence_id)
+        if let Some(page_ids) = self
+            .block_tables
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&sequence_id)
         {
             for page_id in page_ids {
-                self.kv_cache.write().expect("Lock poisoned").free_page(page_id);
+                self.kv_cache
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .free_page(page_id);
             }
         }
     }
@@ -314,7 +320,12 @@ impl PagedAttention {
                             })?
                             .get(&sequence_id)
                             .cloned()
-                            .expect("sequence must have allocated pages");
+                            .ok_or_else(|| {
+                                crate::errors::compute_error(
+                                    "paged_attention_forward",
+                                    "sequence must have allocated pages",
+                                )
+                            })?;
 
                         // For simplicity, use full attention for now
                         // In practice, this would manage KV cache pages more efficiently
@@ -377,8 +388,9 @@ impl PagedAttention {
 
     /// Get memory usage statistics
     pub fn memory_stats(&self) -> MemoryStats {
-        let kv_cache = self.kv_cache.read().expect("Lock poisoned");
-        let block_tables = self.block_tables.read().expect("Lock poisoned");
+        let kv_cache = self.kv_cache.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let block_tables =
+            self.block_tables.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         MemoryStats {
             total_pages: self.max_pages,
             used_pages: self.max_pages - kv_cache.available_pages(),

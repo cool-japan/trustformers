@@ -160,7 +160,7 @@ impl AdaptiveInferenceEngine {
         let capabilities = self
             .device_monitor
             .lock()
-            .expect("device_monitor lock should not be poisoned")
+            .unwrap_or_else(|p| p.into_inner())
             .get_capabilities()?;
 
         // Check cache first
@@ -461,7 +461,7 @@ impl AdaptiveInferenceEngine {
             &self
                 .device_monitor
                 .lock()
-                .expect("device_monitor lock should not be poisoned")
+                .unwrap_or_else(|p| p.into_inner())
                 .get_capabilities()?,
             context,
         )?;

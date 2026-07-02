@@ -1,9 +1,15 @@
-use crate::models::{PyBertModel, PyGPT2Model, PyLlamaModel, PyT5Model};
+use crate::models::{
+    PyBertModel, PyGPT2Model, PyLlamaModel, PyMambaModel, PyRwkvModel, PyT5Model,
+};
 use crate::tokenizers::{PyBPETokenizer, PyWordPieceTokenizer};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyString};
-use std::sync::Arc;
+use pyo3::types::PyDict;
+use pyo3::IntoPyObjectExt;
+
+/// Owned Python reference alias (pyo3 0.28 removed the `PyObject` type alias from
+/// the crate root; it is equivalent to `Py<PyAny>`).
+type PyObject = Py<PyAny>;
 // use trustformers::hub::{download_model, ModelInfo}; // Commented out - main trustformers crate not available
 // use trustformers::{AutoConfig, AutoModel as RustAutoModel, AutoTokenizer as RustAutoTokenizer}; // Commented out - main trustformers crate not available
 
@@ -22,16 +28,16 @@ impl PyAutoModel {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyObject> {
         // Extract optional parameters
-        let cache_dir = kwargs
+        let _cache_dir = kwargs
             .and_then(|d| d.get_item("cache_dir").ok().flatten())
             .and_then(|v| v.extract::<String>().ok());
 
-        let force_download = kwargs
+        let _force_download = kwargs
             .and_then(|d| d.get_item("force_download").ok().flatten())
             .and_then(|v| v.extract::<bool>().ok())
             .unwrap_or(false);
 
-        let revision = kwargs
+        let _revision = kwargs
             .and_then(|d| d.get_item("revision").ok().flatten())
             .and_then(|v| v.extract::<String>().ok())
             .unwrap_or_else(|| "main".to_string());
@@ -47,7 +53,7 @@ impl PyAutoModel {
                     pretrained_model_name_or_path,
                     kwargs.map(|k| k.as_any()), // Pass kwargs to model
                 )?;
-                Ok(model.into_py(py))
+                model.into_py_any(py)
             },
             "deberta" => {
                 // For now, use BERT implementation as fallback
@@ -56,7 +62,7 @@ impl PyAutoModel {
                     pretrained_model_name_or_path,
                     kwargs.map(|k| k.as_any()),
                 )?;
-                Ok(model.into_py(py))
+                model.into_py_any(py)
             },
             "gpt2" | "gpt-j" | "gpt-neo" => {
                 let model = PyGPT2Model::from_pretrained(
@@ -64,7 +70,7 @@ impl PyAutoModel {
                     pretrained_model_name_or_path,
                     kwargs.map(|k| k.as_any()), // Pass kwargs to model
                 )?;
-                Ok(model.into_py(py))
+                model.into_py_any(py)
             },
             "t5" => {
                 let model = PyT5Model::from_pretrained(
@@ -72,7 +78,7 @@ impl PyAutoModel {
                     pretrained_model_name_or_path,
                     kwargs.map(|k| k.as_any()), // Pass kwargs to model
                 )?;
-                Ok(model.into_py(py))
+                model.into_py_any(py)
             },
             "llama" | "falcon" | "mpt" | "mistral" | "gemma" | "phi" | "qwen" => {
                 let model = PyLlamaModel::from_pretrained(
@@ -80,7 +86,7 @@ impl PyAutoModel {
                     pretrained_model_name_or_path,
                     kwargs.map(|k| k.as_any()), // Pass kwargs to model
                 )?;
-                Ok(model.into_py(py))
+                model.into_py_any(py)
             },
             "claude" => {
                 // For Claude models, we'll use a specialized implementation or fallback
@@ -89,17 +95,23 @@ impl PyAutoModel {
                     pretrained_model_name_or_path,
                     kwargs.map(|k| k.as_any()),
                 )?;
-                Ok(model.into_py(py))
+                model.into_py_any(py)
             },
-            "rwkv" | "mamba" => {
-                // State-space models - for now use BERT as fallback
-                // TODO: Implement proper RWKV/Mamba support
-                let model = PyBertModel::from_pretrained(
+            "rwkv" => {
+                let model = PyRwkvModel::from_pretrained(
                     py,
                     pretrained_model_name_or_path,
                     kwargs.map(|k| k.as_any()),
                 )?;
-                Ok(model.into_py(py))
+                model.into_py_any(py)
+            },
+            "mamba" => {
+                let model = PyMambaModel::from_pretrained(
+                    py,
+                    pretrained_model_name_or_path,
+                    kwargs.map(|k| k.as_any()),
+                )?;
+                model.into_py_any(py)
             },
             _ => Err(PyValueError::new_err(format!(
                 "Model type '{}' detected for '{}' but not yet fully implemented. Supported types: bert, roberta, distilbert, deberta, gpt2, gpt-j, gpt-neo, t5, llama, falcon, mpt, claude, mistral, gemma, phi, qwen, rwkv, mamba",
@@ -171,11 +183,11 @@ impl PyAutoTokenizer {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyObject> {
         // Extract optional parameters
-        let cache_dir = kwargs
+        let _cache_dir = kwargs
             .and_then(|d| d.get_item("cache_dir").ok().flatten())
             .and_then(|v| v.extract::<String>().ok());
 
-        let force_download = kwargs
+        let _force_download = kwargs
             .and_then(|d| d.get_item("force_download").ok().flatten())
             .and_then(|v| v.extract::<bool>().ok())
             .unwrap_or(false);
@@ -188,22 +200,22 @@ impl PyAutoTokenizer {
             "wordpiece" => {
                 // Create a basic WordPiece tokenizer
                 let (tokenizer, base) = PyWordPieceTokenizer::new(None, true)?;
-                Py::new(py, (tokenizer, base)).map(|t| t.into_py(py))
+                Py::new(py, (tokenizer, base)).and_then(|t| t.into_py_any(py))
             },
             "bpe" => {
                 // Create a basic BPE tokenizer
                 let (tokenizer, base) = PyBPETokenizer::new(None, None)?;
-                Py::new(py, (tokenizer, base)).map(|t| t.into_py(py))
+                Py::new(py, (tokenizer, base)).and_then(|t| t.into_py_any(py))
             },
             "sentencepiece" => {
                 // For now, fall back to BPE for SentencePiece models
                 let (tokenizer, base) = PyBPETokenizer::new(None, None)?;
-                Py::new(py, (tokenizer, base)).map(|t| t.into_py(py))
+                Py::new(py, (tokenizer, base)).and_then(|t| t.into_py_any(py))
             },
             _ => {
                 // Default to WordPiece tokenizer
                 let (tokenizer, base) = PyWordPieceTokenizer::new(None, true)?;
-                Py::new(py, (tokenizer, base)).map(|t| t.into_py(py))
+                Py::new(py, (tokenizer, base)).and_then(|t| t.into_py_any(py))
             },
         }
     }
@@ -217,9 +229,7 @@ fn infer_tokenizer_type(model_name: &str) -> String {
         "wordpiece".to_string()
     } else if lower.contains("gpt2") || lower.contains("gpt") {
         "bpe".to_string()
-    } else if lower.contains("t5") {
-        "sentencepiece".to_string()
-    } else if lower.contains("llama") {
+    } else if lower.contains("t5") || lower.contains("llama") {
         "sentencepiece".to_string()
     } else {
         "wordpiece".to_string() // Default
@@ -323,6 +333,7 @@ pub fn pipeline(
     device: Option<&str>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyObject> {
+    let _ = kwargs;
     use crate::pipelines::{PyTextClassificationPipeline, PyTextGenerationPipeline};
 
     // If model/tokenizer not provided, auto-detect based on task
@@ -337,21 +348,25 @@ pub fn pipeline(
 
         let model = match model {
             None => PyAutoModel::from_pretrained(py, default_model, None)?,
-            Some(m) => m.unbind(),
+            Some(m) => m.clone().unbind(),
         };
 
         let tokenizer = match tokenizer {
             None => PyAutoTokenizer::from_pretrained(py, default_model, None)?,
-            Some(t) => t.unbind(),
+            Some(t) => t.clone().unbind(),
         };
 
         (model, tokenizer)
     } else {
-        // Both model and tokenizer are provided
-        (
-            model.expect("model should be Some").unbind(),
-            tokenizer.expect("tokenizer should be Some").unbind(),
-        )
+        // Both model and tokenizer are provided (guaranteed by the `if` condition).
+        match (model, tokenizer) {
+            (Some(m), Some(t)) => (m.clone().unbind(), t.clone().unbind()),
+            _ => {
+                return Err(PyValueError::new_err(
+                    "model and tokenizer must both be provided",
+                ))
+            },
+        }
     };
 
     // Create appropriate pipeline
@@ -359,14 +374,14 @@ pub fn pipeline(
         "text-generation" => {
             let model_bound = model.bind(py);
             let tokenizer_bound = tokenizer.bind(py);
-            let (pipeline, base) = PyTextGenerationPipeline::new(py, &model_bound, &tokenizer_bound, device)?;
-            Py::new(py, (pipeline, base)).map(|p| p.into_py(py))
+            let (pipeline, base) = PyTextGenerationPipeline::new(py, model_bound, tokenizer_bound, device)?;
+            Py::new(py, (pipeline, base)).and_then(|p| p.into_py_any(py))
         },
         "text-classification" | "sentiment-analysis" => {
             let model_bound = model.bind(py);
             let tokenizer_bound = tokenizer.bind(py);
-            let (pipeline, base) = PyTextClassificationPipeline::new(py, &model_bound, &tokenizer_bound, device)?;
-            Py::new(py, (pipeline, base)).map(|p| p.into_py(py))
+            let (pipeline, base) = PyTextClassificationPipeline::new(py, model_bound, tokenizer_bound, device)?;
+            Py::new(py, (pipeline, base)).and_then(|p| p.into_py_any(py))
         },
         _ => Err(PyValueError::new_err(format!(
             "Unknown task: {}. Supported tasks: text-generation, text-classification, sentiment-analysis",

@@ -93,7 +93,6 @@ pub struct FeedbackStatistics {
     pub consistency_score: f32,
 }
 
-#[allow(dead_code)]
 impl FeedbackProcessor {
     pub fn new(config: FeedbackConfig) -> Self {
         Self {
@@ -277,7 +276,6 @@ impl FeedbackProcessor {
         })
     }
 
-    #[allow(dead_code)]
     fn compute_rating_weights(&self, ratings: &Tensor) -> Result<Tensor> {
         // Simplified implementation using mean for now
         Ok(ratings.mean()?)

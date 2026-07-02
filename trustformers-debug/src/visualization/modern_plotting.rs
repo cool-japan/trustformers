@@ -2,6 +2,10 @@
 //!
 //! Advanced visualization engine with support for modern plotting libraries,
 //! interactive dashboards, and real-time updates.
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -395,7 +399,6 @@ pub struct ModernPlottingEngine {
     config: ModernPlottingConfig,
     active_plots: HashMap<String, PlotInstance>,
     dashboard_server: Option<DashboardServer>,
-    #[allow(dead_code)]
     plot_cache: HashMap<String, CachedPlot>,
 }
 
@@ -1492,7 +1495,8 @@ mod tests {
     #[test]
     fn test_modern_plotting_engine_new_empty() {
         let mut cfg = ModernPlottingConfig::default();
-        cfg.output_directory = "/tmp/trustformers_test_mp".to_string();
+        cfg.output_directory =
+            std::env::temp_dir().join("trustformers_test_mp").to_string_lossy().into_owned();
         cfg.enable_web_dashboard = false;
         let engine = ModernPlottingEngine::new(cfg);
         assert_eq!(engine.active_plots.len(), 0);
@@ -1502,7 +1506,10 @@ mod tests {
     #[test]
     fn test_modern_plotting_engine_statistics_missing() {
         let mut cfg = ModernPlottingConfig::default();
-        cfg.output_directory = "/tmp/trustformers_test_mp2".to_string();
+        cfg.output_directory = std::env::temp_dir()
+            .join("trustformers_test_mp2")
+            .to_string_lossy()
+            .into_owned();
         cfg.enable_web_dashboard = false;
         let engine = ModernPlottingEngine::new(cfg);
         assert!(engine.get_plot_statistics("nonexistent").is_none());

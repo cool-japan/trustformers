@@ -76,7 +76,7 @@ impl HealthCheckService {
                 details: result.details,
                 timestamp: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .expect("SystemTime should be after UNIX_EPOCH")
+                    .unwrap_or_default()
                     .as_secs(),
                 duration: duration.as_millis() as u64,
             };
@@ -135,7 +135,7 @@ impl HealthCheckService {
             status: overall_status,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("SystemTime should be after UNIX_EPOCH")
+                .unwrap_or_default()
                 .as_secs(),
             components: component_healths,
             uptime_seconds: self.get_uptime().await.as_secs(),
@@ -221,7 +221,7 @@ impl HealthCheck for ModelHealthCheck {
             })),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("SystemTime should be after UNIX_EPOCH")
+                .unwrap_or_default()
                 .as_secs(),
             duration: 1,
         }
@@ -266,7 +266,7 @@ impl HealthCheck for DatabaseHealthCheck {
             })),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("SystemTime should be after UNIX_EPOCH")
+                .unwrap_or_default()
                 .as_secs(),
             duration: 5,
         }
@@ -323,7 +323,7 @@ impl HealthCheck for MemoryHealthCheck {
             })),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("SystemTime should be after UNIX_EPOCH")
+                .unwrap_or_default()
                 .as_secs(),
             duration: 2,
         }
@@ -433,7 +433,7 @@ impl HealthStats {
         Self {
             start_time: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("SystemTime should be after UNIX_EPOCH")
+                .unwrap_or_default()
                 .as_secs(),
             total_checks: 0,
             successful_checks: 0,
@@ -551,8 +551,11 @@ mod tests {
         let service = HealthCheckService::new(config);
 
         // Register a test health check
-        let model_check =
-            ModelHealthCheck::new("test_model".to_string(), "/tmp/test_model".to_string());
+        let model_path = std::env::temp_dir().join("test_model");
+        let model_check = ModelHealthCheck::new(
+            "test_model".to_string(),
+            model_path.to_string_lossy().into_owned(),
+        );
 
         service.register_check("test_model".to_string(), Box::new(model_check)).await;
 

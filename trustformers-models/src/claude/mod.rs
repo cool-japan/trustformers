@@ -35,10 +35,8 @@
 //!
 //! ### Basic Text Generation
 //! ```rust,no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use trustformers_models::claude::{ClaudeForCausalLM, ClaudeConfig};
-//!
-//! let config = ClaudeConfig::claude_3_sonnet();
-//! let mut model = ClaudeForCausalLM::new(config)?;
 //!
 //! // Enable Constitutional AI features
 //! let mut config = ClaudeConfig::claude_3_sonnet();
@@ -46,29 +44,34 @@
 //!       .with_constitutional_weights(1.2, 1.0, 1.1); // Emphasize harmlessness
 //!
 //! let model = ClaudeForCausalLM::new(config)?;
+//! # let _ = model;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### Constitutional AI Generation
 //! ```rust,no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use trustformers_models::claude::{ClaudeForCausalLM, ClaudeConfig};
 //!
-//! let config = ClaudeConfig::claude_3_opus()
+//! let mut config = ClaudeConfig::claude_3_opus();
+//! config
 //!     .with_constitutional_ai(true)
 //!     .with_constitutional_weights(1.5, 1.0, 1.2); // Safety-first configuration
 //!
 //! let model = ClaudeForCausalLM::new(config)?;
 //!
 //! // Generate with constitutional constraints
-//! let output = model.generate_with_constitutional_ai(
-//!     input_ids,
-//!     max_new_tokens: 200,
-//!     temperature: 0.7,
-//!     top_p: 0.9,
-//! )?;
+//! # let input_ids = trustformers_core::tensor::Tensor::randn(&[1, 10])?;
+//! let output = model.generate_with_constitutional_ai(input_ids, 200, 0.7, 0.9)?;
+//! # let _ = output;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### Safety-Critical Applications
 //! ```rust,no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use trustformers_models::claude::{ClaudeForCausalLM, ClaudeConfig};
 //!
 //! // Configuration for maximum safety
@@ -77,8 +80,11 @@
 //!       .with_constitutional_weights(2.0, 0.8, 1.5); // High harmlessness weight
 //!
 //! let model = ClaudeForCausalLM::new(config)?;
+//! # let _ = model;
 //!
 //! // Use for safety-critical applications like medical or legal advice
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Constitutional AI Principles

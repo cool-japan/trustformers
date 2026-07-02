@@ -535,7 +535,7 @@ impl CalibrationToolkit {
             .iter()
             .map(|(method, metrics)| (*method, self.calculate_overall_score(metrics)))
             .collect();
-        method_ranking.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("Partial comparison failed"));
+        method_ranking.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(::std::cmp::Ordering::Equal));
 
         let recommended_method = method_ranking[0].0;
 
@@ -639,7 +639,7 @@ impl CalibrationToolkit {
             recommendations: self.validate_calibration(result, &QualityThresholds::default()),
             generated_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("SystemTime should be after UNIX_EPOCH")
+                .unwrap_or_default()
                 .as_secs(),
         }
     }

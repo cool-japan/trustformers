@@ -1,14 +1,14 @@
 # TrustformeRS 🦀
 
 [![Rust](https://img.shields.io/badge/rust-%23000000.svg?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.1.3-blue.svg)](https://github.com/cool-japan/trustformers)
+[![Version](https://img.shields.io/badge/version-0.1.4-blue.svg)](https://github.com/cool-japan/trustformers)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
 A high-performance, memory-safe Rust implementation of Hugging Face Transformers. TrustformeRS brings the power of transformer models to the Rust ecosystem with zero-cost abstractions, fearless concurrency, and deployment flexibility from edge to cloud.
 
-> **Project Status (alpha)**: TrustformeRS 0.1.3 (in development) is a large Pure-Rust transformer stack — ~1.4M lines across 10 crates and 49+ transformer architectures — together with multi-platform packaging (WebAssembly, server REST/gRPC/GraphQL, mobile iOS/Android, and RLHF/DPO training scaffolding).
+> **Project Status (alpha)**: TrustformeRS 0.1.4 (in development, last verified 2026-07-02) is a large Pure-Rust transformer stack — 2,983 Rust files, ~1.4M lines (~1.18M lines of code, via `tokei`) across 10 crates and 49+ transformer architectures — together with multi-platform packaging (WebAssembly, server REST/gRPC/GraphQL, mobile iOS/Android, and RLHF/DPO training scaffolding).
 >
-> **Honest maturity note**: today's compute path is primarily **CPU and `f32`**. F16/BF16 are supported as a storage/serialization format but are upcast to `f32` for arithmetic (native low-precision kernels are on the roadmap). GPU acceleration is **real** (CUDA via `cudarc`, Metal via `objc2`/MPS, WebGPU via `wgpu`) but is currently wired end-to-end **only for GPT-2 and RetNet**; the remaining backends (ROCm, Vulkan, OpenCL) are feature-gated and experimental, and **TPU is a placeholder, not implemented**. Several newer architectures are still being completed. See [Development Status](#-development-status) for the precise maturity of each area.
+> **Honest maturity note**: today's compute path is primarily **CPU and `f32`**. F16/BF16 are supported as a storage/serialization format but are upcast to `f32` for arithmetic (native low-precision kernels are on the roadmap). GPU acceleration is **real** (CUDA via the Pure-Rust `oxicuda` backend, Metal via `objc2`/`oxicuda-metal`, WebGPU via `wgpu`) but is currently wired end-to-end **only for GPT-2 and RetNet**; the remaining backends (ROCm, Vulkan, OpenCL) are feature-gated and experimental, and **TPU is a placeholder, not implemented**. Several newer architectures are still being completed. See [Development Status](#-development-status) for the precise maturity of each area.
 
 ## 🚀 Why TrustformeRS?
 
@@ -38,19 +38,19 @@ TrustformeRS follows a modular workspace structure inspired by Hugging Face Tran
 
 ```
 trustformers/
-├── trustformers-core/      # Core traits and tensor abstractions  (204,130 SLoC, Stable)
-├── trustformers-models/    # 49+ model implementations           (196,463 SLoC, Alpha)
-├── trustformers-tokenizers/# BPE, WordPiece, SentencePiece       ( 51,211 SLoC, Stable)
-├── trustformers-optim/     # 20+ optimizers and LR schedulers    ( 71,429 SLoC, Stable)
-├── trustformers-training/  # Distributed training, RLHF/DPO      ( 89,413 SLoC, Stable)
-├── trustformers-serve/     # REST/gRPC/GraphQL serving           (361,251 SLoC, Stable)
-├── trustformers-wasm/      # WebAssembly + WebGPU deployment     ( 55,504 SLoC, Stable)
-├── trustformers-mobile/    # iOS/Android deployment              (143,001 SLoC, Alpha)
-├── trustformers-debug/     # Profilers, visualizers, TensorBoard (101,448 SLoC, Alpha)
-└── trustformers/           # High-level integration crate        (134,295 SLoC, Alpha)
+├── trustformers-core/      # Core traits and tensor abstractions  (189,922 SLoC, Stable)
+├── trustformers-models/    # 49+ model implementations           (185,954 SLoC, Alpha)
+├── trustformers-tokenizers/# BPE, WordPiece, SentencePiece       ( 48,701 SLoC, Stable)
+├── trustformers-optim/     # 20+ optimizers and LR schedulers    ( 76,662 SLoC, Stable)
+├── trustformers-training/  # Distributed training, RLHF/DPO      ( 87,017 SLoC, Stable)
+├── trustformers-serve/     # REST/gRPC/GraphQL serving           (331,151 SLoC, Stable)
+├── trustformers-wasm/      # WebAssembly + WebGPU deployment     ( 53,361 SLoC, Stable)
+├── trustformers-mobile/    # iOS/Android deployment              (125,131 SLoC, Alpha)
+├── trustformers-debug/     # Profilers, visualizers, TensorBoard (100,417 SLoC, Alpha)
+└── trustformers/           # High-level integration crate        (131,961 SLoC, Alpha)
 ```
 
-**Total**: ~1.4M+ SLoC, 100% Pure Rust (COOLJAPAN Policy)
+**Total**: ~1.33M SLoC across these 10 crates; **2,983 Rust files, ~1.4M lines total (~1.18M lines of code)** across the full repository including bindings/examples/tooling (via `tokei`, 2026-07-01). 100% Pure Rust source (COOLJAPAN Policy) — default-feature builds are C/C++-free for every crate except `trustformers-serve` (accepted exception: rustls/aws-lc-rs TLS for the HTTP server).
 
 ### Design Principles
 
@@ -65,30 +65,39 @@ trustformers/
 
 ```toml
 [dependencies]
-trustformers = "0.1.3"
+trustformers = "0.1.4"
 ```
 
 ### Basic Usage
 
 ```rust
 use trustformers::prelude::*;
-use trustformers::{AutoModel, AutoTokenizer};
+use trustformers::{AutoModel, AutoTokenizer, Tensor};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load model and tokenizer
     let tokenizer = AutoTokenizer::from_pretrained("bert-base-uncased")?;
     let model = AutoModel::from_pretrained("bert-base-uncased")?;
-    
+
     // Tokenize input
-    let inputs = tokenizer.encode("Hello, Rust world!", None)?;
-    
+    let tokenized = tokenizer.encode("Hello, Rust world!")?;
+
+    // AutoModel's `Model` impl is Tensor-in/Tensor-out (uniform across every
+    // architecture it wraps), so wrap the token IDs as a Tensor before running
+    // inference.
+    let ids: Vec<f32> = tokenized.input_ids.iter().map(|&id| id as f32).collect();
+    let len = ids.len();
+    let inputs = Tensor::from_vec(ids, &[len])?;
+
     // Run inference
-    let outputs = model.forward(&inputs)?;
-    
-    println!("Hidden states shape: {:?}", outputs.last_hidden_state.shape());
+    let outputs = model.forward(inputs)?;
+
+    println!("Output shape: {:?}", outputs.shape());
     Ok(())
 }
 ```
+
+*(For architecture-specific outputs with named fields — e.g. `BertModelOutput { last_hidden_state, pooler_output }` — construct the concrete model type directly, such as `trustformers::BertModel`, whose `forward` takes the `TokenizedInput` from `tokenizer.encode(..)` straight through.)*
 
 ### Pipeline API
 
@@ -96,9 +105,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 use trustformers::pipeline;
 
 // All pipelines are fully implemented and ready to use!
-let classifier = pipeline("sentiment-analysis")?;
-let result = classifier("I love writing Rust code!")?;
-// Output: [{ label: "POSITIVE", score: 0.999 }]
+// `pipeline(task, model, options)` — pass `None, None` for the defaults.
+let classifier = pipeline("sentiment-analysis", None, None)?;
+let result = classifier.__call__("I love writing Rust code!".to_string())?;
+// Output: PipelineOutput::Classification([ClassificationOutput { label: "POSITIVE", score: 0.999 }])
 
 // Also available:
 // - text-generation
@@ -208,7 +218,13 @@ TrustformeRS supports multiple deployment targets:
 
 ```rust
 use trustformers_core::{Model, Layer, Config};
+use trustformers_core::layers::Embedding; // real building block
+use trustformers_core::traits::TokenizedInput;
 
+// `TransformerEncoder`, `Pooler`, `MyConfig`, and `ModelOutput` are illustrative
+// types you define yourself, typically composed from real trustformers_core
+// building blocks such as `MultiHeadAttention`, `LayerNorm`, and `FeedForward`
+// (all in `trustformers_core::layers`).
 struct MyTransformer {
     embeddings: Embedding,
     encoder: TransformerEncoder,
@@ -219,12 +235,12 @@ impl Model for MyTransformer {
     type Config = MyConfig;
     type Input = TokenizedInput;
     type Output = ModelOutput;
-    
+
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
         let hidden_states = self.embeddings.forward(input.input_ids)?;
         let encoded = self.encoder.forward(hidden_states)?;
-        let pooled = self.pooler.forward(&encoded)?;
-        
+        let pooled = self.pooler.forward(encoded.clone())?;
+
         Ok(ModelOutput { hidden_states: encoded, pooled_output: pooled })
     }
 }
@@ -232,16 +248,20 @@ impl Model for MyTransformer {
 
 ### GPU Acceleration
 
-GPU backends are real (CUDA via `cudarc`, Metal via `objc2`/MPS, WebGPU via `wgpu`) but are **currently wired end-to-end only for GPT-2 and RetNet**. Enable the matching feature flag (`metal` on macOS, `cuda` on Linux/Windows) and build a supported model on a GPU `Device`; its `forward` then runs the linear/attention path on-device with a persistent KV cache.
+GPU backends are real (CUDA via the Pure-Rust `oxicuda` backend, Metal via `objc2`/`oxicuda-metal`, WebGPU via `wgpu`) but are **currently wired end-to-end only for GPT-2 and RetNet**. Enable the matching feature flag (`metal` on macOS, `cuda` on Linux/Windows) and build a supported model on a GPU `Device`; its `forward` then runs the linear/attention path on-device with a persistent KV cache.
+
+> **CUDA runtime-verified (2026-07-01):** the CUDA backend was migrated from `cudarc` to the Pure-Rust `oxicuda` (`oxicuda-blas`/`-dnn`/`-memory`/`-driver`) — the `cuda` feature now pulls in `oxicuda` instead of `cudarc` (`cuda-oxicuda` is kept only as a deprecated alias for `cuda`). 12 CPU↔CUDA golden-parity tests (GEMM, GELU, LayerNorm, causal softmax, RoPE — both host and GPU-resident paths, plus cached-weight GEMM) prove the backend is numerically correct against the CPU reference, runtime-verified **12/12 passing on a real NVIDIA RTX A4000 (CUDA 12.0)**. The GPU-resident CUDA transformer layer (LayerNorm→QKV→bias→RoPE→causal-softmax attention→proj→residual, chained via cached device buffers with no host round-trips) replaces the previous CPU-fallback placeholder. Metal compute (matmul + resident attention) similarly migrated to `oxicuda-metal`, dropping the earlier `scirs2-core` MPS dependency.
 
 ```rust
 // Cargo.toml: trustformers-core = { version = "0.1", features = ["metal"] }  // or "cuda"
 use trustformers_core::Device;
+use trustformers_models::gpt2::{Gpt2Config, Gpt2Model};
 
-// Construct a supported model (e.g. GPT-2) on a GPU device.
-let device = Device::Metal(0); // or Device::Cuda(0)
-let model = Gpt2Model::from_pretrained_on("gpt2", device)?;
-let outputs = model.forward(&inputs)?; // attention + linear run on-device
+// Construct a supported model (e.g. GPT-2) and move its weights to a GPU device.
+let device = Device::Metal(0); // or Device::CUDA(0)
+let mut model = Gpt2Model::new_with_device(Gpt2Config::default(), device)?;
+model.weights_to_gpu(&device)?;        // Metal (use `weights_to_gpu_cuda` on CUDA)
+let outputs = model.forward(inputs)?;  // attention + linear run on-device
 ```
 
 > A generic `model.to_gpu()` covering **all** 49+ architectures is **not yet available** — broader coverage is tracked under [Development Status](#-development-status). For unsupported models, inference currently runs on CPU (`f32`).
@@ -252,12 +272,16 @@ let outputs = model.forward(&inputs)?; // attention + linear run on-device
 # Build for WASM
 cargo build --target wasm32-unknown-unknown --features wasm
 
-# Use in JavaScript
-import init, { BertModel, Tokenizer } from './trustformers_wasm.js';
+# Use in JavaScript (real wasm-bindgen exports: WasmTokenizer/BertModelWasm,
+# constructed from a config rather than a HuggingFace Hub name)
+import init, { WasmTokenizer, TokenizerType, BertModelWasm, BertConfig } from './trustformers_wasm.js';
 
 await init();
-const tokenizer = Tokenizer.from_pretrained("bert-base-uncased");
-const model = BertModel.from_pretrained("bert-base-uncased");
+const tokenizer = new WasmTokenizer(TokenizerType.WordPiece);
+const model = new BertModelWasm(new BertConfig());
+
+const ids = tokenizer.encode("Hello, Rust world!", true); // -> token ID array
+const hiddenStates = model.forward(ids);
 ```
 
 ## 🔄 Migration from Python
@@ -298,7 +322,8 @@ outputs = model(**inputs)
 ```rust
 use trustformers::{
     AutoModel, 
-    AutoTokenizer
+    AutoTokenizer,
+    Tensor,
 };
 
 let tokenizer = AutoTokenizer::from_pretrained(
@@ -308,11 +333,15 @@ let model = AutoModel::from_pretrained(
     "bert-base-uncased"
 )?;
 
-let inputs = tokenizer.encode(
-    "Hello world!", 
-    None
+let tokenized = tokenizer.encode(
+    "Hello world!"
 )?;
-let outputs = model.forward(&inputs)?;
+// AutoModel is Tensor-in/Tensor-out; wrap token IDs first.
+let ids: Vec<f32> = tokenized.input_ids
+    .iter().map(|&i| i as f32).collect();
+let len = ids.len();
+let inputs = Tensor::from_vec(ids, &[len])?;
+let outputs = model.forward(inputs)?;
 ```
 
 </td>
@@ -320,6 +349,19 @@ let outputs = model.forward(&inputs)?;
 </table>
 
 ## 🎯 Development Status
+
+### Completed Features (v0.1.4 - 2026-07-01)
+- [x] **CUDA backend migrated to the Pure-Rust `oxicuda`** (COOLJAPAN Pure-Rust policy), entirely replacing `cudarc` (`cuda` now pulls `oxicuda-blas`/`-dnn`/`-memory`/`-driver`; `cuda-oxicuda` kept as a deprecated alias). GPU-resident `matmul_gpu_to_gpu` confirmed genuinely zero-copy (cached `DeviceBuffer`, no host round-trip); the `cuda` feature now propagates through `trustformers-models` and the `trustformers` umbrella crate.
+- [x] **12 CPU↔CUDA golden-parity tests** (GEMM, GELU, LayerNorm, causal softmax, RoPE — host and GPU-resident paths, plus cached-weight GEMM), runtime-verified 12/12 passing on a real NVIDIA RTX A4000 (CUDA 12.0).
+- [x] **Real GPU-resident CUDA transformer layer**: pre-norm causal self-attention (LayerNorm→QKV→bias→RoPE→causal-softmax attention→proj→residual) chained via cached device buffers with no host round-trips, replacing the previous CPU-fallback placeholder.
+- [x] **Metal GPU compute migrated to `oxicuda-metal`** (Pure Rust), dropping the `scirs2-core` MPS dependency entirely; GPU-resident matmul is zero-copy; GPT-2's feed-forward now uses a single fused matmul+bias+GELU Metal kernel (one GPU dispatch instead of three). Verified on Apple Silicon.
+- [x] **Real `PyRwkvModel` / `PyMambaModel` Python classes**: `AutoModel` now loads RWKV/Mamba checkpoints correctly instead of silently falling back to BERT (the Python binding layer was also re-enabled and modernized to PyO3 0.28).
+- [x] **WebGPU device/queue initialization** in the WebAssembly compute backend (`navigator.gpu` → adapter → device), falling back to CPU when no adapter is available.
+- [x] **Eliminated production-code `unwrap()`/`expect()`** across the entire workspace (lock-poison recovery, proper `Result` propagation, documented infallible invariants only where truly load-bearing); no public API changes, all tests pass unchanged.
+- [x] **Default feature trees are Pure-Rust** (C/C++-free) for every crate except `trustformers-serve` (HTTP server; keeps rustls/aws-lc-rs TLS, accepted exception). Networking (HuggingFace Hub downloads, remote leaderboard), debug visualization, and serve's AWS-Lambda/Swagger-UI adapters are now opt-in behind features (`hub`, `remote-leaderboard`, `visual`, `lambda`, `swagger-ui`); switched the tokenizer regex backend to pure-Rust `fancy-regex`.
+- [x] **Restored gRPC proto compilation and serving** (migrated `build.rs` to the tonic 0.14 split `tonic-build`/`tonic-prost-build` API).
+- [x] **Removed the legacy `cudarc`-based CUDA backend** and an orphaned, never-mounted `rope/mod.rs` module (~1,693 lines whose RoPE convention was inconsistent with the live, now parity-tested kernel).
+- [x] **Full workspace verification (2026-07-01)**: `cargo nextest run --workspace --all-features` = **18,102 passed, 0 failed** (119 skipped, ~565s) · `cargo clippy --workspace --all-features --all-targets -- -D warnings` = 0 warnings/errors · `cargo doc --workspace --all-features --no-deps` (`RUSTDOCFLAGS="-D warnings"`) = 0 warnings · `cargo fmt --all -- --check` = clean.
 
 ### Completed Features (v0.1.3 - 2026-06-24)
 - [x] **Gorilla time-series compression + historical-data engine** (trustformers-serve): delta-of-delta timestamp encoding plus XOR float encoding for metric series, with a real lifecycle/archival/query engine (expiry cleanup, archive/retrieve, cached query execution) replacing prior stubs
@@ -348,12 +390,12 @@ let outputs = model.forward(&inputs)?;
 ### Future Enhancements
 
 #### High Priority
-- [ ] **MPSGraph acceleration**: Awaiting scirs2-core 0.3.0 for 50-200x Metal performance improvement
+- [ ] **Broader GPU model coverage**: extend the `oxicuda`/`oxicuda-metal` device-resident forward path beyond GPT-2/RetNet to more architectures (superseded the earlier scirs2-core MPSGraph plan — Metal now runs on `oxicuda-metal` directly, no longer blocked on scirs2-core)
 - [ ] **More quantization methods**: Enhanced GGUF format, AutoGPTQ improvements
 - [ ] **Additional vision transformer variants**: ViT-Huge, DeiT, Swin
 
 #### Performance
-- [ ] **Custom CUDA kernels**: Further GPU optimization beyond current FlashAttention
+- [ ] **Fused CUDA megakernel**: LayerNorm+QKV+RoPE+Attention+Proj+Residual as a single `oxicuda-dnn` kernel (today's oxicuda path executes ops individually — correct, but not fused)
 - [ ] **Streaming inference**: Real-time token streaming for all generation pipelines
 
 #### Documentation

@@ -237,8 +237,8 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
 
     /// Get value from cache
     pub fn get(&self, key: &K) -> Option<V> {
-        let mut cache = self.cache.lock().expect("Lock poisoned");
-        let mut stats = self.stats.lock().expect("Lock poisoned");
+        let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
 
         if let Some(entry) = cache.get_mut(key) {
             // Check if expired
@@ -253,7 +253,7 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
             entry.mark_accessed();
 
             // Update LRU order
-            let mut lru = self.lru_order.lock().expect("Lock poisoned");
+            let mut lru = self.lru_order.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(pos) = lru.iter().position(|k| k == key) {
                 lru.remove(pos);
             }
@@ -286,14 +286,14 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
         priority: u32,
     ) -> Result<()> {
         // Check if we need to evict
-        let mut current_mem = self.current_memory.lock().expect("Lock poisoned");
+        let mut current_mem = self.current_memory.lock().unwrap_or_else(|p| p.into_inner());
         let soft_limit =
             (self.config.max_memory_bytes as f32 * self.config.soft_limit_fraction) as usize;
 
         if *current_mem + size_bytes > soft_limit {
             drop(current_mem);
             self.evict_to_fit(size_bytes)?;
-            current_mem = self.current_memory.lock().expect("Lock poisoned");
+            current_mem = self.current_memory.lock().unwrap_or_else(|p| p.into_inner());
         }
 
         // Create cache entry
@@ -305,18 +305,18 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
         }
 
         // Insert into cache
-        let mut cache = self.cache.lock().expect("Lock poisoned");
+        let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
         cache.insert(key.clone(), entry);
 
         // Update LRU order
-        let mut lru = self.lru_order.lock().expect("Lock poisoned");
+        let mut lru = self.lru_order.lock().unwrap_or_else(|p| p.into_inner());
         lru.push_back(key.clone());
 
         // Update memory tracking
         *current_mem += size_bytes;
 
         // Update statistics
-        let mut stats = self.stats.lock().expect("Lock poisoned");
+        let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
         stats.inserts += 1;
         stats.item_count = cache.len();
         stats.memory_bytes = *current_mem;
@@ -327,21 +327,21 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
 
     /// Remove value from cache
     pub fn remove(&self, key: &K) -> Option<V> {
-        let mut cache = self.cache.lock().expect("Lock poisoned");
+        let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
 
         if let Some(entry) = cache.remove(key) {
             // Update LRU order
-            let mut lru = self.lru_order.lock().expect("Lock poisoned");
+            let mut lru = self.lru_order.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(pos) = lru.iter().position(|k| k == key) {
                 lru.remove(pos);
             }
 
             // Update memory tracking
-            let mut current_mem = self.current_memory.lock().expect("Lock poisoned");
+            let mut current_mem = self.current_memory.lock().unwrap_or_else(|p| p.into_inner());
             *current_mem = current_mem.saturating_sub(entry.size_bytes);
 
             // Update statistics
-            let mut stats = self.stats.lock().expect("Lock poisoned");
+            let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
             stats.item_count = cache.len();
             stats.memory_bytes = *current_mem;
 
@@ -353,16 +353,16 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
 
     /// Clear all cache entries
     pub fn clear(&self) {
-        let mut cache = self.cache.lock().expect("Lock poisoned");
+        let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
         cache.clear();
 
-        let mut lru = self.lru_order.lock().expect("Lock poisoned");
+        let mut lru = self.lru_order.lock().unwrap_or_else(|p| p.into_inner());
         lru.clear();
 
-        let mut current_mem = self.current_memory.lock().expect("Lock poisoned");
+        let mut current_mem = self.current_memory.lock().unwrap_or_else(|p| p.into_inner());
         *current_mem = 0;
 
-        let mut stats = self.stats.lock().expect("Lock poisoned");
+        let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
         stats.item_count = 0;
         stats.memory_bytes = 0;
     }
@@ -371,7 +371,7 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
     fn evict_to_fit(&self, required_bytes: usize) -> Result<()> {
         let target_memory =
             (self.config.max_memory_bytes as f32 * self.config.soft_limit_fraction) as usize;
-        let current_mem = *self.current_memory.lock().expect("Lock poisoned");
+        let current_mem = *self.current_memory.lock().unwrap_or_else(|p| p.into_inner());
 
         if current_mem + required_bytes <= target_memory {
             return Ok(());
@@ -410,25 +410,25 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
     /// LRU eviction - evict least recently used
     fn evict_lru(&self, to_free: usize) -> Result<usize> {
         let mut freed = 0;
-        let mut stats = self.stats.lock().expect("Lock poisoned");
+        let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
 
         while freed < to_free {
             let key = {
-                let mut lru = self.lru_order.lock().expect("Lock poisoned");
+                let mut lru = self.lru_order.lock().unwrap_or_else(|p| p.into_inner());
                 lru.pop_front()
             };
 
             if let Some(key) = key {
                 // Get the size BEFORE removing the entry
                 let entry_size = {
-                    let cache = self.cache.lock().expect("Lock poisoned");
+                    let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
                     cache.get(&key).map(|e| e.size_bytes).unwrap_or(0)
                 };
 
                 drop(stats);
                 if self.remove(&key).is_some() {
                     freed += entry_size;
-                    stats = self.stats.lock().expect("Lock poisoned");
+                    stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
                     stats.evictions += 1;
                 } else {
                     break;
@@ -443,7 +443,7 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
 
     /// LFU eviction - evict least frequently used
     fn evict_lfu(&self, to_free: usize) -> Result<usize> {
-        let cache = self.cache.lock().expect("Lock poisoned");
+        let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
 
         // Sort by access count (ascending)
         let mut entries: Vec<_> = cache.iter().collect();
@@ -469,7 +469,7 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
         }
 
         // Update stats after all removals (avoid deadlock)
-        let mut stats = self.stats.lock().expect("Lock poisoned");
+        let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
         stats.evictions += keys_to_evict.len() as u64;
 
         Ok(freed)
@@ -477,7 +477,7 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
 
     /// Adaptive eviction - combine LRU and LFU based on access patterns
     fn evict_adaptive(&self, to_free: usize) -> Result<usize> {
-        let cache = self.cache.lock().expect("Lock poisoned");
+        let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
 
         // Calculate adaptive score: combines recency and frequency
         let mut entries: Vec<_> = cache
@@ -517,7 +517,7 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
         }
 
         // Update stats after all removals (avoid deadlock)
-        let mut stats = self.stats.lock().expect("Lock poisoned");
+        let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
         stats.evictions += keys_to_evict.len() as u64;
 
         Ok(freed)
@@ -525,7 +525,7 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
 
     /// Size-aware eviction - prioritize smaller items when under pressure
     fn evict_size_aware(&self, to_free: usize) -> Result<usize> {
-        let cache = self.cache.lock().expect("Lock poisoned");
+        let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
 
         // Prefer evicting larger items first to free more space quickly
         let mut entries: Vec<_> = cache.iter().collect();
@@ -551,7 +551,7 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
         }
 
         // Update stats after all removals (avoid deadlock)
-        let mut stats = self.stats.lock().expect("Lock poisoned");
+        let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
         stats.evictions += keys_to_evict.len() as u64;
 
         Ok(freed)
@@ -559,7 +559,7 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
 
     /// Priority-based eviction - evict lowest priority first
     fn evict_by_priority(&self, to_free: usize) -> Result<usize> {
-        let cache = self.cache.lock().expect("Lock poisoned");
+        let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
 
         let mut entries: Vec<_> = cache.iter().collect();
         entries.sort_by_key(|(_, entry)| entry.priority);
@@ -584,7 +584,7 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
         }
 
         // Update stats after all removals (avoid deadlock)
-        let mut stats = self.stats.lock().expect("Lock poisoned");
+        let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
         stats.evictions += keys_to_evict.len() as u64;
 
         Ok(freed)
@@ -592,7 +592,7 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
 
     /// Update access pattern statistics
     fn update_access_pattern(&self, key: &K) {
-        let mut patterns = self.patterns.lock().expect("Lock poisoned");
+        let mut patterns = self.patterns.lock().unwrap_or_else(|p| p.into_inner());
         let stats = patterns.entry(key.clone()).or_default();
 
         stats.total_accesses += 1;
@@ -605,34 +605,33 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
 
         // Update frequency
         if stats.recent_accesses.len() >= 2 {
-            let time_span = stats
-                .recent_accesses
-                .back()
-                .expect("Time went backwards")
-                .duration_since(*stats.recent_accesses.front().expect("No recent accesses"))
-                .as_secs_f64();
-            stats.avg_frequency = stats.recent_accesses.len() as f64 / time_span.max(1.0);
+            if let (Some(back), Some(front)) =
+                (stats.recent_accesses.back(), stats.recent_accesses.front())
+            {
+                let time_span = back.duration_since(*front).as_secs_f64();
+                stats.avg_frequency = stats.recent_accesses.len() as f64 / time_span.max(1.0);
+            }
         }
     }
 
     /// Get cache statistics
     pub fn stats(&self) -> CacheStats {
-        self.stats.lock().expect("Lock poisoned").clone()
+        self.stats.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     /// Get current memory usage
     pub fn memory_usage(&self) -> usize {
-        *self.current_memory.lock().expect("Lock poisoned")
+        *self.current_memory.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Check if cache contains key
     pub fn contains(&self, key: &K) -> bool {
-        self.cache.lock().expect("Lock poisoned").contains_key(key)
+        self.cache.lock().unwrap_or_else(|p| p.into_inner()).contains_key(key)
     }
 
     /// Get cache size (number of entries)
     pub fn len(&self) -> usize {
-        self.cache.lock().expect("Lock poisoned").len()
+        self.cache.lock().unwrap_or_else(|p| p.into_inner()).len()
     }
 
     /// Check if cache is empty

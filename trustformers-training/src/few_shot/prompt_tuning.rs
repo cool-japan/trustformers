@@ -176,8 +176,11 @@ impl SoftPrompt {
 
     /// Save prompt to file
     pub fn save(&self, path: &str) -> Result<()> {
+        let embeddings_slice = self.embeddings.as_slice().ok_or_else(|| {
+            anyhow::anyhow!("embeddings are not contiguous in memory; cannot serialize as slice")
+        })?;
         let data_to_serialize = (
-            self.embeddings.as_slice().expect("embeddings tensor should have valid slice"),
+            embeddings_slice,
             self.embeddings.shape(),
             &self.config,
             &self.task_id,

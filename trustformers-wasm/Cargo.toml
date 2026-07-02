@@ -19,15 +19,15 @@ workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-wasm-bindgen = { version = "0.2.118", features = ["serde-serialize"] }
-wasm-bindgen-futures = "0.4.68"
-js-sys = "0.3.95"
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+js-sys = { workspace = true }
 serde = { workspace = true, features = ["derive", "alloc"] }
 serde_json = { workspace = true, features = ["alloc"] }
 serde-wasm-bindgen = "0.6.5"
-getrandom = { version = "0.4.2", features = ["wasm_js"] }
+getrandom = { version = "0.4.3", features = ["wasm_js"] }
 console_error_panic_hook = { version = "0.1.7", optional = true }
-dlmalloc = { version = "0.2.13", features = ["global"], optional = true }
+dlmalloc = { version = "0.2.14", features = ["global"], optional = true }
 bytemuck = { workspace = true }
 # SciRS2 dependencies (following SCIRS2 POLICY)
 scirs2-core = { workspace = true, optional = true }
@@ -36,108 +36,11 @@ scirs2-core = { workspace = true, optional = true }
 # Note: scirs2-core has issues with wasm32 target due to getrandom v0.3 dependency
 # We'll implement our own tensor operations for now
 
-# Core web-sys features for essential functionality
-web-sys = { version = "0.3.95", features = [
-    "console",
-    "Navigator",
-    "Performance",
-    "PerformanceTiming",
-    "Window",
-    "Worker",
-    "WorkerGlobalScope",
-    "WorkerOptions",
-    "WorkerType",
-    "MessageEvent",
-    "MessagePort",
-    "DedicatedWorkerGlobalScope",
-    "BroadcastChannel",
-    "ServiceWorker",
-    "ServiceWorkerContainer",
-    "ServiceWorkerRegistration",
-    "ServiceWorkerGlobalScope",
-    "CacheStorage",
-    "Cache",
-    "Request",
-    "Response",
-    "Headers",
-    "RequestInit",
-    "Event",
-    "IdbFactory",
-    "IdbDatabase",
-    "IdbTransaction",
-    "IdbObjectStore",
-    "IdbRequest",
-    "IdbCursor",
-    "IdbKeyRange",
-    "IdbVersionChangeEvent",
-    "IdbOpenDbRequest",
-    "DomException",
-    "Document",
-    "Element",
-    "HtmlElement",
-    "CustomElementRegistry",
-    "ShadowRoot",
-    "ShadowRootMode",
-    "DomTokenList",
-    "CssStyleDeclaration",
-    "CanvasRenderingContext2d",
-    "WebGlRenderingContext",
-    "WebGl2RenderingContext",
-    "HtmlCanvasElement",
-    "HtmlSelectElement",
-    "HtmlInputElement",
-    "HtmlTextAreaElement",
-    "OffscreenCanvas",
-    "CustomEvent",
-    "CustomEventInit",
-    # Mobile and camera features (only those that exist in web-sys 0.3.81)
-    "Touch",
-    "TouchEvent",
-    "TouchList",
-    "Blob",
-    "File",
-    "FileReader",
-    "HtmlVideoElement",
-    "ImageBitmap",
-    "ImageData",
-    "MediaDevices",
-    "MediaStream",
-    "MediaStreamTrack",
-    "MediaDeviceInfo",
-    "MediaDeviceKind",
-    "MediaStreamConstraints",
-    "MediaTrackConstraints",
-    "MediaTrackSettings",
-    "VideoTrack",
-    "EventTarget",
-    # Basic WebGPU features (only the ones that exist in 0.3.81)
-    "GpuDevice",
-    "GpuBuffer",
-    "GpuTexture",
-    "GpuCommandEncoder",
-    "GpuBindGroup",
-    "GpuPipelineLayout",
-    "GpuRenderPipeline",
-    "GpuComputePipeline",
-    "GpuShaderModule",
-    "GpuAdapter",
-    "GpuQueue",
-    # Basic geolocation features
-    "Geolocation",
-    # Additional request features
-    "RequestMode",
-    "ResponseInit",
-    # Screen and Storage API features
-    "Screen",
-    "ScreenOrientation",
-    "Storage",
-    "StorageManager",
-    "NodeList",
-    "HtmlCollection"
-] }
+# Core web-sys features for essential functionality (full union defined in workspace root Cargo.toml)
+web-sys = { workspace = true }
 
 [dev-dependencies]
-wasm-bindgen-test = "0.3.68"
+wasm-bindgen-test = "0.3.76"
 
 [features]
 default = ["console_panic", "dlmalloc-alloc"]

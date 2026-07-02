@@ -11,6 +11,10 @@
 //! - **Loop Fusion**: Combine operations to reduce memory bandwidth requirements
 //! - **Vectorization-Friendly**: Design for SIMD instruction utilization
 
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
+
 use crate::common::{BiasCorrection, ParameterUpdate};
 use std::collections::HashMap;
 use trustformers_core::errors::{Result, TrustformersError};
@@ -285,7 +289,6 @@ impl CacheFriendlyAdam {
     }
 
     /// Updates parameter using cache-friendly blocked processing (legacy wrapper).
-    #[allow(dead_code)]
     fn update_parameter_blocked(
         &mut self,
         param: &mut [f32],
@@ -406,7 +409,6 @@ impl CacheFriendlyAdam {
 
     /// Processes a block with fused operations for better cache utilization.
     #[inline]
-    #[allow(dead_code)]
     fn process_block_fused(
         &self,
         param_block: &mut [f32],
@@ -434,7 +436,6 @@ impl CacheFriendlyAdam {
 
     /// Software prefetch hint for better cache performance.
     #[inline]
-    #[allow(dead_code)]
     fn prefetch_block(&self, block: &[f32]) {
         // Implement cache-friendly prefetching for different architectures
         if block.is_empty() {

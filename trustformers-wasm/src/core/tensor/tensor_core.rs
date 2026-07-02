@@ -100,6 +100,22 @@ impl WasmTensor {
         &self.strides
     }
 
+    /// Build a tensor that reuses this tensor's shape (and strides) with new
+    /// `data` of the same length.
+    ///
+    /// Element-wise operations preserve the shape and produce data of identical
+    /// length, so the validation performed by [`WasmTensor::new`] is
+    /// unnecessary here. It is also intentionally skipped so that operations
+    /// such as `log`/`exp` may legitimately yield non-finite values without
+    /// failing.
+    pub(crate) fn with_same_shape(&self, data: Vec<f32>) -> WasmTensor {
+        WasmTensor {
+            data,
+            shape: self.shape.clone(),
+            strides: self.strides.clone(),
+        }
+    }
+
     /// Get the total number of elements in the tensor
     pub fn len(&self) -> usize {
         self.data.len()
@@ -369,14 +385,12 @@ impl WasmTensor {
 
     pub fn exp(&self) -> WasmTensor {
         let data: Vec<f32> = self.data.iter().map(|x| x.exp()).collect();
-        WasmTensor::new(data, self.shape.clone())
-            .expect("exp: tensor creation should succeed with valid shape")
+        self.with_same_shape(data)
     }
 
     pub fn log(&self) -> WasmTensor {
         let data: Vec<f32> = self.data.iter().map(|x| x.ln()).collect();
-        WasmTensor::new(data, self.shape.clone())
-            .expect("log: tensor creation should succeed with valid shape")
+        self.with_same_shape(data)
     }
 
     pub fn softmax(&self, axis: i32) -> Result<WasmTensor, JsValue> {
@@ -440,7 +454,7 @@ impl WasmTensor {
 
     /// JavaScript toString() method - delegates to Display implementation
     #[wasm_bindgen(js_name = toString)]
-    #[allow(clippy::inherent_to_string_shadow_display)]
+    #[allow(clippy::inherent_to_string_shadow_display)] // reason: toString is exported to JS via wasm-bindgen and intentionally delegates to Display
     pub fn to_string(&self) -> String {
         format!("{}", self)
     }
@@ -478,8 +492,7 @@ impl WasmTensor {
     /// Fast element-wise maximum with scalar
     pub fn max_scalar(&self, scalar: f32) -> WasmTensor {
         let data: Vec<f32> = self.data.iter().map(|&x| x.max(scalar)).collect();
-        WasmTensor::new(data, self.shape.clone())
-            .expect("max_scalar: tensor creation should succeed with valid shape")
+        self.with_same_shape(data)
     }
 
     /// Efficient dot product for 1D tensors
@@ -520,7 +533,6 @@ impl WasmTensor {
             let b_offset = b * k * n;
 
             // Optimized matrix multiplication with blocking
-            #[allow(clippy::excessive_nesting)]
             for i in 0..m {
                 for j in 0..n {
                     let mut sum = 0.0f32;
@@ -806,8 +818,10 @@ impl WasmTensor {
             + f32x4_extract_lane::<3>(sum_vec);
 
         // Handle remaining elements
-        for i in (chunks * 4)..self.data.len() {
-            result += self.data[i] * other[i];
+        for (&value, &other_value) in
+            self.data.iter().skip(chunks * 4).zip(other.iter().skip(chunks * 4))
+        {
+            result += value * other_value;
         }
 
         result
@@ -856,7 +870,6 @@ impl WasmTensor {
         // Use blocking for cache efficiency
         const BLOCK_SIZE: usize = 64;
 
-        #[allow(clippy::excessive_nesting)]
         for i_block in (0..m).step_by(BLOCK_SIZE) {
             for j_block in (0..n).step_by(BLOCK_SIZE) {
                 for k_block in (0..k).step_by(BLOCK_SIZE) {

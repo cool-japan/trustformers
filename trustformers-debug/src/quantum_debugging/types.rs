@@ -1200,8 +1200,7 @@ impl QuantumDebugger {
             optimal_parameters.iter().map(|_| 0.001 * (random::<f64>() - 0.5)).collect();
         let optimizer_performance = if convergence_history.len() > 1 {
             let initial = convergence_history[0];
-            let final_val =
-                convergence_history.last().expect("convergence_history has at least 2 elements");
+            let final_val = convergence_history.last().copied().unwrap_or(initial);
             (initial - final_val) / initial
         } else {
             0.0

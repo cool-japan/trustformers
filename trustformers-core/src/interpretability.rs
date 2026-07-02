@@ -1,7 +1,7 @@
-use crate::errors::{TrustformersError, Result};
-use crate::tensor::Tensor;
+use crate::errors::{Result, TrustformersError};
 use crate::layers::attention::MultiHeadAttention;
-use scirs2_core::ndarray::{Array2, ArrayD, Axis, IxDyn, s};
+use crate::tensor::Tensor;
+use scirs2_core::ndarray::{s, Array2, ArrayD, Axis, IxDyn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -42,12 +42,12 @@ pub struct AttentionPattern {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AttentionPatternType {
-    Local,      // Attention focused on nearby tokens
-    Global,     // Attention spread across entire sequence
-    Diagonal,   // Attention following diagonal pattern
-    Vertical,   // Attention focused on specific positions
-    Block,      // Attention in block patterns
-    Random,     // No clear pattern
+    Local,    // Attention focused on nearby tokens
+    Global,   // Attention spread across entire sequence
+    Diagonal, // Attention following diagonal pattern
+    Vertical, // Attention focused on specific positions
+    Block,    // Attention in block patterns
+    Random,   // No clear pattern
 }
 
 /// Feature importance analysis results
@@ -157,7 +157,7 @@ impl InterpretabilityAnalyzer {
                 let shape = arr.shape();
                 if shape.len() < 2 {
                     return Err(TrustformersError::invalid_operation(
-                        "Attention weights must be at least 2D".into()
+                        "Attention weights must be at least 2D".into(),
                     ));
                 }
 
@@ -166,13 +166,7 @@ impl InterpretabilityAnalyzer {
 
                 // Convert to nested Vec for serialization
                 let attention_weights_vec: Vec<Vec<f32>> = (0..seq_len)
-                    .map(|i| {
-                        (0..seq_len)
-                            .map(|j| {
-                                attention_matrix[[i, j]]
-                            })
-                            .collect()
-                    })
+                    .map(|i| (0..seq_len).map(|j| attention_matrix[[i, j]]).collect())
                     .collect();
 
                 // Calculate entropy
@@ -192,8 +186,11 @@ impl InterpretabilityAnalyzer {
                     sparsity,
                     pattern_type,
                 })
-            }
-            _ => Err(TrustformersError::tensor_op_error("Unsupported tensor type for attention analysis", "analyze_attention")),
+            },
+            _ => Err(TrustformersError::tensor_op_error(
+                "Unsupported tensor type for attention analysis",
+                "analyze_attention",
+            )),
         }
     }
 
@@ -249,7 +246,8 @@ impl InterpretabilityAnalyzer {
             (block_score, AttentionPatternType::Block),
         ];
 
-        let (max_score, pattern_type) = scores.into_iter()
+        let (max_score, pattern_type) = scores
+            .into_iter()
             .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
             .expect("scores vec is non-empty");
 
@@ -310,7 +308,9 @@ impl InterpretabilityAnalyzer {
     fn calculate_block_pattern_score(&self, attention_weights: &[Vec<f32>]) -> f32 {
         let seq_len = attention_weights.len();
         let block_size = seq_len / 4; // Quarter of sequence
-        if block_size == 0 { return 0.0; }
+        if block_size == 0 {
+            return 0.0;
+        }
 
         let mut block_score = 0.0;
         let num_blocks = seq_len / block_size;
@@ -342,9 +342,8 @@ impl InterpretabilityAnalyzer {
 
         for row in attention_weights {
             let mean: f32 = row.iter().sum::<f32>() / seq_len as f32;
-            let variance: f32 = row.iter()
-                .map(|&x| (x - mean).powi(2))
-                .sum::<f32>() / seq_len as f32;
+            let variance: f32 =
+                row.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / seq_len as f32;
             variance_sum += variance;
         }
 
@@ -408,13 +407,17 @@ impl InterpretabilityAnalyzer {
                     let occluded_output = model_fn(&occluded_tensor)?;
 
                     // Calculate importance as difference in output
-                    let importance = self.calculate_output_difference(original_output, &occluded_output)?;
+                    let importance =
+                        self.calculate_output_difference(original_output, &occluded_output)?;
                     importance_scores.push(importance);
                 }
 
                 Ok(importance_scores)
-            }
-            _ => Err(TrustformersError::tensor_op_error("Unsupported tensor type for token importance", "analyze_token_importance")),
+            },
+            _ => Err(TrustformersError::tensor_op_error(
+                "Unsupported tensor type for token importance",
+                "analyze_token_importance",
+            )),
         }
     }
 
@@ -447,13 +450,17 @@ impl InterpretabilityAnalyzer {
                     let masked_tensor = Tensor::F32(masked_input);
                     let masked_output = model_fn(&masked_tensor)?;
 
-                    let importance = self.calculate_output_difference(original_output, &masked_output)?;
+                    let importance =
+                        self.calculate_output_difference(original_output, &masked_output)?;
                     importance_scores.push(importance);
                 }
 
                 Ok(importance_scores)
-            }
-            _ => Err(TrustformersError::tensor_op_error("Unsupported tensor type for position importance", "analyze_position_importance")),
+            },
+            _ => Err(TrustformersError::tensor_op_error(
+                "Unsupported tensor type for position importance",
+                "analyze_position_importance",
+            )),
         }
     }
 
@@ -461,13 +468,12 @@ impl InterpretabilityAnalyzer {
     fn calculate_output_difference(&self, original: &Tensor, modified: &Tensor) -> Result<f32> {
         match (original, modified) {
             (Tensor::F32(orig), Tensor::F32(modif)) => {
-                let diff_sum: f32 = orig.iter()
-                    .zip(modif.iter())
-                    .map(|(a, b)| (a - b).abs())
-                    .sum();
+                let diff_sum: f32 = orig.iter().zip(modif.iter()).map(|(a, b)| (a - b).abs()).sum();
                 Ok(diff_sum / orig.len() as f32)
-            }
-            _ => Err(TrustformersError::invalid_operation("Tensor type mismatch in output difference".into())),
+            },
+            _ => Err(TrustformersError::invalid_operation(
+                "Tensor type mismatch in output difference".into(),
+            )),
         }
     }
 
@@ -499,25 +505,29 @@ impl InterpretabilityAnalyzer {
     /// Extract input gradients from gradient tensor
     fn extract_input_gradients(&self, gradients: &Tensor) -> Result<Vec<f32>> {
         match gradients {
-            Tensor::F32(arr) => {
-                Ok(arr.iter().cloned().collect())
-            }
-            _ => Err(TrustformersError::invalid_operation("Unsupported tensor type for gradient extraction".into())),
+            Tensor::F32(arr) => Ok(arr.iter().cloned().collect()),
+            _ => Err(TrustformersError::invalid_operation(
+                "Unsupported tensor type for gradient extraction".into(),
+            )),
         }
     }
 
     /// Calculate integrated gradients
-    fn calculate_integrated_gradients(&self, inputs: &Tensor, gradients: &Tensor) -> Result<Vec<f32>> {
+    fn calculate_integrated_gradients(
+        &self,
+        inputs: &Tensor,
+        gradients: &Tensor,
+    ) -> Result<Vec<f32>> {
         // Simplified integrated gradients - in practice would need multiple evaluations
         match (inputs, gradients) {
             (Tensor::F32(inp), Tensor::F32(grad)) => {
-                let integrated: Vec<f32> = inp.iter()
-                    .zip(grad.iter())
-                    .map(|(input, gradient)| input * gradient)
-                    .collect();
+                let integrated: Vec<f32> =
+                    inp.iter().zip(grad.iter()).map(|(input, gradient)| input * gradient).collect();
                 Ok(integrated)
-            }
-            _ => Err(TrustformersError::invalid_operation("Tensor type mismatch in integrated gradients".into())),
+            },
+            _ => Err(TrustformersError::invalid_operation(
+                "Tensor type mismatch in integrated gradients".into(),
+            )),
         }
     }
 
@@ -527,10 +537,7 @@ impl InterpretabilityAnalyzer {
     }
 
     /// Analyze activation patterns
-    pub fn analyze_activations(
-        &mut self,
-        activations: &HashMap<String, Tensor>,
-    ) -> Result<()> {
+    pub fn analyze_activations(&mut self, activations: &HashMap<String, Tensor>) -> Result<()> {
         if !self.config.enable_activation_analysis {
             return Ok(());
         }
@@ -595,8 +602,10 @@ impl InterpretabilityAnalyzer {
                 }
 
                 Ok(patterns)
-            }
-            _ => Err(TrustformersError::invalid_operation("Unsupported tensor type for activation analysis".into())),
+            },
+            _ => Err(TrustformersError::invalid_operation(
+                "Unsupported tensor type for activation analysis".into(),
+            )),
         }
     }
 
@@ -619,9 +628,8 @@ impl InterpretabilityAnalyzer {
                 }
 
                 let mean = data.iter().sum::<f32>() / data.len() as f32;
-                let variance = data.iter()
-                    .map(|x| (x - mean).powi(2))
-                    .sum::<f32>() / data.len() as f32;
+                let variance =
+                    data.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / data.len() as f32;
                 let std = variance.sqrt();
 
                 let min = data.iter().fold(f32::INFINITY, |a, &b| a.min(b));
@@ -632,16 +640,17 @@ impl InterpretabilityAnalyzer {
 
                 // Calculate skewness and kurtosis
                 let skewness = if std > 0.0 {
-                    data.iter()
-                        .map(|x| ((x - mean) / std).powi(3))
-                        .sum::<f32>() / data.len() as f32
-                } else { 0.0 };
+                    data.iter().map(|x| ((x - mean) / std).powi(3)).sum::<f32>() / data.len() as f32
+                } else {
+                    0.0
+                };
 
                 let kurtosis = if std > 0.0 {
-                    data.iter()
-                        .map(|x| ((x - mean) / std).powi(4))
-                        .sum::<f32>() / data.len() as f32 - 3.0
-                } else { 0.0 };
+                    data.iter().map(|x| ((x - mean) / std).powi(4)).sum::<f32>() / data.len() as f32
+                        - 3.0
+                } else {
+                    0.0
+                };
 
                 Ok(ActivationStats {
                     mean,
@@ -652,8 +661,10 @@ impl InterpretabilityAnalyzer {
                     skewness,
                     kurtosis,
                 })
-            }
-            _ => Err(TrustformersError::invalid_operation("Unsupported tensor type for activation statistics".into())),
+            },
+            _ => Err(TrustformersError::invalid_operation(
+                "Unsupported tensor type for activation statistics".into(),
+            )),
         }
     }
 
@@ -686,13 +697,19 @@ impl InterpretabilityAnalyzer {
                 }
 
                 Ok(dead_count)
-            }
-            _ => Err(TrustformersError::invalid_operation("Unsupported tensor type for dead neuron counting".into())),
+            },
+            _ => Err(TrustformersError::invalid_operation(
+                "Unsupported tensor type for dead neuron counting".into(),
+            )),
         }
     }
 
     /// Cluster activations to find similar patterns
-    fn cluster_activations(&self, layer_name: &str, tensor: &Tensor) -> Result<Vec<ActivationCluster>> {
+    fn cluster_activations(
+        &self,
+        layer_name: &str,
+        tensor: &Tensor,
+    ) -> Result<Vec<ActivationCluster>> {
         // Simplified k-means clustering
         let k = 3; // Number of clusters
         let mut clusters = Vec::with_capacity(k);
@@ -733,8 +750,10 @@ impl InterpretabilityAnalyzer {
                 }
 
                 Ok(clusters)
-            }
-            _ => Err(TrustformersError::invalid_operation("Unsupported tensor type for activation clustering".into())),
+            },
+            _ => Err(TrustformersError::invalid_operation(
+                "Unsupported tensor type for activation clustering".into(),
+            )),
         }
     }
 
@@ -753,23 +772,27 @@ impl InterpretabilityAnalyzer {
     fn generate_summary(&self) -> InterpretabilitySummary {
         let total_attention_patterns = self.attention_patterns.len();
         let avg_attention_entropy = if !self.attention_patterns.is_empty() {
-            self.attention_patterns.iter()
-                .map(|p| p.entropy)
-                .sum::<f32>() / self.attention_patterns.len() as f32
-        } else { 0.0 };
+            self.attention_patterns.iter().map(|p| p.entropy).sum::<f32>()
+                / self.attention_patterns.len() as f32
+        } else {
+            0.0
+        };
 
-        let most_important_tokens = self.feature_importance
+        let most_important_tokens = self
+            .feature_importance
             .as_ref()
             .map(|fi| {
-                fi.token_importance.iter()
+                fi.token_importance
+                    .iter()
                     .enumerate()
-                    .max_by(|a, b| a.1.partial_cmp(b.1).expect("Partial comparison failed"))
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(::std::cmp::Ordering::Equal))
                     .map(|(idx, _)| idx)
                     .unwrap_or(0)
             })
             .unwrap_or(0);
 
-        let total_dead_neurons = self.activation_analysis
+        let total_dead_neurons = self
+            .activation_analysis
             .as_ref()
             .map(|aa| aa.dead_neuron_count.values().sum::<usize>())
             .unwrap_or(0);
@@ -848,7 +871,8 @@ mod tests {
 
         // Create dummy attention weights
         let attention_data = vec![0.1, 0.2, 0.3, 0.4];
-        let attention_tensor = Tensor::from_vec(attention_data, &[2, 2]).expect("Tensor from_vec failed");
+        let attention_tensor =
+            Tensor::from_vec(attention_data, &[2, 2]).expect("Tensor from_vec failed");
         let attention_weights = vec![attention_tensor];
 
         let result = analyzer.analyze_attention_patterns(&attention_weights, 0);
@@ -909,9 +933,12 @@ mod tests {
         let analyzer = InterpretabilityAnalyzer::new(config);
 
         let activation_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 0.0, 0.0, 0.0];
-        let activation_tensor = Tensor::from_vec(activation_data, &[2, 4]).expect("Tensor from_vec failed");
+        let activation_tensor =
+            Tensor::from_vec(activation_data, &[2, 4]).expect("Tensor from_vec failed");
 
-        let stats = analyzer.calculate_activation_statistics(&activation_tensor).expect("tensor operation failed");
+        let stats = analyzer
+            .calculate_activation_statistics(&activation_tensor)
+            .expect("tensor operation failed");
         assert!(stats.mean > 0.0);
         assert!(stats.std > 0.0);
         assert!(stats.sparsity > 0.0);
@@ -924,9 +951,12 @@ mod tests {
 
         // Create tensor with some dead neurons (all zeros)
         let activation_data = vec![1.0, 2.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0];
-        let activation_tensor = Tensor::from_vec(activation_data, &[2, 4]).expect("Tensor from_vec failed");
+        let activation_tensor =
+            Tensor::from_vec(activation_data, &[2, 4]).expect("Tensor from_vec failed");
 
-        let dead_count = analyzer.count_dead_neurons(&activation_tensor).expect("tensor operation failed");
+        let dead_count = analyzer
+            .count_dead_neurons(&activation_tensor)
+            .expect("tensor operation failed");
         assert!(dead_count > 0);
     }
 
@@ -941,7 +971,11 @@ mod tests {
         let inputs = Tensor::from_vec(input_data, &[2, 2]).expect("Tensor from_vec failed");
         let gradients = Tensor::from_vec(gradient_data, &[2, 2]).expect("Tensor from_vec failed");
 
-        let result = analyzer.analyze_gradient_attribution(&inputs, &gradients, AttributionMethod::Gradients);
+        let result = analyzer.analyze_gradient_attribution(
+            &inputs,
+            &gradients,
+            AttributionMethod::Gradients,
+        );
         assert!(result.is_ok());
         assert!(analyzer.gradient_attribution.is_some());
     }
@@ -953,7 +987,8 @@ mod tests {
 
         let mut activations = HashMap::new();
         let activation_data = vec![1.0, 2.0, 3.0, 0.0, 4.0, 5.0, 0.0, 0.0];
-        let activation_tensor = Tensor::from_vec(activation_data, &[2, 4]).expect("Tensor from_vec failed");
+        let activation_tensor =
+            Tensor::from_vec(activation_data, &[2, 4]).expect("Tensor from_vec failed");
         activations.insert("layer1".to_string(), activation_tensor);
 
         let result = analyzer.analyze_activations(&activations);
@@ -984,14 +1019,26 @@ mod tests {
             enable_activation_analysis: true,
             enable_feature_importance: false,
             save_visualizations: true,
-            output_dir: Some("/tmp/interpretability".to_string()),
+            output_dir: Some(
+                std::env::temp_dir()
+                    .join("interpretability")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
         };
 
         let serialized = serde_json::to_string(&config).expect("JSON serialization failed");
-        let deserialized: InterpretabilityConfig = serde_json::from_str(&serialized).expect("JSON deserialization failed");
+        let deserialized: InterpretabilityConfig =
+            serde_json::from_str(&serialized).expect("JSON deserialization failed");
 
-        assert_eq!(config.enable_attention_analysis, deserialized.enable_attention_analysis);
-        assert_eq!(config.enable_gradient_analysis, deserialized.enable_gradient_analysis);
+        assert_eq!(
+            config.enable_attention_analysis,
+            deserialized.enable_attention_analysis
+        );
+        assert_eq!(
+            config.enable_gradient_analysis,
+            deserialized.enable_gradient_analysis
+        );
         assert_eq!(config.save_visualizations, deserialized.save_visualizations);
         assert_eq!(config.output_dir, deserialized.output_dir);
     }

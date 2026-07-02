@@ -80,7 +80,7 @@ impl PerformanceAnalyzer {
     }
     /// Start performance analyzer
     pub async fn start(&self) -> Result<()> {
-        let config = self.config.read().expect("Config RwLock poisoned");
+        let config = self.config.read().unwrap_or_else(|p| p.into_inner());
         if !config.enabled {
             return Ok(());
         }
@@ -113,7 +113,7 @@ impl PerformanceAnalyzer {
     }
     /// Start tracking an evaluation
     pub async fn start_evaluation_tracking(&self) -> String {
-        let config = self.config.read().expect("Config RwLock poisoned");
+        let config = self.config.read().unwrap_or_else(|p| p.into_inner());
         if !config.enable_detailed_tracking {
             return String::new();
         }
@@ -131,7 +131,7 @@ impl PerformanceAnalyzer {
     }
     /// Complete evaluation tracking
     pub async fn complete_evaluation_tracking(&self, alerts_generated: usize, duration: Duration) {
-        let config = self.config.read().expect("Config RwLock poisoned");
+        let config = self.config.read().unwrap_or_else(|p| p.into_inner());
         if !config.enable_detailed_tracking {
             return;
         }
@@ -209,7 +209,7 @@ impl PerformanceAnalyzer {
     ) {
         let mut interval = {
             let analysis_interval = {
-                let config_read = config.read().expect("Config RwLock poisoned");
+                let config_read = config.read().unwrap_or_else(|p| p.into_inner());
                 config_read.analysis_interval
             };
             interval(analysis_interval)
@@ -217,7 +217,7 @@ impl PerformanceAnalyzer {
         while !shutdown_signal.load(Ordering::Relaxed) {
             interval.tick().await;
             let enabled = {
-                let config_read = config.read().expect("Config RwLock poisoned");
+                let config_read = config.read().unwrap_or_else(|p| p.into_inner());
                 config_read.enabled
             };
             if !enabled {
@@ -232,7 +232,7 @@ impl PerformanceAnalyzer {
         config: &Arc<RwLock<PerformanceAnalyzerConfig>>,
     ) {
         let mut metrics_guard = metrics.lock().await;
-        let config_read = config.read().expect("RwLock poisoned");
+        let config_read = config.read().unwrap_or_else(|p| p.into_inner());
         let retention = config_read.history_retention;
         let cutoff_time = Instant::now() - retention;
         metrics_guard.completed_evaluations.retain(|eval| eval.end_time >= cutoff_time);
@@ -375,7 +375,7 @@ impl ThresholdMonitor {
     /// Begins continuous threshold monitoring with real-time evaluation
     /// and intelligent alerting based on configured thresholds.
     pub async fn start_monitoring(&self) -> Result<()> {
-        let config = self.config.read().expect("Config RwLock poisoned");
+        let config = self.config.read().unwrap_or_else(|p| p.into_inner());
         if !config.enable_monitoring {
             return Ok(());
         }
@@ -447,14 +447,14 @@ impl ThresholdMonitor {
         metrics: &TimestampedMetrics,
     ) -> Result<Vec<AlertEvent>> {
         let start_time = Instant::now();
-        let config = self.config.read().expect("Config RwLock poisoned");
+        let config = self.config.read().unwrap_or_else(|p| p.into_inner());
         if !config.enable_monitoring {
             return Ok(Vec::new());
         }
         let performance_tracking = config.enable_performance_analysis;
         drop(config);
-        let thresholds = self.thresholds.read().expect("Thresholds RwLock poisoned");
-        let evaluators = self.evaluators.lock().expect("Evaluators lock poisoned");
+        let thresholds = self.thresholds.read().unwrap_or_else(|p| p.into_inner());
+        let evaluators = self.evaluators.lock().unwrap_or_else(|p| p.into_inner());
         let mut alerts = Vec::new();
         if performance_tracking {
             self.performance_analyzer.start_evaluation_tracking().await;
@@ -465,7 +465,7 @@ impl ThresholdMonitor {
                 let adjusted_threshold = if self
                     .config
                     .read()
-                    .expect("Config RwLock poisoned")
+                    .unwrap_or_else(|p| p.into_inner())
                     .enable_adaptive_thresholds
                 {
                     let history = self.collect_metrics_history(&threshold_config.metric).await;
@@ -509,7 +509,7 @@ impl ThresholdMonitor {
                                 if self
                                     .config
                                     .read()
-                                    .expect("Config RwLock poisoned")
+                                    .unwrap_or_else(|p| p.into_inner())
                                     .enable_alert_suppression
                                     && self.alert_suppressor.should_suppress(&alert).await
                                 {
@@ -519,7 +519,7 @@ impl ThresholdMonitor {
                                 if self
                                     .config
                                     .read()
-                                    .expect("Config RwLock poisoned")
+                                    .unwrap_or_else(|p| p.into_inner())
                                     .enable_alert_correlation
                                 {
                                     self.alert_correlator.correlate_alert(&mut alert).await;
@@ -570,28 +570,28 @@ impl ThresholdMonitor {
     }
     /// Add a new threshold configuration
     pub async fn add_threshold(&self, threshold: ThresholdConfig) -> Result<()> {
-        let mut thresholds = self.thresholds.write().expect("Thresholds RwLock poisoned");
+        let mut thresholds = self.thresholds.write().unwrap_or_else(|p| p.into_inner());
         thresholds.insert(threshold.name.clone(), threshold);
         info!("Added threshold configuration: {}", thresholds.len());
         Ok(())
     }
     /// Remove a threshold configuration
     pub async fn remove_threshold(&self, threshold_name: &str) -> Result<()> {
-        let mut thresholds = self.thresholds.write().expect("Thresholds RwLock poisoned");
+        let mut thresholds = self.thresholds.write().unwrap_or_else(|p| p.into_inner());
         thresholds.remove(threshold_name);
         info!("Removed threshold configuration: {}", threshold_name);
         Ok(())
     }
     /// Update threshold configuration
     pub async fn update_threshold(&self, threshold: ThresholdConfig) -> Result<()> {
-        let mut thresholds = self.thresholds.write().expect("Thresholds RwLock poisoned");
+        let mut thresholds = self.thresholds.write().unwrap_or_else(|p| p.into_inner());
         thresholds.insert(threshold.name.clone(), threshold);
         info!("Updated threshold configuration: {}", thresholds.len());
         Ok(())
     }
     /// Get current monitoring state
     pub async fn get_monitoring_state(&self) -> ThresholdMonitoringState {
-        (*self.monitoring_state.read().expect("Monitoring state RwLock poisoned")).clone()
+        (*self.monitoring_state.read().unwrap_or_else(|p| p.into_inner())).clone()
     }
     /// Get alert history
     pub async fn get_alert_history(
@@ -599,7 +599,7 @@ impl ThresholdMonitor {
         start_time: DateTime<Utc>,
         end_time: DateTime<Utc>,
     ) -> Result<Vec<AlertEvent>> {
-        let history = self.alert_history.lock().expect("Alert history lock poisoned");
+        let history = self.alert_history.lock().unwrap_or_else(|p| p.into_inner());
         let filtered_alerts = history
             .iter()
             .filter(|alert| alert.timestamp >= start_time && alert.timestamp <= end_time)
@@ -642,7 +642,7 @@ impl ThresholdMonitor {
     ) {
         let mut interval = {
             let monitoring_interval = {
-                let config_read = config.read().expect("Config RwLock poisoned");
+                let config_read = config.read().unwrap_or_else(|p| p.into_inner());
                 config_read.monitoring_interval
             };
             interval(monitoring_interval)
@@ -650,7 +650,7 @@ impl ThresholdMonitor {
         while !shutdown_signal.load(Ordering::Relaxed) {
             interval.tick().await;
             let monitoring_enabled = {
-                let config_read = config.read().expect("Config RwLock poisoned");
+                let config_read = config.read().unwrap_or_else(|p| p.into_inner());
                 config_read.enable_monitoring
             };
             if !monitoring_enabled {
@@ -666,20 +666,20 @@ impl ThresholdMonitor {
         monitoring_state: &Arc<RwLock<ThresholdMonitoringState>>,
         config: &Arc<RwLock<ThresholdMonitorConfig>>,
     ) {
-        let config_read = config.read().expect("RwLock poisoned");
+        let config_read = config.read().unwrap_or_else(|p| p.into_inner());
         let max_history = config_read.max_alert_history;
         drop(config_read);
-        let mut history = alert_history.lock().expect("Alert history lock poisoned");
+        let mut history = alert_history.lock().unwrap_or_else(|p| p.into_inner());
         while history.len() > max_history {
             history.pop_front();
         }
         drop(history);
-        let mut state = monitoring_state.write().expect("Monitoring state RwLock poisoned");
+        let mut state = monitoring_state.write().unwrap_or_else(|p| p.into_inner());
         state.last_evaluation = Some(Utc::now());
         drop(state);
     }
     async fn initialize_evaluators(&self) -> Result<()> {
-        let mut evaluators = self.evaluators.lock().expect("Evaluators lock poisoned");
+        let mut evaluators = self.evaluators.lock().unwrap_or_else(|p| p.into_inner());
         evaluators.push(Box::new(SimpleThresholdEvaluator::new()));
         evaluators.push(Box::new(StatisticalThresholdEvaluator::new()));
         evaluators.push(Box::new(AdaptiveThresholdEvaluator::new().await));
@@ -724,7 +724,7 @@ impl ThresholdMonitor {
                 escalation_policy: "performance".to_string(),
             },
         ];
-        let mut thresholds = self.thresholds.write().expect("Thresholds RwLock poisoned");
+        let mut thresholds = self.thresholds.write().unwrap_or_else(|p| p.into_inner());
         for threshold in default_thresholds {
             thresholds.insert(threshold.name.clone(), threshold);
         }
@@ -833,7 +833,7 @@ impl ThresholdMonitor {
         alerts: &[AlertEvent],
         evaluation_duration: Duration,
     ) -> Result<()> {
-        let mut state = self.monitoring_state.write().expect("Monitoring state RwLock poisoned");
+        let mut state = self.monitoring_state.write().unwrap_or_else(|p| p.into_inner());
         state.last_evaluation = Some(Utc::now());
         for alert in alerts {
             *state.alert_counts.entry(alert.severity).or_insert(0) += 1;
@@ -861,11 +861,11 @@ impl ThresholdMonitor {
         Ok(())
     }
     async fn update_alert_history(&self, alerts: &[AlertEvent]) {
-        let mut history = self.alert_history.lock().expect("Lock poisoned");
+        let mut history = self.alert_history.lock().unwrap_or_else(|p| p.into_inner());
         for alert in alerts {
             history.push_back(alert.clone());
         }
-        let max_history = self.config.read().expect("Config RwLock poisoned").max_alert_history;
+        let max_history = self.config.read().unwrap_or_else(|p| p.into_inner()).max_alert_history;
         while history.len() > max_history {
             history.pop_front();
         }
@@ -874,7 +874,7 @@ impl ThresholdMonitor {
         Vec::new()
     }
     async fn get_alert_history_for_metric(&self, metric_name: &str) -> Vec<AlertEvent> {
-        let history = self.alert_history.lock().expect("Alert history lock poisoned");
+        let history = self.alert_history.lock().unwrap_or_else(|p| p.into_inner());
         history
             .iter()
             .filter(|alert| alert.threshold.metric == metric_name)
@@ -1163,7 +1163,7 @@ impl MachineLearningAdaptationAlgorithm {
                 "Invalid training data".to_string(),
             ));
         }
-        let mut model = self.model_state.lock().expect("Model state lock poisoned");
+        let mut model = self.model_state.lock().unwrap_or_else(|p| p.into_inner());
         for (feature_vec, target) in features.iter().zip(targets.iter()) {
             let prediction = self.predict_with_features(&model, feature_vec);
             let error = target - prediction;

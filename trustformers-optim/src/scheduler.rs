@@ -812,6 +812,8 @@ pub struct CompositeScheduler {
     schedulers: Vec<Box<dyn LRScheduler>>,
     step_boundaries: Vec<usize>,
     current_step: usize,
+    // reason: reserved for global-step offsetting across composed schedulers;
+    // retained intentionally for an in-progress feature.
     #[allow(dead_code)]
     global_step_offset: usize,
 }

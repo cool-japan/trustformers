@@ -1245,7 +1245,7 @@ mod tests {
         let config = CalibrationConfig {
             num_samples: 2000,
             method: CalibrationMethod::MinMax,
-            dataset_path: Some(PathBuf::from("/tmp/calibration_data")),
+            dataset_path: Some(std::env::temp_dir().join("calibration_data")),
         };
         assert!(config.dataset_path.is_some());
         assert_eq!(config.num_samples, 2000);

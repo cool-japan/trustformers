@@ -12,6 +12,10 @@
 //! - **Differential Privacy**: Add noise for enhanced privacy protection
 //! - **Client Selection**: Strategies for selecting participating clients
 
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
+
 use anyhow::{anyhow, Result};
 use scirs2_core::random::StdRng; // Explicit import for type clarity
 use scirs2_core::random::*; // SciRS2 Integration Policy - Replaces rand
@@ -240,7 +244,7 @@ impl FedAvg {
         let param_count = client_updates
             .values()
             .next()
-            .expect("client_updates must have at least one entry")
+            .ok_or_else(|| anyhow::anyhow!("client_updates must have at least one entry"))?
             .len();
         let mut aggregated = Vec::with_capacity(param_count);
 
@@ -249,7 +253,7 @@ impl FedAvg {
             let first_param = &client_updates
                 .values()
                 .next()
-                .expect("client_updates must have at least one entry")[i];
+                .ok_or_else(|| anyhow::anyhow!("client_updates must have at least one entry"))?[i];
             aggregated.push(Tensor::zeros_like(first_param)?);
         }
 
@@ -447,7 +451,6 @@ impl DifferentialPrivacy {
 /// see individual client updates, only the aggregated result.
 pub struct SecureAggregation {
     threshold: usize,
-    #[allow(dead_code)]
     total_clients: usize,
 }
 

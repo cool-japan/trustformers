@@ -1,6 +1,6 @@
 {
   "name": "@trustformers/angular",
-  "version": "0.1.0",
+  "version": "0.1.4",
   "description": "Angular services and directives for TrustformeRS",
   "main": "dist/index.cjs.js",
   "module": "dist/index.esm.js",

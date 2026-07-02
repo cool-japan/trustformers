@@ -35,9 +35,11 @@
 //!
 //! ## Example Usage
 //!
-//! ```rust,no_run
+//! ```rust
 //! use trustformers_models::cross_attention::{CrossAttention, CrossAttentionConfig};
+//! use trustformers_core::tensor::Tensor;
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = CrossAttentionConfig {
 //!     hidden_size: 512,
 //!     num_heads: 8,
@@ -48,7 +50,13 @@
 //! let cross_attn = CrossAttention::new(config)?;
 //!
 //! // Query from target sequence, Key/Value from source sequence
-//! let output = cross_attn.forward(query_states, key_states, value_states)?;
+//! # let query_states = Tensor::randn(&[1, 8, 512])?;
+//! # let key_states = Tensor::randn(&[1, 8, 512])?;
+//! # let value_states = Tensor::randn(&[1, 8, 512])?;
+//! let output = cross_attn.forward(query_states, key_states, value_states, None)?;
+//! # let _ = output;
+//! # Ok(())
+//! # }
 //! ```
 
 pub mod config;

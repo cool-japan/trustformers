@@ -3,6 +3,10 @@
 //! This module provides intelligent code analysis capabilities using AI to identify
 //! potential issues in neural network models, suggest optimizations, and provide
 //! automated debugging insights.
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -15,7 +19,6 @@ use tracing::{debug, info};
 pub struct AICodeAnalyzer {
     config: AIAnalysisConfig,
     analysis_cache: HashMap<String, CachedAnalysis>,
-    #[allow(dead_code)]
     pattern_database: ModelPatternDatabase,
     performance_monitor: AnalysisPerformanceMonitor,
 }
@@ -1006,7 +1009,6 @@ impl AICodeAnalyzer {
 /// Model pattern database for common patterns and anti-patterns
 #[derive(Debug)]
 struct ModelPatternDatabase {
-    #[allow(dead_code)]
     patterns: HashMap<String, PatternDefinition>,
 }
 
@@ -1035,9 +1037,7 @@ impl ModelPatternDatabase {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct PatternDefinition {
-    #[allow(dead_code)]
     name: String,
     pattern_type: PatternType,
     keywords: Vec<String>,

@@ -26,27 +26,32 @@
 //!
 //! ### Text Generation
 //! ```rust,no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use trustformers_models::falcon::{FalconForCausalLM, FalconConfig};
-//! use trustformers_core::generation::{GenerationConfig, SamplingStrategy};
+//! use trustformers_core::generation::{GenerationConfig, GenerationStrategy};
 //!
 //! let config = FalconConfig::falcon_7b();
 //! let mut model = FalconForCausalLM::new(config)?;
 //! model.load_from_hub("tiiuae/falcon-7b")?;
 //!
 //! let gen_config = GenerationConfig {
-//!     max_new_tokens: 150,
-//!     temperature: 0.8,
-//!     top_p: 0.95,
+//!     strategy: GenerationStrategy::TopP { p: 0.95, temperature: 0.8 },
+//!     max_new_tokens: Some(150),
 //!     repetition_penalty: 1.1,
-//!     sampling_strategy: SamplingStrategy::TopPNucleus,
 //!     ..Default::default()
 //! };
 //!
-//! let generated = model.generate(input_ids, gen_config)?;
+//! # let input_ids = trustformers_core::tensor::Tensor::randn(&[1, 10])?;
+//! let max_new_tokens = gen_config.max_new_tokens.unwrap_or(150);
+//! let generated = model.generate(input_ids, max_new_tokens)?;
+//! # let _ = generated;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### Instruction Following
 //! ```rust,no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use trustformers_models::falcon::{FalconForCausalLM, FalconConfig};
 //!
 //! let config = FalconConfig::falcon_7b_instruct();
@@ -55,26 +60,29 @@
 //!
 //! // Use with instruction prompt
 //! let instruction = "User: What are the benefits of renewable energy?\nFalcon:";
-//! let input_ids = tokenizer.encode(instruction)?;
+//! # let _ = instruction;
+//! # let input_ids = trustformers_core::tensor::Tensor::randn(&[1, 10])?;
 //!
-//! let response = model.generate(input_ids, max_length: 500)?;
+//! let response = model.generate(input_ids, 500)?;
+//! # let _ = response;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### Large Model Inference
 //! ```rust,no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use trustformers_models::falcon::{FalconForCausalLM, FalconConfig};
 //!
 //! let config = FalconConfig {
-//!     use_flash_attention: true,    // Enable FlashAttention
-//!     gradient_checkpointing: true, // Save memory
+//!     use_flash_attention: Some(true), // Enable FlashAttention
 //!     ..FalconConfig::falcon_40b()
 //! };
 //!
-//! let mut model = FalconForCausalLM::new(config)?;
-//! model.load_sharded("tiiuae/falcon-40b")?;  // Load in shards
-//!
-//! // Use tensor parallelism for large models
-//! model.enable_tensor_parallel(4)?;
+//! let model = FalconForCausalLM::new(config)?;
+//! # let _ = model;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Key Features

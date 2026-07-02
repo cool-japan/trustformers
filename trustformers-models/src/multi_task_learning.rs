@@ -17,9 +17,30 @@
 //!
 //! ```rust,no_run
 //! use trustformers_models::multi_task_learning::{
-//!     MultiTaskLearningTrainer, MTLConfig, MTLArchitecture
+//!     MultiTaskLearningTrainer, MTLConfig, MTLArchitecture,
+//!     LossBalancingStrategy, TaskConfig, TaskType, RegressionLossType,
 //! };
+//! use trustformers_core::{traits::{Config, Model}, tensor::Tensor, Result};
+//! use serde::{Deserialize, Serialize};
+//! use std::collections::HashMap;
 //!
+//! # #[derive(Debug, Clone, Serialize, Deserialize)]
+//! # struct DocConfig;
+//! # impl Config for DocConfig {
+//! #     fn architecture(&self) -> &'static str { "doc" }
+//! # }
+//! # struct DocModel;
+//! # impl Model for DocModel {
+//! #     type Config = DocConfig;
+//! #     type Input = Tensor;
+//! #     type Output = Tensor;
+//! #     fn forward(&self, input: Tensor) -> Result<Tensor> { Ok(input) }
+//! #     fn load_pretrained(&mut self, _r: &mut dyn std::io::Read) -> Result<()> { Ok(()) }
+//! #     fn get_config(&self) -> &DocConfig { &DocConfig }
+//! #     fn num_parameters(&self) -> usize { 0 }
+//! # }
+//!
+//! # fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 //! let config = MTLConfig {
 //!     architecture: MTLArchitecture::HardParameterSharing {
 //!         shared_layers: 8,
@@ -27,14 +48,18 @@
 //!     },
 //!     loss_balancing: LossBalancingStrategy::DynamicWeightAverage,
 //!     tasks: vec![
-//!         TaskConfig::new("classification", TaskType::Classification { num_classes: 10 }),
-//!         TaskConfig::new("regression", TaskType::Regression { output_dim: 1 }),
+//!         TaskConfig::new("classification", TaskType::Classification { num_classes: 10, use_class_weights: false }),
+//!         TaskConfig::new("regression", TaskType::Regression { output_dim: 1, loss_type: RegressionLossType::MSE }),
 //!     ],
 //!     ..Default::default()
 //! };
 //!
-//! let mut trainer = MultiTaskLearningTrainer::new(config)?;
-//! trainer.train_multi_task(task_data)?;
+//! # let base_model = DocModel;
+//! let mut trainer = MultiTaskLearningTrainer::new(base_model, config)?;
+//! # let task_data = HashMap::new();
+//! trainer.train_multi_task_step(&task_data)?;
+//! # Ok(())
+//! # }
 //! ```
 
 use serde::{Deserialize, Serialize};

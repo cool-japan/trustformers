@@ -320,8 +320,9 @@ impl PerformanceModelingManager {
 /// Default implementation for PerformanceModelingManager
 impl Default for PerformanceModelingManager {
     fn default() -> Self {
+        // Default construction is unrecoverable: surface a fatal error if it fails.
         futures::executor::block_on(Self::new())
-            .expect("Failed to create default PerformanceModelingManager")
+            .unwrap_or_else(|e| panic!("Failed to create default PerformanceModelingManager: {e}"))
     }
 }
 

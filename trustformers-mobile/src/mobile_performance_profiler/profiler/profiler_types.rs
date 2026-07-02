@@ -23,10 +23,11 @@
 //! # Usage
 //!
 //! ```rust
-//! use trustformers_mobile::mobile_performance_profiler::{MobilePerformanceProfiler, types::*};
+//! # fn main() -> anyhow::Result<()> {
+//! use trustformers_mobile::mobile_performance_profiler::{MobilePerformanceProfiler, MobileProfilerConfig, types::*};
 //!
 //! // Create a profiler with default configuration
-//! let config = fast_test_config();
+//! let config = MobileProfilerConfig::default();
 //! let profiler = MobilePerformanceProfiler::new(config)?;
 //!
 //! // Start a profiling session
@@ -45,6 +46,9 @@
 //! // Stop profiling and export results
 //! let profiling_data = profiler.stop_profiling()?;
 //! let export_path = profiler.export_data(ExportFormat::JSON)?;
+//! # let _ = (session_id, metrics, bottlenecks, suggestions, profiling_data, export_path);
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Architecture

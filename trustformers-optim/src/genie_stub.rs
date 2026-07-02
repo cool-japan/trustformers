@@ -134,11 +134,10 @@ impl GENIE {
                         .insert(param_name.clone(), vec![0.0; param_data.len()]);
                 }
 
-                let momentum_buffer = self
-                    .state
-                    .momentum_buffers
-                    .get_mut(param_name)
-                    .expect("GENIE momentum buffer must exist after initialization");
+                let momentum_buffer =
+                    self.state.momentum_buffers.get_mut(param_name).ok_or_else(|| {
+                        anyhow::anyhow!("GENIE momentum buffer must exist after initialization")
+                    })?;
 
                 // Simple momentum update (simplified GENIE algorithm)
                 let mut updated_params = param_data.clone();

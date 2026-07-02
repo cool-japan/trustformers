@@ -1,15 +1,17 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // TODO: Proto compilation requires tonic-build API update
-    // The tonic-build/tonic-prost-build API has changed significantly in 0.14
-    // Need to investigate the correct builder pattern or use alternative approach
+    // Compile the gRPC service definitions with tonic 0.14.
     //
-    // Options to investigate:
-    // 1. Use prost_build::Config directly with tonic extensions
-    // 2. Check if there's a different entry point in tonic-build 0.14
-    // 3. Consider using pre-generated proto files
-    //
-    // For now, skip proto compilation to unblock other development
-    // Note: Proto compilation requires tonic-build 0.14 API migration (documented above)
+    // Tonic 0.14 split code generation out of `tonic-build` into the dedicated
+    // `tonic-prost-build` crate. The builder entry point is
+    // `tonic_prost_build::configure()`, which yields a `Builder` exposing
+    // `build_server` / `build_client` toggles and a `compile_protos(protos,
+    // includes)` finalizer. The generated module is consumed at runtime via
+    // `tonic::include_proto!("trustformers.serve.v1")` in `src/grpc.rs`.
+    tonic_prost_build::configure()
+        .build_server(true)
+        .build_client(true)
+        .compile_protos(&["proto/inference.proto"], &["proto"])?;
+
     println!("cargo:rerun-if-changed=proto/inference.proto");
 
     Ok(())

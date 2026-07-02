@@ -19,6 +19,10 @@
 //! Works with all TrustformeRS optimizers including aMacP, NovoGrad, Adam, AdamW,
 //! LAMB, Lion, Sophia, and 40+ other variants.
 
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
+
 use crate::{amacp::AMacPConfig, novograd::NovoGradConfig};
 // Explicit import for .choose() method
 use scirs2_core::random::*; // Replaces rand - SciRS2 Integration Policy
@@ -175,7 +179,6 @@ pub struct BayesianOptimizer {
     good_samples: Vec<HyperparameterSample>,
     poor_samples: Vec<HyperparameterSample>,
     performance_threshold: f32,
-    #[allow(dead_code)]
     exploration_factor: f32,
     n_startup_trials: usize,
     gamma: f32, // Fraction of samples to consider as "good"
@@ -339,7 +342,6 @@ impl BayesianOptimizer {
 #[derive(Debug)]
 pub struct MultiObjectiveOptimizer {
     bayesian_opt: BayesianOptimizer,
-    #[allow(dead_code)]
     objectives: Vec<String>,
     weights: Vec<f32>,
     pareto_front: Vec<HyperparameterSample>,

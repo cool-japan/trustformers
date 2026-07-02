@@ -3,6 +3,10 @@
 //! This module has been refactored into a modular architecture for better
 //! organization and maintainability. All previous functionality remains
 //! available through comprehensive re-exports to ensure backward compatibility.
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use crate::DebugConfig;
 use anyhow::Result;
@@ -14,7 +18,6 @@ use crate::model_diagnostics::*;
 /// Main model diagnostics system that coordinates all diagnostic components.
 #[derive(Debug)]
 pub struct ModelDiagnostics {
-    #[allow(dead_code)]
     config: DebugConfig,
     performance_analyzer: PerformanceAnalyzer,
     architecture_analyzer: ArchitectureAnalyzer,

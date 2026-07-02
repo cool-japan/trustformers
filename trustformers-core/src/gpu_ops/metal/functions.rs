@@ -170,4 +170,83 @@ mod tests {
         }
         Ok(())
     }
+    /// Golden parity: drive the rerouted (oxicuda-metal-backed) `dispatch_matmul`
+    /// on the GPU and compare against a naive CPU triple-loop reference.
+    #[test]
+    #[cfg(all(test, feature = "metal", target_os = "macos"))]
+    fn metal_matmul_oxicuda_parity() -> Result<()> {
+        // Run one (m,k,n) case end-to-end through the rerouted Metal path and
+        // assert elementwise agreement with a CPU reference.
+        fn run_case(m: usize, k: usize, n: usize) -> Result<()> {
+            // Deterministic row-major fills.
+            let mut a_data = vec![0.0f32; m * k];
+            for i in 0..m {
+                for j in 0..k {
+                    a_data[i * k + j] = ((i * k + j) % 7) as f32 * 0.5 - 1.0;
+                }
+            }
+            let mut b_data = vec![0.0f32; k * n];
+            for p in 0..k {
+                for q in 0..n {
+                    b_data[p * n + q] = ((p * n + q) % 5) as f32 * 0.25 - 0.5;
+                }
+            }
+
+            let a = Tensor::F32(
+                scirs2_core::ndarray::Array2::from_shape_vec((m, k), a_data.clone())
+                    .map_err(|e| TrustformersError::shape_error(format!("{e}")))?
+                    .into_dyn(),
+            );
+            let b = Tensor::F32(
+                scirs2_core::ndarray::Array2::from_shape_vec((k, n), b_data.clone())
+                    .map_err(|e| TrustformersError::shape_error(format!("{e}")))?
+                    .into_dyn(),
+            );
+
+            // Drive the rerouted trustformers GPU path (NOT oxicuda directly).
+            let c = dispatch_matmul(&a, &b, &Device::Metal(0))?;
+            let got: Vec<f32> = match c {
+                Tensor::F32(arr) => arr.iter().copied().collect(),
+                other => {
+                    return Err(TrustformersError::shape_error(format!(
+                        "expected Tensor::F32 result, got {:?} variant",
+                        other.dtype()
+                    )))
+                },
+            };
+
+            // Naive CPU triple-loop reference.
+            let mut reference = vec![0.0f32; m * n];
+            for i in 0..m {
+                for j in 0..n {
+                    let mut acc = 0.0f32;
+                    for p in 0..k {
+                        acc += a_data[i * k + p] * b_data[p * n + j];
+                    }
+                    reference[i * n + j] = acc;
+                }
+            }
+
+            assert_eq!(
+                got.len(),
+                m * n,
+                "case {m}x{k}x{n}: result length must be m*n"
+            );
+            for idx in 0..(m * n) {
+                assert!(
+                    (got[idx] - reference[idx]).abs() < 1e-3,
+                    "case {m}x{k}x{n} mismatch at {idx}: got {} want {}",
+                    got[idx],
+                    reference[idx]
+                );
+            }
+            Ok(())
+        }
+
+        run_case(4, 5, 3)?;
+        run_case(64, 64, 64)?;
+
+        println!("metal_matmul_oxicuda_parity PASS");
+        Ok(())
+    }
 }

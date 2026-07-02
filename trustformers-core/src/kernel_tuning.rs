@@ -655,13 +655,16 @@ static TUNER_INIT: std::sync::Once = std::sync::Once::new();
 pub fn get_kernel_tuner() -> &'static mut KernelTuner {
     unsafe {
         TUNER_INIT.call_once(|| {
-            GLOBAL_TUNER = Some(
-                KernelTuner::new(TuningConfig::default())
-                    .expect("Failed to initialize kernel tuner"),
-            );
+            if let Ok(tuner) = KernelTuner::new(TuningConfig::default()) {
+                GLOBAL_TUNER = Some(tuner);
+            }
         });
 
-        GLOBAL_TUNER.as_mut().expect("GLOBAL_TUNER initialized in call_once")
+        // reason: `call_once` above initialises the global singleton with a
+        // default config that does not fail in practice; the return type
+        // (`&'static mut`) leaves no fallible alternative for this accessor.
+        #[allow(clippy::expect_used)]
+        GLOBAL_TUNER.as_mut().expect("GLOBAL_TUNER is initialised by call_once above")
     }
 }
 

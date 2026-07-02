@@ -728,6 +728,7 @@ impl From<std::io::Error> for TrustformersError {
     }
 }
 
+#[cfg(feature = "hub")]
 impl From<reqwest::Error> for TrustformersError {
     fn from(err: reqwest::Error) -> Self {
         let retry_recommended = err.is_timeout() || err.is_connect();

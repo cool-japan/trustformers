@@ -1,5 +1,6 @@
 //! Enhanced WebGPU backend with buffer pool and memory monitoring
 
+use crate::core::tensor::WasmTensor;
 use crate::webgpu::buffer_pool::BufferPool;
 use crate::webgpu::simple_ops::SimpleGpuOps;
 use js_sys::{Float32Array, SharedArrayBuffer};
@@ -167,6 +168,44 @@ impl WebGPUBackend {
 impl WebGPUBackend {
     pub fn ops(&self) -> &SimpleGpuOps {
         &self.ops
+    }
+
+    /// Mutable accessor for the GPU operation helpers.
+    ///
+    /// Compute kernels that cache pipelines (e.g. matmul) need `&mut` access to
+    /// [`SimpleGpuOps`]; the `Rc<RefCell<WebGPUBackend>>` wrapper used by
+    /// `GpuTensor` makes this reachable through `borrow_mut`.
+    pub fn ops_mut(&mut self) -> &mut SimpleGpuOps {
+        &mut self.ops
+    }
+
+    /// Dispatch an element-wise addition through this backend.
+    ///
+    /// This is the synchronous entry point used by `GpuTensor` so that no
+    /// `RefCell` guard is ever held across an `.await`. It currently routes
+    /// through the CPU-backed fallback path; once storage-buffer execution is
+    /// wired in it will run the `add` compute shader on `self.device`.
+    pub fn dispatch_add(&self, a: &WasmTensor, b: &WasmTensor) -> Result<WasmTensor, JsValue> {
+        a.add(b)
+    }
+
+    /// Dispatch a ReLU activation through this backend (CPU-backed fallback).
+    pub fn dispatch_relu(&self, input: &WasmTensor) -> Result<WasmTensor, JsValue> {
+        Ok(input.relu())
+    }
+
+    /// Dispatch a matrix multiplication through this backend.
+    ///
+    /// Mutable access is taken because the GPU path caches compute pipelines and
+    /// reuses pooled buffers via [`WebGPUBackend::ops_mut`]; the current
+    /// implementation falls back to the CPU matmul until the storage-buffer
+    /// kernels are connected.
+    pub fn dispatch_matmul(
+        &mut self,
+        a: &WasmTensor,
+        b: &WasmTensor,
+    ) -> Result<WasmTensor, JsValue> {
+        a.matmul(b)
     }
 
     /// Create a GPU buffer with the given data and usage, using buffer pool

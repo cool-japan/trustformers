@@ -16,6 +16,10 @@
 //! "aMacP: An adaptive optimization algorithm for Deep Neural Network"
 //! Cyber Security and Applications, Volume 3, 2025
 
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
+
 use crate::{
     common::{BiasCorrection, OptimizerState, ParameterUpdate, StateMemoryStats},
     traits::StatefulOptimizer,
@@ -188,7 +192,6 @@ impl AMacP {
     }
 
     /// Compute adaptive step size based on parameter trends (static version to avoid borrowing)
-    #[allow(dead_code)]
     fn compute_adaptive_step_size_static(
         config: &AMacPConfig,
         current_params: &[f32],

@@ -307,7 +307,7 @@ impl BackgroundCoordinator {
 
     /// Schedule a background task
     pub fn schedule_task(&self, task: BackgroundTask) -> Result<(), Box<dyn std::error::Error>> {
-        let mut queue = self.task_queue.lock().expect("Operation failed");
+        let mut queue = self.task_queue.lock().unwrap_or_else(|p| p.into_inner());
         queue.push(task);
 
         // Sort by priority and scheduling strategy
@@ -324,13 +324,13 @@ impl BackgroundCoordinator {
 
     /// Execute next available task
     pub fn execute_next_task(&mut self) -> Result<Option<TaskResult>, Box<dyn std::error::Error>> {
-        let running_count = self.running_tasks.lock().expect("Operation failed").len();
+        let running_count = self.running_tasks.lock().unwrap_or_else(|p| p.into_inner()).len();
         if running_count >= self.max_concurrent_tasks {
             return Ok(None);
         }
 
         let task = {
-            let mut queue = self.task_queue.lock().expect("Operation failed");
+            let mut queue = self.task_queue.lock().unwrap_or_else(|p| p.into_inner());
             if queue.is_empty() {
                 return Ok(None);
             }
@@ -362,15 +362,21 @@ impl BackgroundCoordinator {
 
         self.running_tasks
             .lock()
-            .expect("Operation failed")
+            .unwrap_or_else(|p| p.into_inner())
             .insert(task.task_id.clone(), execution_context);
 
         // Execute task (simplified - in real implementation this would be async)
         let result = self.execute_task_impl(&task)?;
 
         // Remove from running tasks and add to completed
-        self.running_tasks.lock().expect("Operation failed").remove(&task.task_id);
-        self.completed_tasks.lock().expect("Operation failed").push(result.clone());
+        self.running_tasks
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&task.task_id);
+        self.completed_tasks
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(result.clone());
 
         Ok(Some(result))
     }
@@ -444,7 +450,7 @@ impl BackgroundCoordinator {
     ) -> Result<TaskResult, Box<dyn std::error::Error>> {
         let start_timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("Operation failed")
+            .unwrap_or_default()
             .as_secs();
 
         // Simulate task execution
@@ -452,7 +458,7 @@ impl BackgroundCoordinator {
 
         let end_timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("Operation failed")
+            .unwrap_or_default()
             .as_secs();
 
         Ok(TaskResult {
@@ -494,7 +500,7 @@ impl BackgroundCoordinator {
     pub fn get_running_tasks(&self) -> Vec<(String, TaskStatus, f32)> {
         self.running_tasks
             .lock()
-            .expect("Operation failed")
+            .unwrap_or_else(|p| p.into_inner())
             .iter()
             .map(|(id, context)| (id.clone(), context.status, context.progress))
             .collect()
@@ -502,7 +508,7 @@ impl BackgroundCoordinator {
 
     /// Get completed tasks results
     pub fn get_completed_tasks(&self) -> Vec<TaskResult> {
-        self.completed_tasks.lock().expect("Operation failed").clone()
+        self.completed_tasks.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 }
 

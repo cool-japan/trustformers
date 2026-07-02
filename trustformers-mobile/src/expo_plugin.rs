@@ -17,12 +17,14 @@ in React Native apps using the Expo development platform.
 ## Usage
 
 ```rust
-use trustformers_mobile::expo_plugin::{
-    ExpoPlugin, ExpoConfig, ExpoModuleRegistry
-};
+# fn main() -> trustformers_core::Result<()> {
+use trustformers_mobile::expo_plugin::{ExpoPlugin, ExpoConfig};
 
 let config = ExpoConfig::default();
 let plugin = ExpoPlugin::new(config)?;
+# let _ = plugin;
+# Ok(())
+# }
 ```
 
 ## Expo App Configuration
@@ -212,6 +214,7 @@ impl Default for BuildConfig {
 
 /// Target build platforms
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+// reason: `iOS` mirrors Apple's canonical platform spelling used across the SDK.
 #[allow(non_camel_case_types)]
 pub enum TargetPlatform {
     iOS,
@@ -261,6 +264,7 @@ pub struct NativeDepsConfig {
 
 /// iOS framework configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+// reason: `iOS` mirrors Apple's canonical platform spelling used across the SDK.
 #[allow(non_camel_case_types)]
 pub struct iOSFrameworkConfig {
     /// Framework name

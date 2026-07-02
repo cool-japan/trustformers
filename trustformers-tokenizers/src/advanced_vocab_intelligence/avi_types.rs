@@ -624,6 +624,8 @@ pub enum RiskType {
 /// Advanced vocabulary intelligence analyzer
 pub struct VocabIntelligenceAnalyzer {
     pub(super) config: VocabIntelligenceConfig,
+    // reason: memoization store reserved for pairwise-similarity caching; it is
+    // exercised by tests but not yet read on the production analysis path.
     #[allow(dead_code)]
     pub(super) similarity_cache: HashMap<(String, String), f32>,
     pub(super) evolution_history: Vec<EvolutionSnapshot>,

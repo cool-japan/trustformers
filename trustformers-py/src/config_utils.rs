@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use trustformers_models::{bert::BertConfig, gpt2::Gpt2Config, llama::LlamaConfig, t5::T5Config};
+use trustformers_models::{gpt2::Gpt2Config, llama::LlamaConfig, t5::T5Config};
 
 /// Parse GPT-2 config from Python dict
 pub fn parse_gpt2_config(config_dict: &Bound<'_, PyAny>) -> PyResult<Gpt2Config> {

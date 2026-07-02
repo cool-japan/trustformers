@@ -302,7 +302,9 @@ impl TokenClassificationPipeline {
                         entity.score = (entity.score + token.score) / 2.0; // Average score
                     } else {
                         // Different entity type, close current and start new
-                        aggregated.push(current_entity.take().expect("inside if let Some"));
+                        if let Some(prev_entity) = current_entity.take() {
+                            aggregated.push(prev_entity);
+                        }
                         current_entity = Some(PipelineTokenOutput {
                             entity: token.entity[2..].to_string(),
                             score: token.score,

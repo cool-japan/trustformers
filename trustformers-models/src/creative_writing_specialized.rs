@@ -40,16 +40,22 @@
 //!
 //! ## Example Usage
 //!
-//! ```rust
+//! ```rust,no_run
 //! use trustformers_models::creative_writing_specialized::{CreativeWritingConfig, CreativeWritingForCausalLM};
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create a fantasy writing model
+//! // (`fantasy_7b()` is a genuine ~7B-parameter preset; this example is marked
+//! // `no_run` since constructing it allocates full-size weights.)
 //! let config = CreativeWritingConfig::fantasy_7b();
 //! let model = CreativeWritingForCausalLM::new(config)?;
 //!
 //! // Generate a story beginning
 //! let prompt = "In a world where magic has been forgotten, a young librarian discovers";
-//! let story = model.generate_story(prompt, 500)?;
+//! let story = model.generate(prompt, 500)?;
+//! # let _ = story;
+//! # Ok(())
+//! # }
 //! ```
 
 use crate::common_patterns::GenerationConfig;

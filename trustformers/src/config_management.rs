@@ -822,7 +822,7 @@ impl ConfigRecommender {
                         .map(serde_json::Value::Number),
                     recommended_value: serde_json::Value::Number(
                         serde_json::Number::from_f64(2e-5)
-                            .expect("2e-5 is a valid float constant"),
+                            .unwrap_or_else(|| serde_json::Number::from(0)),
                     ),
                     reason: format!("Learning rate of {} is very high and may cause training instability. Consider using 2e-5 for transformer models.", current_lr),
                     impact: RecommendationImpact::Stability,
@@ -1104,14 +1104,14 @@ fn create_training_schema() -> ConfigSchema {
             field_type: FieldType::Number,
             description: "Learning rate for optimization".to_string(),
             default_value: Some(serde_json::Value::Number(
-                serde_json::Number::from_f64(2e-5).expect("2e-5 is a valid float constant"),
+                serde_json::Number::from_f64(2e-5).unwrap_or_else(|| serde_json::Number::from(0)),
             )),
             constraints: vec![
                 FieldConstraint::MinValue(1e-8),
                 FieldConstraint::MaxValue(1.0),
             ],
             examples: vec![serde_json::Value::Number(
-                serde_json::Number::from_f64(5e-5).expect("5e-5 is a valid float constant"),
+                serde_json::Number::from_f64(5e-5).unwrap_or_else(|| serde_json::Number::from(0)),
             )],
         },
     );
@@ -1272,14 +1272,14 @@ fn create_conversational_schema() -> ConfigSchema {
             field_type: FieldType::Number,
             description: "Temperature for response generation".to_string(),
             default_value: Some(serde_json::Value::Number(
-                serde_json::Number::from_f64(0.7).expect("0.7 is a valid float constant"),
+                serde_json::Number::from_f64(0.7).unwrap_or_else(|| serde_json::Number::from(0)),
             )),
             constraints: vec![
                 FieldConstraint::MinValue(0.0),
                 FieldConstraint::MaxValue(2.0),
             ],
             examples: vec![serde_json::Value::Number(
-                serde_json::Number::from_f64(0.8).expect("0.8 is a valid float constant"),
+                serde_json::Number::from_f64(0.8).unwrap_or_else(|| serde_json::Number::from(0)),
             )],
         },
     );

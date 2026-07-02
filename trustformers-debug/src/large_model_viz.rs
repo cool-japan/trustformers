@@ -3,6 +3,10 @@
 //! This module provides optimized visualization for large transformer models,
 //! using smart sampling, hierarchical rendering, and memory-efficient techniques
 //! to handle models with billions of parameters.
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use anyhow::{Context, Result};
 use parking_lot::RwLock;
@@ -127,14 +131,12 @@ struct VisualizationState {
     /// Total layers in model
     total_layers: usize,
     /// Layers currently loaded
-    #[allow(dead_code)]
     loaded_layers: Vec<String>,
     /// Current memory usage (MB)
     current_memory_mb: f64,
     /// Visualization progress (0.0-1.0)
     progress: f64,
     /// Is visualization complete?
-    #[allow(dead_code)]
     is_complete: bool,
 }
 

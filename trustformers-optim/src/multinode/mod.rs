@@ -4,6 +4,10 @@
 //! multiple nodes using MPI communication backend. It integrates with
 //! the existing ZeRO optimization for memory-efficient multi-node training.
 
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use trustformers_core::errors::Result;
@@ -103,7 +107,6 @@ pub struct MultiNodeTrainer<T: Optimizer> {
     zero_optimizer: ZeROOptimizer<T>,
     mpi_communicator: Option<Arc<MpiCommunicatorImpl>>,
     gradient_buffers: HashMap<String, GradientSyncBuffer>,
-    #[allow(dead_code)]
     communication_overlap: bool,
     node_local_group: Option<Vec<usize>>,
     cross_node_group: Option<Vec<usize>>,
@@ -123,13 +126,10 @@ struct GradientSyncBuffer {
 #[derive(Debug, Clone)]
 struct CompressionInfo {
     /// Compression ratio achieved
-    #[allow(dead_code)]
     compression_ratio: f32,
     /// Original size in bytes
-    #[allow(dead_code)]
     original_size: usize,
     /// Compressed size in bytes
-    #[allow(dead_code)]
     compressed_size: usize,
 }
 

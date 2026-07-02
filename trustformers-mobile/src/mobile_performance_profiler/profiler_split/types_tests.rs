@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
+    use crate::device_info::ThermalState;
     use crate::mobile_performance_profiler::profiler_split::types::*;
     use crate::mobile_performance_profiler::types::*;
-    use crate::device_info::ThermalState;
     use std::collections::HashMap;
     use std::time::Duration;
 
@@ -265,7 +265,10 @@ mod tests {
             export_id: "exp_001".to_string(),
             timestamp: std::time::Instant::now(),
             export_format: "json".to_string(),
-            file_path: "/tmp/profiling_data.json".to_string(),
+            file_path: std::env::temp_dir()
+                .join("profiling_data.json")
+                .to_string_lossy()
+                .to_string(),
             data_size_bytes: 1024 * 1024,
             export_duration_ms: 250,
             success: true,
@@ -367,11 +370,7 @@ mod tests {
                     threshold_percent: lcg.next_f32() * 100.0,
                     duration_ms: (lcg.next() % 10000) + 100,
                 },
-                severity: if i < 2 {
-                    BottleneckSeverity::Low
-                } else {
-                    BottleneckSeverity::High
-                },
+                severity: if i < 2 { BottleneckSeverity::Low } else { BottleneckSeverity::High },
                 suggestion: format!("Suggestion for rule {}", i),
                 confidence: lcg.next_f32(),
                 enabled: i % 2 == 0,

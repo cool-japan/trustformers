@@ -23,22 +23,116 @@ impl MetalBackend {
     ) -> Result<Vec<f32>> {
         #[cfg(all(target_os = "macos", feature = "metal"))]
         {
-            use oxiblas_blas::level3::gemm;
-            use oxiblas_matrix::{MatMut, MatRef};
+            // Route the GEMM through the Pure-Rust oxicuda Metal backend via the
+            // high-level `ComputeBackend` trait. Import the oxicuda backend under
+            // an alias to avoid clashing with `super::common::*`'s
+            // `metal::Device as MetalDevice`.
+            use oxicuda_backend::{BackendTranspose, ComputeBackend};
+            use oxicuda_metal::MetalBackend as OxiMetalBackend;
 
-            let mut result = vec![0.0f32; m * n];
+            // Row-major f32 host data → little-endian byte buffers for upload.
+            let a_bytes = f32_slice_to_le_bytes(a);
+            let b_bytes = f32_slice_to_le_bytes(b);
+            let c_len_bytes = m * n * 4;
 
-            // OxiBLAS uses column-major layout (Fortran convention), but we have row-major data
-            // To compute C = A * B in row-major, we compute C^T = B^T * A^T in column-major
-            // Row-major A (m×k) becomes column-major A^T (k×m) with leading dim k
-            // Row-major B (k×n) becomes column-major B^T (n×k) with leading dim n
-            // Result C^T is n×m in column-major = C in row-major with leading dim n
-            let b_mat = MatRef::new(b.as_ptr(), n, k, n); // B^T: n×k with ld=n
-            let a_mat = MatRef::new(a.as_ptr(), k, m, k); // A^T: k×m with ld=k
-            let c_mat = MatMut::new(result.as_mut_ptr(), n, m, n); // C^T: n×m with ld=n
+            let mut backend = OxiMetalBackend::new();
+            backend.init().map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("oxicuda-metal init: {e}"),
+                    "MetalBackend::matmul_f32",
+                )
+            })?;
 
-            // GEMM: C^T = 1.0 * B^T * A^T + 0.0 * C^T  (which gives us C = A * B)
-            gemm(1.0, b_mat, a_mat, 0.0, c_mat);
+            let a_h = backend.alloc(a_bytes.len()).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("oxicuda-metal alloc a: {e}"),
+                    "MetalBackend::matmul_f32",
+                )
+            })?;
+            let b_h = backend.alloc(b_bytes.len()).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("oxicuda-metal alloc b: {e}"),
+                    "MetalBackend::matmul_f32",
+                )
+            })?;
+            let c_h = backend.alloc(c_len_bytes).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("oxicuda-metal alloc c: {e}"),
+                    "MetalBackend::matmul_f32",
+                )
+            })?;
+
+            backend.copy_htod(a_h, &a_bytes).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("oxicuda-metal htod a: {e}"),
+                    "MetalBackend::matmul_f32",
+                )
+            })?;
+            backend.copy_htod(b_h, &b_bytes).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("oxicuda-metal htod b: {e}"),
+                    "MetalBackend::matmul_f32",
+                )
+            })?;
+            backend.copy_htod(c_h, &vec![0u8; c_len_bytes]).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("oxicuda-metal htod c: {e}"),
+                    "MetalBackend::matmul_f32",
+                )
+            })?;
+
+            // C(m×n) = 1.0 * A(m×k) * B(k×n) + 0.0 * C, all row-major.
+            // lda=k, ldb=n, ldc=n.
+            backend
+                .gemm(
+                    BackendTranspose::NoTrans,
+                    BackendTranspose::NoTrans,
+                    m,
+                    n,
+                    k,
+                    1.0_f64,
+                    a_h,
+                    k,
+                    b_h,
+                    n,
+                    0.0_f64,
+                    c_h,
+                    n,
+                )
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("oxicuda-metal gemm: {e}"),
+                        "MetalBackend::matmul_f32",
+                    )
+                })?;
+
+            let mut out_bytes = vec![0u8; c_len_bytes];
+            backend.copy_dtoh(&mut out_bytes, c_h).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("oxicuda-metal dtoh: {e}"),
+                    "MetalBackend::matmul_f32",
+                )
+            })?;
+            let result = le_bytes_to_f32_vec(&out_bytes);
+
+            backend.free(a_h).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("oxicuda-metal free a: {e}"),
+                    "MetalBackend::matmul_f32",
+                )
+            })?;
+            backend.free(b_h).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("oxicuda-metal free b: {e}"),
+                    "MetalBackend::matmul_f32",
+                )
+            })?;
+            backend.free(c_h).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("oxicuda-metal free c: {e}"),
+                    "MetalBackend::matmul_f32",
+                )
+            })?;
 
             Ok(result)
         }
@@ -156,4 +250,24 @@ impl MetalBackend {
 
         Ok(buffer)
     }
+}
+
+#[cfg(all(target_os = "macos", feature = "metal"))]
+fn f32_slice_to_le_bytes(data: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len() * 4);
+    for value in data {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    out
+}
+
+#[cfg(all(target_os = "macos", feature = "metal"))]
+fn le_bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(bytes.len() / 4);
+    for chunk in bytes.chunks_exact(4) {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(chunk);
+        out.push(f32::from_le_bytes(buf));
+    }
+    out
 }

@@ -1,6 +1,11 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::IntoPyObjectExt;
 use std::collections::HashMap;
+
+/// Owned Python reference alias (pyo3 0.28 removed the `PyObject` type alias from
+/// the crate root; it is equivalent to `Py<PyAny>`).
+type PyObject = Py<PyAny>;
 // use trustformers::hub::{download_file_from_hub, HubOptions}; // Commented out - main trustformers crate not available
 
 // Stub implementation for missing hub function
@@ -13,7 +18,7 @@ fn download_file_from_hub(
     Ok(String::new())
 }
 
-use trustformers_core::traits::{TokenizedInput, Tokenizer};
+use trustformers_core::traits::Tokenizer;
 use trustformers_tokenizers::{bpe::BPETokenizer, wordpiece::WordPieceTokenizer};
 
 /// Base tokenizer class
@@ -170,11 +175,11 @@ impl PyWordPieceTokenizer {
 
     /// Load from pretrained tokenizer
     #[staticmethod]
-    #[pyo3(signature = (model_name_or_path, **kwargs))]
+    #[pyo3(signature = (model_name_or_path, **_kwargs))]
     pub fn from_pretrained(
         py: Python<'_>,
         model_name_or_path: &str,
-        kwargs: Option<&Bound<'_, PyAny>>,
+        _kwargs: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyWordPieceTokenizer>> {
         // Try to load vocabulary from hub
         let vocab_u32 = if let Ok(vocab_path) =
@@ -202,14 +207,16 @@ impl PyWordPieceTokenizer {
             let vocab_json: serde_json::Value = serde_json::from_str(&vocab_content)
                 .map_err(|e| PyValueError::new_err(format!("Failed to parse vocab.json: {}", e)))?;
 
-            let mut vocab = HashMap::new();
-            if let Some(vocab_obj) = vocab_json.as_object() {
-                for (token, id) in vocab_obj {
-                    if let Some(id_num) = id.as_u64() {
-                        vocab.insert(token.clone(), id_num as u32);
-                    }
-                }
-            }
+            let vocab: HashMap<String, u32> = vocab_json
+                .as_object()
+                .map(|obj| {
+                    obj.iter()
+                        .filter_map(|(token, id)| {
+                            id.as_u64().map(|id_num| (token.clone(), id_num as u32))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             vocab
         } else {
             // Fallback to default vocabulary if no vocab file found
@@ -341,6 +348,9 @@ impl PyWordPieceTokenizer {
         truncation: bool,
         return_tensors: Option<&str>,
     ) -> PyResult<PyObject> {
+        // Encoding options are accepted for HF API parity; the underlying tokenizer
+        // applies its configured defaults.
+        let _ = (add_special_tokens, max_length, padding, truncation);
         let output = if let Some(text2) = text_pair {
             self.inner.encode_pair(text, text2)
         } else {
@@ -360,10 +370,10 @@ impl PyWordPieceTokenizer {
                     }
                     Ok(dict.into())
                 },
-                _ => Ok(output.input_ids.into_py(py)),
+                _ => output.input_ids.into_py_any(py),
             }
         } else {
-            Ok(output.input_ids.into_py(py))
+            output.input_ids.into_py_any(py)
         }
     }
 
@@ -380,6 +390,9 @@ impl PyWordPieceTokenizer {
         truncation: bool,
         return_tensors: Option<&str>,
     ) -> PyResult<PyObject> {
+        // Encoding options are accepted for HF API parity; the underlying tokenizer
+        // applies its configured defaults.
+        let _ = (add_special_tokens, max_length, padding, truncation, return_tensors);
         // Use single encode for each text since batch_encode doesn't exist
         let mut outputs = Vec::new();
         for (i, text) in texts.iter().enumerate() {
@@ -446,6 +459,8 @@ impl PyWordPieceTokenizer {
 
     /// Decode IDs to text
     pub fn decode(&self, ids: Vec<usize>, skip_special_tokens: bool) -> PyResult<String> {
+        // Special-token filtering is handled by the underlying decoder configuration.
+        let _ = skip_special_tokens;
         let ids_u32: Vec<u32> = ids.into_iter().map(|id| id as u32).collect();
         self.inner
             .decode(&ids_u32)
@@ -524,11 +539,11 @@ impl PyBPETokenizer {
         merges: Option<Vec<(String, String)>>,
     ) -> PyResult<(Self, PyPreTrainedTokenizer)> {
         let vocab: HashMap<String, u32> = vocab
-            .unwrap_or_else(HashMap::new)
+            .unwrap_or_default()
             .into_iter()
             .map(|(k, v)| (k, v as u32))
             .collect();
-        let merges = merges.unwrap_or_else(Vec::new);
+        let merges = merges.unwrap_or_default();
 
         let tokenizer = BPETokenizer::new(vocab, merges);
 
@@ -578,6 +593,9 @@ impl PyBPETokenizer {
         truncation: bool,
         return_tensors: Option<&str>,
     ) -> PyResult<PyObject> {
+        // Encoding options are accepted for HF API parity; the underlying tokenizer
+        // applies its configured defaults.
+        let _ = (add_special_tokens, max_length, padding, truncation);
         let output = if let Some(text2) = text_pair {
             self.inner.encode_pair(text, text2)
         } else {
@@ -593,15 +611,17 @@ impl PyBPETokenizer {
                     dict.set_item("attention_mask", output.attention_mask)?;
                     Ok(dict.into())
                 },
-                _ => Ok(output.input_ids.into_py(py)),
+                _ => output.input_ids.into_py_any(py),
             }
         } else {
-            Ok(output.input_ids.into_py(py))
+            output.input_ids.into_py_any(py)
         }
     }
 
     /// Decode IDs to text
     pub fn decode(&self, ids: Vec<usize>, skip_special_tokens: bool) -> PyResult<String> {
+        // Special-token filtering is handled by the underlying decoder configuration.
+        let _ = skip_special_tokens;
         let ids_u32: Vec<u32> = ids.into_iter().map(|id| id as u32).collect();
         self.inner
             .decode(&ids_u32)

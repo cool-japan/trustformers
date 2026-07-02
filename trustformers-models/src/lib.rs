@@ -46,11 +46,9 @@
 //!
 //! fn main() -> Result<()> {
 //!     // Load a pre-trained BERT model
-//!     let config = BertConfig::bert_base_uncased();
-//!     let mut model = BertModel::new(config)?;
-//!
-//!     // Load weights from Hugging Face
-//!     model.load_from_hub("bert-base-uncased")?;
+//!     let config = BertConfig::default();
+//!     let model = BertModel::new(config)?;
+//!     # let _ = model;
 //!
 //!     // Use the model for inference
 //!     // ... tokenization and forward pass

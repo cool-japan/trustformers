@@ -243,7 +243,6 @@ pub struct AlertSystem {
     /// System enabled
     pub enabled: bool,
     /// Alert handlers
-    #[allow(dead_code)]
     pub handlers: HashMap<String, Box<dyn AlertHandler + Send + Sync>>,
     /// Alert queue
     pub alert_queue: Arc<Mutex<VecDeque<Alert>>>,

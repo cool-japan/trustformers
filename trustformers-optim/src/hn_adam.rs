@@ -321,19 +321,31 @@ impl StatefulOptimizer for HNAdam {
             if key.starts_with("momentum_") {
                 let param_id = key
                     .strip_prefix("momentum_")
-                    .expect("key must have momentum_ prefix")
+                    .ok_or_else(|| {
+                        TrustformersError::invalid_state(
+                            "key must have momentum_ prefix".to_string(),
+                        )
+                    })?
                     .to_string();
                 self.state.momentum.insert(param_id, tensor.data()?);
             } else if key.starts_with("variance_") {
                 let param_id = key
                     .strip_prefix("variance_")
-                    .expect("key must have variance_ prefix")
+                    .ok_or_else(|| {
+                        TrustformersError::invalid_state(
+                            "key must have variance_ prefix".to_string(),
+                        )
+                    })?
                     .to_string();
                 self.state.variance.insert(param_id, tensor.data()?);
             } else if key.starts_with("max_variance_") && self.config.amsgrad {
                 let param_id = key
                     .strip_prefix("max_variance_")
-                    .expect("key must have max_variance_ prefix")
+                    .ok_or_else(|| {
+                        TrustformersError::invalid_state(
+                            "key must have max_variance_ prefix".to_string(),
+                        )
+                    })?
                     .to_string();
                 self.max_variance.insert(param_id, tensor.data()?);
             }
@@ -401,10 +413,12 @@ impl Optimizer for HNAdam {
                 let mut update_values = Vec::with_capacity(param_size);
 
                 // Get momentum and variance values for computation
-                let momentum_values =
-                    self.state.momentum.get(&param_id).expect("momentum must exist for param_id");
-                let variance_values =
-                    self.state.variance.get(&param_id).expect("variance must exist for param_id");
+                let momentum_values = self.state.momentum.get(&param_id).ok_or_else(|| {
+                    TrustformersError::invalid_state("momentum must exist for param_id".to_string())
+                })?;
+                let variance_values = self.state.variance.get(&param_id).ok_or_else(|| {
+                    TrustformersError::invalid_state("variance must exist for param_id".to_string())
+                })?;
 
                 let mut new_momentum = vec![0.0; param_size];
                 let mut new_variance = vec![0.0; param_size];

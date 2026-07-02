@@ -104,7 +104,7 @@ impl StatisticalThresholdEvaluator {
 
     /// Add data point to history
     pub fn add_data_point(&self, value: f64, quality: f32) {
-        let mut history = self.history.lock().expect("History lock poisoned");
+        let mut history = self.history.lock().unwrap_or_else(|p| p.into_inner());
 
         let data_point = StatisticalDataPoint {
             value,
@@ -122,7 +122,7 @@ impl StatisticalThresholdEvaluator {
 
     /// Calculate statistical confidence
     fn calculate_confidence(&self, config: &ThresholdConfig, value: f64) -> f32 {
-        let history = self.history.lock().expect("History lock poisoned");
+        let history = self.history.lock().unwrap_or_else(|p| p.into_inner());
 
         if history.len() < self.config.min_data_points {
             return 0.5; // Low confidence with insufficient data
@@ -332,7 +332,7 @@ impl ThresholdEvaluator for StatisticalThresholdEvaluator {
         );
         context.insert(
             "history_size".to_string(),
-            self.history.lock().expect("History lock poisoned").len().to_string(),
+            self.history.lock().unwrap_or_else(|p| p.into_inner()).len().to_string(),
         );
 
         Ok(ThresholdEvaluation {

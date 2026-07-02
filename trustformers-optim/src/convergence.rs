@@ -304,15 +304,16 @@ impl OptimizerState for AggMo {
             };
 
             // Get or initialize momentum buffers for this parameter
-            let buffers = self.momentum_buffers.entry(param_id).or_insert_with(|| {
-                // Initialize all momentum buffers with zeros
-                (0..self.config.momentum_coefficients.len())
-                    .map(|_| {
-                        Tensor::zeros(&effective_grad.shape())
-                            .expect("zeros should always succeed for valid gradient shape")
-                    })
-                    .collect()
-            });
+            let buffers = match self.momentum_buffers.entry(param_id) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    // Initialize all momentum buffers with zeros
+                    let init = (0..self.config.momentum_coefficients.len())
+                        .map(|_| Tensor::zeros(&effective_grad.shape()))
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    entry.insert(init)
+                },
+            };
 
             // Update each momentum buffer
             let mut aggregated_momentum = Tensor::zeros(&effective_grad.shape())?;

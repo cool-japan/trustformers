@@ -380,7 +380,6 @@ mod svg_render {
     }
 
     /// Render axis lines, tick marks and numeric tick labels.
-    #[allow(clippy::too_many_arguments)]
     fn svg_axes(
         px_left: f64,
         px_right: f64,

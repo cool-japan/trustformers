@@ -16,7 +16,7 @@ use wasm_bindgen::prelude::*;
 /// GGUF quantization types
 #[wasm_bindgen]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(non_camel_case_types)]
+#[allow(non_camel_case_types)] // reason: variant names mirror external platform / GGUF spec identifiers
 pub enum GGUFQuantType {
     /// 4-bit quantization (symmetric)
     Q4_0,

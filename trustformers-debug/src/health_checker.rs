@@ -1,4 +1,8 @@
 //! Model and training health assessment system
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -10,7 +14,6 @@ use crate::{DashboardMetrics, DebugConfig};
 /// Comprehensive health checker for model training
 #[derive(Debug)]
 pub struct HealthChecker {
-    #[allow(dead_code)]
     config: DebugConfig,
     metrics_history: VecDeque<DashboardMetrics>,
     health_assessments: Vec<HealthAssessment>,
@@ -124,7 +127,6 @@ pub struct StabilityTracker {
     accuracy_stability: MetricStability,
     gradient_stability: MetricStability,
     learning_rate_stability: MetricStability,
-    #[allow(dead_code)]
     window_size: usize,
 }
 
@@ -132,7 +134,6 @@ pub struct StabilityTracker {
 pub struct MetricStability {
     values: VecDeque<f64>,
     variance_threshold: f64,
-    #[allow(dead_code)]
     trend_threshold: f64,
 }
 
@@ -486,7 +487,6 @@ pub struct GeneralizationMonitor {
 #[derive(Debug)]
 pub struct ComplexityMetrics {
     parameter_count: usize,
-    #[allow(dead_code)]
     effective_capacity: f64,
     data_size: usize,
 }

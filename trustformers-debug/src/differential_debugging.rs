@@ -1148,15 +1148,11 @@ impl DifferentialDebugger {
             (None, 0.5, false)
         };
 
-        let recommendation = if practical_significance && confidence > 0.9 {
-            format!(
-                "Recommend deploying {}",
-                winner.as_ref().expect(
-                    "winner should be Some when practical_significance and confidence > 0.9"
-                )
-            )
-        } else {
-            "Insufficient evidence for a clear recommendation".to_string()
+        let recommendation = match winner.as_ref() {
+            Some(w) if practical_significance && confidence > 0.9 => {
+                format!("Recommend deploying {}", w)
+            },
+            _ => "Insufficient evidence for a clear recommendation".to_string(),
         };
 
         let summary = format!(

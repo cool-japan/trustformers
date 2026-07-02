@@ -515,7 +515,7 @@ impl ONNXRuntimeSession {
         }
 
         // Calculate statistics
-        latencies.sort_by(|a, b| a.partial_cmp(b).expect("Partial comparison failed"));
+        latencies.sort_by(|a, b| a.partial_cmp(b).unwrap_or(::std::cmp::Ordering::Equal));
         let mean = latencies.iter().sum::<f64>() / latencies.len() as f64;
         let median = latencies[latencies.len() / 2];
         let p90 = latencies[(latencies.len() as f64 * 0.9) as usize];

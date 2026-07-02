@@ -18,7 +18,26 @@
 //! use trustformers_models::continual_learning::{
 //!     ContinualLearningTrainer, ContinualLearningConfig, ContinualStrategy
 //! };
+//! use trustformers_core::{traits::{Config, Model}, tensor::Tensor, Result};
+//! use serde::{Deserialize, Serialize};
 //!
+//! # #[derive(Debug, Clone, Serialize, Deserialize)]
+//! # struct DocConfig;
+//! # impl Config for DocConfig {
+//! #     fn architecture(&self) -> &'static str { "doc" }
+//! # }
+//! # struct DocModel;
+//! # impl Model for DocModel {
+//! #     type Config = DocConfig;
+//! #     type Input = Tensor;
+//! #     type Output = Tensor;
+//! #     fn forward(&self, input: Tensor) -> Result<Tensor> { Ok(input) }
+//! #     fn load_pretrained(&mut self, _r: &mut dyn std::io::Read) -> Result<()> { Ok(()) }
+//! #     fn get_config(&self) -> &DocConfig { &DocConfig }
+//! #     fn num_parameters(&self) -> usize { 0 }
+//! # }
+//!
+//! # fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 //! let config = ContinualLearningConfig {
 //!     strategy: ContinualStrategy::ElasticWeightConsolidation {
 //!         lambda: 0.4,
@@ -28,12 +47,17 @@
 //!     ..Default::default()
 //! };
 //!
+//! # let model = DocModel;
 //! let mut trainer = ContinualLearningTrainer::new(model, config)?;
 //!
-//! // Learn task 1
-//! trainer.learn_task(task1_data, 0)?;
+//! // Learn task 1 (inputs/targets must share shape and be non-empty)
+//! # let inputs = [Tensor::zeros(&[1, 4])?];
+//! # let targets = [Tensor::zeros(&[1, 4])?];
+//! trainer.learn_batch(&inputs, &targets, Some(0))?;
 //! // Learn task 2 without forgetting task 1
-//! trainer.learn_task(task2_data, 1)?;
+//! trainer.learn_batch(&inputs, &targets, Some(1))?;
+//! # Ok(())
+//! # }
 //! ```
 
 use serde::{Deserialize, Serialize};

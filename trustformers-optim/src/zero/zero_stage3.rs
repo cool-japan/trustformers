@@ -4,6 +4,10 @@
 //! This provides maximum memory savings by distributing all model components,
 //! but requires parameter gathering for forward passes and additional communication.
 
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -123,17 +127,14 @@ struct CommunicationScheduler {
     /// Pending release operations
     pending_releases: Vec<String>,
     /// Communication queue for batching
-    #[allow(dead_code)]
     comm_queue: Vec<CommOp>,
 }
 
 #[derive(Debug, Clone)]
 enum CommOp {
-    #[allow(dead_code)]
     Gather(String),
     Release(String),
     AllGather(Vec<String>),
-    #[allow(dead_code)]
     ReduceScatter(Vec<String>),
 }
 
@@ -154,7 +155,6 @@ impl CommunicationScheduler {
     }
 
     /// Schedule a parameter release operation
-    #[allow(dead_code)]
     fn schedule_release(&mut self, param_name: String) {
         if !self.pending_releases.contains(&param_name) {
             self.pending_releases.push(param_name);

@@ -34,41 +34,52 @@
 //! use trustformers_models::llava::{LlavaForConditionalGeneration, LlavaConfig};
 //! use trustformers_core::tensor::Tensor;
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = LlavaConfig::llava_v1_5_7b();
 //! let model = LlavaForConditionalGeneration::new(config)?;
 //!
 //! // Process image and text
 //! let pixel_values = Tensor::randn(&[1, 3, 336, 336])?; // Batch of images
-//! let input_ids = Tensor::from_vec(vec![1, 2, 3, 4], &[1, 4])?; // Text tokens
+//! let input_ids = Tensor::from_vec_i64(vec![1, 2, 3, 4], &[1, 4])?; // Text tokens
 //!
 //! let output = model.forward_multimodal(input_ids, Some(pixel_values), None)?;
 //! println!("Generated logits shape: {:?}", output.logits.shape());
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### Visual Question Answering
 //! ```rust,no_run
 //! use trustformers_models::llava::{LlavaForConditionalGeneration, LlavaConfig};
 //!
-//! let config = LlavaConfig::llava_v1_6_7b()
-//!     .with_high_resolution(true);  // Enable high-res processing
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut config = LlavaConfig::llava_v1_6_7b();
+//! config.with_high_resolution(true); // Enable high-res processing
 //!
 //! let model = LlavaForConditionalGeneration::new(config)?;
+//! # let _ = model;
 //!
 //! // Question: "What do you see in this image?"
 //! // The model would process both the image and question together
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### High-Resolution Image Processing
 //! ```rust,no_run
 //! use trustformers_models::llava::{LlavaForConditionalGeneration, LlavaConfig};
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut config = LlavaConfig::llava_v1_6_34b();
 //! config.with_high_resolution(true)
 //!       .with_vision_tower("openai/clip-vit-large-patch14-336");
 //!
 //! let model = LlavaForConditionalGeneration::new(config)?;
+//! # let _ = model;
 //!
 //! // Process high-resolution images with multiple grid configurations
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Vision Processing Features

@@ -1,4 +1,8 @@
 //! Carbon footprint tracking and analysis
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use crate::environmental_monitor::{config::EnvironmentalConfig, types::*};
 use anyhow::Result;
@@ -18,16 +22,13 @@ pub struct CarbonFootprintTracker {
 #[derive(Debug)]
 struct CarbonIntensityDatabase {
     regional_intensities: HashMap<String, f64>, // gCO2/kWh
-    #[allow(dead_code)]
     time_based_intensities: HashMap<String, Vec<TimeBasedIntensity>>,
     renewable_percentages: HashMap<String, f64>,
 }
 
 /// Time-based carbon intensity data
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct TimeBasedIntensity {
-    #[allow(dead_code)]
     hour: u32,
     carbon_intensity: f64,
     renewable_percentage: f64,
@@ -35,9 +36,7 @@ struct TimeBasedIntensity {
 
 /// Emission factors for different activities
 #[derive(Debug)]
-#[allow(dead_code)]
 struct EmissionFactors {
-    #[allow(dead_code)]
     gpu_manufacturing_kg_co2: f64,
     cpu_manufacturing_kg_co2: f64,
     infrastructure_kg_co2_per_hour: f64,

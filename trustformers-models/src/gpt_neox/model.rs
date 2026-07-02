@@ -161,9 +161,10 @@ impl Layer for GPTNeoXAttention {
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
         use scirs2_core::ndarray::{s, Array2};
 
-        // Temporary fallback: Convert Metal/CUDA tensors to F32
-        // TODO: Implement full Tensor::Metal/CUDA support in Attention
-        // Complex operations (QKV split, RoPE) are CPU-friendly
+        // GPU-resident attention is not yet available: the oxicuda CUDA backend exposes host-in/
+        // host-out matmul + resident elementwise ops, but not on-device QKV-split/RoPE/attention.
+        // CUDA/Metal operands are therefore downloaded to CPU F32 for attention (correct, not a stub).
+        // On-device attention residency is tracked as future work.
         #[cfg(all(target_os = "macos", feature = "metal"))]
         let input = match &input {
             Tensor::Metal(_) => input.to_device_enum(&trustformers_core::device::Device::CPU)?,

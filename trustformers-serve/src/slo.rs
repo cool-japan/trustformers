@@ -18,13 +18,21 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 // Global metric registrations — registered exactly once, shared across all SloTracker instances.
+// Registration only fails on duplicate registration; fall back to an unregistered
+// metric (compile-time-valid opts) so the server keeps running.
 static SLO_SLI_VALUE: Lazy<GaugeVec> = Lazy::new(|| {
     register_gauge_vec!(
         "slo_sli_value",
         "Current SLI value",
         &["sli_id", "sli_name"]
     )
-    .expect("Failed to register slo_sli_value metric")
+    .unwrap_or_else(|_| {
+        prometheus::GaugeVec::new(
+            prometheus::opts!("slo_sli_value", "Current SLI value"),
+            &["sli_id", "sli_name"],
+        )
+        .unwrap_or_else(|_| unreachable!("static prometheus opts are valid"))
+    })
 });
 
 static SLO_COMPLIANCE: Lazy<GaugeVec> = Lazy::new(|| {
@@ -33,7 +41,13 @@ static SLO_COMPLIANCE: Lazy<GaugeVec> = Lazy::new(|| {
         "SLO compliance percentage",
         &["slo_id", "slo_name"]
     )
-    .expect("Failed to register slo_compliance_percentage metric")
+    .unwrap_or_else(|_| {
+        prometheus::GaugeVec::new(
+            prometheus::opts!("slo_compliance_percentage", "SLO compliance percentage"),
+            &["slo_id", "slo_name"],
+        )
+        .unwrap_or_else(|_| unreachable!("static prometheus opts are valid"))
+    })
 });
 
 static SLO_ERROR_BUDGET_REMAINING: Lazy<GaugeVec> = Lazy::new(|| {
@@ -42,7 +56,16 @@ static SLO_ERROR_BUDGET_REMAINING: Lazy<GaugeVec> = Lazy::new(|| {
         "Error budget remaining percentage",
         &["slo_id", "slo_name"]
     )
-    .expect("Failed to register slo_error_budget_remaining metric")
+    .unwrap_or_else(|_| {
+        prometheus::GaugeVec::new(
+            prometheus::opts!(
+                "slo_error_budget_remaining",
+                "Error budget remaining percentage"
+            ),
+            &["slo_id", "slo_name"],
+        )
+        .unwrap_or_else(|_| unreachable!("static prometheus opts are valid"))
+    })
 });
 
 static SLO_BURN_RATE: Lazy<GaugeVec> = Lazy::new(|| {
@@ -51,7 +74,13 @@ static SLO_BURN_RATE: Lazy<GaugeVec> = Lazy::new(|| {
         "Current error budget burn rate",
         &["slo_id", "slo_name"]
     )
-    .expect("Failed to register slo_burn_rate metric")
+    .unwrap_or_else(|_| {
+        prometheus::GaugeVec::new(
+            prometheus::opts!("slo_burn_rate", "Current error budget burn rate"),
+            &["slo_id", "slo_name"],
+        )
+        .unwrap_or_else(|_| unreachable!("static prometheus opts are valid"))
+    })
 });
 
 static SLO_BREACHES_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
@@ -60,7 +89,13 @@ static SLO_BREACHES_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
         "Total number of SLO breaches",
         &["slo_id", "slo_name", "severity"]
     )
-    .expect("Failed to register slo_breaches_total metric")
+    .unwrap_or_else(|_| {
+        prometheus::CounterVec::new(
+            prometheus::opts!("slo_breaches_total", "Total number of SLO breaches"),
+            &["slo_id", "slo_name", "severity"],
+        )
+        .unwrap_or_else(|_| unreachable!("static prometheus opts are valid"))
+    })
 });
 
 static SLO_SLI_EVAL_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
@@ -69,7 +104,16 @@ static SLO_SLI_EVAL_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
         "SLI evaluation duration in seconds",
         &["sli_id"]
     )
-    .expect("Failed to register slo_sli_evaluation_duration_seconds metric")
+    .unwrap_or_else(|_| {
+        prometheus::HistogramVec::new(
+            prometheus::histogram_opts!(
+                "slo_sli_evaluation_duration_seconds",
+                "SLI evaluation duration in seconds"
+            ),
+            &["sli_id"],
+        )
+        .unwrap_or_else(|_| unreachable!("static prometheus opts are valid"))
+    })
 });
 
 /// SLO configuration
@@ -930,10 +974,9 @@ impl SloTracker {
             } else if !is_breaching && active_breaches.contains_key(&slo_id) {
                 // Breach resolved
                 if let Some(mut breach) = active_breaches.remove(&slo_id) {
-                    breach.end_time = Some(SystemTime::now());
-                    breach.duration = breach
-                        .end_time
-                        .expect("end_time was just set to Some above")
+                    let end_time = SystemTime::now();
+                    breach.end_time = Some(end_time);
+                    breach.duration = end_time
                         .duration_since(breach.start_time)
                         .unwrap_or(Duration::from_secs(0));
 

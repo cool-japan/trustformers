@@ -8,7 +8,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use trustformers_core::errors::Result;
+use trustformers_core::errors::{Result, TrustformersError};
 
 /// Configuration for music tokenizer
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,6 +179,55 @@ static DYNAMICS: Lazy<HashMap<String, u8>> = Lazy::new(|| {
     map
 });
 
+/// Compile a set of compile-time-constant regex patterns.
+///
+/// All callers pass string literals defined in this module, so compilation is a
+/// genuinely infallible invariant. A single documented `expect` per pattern set
+/// guards it (priority-4 last resort: no clean `Result` path from a `static`).
+fn compile_static_patterns(patterns: &[&str], message: &'static str) -> Vec<Regex> {
+    patterns
+        .iter()
+        .map(|p| Regex::new(p))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .expect(message)
+}
+
+/// Chord recognition patterns (compiled once from constant expressions).
+static CHORD_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
+    compile_static_patterns(
+        &[
+            // Basic triads and sevenths
+            r"[A-G][#b]?(m|maj|M|min|dim|aug|sus[24])?[67]?",
+            // Complex chord extensions
+            r"[A-G][#b]?(add|sus|maj|min|dim|aug)\d+",
+            // Slash chords
+            r"[A-G][#b]?[^/]*/[A-G][#b]?",
+        ],
+        "built-in chord regex patterns are compile-time constants and must compile",
+    )
+});
+
+/// ABC notation patterns (compiled once from constant expressions).
+static ABC_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
+    compile_static_patterns(
+        &[
+            // ABC notes with accidentals and octaves
+            r"[_=^]*[A-Ga-g][',]*",
+            // Duration modifiers
+            r"\d*/?\.?",
+            // Rests
+            r"z\d*/?\.?",
+            // Barlines
+            r"\|[\|:\]]*",
+            // Chords (bracketed notes)
+            r"\[([A-Ga-g][',]*\d*/?\.?)+\]",
+            // Slurs and ties
+            r"[()~-]",
+        ],
+        "built-in ABC notation regex patterns are compile-time constants and must compile",
+    )
+});
+
 impl Default for MusicTokenizer {
     fn default() -> Self {
         Self::new()
@@ -324,32 +373,12 @@ impl MusicTokenizer {
 
     /// Create chord recognition patterns
     fn create_chord_patterns() -> Vec<Regex> {
-        vec![
-            // Basic triads and sevenths
-            Regex::new(r"[A-G][#b]?(m|maj|M|min|dim|aug|sus[24])?[67]?").expect("valid regex"),
-            // Complex chord extensions
-            Regex::new(r"[A-G][#b]?(add|sus|maj|min|dim|aug)\d+").expect("valid regex"),
-            // Slash chords
-            Regex::new(r"[A-G][#b]?[^/]*/[A-G][#b]?").expect("valid regex"),
-        ]
+        CHORD_PATTERNS.clone()
     }
 
     /// Create ABC notation patterns
     fn create_abc_patterns() -> Vec<Regex> {
-        vec![
-            // ABC notes with accidentals and octaves
-            Regex::new(r"[_=^]*[A-Ga-g][',]*").expect("valid regex"),
-            // Duration modifiers
-            Regex::new(r"\d*/?\.?").expect("valid regex"),
-            // Rests
-            Regex::new(r"z\d*/?\.?").expect("valid regex"),
-            // Barlines
-            Regex::new(r"\|[\|:\]]*").expect("valid regex"),
-            // Chords (bracketed notes)
-            Regex::new(r"\[([A-Ga-g][',]*\d*/?\.?)+\]").expect("valid regex"),
-            // Slurs and ties
-            Regex::new(r"[()~-]").expect("valid regex"),
-        ]
+        ABC_PATTERNS.clone()
     }
 
     /// Tokenize music notation
@@ -452,7 +481,9 @@ impl MusicTokenizer {
         let mut tokens = Vec::new();
 
         // Simple XML tag extraction
-        let tag_regex = Regex::new(r"<([^>]+)>([^<]*)</[^>]+>").expect("valid regex");
+        let tag_regex = Regex::new(r"<([^>]+)>([^<]*)</[^>]+>").map_err(|e| {
+            TrustformersError::other(format!("failed to compile MusicXML tag regex: {e}"))
+        })?;
 
         for mat in tag_regex.find_iter(text) {
             let token_text = mat.as_str().to_string();

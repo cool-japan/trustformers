@@ -79,16 +79,22 @@ impl Tensor {
     pub fn std(&self) -> Result<Tensor> {
         match self {
             Tensor::F32(a) => {
-                let mean = a.mean().expect("Mean calculation failed");
-                let variance =
-                    a.mapv(|x| (x - mean).powi(2)).mean().expect("Mean calculation failed");
+                let mean = a.mean().ok_or_else(|| {
+                    crate::errors::compute_error("std", "Mean calculation failed")
+                })?;
+                let variance = a.mapv(|x| (x - mean).powi(2)).mean().ok_or_else(|| {
+                    crate::errors::compute_error("std", "Mean calculation failed")
+                })?;
                 let std = variance.sqrt();
                 Ok(Tensor::F32(ArrayD::from_elem(IxDyn(&[]), std)))
             },
             Tensor::F64(a) => {
-                let mean = a.mean().expect("Mean calculation failed");
-                let variance =
-                    a.mapv(|x| (x - mean).powi(2)).mean().expect("Mean calculation failed");
+                let mean = a.mean().ok_or_else(|| {
+                    crate::errors::compute_error("std", "Mean calculation failed")
+                })?;
+                let variance = a.mapv(|x| (x - mean).powi(2)).mean().ok_or_else(|| {
+                    crate::errors::compute_error("std", "Mean calculation failed")
+                })?;
                 let std = variance.sqrt();
                 Ok(Tensor::F64(ArrayD::from_elem(IxDyn(&[]), std)))
             },
@@ -122,18 +128,26 @@ impl Tensor {
                 // Handle scalar case (0-dimensional tensor)
                 if a.ndim() == 0 && b.ndim() > 0 {
                     // a is scalar, broadcast to b's shape
-                    let scalar_val = a.iter().next().expect("array must have at least one element");
+                    let scalar_val = a.iter().next().ok_or_else(|| {
+                        crate::errors::compute_error("max", "array must have at least one element")
+                    })?;
                     let result = b.mapv(|x| x.max(*scalar_val));
                     Ok(Tensor::F32(result))
                 } else if b.ndim() == 0 && a.ndim() > 0 {
                     // b is scalar, broadcast to a's shape
-                    let scalar_val = b.iter().next().expect("array must have at least one element");
+                    let scalar_val = b.iter().next().ok_or_else(|| {
+                        crate::errors::compute_error("max", "array must have at least one element")
+                    })?;
                     let result = a.mapv(|x| x.max(*scalar_val));
                     Ok(Tensor::F32(result))
                 } else if a.ndim() == 0 && b.ndim() == 0 {
                     // Both scalars
-                    let a_val = a.iter().next().expect("array must have at least one element");
-                    let b_val = b.iter().next().expect("array must have at least one element");
+                    let a_val = a.iter().next().ok_or_else(|| {
+                        crate::errors::compute_error("max", "array must have at least one element")
+                    })?;
+                    let b_val = b.iter().next().ok_or_else(|| {
+                        crate::errors::compute_error("max", "array must have at least one element")
+                    })?;
                     let max_val = a_val.max(*b_val);
                     Ok(Tensor::F32(ArrayD::from_elem(IxDyn(&[]), max_val)))
                 } else {
@@ -146,18 +160,26 @@ impl Tensor {
                 // Handle scalar case (0-dimensional tensor)
                 if a.ndim() == 0 && b.ndim() > 0 {
                     // a is scalar, broadcast to b's shape
-                    let scalar_val = a.iter().next().expect("array must have at least one element");
+                    let scalar_val = a.iter().next().ok_or_else(|| {
+                        crate::errors::compute_error("max", "array must have at least one element")
+                    })?;
                     let result = b.mapv(|x| x.max(*scalar_val));
                     Ok(Tensor::F64(result))
                 } else if b.ndim() == 0 && a.ndim() > 0 {
                     // b is scalar, broadcast to a's shape
-                    let scalar_val = b.iter().next().expect("array must have at least one element");
+                    let scalar_val = b.iter().next().ok_or_else(|| {
+                        crate::errors::compute_error("max", "array must have at least one element")
+                    })?;
                     let result = a.mapv(|x| x.max(*scalar_val));
                     Ok(Tensor::F64(result))
                 } else if a.ndim() == 0 && b.ndim() == 0 {
                     // Both scalars
-                    let a_val = a.iter().next().expect("array must have at least one element");
-                    let b_val = b.iter().next().expect("array must have at least one element");
+                    let a_val = a.iter().next().ok_or_else(|| {
+                        crate::errors::compute_error("max", "array must have at least one element")
+                    })?;
+                    let b_val = b.iter().next().ok_or_else(|| {
+                        crate::errors::compute_error("max", "array must have at least one element")
+                    })?;
                     let max_val = a_val.max(*b_val);
                     Ok(Tensor::F64(ArrayD::from_elem(IxDyn(&[]), max_val)))
                 } else {
@@ -253,11 +275,15 @@ impl Tensor {
     pub fn mean(&self) -> Result<Tensor> {
         match self {
             Tensor::F32(a) => {
-                let mean = a.mean().expect("Mean calculation failed");
+                let mean = a.mean().ok_or_else(|| {
+                    crate::errors::compute_error("mean", "Mean calculation failed")
+                })?;
                 Ok(Tensor::F32(ArrayD::from_elem(IxDyn(&[]), mean)))
             },
             Tensor::F64(a) => {
-                let mean = a.mean().expect("Mean calculation failed");
+                let mean = a.mean().ok_or_else(|| {
+                    crate::errors::compute_error("mean", "Mean calculation failed")
+                })?;
                 Ok(Tensor::F64(ArrayD::from_elem(IxDyn(&[]), mean)))
             },
             Tensor::F16(_) | Tensor::BF16(_) => run_half_in_f32(self, |t| t.mean()),
@@ -272,12 +298,16 @@ impl Tensor {
     pub fn min_max(&self) -> Result<(f32, f32)> {
         match self {
             Tensor::F32(a) => {
-                let data = a.as_slice().expect("array must have contiguous layout");
+                let data = a.as_slice().ok_or_else(|| {
+                    crate::errors::compute_error("min_max", "array must have contiguous layout")
+                })?;
                 let (min_val, max_val) = simd_min_max_f32(data);
                 Ok((min_val, max_val))
             },
             Tensor::F64(a) => {
-                let data = a.as_slice().expect("array must have contiguous layout");
+                let data = a.as_slice().ok_or_else(|| {
+                    crate::errors::compute_error("min_max", "array must have contiguous layout")
+                })?;
                 let (min_val, max_val) = simd_min_max_f64(data);
                 Ok((min_val as f32, max_val as f32))
             },
@@ -444,9 +474,12 @@ impl Tensor {
                             "mean_axes",
                         ));
                     }
-                    result = result
-                        .mean_axis(Axis(axis))
-                        .expect("axis must be valid for mean operation");
+                    result = result.mean_axis(Axis(axis)).ok_or_else(|| {
+                        crate::errors::compute_error(
+                            "mean_axes",
+                            "axis must be valid for mean operation",
+                        )
+                    })?;
                 }
                 Ok(Tensor::F32(result))
             },
@@ -463,9 +496,12 @@ impl Tensor {
                             "mean_axes",
                         ));
                     }
-                    result = result
-                        .mean_axis(Axis(axis))
-                        .expect("axis must be valid for mean operation");
+                    result = result.mean_axis(Axis(axis)).ok_or_else(|| {
+                        crate::errors::compute_error(
+                            "mean_axes",
+                            "axis must be valid for mean operation",
+                        )
+                    })?;
                 }
                 Ok(Tensor::F64(result))
             },
@@ -797,8 +833,12 @@ impl Tensor {
                 for dist_idx in 0..num_dists {
                     // Extract probabilities for this distribution
                     let offset = dist_idx * last_dim;
-                    let prob_slice = &probs.as_slice().expect("array must have contiguous layout")
-                        [offset..offset + last_dim];
+                    let prob_slice = &probs.as_slice().ok_or_else(|| {
+                        crate::errors::compute_error(
+                            "multinomial",
+                            "array must have contiguous layout",
+                        )
+                    })?[offset..offset + last_dim];
 
                     // Compute cumulative distribution
                     let mut cumsum = Vec::with_capacity(last_dim);
@@ -840,8 +880,12 @@ impl Tensor {
 
                 for dist_idx in 0..num_dists {
                     let offset = dist_idx * last_dim;
-                    let prob_slice = &probs.as_slice().expect("array must have contiguous layout")
-                        [offset..offset + last_dim];
+                    let prob_slice = &probs.as_slice().ok_or_else(|| {
+                        crate::errors::compute_error(
+                            "multinomial",
+                            "array must have contiguous layout",
+                        )
+                    })?[offset..offset + last_dim];
 
                     let mut cumsum = Vec::with_capacity(last_dim);
                     let mut sum = 0.0f64;

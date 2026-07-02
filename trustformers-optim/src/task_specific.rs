@@ -1,3 +1,7 @@
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
+
 use crate::{
     adam::{Adam, AdamW},
     scheduler::LRScheduler,
@@ -9,14 +13,10 @@ use trustformers_core::{errors::Result, tensor::Tensor, traits::Optimizer};
 pub struct BERTOptimizer {
     base_optimizer: AdamW,
     warmup_scheduler: Box<dyn LRScheduler>,
-    #[allow(dead_code)]
     layer_wise_decay: f32,
-    #[allow(dead_code)]
     weight_decay_exclusions: Vec<String>,
     current_step: usize,
-    #[allow(dead_code)]
     warmup_steps: usize,
-    #[allow(dead_code)]
     total_steps: usize,
 }
 
@@ -56,7 +56,6 @@ impl BERTOptimizer {
     }
 
     /// Apply layer-wise learning rate decay for deeper layers
-    #[allow(dead_code)]
     fn get_layer_wise_lr(&self, param_name: &str, base_lr: f32) -> f32 {
         // Extract layer number from parameter name
         if let Some(layer_num) = self.extract_layer_number(param_name) {
@@ -82,7 +81,6 @@ impl BERTOptimizer {
         None
     }
 
-    #[allow(dead_code)]
     fn should_exclude_weight_decay(&self, param_name: &str) -> bool {
         self.weight_decay_exclusions
             .iter()
@@ -157,7 +155,6 @@ pub struct GANOptimizer {
     discriminator_optimizer: Adam,
     spectral_norm: bool,
     gradient_penalty_weight: f32,
-    #[allow(dead_code)]
     ttur: bool, // Two Time-scale Update Rule
     d_steps_per_g_step: usize,
     current_d_steps: usize,
@@ -323,7 +320,6 @@ pub struct RLOptimizer {
     clip_grad_norm: Option<f32>,
     entropy_coeff: f32,
     value_loss_coeff: f32,
-    #[allow(dead_code)]
     max_grad_norm: f32,
 }
 
@@ -422,9 +418,7 @@ pub struct MetaOptimizer {
     meta_optimizer: Adam,
     inner_optimizer: SGD,
     inner_steps: usize,
-    #[allow(dead_code)]
     inner_lr: f32,
-    #[allow(dead_code)]
     meta_lr: f32,
     first_order: bool, // Use first-order approximation
 }

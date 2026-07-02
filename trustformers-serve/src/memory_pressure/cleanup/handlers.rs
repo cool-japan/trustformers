@@ -90,7 +90,7 @@ impl GarbageCollectionHandler {
     fn force_gc(&self, aggressive: bool) -> Result<()> {
         // Check minimum interval
         {
-            let mut last_time = self.last_gc_time.lock().expect("lock should not be poisoned");
+            let mut last_time = self.last_gc_time.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(last) = *last_time {
                 let elapsed = last.elapsed();
                 if elapsed < Duration::from_millis(self.min_interval_ms) {

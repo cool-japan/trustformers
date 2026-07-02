@@ -12,6 +12,10 @@
 //! - **Warp-Level Optimizations**: Leverage GPU warp-level primitives
 //! - **Mixed Precision Support**: Efficient FP16/FP32 mixed precision
 
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
+
 use crate::common::{BiasCorrection, ParameterUpdate};
 use std::collections::HashMap;
 use trustformers_core::errors::{Result, TrustformersError};
@@ -135,17 +139,14 @@ pub struct FusedGPUState {
 #[derive(Debug)]
 struct FusedParameterBuffer {
     /// Parameter ID
-    #[allow(dead_code)]
     id: String,
     /// Number of parameter elements
     size: usize,
     /// GPU memory pointer (simplified representation)
-    #[allow(dead_code)]
     gpu_ptr: usize, // In real implementation, this would be a CUDA device pointer
     /// Memory layout stride for coalescing
     stride: usize,
     /// Whether buffer uses mixed precision
-    #[allow(dead_code)]
     mixed_precision: bool,
 }
 
@@ -556,8 +557,16 @@ impl Optimizer for KernelFusedAdam {
 
                 self.gpu_state.launch_fused_adam_kernel(
                     &param_id,
-                    param.as_slice_mut().expect("param tensor should have contiguous layout"),
-                    grad_arr.as_slice().expect("gradient tensor should have contiguous layout"),
+                    param.as_slice_mut().ok_or_else(|| {
+                        TrustformersError::invalid_state(
+                            "param tensor should have contiguous layout".to_string(),
+                        )
+                    })?,
+                    grad_arr.as_slice().ok_or_else(|| {
+                        TrustformersError::invalid_state(
+                            "gradient tensor should have contiguous layout".to_string(),
+                        )
+                    })?,
                     self.lr,
                     self.betas,
                     self.eps,

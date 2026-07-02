@@ -95,7 +95,7 @@ impl BenchmarkReport {
         let std_dev = variance.sqrt();
 
         let mut sorted = durations.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).expect("Partial comparison failed"));
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(::std::cmp::Ordering::Equal));
 
         let percentiles = vec![
             ("p50".to_string(), Self::percentile(&sorted, 0.50)),
@@ -175,7 +175,7 @@ impl BenchmarkReport {
         let std_dev = variance.sqrt();
 
         let mut sorted = values.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).expect("Partial comparison failed"));
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(::std::cmp::Ordering::Equal));
 
         MetricStats {
             mean,

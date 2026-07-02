@@ -6,7 +6,11 @@ use std::vec::Vec;
 use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "webgpu")]
+use crate::webgpu::types::{Gpu, GpuAdapter, GpuAdapterExt, GpuDevice, GpuExt};
+#[cfg(feature = "webgpu")]
 use crate::webgpu::WebGPUBackend;
+#[cfg(feature = "webgpu")]
+use std::cell::RefCell;
 #[cfg(feature = "webgpu")]
 use std::rc::Rc;
 
@@ -24,7 +28,7 @@ pub struct GpuTensor {
     tensor: WasmTensor,
     backend: ComputeBackend,
     #[cfg(feature = "webgpu")]
-    gpu_backend: Option<Rc<WebGPUBackend>>,
+    gpu_backend: Option<Rc<RefCell<WebGPUBackend>>>,
 }
 
 #[wasm_bindgen]
@@ -42,18 +46,61 @@ impl GpuTensor {
         })
     }
 
-    /// Initialize WebGPU backend if available
+    /// Initialize the WebGPU backend if a device can be acquired.
+    ///
+    /// This performs the asynchronous WebGPU handshake exactly as a browser
+    /// requires it:
+    ///
+    /// 1. resolve `navigator.gpu` (the WebGPU entry point),
+    /// 2. `requestAdapter()` to pick a physical adapter (a `Promise`),
+    /// 3. `requestDevice()` to obtain a logical device and its default queue
+    ///    (also a `Promise`).
+    ///
+    /// Both adapter and device requests are futures, so they are awaited
+    /// through `wasm_bindgen_futures::JsFuture`. On success the resulting
+    /// [`WebGPUBackend`] is wrapped in `Rc<RefCell<_>>` so it can be cheaply
+    /// shared between derived tensors while still allowing the interior
+    /// mutability that GPU compute dispatch requires. All failure paths map to
+    /// a descriptive [`JsValue`] error; no `unwrap`/`expect` is used.
     #[cfg(feature = "webgpu")]
     pub async fn init_webgpu(&mut self) -> Result<(), JsValue> {
-        if WebGPUBackend::is_available() {
-            // Get WebGPU device - this would need to be implemented in WebGPUBackend
-            // For now we'll use a placeholder implementation
-            web_sys::console::log_1(&"WebGPU backend initialization not yet implemented".into());
-            // TODO: Implement WebGPU device creation and backend initialization
-            Ok(())
-        } else {
-            Err(JsValue::from_str("WebGPU is not available"))
+        if !WebGPUBackend::is_available() {
+            return Err(JsValue::from_str("WebGPU is not available"));
         }
+
+        // Resolve `navigator.gpu`, the root WebGPU object.
+        let navigator = web_sys::window()
+            .ok_or_else(|| JsValue::from_str("No window object available"))?
+            .navigator();
+        let gpu = js_sys::Reflect::get(&navigator, &JsValue::from_str("gpu"))?;
+        if gpu.is_undefined() || gpu.is_null() {
+            return Err(JsValue::from_str("navigator.gpu is unavailable"));
+        }
+        let gpu: Gpu = gpu.dyn_into()?;
+
+        // Request an adapter. `requestAdapter()` returns a Promise that resolves
+        // either to a GPUAdapter or to `null` when none can be provided.
+        let adapter = wasm_bindgen_futures::JsFuture::from(gpu.request_adapter()).await?;
+        if adapter.is_null() || adapter.is_undefined() {
+            return Err(JsValue::from_str("No suitable WebGPU adapter was found"));
+        }
+        let adapter: GpuAdapter = adapter.dyn_into()?;
+
+        // Request a logical device (and its default queue). Also a Promise.
+        let device = wasm_bindgen_futures::JsFuture::from(adapter.request_device()).await?;
+        if device.is_null() || device.is_undefined() {
+            return Err(JsValue::from_str("Failed to acquire a WebGPU device"));
+        }
+        let device: GpuDevice = device.dyn_into()?;
+
+        // Build the backend (which also captures the device's queue via
+        // `GpuDeviceExt::queue`) and wrap it for shared, interior-mutable access.
+        let backend = WebGPUBackend::new(device)?;
+        self.gpu_backend = Some(Rc::new(RefCell::new(backend)));
+        self.backend = ComputeBackend::WebGpu;
+
+        web_sys::console::log_1(&"WebGPU backend initialized".into());
+        Ok(())
     }
 
     /// Get the current backend
@@ -78,11 +125,20 @@ impl GpuTensor {
     pub async fn matmul(&self, other: &GpuTensor) -> Result<GpuTensor, JsValue> {
         #[cfg(feature = "webgpu")]
         {
-            if let (ComputeBackend::WebGpu, Some(_backend)) = (self.backend, &self.gpu_backend) {
-                if let Some(_other_backend) = &other.gpu_backend {
-                    // GPU acceleration requires mutable access to ops
-                    // For now, fall back to CPU implementation
-                    // TODO: Wrap backend in Rc<RefCell<>> for interior mutability
+            if let (ComputeBackend::WebGpu, Some(backend)) = (self.backend, &self.gpu_backend) {
+                if other.gpu_backend.is_some() {
+                    // Matmul caches compute pipelines / pooled buffers and so
+                    // needs mutable access to the backend. The `Rc<RefCell<_>>`
+                    // wrapper now provides that interior mutability; the borrow
+                    // is released before this scope ends, so no `RefCell` guard
+                    // is ever held across an `.await`.
+                    let result_tensor =
+                        backend.borrow_mut().dispatch_matmul(&self.tensor, &other.tensor)?;
+                    return Ok(GpuTensor {
+                        tensor: result_tensor,
+                        backend: ComputeBackend::WebGpu,
+                        gpu_backend: Some(Rc::clone(backend)),
+                    });
                 }
             }
         }
@@ -102,9 +158,12 @@ impl GpuTensor {
         #[cfg(feature = "webgpu")]
         {
             if let (ComputeBackend::WebGpu, Some(backend)) = (self.backend, &self.gpu_backend) {
-                if let Some(_other_backend) = &other.gpu_backend {
-                    // Use GPU acceleration (simplified - currently falls back to CPU)
-                    let result_tensor = backend.ops().add(&self.tensor, &other.tensor).await?;
+                if other.gpu_backend.is_some() {
+                    // Dispatch through the shared backend. The `RefCell` borrow
+                    // is scoped to this statement and dropped before any await,
+                    // avoiding `await_holding_refcell_ref`.
+                    let result_tensor =
+                        backend.borrow().dispatch_add(&self.tensor, &other.tensor)?;
 
                     return Ok(GpuTensor {
                         tensor: result_tensor,
@@ -130,8 +189,9 @@ impl GpuTensor {
         #[cfg(feature = "webgpu")]
         {
             if let (ComputeBackend::WebGpu, Some(backend)) = (self.backend, &self.gpu_backend) {
-                // Use GPU acceleration (simplified - currently falls back to CPU)
-                let result_tensor = backend.ops().relu(&self.tensor).await?;
+                // Dispatch through the shared backend. The `RefCell` borrow is
+                // scoped to this statement and dropped before any await.
+                let result_tensor = backend.borrow().dispatch_relu(&self.tensor)?;
 
                 return Ok(GpuTensor {
                     tensor: result_tensor,

@@ -678,7 +678,7 @@ impl SynchronizationPointDetector {
     }
     /// Updates detection metrics
     async fn update_detection_metrics(&self, points: &[DetectedSynchronizationPoint]) {
-        let mut metrics = self.detection_metrics.lock().expect("Lock poisoned");
+        let mut metrics = self.detection_metrics.lock().unwrap_or_else(|p| p.into_inner());
         metrics.total_detections += points.len() as u64;
         metrics.barrier_detections += points
             .iter()
@@ -1170,7 +1170,7 @@ impl SynchronizationAnalyzer {
     }
     /// Updates analysis statistics
     async fn update_analysis_stats(&self, success: bool, duration: Duration, cache_hit: bool) {
-        let mut stats = self.analysis_stats.lock().expect("Lock poisoned");
+        let mut stats = self.analysis_stats.lock().unwrap_or_else(|p| p.into_inner());
         if success {
             stats.successful_analyses += 1;
         } else {

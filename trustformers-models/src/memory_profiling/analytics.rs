@@ -427,7 +427,7 @@ impl StatisticalAnalyzer {
 
     fn calculate_median(&self, values: &[f64]) -> f64 {
         let mut sorted = values.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).expect("operation failed"));
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let mid = sorted.len() / 2;
         if sorted.len().is_multiple_of(2) {
             (sorted[mid - 1] + sorted[mid]) / 2.0
@@ -438,7 +438,7 @@ impl StatisticalAnalyzer {
 
     fn calculate_quartiles(&self, values: &[f64]) -> (f64, f64) {
         let mut sorted = values.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).expect("operation failed"));
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let n = sorted.len();
         let q1_idx = n / 4;
         let q3_idx = 3 * n / 4;

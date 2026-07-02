@@ -2,6 +2,10 @@
 //!
 //! This module provides comprehensive GPU memory analysis, kernel optimization
 //! suggestions, and advanced profiling capabilities for CUDA/ROCm/OpenCL kernels.
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -13,7 +17,6 @@ use uuid::Uuid;
 /// Advanced GPU memory profiler with fragmentation analysis
 #[derive(Debug)]
 pub struct AdvancedGpuMemoryProfiler {
-    #[allow(dead_code)]
     device_count: i32,
     memory_pools: HashMap<i32, GpuMemoryPool>,
     memory_allocations: HashMap<Uuid, GpuMemoryAllocation>,
@@ -106,9 +109,7 @@ pub struct MemoryFragmentationSnapshot {
 
 /// GPU bandwidth monitoring
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct GpuBandwidthMonitor {
-    #[allow(dead_code)]
     device_id: i32,
     bandwidth_samples: VecDeque<BandwidthSample>,
     theoretical_bandwidth: f64, // GB/s
@@ -147,10 +148,8 @@ pub struct SustainedBandwidthMeasurement {
 
 /// Memory pressure monitoring
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct MemoryPressureMonitor {
     pressure_history: VecDeque<MemoryPressureSnapshot>,
-    #[allow(dead_code)]
     pressure_thresholds: MemoryPressureThresholds,
     auto_optimization_enabled: bool,
 }
@@ -276,9 +275,7 @@ pub enum ImplementationDifficulty {
 
 /// Launch configuration analysis
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct LaunchConfigAnalyzer {
-    #[allow(dead_code)]
     optimal_configs: HashMap<String, OptimalLaunchConfig>,
     config_performance_history: HashMap<String, Vec<ConfigPerformanceMeasurement>>,
     autotuning_enabled: bool,
@@ -331,9 +328,7 @@ pub enum LaunchConstraint {
 
 /// Memory access pattern analysis
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct MemoryAccessAnalyzer {
-    #[allow(dead_code)]
     access_patterns: HashMap<String, MemoryAccessAnalysis>,
     coalescing_analysis: HashMap<String, CoalescingAnalysis>,
     cache_performance: HashMap<String, CachePerformanceAnalysis>,
@@ -359,9 +354,7 @@ pub enum StridePattern {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct BankConflictAnalyzer {
-    #[allow(dead_code)]
     conflict_patterns: HashMap<String, BankConflictPattern>,
     resolution_strategies: HashMap<String, Vec<ConflictResolutionStrategy>>,
 }
@@ -484,9 +477,7 @@ pub enum CacheOptimizationType {
 
 /// Compute utilization analysis
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct ComputeUtilizationAnalyzer {
-    #[allow(dead_code)]
     utilization_profiles: HashMap<String, ComputeUtilizationProfile>,
     bottleneck_analysis: HashMap<String, ComputeBottleneckAnalysis>,
     arithmetic_intensity_analyzer: ArithmeticIntensityAnalyzer,
@@ -494,9 +485,7 @@ pub struct ComputeUtilizationAnalyzer {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct ArithmeticIntensityAnalyzer {
-    #[allow(dead_code)]
     intensity_profiles: HashMap<String, ArithmeticIntensityProfile>,
     roofline_models: HashMap<i32, RooflineModel>,
 }
@@ -518,9 +507,7 @@ pub struct RooflineModel {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct ResourceBalancer {
-    #[allow(dead_code)]
     resource_profiles: HashMap<String, ResourceProfile>,
     balancing_strategies: HashMap<String, BalancingStrategy>,
 }

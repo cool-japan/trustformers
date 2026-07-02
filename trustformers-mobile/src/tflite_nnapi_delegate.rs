@@ -4,7 +4,7 @@
 //! for hardware-accelerated inference, integrating with our existing NNAPI backend.
 
 #[cfg(all(target_os = "android", feature = "tflite-nnapi"))]
-use crate::nnapi::{NNAPIConfig, NNAPIEngine, NNAPIDeviceType, NNAPIExecutionPreference};
+use crate::nnapi::{NNAPIConfig, NNAPIDeviceType, NNAPIEngine, NNAPIExecutionPreference};
 #[cfg(all(target_os = "android", feature = "tflite-nnapi"))]
 use crate::{MemoryOptimization, MobileConfig};
 #[cfg(all(target_os = "android", feature = "tflite-nnapi"))]
@@ -17,9 +17,9 @@ use std::ffi::{c_void, CStr, CString};
 use std::ptr;
 #[cfg(all(target_os = "android", feature = "tflite-nnapi"))]
 use std::time::Instant;
-#[cfg(all(target_os = "android", feature = "tflite-nnapi"))]
-use trustformers_core::{Tensor};
 use trustformers_core::error::{CoreError, Result};
+#[cfg(all(target_os = "android", feature = "tflite-nnapi"))]
+use trustformers_core::Tensor;
 
 /// TensorFlow Lite NNAPI delegate
 #[cfg(all(target_os = "android", feature = "tflite-nnapi"))]
@@ -150,7 +150,9 @@ impl TfLiteNNAPIDelegate {
         let start_time = Instant::now();
 
         // Invoke TensorFlow Lite interpreter with NNAPI delegate
-        let interpreter = self.interpreter_handle.expect("Operation failed");
+        let interpreter = self.interpreter_handle.ok_or_else(|| {
+            TrustformersError::runtime_error("delegate interpreter not initialized".to_string())
+        })?;
         self.invoke_interpreter(interpreter)?;
 
         let invocation_time = start_time.elapsed().as_millis() as f32;
@@ -228,12 +230,14 @@ impl TfLiteNNAPIDelegate {
         // Adjust configuration based on NNAPI support ratio
         if support_ratio > 0.8 {
             // High NNAPI support - optimize for performance
-            self.config.nnapi_config.execution_preference = NNAPIExecutionPreference::SustainedSpeed;
+            self.config.nnapi_config.execution_preference =
+                NNAPIExecutionPreference::SustainedSpeed;
             self.config.max_partitions = 8;
             self.config.enable_cpu_fallback = false;
         } else if support_ratio > 0.5 {
             // Medium NNAPI support - balanced approach
-            self.config.nnapi_config.execution_preference = NNAPIExecutionPreference::FastSingleAnswer;
+            self.config.nnapi_config.execution_preference =
+                NNAPIExecutionPreference::FastSingleAnswer;
             self.config.max_partitions = 4;
             self.config.enable_cpu_fallback = true;
         } else {
@@ -274,7 +278,8 @@ impl TfLiteNNAPIDelegate {
         if delegate.is_null() {
             return Err(TrustformersError::runtime_error(
                 "Failed to create TensorFlow Lite NNAPI delegate".into(),
-            ).into());
+            )
+            .into());
         }
 
         // Clean up options
@@ -290,7 +295,8 @@ impl TfLiteNNAPIDelegate {
         if options.is_null() {
             return Err(TrustformersError::runtime_error(
                 "Failed to create delegate options".into(),
-            ).into());
+            )
+            .into());
         }
 
         // Configure options based on our config
@@ -305,35 +311,48 @@ impl TfLiteNNAPIDelegate {
 
             // Set accelerator name if specified
             if let Some(ref accelerator_name) = self.config.accelerator_name {
-                let name_cstring = CString::new(accelerator_name.as_str()).expect("Operation failed");
+                let name_cstring = CString::new(accelerator_name.as_str()).unwrap_or_default();
                 tflite_nnapi_delegate_options_set_accelerator_name(options, name_cstring.as_ptr());
             }
 
             // Set caching if enabled
             if self.config.enable_delegate_caching {
-                let cache_dir = CString::new("/data/data/com.trustformers/cache").expect("Operation failed");
-                let model_token = CString::new("trustformers_model").expect("Operation failed");
+                let cache_dir =
+                    CString::new("/data/data/com.trustformers/cache").unwrap_or_default();
+                let model_token = CString::new("trustformers_model").unwrap_or_default();
                 tflite_nnapi_delegate_options_set_cache_dir(options, cache_dir.as_ptr());
                 tflite_nnapi_delegate_options_set_model_token(options, model_token.as_ptr());
             }
 
             // Set CPU fallback
-            tflite_nnapi_delegate_options_set_allow_fp16(options, self.config.nnapi_config.allow_relaxed_computation);
+            tflite_nnapi_delegate_options_set_allow_fp16(
+                options,
+                self.config.nnapi_config.allow_relaxed_computation,
+            );
 
             // Set max partitions
-            tflite_nnapi_delegate_options_set_max_partitions(options, self.config.max_partitions as i32);
+            tflite_nnapi_delegate_options_set_max_partitions(
+                options,
+                self.config.max_partitions as i32,
+            );
         }
 
         Ok(options)
     }
 
-    fn apply_delegate_to_interpreter(&self, interpreter: *mut c_void, delegate: *mut c_void) -> Result<()> {
-        let result = unsafe { tflite_interpreter_modify_graph_with_delegate(interpreter, delegate) };
+    fn apply_delegate_to_interpreter(
+        &self,
+        interpreter: *mut c_void,
+        delegate: *mut c_void,
+    ) -> Result<()> {
+        let result =
+            unsafe { tflite_interpreter_modify_graph_with_delegate(interpreter, delegate) };
 
         if result != 0 {
             return Err(TrustformersError::runtime_error(
                 "Failed to apply NNAPI delegate to interpreter".into(),
-            ).into());
+            )
+            .into());
         }
 
         Ok(())
@@ -349,7 +368,9 @@ impl TfLiteNNAPIDelegate {
             let op_count = unsafe { tflite_subgraph_get_node_count(interpreter, subgraph_index) };
 
             for op_index in 0..op_count {
-                let op_code = unsafe { tflite_subgraph_get_node_opcode(interpreter, subgraph_index, op_index) };
+                let op_code = unsafe {
+                    tflite_subgraph_get_node_opcode(interpreter, subgraph_index, op_index)
+                };
 
                 // Check if this operation is supported by NNAPI
                 if self.is_operation_supported_by_nnapi(op_code) {
@@ -375,7 +396,9 @@ impl TfLiteNNAPIDelegate {
             let op_count = unsafe { tflite_subgraph_get_node_count(interpreter, subgraph_index) };
 
             for op_index in 0..op_count {
-                let op_code = unsafe { tflite_subgraph_get_node_opcode(interpreter, subgraph_index, op_index) };
+                let op_code = unsafe {
+                    tflite_subgraph_get_node_opcode(interpreter, subgraph_index, op_index)
+                };
                 let op_name = self.get_operation_name(op_code);
                 let nnapi_supported = self.is_operation_supported_by_nnapi(op_code);
                 let performance_gain = self.estimate_performance_gain(op_code);
@@ -403,13 +426,21 @@ impl TfLiteNNAPIDelegate {
         let result = unsafe { tflite_interpreter_invoke(interpreter) };
 
         if result != 0 {
-            return Err(TrustformersError::runtime_error("TensorFlow Lite inference failed".into()).into());
+            return Err(TrustformersError::runtime_error(
+                "TensorFlow Lite inference failed".into(),
+            )
+            .into());
         }
 
         Ok(())
     }
 
-    fn get_tensor_info(&self, interpreter: *mut c_void, index: i32, is_input: bool) -> Result<TensorInfo> {
+    fn get_tensor_info(
+        &self,
+        interpreter: *mut c_void,
+        index: i32,
+        is_input: bool,
+    ) -> Result<TensorInfo> {
         let tensor = if is_input {
             unsafe { tflite_interpreter_get_input_tensor(interpreter, index) }
         } else {
@@ -443,14 +474,19 @@ impl TfLiteNNAPIDelegate {
         let tensor = unsafe { tflite_interpreter_get_input_tensor(interpreter, index) };
 
         if tensor.is_null() {
-            return Err(TrustformersError::runtime_error("Invalid input tensor index".into()).into());
+            return Err(
+                TrustformersError::runtime_error("Invalid input tensor index".into()).into(),
+            );
         }
 
         let tensor_data = unsafe { tflite_tensor_get_data(tensor) as *mut f32 };
-        let tensor_size = unsafe { tflite_tensor_get_byte_size(tensor) } / std::mem::size_of::<f32>() as i32;
+        let tensor_size =
+            unsafe { tflite_tensor_get_byte_size(tensor) } / std::mem::size_of::<f32>() as i32;
 
         if data.len() != tensor_size as usize {
-            return Err(TrustformersError::runtime_error("Tensor data size mismatch".into()).into());
+            return Err(
+                TrustformersError::runtime_error("Tensor data size mismatch".into()).into(),
+            );
         }
 
         unsafe {
@@ -464,11 +500,14 @@ impl TfLiteNNAPIDelegate {
         let tensor = unsafe { tflite_interpreter_get_output_tensor(interpreter, index) };
 
         if tensor.is_null() {
-            return Err(TrustformersError::runtime_error("Invalid output tensor index".into()).into());
+            return Err(
+                TrustformersError::runtime_error("Invalid output tensor index".into()).into(),
+            );
         }
 
         let tensor_data = unsafe { tflite_tensor_get_data(tensor) as *const f32 };
-        let tensor_size = unsafe { tflite_tensor_get_byte_size(tensor) } / std::mem::size_of::<f32>() as i32;
+        let tensor_size =
+            unsafe { tflite_tensor_get_byte_size(tensor) } / std::mem::size_of::<f32>() as i32;
 
         let data = unsafe { std::slice::from_raw_parts(tensor_data, tensor_size as usize) };
 
@@ -515,13 +554,13 @@ impl TfLiteNNAPIDelegate {
     fn estimate_performance_gain(&self, op_code: i32) -> f32 {
         // Estimate performance gain from using NNAPI for this operation
         match op_code {
-            2 | 3 => 3.0,  // Convolution operations - high gain
-            4 => 2.5,      // Fully connected - medium-high gain
-            1 | 6 => 2.0,  // Pooling operations - medium gain
-            0 | 7 => 1.5,  // Element-wise operations - low-medium gain
+            2 | 3 => 3.0,      // Convolution operations - high gain
+            4 => 2.5,          // Fully connected - medium-high gain
+            1 | 6 => 2.0,      // Pooling operations - medium gain
+            0 | 7 => 1.5,      // Element-wise operations - low-medium gain
             5 | 8 | 10 => 1.8, // Activation functions - medium gain
-            9 => 1.0,      // Reshape - minimal gain
-            _ => 1.0,      // Unknown operations
+            9 => 1.0,          // Reshape - minimal gain
+            _ => 1.0,          // Unknown operations
         }
     }
 
@@ -702,21 +741,31 @@ extern "C" {
     fn tflite_nnapi_delegate_delete(delegate: *mut c_void);
     fn tflite_nnapi_delegate_options_create() -> *mut c_void;
     fn tflite_nnapi_delegate_options_delete(options: *mut c_void);
-    fn tflite_nnapi_delegate_options_set_execution_preference(options: *mut c_void, preference: i32);
+    fn tflite_nnapi_delegate_options_set_execution_preference(
+        options: *mut c_void,
+        preference: i32,
+    );
     fn tflite_nnapi_delegate_options_set_accelerator_name(options: *mut c_void, name: *const i8);
     fn tflite_nnapi_delegate_options_set_cache_dir(options: *mut c_void, cache_dir: *const i8);
     fn tflite_nnapi_delegate_options_set_model_token(options: *mut c_void, model_token: *const i8);
     fn tflite_nnapi_delegate_options_set_allow_fp16(options: *mut c_void, allow: bool);
     fn tflite_nnapi_delegate_options_set_max_partitions(options: *mut c_void, max_partitions: i32);
 
-    fn tflite_interpreter_modify_graph_with_delegate(interpreter: *mut c_void, delegate: *mut c_void) -> i32;
+    fn tflite_interpreter_modify_graph_with_delegate(
+        interpreter: *mut c_void,
+        delegate: *mut c_void,
+    ) -> i32;
     fn tflite_interpreter_invoke(interpreter: *mut c_void) -> i32;
     fn tflite_interpreter_get_input_tensor(interpreter: *mut c_void, index: i32) -> *mut c_void;
     fn tflite_interpreter_get_output_tensor(interpreter: *mut c_void, index: i32) -> *mut c_void;
     fn tflite_interpreter_get_subgraph_count(interpreter: *mut c_void) -> i32;
 
     fn tflite_subgraph_get_node_count(interpreter: *mut c_void, subgraph_index: i32) -> i32;
-    fn tflite_subgraph_get_node_opcode(interpreter: *mut c_void, subgraph_index: i32, node_index: i32) -> i32;
+    fn tflite_subgraph_get_node_opcode(
+        interpreter: *mut c_void,
+        subgraph_index: i32,
+        node_index: i32,
+    ) -> i32;
 
     fn tflite_tensor_get_data(tensor: *mut c_void) -> *mut c_void;
     fn tflite_tensor_get_byte_size(tensor: *mut c_void) -> i32;

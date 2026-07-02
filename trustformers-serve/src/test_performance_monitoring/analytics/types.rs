@@ -148,8 +148,8 @@ impl StatisticalAnalyzer {
             kurtosis: 0.0,
             percentiles,
             range: (
-                *sorted_data.first().expect("data checked non-empty above"),
-                *sorted_data.last().expect("data checked non-empty above"),
+                sorted_data.first().copied().unwrap_or(0.0),
+                sorted_data.last().copied().unwrap_or(0.0),
             ),
             interquartile_range,
         })
@@ -399,7 +399,11 @@ impl BaselineManager {
             self.active_baselines.insert(test_id.to_string(), new_baseline);
         }
         let (baseline_id, baseline_clone) = {
-            let baseline = self.active_baselines.get_mut(test_id).expect("baseline exists");
+            let baseline = self.active_baselines.get_mut(test_id).ok_or_else(|| {
+                AnalyticsError::BaselineComparisonError {
+                    reason: "baseline missing after insertion".to_string(),
+                }
+            })?;
             if !metrics_data.is_empty() {
                 baseline.sample_size =
                     baseline.sample_size.saturating_add(metrics_data.len() as u64);
@@ -415,7 +419,10 @@ impl BaselineManager {
             }
             (baseline.baseline_id.clone(), baseline.clone())
         };
-        let latest = metrics_data.last().expect("metrics_data not empty");
+        let latest = metrics_data.last().ok_or(AnalyticsError::InsufficientData {
+            required: 1,
+            available: 0,
+        })?;
         let performance_delta = self.calculate_performance_delta(&baseline_clone, latest);
         let confidence_interval = self.calculate_confidence_interval(
             &baseline_clone.statistical_summary,

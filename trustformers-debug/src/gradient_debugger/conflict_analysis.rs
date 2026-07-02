@@ -332,9 +332,6 @@ impl GradientConflictAnalyzer {
 
     pub fn generate_conflict_report(&self, analysis: &GradientConflictAnalysis) -> ConflictReport {
         let mut layer_conflict_counts = HashMap::new();
-        #[allow(dead_code)]
-        #[allow(unused_assignments)]
-        let mut most_problematic_pairs = Vec::new();
 
         // Count conflicts per layer
         for conflict in &analysis.conflicts {
@@ -349,7 +346,7 @@ impl GradientConflictAnalyzer {
                 .partial_cmp(&a.conflict_score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        most_problematic_pairs = sorted_conflicts.into_iter().take(5).collect();
+        let most_problematic_pairs = sorted_conflicts.into_iter().take(5).collect();
 
         // Find most problematic layers
         let mut layer_scores: Vec<(String, usize)> = layer_conflict_counts.into_iter().collect();

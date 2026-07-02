@@ -200,7 +200,7 @@ impl AlertSuppressor {
         self.stats.total_processed.fetch_add(1, Ordering::Relaxed);
 
         let suppressed_by_rule = {
-            let rules = self.rules.read().expect("Rules RwLock poisoned");
+            let rules = self.rules.read().unwrap_or_else(|p| p.into_inner());
             let mut suppressed = false;
 
             for rule in rules.iter() {
@@ -227,7 +227,7 @@ impl AlertSuppressor {
 
         // Check deduplication
         let enable_deduplication = {
-            let config = self.config.read().expect("Config RwLock poisoned");
+            let config = self.config.read().unwrap_or_else(|p| p.into_inner());
             config.enable_deduplication
         };
 
@@ -250,7 +250,7 @@ impl AlertSuppressor {
 
         // Update fingerprint if deduplication is enabled
         let enable_deduplication = {
-            let config = self.config.read().expect("Config RwLock poisoned");
+            let config = self.config.read().unwrap_or_else(|p| p.into_inner());
             config.enable_deduplication
         };
 
@@ -317,9 +317,9 @@ impl AlertSuppressor {
             // Check if within deduplication window
             let time_diff = existing.last_seen.signed_duration_since(existing.first_seen);
             let dedup_window = chrono::Duration::from_std(
-                self.config.read().expect("Config RwLock poisoned").deduplication_window,
+                self.config.read().unwrap_or_else(|p| p.into_inner()).deduplication_window,
             )
-            .expect("Duration conversion failed");
+            .unwrap_or_else(|_| chrono::Duration::zero());
 
             return time_diff <= dedup_window;
         }
@@ -338,7 +338,7 @@ impl AlertSuppressor {
 
         // Maintain cache size
         let max_cache_size =
-            self.config.read().expect("Config RwLock poisoned").max_fingerprint_cache;
+            self.config.read().unwrap_or_else(|p| p.into_inner()).max_fingerprint_cache;
         if fingerprints.len() > max_cache_size {
             // Remove oldest entries - collect keys first to avoid borrow conflict
             let mut entries: Vec<_> =
@@ -393,14 +393,13 @@ impl AlertSuppressor {
 
     /// Update rule statistics
     fn update_rule_stats(&self, rule_id: &str) {
-        let mut stats =
-            self.stats.suppression_by_rule.lock().expect("Suppression stats lock poisoned");
+        let mut stats = self.stats.suppression_by_rule.lock().unwrap_or_else(|p| p.into_inner());
         *stats.entry(rule_id.to_string()).or_insert(0) += 1;
     }
 
     /// Add suppression rule
     pub fn add_rule(&self, rule: SuppressionRule) {
-        let mut rules = self.rules.write().expect("Rules RwLock poisoned");
+        let mut rules = self.rules.write().unwrap_or_else(|p| p.into_inner());
         rules.push(rule);
 
         // Sort by priority (higher priority first)
@@ -409,7 +408,7 @@ impl AlertSuppressor {
 
     /// Remove suppression rule
     pub fn remove_rule(&self, rule_id: &str) {
-        let mut rules = self.rules.write().expect("Rules RwLock poisoned");
+        let mut rules = self.rules.write().unwrap_or_else(|p| p.into_inner());
         rules.retain(|rule| rule.id != rule_id);
     }
 
@@ -419,25 +418,13 @@ impl AlertSuppressor {
             total_processed: AtomicU64::new(self.stats.total_processed.load(Ordering::Relaxed)),
             total_suppressed: AtomicU64::new(self.stats.total_suppressed.load(Ordering::Relaxed)),
             suppression_by_rule: Arc::new(Mutex::new(
-                self.stats
-                    .suppression_by_rule
-                    .lock()
-                    .expect("Suppression stats lock poisoned")
-                    .clone(),
+                self.stats.suppression_by_rule.lock().unwrap_or_else(|p| p.into_inner()).clone(),
             )),
             avg_suppression_rate: Arc::new(Mutex::new(
-                *self
-                    .stats
-                    .avg_suppression_rate
-                    .lock()
-                    .expect("Avg suppression rate lock poisoned"),
+                *self.stats.avg_suppression_rate.lock().unwrap_or_else(|p| p.into_inner()),
             )),
             peak_suppression_rate: Arc::new(Mutex::new(
-                *self
-                    .stats
-                    .peak_suppression_rate
-                    .lock()
-                    .expect("Peak suppression rate lock poisoned"),
+                *self.stats.peak_suppression_rate.lock().unwrap_or_else(|p| p.into_inner()),
             )),
         }
     }

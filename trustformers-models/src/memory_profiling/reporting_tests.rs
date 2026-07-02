@@ -181,6 +181,7 @@ mod tests {
 
     #[test]
     fn test_profiler_config_custom() {
+        let output_dir = std::env::temp_dir().join("reports").to_string_lossy().to_string();
         let config = ProfilerConfig {
             max_data_points: 5000,
             collection_interval_ms: 500,
@@ -188,11 +189,11 @@ mod tests {
             enable_pattern_analysis: false,
             memory_alert_threshold_mb: 512.0,
             enable_gc_suggestions: false,
-            output_dir: "/tmp/reports".to_string(),
+            output_dir: output_dir.clone(),
         };
         assert_eq!(config.max_data_points, 5000);
         assert!(!config.enable_leak_detection);
-        assert_eq!(config.output_dir, "/tmp/reports");
+        assert_eq!(config.output_dir, output_dir);
     }
 
     // --- MemoryAlert tests ---

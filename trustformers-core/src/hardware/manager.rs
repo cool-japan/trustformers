@@ -177,7 +177,8 @@ impl HardwareManager {
             // GPU backend initialization - no longer needed with new trait design
             self.register_backend_devices(&gpu_backend).await?;
 
-            *self.gpu_backend.lock().expect("lock should not be poisoned") = Some(gpu_backend);
+            *self.gpu_backend.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                Some(gpu_backend);
         }
         Ok(())
     }
@@ -185,7 +186,8 @@ impl HardwareManager {
     /// Register devices from a backend
     async fn register_backend_devices(&self, backend: &dyn HardwareBackend) -> HardwareResult<()> {
         let devices = backend.discover_devices().await?;
-        let mut device_info = self.device_info.write().expect("lock should not be poisoned");
+        let mut device_info =
+            self.device_info.write().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         for device in devices {
             let device_id = device.device_id().to_string();
@@ -222,7 +224,7 @@ impl HardwareManager {
     pub fn has_device(&self, device_id: &str) -> bool {
         self.device_info
             .read()
-            .expect("device_info lock should not be poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .contains_key(device_id)
     }
 
@@ -230,7 +232,7 @@ impl HardwareManager {
     pub fn get_device_info(&self, device_id: &str) -> Option<DeviceInfo> {
         self.device_info
             .read()
-            .expect("device_info lock should not be poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(device_id)
             .cloned()
     }
@@ -239,7 +241,7 @@ impl HardwareManager {
     pub fn get_device_metrics(&self, device_id: &str) -> Option<HardwareMetrics> {
         self.device_metrics
             .read()
-            .expect("device_metrics lock should not be poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(device_id)
             .cloned()
     }
@@ -248,7 +250,7 @@ impl HardwareManager {
     pub fn list_devices(&self) -> Vec<DeviceInfo> {
         self.device_info
             .read()
-            .expect("device_info lock should not be poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .values()
             .cloned()
             .collect()
@@ -258,7 +260,7 @@ impl HardwareManager {
     pub fn list_devices_by_type(&self, hardware_type: HardwareType) -> Vec<DeviceInfo> {
         self.device_info
             .read()
-            .expect("device_info lock should not be poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .values()
             .filter(|info| info.hardware_type == hardware_type)
             .cloned()
@@ -331,7 +333,7 @@ impl HardwareManager {
     pub fn update_device_metrics(&self, device_id: &str, metrics: HardwareMetrics) {
         {
             let mut device_metrics =
-                self.device_metrics.write().expect("device_metrics lock should not be poisoned");
+                self.device_metrics.write().unwrap_or_else(|poisoned| poisoned.into_inner());
             device_metrics.insert(device_id.to_string(), metrics.clone());
         }
 
@@ -371,11 +373,11 @@ impl HardwareManager {
         // Clear caches
         self.device_info
             .write()
-            .expect("device_info lock should not be poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
         self.device_metrics
             .write()
-            .expect("device_metrics lock should not be poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
 
         Ok(())

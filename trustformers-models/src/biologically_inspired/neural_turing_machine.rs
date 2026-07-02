@@ -203,7 +203,11 @@ impl NTMLayer {
     fn forward_timestep(&mut self, input: &Tensor) -> Result<Tensor> {
         // Read from memory (simplified to avoid borrowing conflicts)
         let read_vectors = {
-            let memory_bank = self.memory_bank.as_ref().expect("operation failed");
+            let memory_bank = self.memory_bank.as_ref().ok_or_else(|| {
+                trustformers_core::errors::TrustformersError::model_error(
+                    "Neural Turing Machine memory bank not initialized".to_string(),
+                )
+            })?;
             // Simple read operation - average of memory rows weighted by attention
             let mut vectors = Vec::new();
             for head in &memory_bank.read_heads {
@@ -228,7 +232,11 @@ impl NTMLayer {
 
         // Generate head control signals and write to memory (simplified)
         {
-            let memory_bank = self.memory_bank.as_mut().expect("operation failed");
+            let memory_bank = self.memory_bank.as_mut().ok_or_else(|| {
+                trustformers_core::errors::TrustformersError::model_error(
+                    "Neural Turing Machine memory bank not initialized".to_string(),
+                )
+            })?;
 
             // Simple uniform attention weights for heads
             let memory_size = memory_bank.memory_size.0;

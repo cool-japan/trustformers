@@ -23,8 +23,9 @@ mod tests {
 
     #[test]
     fn test_training_args_new() {
-        let args = TrainingArguments::new("/tmp/output");
-        assert_eq!(args.output_dir, PathBuf::from("/tmp/output"));
+        let output_dir = std::env::temp_dir().join("output");
+        let args = TrainingArguments::new(output_dir.clone());
+        assert_eq!(args.output_dir, output_dir);
         assert!(args.validate().is_ok());
     }
 

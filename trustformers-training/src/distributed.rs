@@ -8,7 +8,6 @@ use trustformers_core::traits::Model;
 
 /// Configuration for distributed training
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct DistributedConfig {
     /// Number of processes/nodes
     pub world_size: usize,
@@ -110,11 +109,9 @@ impl ProcessGroup for SimulatedProcessGroup {
 
 /// NCCL-based process group for GPU distributed training
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct NCCLProcessGroup {
     rank: usize,
     world_size: usize,
-    #[allow(dead_code)]
     device_id: usize,
     master_addr: String,
     master_port: u16,
@@ -123,9 +120,7 @@ pub struct NCCLProcessGroup {
 
 /// NCCL communicator wrapper
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct NCCLCommunicator {
-    #[allow(dead_code)]
     comm_id: String,
     initialized: bool,
 }
@@ -267,11 +262,9 @@ impl ProcessGroup for NCCLProcessGroup {
 
 /// Gloo-based process group for CPU distributed training
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct GlooProcessGroup {
     rank: usize,
     world_size: usize,
-    #[allow(dead_code)]
     master_addr: String,
     master_port: u16,
     gloo_context: Option<GlooContext>,
@@ -279,9 +272,7 @@ pub struct GlooProcessGroup {
 
 /// Gloo context wrapper
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct GlooContext {
-    #[allow(dead_code)]
     context_id: String,
     initialized: bool,
 }
@@ -409,11 +400,9 @@ impl ProcessGroup for GlooProcessGroup {
 }
 
 /// Data parallel trainer that wraps a model for distributed training
-#[allow(dead_code)]
 pub struct DataParallelTrainer<M: Model<Input = Tensor, Output = Tensor>> {
     model: Arc<Mutex<M>>,
     process_group: Arc<dyn ProcessGroup>,
-    #[allow(dead_code)]
     config: DistributedConfig,
     gradient_buckets: Vec<Vec<String>>, // Parameter names grouped into buckets
 }
@@ -439,7 +428,7 @@ impl<M: Model<Input = Tensor, Output = Tensor>> DataParallelTrainer<M> {
 
     /// Forward pass through the model
     pub fn forward(&self, input: Tensor) -> Result<Tensor> {
-        let model = self.model.lock().expect("lock should not be poisoned");
+        let model = self.model.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         model.forward(input).map_err(|e| anyhow::anyhow!(e))
     }
 
@@ -509,55 +498,54 @@ impl<M: Model<Input = Tensor, Output = Tensor>> DataParallelTrainer<M> {
         // 2. Extract each parameter tensor
         // 3. Return a vector of (name, tensor) pairs
 
-        // For simulation, create some representative parameters
-        let mut parameters = Vec::new();
-
-        // Simulate transformer model parameters
-        parameters.push((
-            "embedding.weight".to_string(),
-            Tensor::randn(&[50257, 768])?,
-        ));
-        parameters.push((
-            "layer.0.attention.query.weight".to_string(),
-            Tensor::randn(&[768, 768])?,
-        ));
-        parameters.push((
-            "layer.0.attention.key.weight".to_string(),
-            Tensor::randn(&[768, 768])?,
-        ));
-        parameters.push((
-            "layer.0.attention.value.weight".to_string(),
-            Tensor::randn(&[768, 768])?,
-        ));
-        parameters.push((
-            "layer.0.attention.output.weight".to_string(),
-            Tensor::randn(&[768, 768])?,
-        ));
-        parameters.push((
-            "layer.0.mlp.up.weight".to_string(),
-            Tensor::randn(&[768, 3072])?,
-        ));
-        parameters.push((
-            "layer.0.mlp.down.weight".to_string(),
-            Tensor::randn(&[3072, 768])?,
-        ));
-        parameters.push((
-            "layer.0.layernorm1.weight".to_string(),
-            Tensor::ones(&[768])?,
-        ));
-        parameters.push((
-            "layer.0.layernorm1.bias".to_string(),
-            Tensor::zeros(&[768])?,
-        ));
-        parameters.push((
-            "layer.0.layernorm2.weight".to_string(),
-            Tensor::ones(&[768])?,
-        ));
-        parameters.push((
-            "layer.0.layernorm2.bias".to_string(),
-            Tensor::zeros(&[768])?,
-        ));
-        parameters.push(("lm_head.weight".to_string(), Tensor::randn(&[768, 50257])?));
+        // For simulation, create some representative transformer model parameters.
+        let parameters = vec![
+            (
+                "embedding.weight".to_string(),
+                Tensor::randn(&[50257, 768])?,
+            ),
+            (
+                "layer.0.attention.query.weight".to_string(),
+                Tensor::randn(&[768, 768])?,
+            ),
+            (
+                "layer.0.attention.key.weight".to_string(),
+                Tensor::randn(&[768, 768])?,
+            ),
+            (
+                "layer.0.attention.value.weight".to_string(),
+                Tensor::randn(&[768, 768])?,
+            ),
+            (
+                "layer.0.attention.output.weight".to_string(),
+                Tensor::randn(&[768, 768])?,
+            ),
+            (
+                "layer.0.mlp.up.weight".to_string(),
+                Tensor::randn(&[768, 3072])?,
+            ),
+            (
+                "layer.0.mlp.down.weight".to_string(),
+                Tensor::randn(&[3072, 768])?,
+            ),
+            (
+                "layer.0.layernorm1.weight".to_string(),
+                Tensor::ones(&[768])?,
+            ),
+            (
+                "layer.0.layernorm1.bias".to_string(),
+                Tensor::zeros(&[768])?,
+            ),
+            (
+                "layer.0.layernorm2.weight".to_string(),
+                Tensor::ones(&[768])?,
+            ),
+            (
+                "layer.0.layernorm2.bias".to_string(),
+                Tensor::zeros(&[768])?,
+            ),
+            ("lm_head.weight".to_string(), Tensor::randn(&[768, 50257])?),
+        ];
 
         Ok(parameters)
     }
@@ -641,7 +629,6 @@ fn detect_gpu_count() -> Result<usize> {
 
 /// MPI-based process group for distributed training
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct MPIProcessGroup {
     rank: usize,
     world_size: usize,
@@ -650,7 +637,6 @@ pub struct MPIProcessGroup {
 
 /// MPI context wrapper
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct MPIContext {
     context_id: String,
     initialized: bool,

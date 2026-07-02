@@ -2,6 +2,10 @@
 //!
 //! This module contains the fundamental components for TrustformeRS debugging including
 //! the main DebugSession coordinator, configuration structures, and session lifecycle management.
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use crate::*;
 use anyhow::Result;
@@ -117,7 +121,6 @@ pub struct DebugSession {
     transformer_debugger: Option<neural_network_debugging::TransformerDebugger>,
     advanced_ml_debugger: AdvancedMLDebugger,
     advanced_gpu_profiler: Option<AdvancedGpuMemoryProfiler>,
-    #[allow(dead_code)]
     kernel_optimizer: KernelOptimizationAnalyzer,
     ai_code_analyzer: Option<AICodeAnalyzer>,
     distributed_debugger: Option<DistributedDebugger>,

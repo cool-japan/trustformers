@@ -51,6 +51,8 @@ impl AutoModelForSequenceClassification {
                     )?,
                 ))
             },
+            // reason: catch-all is unreachable when model features are enabled, but
+            // required so the match stays exhaustive across arbitrary feature subsets.
             #[allow(unreachable_patterns)]
             _ => Err(TrustformersError::Core(
                 CoreTrustformersError::runtime_error(
@@ -129,6 +131,8 @@ impl AutoModelForTokenClassification {
                     )?,
                 ))
             },
+            // reason: catch-all is unreachable when model features are enabled, but
+            // required so the match stays exhaustive across arbitrary feature subsets.
             #[allow(unreachable_patterns)]
             _ => Err(TrustformersError::Core(
                 CoreTrustformersError::runtime_error(
@@ -213,6 +217,8 @@ impl AutoModelForQuestionAnswering {
                     crate::models::albert::AlbertForQuestionAnswering::new(albert_config)?,
                 ))
             },
+            // reason: catch-all is unreachable when model features are enabled, but
+            // required so the match stays exhaustive across arbitrary feature subsets.
             #[allow(unreachable_patterns)]
             _ => Err(TrustformersError::Core(
                 CoreTrustformersError::runtime_error(
@@ -292,6 +298,8 @@ impl AutoModelForCausalLM {
             crate::automodel::AutoConfig::GptJ(gpt_j_config) => Ok(AutoModelForCausalLM::GptJ(
                 crate::models::gpt_j::GptJLMHeadModel::new(gpt_j_config)?,
             )),
+            // reason: catch-all is unreachable when model features are enabled, but
+            // required so the match stays exhaustive across arbitrary feature subsets.
             #[allow(unreachable_patterns)]
             _ => Err(TrustformersError::Core(
                 CoreTrustformersError::runtime_error(
@@ -391,6 +399,8 @@ impl AutoModelForSeq2SeqLM {
             crate::automodel::AutoConfig::T5(t5_config) => Ok(AutoModelForSeq2SeqLM::T5(
                 crate::models::t5::T5ForConditionalGeneration::new(t5_config)?,
             )),
+            // reason: catch-all is unreachable when model features are enabled, but
+            // required so the match stays exhaustive across arbitrary feature subsets.
             #[allow(unreachable_patterns)]
             _ => Err(TrustformersError::Core(
                 CoreTrustformersError::runtime_error(
@@ -466,6 +476,8 @@ impl AutoModelForMaskedLM {
                     crate::models::albert::AlbertForMaskedLM::new(albert_config)?,
                 ))
             },
+            // reason: catch-all is unreachable when model features are enabled, but
+            // required so the match stays exhaustive across arbitrary feature subsets.
             #[allow(unreachable_patterns)]
             _ => Err(TrustformersError::Core(
                 CoreTrustformersError::runtime_error(

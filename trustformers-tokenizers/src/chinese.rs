@@ -352,14 +352,17 @@ impl ChineseTokenizer {
     /// Calculate word score for segmentation
     fn calculate_word_score(&self, word: &str) -> f64 {
         if word.len() == 1 {
-            let ch = word.chars().next().expect("word with len()==1 must have at least one char");
-            if Self::is_chinese_char(ch) {
-                // Single character Chinese words have lower score
-                return self.char_freq.get(&ch).map(|&f| (f as f64).ln()).unwrap_or(-10.0);
-            } else if Self::is_chinese_punctuation(ch) || ch.is_ascii_punctuation() {
-                return 0.0; // Neutral score for punctuation
-            } else {
-                return -5.0; // Lower score for other single characters
+            // `len() == 1` guarantees a single char; fall through to the
+            // multi-character logic on the impossible empty case.
+            if let Some(ch) = word.chars().next() {
+                if Self::is_chinese_char(ch) {
+                    // Single character Chinese words have lower score
+                    return self.char_freq.get(&ch).map(|&f| (f as f64).ln()).unwrap_or(-10.0);
+                } else if Self::is_chinese_punctuation(ch) || ch.is_ascii_punctuation() {
+                    return 0.0; // Neutral score for punctuation
+                } else {
+                    return -5.0; // Lower score for other single characters
+                }
             }
         }
 
@@ -419,15 +422,15 @@ impl ChineseTokenizer {
 
             // Handle punctuation
             if segment.len() == 1 {
-                let ch = segment
-                    .chars()
-                    .next()
-                    .expect("segment with len()==1 must have at least one char");
-                if Self::is_chinese_punctuation(ch) || ch.is_ascii_punctuation() {
-                    if self.config.keep_punctuation {
-                        tokens.push(segment);
+                // `len() == 1` guarantees a single char; the empty case is
+                // impossible, so wrap defensively instead of panicking.
+                if let Some(ch) = segment.chars().next() {
+                    if Self::is_chinese_punctuation(ch) || ch.is_ascii_punctuation() {
+                        if self.config.keep_punctuation {
+                            tokens.push(segment);
+                        }
+                        continue;
                     }
-                    continue;
                 }
             }
 

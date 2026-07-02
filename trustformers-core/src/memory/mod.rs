@@ -311,13 +311,14 @@ impl TensorMemoryPool {
     pub fn get_tensor(&self, shape: &[usize], dtype: crate::tensor::DType) -> Result<Tensor> {
         // Track access pattern for prefetching
         if self.config.enable_prefetching {
-            let mut patterns = self.access_patterns.lock().expect("lock should not be poisoned");
+            let mut patterns =
+                self.access_patterns.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             patterns.entry(shape.to_vec()).or_default().push(Instant::now());
         }
 
         // Update statistics
         {
-            let mut stats = self.statistics.lock().expect("lock should not be poisoned");
+            let mut stats = self.statistics.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             stats.total_requests += 1;
         }
 
@@ -328,14 +329,14 @@ impl TensorMemoryPool {
         // Try to get from pool first
         if let Some(tensor) = self.try_get_from_pool(shape)? {
             // Cache hit!
-            let mut stats = self.statistics.lock().expect("lock should not be poisoned");
+            let mut stats = self.statistics.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             stats.cache_hits += 1;
             return Ok(tensor);
         }
 
         // Cache miss
         {
-            let mut stats = self.statistics.lock().expect("lock should not be poisoned");
+            let mut stats = self.statistics.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             stats.cache_misses += 1;
         }
 
@@ -360,15 +361,16 @@ impl TensorMemoryPool {
         // Create enhanced pool entry
         let entry = PoolEntry::new(tensor, tensor_size);
 
-        let mut pool = self.pool.write().expect("lock should not be poisoned");
+        let mut pool = self.pool.write().unwrap_or_else(|poisoned| poisoned.into_inner());
         pool.entry(shape).or_default().push(entry);
 
         // Update current size and peak usage
         {
-            let mut current = self.current_size.lock().expect("lock should not be poisoned");
+            let mut current =
+                self.current_size.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             *current += tensor_size;
 
-            let mut stats = self.statistics.lock().expect("lock should not be poisoned");
+            let mut stats = self.statistics.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if *current > stats.peak_memory_usage {
                 stats.peak_memory_usage = *current;
             }
@@ -383,7 +385,7 @@ impl TensorMemoryPool {
 
     /// Try to get a tensor from the pool (enhanced with access tracking)
     fn try_get_from_pool(&self, shape: &[usize]) -> Result<Option<Tensor>> {
-        let mut pool = self.pool.write().expect("lock should not be poisoned");
+        let mut pool = self.pool.write().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         if let Some(entries) = pool.get_mut(shape) {
             if let Some(mut entry) = entries.pop() {
@@ -391,7 +393,8 @@ impl TensorMemoryPool {
                 entry.mark_accessed();
 
                 let tensor_size = entry.size_bytes;
-                *self.current_size.lock().expect("lock should not be poisoned") -= tensor_size;
+                *self.current_size.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) -=
+                    tensor_size;
                 return Ok(Some(entry.tensor));
             }
         }
@@ -449,11 +452,14 @@ impl TensorMemoryPool {
 
     /// Cleanup old entries if needed (enhanced with adaptive eviction policies)
     fn cleanup_if_needed(&self) -> Result<()> {
-        let mut last_cleanup = self.last_cleanup.lock().expect("lock should not be poisoned");
+        let mut last_cleanup =
+            self.last_cleanup.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let should_cleanup_time = last_cleanup.elapsed() >= self.config.cleanup_interval;
 
-        let current_size = *self.current_size.lock().expect("lock should not be poisoned");
-        let dynamic_max = *self.dynamic_max_size.lock().expect("lock should not be poisoned");
+        let current_size =
+            *self.current_size.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dynamic_max =
+            *self.dynamic_max_size.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let should_cleanup_size = current_size > dynamic_max;
 
         if !should_cleanup_time && !should_cleanup_size {
@@ -461,7 +467,7 @@ impl TensorMemoryPool {
         }
 
         // Enhanced cleanup using configured eviction policy
-        let mut pool = self.pool.write().expect("lock should not be poisoned");
+        let mut pool = self.pool.write().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut total_freed = 0;
         let mut eviction_count = 0;
         let policy = self.config.eviction_policy;
@@ -523,14 +529,14 @@ impl TensorMemoryPool {
 
         // Update statistics
         {
-            let mut stats = self.statistics.lock().expect("lock should not be poisoned");
+            let mut stats = self.statistics.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             stats.total_evictions += eviction_count;
             *stats.evictions_by_policy.entry(format!("{:?}", policy)).or_insert(0) +=
                 eviction_count;
         }
 
         // Update size
-        *self.current_size.lock().expect("lock should not be poisoned") -= total_freed;
+        *self.current_size.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) -= total_freed;
         *last_cleanup = Instant::now();
 
         // Run defragmentation if enabled
@@ -553,11 +559,12 @@ impl TensorMemoryPool {
 
     /// Adapt pool size based on hit rate
     fn adapt_by_hit_rate(&self) -> Result<()> {
-        let stats = self.statistics.lock().expect("lock should not be poisoned");
+        let stats = self.statistics.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let hit_rate = stats.hit_rate();
         drop(stats);
 
-        let mut dynamic_max = self.dynamic_max_size.lock().expect("lock should not be poisoned");
+        let mut dynamic_max =
+            self.dynamic_max_size.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let target_rate = self.config.target_hit_rate;
 
         if hit_rate < target_rate {
@@ -583,8 +590,10 @@ impl TensorMemoryPool {
     fn adapt_by_memory_pressure(&self) -> Result<()> {
         // Simplified memory pressure detection
         // In production, this would query OS for available memory
-        let current_size = *self.current_size.lock().expect("lock should not be poisoned");
-        let mut dynamic_max = self.dynamic_max_size.lock().expect("lock should not be poisoned");
+        let current_size =
+            *self.current_size.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut dynamic_max =
+            self.dynamic_max_size.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let utilization = current_size as f64 / *dynamic_max as f64;
 
@@ -603,7 +612,7 @@ impl TensorMemoryPool {
 
     /// Adapt pool size based on access pattern prediction
     fn adapt_by_prediction(&self) -> Result<()> {
-        let patterns = self.access_patterns.lock().expect("lock should not be poisoned");
+        let patterns = self.access_patterns.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Analyze access patterns to predict future needs
         let mut total_recent_accesses = 0;
@@ -618,7 +627,8 @@ impl TensorMemoryPool {
         drop(patterns);
 
         // Adjust based on activity level
-        let mut dynamic_max = self.dynamic_max_size.lock().expect("lock should not be poisoned");
+        let mut dynamic_max =
+            self.dynamic_max_size.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         if total_recent_accesses > 1000 {
             // High activity: increase pool
@@ -636,7 +646,7 @@ impl TensorMemoryPool {
     /// Defragment the pool by reorganizing entries
     fn defragment_pool(&self) -> Result<()> {
         // Simplified defragmentation: consolidate shape groups
-        let mut pool = self.pool.write().expect("lock should not be poisoned");
+        let mut pool = self.pool.write().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         for entries in pool.values_mut() {
             // Sort entries by access count (most accessed first)
@@ -648,10 +658,12 @@ impl TensorMemoryPool {
 
     /// Get enhanced memory pool statistics
     pub fn get_stats(&self) -> MemoryPoolStats {
-        let pool = self.pool.read().expect("lock should not be poisoned");
-        let current_size = *self.current_size.lock().expect("lock should not be poisoned");
-        let stats = self.statistics.lock().expect("lock should not be poisoned");
-        let dynamic_max = *self.dynamic_max_size.lock().expect("lock should not be poisoned");
+        let pool = self.pool.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let current_size =
+            *self.current_size.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let stats = self.statistics.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dynamic_max =
+            *self.dynamic_max_size.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let total_tensors = pool.values().map(|v| v.len()).sum();
         let total_shapes = pool.len();
@@ -677,13 +689,13 @@ impl TensorMemoryPool {
 
     /// Reset statistics counters
     pub fn reset_statistics(&self) {
-        let mut stats = self.statistics.lock().expect("Lock poisoned");
+        let mut stats = self.statistics.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         *stats = PoolStatistics::default();
     }
 
     /// Get current hit rate
     pub fn hit_rate(&self) -> f64 {
-        let stats = self.statistics.lock().expect("lock should not be poisoned");
+        let stats = self.statistics.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         stats.hit_rate()
     }
 
@@ -699,7 +711,7 @@ impl TensorMemoryPool {
 
     /// Get predicted shapes based on access patterns
     pub fn get_predicted_shapes(&self, window: Duration) -> Vec<Vec<usize>> {
-        let patterns = self.access_patterns.lock().expect("lock should not be poisoned");
+        let patterns = self.access_patterns.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let now = Instant::now();
 
         let mut frequent_shapes: Vec<(Vec<usize>, usize)> = patterns

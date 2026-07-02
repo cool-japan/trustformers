@@ -1,6 +1,10 @@
 //! Auto-generated module
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -11,13 +15,9 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub(super) struct BandwidthStats {
-    #[allow(dead_code)]
     pub(super) bytes_per_second: f64,
-    #[allow(dead_code)]
     pub(super) peak_bandwidth: f64,
-    #[allow(dead_code)]
     pub(super) utilization_percentage: f64,
-    #[allow(dead_code)]
     pub(super) congestion_events: u32,
 }
 /// Status information for distributed debugging coordination
@@ -38,13 +38,9 @@ pub struct CoordinationStatus {
 }
 #[derive(Debug, Clone)]
 pub(super) struct LoadDataPoint {
-    #[allow(dead_code)]
     pub(super) timestamp: Instant,
-    #[allow(dead_code)]
     pub(super) node_id: NodeId,
-    #[allow(dead_code)]
     pub(super) load_metrics: NodeMetrics,
-    #[allow(dead_code)]
     pub(super) workload_characteristics: WorkloadCharacteristics,
 }
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -77,39 +73,26 @@ pub(crate) struct GradientSyncStatistics {
     pub(crate) total_sync_rounds: u64,
     pub(crate) average_sync_time: Duration,
     pub(crate) sync_efficiency: f64,
-    #[allow(dead_code)]
     pub(crate) gradient_staleness: f64,
     pub(crate) _convergence_rate: f64,
 }
 #[derive(Debug, Clone)]
 pub(super) struct PendingOperation {
     pub(super) operation_type: OperationType,
-    #[allow(dead_code)]
     pub(super) requester_node: NodeId,
-    #[allow(dead_code)]
     pub(super) priority: OperationPriority,
-    #[allow(dead_code)]
     pub(super) estimated_duration: Duration,
-    #[allow(dead_code)]
     pub(super) required_resources: Vec<String>,
-    #[allow(dead_code)]
     pub(super) metadata: HashMap<String, String>,
 }
 #[derive(Debug, Clone)]
 pub(super) struct BalancingDecision {
-    #[allow(dead_code)]
     pub(super) decision_id: Uuid,
-    #[allow(dead_code)]
     pub(super) algorithm_used: LoadBalancingAlgorithm,
-    #[allow(dead_code)]
     pub(super) workload_movements: Vec<WorkloadMovement>,
-    #[allow(dead_code)]
     pub(super) decision_rationale: String,
-    #[allow(dead_code)]
     pub(super) expected_improvement: f64,
-    #[allow(dead_code)]
     pub(super) actual_improvement: Option<f64>,
-    #[allow(dead_code)]
     pub(super) timestamp: Instant,
 }
 /// Configuration for distributed debugging
@@ -158,26 +141,17 @@ pub struct DistributedDebugConfig {
 }
 #[derive(Debug)]
 pub(super) struct MerkleTree {
-    #[allow(dead_code)]
     pub(super) root_hash: String,
-    #[allow(dead_code)]
     pub(super) tree_levels: u32,
-    #[allow(dead_code)]
     pub(super) leaf_hashes: Vec<String>,
-    #[allow(dead_code)]
     pub(super) internal_nodes: HashMap<String, MerkleNode>,
 }
 #[derive(Debug, Clone)]
 pub(super) struct ConflictEvent {
-    #[allow(dead_code)]
     pub(super) conflict_id: Uuid,
-    #[allow(dead_code)]
     pub(super) conflicting_versions: Vec<StateVersion>,
-    #[allow(dead_code)]
     pub(super) resolution_strategy: ConflictResolutionStrategy,
-    #[allow(dead_code)]
     pub(super) resolution_time: Duration,
-    #[allow(dead_code)]
     pub(super) outcome: ConflictOutcome,
 }
 #[derive(Debug, Clone)]
@@ -219,28 +193,18 @@ pub struct ResourceUsage {
 }
 #[derive(Debug, Clone)]
 pub(super) struct SynchronizationPoint {
-    #[allow(dead_code)]
     pub(super) sync_id: Uuid,
-    #[allow(dead_code)]
     pub(super) trigger_condition: String,
-    #[allow(dead_code)]
     pub(super) waiting_nodes: HashSet<NodeId>,
-    #[allow(dead_code)]
     pub(super) reached_nodes: HashSet<NodeId>,
-    #[allow(dead_code)]
     pub(super) timeout: Instant,
 }
 #[derive(Debug, Clone)]
 pub(super) struct FailurePattern {
-    #[allow(dead_code)]
     pub(super) pattern_name: String,
-    #[allow(dead_code)]
     pub(super) frequency: f64,
-    #[allow(dead_code)]
     pub(super) precursors: Vec<String>,
-    #[allow(dead_code)]
     pub(super) typical_duration: Duration,
-    #[allow(dead_code)]
     pub(super) recovery_success_rate: f64,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -258,29 +222,21 @@ pub enum MessageType {
 #[derive(Debug)]
 pub(super) struct FaultDetector {
     pub(super) fault_history: Vec<FaultEvent>,
-    #[allow(dead_code)]
     pub(super) failure_patterns: HashMap<String, FailurePattern>,
     pub(super) _recovery_strategies: HashMap<FaultType, RecoveryStrategy>,
     pub(super) ongoing_recoveries: HashMap<NodeId, RecoveryOperation>,
 }
 #[derive(Debug, Clone)]
 pub(super) struct AdaptationStrategy {
-    #[allow(dead_code)]
     pub(super) strategy_name: String,
-    #[allow(dead_code)]
     pub(super) trigger_threshold: f64,
-    #[allow(dead_code)]
     pub(super) adaptation_actions: Vec<AdaptationAction>,
-    #[allow(dead_code)]
     pub(super) effectiveness_score: f64,
 }
 #[derive(Debug, Clone)]
 pub(super) struct BreakpointLocation {
-    #[allow(dead_code)]
     pub(super) function_name: String,
-    #[allow(dead_code)]
     pub(super) line_number: u32,
-    #[allow(dead_code)]
     pub(super) module_path: String,
 }
 #[derive(Debug, Clone)]
@@ -346,23 +302,16 @@ pub struct ClusterInfo {
 }
 #[derive(Debug, Clone)]
 pub(super) struct ResourceContention {
-    #[allow(dead_code)]
     pub(super) resource_type: String,
-    #[allow(dead_code)]
     pub(super) contending_processes: Vec<String>,
-    #[allow(dead_code)]
     pub(super) contention_level: f64,
 }
 #[derive(Debug, Clone)]
 pub(crate) struct CompressionStats {
-    #[allow(dead_code)]
     pub(crate) compression_algorithm: String,
     pub(crate) average_compression_ratio: f64,
-    #[allow(dead_code)]
     pub(crate) compression_time: Duration,
-    #[allow(dead_code)]
     pub(crate) decompression_time: Duration,
-    #[allow(dead_code)]
     pub(crate) accuracy_loss: f64,
 }
 #[derive(Debug, Clone)]
@@ -397,13 +346,9 @@ pub enum RiskLevel {
 }
 #[derive(Debug, Clone)]
 pub(super) struct AdaptationAction {
-    #[allow(dead_code)]
     pub(super) action_type: ActionType,
-    #[allow(dead_code)]
     pub(super) parameters: HashMap<String, String>,
-    #[allow(dead_code)]
     pub(super) expected_impact: f64,
-    #[allow(dead_code)]
     pub(super) risk_level: RiskLevel,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -450,24 +395,16 @@ pub enum OperationType {
 pub(super) struct SyncMetrics {
     pub(super) total_syncs: u64,
     pub(super) successful_syncs: u64,
-    #[allow(dead_code)]
     pub(super) conflicts_detected: u64,
-    #[allow(dead_code)]
     pub(super) conflicts_resolved: u64,
-    #[allow(dead_code)]
     pub(super) average_sync_time: Duration,
-    #[allow(dead_code)]
     pub(super) sync_efficiency: f64,
 }
 #[derive(Debug, Clone)]
 pub(super) struct OptimizationOpportunity {
-    #[allow(dead_code)]
     pub(super) opportunity_type: String,
-    #[allow(dead_code)]
     pub(super) description: String,
-    #[allow(dead_code)]
     pub(super) potential_improvement: f64,
-    #[allow(dead_code)]
     pub(super) implementation_difficulty: f64,
 }
 #[derive(Debug, Clone)]
@@ -503,28 +440,18 @@ pub enum SessionState {
 pub(super) struct RollbackStrategy {
     pub(super) strategy_type: RollbackType,
     pub(super) compensation_actions: Vec<String>,
-    #[allow(dead_code)]
     pub(super) rollback_timeout: Duration,
 }
 #[derive(Debug, Clone)]
 pub(super) struct DistributedDebugSession {
-    #[allow(dead_code)]
     pub(super) session_id: Uuid,
-    #[allow(dead_code)]
     pub(super) coordinator_node: NodeId,
-    #[allow(dead_code)]
     pub(super) participating_nodes: HashSet<NodeId>,
-    #[allow(dead_code)]
     pub(super) session_type: DebugSessionType,
-    #[allow(dead_code)]
     pub(super) session_state: SessionState,
-    #[allow(dead_code)]
     pub(super) start_time: Instant,
-    #[allow(dead_code)]
     pub(super) breakpoints: Vec<DistributedBreakpoint>,
-    #[allow(dead_code)]
     pub(super) shared_state: HashMap<String, String>,
-    #[allow(dead_code)]
     pub(super) synchronization_points: Vec<SynchronizationPoint>,
 }
 #[derive(Debug, Clone)]
@@ -546,34 +473,25 @@ pub enum NodeStatus {
 }
 #[derive(Debug, Clone)]
 pub(super) struct DistributionMetrics {
-    #[allow(dead_code)]
     pub(super) load_variance: f64,
     pub(super) balance_score: f64,
     pub(super) migration_count: u64,
-    #[allow(dead_code)]
     pub(super) assignment_efficiency: f64,
-    #[allow(dead_code)]
     pub(super) prediction_accuracy: f64,
 }
 #[derive(Debug, Clone)]
 pub(super) struct BottleneckAnalysis {
     pub(super) identified_bottlenecks: Vec<Bottleneck>,
-    #[allow(dead_code)]
     pub(super) critical_path: Vec<NodeId>,
     pub(super) _resource_contention: Vec<ResourceContention>,
     pub(super) optimization_opportunities: Vec<OptimizationOpportunity>,
 }
 #[derive(Debug)]
 pub(super) struct LoadPredictionModel {
-    #[allow(dead_code)]
     pub(super) model_type: PredictionModelType,
-    #[allow(dead_code)]
     pub(super) training_data: Vec<LoadDataPoint>,
-    #[allow(dead_code)]
     pub(super) model_parameters: HashMap<String, f64>,
-    #[allow(dead_code)]
     pub(super) prediction_accuracy: f64,
-    #[allow(dead_code)]
     pub(super) last_training: Instant,
 }
 /// Coordination engine for managing distributed debugging operations
@@ -583,26 +501,19 @@ pub(super) struct CoordinationEngine {
     pub(super) active_operations: HashMap<Uuid, CoordinatedOperation>,
     pub(super) operation_queue: VecDeque<PendingOperation>,
     pub(super) coordination_protocols: HashMap<OperationType, CoordinationProtocol>,
-    #[allow(dead_code)]
     pub(super) leader_election: LeaderElection,
     pub(super) _distributed_locks: HashMap<String, DistributedLock>,
 }
 #[derive(Debug, Clone)]
 pub(super) struct CoordinatedOperation {
-    #[allow(dead_code)]
     pub(super) operation_id: Uuid,
     pub(super) operation_type: OperationType,
-    #[allow(dead_code)]
     pub(super) coordinator_node: NodeId,
     pub(super) participating_nodes: HashSet<NodeId>,
     pub(super) operation_state: OperationState,
-    #[allow(dead_code)]
     pub(super) start_time: Instant,
-    #[allow(dead_code)]
     pub(super) timeout: Duration,
-    #[allow(dead_code)]
     pub(super) dependencies: Vec<Uuid>,
-    #[allow(dead_code)]
     pub(super) metadata: HashMap<String, String>,
 }
 #[derive(Debug)]
@@ -619,30 +530,19 @@ pub struct FaultAnalysis {
 }
 #[derive(Debug, Clone)]
 pub(super) struct RecoveryOperation {
-    #[allow(dead_code)]
     pub(super) recovery_id: Uuid,
-    #[allow(dead_code)]
     pub(super) fault_type: FaultType,
-    #[allow(dead_code)]
     pub(super) start_time: Instant,
-    #[allow(dead_code)]
     pub(super) current_step: usize,
-    #[allow(dead_code)]
     pub(super) strategy: RecoveryStrategy,
-    #[allow(dead_code)]
     pub(super) status: RecoveryStatus,
 }
 #[derive(Debug, Clone)]
 pub(super) struct ConsensusResult {
-    #[allow(dead_code)]
     pub(super) proposal_id: Uuid,
-    #[allow(dead_code)]
     pub(super) result: ConsensusOutcome,
-    #[allow(dead_code)]
     pub(super) vote_count: HashMap<bool, usize>,
-    #[allow(dead_code)]
     pub(super) decision_time: Duration,
-    #[allow(dead_code)]
     pub(super) timestamp: Instant,
 }
 #[derive(Debug, Clone)]
@@ -690,30 +590,20 @@ impl DebugSessionCoordinator {
 /// Leader election system for distributed coordination
 #[derive(Debug)]
 pub(super) struct LeaderElection {
-    #[allow(dead_code)]
     pub(super) election_algorithm: ElectionAlgorithm,
-    #[allow(dead_code)]
     pub(super) election_state: ElectionState,
-    #[allow(dead_code)]
     pub(super) candidate_nodes: HashSet<NodeId>,
-    #[allow(dead_code)]
     pub(super) voting_records: HashMap<NodeId, Vote>,
-    #[allow(dead_code)]
     pub(super) election_timeout: Duration,
-    #[allow(dead_code)]
     pub(super) last_election: Option<Instant>,
 }
 #[derive(Debug, Clone)]
 pub struct FaultEvent {
     pub(super) timestamp: std::time::SystemTime,
-    #[allow(dead_code)]
     pub(super) fault_type: FaultType,
-    #[allow(dead_code)]
     pub(super) affected_nodes: Vec<NodeId>,
-    #[allow(dead_code)]
     pub(super) severity: FaultSeverity,
     pub(super) description: String,
-    #[allow(dead_code)]
     pub(super) detection_method: String,
 }
 #[derive(Debug, Clone)]
@@ -721,7 +611,6 @@ pub(super) struct CoordinationStep {
     pub(super) step_name: String,
     pub(super) step_type: CoordinationStepType,
     pub(super) timeout: Duration,
-    #[allow(dead_code)]
     pub(super) required_acknowledgments: usize,
     pub(super) rollback_point: bool,
 }
@@ -740,15 +629,10 @@ pub struct TrendAnalysis {
 }
 #[derive(Debug, Clone)]
 pub(super) struct WorkloadItem {
-    #[allow(dead_code)]
     pub(super) item_id: Uuid,
-    #[allow(dead_code)]
     pub(super) workload_type: WorkloadType,
-    #[allow(dead_code)]
     pub(super) resource_requirements: ResourceRequirements,
-    #[allow(dead_code)]
     pub(super) estimated_duration: Duration,
-    #[allow(dead_code)]
     pub(super) priority: WorkloadPriority,
 }
 #[derive(Debug, Clone)]
@@ -761,29 +645,21 @@ pub enum ConflictResolutionStrategy {
 }
 #[derive(Debug, Clone)]
 pub struct ScalabilityAnalysis {
-    #[allow(dead_code)]
     pub(super) current_efficiency: f64,
-    #[allow(dead_code)]
     pub(super) predicted_efficiency: HashMap<u32, f64>,
-    #[allow(dead_code)]
     pub(super) scaling_bottlenecks: Vec<String>,
-    #[allow(dead_code)]
     pub(super) optimal_node_count: u32,
 }
 #[derive(Debug)]
 pub(super) struct ConflictResolver {
-    #[allow(dead_code)]
     pub(super) resolution_strategies: HashMap<String, ConflictResolutionStrategy>,
-    #[allow(dead_code)]
     pub(super) conflict_history: Vec<ConflictEvent>,
-    #[allow(dead_code)]
     pub(super) resolution_metrics: ResolutionMetrics,
 }
 /// Distributed performance profiler
 #[derive(Debug)]
 pub(super) struct DistributedProfiler {
     pub(super) cluster_performance: ClusterPerformanceMetrics,
-    #[allow(dead_code)]
     pub(super) node_profiles: HashMap<NodeId, NodePerformanceProfile>,
     pub(super) bottleneck_analysis: BottleneckAnalysis,
     pub(super) scalability_analysis: ScalabilityAnalysis,
@@ -791,15 +667,10 @@ pub(super) struct DistributedProfiler {
 #[derive(Debug, Clone)]
 pub(super) struct ConsensusProposal {
     pub(super) proposal_id: Uuid,
-    #[allow(dead_code)]
     pub(super) proposer: NodeId,
-    #[allow(dead_code)]
     pub(super) proposal_type: ProposalType,
-    #[allow(dead_code)]
     pub(super) content: String,
-    #[allow(dead_code)]
     pub(super) required_votes: usize,
-    #[allow(dead_code)]
     pub(super) votes: HashMap<NodeId, bool>,
     pub(super) timeout: Instant,
 }
@@ -807,7 +678,6 @@ pub(super) struct ConsensusProposal {
 #[derive(Debug)]
 pub(super) struct AdvancedLoadBalancer {
     pub(super) balancing_algorithm: LoadBalancingAlgorithm,
-    #[allow(dead_code)]
     pub(super) node_metrics: HashMap<NodeId, NodeMetrics>,
     pub(super) workload_distribution: WorkloadDistribution,
     pub(super) _prediction_model: LoadPredictionModel,
@@ -816,13 +686,9 @@ pub(super) struct AdvancedLoadBalancer {
 }
 #[derive(Debug, Clone)]
 pub(super) struct Vote {
-    #[allow(dead_code)]
     pub(super) voter: NodeId,
-    #[allow(dead_code)]
     pub(super) candidate: NodeId,
-    #[allow(dead_code)]
     pub(super) election_round: u64,
-    #[allow(dead_code)]
     pub(super) timestamp: Instant,
 }
 /// Gradient synchronization monitoring
@@ -835,13 +701,9 @@ pub(super) struct GradientSynchronizationMonitor {
 }
 #[derive(Debug, Clone)]
 pub(super) struct WorkloadCharacteristics {
-    #[allow(dead_code)]
     pub(super) request_rate: f64,
-    #[allow(dead_code)]
     pub(super) data_size: u64,
-    #[allow(dead_code)]
     pub(super) complexity_score: f64,
-    #[allow(dead_code)]
     pub(super) duration_estimate: Duration,
 }
 #[derive(Debug, Clone)]
@@ -850,31 +712,22 @@ pub(super) struct ResourceMetrics {
     pub(super) successful_allocations: u64,
     pub(super) failed_allocations: u64,
     pub(super) average_utilization: f64,
-    #[allow(dead_code)]
     pub(super) allocation_efficiency: f64,
 }
 #[derive(Debug, Clone)]
 pub(super) struct ResourceRequirements {
-    #[allow(dead_code)]
     pub(super) cpu_cores: u32,
-    #[allow(dead_code)]
     pub(super) memory_mb: u64,
-    #[allow(dead_code)]
     pub(super) network_bandwidth: u64,
-    #[allow(dead_code)]
     pub(super) storage_mb: u64,
-    #[allow(dead_code)]
     pub(super) gpu_units: u32,
 }
 #[derive(Debug, Clone)]
 pub(super) struct SessionMetrics {
     pub(super) total_sessions: u64,
     pub(super) successful_sessions: u64,
-    #[allow(dead_code)]
     pub(super) failed_sessions: u64,
-    #[allow(dead_code)]
     pub(super) average_session_duration: Duration,
-    #[allow(dead_code)]
     pub(super) session_efficiency: f64,
 }
 #[derive(Debug, Clone)]
@@ -901,28 +754,19 @@ pub enum ReservationStatus {
 }
 #[derive(Debug, Clone)]
 pub(super) struct StragglerInfo {
-    #[allow(dead_code)]
     pub(super) node_id: NodeId,
-    #[allow(dead_code)]
     pub(super) average_delay: Duration,
-    #[allow(dead_code)]
     pub(super) frequency: f64,
-    #[allow(dead_code)]
     pub(super) impact_score: f64,
-    #[allow(dead_code)]
     pub(super) suggested_actions: Vec<String>,
 }
 #[derive(Debug, Clone)]
 pub(super) struct SyncOperation {
     pub(super) sync_id: Uuid,
-    #[allow(dead_code)]
     pub(super) state_key: String,
     pub(super) operation_type: SyncOperationType,
-    #[allow(dead_code)]
     pub(super) source_node: NodeId,
-    #[allow(dead_code)]
     pub(super) target_nodes: HashSet<NodeId>,
-    #[allow(dead_code)]
     pub(super) priority: SyncPriority,
 }
 #[derive(Debug, Clone)]
@@ -937,10 +781,8 @@ pub enum CoordinationStepType {
 /// Distributed event bus for coordination events
 #[derive(Debug)]
 pub struct DistributedEventBus {
-    #[allow(dead_code)]
     pub(super) event_channels: HashMap<String, broadcast::Sender<DistributedEvent>>,
     pub(super) event_history: VecDeque<DistributedEvent>,
-    #[allow(dead_code)]
     pub(super) subscribers: HashMap<String, HashSet<NodeId>>,
     pub(super) event_metrics: EventMetrics,
 }
@@ -970,7 +812,6 @@ pub enum ConsistencyLevel {
 }
 #[derive(Debug, Clone)]
 pub(super) struct VectorClock {
-    #[allow(dead_code)]
     pub(super) clocks: HashMap<NodeId, u64>,
 }
 #[derive(Debug, Clone)]
@@ -1025,21 +866,15 @@ pub enum BottleneckType {
 }
 #[derive(Debug, Clone)]
 pub(super) struct AggregatedPerformanceMetrics {
-    #[allow(dead_code)]
     pub(super) cluster_throughput: f64,
-    #[allow(dead_code)]
     pub(super) average_node_utilization: f64,
-    #[allow(dead_code)]
     pub(super) network_efficiency: f64,
-    #[allow(dead_code)]
     pub(super) gradient_sync_efficiency: f64,
-    #[allow(dead_code)]
     pub(super) overall_health_score: f64,
 }
 /// Consensus manager for distributed decision making
 #[derive(Debug)]
 pub struct ConsensusManager {
-    #[allow(dead_code)]
     pub(super) consensus_algorithm: ConsensusAlgorithm,
     pub(super) consensus_state: ConsensusState,
     pub(super) pending_proposals: VecDeque<ConsensusProposal>,
@@ -1064,15 +899,10 @@ impl ConsensusManager {
 }
 #[derive(Debug, Clone)]
 pub(super) struct ResolutionMetrics {
-    #[allow(dead_code)]
     pub(super) total_conflicts: u64,
-    #[allow(dead_code)]
     pub(super) auto_resolved: u64,
-    #[allow(dead_code)]
     pub(super) manual_resolved: u64,
-    #[allow(dead_code)]
     pub(super) unresolved: u64,
-    #[allow(dead_code)]
     pub(super) average_resolution_time: Duration,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1104,13 +934,11 @@ pub(super) struct ClusterState {
     pub(super) nodes: HashMap<NodeId, NodeInfo>,
     pub(super) master_node: Option<NodeId>,
     pub(super) cluster_topology: ClusterTopology,
-    #[allow(dead_code)]
     pub(super) last_updated: Instant,
 }
 /// Performance data aggregator
 #[derive(Debug)]
 pub(super) struct PerformanceAggregator {
-    #[allow(dead_code)]
     pub(super) aggregated_metrics: AggregatedPerformanceMetrics,
     pub(super) _historical_data: Vec<PerformanceSnapshot>,
     pub(super) trend_analysis: TrendAnalysis,
@@ -1124,28 +952,19 @@ pub enum TrendDirection {
 }
 #[derive(Debug, Clone)]
 pub struct GradientSyncEvent {
-    #[allow(dead_code)]
     pub timestamp: std::time::SystemTime,
-    #[allow(dead_code)]
     pub sync_round: u64,
     pub participating_nodes: Vec<NodeId>,
     pub total_sync_time: Duration,
-    #[allow(dead_code)]
     pub gradient_sizes: HashMap<String, usize>,
-    #[allow(dead_code)]
     pub compression_ratio: f64,
-    #[allow(dead_code)]
     pub sync_algorithm: SyncAlgorithm,
 }
 #[derive(Debug, Clone)]
 pub(super) struct MerkleNode {
-    #[allow(dead_code)]
     pub(super) hash: String,
-    #[allow(dead_code)]
     pub(super) left_child: Option<String>,
-    #[allow(dead_code)]
     pub(super) right_child: Option<String>,
-    #[allow(dead_code)]
     pub(super) level: u32,
 }
 #[derive(Debug, Clone)]
@@ -1153,34 +972,23 @@ pub(super) struct WorkloadAssignment {
     pub(super) assignment_id: Uuid,
     pub(super) workload: WorkloadItem,
     pub(super) target_node: NodeId,
-    #[allow(dead_code)]
     pub(super) assignment_rationale: String,
     pub(super) _assignment_time: Instant,
 }
 #[derive(Debug, Clone)]
 pub(super) struct RecoveryStrategy {
-    #[allow(dead_code)]
     pub(super) strategy_name: String,
-    #[allow(dead_code)]
     pub(super) steps: Vec<RecoveryStep>,
-    #[allow(dead_code)]
     pub(super) estimated_duration: Duration,
-    #[allow(dead_code)]
     pub(super) success_probability: f64,
 }
 #[derive(Debug, Clone)]
 pub(super) struct FailedCommunication {
-    #[allow(dead_code)]
     pub(super) timestamp: std::time::SystemTime,
-    #[allow(dead_code)]
     pub(super) source_node: NodeId,
-    #[allow(dead_code)]
     pub(super) target_node: NodeId,
-    #[allow(dead_code)]
     pub(super) message_type: MessageType,
-    #[allow(dead_code)]
     pub(super) error_reason: String,
-    #[allow(dead_code)]
     pub(super) retry_count: u32,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1193,26 +1001,17 @@ pub enum ClusterMode {
 }
 #[derive(Debug, Clone)]
 pub(super) struct LatencyStats {
-    #[allow(dead_code)]
     pub(super) average_latency: Duration,
-    #[allow(dead_code)]
     pub(super) p50_latency: Duration,
-    #[allow(dead_code)]
     pub(super) p95_latency: Duration,
-    #[allow(dead_code)]
     pub(super) p99_latency: Duration,
-    #[allow(dead_code)]
     pub(super) max_latency: Duration,
 }
 #[derive(Debug, Clone)]
 pub(super) struct PerformanceSnapshot {
-    #[allow(dead_code)]
     pub(super) timestamp: std::time::SystemTime,
-    #[allow(dead_code)]
     pub(super) metrics: AggregatedPerformanceMetrics,
-    #[allow(dead_code)]
     pub(super) active_nodes: u32,
-    #[allow(dead_code)]
     pub(super) total_workload: f64,
 }
 #[derive(Debug, Clone)]
@@ -1220,7 +1019,6 @@ pub(super) struct CoordinationState {
     pub(super) current_leader: Option<NodeId>,
     pub(super) coordination_round: u64,
     pub(super) cluster_mode: ClusterMode,
-    #[allow(dead_code)]
     pub(super) active_coordinators: HashSet<NodeId>,
     pub(super) coordination_metrics: CoordinationMetrics,
 }
@@ -1234,17 +1032,11 @@ pub enum ElectionAlgorithm {
 /// Distributed lock mechanism for resource coordination
 #[derive(Debug, Clone)]
 pub(super) struct DistributedLock {
-    #[allow(dead_code)]
     pub(super) lock_id: String,
-    #[allow(dead_code)]
     pub(super) holder: Option<NodeId>,
-    #[allow(dead_code)]
     pub(super) acquisition_time: Option<Instant>,
-    #[allow(dead_code)]
     pub(super) lease_duration: Duration,
-    #[allow(dead_code)]
     pub(super) waiters: VecDeque<NodeId>,
-    #[allow(dead_code)]
     pub(super) lock_type: LockType,
 }
 #[derive(Debug, Clone)]
@@ -1257,30 +1049,19 @@ pub enum FaultToleranceLevel {
 }
 #[derive(Debug, Clone)]
 pub(super) struct WorkloadMovement {
-    #[allow(dead_code)]
     pub(super) workload_id: Uuid,
-    #[allow(dead_code)]
     pub(super) source_node: NodeId,
-    #[allow(dead_code)]
     pub(super) target_node: NodeId,
-    #[allow(dead_code)]
     pub(super) movement_reason: String,
-    #[allow(dead_code)]
     pub(super) estimated_cost: f64,
 }
 #[derive(Debug, Clone)]
 pub(super) struct AdaptationEvent {
-    #[allow(dead_code)]
     pub(super) event_id: Uuid,
-    #[allow(dead_code)]
     pub(super) trigger_condition: ConditionType,
-    #[allow(dead_code)]
     pub(super) applied_strategy: String,
-    #[allow(dead_code)]
     pub(super) actions_taken: Vec<AdaptationAction>,
-    #[allow(dead_code)]
     pub(super) effectiveness: f64,
-    #[allow(dead_code)]
     pub(super) timestamp: Instant,
 }
 #[derive(Debug, Clone)]
@@ -1288,7 +1069,6 @@ pub(super) struct CoordinationMetrics {
     pub(super) total_operations: u64,
     pub(super) successful_operations: u64,
     pub(super) failed_operations: u64,
-    #[allow(dead_code)]
     pub(super) average_coordination_time: Duration,
     pub(super) coordination_efficiency: f64,
     pub(super) _consensus_success_rate: f64,
@@ -1297,51 +1077,35 @@ pub(super) struct CoordinationMetrics {
 #[derive(Debug)]
 pub(super) struct CommunicationMonitor {
     pub(super) message_stats: HashMap<MessageType, MessageStatistics>,
-    #[allow(dead_code)]
     pub(super) bandwidth_usage: HashMap<(NodeId, NodeId), BandwidthStats>,
     pub(super) _latency_measurements: HashMap<(NodeId, NodeId), LatencyStats>,
     pub(super) failed_communications: Vec<FailedCommunication>,
 }
 #[derive(Debug, Clone)]
 pub(super) struct NodePerformanceProfile {
-    #[allow(dead_code)]
     pub(super) node_id: NodeId,
-    #[allow(dead_code)]
     pub(super) compute_utilization: f64,
-    #[allow(dead_code)]
     pub(super) memory_bandwidth: f64,
-    #[allow(dead_code)]
     pub(super) network_io: f64,
-    #[allow(dead_code)]
     pub(super) disk_io: f64,
-    #[allow(dead_code)]
     pub(super) thermal_state: ThermalState,
-    #[allow(dead_code)]
     pub(super) power_consumption: f64,
-    #[allow(dead_code)]
     pub(super) performance_per_watt: f64,
 }
 #[derive(Debug, Clone)]
 pub(super) struct LogEntry {
-    #[allow(dead_code)]
     pub(super) term: u64,
-    #[allow(dead_code)]
     pub(super) index: u64,
-    #[allow(dead_code)]
     pub(super) command: String,
-    #[allow(dead_code)]
     pub(super) timestamp: Instant,
 }
 #[derive(Debug, Clone)]
 pub(super) struct DistributedResource {
-    #[allow(dead_code)]
     pub(super) resource_id: String,
-    #[allow(dead_code)]
     pub(super) resource_type: ResourceType,
     pub(super) total_capacity: u64,
     pub(super) available_capacity: u64,
     pub(super) allocated_to: HashMap<NodeId, u64>,
-    #[allow(dead_code)]
     pub(super) location_constraints: Vec<String>,
 }
 #[derive(Debug, Clone)]
@@ -1354,13 +1118,9 @@ pub enum FaultSeverity {
 #[derive(Debug, Clone)]
 pub(super) struct ConsensusState {
     pub(super) current_term: u64,
-    #[allow(dead_code)]
     pub(super) voted_for: Option<NodeId>,
-    #[allow(dead_code)]
     pub(super) log_entries: Vec<LogEntry>,
-    #[allow(dead_code)]
     pub(super) commit_index: u64,
-    #[allow(dead_code)]
     pub(super) last_applied: u64,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1372,78 +1132,58 @@ pub struct CommunicationAnalysis {
 }
 #[derive(Debug, Clone)]
 pub struct Bottleneck {
-    #[allow(dead_code)]
     pub(super) bottleneck_type: BottleneckType,
-    #[allow(dead_code)]
     pub(super) affected_nodes: Vec<NodeId>,
-    #[allow(dead_code)]
     pub(super) severity: f64,
-    #[allow(dead_code)]
     pub(super) description: String,
-    #[allow(dead_code)]
     pub(super) estimated_impact: f64,
 }
 #[derive(Debug, Clone)]
 pub(super) enum DistributedMessage {
     JoinRequest {
-        #[allow(dead_code)]
         node_info: NodeInfo,
     },
-    #[allow(dead_code)]
-    JoinResponse { cluster_info: ClusterInfo },
-    #[allow(dead_code)]
+    JoinResponse {
+        cluster_info: ClusterInfo,
+    },
     Heartbeat {
         node_id: NodeId,
         metrics: ResourceUsage,
     },
-    #[allow(dead_code)]
-    GradientSync { sync_data: Vec<u8> },
-    #[allow(dead_code)]
-    FaultAlert { fault: FaultEvent },
-    #[allow(dead_code)]
-    RecoveryInstruction { instruction: RecoveryAction },
+    GradientSync {
+        sync_data: Vec<u8>,
+    },
+    FaultAlert {
+        fault: FaultEvent,
+    },
+    RecoveryInstruction {
+        instruction: RecoveryAction,
+    },
 }
 #[derive(Debug, Clone)]
 pub(super) struct DistributedEvent {
-    #[allow(dead_code)]
     pub(super) event_id: Uuid,
-    #[allow(dead_code)]
     pub(super) event_type: EventType,
-    #[allow(dead_code)]
     pub(super) source_node: NodeId,
-    #[allow(dead_code)]
     pub(super) timestamp: Instant,
-    #[allow(dead_code)]
     pub(super) payload: HashMap<String, String>,
-    #[allow(dead_code)]
     pub(super) priority: EventPriority,
 }
 #[derive(Debug, Clone)]
 pub(super) struct NodeMetrics {
-    #[allow(dead_code)]
     pub(super) cpu_utilization: f64,
-    #[allow(dead_code)]
     pub(super) memory_utilization: f64,
-    #[allow(dead_code)]
     pub(super) network_utilization: f64,
-    #[allow(dead_code)]
     pub(super) active_connections: u32,
-    #[allow(dead_code)]
     pub(super) response_time: Duration,
-    #[allow(dead_code)]
     pub(super) throughput: f64,
-    #[allow(dead_code)]
     pub(super) error_rate: f64,
-    #[allow(dead_code)]
     pub(super) reliability_score: f64,
 }
 #[derive(Debug, Clone)]
 pub(super) struct RecoveryStep {
-    #[allow(dead_code)]
     pub(super) step_name: String,
-    #[allow(dead_code)]
     pub(super) action: RecoveryAction,
-    #[allow(dead_code)]
     pub(super) timeout: Duration,
 }
 #[derive(Debug, Clone)]
@@ -1458,15 +1198,11 @@ pub enum ResourceType {
 /// State synchronization system for maintaining consistency
 #[derive(Debug)]
 pub(super) struct StateSynchronizer {
-    #[allow(dead_code)]
     pub(super) sync_protocol: SyncProtocol,
-    #[allow(dead_code)]
     pub(super) state_versions: HashMap<String, StateVersion>,
     pub(super) pending_syncs: VecDeque<SyncOperation>,
-    #[allow(dead_code)]
     pub(super) conflict_resolver: ConflictResolver,
     pub(super) sync_metrics: SyncMetrics,
-    #[allow(dead_code)]
     pub(super) merkle_trees: HashMap<String, MerkleTree>,
 }
 #[derive(Debug, Clone)]
@@ -1478,13 +1214,9 @@ pub enum ElectionState {
 }
 #[derive(Debug, Clone)]
 pub(super) struct SyncProtocol {
-    #[allow(dead_code)]
     pub(super) protocol_type: SyncProtocolType,
-    #[allow(dead_code)]
     pub(super) consistency_level: ConsistencyLevel,
-    #[allow(dead_code)]
     pub(super) conflict_resolution: ConflictResolutionStrategy,
-    #[allow(dead_code)]
     pub(super) sync_frequency: Duration,
 }
 /// Resource coordinator for managing distributed resources
@@ -1492,7 +1224,6 @@ pub(super) struct SyncProtocol {
 pub struct ResourceCoordinator {
     pub(super) resource_pool: HashMap<String, DistributedResource>,
     pub(super) resource_reservations: HashMap<Uuid, ResourceReservation>,
-    #[allow(dead_code)]
     pub(super) allocation_strategy: AllocationStrategy,
     pub(super) resource_metrics: ResourceMetrics,
 }
@@ -1515,25 +1246,18 @@ impl ResourceCoordinator {
 }
 #[derive(Debug)]
 pub(super) struct AdaptationEngine {
-    #[allow(dead_code)]
     pub(super) adaptation_strategies: Vec<AdaptationStrategy>,
     pub(super) trigger_conditions: Vec<TriggerCondition>,
-    #[allow(dead_code)]
     pub(super) adaptation_history: Vec<AdaptationEvent>,
-    #[allow(dead_code)]
     pub(super) learning_rate: f64,
 }
 #[derive(Debug, Clone)]
 pub struct ClusterPerformanceMetrics {
     pub(super) total_throughput: f64,
-    #[allow(dead_code)]
     pub(super) aggregate_flops: f64,
-    #[allow(dead_code)]
     pub(super) total_memory_usage: u64,
-    #[allow(dead_code)]
     pub(super) network_utilization: f64,
     pub(super) cluster_efficiency: f64,
-    #[allow(dead_code)]
     pub(super) load_balance_score: f64,
 }
 #[derive(Debug, Clone)]
@@ -1546,26 +1270,17 @@ pub enum RecoveryStatus {
 #[derive(Debug, Clone)]
 pub(super) struct MessageStatistics {
     pub(super) total_messages: u64,
-    #[allow(dead_code)]
     pub(super) total_bytes: u64,
-    #[allow(dead_code)]
     pub(super) average_size: f64,
-    #[allow(dead_code)]
     pub(super) success_rate: f64,
-    #[allow(dead_code)]
     pub(super) average_latency: Duration,
 }
 #[derive(Debug, Clone)]
 pub(super) struct StateVersion {
-    #[allow(dead_code)]
     pub(super) version_id: Uuid,
-    #[allow(dead_code)]
     pub(super) vector_clock: VectorClock,
-    #[allow(dead_code)]
     pub(super) state_hash: String,
-    #[allow(dead_code)]
     pub(super) timestamp: Instant,
-    #[allow(dead_code)]
     pub(super) node_id: NodeId,
 }
 #[derive(Debug, Clone)]
@@ -1578,7 +1293,6 @@ pub enum DebugSessionType {
 }
 #[derive(Debug, Clone)]
 pub(super) struct ResourceReservation {
-    #[allow(dead_code)]
     pub(super) reservation_id: Uuid,
     pub(super) requester: NodeId,
     pub(super) resource_requirements: HashMap<String, u64>,
@@ -1589,7 +1303,6 @@ pub(super) struct ResourceReservation {
 #[derive(Debug, Clone)]
 pub(super) struct CoordinationProtocol {
     pub(super) protocol_name: String,
-    #[allow(dead_code)]
     pub(super) consensus_requirement: ConsensusRequirement,
     pub(super) _fault_tolerance: FaultToleranceLevel,
     pub(super) coordination_steps: Vec<CoordinationStep>,
@@ -1608,24 +1321,16 @@ pub enum FaultType {
 #[derive(Debug, Clone)]
 pub(super) struct TriggerCondition {
     pub(super) condition_type: ConditionType,
-    #[allow(dead_code)]
     pub(super) threshold: f64,
-    #[allow(dead_code)]
     pub(super) window_size: Duration,
-    #[allow(dead_code)]
     pub(super) evaluation_frequency: Duration,
 }
 #[derive(Debug, Clone)]
 pub(super) struct DistributedBreakpoint {
-    #[allow(dead_code)]
     pub(super) breakpoint_id: Uuid,
-    #[allow(dead_code)]
     pub(super) location: BreakpointLocation,
-    #[allow(dead_code)]
     pub(super) condition: Option<String>,
-    #[allow(dead_code)]
     pub(super) hit_count: u64,
-    #[allow(dead_code)]
     pub(super) enabled_nodes: HashSet<NodeId>,
 }
 #[derive(Debug, Clone)]
@@ -1640,7 +1345,6 @@ pub(super) struct SessionRequest {
     pub(super) requester: NodeId,
     pub(super) session_type: DebugSessionType,
     pub(super) required_nodes: HashSet<NodeId>,
-    #[allow(dead_code)]
     pub(super) priority: SessionPriority,
     pub(super) _estimated_duration: Duration,
 }

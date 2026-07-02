@@ -919,20 +919,12 @@ impl QualityAnalyzer {
 
                 // Calculate throughput: measurements per second, converted to approximate MB/s
                 // Assuming avg chunk size of ~100 bytes per measurement
-                let time_window_secs = if window.len() > 1 {
-                    // Safe: window.len() > 1 guarantees both back() and front() return Some
-                    let back_timestamp = window
-                        .back()
-                        .expect("window.back() guaranteed by len() > 1 check")
-                        .timestamp;
-                    let front_timestamp = window
-                        .front()
-                        .expect("window.front() guaranteed by len() > 1 check")
-                        .timestamp;
-                    let elapsed = back_timestamp.duration_since(front_timestamp);
-                    elapsed.as_secs_f32().max(1.0)
-                } else {
-                    1.0
+                let time_window_secs = match (window.back(), window.front()) {
+                    (Some(back), Some(front)) if window.len() > 1 => {
+                        let elapsed = back.timestamp.duration_since(front.timestamp);
+                        elapsed.as_secs_f32().max(1.0)
+                    },
+                    _ => 1.0,
                 };
                 let measurements_per_sec = window.len() as f32 / time_window_secs;
                 let throughput_mbps = (measurements_per_sec * 100.0) / 1_000_000.0; // bytes to MB

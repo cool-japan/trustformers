@@ -17,6 +17,10 @@
 //! efficient compression techniques that preserve the essential information needed for
 //! convergence while dramatically reducing storage requirements.
 
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
+
 use crate::common::{OptimizerState, StateMemoryStats};
 use crate::traits::StatefulOptimizer;
 use serde::{Deserialize, Serialize};
@@ -95,7 +99,6 @@ enum CompressionType {
     /// Block-wise compression
     BlockWise,
     /// Adaptive hybrid compression
-    #[allow(dead_code)]
     Adaptive,
 }
 

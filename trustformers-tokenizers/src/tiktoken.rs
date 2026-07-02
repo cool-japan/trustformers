@@ -31,10 +31,12 @@ impl Clone for TiktokenTokenizer {
 }
 
 // GPT-3.5/4 pattern from tiktoken (simplified for Rust regex)
+// reason: compile-time-constant pattern; `Regex::new` cannot fail at runtime and
+// a `static` initializer has no fallible channel to propagate an error through.
 static TIKTOKEN_PATTERN: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
         r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+"
-    ).expect("TIKTOKEN_PATTERN regex must be valid")
+    ).expect("built-in TIKTOKEN_PATTERN regex must compile")
 });
 
 impl TiktokenTokenizer {

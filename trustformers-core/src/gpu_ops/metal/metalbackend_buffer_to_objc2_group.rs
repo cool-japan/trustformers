@@ -13,6 +13,7 @@ use super::metalbackend_type::MetalBackend;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 impl MetalBackend {
     /// Convert metal-rs Buffer to objc2-metal ProtocolObject
+    #[allow(dead_code)]
     pub(crate) fn buffer_to_objc2(
         buffer: &Arc<Buffer>,
     ) -> Result<Retained<ProtocolObject<dyn ObjC2Buffer>>> {

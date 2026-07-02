@@ -108,6 +108,10 @@ impl WebGpuBackend {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None,
                 force_fallback_adapter: false,
+                // This is a native, trusted compute backend (not exposed to untrusted
+                // web content), so we want the adapter's real limits rather than
+                // fingerprinting-resistant buckets (wgpu 30 added this field).
+                apply_limit_buckets: false,
             })
             .block_on()
             .map_err(|e| {
@@ -443,7 +447,12 @@ fn matmul_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         })?;
 
         // Copy data
-        let data = buffer_slice.get_mapped_range();
+        let data = buffer_slice.get_mapped_range().map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to get mapped buffer range: {}", e),
+                "matmul_f32",
+            )
+        })?;
         let result: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
 
         drop(data);
@@ -644,7 +653,12 @@ fn gelu_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             TrustformersError::hardware_error(&format!("Failed to map buffer: {:?}", e), "gelu_f32")
         })?;
 
-        let data = buffer_slice.get_mapped_range();
+        let data = buffer_slice.get_mapped_range().map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to get mapped buffer range: {}", e),
+                "gelu_f32",
+            )
+        })?;
         let result: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
 
         drop(data);
@@ -924,7 +938,12 @@ fn layernorm_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             )
         })?;
 
-        let data = buffer_slice.get_mapped_range();
+        let data = buffer_slice.get_mapped_range().map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to get mapped buffer range: {}", e),
+                "layernorm_f32",
+            )
+        })?;
         let result: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
 
         drop(data);
@@ -978,7 +997,12 @@ fn layernorm_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             )
         })?;
 
-        let data = buffer_slice.get_mapped_range();
+        let data = buffer_slice.get_mapped_range().map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to get mapped buffer range: {}", e),
+                "buffer_to_cpu",
+            )
+        })?;
         let result: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
 
         drop(data);

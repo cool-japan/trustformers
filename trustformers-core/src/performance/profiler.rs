@@ -142,17 +142,17 @@ impl PerformanceProfiler {
 
     /// Enable profiling
     pub fn enable(&self) {
-        *self.enabled.lock().expect("Lock poisoned") = true;
+        *self.enabled.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
     }
 
     /// Disable profiling
     pub fn disable(&self) {
-        *self.enabled.lock().expect("Lock poisoned") = false;
+        *self.enabled.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
     }
 
     /// Check if profiling is enabled
     pub fn is_enabled(&self) -> bool {
-        *self.enabled.lock().expect("Lock poisoned")
+        *self.enabled.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Start profiling an operation
@@ -170,7 +170,7 @@ impl PerformanceProfiler {
             result: ProfileResult::new(name.to_string()),
         };
 
-        self.stack.lock().expect("Lock poisoned").push(node);
+        self.stack.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(node);
 
         ProfileGuard {
             profiler: Some(self.clone()),
@@ -180,7 +180,7 @@ impl PerformanceProfiler {
 
     /// End profiling an operation
     fn end_operation(&self, name: &str) {
-        let mut stack = self.stack.lock().expect("Lock poisoned");
+        let mut stack = self.stack.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         if let Some(node) = stack.pop() {
             if node.name != name {
@@ -194,7 +194,7 @@ impl PerformanceProfiler {
 
             if stack.is_empty() {
                 // This is a root operation
-                let mut roots = self.roots.lock().expect("Lock poisoned");
+                let mut roots = self.roots.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 roots
                     .entry(name.to_string())
                     .and_modify(|r| {
@@ -216,7 +216,8 @@ impl PerformanceProfiler {
 
     /// Get profile results
     pub fn get_results(&self) -> HashMap<String, ProfileResult> {
-        let mut results = self.roots.lock().expect("Lock poisoned").clone();
+        let mut results =
+            self.roots.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
 
         // Calculate self times and percentages
         for result in results.values_mut() {
@@ -228,8 +229,8 @@ impl PerformanceProfiler {
 
     /// Clear all profile data
     pub fn clear(&self) {
-        self.stack.lock().expect("Lock poisoned").clear();
-        self.roots.lock().expect("Lock poisoned").clear();
+        self.stack.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
+        self.roots.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
     }
 
     /// Print profile summary

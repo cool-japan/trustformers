@@ -16,9 +16,29 @@
 //!
 //! ```rust,no_run
 //! use trustformers_models::knowledge_distillation::{
-//!     KnowledgeDistillationTrainer, DistillationConfig, DistillationStrategy
+//!     KnowledgeDistillationTrainer, DistillationConfig, DistillationStrategy,
+//!     TeacherOutputs, StudentOutputs,
 //! };
+//! use trustformers_core::{traits::{Config, Model}, tensor::Tensor, Result};
+//! use serde::{Deserialize, Serialize};
 //!
+//! # #[derive(Debug, Clone, Serialize, Deserialize)]
+//! # struct DocConfig;
+//! # impl Config for DocConfig {
+//! #     fn architecture(&self) -> &'static str { "doc" }
+//! # }
+//! # struct DocModel;
+//! # impl Model for DocModel {
+//! #     type Config = DocConfig;
+//! #     type Input = Tensor;
+//! #     type Output = Tensor;
+//! #     fn forward(&self, input: Tensor) -> Result<Tensor> { Ok(input) }
+//! #     fn load_pretrained(&mut self, _r: &mut dyn std::io::Read) -> Result<()> { Ok(()) }
+//! #     fn get_config(&self) -> &DocConfig { &DocConfig }
+//! #     fn num_parameters(&self) -> usize { 0 }
+//! # }
+//!
+//! # fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 //! let config = DistillationConfig {
 //!     temperature: 4.0,
 //!     alpha: 0.7,
@@ -26,8 +46,15 @@
 //!     ..Default::default()
 //! };
 //!
+//! # let teacher_model = DocModel;
+//! # let student_model = DocModel;
 //! let trainer = KnowledgeDistillationTrainer::new(teacher_model, student_model, config)?;
-//! trainer.train(dataloader)?;
+//!
+//! # let teacher_outputs = TeacherOutputs { logits: Tensor::zeros(&[1, 4])?, hidden_states: vec![], attentions: vec![] };
+//! # let student_outputs = StudentOutputs { logits: Tensor::zeros(&[1, 4])?, hidden_states: vec![], attentions: vec![] };
+//! let _loss = trainer.compute_distillation_loss(&teacher_outputs, &student_outputs, None)?;
+//! # Ok(())
+//! # }
 //! ```
 
 use scirs2_core::ndarray::{ArrayD, Axis, IxDyn}; // SciRS2 Integration Policy
@@ -715,7 +742,12 @@ where
                 let log_probs = arr.mapv(|x| (x + epsilon).ln());
                 let entropy_contributions = arr * &log_probs;
                 let entropy = entropy_contributions.sum_axis(Axis(3)); // Sum over last dimension
-                let mean_entropy = entropy.mean().expect("operation failed");
+                let mean_entropy = entropy.mean().ok_or_else(|| {
+                    tensor_op_error(
+                        "tensor_operation",
+                        "Cannot compute mean of empty entropy tensor".to_string(),
+                    )
+                })?;
 
                 Ok(Tensor::F32(ArrayD::from_elem(IxDyn(&[1]), -mean_entropy)))
             },

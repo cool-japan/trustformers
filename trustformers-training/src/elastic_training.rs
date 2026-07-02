@@ -141,13 +141,11 @@ pub enum ScalingType {
 }
 
 /// Elastic training coordinator
-#[allow(dead_code)]
 pub struct ElasticTrainingCoordinator {
     config: ElasticTrainingConfig,
     workers: Arc<Mutex<HashMap<String, WorkerInfo>>>,
     checkpoints: HashMap<String, CheckpointInfo>,
     scaling_history: Vec<ScalingEvent>,
-    #[allow(dead_code)]
     performance_history: Vec<SystemPerformanceSnapshot>,
     resource_monitor: ResourceMonitor,
     fault_detector: FaultDetector,
@@ -174,7 +172,7 @@ impl ElasticTrainingCoordinator {
         worker_id: String,
         hardware_info: HardwareInfo,
     ) -> Result<usize> {
-        let mut workers = self.workers.lock().expect("lock should not be poisoned");
+        let mut workers = self.workers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let rank = workers.len();
         let worker_info = WorkerInfo {
@@ -200,7 +198,7 @@ impl ElasticTrainingCoordinator {
         worker_id: &str,
         metrics: WorkerPerformanceMetrics,
     ) -> Result<()> {
-        let mut workers = self.workers.lock().expect("lock should not be poisoned");
+        let mut workers = self.workers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         if let Some(worker) = workers.get_mut(worker_id) {
             worker.last_heartbeat = Instant::now();
@@ -224,7 +222,7 @@ impl ElasticTrainingCoordinator {
         let now = Instant::now();
 
         {
-            let mut workers = self.workers.lock().expect("lock should not be poisoned");
+            let mut workers = self.workers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
             for (worker_id, worker) in workers.iter_mut() {
                 // Check heartbeat timeout
@@ -262,7 +260,7 @@ impl ElasticTrainingCoordinator {
 
         // Remove failed worker from active set
         {
-            let mut workers = self.workers.lock().expect("lock should not be poisoned");
+            let mut workers = self.workers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             workers.remove(worker_id);
         }
 
@@ -280,7 +278,7 @@ impl ElasticTrainingCoordinator {
             return Ok(None);
         }
 
-        let workers = self.workers.lock().expect("lock should not be poisoned");
+        let workers = self.workers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let active_workers =
             workers.iter().filter(|(_, w)| matches!(w.status, WorkerStatus::Active)).count();
 
@@ -355,7 +353,7 @@ impl ElasticTrainingCoordinator {
 
     /// Calculate system performance metrics
     fn calculate_system_performance(&self) -> SystemPerformanceSnapshot {
-        let workers = self.workers.lock().expect("lock should not be poisoned");
+        let workers = self.workers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let active_workers: Vec<_> = workers
             .iter()
             .filter(|(_, w)| matches!(w.status, WorkerStatus::Active))
@@ -404,7 +402,7 @@ impl ElasticTrainingCoordinator {
             return false;
         }
 
-        let workers = self.workers.lock().expect("lock should not be poisoned");
+        let workers = self.workers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let workloads: Vec<f32> = workers
             .iter()
             .filter(|(_, w)| matches!(w.status, WorkerStatus::Active))
@@ -450,7 +448,8 @@ impl ElasticTrainingCoordinator {
 
     /// Scale up workers
     fn scale_up(&mut self, target_workers: usize) -> Result<()> {
-        let current_workers = self.workers.lock().expect("lock should not be poisoned").len();
+        let current_workers =
+            self.workers.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).len();
         let workers_to_add = target_workers.saturating_sub(current_workers);
 
         println!("Scaling up: adding {} workers", workers_to_add);
@@ -466,7 +465,7 @@ impl ElasticTrainingCoordinator {
 
     /// Scale down workers
     fn scale_down(&mut self, target_workers: usize) -> Result<()> {
-        let mut workers = self.workers.lock().expect("lock should not be poisoned");
+        let mut workers = self.workers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let current_workers = workers.len();
         let workers_to_remove = current_workers.saturating_sub(target_workers);
 
@@ -549,7 +548,7 @@ impl ElasticTrainingCoordinator {
         let performance = self.calculate_system_performance();
 
         // Now acquire workers lock for remaining stats
-        let workers = self.workers.lock().expect("lock should not be poisoned");
+        let workers = self.workers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let active_count =
             workers.iter().filter(|(_, w)| matches!(w.status, WorkerStatus::Active)).count();
 

@@ -1,18 +1,18 @@
 # trustformers-core
 
-![Version](https://img.shields.io/badge/version-0.1.3-blue)
+![Version](https://img.shields.io/badge/version-0.1.4-blue)
 ![Status](https://img.shields.io/badge/status-Stable-brightgreen)
-![Tests](https://img.shields.io/badge/tests-1%2C140%20passing-brightgreen)
-![SLoC](https://img.shields.io/badge/SLoC-121%2C799-informational)
-![Date](https://img.shields.io/badge/updated-2026--06--24-lightgrey)
+![Tests](https://img.shields.io/badge/tests-2%2C353%2B%20passing-brightgreen)
+![SLoC](https://img.shields.io/badge/SLoC-155%2C280-informational)
+![Date](https://img.shields.io/badge/updated-2026--07--02-lightgrey)
 
 Core infrastructure crate providing fundamental abstractions and utilities for the TrustformeRS ecosystem.
 
 ## Current State
 
-**Version 0.1.3 — Development (2026-06-24)**
+**Version 0.1.4 — Stable (2026-07-02)**
 
-This crate is **stable and production-ready**, serving as the foundation for all other TrustformeRS components. It provides high-performance tensor operations, layer implementations, and advanced optimization techniques. All 1,140 tests pass with zero stubs or unimplemented items.
+This crate is **stable and production-ready**, serving as the foundation for all other TrustformeRS components. It provides high-performance tensor operations, layer implementations, and advanced optimization techniques. ~2,353 tests pass for this crate specifically, with zero stubs or unimplemented items, and zero clippy/rustdoc warnings workspace-wide.
 
 ## Features
 
@@ -75,37 +75,41 @@ This crate is **stable and production-ready**, serving as the foundation for all
 ```
 trustformers-core/
 ├── src/
-│   ├── tensor/           # Tensor abstractions and operations
-│   ├── layers/           # Neural network layers
-│   ├── attention/        # Attention mechanisms
-│   ├── optimization/     # Performance optimizations
-│   ├── quantization/     # Quantization infrastructure
-│   ├── export/           # Model export formats
-│   ├── evaluation/       # Benchmark implementations
-│   ├── monitoring/       # Profiling and analysis
-│   ├── parallel/         # Distributed computing
-│   └── peft/            # Parameter-efficient fine-tuning
+│   ├── tensor/             # Tensor abstractions and operations
+│   ├── layers/             # Neural network layers
+│   ├── attention/          # Attention mechanisms
+│   ├── quantization/       # Quantization infrastructure (largest module by API surface)
+│   ├── export/             # Model export formats (ONNX, GGUF, CoreML)
+│   ├── kernels/            # Custom fused and SIMD compute kernels
+│   ├── hardware/           # Hardware acceleration abstraction (CUDA, Metal, Vulkan, ROCm, ...)
+│   ├── compiler/           # JIT compilation, kernel fusion, graph optimization
+│   ├── performance/        # Benchmarking, profiling, and optimization advisor
+│   ├── monitoring/         # Profiling and analysis
+│   ├── parallel/           # Distributed computing
+│   ├── evaluation/         # Benchmark implementations
+│   └── peft.rs             # Parameter-efficient fine-tuning
 ```
 
 ## Usage Example
 
 ```rust
-use trustformers_core::{
-    tensor::Tensor,
-    layers::{Linear, Layer},
-    attention::FlashAttention,
-};
+use trustformers_core::layers::{Linear, LayerNorm, MultiHeadAttention};
+use trustformers_core::tensor::Tensor;
+use trustformers_core::traits::Layer;
 
-// Create tensors
-let input = Tensor::randn(&[32, 512, 768])?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Create layers for a transformer block
+    let attention = MultiHeadAttention::new(768, 12, 0.1, true)?;
+    let norm1 = LayerNorm::new(vec![768], 1e-5)?;
+    let ffn = Linear::new(768, 3072, true);
+    let norm2 = LayerNorm::new(vec![768], 1e-5)?;
 
-// Create layers
-let linear = Linear::new(768, 768, true)?;
-let attention = FlashAttention::new(768, 12)?;
+    // Run the attention sub-layer's forward pass
+    let input = Tensor::randn(&[2, 128, 768])?;
+    let attended = attention.forward(input)?;
 
-// Forward pass
-let output = linear.forward(&input)?;
-let attended = attention.forward(&output, None)?;
+    Ok(())
+}
 ```
 
 ## Performance
@@ -118,7 +122,7 @@ let attended = attention.forward(&output, None)?;
 ## Testing
 
 The crate includes comprehensive test coverage:
-- **1,140 unit and integration tests, all passing**
+- **~2,353 unit and integration tests, all passing** (this crate's approximate share of a workspace-wide run completed 2026-07-01: 18,102 passed / 0 failed / 119 skipped via `cargo nextest run --workspace --all-features`, plus 0 clippy warnings and 0 rustdoc warnings)
 - Property-based testing with proptest
 - Memory leak detection
 - Performance benchmarks
@@ -134,7 +138,7 @@ The crate includes comprehensive test coverage:
 
 ## Public API
 
-The crate exposes **1,596 public API items** covering tensors, layers, attention, quantization, export, evaluation, monitoring, distributed computing, PEFT, kernel tuning, and memory management.
+The crate exposes **~4,533 public API items** (structs, enums, traits, and fns across the public API, including impl blocks — broader than a prior doc revision's narrower top-level-only count) covering tensors, layers, attention, quantization, export, evaluation, monitoring, distributed computing, PEFT, kernel tuning, and memory management.
 
 ## License
 

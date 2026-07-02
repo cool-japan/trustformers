@@ -86,7 +86,8 @@ impl PluginInfo {
     /// );
     /// ```
     pub fn new(name: &str, version: &str, description: &str, dependencies: &[&str]) -> Self {
-        let version = Version::parse(version).expect("Invalid version string");
+        // Fall back to 0.0.0 for an unparseable version rather than panicking.
+        let version = Version::parse(version).unwrap_or_else(|_| Version::new(0, 0, 0));
 
         let deps = dependencies.iter().filter_map(|dep| Dependency::parse(dep).ok()).collect();
 

@@ -11,6 +11,8 @@ pub struct WordPieceTokenizer {
     sep_token: String,
     pad_token: String,
     cls_token: String,
+    // reason: part of the standard BERT special-token set; stored for vocabulary
+    // completeness and reserved for masked-LM workflows, not the encode path.
     #[allow(dead_code)]
     mask_token: String,
     do_lower_case: bool,
@@ -234,9 +236,14 @@ impl Tokenizer for WordPieceTokenizer {
 
         let mut input_ids = Vec::with_capacity(tokens.len());
         for token in &tokens {
-            let id = self.vocab.get_id(token).unwrap_or_else(|| {
-                self.vocab.get_id(&self.unk_token).expect("UNK token must exist in vocabulary")
-            });
+            let id = match self.vocab.get_id(token) {
+                Some(id) => id,
+                None => self.vocab.get_id(&self.unk_token).ok_or_else(|| {
+                    TrustformersError::invalid_input(
+                        "UNK token not found in WordPiece vocabulary".to_string(),
+                    )
+                })?,
+            };
             input_ids.push(id);
         }
 
@@ -271,9 +278,14 @@ impl Tokenizer for WordPieceTokenizer {
 
         let mut input_ids = Vec::with_capacity(tokens.len());
         for token in &tokens {
-            let id = self.vocab.get_id(token).unwrap_or_else(|| {
-                self.vocab.get_id(&self.unk_token).expect("UNK token must exist in vocabulary")
-            });
+            let id = match self.vocab.get_id(token) {
+                Some(id) => id,
+                None => self.vocab.get_id(&self.unk_token).ok_or_else(|| {
+                    TrustformersError::invalid_input(
+                        "UNK token not found in WordPiece vocabulary".to_string(),
+                    )
+                })?,
+            };
             input_ids.push(id);
         }
 

@@ -1,6 +1,10 @@
 //! Auto-generated module
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use anyhow::Result;
 use scirs2_core::random::*;
@@ -175,7 +179,6 @@ struct RateLimiter {
     tokens: u32,
     last_refill: Instant,
     max_tokens: u32,
-    #[allow(dead_code)]
     refill_rate: u32,
 }
 impl RateLimiter {
@@ -874,7 +877,6 @@ pub enum StreamEvent {
 /// Stream subscription handle
 pub struct StreamSubscription {
     subscriber_id: Uuid,
-    #[allow(dead_code)]
     receiver: BroadcastStream<StreamEvent>,
     filter: StreamFilter,
     format: StreamFormat,

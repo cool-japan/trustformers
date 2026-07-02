@@ -287,10 +287,8 @@ impl DefaultDataCollator {
         let input_lengths: Vec<usize> = examples.iter().map(|ex| ex.input_ids.len()).collect();
 
         if !input_lengths.is_empty() {
-            let min_length =
-                *input_lengths.iter().min().expect("input_lengths checked as non-empty");
-            let max_length =
-                *input_lengths.iter().max().expect("input_lengths checked as non-empty");
+            let min_length = input_lengths.iter().min().copied().unwrap_or(0);
+            let max_length = input_lengths.iter().max().copied().unwrap_or(0);
             let avg_length =
                 input_lengths.iter().sum::<usize>() as f64 / input_lengths.len() as f64;
 

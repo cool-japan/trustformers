@@ -111,8 +111,11 @@ fn main() {
 }
 
 fn generate_specification(matches: &clap::ArgMatches) -> Result<(), Box<dyn std::error::Error>> {
-    let output_file = matches.get_one::<String>("output").expect("Operation failed");
-    let version_str = matches.get_one::<String>("version").expect("Operation failed");
+    let output_file =
+        matches.get_one::<String>("output").ok_or("missing required argument: output")?;
+    let version_str = matches
+        .get_one::<String>("version")
+        .ok_or("missing required argument: version")?;
 
     // Parse version string
     let version = parse_version(version_str)?;
@@ -137,8 +140,10 @@ fn generate_specification(matches: &clap::ArgMatches) -> Result<(), Box<dyn std:
 }
 
 fn check_compatibility(matches: &clap::ArgMatches) -> Result<(), Box<dyn std::error::Error>> {
-    let baseline_file = matches.get_one::<String>("baseline").expect("Operation failed");
-    let format = matches.get_one::<String>("format").expect("Operation failed");
+    let baseline_file = matches
+        .get_one::<String>("baseline")
+        .ok_or("missing required argument: baseline")?;
+    let format = matches.get_one::<String>("format").ok_or("missing required argument: format")?;
 
     let mut checker = AbiChecker::new();
     checker.load_baseline_from_file(baseline_file)?;
@@ -178,8 +183,8 @@ fn check_compatibility(matches: &clap::ArgMatches) -> Result<(), Box<dyn std::er
 }
 
 fn show_diff(matches: &clap::ArgMatches) -> Result<(), Box<dyn std::error::Error>> {
-    let old_file = matches.get_one::<String>("old").expect("Operation failed");
-    let new_file = matches.get_one::<String>("new").expect("Operation failed");
+    let old_file = matches.get_one::<String>("old").ok_or("missing required argument: old")?;
+    let new_file = matches.get_one::<String>("new").ok_or("missing required argument: new")?;
 
     // Load specifications
     let old_content = std::fs::read_to_string(old_file)?;

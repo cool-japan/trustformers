@@ -320,8 +320,11 @@ impl TPESampler {
                     let noise_std = (p.high - p.low) * 0.1; // 10% of range
                                                             // Distribution and Normal already available via scirs2_core::random::*
                     let normal = Normal::new(0.0, noise_std).unwrap_or_else(|_| {
+                        // reason: `Normal::new(0.0, 1.0)` uses compile-time constant parameters
+                        // (finite mean, positive std dev) and can never fail; this is the
+                        // fallback for a degenerate (zero-width) parameter range.
                         Normal::new(0.0, 1.0)
-                            .expect("Standard normal distribution should always be valid")
+                            .expect("unit-variance normal with constant parameters is always valid")
                     });
                     let noisy_value = base_float + normal.sample(&mut self.rng);
                     let clamped_value = noisy_value.clamp(p.low, p.high);
@@ -384,8 +387,11 @@ impl TPESampler {
 
                     // Distribution and Normal already available via scirs2_core::random::*
                     let normal = Normal::new(0.0, noise_std).unwrap_or_else(|_| {
+                        // reason: `Normal::new(0.0, 1.0)` uses compile-time constant parameters
+                        // (finite mean, positive std dev) and can never fail; this is the
+                        // fallback for a degenerate (zero-width) parameter range.
                         Normal::new(0.0, 1.0)
-                            .expect("Standard normal distribution should always be valid")
+                            .expect("unit-variance normal with constant parameters is always valid")
                     });
                     let noisy_log = log_base + normal.sample(&mut self.rng);
                     let clamped_log = noisy_log.clamp(log_low, log_high);

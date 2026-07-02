@@ -169,11 +169,14 @@ impl Default for NamingChecker {
 
         Self {
             conventions: NamingConventions::default(),
-            excluded_patterns: vec![
-                Regex::new(r"^_.*").expect("Regex compilation failed"), // Private items starting with underscore
-                Regex::new(r".*_test$").expect("Regex compilation failed"), // Test functions
-                Regex::new(r"^test_.*").expect("Regex compilation failed"), // Test functions
-            ],
+            excluded_patterns: [
+                r"^_.*",     // Private items starting with underscore
+                r".*_test$", // Test functions
+                r"^test_.*", // Test functions
+            ]
+            .iter()
+            .filter_map(|p| Regex::new(p).ok())
+            .collect(),
             included_extensions: {
                 let mut set = HashSet::new();
                 set.insert("rs".to_string());
@@ -246,7 +249,7 @@ impl NamingChecker {
         // Function definitions
         let fn_regex =
             Regex::new(r"(?m)^\s*(?:pub\s+)?(?:async\s+)?fn\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")
-                .expect("function regex pattern is valid");
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         for (line_num, line) in content.lines().enumerate() {
             for cap in fn_regex.captures_iter(line) {
                 let name = &cap[1];
@@ -268,7 +271,7 @@ impl NamingChecker {
         // Struct definitions
         let struct_regex =
             Regex::new(r"(?m)^\s*(?:pub\s+)?struct\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[<{]")
-                .expect("struct regex pattern is valid");
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         for (line_num, line) in content.lines().enumerate() {
             for cap in struct_regex.captures_iter(line) {
                 let name = &cap[1];
@@ -288,8 +291,9 @@ impl NamingChecker {
         }
 
         // Enum definitions
-        let enum_regex = Regex::new(r"(?m)^\s*(?:pub\s+)?enum\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[<{]")
-            .expect("enum regex pattern is valid");
+        let enum_regex =
+            Regex::new(r"(?m)^\s*(?:pub\s+)?enum\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[<{]")
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         for (line_num, line) in content.lines().enumerate() {
             for cap in enum_regex.captures_iter(line) {
                 let name = &cap[1];
@@ -311,7 +315,7 @@ impl NamingChecker {
         // Trait definitions
         let trait_regex =
             Regex::new(r"(?m)^\s*(?:pub\s+)?trait\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[<:{]")
-                .expect("trait regex pattern is valid");
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         for (line_num, line) in content.lines().enumerate() {
             for cap in trait_regex.captures_iter(line) {
                 let name = &cap[1];
@@ -332,7 +336,7 @@ impl NamingChecker {
 
         // Constants
         let const_regex = Regex::new(r"(?m)^\s*(?:pub\s+)?const\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*:")
-            .expect("const regex pattern is valid");
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         for (line_num, line) in content.lines().enumerate() {
             for cap in const_regex.captures_iter(line) {
                 let name = &cap[1];
@@ -353,7 +357,7 @@ impl NamingChecker {
 
         // Type aliases
         let type_regex = Regex::new(r"(?m)^\s*(?:pub\s+)?type\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[<=>]")
-            .expect("type alias regex pattern is valid");
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         for (line_num, line) in content.lines().enumerate() {
             for cap in type_regex.captures_iter(line) {
                 let name = &cap[1];
@@ -374,7 +378,7 @@ impl NamingChecker {
 
         // Macros
         let macro_regex = Regex::new(r"(?m)^\s*macro_rules!\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\{")
-            .expect("macro regex pattern is valid");
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         for (line_num, line) in content.lines().enumerate() {
             for cap in macro_regex.captures_iter(line) {
                 let name = &cap[1];
@@ -406,8 +410,8 @@ impl NamingChecker {
 
         // Check package name in Cargo.toml
         if file_path.file_name() == Some(std::ffi::OsStr::new("Cargo.toml")) {
-            let name_regex =
-                Regex::new(r#"name\s*=\s*"([^"]+)""#).expect("TOML name regex pattern is valid");
+            let name_regex = Regex::new(r#"name\s*=\s*"([^"]+)""#)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
             for (line_num, line) in content.lines().enumerate() {
                 for cap in name_regex.captures_iter(line) {
                     let name = &cap[1];
@@ -532,37 +536,49 @@ impl NamingChecker {
 
     /// Check if name is snake_case
     fn is_snake_case(&self, name: &str) -> bool {
-        let regex = Regex::new(r"^[a-z][a-z0-9_]*$").expect("Regex compilation failed");
+        let Ok(regex) = Regex::new(r"^[a-z][a-z0-9_]*$") else {
+            return false;
+        };
         regex.is_match(name) && !name.ends_with('_') && !name.contains("__")
     }
 
     /// Check if name is PascalCase
     fn is_pascal_case(&self, name: &str) -> bool {
-        let regex = Regex::new(r"^[A-Z][a-zA-Z0-9]*$").expect("Regex compilation failed");
+        let Ok(regex) = Regex::new(r"^[A-Z][a-zA-Z0-9]*$") else {
+            return false;
+        };
         regex.is_match(name)
     }
 
     /// Check if name is camelCase
     fn is_camel_case(&self, name: &str) -> bool {
-        let regex = Regex::new(r"^[a-z][a-zA-Z0-9]*$").expect("Regex compilation failed");
+        let Ok(regex) = Regex::new(r"^[a-z][a-zA-Z0-9]*$") else {
+            return false;
+        };
         regex.is_match(name)
     }
 
     /// Check if name is SCREAMING_SNAKE_CASE
     fn is_screaming_snake_case(&self, name: &str) -> bool {
-        let regex = Regex::new(r"^[A-Z][A-Z0-9_]*$").expect("Regex compilation failed");
+        let Ok(regex) = Regex::new(r"^[A-Z][A-Z0-9_]*$") else {
+            return false;
+        };
         regex.is_match(name) && !name.ends_with('_') && !name.contains("__")
     }
 
     /// Check if name is kebab-case
     fn is_kebab_case(&self, name: &str) -> bool {
-        let regex = Regex::new(r"^[a-z][a-z0-9-]*$").expect("Regex compilation failed");
+        let Ok(regex) = Regex::new(r"^[a-z][a-z0-9-]*$") else {
+            return false;
+        };
         regex.is_match(name) && !name.ends_with('-') && !name.contains("--")
     }
 
     /// Check if name is single uppercase letter
     fn is_single_uppercase(&self, name: &str) -> bool {
-        let regex = Regex::new(r"^[A-Z]$").expect("Regex compilation failed");
+        let Ok(regex) = Regex::new(r"^[A-Z]$") else {
+            return false;
+        };
         regex.is_match(name)
     }
 

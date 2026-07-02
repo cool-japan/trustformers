@@ -825,6 +825,8 @@ pub struct JaxDataIterator<'a> {
     texts: &'a [String],
     batch_size: usize,
     current_index: usize,
+    // reason: stored from the constructor; reserved for planned per-batch JAX
+    // dtype/device configuration that the iterator does not yet consume.
     #[allow(dead_code)]
     config: JaxConfig,
 }

@@ -460,18 +460,24 @@ impl NeuralEngineV3Engine {
         let result = match operation {
             NeuralEngineOperation::MatMulQuantized => self.execute_quantized_matmul(
                 &quantized_input,
-                quantized_weights.as_ref().expect("Operation failed"),
+                quantized_weights.as_ref().ok_or_else(|| {
+                    TrustformersError::runtime_error("quantized weights required".to_string())
+                })?,
             )?,
             NeuralEngineOperation::ConvolutionAdvanced => self.execute_advanced_convolution(
                 &quantized_input,
-                quantized_weights.as_ref().expect("Operation failed"),
+                quantized_weights.as_ref().ok_or_else(|| {
+                    TrustformersError::runtime_error("quantized weights required".to_string())
+                })?,
             )?,
             NeuralEngineOperation::AttentionOptimized => {
                 self.execute_optimized_attention(&quantized_input, parameters)?
             },
             NeuralEngineOperation::BatchNormalization => self.execute_batch_normalization(
                 &quantized_input,
-                quantized_weights.as_ref().expect("Operation failed"),
+                quantized_weights.as_ref().ok_or_else(|| {
+                    TrustformersError::runtime_error("quantized weights required".to_string())
+                })?,
             )?,
             NeuralEngineOperation::LayerNormalization => {
                 self.execute_layer_normalization(&quantized_input, parameters)?
@@ -487,7 +493,9 @@ impl NeuralEngineV3Engine {
             },
             NeuralEngineOperation::EmbeddingLookup => self.execute_embedding_lookup(
                 &quantized_input,
-                quantized_weights.as_ref().expect("Operation failed"),
+                quantized_weights.as_ref().ok_or_else(|| {
+                    TrustformersError::runtime_error("quantized weights required".to_string())
+                })?,
             )?,
             NeuralEngineOperation::MultiHeadAttentionFused => {
                 self.execute_fused_multihead_attention(&quantized_input, parameters)?

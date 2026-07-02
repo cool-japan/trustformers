@@ -3,6 +3,10 @@
 //! This module provides advanced statistical analysis and machine learning-based
 //! detection of performance regressions in model training and inference, enabling
 //! early detection of performance degradation with high accuracy.
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -196,7 +200,6 @@ pub struct RegressionDetector {
 struct AnomalyDetector {
     z_score_threshold: f64,
     iqr_multiplier: f64,
-    #[allow(dead_code)]
     isolation_forest_threshold: f64,
 }
 
@@ -388,10 +391,8 @@ impl TrendAnalyzer {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 struct TrendChangeResult {
     slope_change: f64,
-    #[allow(dead_code)]
     recent_slope: f64,
     baseline_slope: f64,
     significance: f64,
@@ -575,17 +576,14 @@ struct SeasonalComponents {
 /// ML-based predictor for advanced regression detection
 #[derive(Debug)]
 struct MLPredictor {
-    #[allow(dead_code)]
     model_type: MLModelType,
     feature_extractor: FeatureExtractor,
     prediction_threshold: f64,
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 enum MLModelType {
     IsolationForest,
-    #[allow(dead_code)]
     LSTM,
     AutoEncoder,
 }
@@ -867,10 +865,7 @@ impl RegressionDetector {
 
         // 2. Change point detection
         let change_points = self.change_point_detector.detect_change_points(&filtered_values);
-        if !change_points.is_empty() {
-            let latest_change_point = change_points
-                .last()
-                .expect("change_points should not be empty after is_empty check");
+        if let Some(latest_change_point) = change_points.last() {
             let before = &filtered_values[0..*latest_change_point];
             let after = &filtered_values[*latest_change_point..];
 

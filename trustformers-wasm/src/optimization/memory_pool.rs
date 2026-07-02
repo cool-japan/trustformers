@@ -4,8 +4,6 @@
 //! to reduce allocation overhead and fragmentation.
 
 #![allow(dead_code)]
-#![allow(clippy::missing_enforced_import_renames)]
-
 use std::collections::HashMap;
 use std::vec::Vec;
 use wasm_bindgen::prelude::*;

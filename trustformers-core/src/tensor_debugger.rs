@@ -488,14 +488,15 @@ impl TensorDebugger {
 
     /// Register a tensor for debugging
     pub fn register_tensor(&self, name: String, tensor: Tensor) -> Result<()> {
-        let mut tensors = self.tensors.lock().expect("Lock poisoned");
+        let mut tensors = self.tensors.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         tensors.insert(name.clone(), tensor.clone());
 
         // Compute and cache statistics
         let stats = DebugTensorStats::from_tensor(&tensor)?;
 
         {
-            let mut cache = self.stats_cache.lock().expect("Lock poisoned");
+            let mut cache =
+                self.stats_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             cache.insert(name.clone(), stats.clone());
         }
 
@@ -503,7 +504,8 @@ impl TensorDebugger {
         if self.config.auto_detect_issues {
             let detected_issues = stats.detect_issues();
             if !detected_issues.is_empty() {
-                let mut issues = self.issues.lock().expect("Lock poisoned");
+                let mut issues =
+                    self.issues.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 for mut issue in detected_issues {
                     issue = issue.with_tensor_name(name.clone());
 
@@ -511,7 +513,10 @@ impl TensorDebugger {
                     if (issue.severity == Severity::Error && self.config.break_on_error)
                         || (issue.severity == Severity::Warning && self.config.break_on_warning)
                     {
-                        *self.breakpoint_hit.lock().expect("Lock poisoned") = true;
+                        *self
+                            .breakpoint_hit
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
                     }
 
                     issues.push_back(issue);
@@ -534,19 +539,22 @@ impl TensorDebugger {
 
     /// Add a watchpoint
     pub fn add_watchpoint(&self, watchpoint: Watchpoint) {
-        let mut watchpoints = self.watchpoints.lock().expect("Lock poisoned");
+        let mut watchpoints =
+            self.watchpoints.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         watchpoints.push(watchpoint);
     }
 
     /// Remove all watchpoints matching pattern
     pub fn remove_watchpoint(&self, pattern: &str) {
-        let mut watchpoints = self.watchpoints.lock().expect("Lock poisoned");
+        let mut watchpoints =
+            self.watchpoints.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         watchpoints.retain(|w| w.tensor_pattern != pattern);
     }
 
     /// Check watchpoints for a tensor
     fn check_watchpoints(&self, name: &str, tensor: &Tensor) -> Result<()> {
-        let mut watchpoints = self.watchpoints.lock().expect("Lock poisoned");
+        let mut watchpoints =
+            self.watchpoints.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         for wp in watchpoints.iter_mut() {
             // Simple pattern matching (exact match for now)
@@ -578,7 +586,10 @@ impl TensorDebugger {
                     wp.trigger_count += 1;
 
                     if wp.break_on_trigger {
-                        *self.breakpoint_hit.lock().expect("Lock poisoned") = true;
+                        *self
+                            .breakpoint_hit
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
                     }
 
                     // Log issue
@@ -590,7 +601,8 @@ impl TensorDebugger {
                     .with_tensor_name(name.to_string())
                     .with_metadata("trigger_count".to_string(), wp.trigger_count.to_string());
 
-                    let mut issues = self.issues.lock().expect("Lock poisoned");
+                    let mut issues =
+                        self.issues.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     issues.push_back(issue);
                 }
             }
@@ -601,55 +613,55 @@ impl TensorDebugger {
 
     /// Get tensor by name
     pub fn get_tensor(&self, name: &str) -> Option<Tensor> {
-        let tensors = self.tensors.lock().expect("Lock poisoned");
+        let tensors = self.tensors.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         tensors.get(name).cloned()
     }
 
     /// Get statistics for a tensor
     pub fn get_stats(&self, name: &str) -> Option<DebugTensorStats> {
-        let cache = self.stats_cache.lock().expect("Lock poisoned");
+        let cache = self.stats_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         cache.get(name).cloned()
     }
 
     /// Get all issues
     pub fn get_issues(&self) -> Vec<TensorDebugIssue> {
-        let issues = self.issues.lock().expect("Lock poisoned");
+        let issues = self.issues.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         issues.iter().cloned().collect()
     }
 
     /// Clear all issues
     pub fn clear_issues(&self) {
-        let mut issues = self.issues.lock().expect("Lock poisoned");
+        let mut issues = self.issues.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         issues.clear();
     }
 
     /// Get operation traces
     pub fn get_traces(&self) -> Vec<OperationTrace> {
-        let traces = self.traces.lock().expect("Lock poisoned");
+        let traces = self.traces.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         traces.iter().cloned().collect()
     }
 
     /// Clear traces
     pub fn clear_traces(&self) {
-        let mut traces = self.traces.lock().expect("Lock poisoned");
+        let mut traces = self.traces.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         traces.clear();
     }
 
     /// Check if breakpoint was hit
     pub fn is_breakpoint_hit(&self) -> bool {
-        *self.breakpoint_hit.lock().expect("Lock poisoned")
+        *self.breakpoint_hit.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Clear breakpoint flag
     pub fn clear_breakpoint(&self) {
-        *self.breakpoint_hit.lock().expect("Lock poisoned") = false;
+        *self.breakpoint_hit.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
     }
 
     /// Print summary of all tracked tensors
     pub fn print_summary(&self) {
         println!("\n=== Tensor Debugger Summary ===\n");
 
-        let cache = self.stats_cache.lock().expect("Lock poisoned");
+        let cache = self.stats_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         println!("Tracked Tensors: {}", cache.len());
 
         for (name, stats) in cache.iter() {
@@ -680,7 +692,7 @@ impl TensorDebugger {
             }
         }
 
-        let issues = self.issues.lock().expect("Lock poisoned");
+        let issues = self.issues.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if !issues.is_empty() {
             println!("\n=== Issues ({}) ===\n", issues.len());
             for (i, issue) in issues.iter().enumerate() {

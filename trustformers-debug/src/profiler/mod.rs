@@ -1,4 +1,8 @@
 //! Performance profiling tools for debugging
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 pub mod events;
 pub mod gpu;
@@ -35,7 +39,6 @@ use crate::DebugConfig;
 /// Performance profiler
 #[derive(Debug)]
 pub struct Profiler {
-    #[allow(dead_code)]
     config: DebugConfig,
     events: Vec<ProfileEvent>,
     active_timers: HashMap<String, Instant>,
@@ -56,7 +59,6 @@ pub struct Profiler {
 
 #[derive(Debug)]
 pub struct LayerProfile {
-    #[allow(dead_code)]
     layer_name: String,
     forward_times: Vec<Duration>,
     backward_times: Vec<Duration>,
@@ -757,10 +759,7 @@ impl Profiler {
 
         if recent_snapshots.len() >= 5 {
             let initial_memory = recent_snapshots[0].heap_allocated;
-            let final_memory = recent_snapshots
-                .last()
-                .expect("recent_snapshots has at least 5 elements")
-                .heap_allocated;
+            let final_memory = recent_snapshots.last().map(|s| s.heap_allocated).unwrap_or(0);
 
             if final_memory > initial_memory * 2 {
                 let mut metrics = HashMap::new();

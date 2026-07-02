@@ -40,7 +40,9 @@
 //!
 //! ```rust,no_run
 //! use trustformers_models::hierarchical::{HierarchicalTransformer, HierarchicalConfig};
+//! use trustformers_core::traits::Model;
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = HierarchicalConfig {
 //!     hidden_size: 768,
 //!     num_levels: 4,
@@ -49,8 +51,13 @@
 //!     ..Default::default()
 //! };
 //!
-//! let model = HierarchicalTransformer::new(config)?;
+//! # let vocab_size = 32000;
+//! let model = HierarchicalTransformer::new(config, vocab_size)?;
+//! # let input_ids: Vec<u32> = vec![1, 2, 3, 4, 5];
 //! let output = model.forward(input_ids)?;
+//! # let _ = output;
+//! # Ok(())
+//! # }
 //! ```
 
 pub mod config;

@@ -240,7 +240,11 @@ impl PerformanceBenchmark {
             overall_score
         );
 
-        Ok(self.results.as_ref().expect("Operation failed"))
+        self.results.as_ref().ok_or_else(|| {
+            trustformers_core::TrustformersError::runtime_error(
+                "benchmark results were not produced".to_string(),
+            )
+        })
     }
 
     /// Benchmark inference latency across different scenarios

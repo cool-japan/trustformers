@@ -1,15 +1,16 @@
 //! Python bindings for training functionality
 
-use crate::tensor::PyTensor;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use trustformers_core::errors::TrustformersError;
-use trustformers_training::{
-    EvaluationStrategy, SaveStrategy, Trainer, TrainerCallback, TrainingArguments,
-};
+use trustformers_training::{EvaluationStrategy, SaveStrategy, TrainingArguments};
+
+/// Owned Python reference alias (pyo3 0.28 removed the `PyObject` type alias from
+/// the crate root; it is equivalent to `Py<PyAny>`).
+type PyObject = Py<PyAny>;
 
 /// Python wrapper for TrainingArguments
 #[pyclass(name = "TrainingArguments", from_py_object)]
@@ -236,6 +237,17 @@ impl PyTrainer {
         callbacks: Option<&Bound<'_, PyAny>>,
         optimizers: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
+        // These configuration objects are accepted for HF Trainer API parity; the
+        // current simplified trainer does not yet consume them.
+        let _ = (
+            train_dataset,
+            eval_dataset,
+            tokenizer,
+            data_collator,
+            compute_metrics,
+            callbacks,
+            optimizers,
+        );
         // For now, we'll create a simplified trainer
         // In a real implementation, we'd convert the Python objects to Rust types
 
@@ -247,7 +259,7 @@ impl PyTrainer {
     /// Train the model
     fn train(&mut self, py: Python<'_>) -> PyResult<PyObject> {
         // Release the GIL for training
-        py.allow_threads(|| -> Result<(), TrustformersError> {
+        py.detach(|| -> Result<(), TrustformersError> {
             // In a real implementation, we'd run the training loop here
             // For now, return a mock training result
             Ok(())
@@ -269,6 +281,7 @@ impl PyTrainer {
         py: Python<'_>,
         eval_dataset: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyObject> {
+        let _ = eval_dataset;
         // Return evaluation metrics
         let metrics = PyDict::new(py);
         metrics.set_item("eval_loss", 0.45)?;
@@ -280,6 +293,7 @@ impl PyTrainer {
 
     /// Make predictions
     fn predict(&self, py: Python<'_>, test_dataset: &Bound<'_, PyAny>) -> PyResult<PyObject> {
+        let _ = test_dataset;
         // Return predictions
         let result = PyDict::new(py);
         result.set_item("predictions", vec![0.1, 0.9, 0.3, 0.7])?;
@@ -290,7 +304,7 @@ impl PyTrainer {
 
     /// Save the model
     fn save_model(&self, output_dir: Option<String>) -> PyResult<()> {
-        let save_dir =
+        let _save_dir =
             output_dir.unwrap_or_else(|| self.args.inner.output_dir.to_string_lossy().to_string());
         // In a real implementation, we'd save the model here
         Ok(())
@@ -303,6 +317,7 @@ impl PyTrainer {
         commit_message: Option<String>,
         private: Option<bool>,
     ) -> PyResult<String> {
+        let _ = (commit_message, private);
         // In a real implementation, we'd push to HuggingFace Hub
         Ok(format!("https://huggingface.co/{}", repo_name))
     }
@@ -410,6 +425,12 @@ pub struct PyTrainingMetrics {
     metrics: HashMap<String, Vec<f32>>,
 }
 
+impl Default for PyTrainingMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[pymethods]
 impl PyTrainingMetrics {
     #[new]
@@ -421,7 +442,7 @@ impl PyTrainingMetrics {
 
     /// Add a metric value
     fn add(&mut self, name: String, value: f32) {
-        self.metrics.entry(name).or_insert_with(Vec::new).push(value);
+        self.metrics.entry(name).or_default().push(value);
     }
 
     /// Get metric values

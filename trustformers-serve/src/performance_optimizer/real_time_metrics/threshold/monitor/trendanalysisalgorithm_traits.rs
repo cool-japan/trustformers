@@ -46,14 +46,14 @@ impl ThresholdAdaptationAlgorithm for TrendAnalysisAlgorithm {
             Vec::new()
         };
         {
-            let mut state = self.trend_state.lock().expect("Trend state lock poisoned");
+            let mut state = self.trend_state.lock().unwrap_or_else(|p| p.into_inner());
             state.current_trend = trend_direction;
             state.trend_strength = trend_strength;
             state.seasonal_patterns = seasonal_patterns;
             state.last_analysis = Utc::now();
         }
         let adaptation_factor =
-            match self.trend_state.lock().expect("Trend state lock poisoned").current_trend {
+            match self.trend_state.lock().unwrap_or_else(|p| p.into_inner()).current_trend {
                 TrendDirection::Increasing => 1.0 + trend_strength as f64 * 0.2,
                 TrendDirection::Decreasing => 1.0 - trend_strength as f64 * 0.1,
                 TrendDirection::Stable => 1.0,
@@ -66,7 +66,7 @@ impl ThresholdAdaptationAlgorithm for TrendAnalysisAlgorithm {
         "trend_analysis_adaptation"
     }
     fn confidence(&self, data_quality: f32) -> f32 {
-        let state = self.trend_state.lock().expect("Trend state lock poisoned");
+        let state = self.trend_state.lock().unwrap_or_else(|p| p.into_inner());
         let trend_confidence = state.trend_strength.min(1.0);
         let seasonal_confidence =
             state.seasonal_patterns.iter().map(|p| p.confidence).fold(0.0f32, f32::max);

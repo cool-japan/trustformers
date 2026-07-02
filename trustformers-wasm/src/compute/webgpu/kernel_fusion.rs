@@ -4,7 +4,6 @@
 //! into single GPU kernels, reducing memory bandwidth and improving performance.
 
 #![allow(dead_code)]
-
 use crate::webgpu::{DeviceCapabilities, WorkgroupTuner};
 use std::collections::BTreeMap;
 use std::format;
@@ -243,24 +242,21 @@ impl KernelFusion {
     /// Get fusion statistics
     pub fn get_fusion_stats(&self) -> js_sys::Object {
         let stats = js_sys::Object::new();
-        js_sys::Reflect::set(
+        let _ = js_sys::Reflect::set(
             &stats,
             &"cache_size".into(),
             &self.fusion_cache.len().into(),
-        )
-        .expect("Failed to set fusion stats property");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &stats,
             &"max_fusion_depth".into(),
             &self.max_fusion_depth.into(),
-        )
-        .expect("Failed to set fusion stats property");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &stats,
             &"max_intermediate_memory".into(),
             &self.max_intermediate_memory.into(),
-        )
-        .expect("Failed to set fusion stats property");
+        );
         stats
     }
 

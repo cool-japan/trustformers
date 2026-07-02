@@ -21,7 +21,9 @@ pub use ranking::{
     SortOrder,
 };
 pub use stats::{LeaderboardStats, PerformanceTrend, TrendAnalysis};
-pub use storage::{FileStorage, LeaderboardStorage, RemoteStorage};
+#[cfg(feature = "remote-leaderboard")]
+pub use storage::RemoteStorage;
+pub use storage::{FileStorage, LeaderboardStorage};
 pub use submission::{
     DefaultValidator, LeaderboardSubmission, SubmissionValidator, ValidationResult,
 };

@@ -559,7 +559,8 @@ mod tests {
         suite.add_result(result);
 
         // Save and load
-        let temp_path = "/tmp/test_results.json";
+        let temp_path_buf = std::env::temp_dir().join("test_results.json");
+        let temp_path = temp_path_buf.to_str().expect("temp path should be valid UTF-8");
         harness.save_results(&suite, temp_path).expect("temp file creation failed");
         let loaded_suite = harness.load_results(temp_path).expect("temp file creation failed");
 

@@ -213,39 +213,63 @@ impl GpuResourceManager {
         Ok(())
     }
 
-    /// Discover and catalog available GPU devices
+    /// Discover and catalog available NVIDIA GPU devices via nvidia-smi
     ///
-    /// This performs comprehensive device discovery including:
-    /// - Hardware detection via multiple APIs (CUDA, OpenCL, etc.)
-    /// - Capability assessment and compatibility checking
-    /// - Driver version verification
-    /// - Initial health assessment
+    /// Enumerates real GPU hardware by invoking `nvidia-smi` as a subprocess and
+    /// parsing its CSV output.  If `nvidia-smi` is unavailable (non-NVIDIA system,
+    /// driver not installed, container without GPU passthrough, etc.) an honest empty
+    /// `HashMap` is returned — no fake devices are ever inserted.
+    ///
+    /// Discovery is capped at `config.max_devices` to respect operator limits.
     #[instrument(skip(config))]
     async fn discover_gpu_devices(
         config: &GpuPoolConfig,
     ) -> GpuResult<HashMap<usize, GpuDeviceInfo>> {
         let mut devices = HashMap::new();
+        let device_limit = config.max_devices;
 
-        info!("Starting GPU device discovery");
+        info!(
+            "Starting GPU device discovery via nvidia-smi (limit={})",
+            device_limit
+        );
 
-        // In a real implementation, this would use multiple GPU discovery methods:
-        // - NVIDIA Management Library (NVML) for NVIDIA GPUs
-        // - ROCm for AMD GPUs
-        // - OpenCL for general GPU detection
-        // - Vulkan API for graphics capabilities
+        // Detect CUDA runtime version once; used to populate device capabilities.
+        let cuda_version = Self::detect_cuda_version().await;
+        if let Some(ref v) = cuda_version {
+            debug!("Detected CUDA runtime version: {}", v);
+        } else {
+            debug!("CUDA runtime version not detected; omitting Cuda capability");
+        }
 
-        // For this implementation, we'll create mock devices for testing
-        // This allows the system to work without actual GPU hardware
-        let device_count = std::cmp::min(config.max_devices, 4); // Limit for testing
+        // Query the list of real NVIDIA GPU devices.
+        let real_devices = Self::query_nvidia_devices().await?;
 
-        for device_id in 0..device_count {
-            let device = Self::create_mock_device(device_id).await?;
+        for (device_id, device_name, total_memory_mb, free_memory_mb) in
+            real_devices.into_iter().take(device_limit)
+        {
+            let mut capabilities = Vec::new();
+            if let Some(ref version) = cuda_version {
+                capabilities.push(GpuCapability::Cuda(version.clone()));
+            }
 
-            // Perform initial capability assessment
+            let device = GpuDeviceInfo {
+                device_id,
+                device_name,
+                total_memory_mb,
+                available_memory_mb: free_memory_mb,
+                utilization_percent: 0.0,
+                capabilities,
+                status: GpuDeviceStatus::Available,
+                last_updated: Utc::now(),
+            };
+
             if Self::assess_device_health(&device).await? {
                 info!(
-                    "Discovered GPU device {}: {} with {}MB memory",
-                    device.device_id, device.device_name, device.total_memory_mb
+                    "Discovered GPU device {}: {} ({}MB total, {}MB free)",
+                    device.device_id,
+                    device.device_name,
+                    device.total_memory_mb,
+                    device.available_memory_mb
                 );
                 devices.insert(device_id, device);
             } else {
@@ -256,20 +280,172 @@ impl GpuResourceManager {
             }
         }
 
-        // TODO: In production, add real GPU discovery:
-        // - Use nvidia-ml-py for NVIDIA GPU detection
-        // - Use ROCm APIs for AMD GPU detection
-        // - Use OpenCL for cross-vendor detection
-        // - Implement driver compatibility checking
+        if devices.is_empty() {
+            info!(
+                "No NVIDIA GPU devices discovered; system will operate in CPU-only mode. \
+                 Install NVIDIA drivers and ensure nvidia-smi is on PATH to enable GPU support."
+            );
+        }
 
         info!(
-            "GPU device discovery completed, found {} healthy devices",
+            "GPU device discovery completed, found {} healthy device(s)",
             devices.len()
         );
         Ok(devices)
     }
 
-    /// Create a mock GPU device for testing purposes
+    /// Enumerate NVIDIA GPU devices by parsing `nvidia-smi` CSV output.
+    ///
+    /// Runs: `nvidia-smi --query-gpu=index,name,memory.total,memory.free
+    ///                    --format=csv,noheader,nounits`
+    ///
+    /// Returns `Vec<(device_id, name, total_memory_mb, free_memory_mb)>`.
+    /// Returns an empty `Vec` without error if `nvidia-smi` is absent or fails.
+    async fn query_nvidia_devices() -> GpuResult<Vec<(usize, String, u64, u64)>> {
+        // Spawn blocking because std::process::Command is synchronous.
+        let spawn_result = tokio::task::spawn_blocking(|| {
+            std::process::Command::new("nvidia-smi")
+                .args([
+                    "--query-gpu=index,name,memory.total,memory.free",
+                    "--format=csv,noheader,nounits",
+                ])
+                .output()
+        })
+        .await
+        .map_err(|e| GpuManagerError::MonitoringError {
+            source: anyhow::anyhow!("spawn_blocking for nvidia-smi failed: {}", e),
+        })?;
+
+        let output = match spawn_result {
+            Err(e) => {
+                // nvidia-smi not found or not executable.
+                info!(
+                    "nvidia-smi unavailable ({}); returning empty GPU device list",
+                    e
+                );
+                return Ok(Vec::new());
+            },
+            Ok(o) => o,
+        };
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(
+                "nvidia-smi exited with status {:?}: {}; returning empty GPU device list",
+                output.status,
+                stderr.trim()
+            );
+            return Ok(Vec::new());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut devices: Vec<(usize, String, u64, u64)> = Vec::new();
+
+        for line in stdout.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            // Expected CSV format: "0, NVIDIA RTX A4000, 16376, 16101"
+            // Use splitn(4) so that commas inside the device name are preserved.
+            let parts: Vec<&str> = line.splitn(4, ',').collect();
+            if parts.len() < 4 {
+                warn!(
+                    "Skipping nvidia-smi output line with unexpected format (expected 4 \
+                     comma-separated fields): {:?}",
+                    line
+                );
+                continue;
+            }
+
+            let device_id = match parts[0].trim().parse::<usize>() {
+                Ok(id) => id,
+                Err(e) => {
+                    warn!(
+                        "Failed to parse GPU index from {:?}: {}; skipping line",
+                        parts[0].trim(),
+                        e
+                    );
+                    continue;
+                },
+            };
+
+            let device_name = parts[1].trim().to_string();
+
+            let total_memory_mb = match parts[2].trim().parse::<u64>() {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!(
+                        "Failed to parse total memory from {:?}: {}; skipping device {}",
+                        parts[2].trim(),
+                        e,
+                        device_id
+                    );
+                    continue;
+                },
+            };
+
+            let free_memory_mb = match parts[3].trim().parse::<u64>() {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!(
+                        "Failed to parse free memory from {:?}: {}; skipping device {}",
+                        parts[3].trim(),
+                        e,
+                        device_id
+                    );
+                    continue;
+                },
+            };
+
+            debug!(
+                "Parsed GPU entry: index={}, name={:?}, total={}MB, free={}MB",
+                device_id, device_name, total_memory_mb, free_memory_mb
+            );
+
+            devices.push((device_id, device_name, total_memory_mb, free_memory_mb));
+        }
+
+        Ok(devices)
+    }
+
+    /// Detect the CUDA runtime version from `nvidia-smi` header output.
+    ///
+    /// Parses the top section of standard `nvidia-smi` output looking for a line
+    /// that contains `"CUDA Version: X.Y"` and returns the version string.  Returns
+    /// `None` if the version cannot be determined.
+    async fn detect_cuda_version() -> Option<String> {
+        let spawn_result =
+            tokio::task::spawn_blocking(|| std::process::Command::new("nvidia-smi").output())
+                .await
+                .ok()?;
+
+        let output = spawn_result.ok()?;
+        if !output.status.success() {
+            return None;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if let Some(pos) = line.find("CUDA Version:") {
+                let after = &line[pos + "CUDA Version:".len()..];
+                // Strip trailing pipe characters and whitespace from the table border.
+                let version = after.trim().trim_end_matches('|').trim().to_string();
+                if !version.is_empty() && version != "N/A" {
+                    return Some(version);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Create a mock GPU device for testing purposes.
+    ///
+    /// This function is retained for unit-test use.  It is **not** called from the
+    /// production discovery path; real discovery uses `query_nvidia_devices`.
+    #[allow(dead_code)]
     async fn create_mock_device(device_id: usize) -> GpuResult<GpuDeviceInfo> {
         // Simulate different GPU types and capabilities
         let (device_name, total_memory_mb, capabilities) = match device_id {
@@ -331,26 +507,27 @@ impl GpuResourceManager {
         })
     }
 
-    /// Assess device health and compatibility
+    /// Assess initial health of a discovered device.
+    ///
+    /// Devices returned by `query_nvidia_devices` are known to the NVIDIA driver and
+    /// are considered healthy at discovery time.  Runtime failure detection (thermal
+    /// events, ECC errors, power issues) is handled by `GpuHealthMonitor` during
+    /// ongoing operation, not at discovery.
     async fn assess_device_health(device: &GpuDeviceInfo) -> GpuResult<bool> {
-        // In a real implementation, this would:
-        // - Check driver compatibility
-        // - Verify device functionality with test operations
-        // - Check temperature and power status
-        // - Validate memory integrity
-        // - Test basic compute operations
-
-        // For mock implementation, randomly simulate some devices being unhealthy
-        let health_score = (device.device_id as f32 * 17.0) % 1.0;
-        let is_healthy = health_score > 0.1; // 90% of devices are healthy
-
-        if is_healthy {
-            debug!("Device {} passed health assessment", device.device_id);
-        } else {
-            warn!("Device {} failed health assessment", device.device_id);
+        // A device must have at least some memory to be usable.
+        if device.total_memory_mb == 0 {
+            warn!(
+                "Device {} ({}) reports zero total memory; marking unhealthy",
+                device.device_id, device.device_name
+            );
+            return Ok(false);
         }
 
-        Ok(is_healthy)
+        debug!(
+            "Device {} ({}) passed initial health assessment ({}MB total)",
+            device.device_id, device.device_name, device.total_memory_mb
+        );
+        Ok(true)
     }
 
     /// Start all monitoring and background systems

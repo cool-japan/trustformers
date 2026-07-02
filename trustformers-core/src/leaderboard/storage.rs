@@ -164,12 +164,17 @@ impl LeaderboardStorage for FileStorage {
 }
 
 /// Remote storage implementation (e.g., REST API, database)
+///
+/// Requires the `remote-leaderboard` feature (pulls in `reqwest`). Without it,
+/// use [`FileStorage`] or [`MemoryStorage`], which need no network stack.
+#[cfg(feature = "remote-leaderboard")]
 pub struct RemoteStorage {
     endpoint: String,
     client: reqwest::Client,
     api_key: Option<String>,
 }
 
+#[cfg(feature = "remote-leaderboard")]
 impl RemoteStorage {
     /// Create new remote storage
     pub fn new(endpoint: String, api_key: Option<String>) -> Self {
@@ -193,6 +198,7 @@ impl RemoteStorage {
     }
 }
 
+#[cfg(feature = "remote-leaderboard")]
 #[async_trait]
 impl LeaderboardStorage for RemoteStorage {
     async fn store(&self, entry: &LeaderboardEntry) -> Result<()> {

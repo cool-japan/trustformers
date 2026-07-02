@@ -211,21 +211,16 @@ pub trait GpuDeviceExt {
 
 impl GpuDeviceExt for GpuDevice {
     fn create_buffer(&self, descriptor: &GpuBufferDescriptor) -> GpuBuffer {
-        let func = js_sys::Reflect::get(self, &"createBuffer".into())
-            .expect("createBuffer method should exist");
+        let func = js_sys::Reflect::get(self, &"createBuffer".into()).unwrap_or(JsValue::UNDEFINED);
         let func: js_sys::Function = func.unchecked_into();
-        func.call1(self, descriptor)
-            .expect("createBuffer should succeed")
-            .unchecked_into()
+        func.call1(self, descriptor).unwrap_or(JsValue::UNDEFINED).unchecked_into()
     }
 
     fn create_shader_module(&self, descriptor: &GpuShaderModuleDescriptor) -> GpuShaderModule {
-        let func = js_sys::Reflect::get(self, &"createShaderModule".into())
-            .expect("createShaderModule method should exist");
+        let func =
+            js_sys::Reflect::get(self, &"createShaderModule".into()).unwrap_or(JsValue::UNDEFINED);
         let func: js_sys::Function = func.unchecked_into();
-        func.call1(self, descriptor)
-            .expect("createShaderModule should succeed")
-            .unchecked_into()
+        func.call1(self, descriptor).unwrap_or(JsValue::UNDEFINED).unchecked_into()
     }
 
     fn create_compute_pipeline(
@@ -233,41 +228,35 @@ impl GpuDeviceExt for GpuDevice {
         descriptor: &GpuComputePipelineDescriptor,
     ) -> GpuComputePipeline {
         let func = js_sys::Reflect::get(self, &"createComputePipeline".into())
-            .expect("createComputePipeline method should exist");
+            .unwrap_or(JsValue::UNDEFINED);
         let func: js_sys::Function = func.unchecked_into();
-        func.call1(self, descriptor)
-            .expect("createComputePipeline should succeed")
-            .unchecked_into()
+        func.call1(self, descriptor).unwrap_or(JsValue::UNDEFINED).unchecked_into()
     }
 
     fn create_bind_group(&self, descriptor: &GpuBindGroupDescriptor) -> GpuBindGroup {
-        let func = js_sys::Reflect::get(self, &"createBindGroup".into())
-            .expect("createBindGroup method should exist");
+        let func =
+            js_sys::Reflect::get(self, &"createBindGroup".into()).unwrap_or(JsValue::UNDEFINED);
         let func: js_sys::Function = func.unchecked_into();
-        func.call1(self, descriptor)
-            .expect("createBindGroup should succeed")
-            .unchecked_into()
+        func.call1(self, descriptor).unwrap_or(JsValue::UNDEFINED).unchecked_into()
     }
 
     fn create_command_encoder(&self) -> GpuCommandEncoder {
         let func = js_sys::Reflect::get(self, &"createCommandEncoder".into())
-            .expect("createCommandEncoder method should exist");
+            .unwrap_or(JsValue::UNDEFINED);
         let func: js_sys::Function = func.unchecked_into();
-        func.call0(self).expect("createCommandEncoder should succeed").unchecked_into()
+        func.call0(self).unwrap_or(JsValue::UNDEFINED).unchecked_into()
     }
 
     fn create_texture(&self, descriptor: &GpuTextureDescriptor) -> GpuTexture {
-        let func = js_sys::Reflect::get(self, &"createTexture".into())
-            .expect("createTexture method should exist");
+        let func =
+            js_sys::Reflect::get(self, &"createTexture".into()).unwrap_or(JsValue::UNDEFINED);
         let func: js_sys::Function = func.unchecked_into();
-        func.call1(self, descriptor)
-            .expect("createTexture should succeed")
-            .unchecked_into()
+        func.call1(self, descriptor).unwrap_or(JsValue::UNDEFINED).unchecked_into()
     }
 
     fn queue(&self) -> GpuQueue {
         js_sys::Reflect::get(self, &"queue".into())
-            .expect("queue property should exist")
+            .unwrap_or(JsValue::UNDEFINED)
             .unchecked_into()
     }
 }
@@ -279,10 +268,10 @@ pub trait GpuExt {
 
 impl GpuExt for Gpu {
     fn request_adapter(&self) -> js_sys::Promise {
-        let func = js_sys::Reflect::get(self, &"requestAdapter".into())
-            .expect("requestAdapter method should exist");
+        let func =
+            js_sys::Reflect::get(self, &"requestAdapter".into()).unwrap_or(JsValue::UNDEFINED);
         let func: js_sys::Function = func.unchecked_into();
-        func.call0(self).expect("requestAdapter should succeed").unchecked_into()
+        func.call0(self).unwrap_or(JsValue::UNDEFINED).unchecked_into()
     }
 }
 
@@ -294,15 +283,15 @@ pub trait GpuAdapterExt {
 
 impl GpuAdapterExt for GpuAdapter {
     fn request_device(&self) -> js_sys::Promise {
-        let func = js_sys::Reflect::get(self, &"requestDevice".into())
-            .expect("requestDevice method should exist");
+        let func =
+            js_sys::Reflect::get(self, &"requestDevice".into()).unwrap_or(JsValue::UNDEFINED);
         let func: js_sys::Function = func.unchecked_into();
-        func.call0(self).expect("requestDevice should succeed").unchecked_into()
+        func.call0(self).unwrap_or(JsValue::UNDEFINED).unchecked_into()
     }
 
     fn limits(&self) -> js_sys::Object {
         js_sys::Reflect::get(self, &"limits".into())
-            .expect("limits property should exist")
+            .unwrap_or(JsValue::UNDEFINED)
             .unchecked_into()
     }
 }
@@ -330,8 +319,8 @@ impl GpuCommandEncoderExt for GpuCommandEncoder {
         destination_offset: f64,
         size: f64,
     ) {
-        let func = js_sys::Reflect::get(self, &"copyBufferToBuffer".into())
-            .expect("copyBufferToBuffer method should exist");
+        let func =
+            js_sys::Reflect::get(self, &"copyBufferToBuffer".into()).unwrap_or(JsValue::UNDEFINED);
         let func: js_sys::Function = func.unchecked_into();
         let _ = func.call5(
             self,
@@ -344,17 +333,16 @@ impl GpuCommandEncoderExt for GpuCommandEncoder {
     }
 
     fn begin_compute_pass(&self) -> GpuComputePassEncoder {
-        let func = js_sys::Reflect::get(self, &"beginComputePass".into())
-            .expect("beginComputePass method should exist");
+        let func =
+            js_sys::Reflect::get(self, &"beginComputePass".into()).unwrap_or(JsValue::UNDEFINED);
         let func: js_sys::Function = func.unchecked_into();
-        func.call0(self).expect("beginComputePass should succeed").unchecked_into()
+        func.call0(self).unwrap_or(JsValue::UNDEFINED).unchecked_into()
     }
 
     fn finish(&self) -> js_sys::Object {
-        let func =
-            js_sys::Reflect::get(self, &"finish".into()).expect("finish method should exist");
+        let func = js_sys::Reflect::get(self, &"finish".into()).unwrap_or(JsValue::UNDEFINED);
         let func: js_sys::Function = func.unchecked_into();
-        func.call0(self).expect("finish should succeed").unchecked_into()
+        func.call0(self).unwrap_or(JsValue::UNDEFINED).unchecked_into()
     }
 }
 
@@ -365,8 +353,7 @@ pub trait GpuQueueExt {
 
 impl GpuQueueExt for GpuQueue {
     fn submit(&self, command_buffers: &js_sys::Array) {
-        let func =
-            js_sys::Reflect::get(self, &"submit".into()).expect("submit method should exist");
+        let func = js_sys::Reflect::get(self, &"submit".into()).unwrap_or(JsValue::UNDEFINED);
         let func: js_sys::Function = func.unchecked_into();
         let _ = func.call1(self, command_buffers);
     }
@@ -381,8 +368,7 @@ pub trait GpuBufferExt {
 
 impl GpuBufferExt for GpuBuffer {
     fn map_async(&self, mode: u32, offset: f64, size: f64) -> js_sys::Promise {
-        let func =
-            js_sys::Reflect::get(self, &"mapAsync".into()).expect("mapAsync method should exist");
+        let func = js_sys::Reflect::get(self, &"mapAsync".into()).unwrap_or(JsValue::UNDEFINED);
         let func: js_sys::Function = func.unchecked_into();
         func.call3(
             self,
@@ -390,19 +376,19 @@ impl GpuBufferExt for GpuBuffer {
             &JsValue::from_f64(offset),
             &JsValue::from_f64(size),
         )
-        .expect("mapAsync should succeed")
+        .unwrap_or(JsValue::UNDEFINED)
         .unchecked_into()
     }
 
     fn get_mapped_range(&self) -> js_sys::ArrayBuffer {
-        let func = js_sys::Reflect::get(self, &"getMappedRange".into())
-            .expect("getMappedRange method should exist");
+        let func =
+            js_sys::Reflect::get(self, &"getMappedRange".into()).unwrap_or(JsValue::UNDEFINED);
         let func: js_sys::Function = func.unchecked_into();
-        func.call0(self).expect("getMappedRange should succeed").unchecked_into()
+        func.call0(self).unwrap_or(JsValue::UNDEFINED).unchecked_into()
     }
 
     fn unmap(&self) {
-        let func = js_sys::Reflect::get(self, &"unmap".into()).expect("unmap method should exist");
+        let func = js_sys::Reflect::get(self, &"unmap".into()).unwrap_or(JsValue::UNDEFINED);
         let func: js_sys::Function = func.unchecked_into();
         let _ = func.call0(self);
     }
@@ -415,11 +401,11 @@ pub trait GpuComputePipelineExt {
 
 impl GpuComputePipelineExt for GpuComputePipeline {
     fn get_bind_group_layout(&self, index: u32) -> GpuBindGroupLayout {
-        let func = js_sys::Reflect::get(self, &"getBindGroupLayout".into())
-            .expect("getBindGroupLayout method should exist");
+        let func =
+            js_sys::Reflect::get(self, &"getBindGroupLayout".into()).unwrap_or(JsValue::UNDEFINED);
         let func: js_sys::Function = func.unchecked_into();
         func.call1(self, &JsValue::from_f64(index as f64))
-            .expect("getBindGroupLayout should succeed")
+            .unwrap_or(JsValue::UNDEFINED)
             .unchecked_into()
     }
 }
@@ -434,22 +420,20 @@ pub trait GpuComputePassEncoderExt {
 
 impl GpuComputePassEncoderExt for GpuComputePassEncoder {
     fn set_pipeline(&self, pipeline: &GpuComputePipeline) {
-        let func = js_sys::Reflect::get(self, &"setPipeline".into())
-            .expect("setPipeline method should exist");
+        let func = js_sys::Reflect::get(self, &"setPipeline".into()).unwrap_or(JsValue::UNDEFINED);
         let func: js_sys::Function = func.unchecked_into();
         let _ = func.call1(self, pipeline);
     }
 
     fn set_bind_group(&self, index: u32, bind_group: &GpuBindGroup) {
-        let func = js_sys::Reflect::get(self, &"setBindGroup".into())
-            .expect("setBindGroup method should exist");
+        let func = js_sys::Reflect::get(self, &"setBindGroup".into()).unwrap_or(JsValue::UNDEFINED);
         let func: js_sys::Function = func.unchecked_into();
         let _ = func.call2(self, &JsValue::from_f64(index as f64), bind_group);
     }
 
     fn dispatch_workgroups(&self, x: u32, y: u32, z: u32) {
-        let func = js_sys::Reflect::get(self, &"dispatchWorkgroups".into())
-            .expect("dispatchWorkgroups method should exist");
+        let func =
+            js_sys::Reflect::get(self, &"dispatchWorkgroups".into()).unwrap_or(JsValue::UNDEFINED);
         let func: js_sys::Function = func.unchecked_into();
         let _ = func.call3(
             self,
@@ -460,7 +444,7 @@ impl GpuComputePassEncoderExt for GpuComputePassEncoder {
     }
 
     fn end(&self) {
-        let func = js_sys::Reflect::get(self, &"end".into()).expect("end method should exist");
+        let func = js_sys::Reflect::get(self, &"end".into()).unwrap_or(JsValue::UNDEFINED);
         let func: js_sys::Function = func.unchecked_into();
         let _ = func.call0(self);
     }

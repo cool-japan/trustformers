@@ -271,7 +271,6 @@ impl DimensionRange {
         Self { min, max, step }
     }
 
-    #[allow(deprecated)]
     pub fn sample(&self, rng: &mut impl Rng) -> i32 {
         let steps = (self.max - self.min) / self.step + 1;
         let step_idx = rng.random_range(0..steps);
@@ -518,7 +517,6 @@ impl Architecture {
     }
 
     /// Generate a random architecture within the search space
-    #[allow(deprecated)]
     pub fn random(search_space: &SearchSpace, rng: &mut impl Rng) -> Self {
         let mut architecture = Architecture::new();
 
@@ -539,7 +537,6 @@ impl Architecture {
     }
 
     /// Mutate the architecture for evolutionary search
-    #[allow(deprecated)]
     pub fn mutate(&mut self, search_space: &SearchSpace, mutation_rate: f32, rng: &mut impl Rng) {
         // Mutate dimensions
         for (name, value) in &mut self.dimensions {
@@ -565,7 +562,6 @@ impl Architecture {
     }
 
     /// Create a crossover between two architectures
-    #[allow(deprecated)]
     pub fn crossover(&self, other: &Architecture, rng: &mut impl Rng) -> Architecture {
         let mut child = Architecture::new();
 
@@ -710,7 +706,6 @@ impl NeuralArchitectureSearcher {
         })
     }
 
-    #[allow(deprecated)]
     fn evolutionary_search(&mut self) -> Result<ArchitectureEvaluation> {
         // Initialize population
         self.initialize_population()?;
@@ -879,7 +874,6 @@ impl NeuralArchitectureSearcher {
         })
     }
 
-    #[allow(deprecated)]
     fn nsga2_search(&mut self) -> Result<ArchitectureEvaluation> {
         // Simplified NSGA-II for multi-objective optimization
         self.initialize_population()?;
@@ -930,7 +924,7 @@ impl NeuralArchitectureSearcher {
         if let Some(best) = self
             .population
             .iter()
-            .max_by(|a, b| a.fitness.partial_cmp(&b.fitness).expect("operation failed"))
+            .max_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap_or(std::cmp::Ordering::Equal))
         {
             self.best_architecture = Some(best.clone());
         }
@@ -938,7 +932,6 @@ impl NeuralArchitectureSearcher {
         Ok(())
     }
 
-    #[allow(deprecated)]
     fn select_parents(&mut self) -> Vec<ArchitectureEvaluation> {
         // Tournament selection
         let tournament_size = 3;

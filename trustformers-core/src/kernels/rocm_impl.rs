@@ -352,7 +352,7 @@ impl RocmImpl {
     ) -> Result<RocmKernel> {
         // Check cache first
         {
-            let cache = self.kernel_cache.lock().expect("Lock poisoned");
+            let cache = self.kernel_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(kernel) = cache.get(name) {
                 return Ok(kernel.clone());
             }
@@ -404,7 +404,8 @@ impl RocmImpl {
 
         // Cache the kernel
         {
-            let mut cache = self.kernel_cache.lock().expect("Lock poisoned");
+            let mut cache =
+                self.kernel_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             cache.insert(name.to_string(), kernel.clone());
         }
 
@@ -422,7 +423,7 @@ impl RocmImpl {
     pub fn allocate_memory(&self, size: usize) -> Result<*mut std::ffi::c_void> {
         // Try to get from pool first
         {
-            let mut pool = self.memory_pool.lock().expect("Lock poisoned");
+            let mut pool = self.memory_pool.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(block) = pool.get_block(size) {
                 return Ok(block.ptr);
             }
@@ -440,7 +441,7 @@ impl RocmImpl {
 
         // Update memory tracking
         {
-            let mut pool = self.memory_pool.lock().expect("Lock poisoned");
+            let mut pool = self.memory_pool.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             pool.total_allocated += size;
             pool.peak_memory = pool.peak_memory.max(pool.total_allocated);
         }
@@ -847,7 +848,7 @@ extern "C" __global__ void rocm_flash_attention(
 
     /// Get memory usage statistics
     pub fn memory_stats(&self) -> (usize, usize) {
-        let pool = self.memory_pool.lock().expect("Lock poisoned");
+        let pool = self.memory_pool.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         (pool.total_allocated, pool.peak_memory)
     }
 

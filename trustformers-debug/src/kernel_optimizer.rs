@@ -2,6 +2,10 @@
 //!
 //! This module provides comprehensive analysis of GPU kernel performance,
 //! identifies optimization opportunities, and suggests specific improvements.
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -15,6 +19,10 @@ use crate::advanced_gpu_profiler::{
     ImplementationDifficulty, InstructionMixAnalysis, KernelExecutionProfile, KernelOptimization,
     MemoryAccessAnalysis, OptimalLaunchConfig, ResourceUtilizationMetrics,
 };
+
+/// CPU-side analytical computations backing the analyzers in this module
+/// (occupancy estimation, roofline classification, fusion detection).
+mod analysis;
 
 /// Comprehensive kernel optimization analyzer
 #[derive(Debug)]
@@ -30,9 +38,7 @@ pub struct KernelOptimizationAnalyzer {
 
 /// Launch configuration optimization engine
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct LaunchConfigAnalyzer {
-    #[allow(dead_code)]
     optimal_configs: HashMap<String, OptimalLaunchConfig>,
     config_performance_history: HashMap<String, Vec<ConfigPerformanceMeasurement>>,
     autotuning_enabled: bool,
@@ -81,10 +87,8 @@ pub struct OccupancyTargets {
 }
 
 /// Memory access pattern analysis engine
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct MemoryAccessAnalyzer {
-    #[allow(dead_code)]
     access_patterns: HashMap<String, MemoryAccessAnalysis>,
     coalescing_analysis: HashMap<String, CoalescingAnalysis>,
     cache_performance: HashMap<String, CachePerformanceAnalysis>,
@@ -145,11 +149,9 @@ pub enum StrideOptimizationType {
     VectorizedAccess,
 }
 
-#[allow(dead_code)]
 /// Bank conflict analysis for shared memory
 #[derive(Debug)]
 pub struct BankConflictAnalyzer {
-    #[allow(dead_code)]
     conflict_patterns: HashMap<String, BankConflictPattern>,
     resolution_strategies: HashMap<String, Vec<ConflictResolutionStrategy>>,
 }
@@ -196,23 +198,18 @@ pub enum ConflictResolutionType {
     BroadcastOptimization,
     MemoryLayoutChange,
 }
-#[allow(dead_code)]
 
 /// Compute utilization analysis engine
 #[derive(Debug)]
 pub struct ComputeUtilizationAnalyzer {
-    #[allow(dead_code)]
     utilization_profiles: HashMap<String, ComputeUtilizationProfile>,
     bottleneck_analysis: HashMap<String, ComputeBottleneckAnalysis>,
     arithmetic_intensity_analyzer: ArithmeticIntensityAnalyzer,
-    #[allow(dead_code)]
     resource_balancer: ResourceBalancer,
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct ArithmeticIntensityAnalyzer {
-    #[allow(dead_code)]
     intensity_profiles: HashMap<String, ArithmeticIntensityProfile>,
     roofline_models: HashMap<i32, RooflineModel>, // Per device
 }
@@ -275,15 +272,12 @@ pub struct ComputeCapabilities {
     pub fp16_performance: f64,
     pub int32_performance: f64,
     pub tensor_performance: f64,
-    #[allow(dead_code)]
     pub special_function_performance: f64,
 }
 
 /// Resource balancing engine
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct ResourceBalancer {
-    #[allow(dead_code)]
     resource_profiles: HashMap<String, ResourceProfile>,
     balancing_strategies: HashMap<String, Vec<BalancingStrategy>>,
 }
@@ -327,17 +321,14 @@ pub enum BalancingStrategyType {
     RegisterOptimization,
     SharedMemoryOptimization,
     BlockSizeAdjustment,
-    #[allow(dead_code)]
     WorkDistributionOptimization,
     ResourcePartitioning,
 }
 
 /// Kernel fusion analysis engine
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct KernelFusionAnalyzer {
     fusion_opportunities: HashMap<String, Vec<FusionOpportunity>>,
-    #[allow(dead_code)]
     dependency_graph: KernelDependencyGraph,
     fusion_templates: Vec<FusionTemplate>,
     cost_benefit_analyzer: FusionCostBenefitAnalyzer,
@@ -395,7 +386,6 @@ pub struct FusionFeasibility {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SynchronizationComplexity {
     None,
-    #[allow(dead_code)]
     Minimal,
     Moderate,
     Complex,
@@ -403,9 +393,7 @@ pub enum SynchronizationComplexity {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct KernelDependencyGraph {
-    #[allow(dead_code)]
     nodes: HashMap<String, KernelNode>,
     edges: Vec<DependencyEdge>,
     fusion_clusters: Vec<FusionCluster>,
@@ -462,7 +450,6 @@ pub struct FusionStrategy {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FusionBenefits {
-    #[allow(dead_code)]
     pub memory_bandwidth_reduction: f64,
     pub kernel_launch_overhead_reduction: f64,
     pub cache_locality_improvement: f64,
@@ -471,9 +458,7 @@ pub struct FusionBenefits {
 
 /// Fusion cost-benefit analyzer
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct FusionCostBenefitAnalyzer {
-    #[allow(dead_code)]
     cost_models: HashMap<FusionType, CostModel>,
     benefit_predictors: HashMap<FusionType, BenefitPredictor>,
 }
@@ -508,7 +493,6 @@ pub struct MemoryModel {
     pub bandwidth_savings: f64,
     pub cache_improvement: f64,
 }
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnergyModel {
     pub energy_reduction_factor: f64,
@@ -517,9 +501,7 @@ pub struct EnergyModel {
 
 /// Performance regression detection
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct PerformanceRegressionDetector {
-    #[allow(dead_code)]
     baseline_profiles: HashMap<String, BaselineProfile>,
     regression_alerts: Vec<RegressionAlert>,
     statistical_analyzer: StatisticalAnalyzer,
@@ -584,9 +566,7 @@ pub struct RegressionThresholds {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct StatisticalAnalyzer {
-    #[allow(dead_code)]
     sample_size_requirements: HashMap<String, usize>,
     statistical_tests: Vec<StatisticalTest>,
 }
@@ -981,10 +961,12 @@ impl LaunchConfigAnalyzer {
     fn analyze(
         &mut self,
         _kernel_name: &str,
-        _profile_data: &KernelProfileData,
+        profile_data: &KernelProfileData,
     ) -> Result<Vec<KernelOptimization>> {
-        // Simplified implementation - would perform actual launch config analysis
-        Ok(vec![])
+        // Real CPU-side launch-configuration analysis: estimate occupancy from
+        // the launch descriptor + documented sm_86 device limits and emit
+        // block-size / register / shared-memory recommendations.
+        Ok(analysis::analyze_launch_config(profile_data))
     }
 
     fn get_analysis(&self, kernel_name: &str) -> Result<LaunchConfigAnalysisResult> {
@@ -1029,10 +1011,11 @@ impl MemoryAccessAnalyzer {
     fn analyze(
         &mut self,
         _kernel_name: &str,
-        _profile_data: &KernelProfileData,
+        profile_data: &KernelProfileData,
     ) -> Result<Vec<KernelOptimization>> {
-        // Simplified implementation
-        Ok(vec![])
+        // Real CPU-side memory-access analysis: classify coalescing / warp
+        // divergence from the measured efficiency metrics and emit fixes.
+        Ok(analysis::analyze_memory_access(profile_data))
     }
 
     fn get_analysis(&self, kernel_name: &str) -> Result<MemoryAnalysisResult> {
@@ -1095,10 +1078,12 @@ impl ComputeUtilizationAnalyzer {
     fn analyze(
         &mut self,
         _kernel_name: &str,
-        _profile_data: &KernelProfileData,
+        profile_data: &KernelProfileData,
     ) -> Result<Vec<KernelOptimization>> {
-        // Simplified implementation
-        Ok(vec![])
+        // Real CPU-side compute-utilization analysis: place the kernel on the
+        // roofline (arithmetic intensity vs ridge point) and classify the
+        // bottleneck (memory-bound / compute-bound / latency-bound).
+        Ok(analysis::analyze_compute_utilization(profile_data))
     }
 
     fn get_analysis(&self, kernel_name: &str) -> Result<ComputeAnalysisResult> {
@@ -1174,10 +1159,24 @@ impl KernelFusionAnalyzer {
 
     fn find_fusion_opportunities(
         &mut self,
-        _kernel_sequence: &[String],
+        kernel_sequence: &[String],
     ) -> Result<Vec<FusionOpportunity>> {
-        // Simplified implementation
-        Ok(vec![])
+        // Real CPU-side fusion detection: examine each adjacent producer→consumer
+        // pair, classify the kernels, and model the memory-traffic speedup.
+        let opportunities = analysis::find_fusion_opportunities(kernel_sequence);
+
+        // Index opportunities by participating kernel so per-kernel reports can
+        // surface them later.
+        for opportunity in &opportunities {
+            for kernel in &opportunity.kernel_group {
+                self.fusion_opportunities
+                    .entry(kernel.clone())
+                    .or_default()
+                    .push(opportunity.clone());
+            }
+        }
+
+        Ok(opportunities)
     }
 
     fn get_opportunities_for_kernel(&self, kernel_name: &str) -> Result<Vec<FusionOpportunity>> {
@@ -1758,5 +1757,102 @@ mod tests {
         };
         assert_eq!(constraints.max_registers_per_thread, 255);
         assert!((constraints.occupancy_impact_threshold - 0.5).abs() < f64::EPSILON);
+    }
+
+    fn low_occupancy_matmul_profile() -> KernelProfileData {
+        KernelProfileData {
+            execution_time: Duration::from_micros(250),
+            grid_size: (4096, 1, 1),
+            block_size: (256, 1, 1),
+            shared_memory_bytes: 0,
+            registers_per_thread: 128, // register-limited → low occupancy
+            occupancy: 0.33,
+            compute_utilization: 0.65,
+            memory_bandwidth_utilization: 0.45,
+            warp_efficiency: 0.92,
+            memory_efficiency: 0.88,
+        }
+    }
+
+    #[test]
+    fn test_analyze_kernel_returns_real_optimizations() {
+        let mut analyzer =
+            KernelOptimizationAnalyzer::new().expect("analyzer construction should succeed");
+        let opts = analyzer
+            .analyze_kernel("matmul_tile", low_occupancy_matmul_profile())
+            .expect("analysis should succeed");
+        assert!(
+            !opts.is_empty(),
+            "low-occupancy register-limited kernel must yield optimizations"
+        );
+        // Results are ranked by performance gain (descending) and within range.
+        for window in opts.windows(2) {
+            assert!(
+                window[0].expected_improvement.performance_gain_percentage
+                    >= window[1].expected_improvement.performance_gain_percentage
+            );
+        }
+        for opt in &opts {
+            assert!((0.0..=1.0).contains(&opt.confidence));
+            assert!((0.0..=95.0).contains(&opt.expected_improvement.performance_gain_percentage));
+        }
+    }
+
+    #[test]
+    fn test_analyze_memory_bound_kernel() {
+        let mut analyzer =
+            KernelOptimizationAnalyzer::new().expect("analyzer construction should succeed");
+        let profile = KernelProfileData {
+            execution_time: Duration::from_micros(80),
+            grid_size: (8192, 1, 1),
+            block_size: (256, 1, 1),
+            shared_memory_bytes: 0,
+            registers_per_thread: 32,
+            occupancy: 0.55,
+            compute_utilization: 0.15,
+            memory_bandwidth_utilization: 0.9,
+            warp_efficiency: 0.6,
+            memory_efficiency: 0.4,
+        };
+        let opts = analyzer.analyze_kernel("gemv", profile).expect("analysis should succeed");
+        assert!(
+            !opts.is_empty(),
+            "memory-bound kernel must yield optimizations"
+        );
+        assert!(opts.iter().any(|o| matches!(
+            o.optimization_type,
+            crate::advanced_gpu_profiler::OptimizationType::MemoryCoalescing
+                | crate::advanced_gpu_profiler::OptimizationType::ComputeIntensityBalance
+        )));
+    }
+
+    #[test]
+    fn test_analyze_fusion_opportunities_public_api() {
+        let mut analyzer =
+            KernelOptimizationAnalyzer::new().expect("analyzer construction should succeed");
+        let sequence = vec![
+            "matmul_qk".to_string(),
+            "softmax".to_string(),
+            "matmul_v".to_string(),
+            "bias_add".to_string(),
+            "gelu".to_string(),
+        ];
+        let opportunities = analyzer
+            .analyze_fusion_opportunities(&sequence)
+            .expect("fusion analysis should succeed");
+        assert!(
+            !opportunities.is_empty(),
+            "an attention-style kernel chain must expose fusion opportunities"
+        );
+        for opp in &opportunities {
+            assert!(opp.expected_speedup > 1.0);
+            assert_eq!(opp.kernel_group.len(), 2);
+            assert!(opp.memory_savings > 0);
+            assert!((0.0..=1.0).contains(&opp.fusion_feasibility.fusion_confidence));
+        }
+        // Opportunities are indexed per participating kernel.
+        let report = analyzer.fusion_analyzer.get_opportunities_for_kernel("softmax");
+        assert!(report.is_ok());
+        assert!(!report.expect("indexed opportunities").is_empty());
     }
 }

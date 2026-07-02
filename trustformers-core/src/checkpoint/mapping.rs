@@ -55,10 +55,10 @@ pub enum ConvFormat {
 impl WeightMapping {
     pub fn new(model_type: ModelType) -> Self {
         let rules = match model_type {
-            ModelType::BERT => Self::bert_rules(),
-            ModelType::GPT2 => Self::gpt2_rules(),
-            ModelType::T5 => Self::t5_rules(),
-            ModelType::LLaMA => Self::llama_rules(),
+            ModelType::BERT => Self::bert_rules().unwrap_or_default(),
+            ModelType::GPT2 => Self::gpt2_rules().unwrap_or_default(),
+            ModelType::T5 => Self::t5_rules().unwrap_or_default(),
+            ModelType::LLaMA => Self::llama_rules().unwrap_or_default(),
             ModelType::Generic => Vec::new(),
         };
 
@@ -99,243 +99,231 @@ impl WeightMapping {
         Ok((jax_name, None))
     }
 
-    fn bert_rules() -> Vec<WeightMappingRule> {
-        vec![
+    fn bert_rules() -> Result<Vec<WeightMappingRule>> {
+        Ok(vec![
             // Embeddings
             WeightMappingRule {
-                pattern: Regex::new(r"^embeddings\.word_embeddings\.weight$").expect("valid regex"),
+                pattern: Regex::new(r"^embeddings\.word_embeddings\.weight$")?,
                 replacement: "bert/embeddings/word_embeddings".to_string(),
                 transform: None,
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^embeddings\.position_embeddings\.weight$")
-                    .expect("valid regex"),
+                pattern: Regex::new(r"^embeddings\.position_embeddings\.weight$")?,
                 replacement: "bert/embeddings/position_embeddings".to_string(),
                 transform: None,
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^embeddings\.token_type_embeddings\.weight$")
-                    .expect("valid regex"),
+                pattern: Regex::new(r"^embeddings\.token_type_embeddings\.weight$")?,
                 replacement: "bert/embeddings/token_type_embeddings".to_string(),
                 transform: None,
             },
             // Layer normalization
             WeightMappingRule {
-                pattern: Regex::new(r"^embeddings\.LayerNorm\.weight$").expect("valid regex"),
+                pattern: Regex::new(r"^embeddings\.LayerNorm\.weight$")?,
                 replacement: "bert/embeddings/LayerNorm/gamma".to_string(),
                 transform: None,
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^embeddings\.LayerNorm\.bias$").expect("valid regex"),
+                pattern: Regex::new(r"^embeddings\.LayerNorm\.bias$")?,
                 replacement: "bert/embeddings/LayerNorm/beta".to_string(),
                 transform: None,
             },
             // Encoder layers
             WeightMappingRule {
-                pattern: Regex::new(r"^encoder\.layer\.(\d+)\.attention\.self\.query\.weight$")
-                    .expect("valid regex"),
+                pattern: Regex::new(r"^encoder\.layer\.(\d+)\.attention\.self\.query\.weight$")?,
                 replacement: "bert/encoder/layer_$1/attention/self/query/kernel".to_string(),
                 transform: Some(WeightTransform::Transpose(vec![1, 0])),
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^encoder\.layer\.(\d+)\.attention\.self\.key\.weight$")
-                    .expect("valid regex"),
+                pattern: Regex::new(r"^encoder\.layer\.(\d+)\.attention\.self\.key\.weight$")?,
                 replacement: "bert/encoder/layer_$1/attention/self/key/kernel".to_string(),
                 transform: Some(WeightTransform::Transpose(vec![1, 0])),
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^encoder\.layer\.(\d+)\.attention\.self\.value\.weight$")
-                    .expect("valid regex"),
+                pattern: Regex::new(r"^encoder\.layer\.(\d+)\.attention\.self\.value\.weight$")?,
                 replacement: "bert/encoder/layer_$1/attention/self/value/kernel".to_string(),
                 transform: Some(WeightTransform::Transpose(vec![1, 0])),
             },
             // Output projection
             WeightMappingRule {
-                pattern: Regex::new(r"^encoder\.layer\.(\d+)\.attention\.output\.dense\.weight$")
-                    .expect("valid regex"),
+                pattern: Regex::new(r"^encoder\.layer\.(\d+)\.attention\.output\.dense\.weight$")?,
                 replacement: "bert/encoder/layer_$1/attention/output/dense/kernel".to_string(),
                 transform: Some(WeightTransform::Transpose(vec![1, 0])),
             },
             // FFN layers
             WeightMappingRule {
-                pattern: Regex::new(r"^encoder\.layer\.(\d+)\.intermediate\.dense\.weight$")
-                    .expect("valid regex"),
+                pattern: Regex::new(r"^encoder\.layer\.(\d+)\.intermediate\.dense\.weight$")?,
                 replacement: "bert/encoder/layer_$1/intermediate/dense/kernel".to_string(),
                 transform: Some(WeightTransform::Transpose(vec![1, 0])),
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^encoder\.layer\.(\d+)\.output\.dense\.weight$")
-                    .expect("regex pattern must be valid"),
+                pattern: Regex::new(r"^encoder\.layer\.(\d+)\.output\.dense\.weight$")?,
                 replacement: "bert/encoder/layer_$1/output/dense/kernel".to_string(),
                 transform: Some(WeightTransform::Transpose(vec![1, 0])),
             },
-        ]
+        ])
     }
 
-    fn gpt2_rules() -> Vec<WeightMappingRule> {
-        vec![
+    fn gpt2_rules() -> Result<Vec<WeightMappingRule>> {
+        Ok(vec![
             // Token embeddings
             WeightMappingRule {
-                pattern: Regex::new(r"^wte\.weight$").expect("valid regex"),
+                pattern: Regex::new(r"^wte\.weight$")?,
                 replacement: "model/wte".to_string(),
                 transform: None,
             },
             // Position embeddings
             WeightMappingRule {
-                pattern: Regex::new(r"^wpe\.weight$").expect("valid regex"),
+                pattern: Regex::new(r"^wpe\.weight$")?,
                 replacement: "model/wpe".to_string(),
                 transform: None,
             },
             // Transformer blocks
             WeightMappingRule {
-                pattern: Regex::new(r"^h\.(\d+)\.attn\.c_attn\.weight$").expect("valid regex"),
+                pattern: Regex::new(r"^h\.(\d+)\.attn\.c_attn\.weight$")?,
                 replacement: "model/h$1/attn/c_attn/kernel".to_string(),
                 transform: Some(WeightTransform::Transpose(vec![1, 0])),
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^h\.(\d+)\.attn\.c_proj\.weight$").expect("valid regex"),
+                pattern: Regex::new(r"^h\.(\d+)\.attn\.c_proj\.weight$")?,
                 replacement: "model/h$1/attn/c_proj/kernel".to_string(),
                 transform: Some(WeightTransform::Transpose(vec![1, 0])),
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^h\.(\d+)\.mlp\.c_fc\.weight$").expect("valid regex"),
+                pattern: Regex::new(r"^h\.(\d+)\.mlp\.c_fc\.weight$")?,
                 replacement: "model/h$1/mlp/c_fc/kernel".to_string(),
                 transform: Some(WeightTransform::Transpose(vec![1, 0])),
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^h\.(\d+)\.mlp\.c_proj\.weight$").expect("valid regex"),
+                pattern: Regex::new(r"^h\.(\d+)\.mlp\.c_proj\.weight$")?,
                 replacement: "model/h$1/mlp/c_proj/kernel".to_string(),
                 transform: Some(WeightTransform::Transpose(vec![1, 0])),
             },
             // Layer norms
             WeightMappingRule {
-                pattern: Regex::new(r"^h\.(\d+)\.ln_1\.weight$").expect("valid regex"),
+                pattern: Regex::new(r"^h\.(\d+)\.ln_1\.weight$")?,
                 replacement: "model/h$1/ln_1/g".to_string(),
                 transform: None,
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^h\.(\d+)\.ln_2\.weight$").expect("valid regex"),
+                pattern: Regex::new(r"^h\.(\d+)\.ln_2\.weight$")?,
                 replacement: "model/h$1/ln_2/g".to_string(),
                 transform: None,
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^ln_f\.weight$").expect("valid regex"),
+                pattern: Regex::new(r"^ln_f\.weight$")?,
                 replacement: "model/ln_f/g".to_string(),
                 transform: None,
             },
-        ]
+        ])
     }
 
-    fn t5_rules() -> Vec<WeightMappingRule> {
-        vec![
+    fn t5_rules() -> Result<Vec<WeightMappingRule>> {
+        Ok(vec![
             // Shared embeddings
             WeightMappingRule {
-                pattern: Regex::new(r"^shared\.weight$").expect("valid regex"),
+                pattern: Regex::new(r"^shared\.weight$")?,
                 replacement: "shared/embedding".to_string(),
                 transform: None,
             },
             // Encoder blocks
             WeightMappingRule {
-                pattern: Regex::new(r"^encoder\.block\.(\d+)\.layer\.0\.SelfAttention\.q\.weight$")
-                    .expect("valid regex"),
+                pattern: Regex::new(
+                    r"^encoder\.block\.(\d+)\.layer\.0\.SelfAttention\.q\.weight$",
+                )?,
                 replacement: "encoder/block_$1/layer_0/SelfAttention/q".to_string(),
                 transform: Some(WeightTransform::Transpose(vec![1, 0])),
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^encoder\.block\.(\d+)\.layer\.0\.SelfAttention\.k\.weight$")
-                    .expect("valid regex"),
+                pattern: Regex::new(
+                    r"^encoder\.block\.(\d+)\.layer\.0\.SelfAttention\.k\.weight$",
+                )?,
                 replacement: "encoder/block_$1/layer_0/SelfAttention/k".to_string(),
                 transform: Some(WeightTransform::Transpose(vec![1, 0])),
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^encoder\.block\.(\d+)\.layer\.0\.SelfAttention\.v\.weight$")
-                    .expect("valid regex"),
+                pattern: Regex::new(
+                    r"^encoder\.block\.(\d+)\.layer\.0\.SelfAttention\.v\.weight$",
+                )?,
                 replacement: "encoder/block_$1/layer_0/SelfAttention/v".to_string(),
                 transform: Some(WeightTransform::Transpose(vec![1, 0])),
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^encoder\.block\.(\d+)\.layer\.0\.SelfAttention\.o\.weight$")
-                    .expect("valid regex"),
+                pattern: Regex::new(
+                    r"^encoder\.block\.(\d+)\.layer\.0\.SelfAttention\.o\.weight$",
+                )?,
                 replacement: "encoder/block_$1/layer_0/SelfAttention/o".to_string(),
                 transform: Some(WeightTransform::Transpose(vec![1, 0])),
             },
             // Decoder blocks
             WeightMappingRule {
-                pattern: Regex::new(r"^decoder\.block\.(\d+)\.layer\.0\.SelfAttention\.q\.weight$")
-                    .expect("valid regex"),
+                pattern: Regex::new(
+                    r"^decoder\.block\.(\d+)\.layer\.0\.SelfAttention\.q\.weight$",
+                )?,
                 replacement: "decoder/block_$1/layer_0/SelfAttention/q".to_string(),
                 transform: Some(WeightTransform::Transpose(vec![1, 0])),
             },
             // Add more T5 specific rules...
-        ]
+        ])
     }
 
-    fn llama_rules() -> Vec<WeightMappingRule> {
-        vec![
+    fn llama_rules() -> Result<Vec<WeightMappingRule>> {
+        Ok(vec![
             // Token embeddings
             WeightMappingRule {
-                pattern: Regex::new(r"^model\.embed_tokens\.weight$").expect("valid regex"),
+                pattern: Regex::new(r"^model\.embed_tokens\.weight$")?,
                 replacement: "model.embed_tokens.weight".to_string(),
                 transform: None,
             },
             // Layers
             WeightMappingRule {
-                pattern: Regex::new(r"^model\.layers\.(\d+)\.self_attn\.q_proj\.weight$")
-                    .expect("regex pattern must be valid"),
+                pattern: Regex::new(r"^model\.layers\.(\d+)\.self_attn\.q_proj\.weight$")?,
                 replacement: "model.layers.$1.self_attn.q_proj.weight".to_string(),
                 transform: None,
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^model\.layers\.(\d+)\.self_attn\.k_proj\.weight$")
-                    .expect("regex pattern must be valid"),
+                pattern: Regex::new(r"^model\.layers\.(\d+)\.self_attn\.k_proj\.weight$")?,
                 replacement: "model.layers.$1.self_attn.k_proj.weight".to_string(),
                 transform: None,
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^model\.layers\.(\d+)\.self_attn\.v_proj\.weight$")
-                    .expect("regex pattern must be valid"),
+                pattern: Regex::new(r"^model\.layers\.(\d+)\.self_attn\.v_proj\.weight$")?,
                 replacement: "model.layers.$1.self_attn.v_proj.weight".to_string(),
                 transform: None,
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^model\.layers\.(\d+)\.self_attn\.o_proj\.weight$")
-                    .expect("regex pattern must be valid"),
+                pattern: Regex::new(r"^model\.layers\.(\d+)\.self_attn\.o_proj\.weight$")?,
                 replacement: "model.layers.$1.self_attn.o_proj.weight".to_string(),
                 transform: None,
             },
             // MLP
             WeightMappingRule {
-                pattern: Regex::new(r"^model\.layers\.(\d+)\.mlp\.gate_proj\.weight$")
-                    .expect("regex pattern must be valid"),
+                pattern: Regex::new(r"^model\.layers\.(\d+)\.mlp\.gate_proj\.weight$")?,
                 replacement: "model.layers.$1.mlp.gate_proj.weight".to_string(),
                 transform: None,
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^model\.layers\.(\d+)\.mlp\.up_proj\.weight$")
-                    .expect("regex pattern must be valid"),
+                pattern: Regex::new(r"^model\.layers\.(\d+)\.mlp\.up_proj\.weight$")?,
                 replacement: "model.layers.$1.mlp.up_proj.weight".to_string(),
                 transform: None,
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^model\.layers\.(\d+)\.mlp\.down_proj\.weight$")
-                    .expect("regex pattern must be valid"),
+                pattern: Regex::new(r"^model\.layers\.(\d+)\.mlp\.down_proj\.weight$")?,
                 replacement: "model.layers.$1.mlp.down_proj.weight".to_string(),
                 transform: None,
             },
             // RMS Norm
             WeightMappingRule {
-                pattern: Regex::new(r"^model\.layers\.(\d+)\.input_layernorm\.weight$")
-                    .expect("regex pattern must be valid"),
+                pattern: Regex::new(r"^model\.layers\.(\d+)\.input_layernorm\.weight$")?,
                 replacement: "model.layers.$1.input_layernorm.weight".to_string(),
                 transform: None,
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^model\.layers\.(\d+)\.post_attention_layernorm\.weight$")
-                    .expect("valid regex"),
+                pattern: Regex::new(r"^model\.layers\.(\d+)\.post_attention_layernorm\.weight$")?,
                 replacement: "model.layers.$1.post_attention_layernorm.weight".to_string(),
                 transform: None,
             },
-        ]
+        ])
     }
 
     fn default_pytorch_to_tf(&self, name: &str) -> String {

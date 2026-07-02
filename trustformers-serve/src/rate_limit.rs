@@ -307,10 +307,14 @@ impl RateLimitService {
 
         // Check per-key rate limit
         let mut limiters = self.limiters.write().await;
-        let limiter = limiters.entry(key.to_string()).or_insert_with(|| {
-            RateLimiterState::new(&self.config)
-                .expect("RateLimiterState::new should not fail with valid config")
-        });
+        let limiter = match limiters.entry(key.to_string()) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let state = RateLimiterState::new(&self.config)
+                    .map_err(|e| RateLimitError::InvalidConfig(e.to_string()))?;
+                entry.insert(state)
+            },
+        };
 
         if !limiter.try_consume() {
             let retry_after = limiter.retry_after().as_secs();

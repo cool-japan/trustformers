@@ -3,6 +3,10 @@
 //! This module provides sophisticated analytical capabilities including
 //! clustering analysis, temporal dynamics monitoring, representation
 //! stability assessment, and multi-dimensional data visualization.
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use anyhow::Result;
 use std::collections::{HashMap, VecDeque};
@@ -14,7 +18,6 @@ use super::types::{
 
 /// Advanced analytics engine for model behavior analysis.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct AdvancedAnalytics {
     /// Analytics configuration
     config: AnalyticsConfig,
@@ -23,7 +26,6 @@ pub struct AdvancedAnalytics {
     /// Performance correlation data
     performance_correlations: HashMap<String, CorrelationData>,
     /// Temporal analysis cache
-    #[allow(dead_code)]
     temporal_analysis_cache: TemporalAnalysisCache,
     /// Clustering analysis results
     clustering_results_cache: HashMap<String, ClusteringResults>,
@@ -383,9 +385,6 @@ impl AdvancedAnalytics {
         // Simple k-means clustering implementation
         let mut cluster_centers = self.initialize_cluster_centers(data, num_clusters)?;
         let mut cluster_assignments = vec![0; data.len()];
-        #[allow(dead_code)]
-        #[allow(unused_assignments)]
-        let mut _converged = false;
 
         for _iteration in 0..params.max_iterations {
             // Assign points to nearest cluster
@@ -407,7 +406,6 @@ impl AdvancedAnalytics {
 
             // Check for convergence
             if new_assignments == cluster_assignments {
-                _converged = true;
                 break;
             }
             cluster_assignments = new_assignments;

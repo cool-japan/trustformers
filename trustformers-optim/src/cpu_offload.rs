@@ -15,6 +15,10 @@
 //! - Requires sufficient system RAM
 //! - May create CPU bottlenecks with very fast GPUs
 
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
+
 use crate::StatefulOptimizer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -58,7 +62,6 @@ pub struct CPUOffloadedOptimizer<T: Optimizer> {
     config: CPUOffloadConfig,
     cpu_states: HashMap<String, Tensor>,
     gpu_states: HashMap<String, Tensor>,
-    #[allow(dead_code)]
     transfer_stream: Option<usize>, // Stream ID for async transfers
     memory_stats: CPUOffloadStats,
 }
@@ -112,7 +115,6 @@ impl<T: Optimizer + StatefulOptimizer> CPUOffloadedOptimizer<T> {
     }
 
     /// Offload a tensor to CPU memory.
-    #[allow(dead_code)]
     fn offload_to_cpu(&mut self, key: &str, tensor: Tensor) -> Result<()> {
         if tensor.size_bytes() >= self.config.offload_threshold {
             let start_time = std::time::Instant::now();
@@ -232,7 +234,6 @@ impl<T: Optimizer> Optimizer for CPUOffloadedOptimizer<T> {
 }
 
 impl<T: Optimizer + StatefulOptimizer> CPUOffloadedOptimizer<T> {
-    #[allow(dead_code)]
     fn state_dict(&self) -> Result<HashMap<String, Tensor>> {
         // Combine CPU and GPU states
         let mut state = self.base_optimizer.state_dict()?;
@@ -245,7 +246,6 @@ impl<T: Optimizer + StatefulOptimizer> CPUOffloadedOptimizer<T> {
         Ok(state)
     }
 
-    #[allow(dead_code)]
     fn load_state_dict(&mut self, state: HashMap<String, Tensor>) -> Result<()> {
         let mut base_state = HashMap::new();
         let mut cpu_state = HashMap::new();
@@ -272,7 +272,6 @@ impl<T: Optimizer + StatefulOptimizer> CPUOffloadedOptimizer<T> {
 impl<T: Optimizer + StatefulOptimizer> CPUOffloadedOptimizer<T> {
     /// Helper method to offload states after optimization step.
     /// Accesses the optimizer's internal states and offloads them to CPU.
-    #[allow(dead_code)]
     fn offload_states_after_step(&mut self, param_names: &[String]) -> Result<()> {
         if !self.config.offload_optimizer_states {
             return Ok(());

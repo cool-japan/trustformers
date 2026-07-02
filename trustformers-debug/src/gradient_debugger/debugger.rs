@@ -3,6 +3,10 @@
 //! This module provides the main GradientDebugger that orchestrates all gradient
 //! debugging capabilities including monitoring, anomaly detection, performance tracking,
 //! conflict analysis, visualization, and enhanced analysis.
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use super::anomaly_detection::*;
 use super::conflict_analysis::*;
@@ -35,7 +39,6 @@ pub struct LayerFlowAnalysis {
 /// Main gradient debugger
 #[derive(Debug)]
 pub struct GradientDebugger {
-    #[allow(dead_code)]
     config: DebugConfig,
     gradient_config: GradientDebugConfig,
     gradient_histories: HashMap<String, GradientHistory>,
@@ -626,12 +629,8 @@ impl GradientDebugger {
         let mut active_layers = 0;
 
         for (layer_name, history) in &self.gradient_histories {
-            if !history.gradient_norms.is_empty() {
+            if let Some(latest_norm) = history.gradient_norms.back() {
                 active_layers += 1;
-                let latest_norm = history
-                    .gradient_norms
-                    .back()
-                    .expect("gradient_norms should not be empty after is_empty check");
                 total_gradients += latest_norm;
 
                 // Check for basic problems
@@ -739,7 +738,6 @@ impl GradientDebugger {
     }
 
     /// Calculate gradient trend for a layer
-    #[allow(dead_code)]
     fn calculate_trend(&self, history: &GradientHistory) -> GradientTrend {
         if history.gradient_norms.len() < 3 {
             return GradientTrend::Unknown;

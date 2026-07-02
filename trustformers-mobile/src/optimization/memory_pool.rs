@@ -118,9 +118,9 @@ impl MobileMemoryPool {
 
         // Check if allocation would exceed limit
         {
-            let total = self.total_allocated.lock().expect("Lock poisoned");
+            let total = self.total_allocated.lock().unwrap_or_else(|p| p.into_inner());
             if *total + size > self.config.max_memory_bytes {
-                let mut stats = self.stats.lock().expect("Lock poisoned");
+                let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
                 stats.allocation_failures += 1;
                 return Err(TrustformersError::hardware_error(
                     &format!(
@@ -147,13 +147,13 @@ impl MobileMemoryPool {
     pub fn deallocate(&self, allocation: MemoryAllocation) -> Result<()> {
         // Remove from active allocations
         {
-            let mut allocations = self.allocations.lock().expect("Lock poisoned");
+            let mut allocations = self.allocations.lock().unwrap_or_else(|p| p.into_inner());
             allocations.remove(&allocation.id);
         }
 
         // Add to free blocks
         {
-            let mut free_blocks = self.free_blocks.lock().expect("Lock poisoned");
+            let mut free_blocks = self.free_blocks.lock().unwrap_or_else(|p| p.into_inner());
             let blocks = free_blocks.entry(allocation.size).or_default();
             blocks.push(FreeBlock {
                 ptr: allocation.ptr,
@@ -164,10 +164,10 @@ impl MobileMemoryPool {
 
         // Update statistics
         {
-            let mut total = self.total_allocated.lock().expect("Lock poisoned");
+            let mut total = self.total_allocated.lock().unwrap_or_else(|p| p.into_inner());
             *total -= allocation.size;
 
-            let mut stats = self.stats.lock().expect("Lock poisoned");
+            let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
             stats.total_deallocations += 1;
             stats.current_allocations -= 1;
             stats.current_memory_bytes = *total;
@@ -183,31 +183,31 @@ impl MobileMemoryPool {
 
     /// Get pool statistics
     pub fn get_stats(&self) -> PoolStats {
-        self.stats.lock().expect("Lock poisoned").clone()
+        self.stats.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     /// Get memory usage ratio (0.0 to 1.0)
     pub fn get_usage_ratio(&self) -> f32 {
-        let total_allocated = *self.total_allocated.lock().expect("Lock poisoned");
+        let total_allocated = *self.total_allocated.lock().unwrap_or_else(|p| p.into_inner());
         total_allocated as f32 / self.config.max_memory_bytes as f32
     }
 
     /// Get available memory in bytes
     pub fn get_available_memory(&self) -> usize {
-        let total_allocated = *self.total_allocated.lock().expect("Lock poisoned");
+        let total_allocated = *self.total_allocated.lock().unwrap_or_else(|p| p.into_inner());
         self.config.max_memory_bytes - total_allocated
     }
 
     /// Get peak memory usage in bytes
     pub fn get_peak_usage(&self) -> usize {
-        *self.peak_allocated.lock().expect("Lock poisoned")
+        *self.peak_allocated.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Clear all allocations (dangerous!)
     pub fn clear(&self) -> Result<()> {
         // Deallocate all active allocations
         let allocations: Vec<_> = {
-            let allocs = self.allocations.lock().expect("Lock poisoned");
+            let allocs = self.allocations.lock().unwrap_or_else(|p| p.into_inner());
             allocs.values().cloned().collect()
         };
 
@@ -220,12 +220,12 @@ impl MobileMemoryPool {
         }
 
         // Clear all tracking
-        self.allocations.lock().expect("Lock poisoned").clear();
-        self.free_blocks.lock().expect("Lock poisoned").clear();
-        *self.total_allocated.lock().expect("Lock poisoned") = 0;
+        self.allocations.lock().unwrap_or_else(|p| p.into_inner()).clear();
+        self.free_blocks.lock().unwrap_or_else(|p| p.into_inner()).clear();
+        *self.total_allocated.lock().unwrap_or_else(|p| p.into_inner()) = 0;
 
         // Reset stats
-        let mut stats = self.stats.lock().expect("Lock poisoned");
+        let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
         stats.current_allocations = 0;
         stats.current_memory_bytes = 0;
 
@@ -250,7 +250,8 @@ impl MobileMemoryPool {
             for _ in 0..2 {
                 if let Ok(alloc) = self.allocate_new_for_preallocation(size, 64) {
                     // Immediately add to free list
-                    let mut free_blocks = self.free_blocks.lock().expect("Lock poisoned");
+                    let mut free_blocks =
+                        self.free_blocks.lock().unwrap_or_else(|p| p.into_inner());
                     let blocks = free_blocks.entry(size).or_default();
                     blocks.push(FreeBlock {
                         ptr: alloc.ptr,
@@ -269,7 +270,7 @@ impl MobileMemoryPool {
         size: usize,
         alignment: usize,
     ) -> Result<Option<MemoryAllocation>> {
-        let mut free_blocks = self.free_blocks.lock().expect("Lock poisoned");
+        let mut free_blocks = self.free_blocks.lock().unwrap_or_else(|p| p.into_inner());
 
         match self.config.allocation_strategy {
             AllocationStrategy::FirstFit => {
@@ -348,7 +349,7 @@ impl MobileMemoryPool {
         };
 
         let id = {
-            let mut counter = self.allocation_counter.lock().expect("Lock poisoned");
+            let mut counter = self.allocation_counter.lock().unwrap_or_else(|p| p.into_inner());
             *counter += 1;
             *counter
         };
@@ -363,21 +364,21 @@ impl MobileMemoryPool {
 
         // Track allocation
         {
-            let mut allocations = self.allocations.lock().expect("Lock poisoned");
+            let mut allocations = self.allocations.lock().unwrap_or_else(|p| p.into_inner());
             allocations.insert(id, allocation.clone());
         }
 
         // Update statistics
         {
-            let mut total = self.total_allocated.lock().expect("Lock poisoned");
+            let mut total = self.total_allocated.lock().unwrap_or_else(|p| p.into_inner());
             *total += size;
 
-            let mut peak = self.peak_allocated.lock().expect("Lock poisoned");
+            let mut peak = self.peak_allocated.lock().unwrap_or_else(|p| p.into_inner());
             if *total > *peak {
                 *peak = *total;
             }
 
-            let mut stats = self.stats.lock().expect("Lock poisoned");
+            let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
             stats.total_allocations += 1;
             stats.current_allocations += 1;
             stats.current_memory_bytes = *total;
@@ -407,7 +408,7 @@ impl MobileMemoryPool {
         };
 
         let id = {
-            let mut counter = self.allocation_counter.lock().expect("Lock poisoned");
+            let mut counter = self.allocation_counter.lock().unwrap_or_else(|p| p.into_inner());
             *counter += 1;
             *counter
         };
@@ -428,7 +429,7 @@ impl MobileMemoryPool {
 
     fn create_allocation_from_block(&self, block: FreeBlock) -> Result<MemoryAllocation> {
         let id = {
-            let mut counter = self.allocation_counter.lock().expect("Lock poisoned");
+            let mut counter = self.allocation_counter.lock().unwrap_or_else(|p| p.into_inner());
             *counter += 1;
             *counter
         };
@@ -443,21 +444,21 @@ impl MobileMemoryPool {
 
         // Track allocation
         {
-            let mut allocations = self.allocations.lock().expect("Lock poisoned");
+            let mut allocations = self.allocations.lock().unwrap_or_else(|p| p.into_inner());
             allocations.insert(id, allocation.clone());
         }
 
         // Update statistics
         {
-            let mut total = self.total_allocated.lock().expect("Lock poisoned");
+            let mut total = self.total_allocated.lock().unwrap_or_else(|p| p.into_inner());
             *total += block.size;
 
-            let mut peak = self.peak_allocated.lock().expect("Lock poisoned");
+            let mut peak = self.peak_allocated.lock().unwrap_or_else(|p| p.into_inner());
             if *total > *peak {
                 *peak = *total;
             }
 
-            let mut stats = self.stats.lock().expect("Lock poisoned");
+            let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
             stats.total_allocations += 1;
             stats.current_allocations += 1;
             stats.current_memory_bytes = *total;
@@ -480,7 +481,7 @@ impl MobileMemoryPool {
 
     fn defragment(&self) -> Result<()> {
         // Simple defragmentation: merge adjacent free blocks
-        let mut free_blocks = self.free_blocks.lock().expect("Lock poisoned");
+        let mut free_blocks = self.free_blocks.lock().unwrap_or_else(|p| p.into_inner());
 
         for (_, blocks) in free_blocks.iter_mut() {
             if blocks.len() > 1 {
@@ -512,7 +513,7 @@ impl MobileMemoryPool {
 
         // Update stats
         {
-            let mut stats = self.stats.lock().expect("Lock poisoned");
+            let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
             stats.defragmentation_count += 1;
             stats.fragmentation_ratio = self.calculate_fragmentation();
         }
@@ -521,7 +522,7 @@ impl MobileMemoryPool {
     }
 
     fn calculate_fragmentation(&self) -> f32 {
-        let free_blocks = self.free_blocks.lock().expect("Lock poisoned");
+        let free_blocks = self.free_blocks.lock().unwrap_or_else(|p| p.into_inner());
 
         let total_free_blocks: usize = free_blocks.values().map(|blocks| blocks.len()).sum();
 
@@ -593,12 +594,14 @@ impl<'a> ScopedAllocation<'a> {
 
     /// Get pointer to allocated memory
     pub fn ptr(&self) -> *mut u8 {
-        self.allocation.as_ref().expect("No allocation").ptr
+        self.allocation
+            .as_ref()
+            .map_or(std::ptr::null_mut(), |allocation| allocation.ptr)
     }
 
     /// Get size of allocation
     pub fn size(&self) -> usize {
-        self.allocation.as_ref().expect("No allocation").size
+        self.allocation.as_ref().map_or(0, |allocation| allocation.size)
     }
 }
 

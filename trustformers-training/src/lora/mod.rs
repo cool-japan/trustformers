@@ -53,28 +53,39 @@ impl fmt::Display for LoraError {
         match self {
             LoraError::LayerNotFound(name) => {
                 write!(f, "LoRA layer '{}' not found", name)
-            }
-            LoraError::ShapeMismatch { layer, expected, actual } => {
+            },
+            LoraError::ShapeMismatch {
+                layer,
+                expected,
+                actual,
+            } => {
                 write!(
                     f,
                     "Shape mismatch for layer '{}': expected {} elements, got {}",
                     layer, expected, actual
                 )
-            }
+            },
             LoraError::InvalidMergeState(msg) => {
                 write!(f, "Invalid merge state: {}", msg)
-            }
+            },
             LoraError::InvalidConfig(msg) => {
                 write!(f, "Invalid LoRA configuration: {}", msg)
-            }
-            LoraError::BatchSizeMismatch { input_len, batch_size, in_features } => {
+            },
+            LoraError::BatchSizeMismatch {
+                input_len,
+                batch_size,
+                in_features,
+            } => {
                 write!(
                     f,
                     "Batch size mismatch: input length {} with batch_size {} and \
                      in_features {} is inconsistent (expected {} elements)",
-                    input_len, batch_size, in_features, batch_size * in_features
+                    input_len,
+                    batch_size,
+                    in_features,
+                    batch_size * in_features
                 )
-            }
+            },
         }
     }
 }
@@ -226,7 +237,6 @@ fn pseudo_rand_f32(seed: u64, index: usize) -> f32 {
 /// Generate a deterministic pseudo-random f32 in [0, 1) from a seed and index.
 ///
 /// Used in tests to verify range properties of the PRNG.
-#[allow(dead_code)]
 #[inline]
 fn pseudo_rand_unit(seed: u64, index: usize) -> f32 {
     let h = fnv1a_u64(seed ^ fnv1a_u64(index as u64 + 0xDEAD_BEEF));
@@ -269,8 +279,7 @@ impl LoraLayer {
         let scaling = config.effective_scaling();
 
         // Deterministic seed based on dimensions and rank.
-        let seed: u64 = (in_features as u64)
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        let seed: u64 = (in_features as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
             ^ (out_features as u64).wrapping_mul(0x6C62_272E_07BB_0142)
             ^ (rank as u64).wrapping_mul(0xBEA2_25AF_9267_9A57);
 
@@ -279,17 +288,13 @@ impl LoraLayer {
             LoraInitMethod::Gaussian => {
                 // σ = 1 / √in_features  (lecun normal style)
                 let std_dev = 1.0 / (in_features as f32).sqrt();
-                (0..a_size)
-                    .map(|i| pseudo_rand_f32(seed, i) * std_dev)
-                    .collect()
-            }
+                (0..a_size).map(|i| pseudo_rand_f32(seed, i) * std_dev).collect()
+            },
             LoraInitMethod::KaimingUniform => {
                 // Kaiming uniform: bound = √(1 / fan_in)
                 let bound = 1.0 / (in_features as f32).sqrt();
-                (0..a_size)
-                    .map(|i| pseudo_rand_f32(seed, i) * bound)
-                    .collect()
-            }
+                (0..a_size).map(|i| pseudo_rand_f32(seed, i) * bound).collect()
+            },
             LoraInitMethod::Zero => vec![0.0f32; a_size],
         };
 
@@ -447,12 +452,8 @@ impl LoraModel {
         match self.layer_configs.get(name) {
             Some(layer) => {
                 let delta = layer.forward(x, batch_size);
-                base_output
-                    .iter()
-                    .zip(delta.iter())
-                    .map(|(b, d)| b + d)
-                    .collect()
-            }
+                base_output.iter().zip(delta.iter()).map(|(b, d)| b + d).collect()
+            },
             None => base_output.to_vec(),
         }
     }
@@ -734,9 +735,8 @@ impl DoraLayer {
             ^ (d_out as u64).wrapping_mul(0x6C62_272E)
             ^ (rank as u64).wrapping_mul(0xBEA2_25AF);
         let bound = 1.0 / (d_in as f32).sqrt();
-        let lora_a: Vec<f32> = (0..rank * d_in)
-            .map(|idx| pseudo_rand_f32(a_seed, idx) * bound)
-            .collect();
+        let lora_a: Vec<f32> =
+            (0..rank * d_in).map(|idx| pseudo_rand_f32(a_seed, idx) * bound).collect();
 
         // B: zeros, shape [d_out, rank]
         let lora_b = vec![0.0f32; d_out * rank];
@@ -807,9 +807,8 @@ impl DoraLayer {
         let dw = self.delta_weight();
 
         // V_hat = direction + ΔW
-        let v_hat: Vec<f32> = self.direction.iter().zip(dw.iter())
-            .map(|(&d, &delta)| d + delta)
-            .collect();
+        let v_hat: Vec<f32> =
+            self.direction.iter().zip(dw.iter()).map(|(&d, &delta)| d + delta).collect();
 
         // V_norm = column-normalise V_hat
         let v_norm = Self::col_normalise(&v_hat, self.d_out, self.d_in);
@@ -817,9 +816,7 @@ impl DoraLayer {
         // y[i] = magnitude[i] * dot(V_norm[i, :], input)
         let mut output = vec![0.0f32; self.d_out];
         for i in 0..self.d_out {
-            let dot: f32 = (0..self.d_in)
-                .map(|j| v_norm[i * self.d_in + j] * input[j])
-                .sum();
+            let dot: f32 = (0..self.d_in).map(|j| v_norm[i * self.d_in + j] * input[j]).sum();
             output[i] = self.magnitude[i] * dot;
         }
 
@@ -836,9 +833,8 @@ impl DoraLayer {
         let dw = self.delta_weight();
 
         // V_hat = direction + ΔW
-        let v_hat: Vec<f32> = self.direction.iter().zip(dw.iter())
-            .map(|(&d, &delta)| d + delta)
-            .collect();
+        let v_hat: Vec<f32> =
+            self.direction.iter().zip(dw.iter()).map(|(&d, &delta)| d + delta).collect();
 
         // V_norm = column-normalise
         let v_norm = Self::col_normalise(&v_hat, self.d_out, self.d_in);
@@ -908,7 +904,11 @@ mod tests {
     // ── 4. LoraLayer: check shape (forward output length) ────────────────────
     #[test]
     fn test_lora_layer_forward_shape() {
-        let cfg = LoraConfig { rank: 4, alpha: 8.0, ..Default::default() };
+        let cfg = LoraConfig {
+            rank: 4,
+            alpha: 8.0,
+            ..Default::default()
+        };
         let layer = LoraLayer::new(8, 16, &cfg);
         let x = vec![0.5f32; 3 * 8]; // batch=3, in=8
         let out = layer.forward(&x, 3);
@@ -918,10 +918,18 @@ mod tests {
     // ── 5. Delta weight shape ─────────────────────────────────────────────────
     #[test]
     fn test_delta_weight_shape() {
-        let cfg = LoraConfig { rank: 4, alpha: 8.0, ..Default::default() };
+        let cfg = LoraConfig {
+            rank: 4,
+            alpha: 8.0,
+            ..Default::default()
+        };
         let layer = LoraLayer::new(12, 24, &cfg);
         let delta = layer.get_delta_weight();
-        assert_eq!(delta.len(), 12 * 24, "delta shape should be [in_features, out_features]");
+        assert_eq!(
+            delta.len(),
+            12 * 24,
+            "delta shape should be [in_features, out_features]"
+        );
     }
 
     // ── 6. lora_b = 0 → forward output is all zeros at init ──────────────────
@@ -938,7 +946,10 @@ mod tests {
         let x = vec![1.0f32; 2 * 8];
         let out = layer.forward(&x, 2);
         for &v in &out {
-            assert!(v.abs() < 1e-7, "Initial forward pass must be zero (lora_b=0)");
+            assert!(
+                v.abs() < 1e-7,
+                "Initial forward pass must be zero (lora_b=0)"
+            );
         }
     }
 
@@ -980,7 +991,8 @@ mod tests {
 
         // Weights should differ after merge
         let merged = base_weights["linear"].clone();
-        let any_diff = merged.iter().zip(original_weights.iter()).any(|(a, b)| (a - b).abs() > 1e-7);
+        let any_diff =
+            merged.iter().zip(original_weights.iter()).any(|(a, b)| (a - b).abs() > 1e-7);
         assert!(any_diff, "merged weights should differ from originals");
 
         // Unmerge
@@ -990,7 +1002,12 @@ mod tests {
         // Weights should be restored to original
         let restored = &base_weights["linear"];
         for (r, o) in restored.iter().zip(original_weights.iter()) {
-            assert!((r - o).abs() < 1e-5, "unmerge should restore original weights, got {} expected {}", r, o);
+            assert!(
+                (r - o).abs() < 1e-5,
+                "unmerge should restore original weights, got {} expected {}",
+                r,
+                o
+            );
         }
     }
 
@@ -1058,7 +1075,11 @@ mod tests {
     // ── 11. Batch forward: batch dimension correctly handled ──────────────────
     #[test]
     fn test_batch_forward() {
-        let mut cfg = LoraConfig { rank: 2, alpha: 2.0, ..Default::default() };
+        let mut cfg = LoraConfig {
+            rank: 2,
+            alpha: 2.0,
+            ..Default::default()
+        };
         cfg.init_lora_weights = LoraInitMethod::Zero;
 
         let mut layer = LoraLayer::new(4, 6, &cfg);
@@ -1111,7 +1132,9 @@ mod tests {
         let mut weights: HashMap<String, Vec<f32>> = HashMap::new();
         weights.insert("w".to_string(), vec![0.0f32; 16]);
 
-        let err = model.unmerge_weights(&mut weights).expect_err("unmerge without merge should error");
+        let err = model
+            .unmerge_weights(&mut weights)
+            .expect_err("unmerge without merge should error");
         assert!(matches!(err, LoraError::InvalidMergeState(_)));
     }
 
@@ -1178,7 +1201,10 @@ mod tests {
     // 19. lora_plus_lr_schedule: lr_B = multiplier * lr_A
     #[test]
     fn test_lora_plus_lr_ratio() {
-        let cfg = LoraPlusConfig { learning_rate_b_multiplier: 16.0, ..Default::default() };
+        let cfg = LoraPlusConfig {
+            learning_rate_b_multiplier: 16.0,
+            ..Default::default()
+        };
         let (lr_a, lr_b) = lora_plus_lr_schedule(1e-4, &cfg).expect("ok");
         assert!((lr_a - 1e-4).abs() < 1e-10, "lr_A should equal base_lr");
         let expected_lr_b = 1e-4 * 16.0;
@@ -1212,7 +1238,10 @@ mod tests {
     // 23. LoraPlusConfig validate: rejects rank=0
     #[test]
     fn test_lora_plus_config_rank_zero() {
-        let cfg = LoraPlusConfig { rank: 0, ..Default::default() };
+        let cfg = LoraPlusConfig {
+            rank: 0,
+            ..Default::default()
+        };
         let err = cfg.validate().unwrap_err();
         assert!(matches!(err, LoraError::InvalidConfig(_)));
     }
@@ -1220,7 +1249,10 @@ mod tests {
     // 24. LoraPlusConfig validate: rejects multiplier <= 0
     #[test]
     fn test_lora_plus_config_bad_multiplier() {
-        let cfg = LoraPlusConfig { learning_rate_b_multiplier: -1.0, ..Default::default() };
+        let cfg = LoraPlusConfig {
+            learning_rate_b_multiplier: -1.0,
+            ..Default::default()
+        };
         let err = cfg.validate().unwrap_err();
         assert!(matches!(err, LoraError::InvalidConfig(_)));
     }
@@ -1228,7 +1260,10 @@ mod tests {
     // 25. LoraPlusConfig validate: rejects dropout >= 1.0
     #[test]
     fn test_lora_plus_config_bad_dropout() {
-        let cfg = LoraPlusConfig { dropout: 1.0, ..Default::default() };
+        let cfg = LoraPlusConfig {
+            dropout: 1.0,
+            ..Default::default()
+        };
         let err = cfg.validate().unwrap_err();
         assert!(matches!(err, LoraError::InvalidConfig(_)));
     }
@@ -1259,7 +1294,12 @@ mod tests {
         for i in 0..d_out {
             let norm_sq: f32 = (0..d_in).map(|j| layer.direction[i * d_in + j].powi(2)).sum();
             let norm = norm_sq.sqrt();
-            assert!((norm - 1.0).abs() < 1e-5, "row {} should be unit norm, got {}", i, norm);
+            assert!(
+                (norm - 1.0).abs() < 1e-5,
+                "row {} should be unit norm, got {}",
+                i,
+                norm
+            );
         }
     }
 
@@ -1268,7 +1308,10 @@ mod tests {
     fn test_dora_lora_b_init_zero() {
         let weight: Vec<f32> = vec![1.0, 0.0, 0.0, 1.0];
         let layer = DoraLayer::from_pretrained(&weight, 2, 2, 2, 4.0).expect("ok");
-        assert!(layer.lora_b.iter().all(|&v| v == 0.0), "lora_b should init to zero");
+        assert!(
+            layer.lora_b.iter().all(|&v| v == 0.0),
+            "lora_b should init to zero"
+        );
     }
 
     // 29. DoraLayer forward: at init (lora_b=0), ΔW=0 and output = magnitude * direction @ x
@@ -1308,7 +1351,12 @@ mod tests {
         // Since direction = weight / magnitude, W_eff[i,j] = magnitude[i] * (weight[i,j] / magnitude[i]) = weight[i,j]
         let merged = layer.merge_weights().expect("merge ok");
         for (&m, &w) in merged.iter().zip(weight.iter()) {
-            assert!((m - w).abs() < 1e-4, "merged should recover original: {} vs {}", m, w);
+            assert!(
+                (m - w).abs() < 1e-4,
+                "merged should recover original: {} vs {}",
+                m,
+                w
+            );
         }
     }
 

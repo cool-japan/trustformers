@@ -512,7 +512,7 @@ impl GraphAnalyzer {
         bottlenecks.sort_by(|a, b| {
             b.criticality_score
                 .partial_cmp(&a.criticality_score)
-                .expect("Partial comparison failed")
+                .unwrap_or(::std::cmp::Ordering::Equal)
         });
 
         Ok(bottlenecks)

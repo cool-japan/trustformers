@@ -144,7 +144,9 @@ fn main() -> Result<()> {
     let report = run_profiling_session(config, mobile_config)?;
 
     // Save results
-    let output_file = matches.get_one::<String>("output").expect("Operation failed");
+    let output_file = matches
+        .get_one::<String>("output")
+        .ok_or_else(|| TrustformersError::config_error("missing 'output' argument", "output"))?;
     save_profiling_report(&report, output_file, &report.config.output_format)?;
 
     // Print summary
@@ -156,35 +158,60 @@ fn main() -> Result<()> {
 fn parse_configuration(matches: &clap::ArgMatches) -> Result<ProfilingConfiguration> {
     let batch_size = matches
         .get_one::<String>("batch-size")
-        .expect("Operation failed")
+        .ok_or_else(|| {
+            TrustformersError::config_error("missing 'batch-size' argument", "batch-size")
+        })?
         .parse()
         .map_err(|_| TrustformersError::config_error("Invalid batch size", "parse"))?;
     let sequence_length = matches
         .get_one::<String>("seq-length")
-        .expect("Operation failed")
+        .ok_or_else(|| {
+            TrustformersError::config_error("missing 'seq-length' argument", "seq-length")
+        })?
         .parse()
         .map_err(|_| TrustformersError::config_error("Invalid sequence length", "parse"))?;
     let num_iterations = matches
         .get_one::<String>("iterations")
-        .expect("Operation failed")
+        .ok_or_else(|| {
+            TrustformersError::config_error("missing 'iterations' argument", "iterations")
+        })?
         .parse()
         .map_err(|_| TrustformersError::config_error("Invalid iteration count", "parse"))?;
     let warmup_iterations = matches
         .get_one::<String>("warmup")
-        .expect("Operation failed")
+        .ok_or_else(|| TrustformersError::config_error("missing 'warmup' argument", "warmup"))?
         .parse()
         .map_err(|_| TrustformersError::config_error("Invalid warmup count", "parse"))?;
 
     Ok(ProfilingConfiguration {
-        model_name: matches.get_one::<String>("model").expect("Operation failed").clone(),
-        platform: matches.get_one::<String>("platform").expect("Operation failed").clone(),
-        backend: matches.get_one::<String>("backend").expect("Operation failed").clone(),
+        model_name: matches
+            .get_one::<String>("model")
+            .ok_or_else(|| TrustformersError::config_error("missing 'model' argument", "model"))?
+            .clone(),
+        platform: matches
+            .get_one::<String>("platform")
+            .ok_or_else(|| {
+                TrustformersError::config_error("missing 'platform' argument", "platform")
+            })?
+            .clone(),
+        backend: matches
+            .get_one::<String>("backend")
+            .ok_or_else(|| {
+                TrustformersError::config_error("missing 'backend' argument", "backend")
+            })?
+            .clone(),
         batch_size,
         sequence_length,
         num_iterations,
         warmup_iterations,
-        profiling_mode: matches.get_one::<String>("mode").expect("Operation failed").clone(),
-        output_format: matches.get_one::<String>("format").expect("Operation failed").clone(),
+        profiling_mode: matches
+            .get_one::<String>("mode")
+            .ok_or_else(|| TrustformersError::config_error("missing 'mode' argument", "mode"))?
+            .clone(),
+        output_format: matches
+            .get_one::<String>("format")
+            .ok_or_else(|| TrustformersError::config_error("missing 'format' argument", "format"))?
+            .clone(),
     })
 }
 
@@ -251,7 +278,7 @@ fn run_profiling_session(
 
         if (i + 1) % 5 == 0 {
             print!(".");
-            std::io::Write::flush(&mut std::io::stdout()).expect("Operation failed");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
         }
     }
     println!(" Done");
@@ -274,7 +301,7 @@ fn run_profiling_session(
 
         if (i + 1) % 10 == 0 {
             print!(".");
-            std::io::Write::flush(&mut std::io::stdout()).expect("Operation failed");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
         }
     }
 
@@ -282,7 +309,7 @@ fn run_profiling_session(
     println!(" Done");
 
     // Calculate statistics
-    latencies.sort_by(|a, b| a.partial_cmp(b).expect("Operation failed"));
+    latencies.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let avg_latency_ms = latencies.iter().sum::<f64>() / latencies.len() as f64;
     let min_latency_ms = *latencies.first().unwrap_or(&0.0);
     let max_latency_ms = *latencies.last().unwrap_or(&0.0);

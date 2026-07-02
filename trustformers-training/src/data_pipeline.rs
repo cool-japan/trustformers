@@ -867,10 +867,8 @@ pub enum ErrorHandling {
 }
 
 /// Main data pipeline orchestrator
-#[allow(dead_code)]
 pub struct DataPipeline {
     /// Pipeline configuration
-    #[allow(dead_code)]
     config: DataPipelineConfig,
     /// Active streaming datasets
     streaming_datasets: Arc<Mutex<HashMap<String, StreamingDataset>>>,

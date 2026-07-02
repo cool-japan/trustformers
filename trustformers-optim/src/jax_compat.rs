@@ -4,6 +4,10 @@
 //! integration with JAX-based training workflows. It wraps our native
 //! optimizers to provide the familiar JAX Optax API while maintaining high performance.
 
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
+
 use crate::{Adam, AdamW, SGD};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -249,7 +253,6 @@ pub struct JAXAdam {
     b1: f64,
     b2: f64,
     eps: f64,
-    #[allow(dead_code)]
     eps_root: f64,
     weight_decay: Option<f64>,
     lr_schedule: Option<Box<dyn JAXLearningRateSchedule>>,
@@ -376,7 +379,6 @@ impl JAXAdam {
         Self::from_params(1e-3, 0.9, 0.999, 1e-8, 0.0, None)
     }
 
-    #[allow(dead_code)]
     fn update_learning_rate(&mut self, step: i64) -> Result<()> {
         if let Some(ref schedule) = self.lr_schedule {
             let new_lr = schedule.get_lr(step);
@@ -464,16 +466,11 @@ impl JAXGradientTransformation for JAXAdam {
 
 /// JAX-compatible AdamW optimizer
 pub struct JAXAdamW {
-    #[allow(dead_code)]
     inner: AdamW,
     learning_rate: f64,
-    #[allow(dead_code)]
     b1: f64,
-    #[allow(dead_code)]
     b2: f64,
-    #[allow(dead_code)]
     eps: f64,
-    #[allow(dead_code)]
     eps_root: f64,
     weight_decay: f64,
     lr_schedule: Option<Box<dyn JAXLearningRateSchedule>>,
@@ -613,11 +610,9 @@ impl JAXGradientTransformation for JAXAdamW {
 
 /// JAX-compatible SGD optimizer
 pub struct JAXSGD {
-    #[allow(dead_code)]
     inner: SGD,
     learning_rate: f64,
     momentum: f64,
-    #[allow(dead_code)]
     nesterov: bool,
     weight_decay: Option<f64>,
     lr_schedule: Option<Box<dyn JAXLearningRateSchedule>>,

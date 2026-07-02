@@ -816,8 +816,9 @@ pub struct SystemHealthSummary {
 
 impl Default for AdvancedOptimizationHistoryManager {
     fn default() -> Self {
-        tokio::runtime::Handle::current()
-            .block_on(Self::new())
-            .expect("Failed to create advanced optimization history manager")
+        // Default construction is unrecoverable: surface a fatal error if it fails.
+        tokio::runtime::Handle::current().block_on(Self::new()).unwrap_or_else(|e| {
+            panic!("Failed to create advanced optimization history manager: {e}")
+        })
     }
 }

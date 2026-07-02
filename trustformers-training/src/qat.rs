@@ -355,16 +355,20 @@ pub struct QuantizationParams {
 
 impl QuantizationParams {
     pub fn new(shape: &[usize], symmetric: bool) -> Self {
+        // reason: tensor construction from a caller-provided `shape` only fails on an
+        // invalid (e.g. zero-element) shape, which is a programming error; this public
+        // constructor cannot return `Result`, so the invariant is asserted with `expect`.
         Self {
-            scale: Tensor::ones(shape).expect("Failed to create scale"),
+            scale: Tensor::ones(shape).expect("valid shape yields a ones tensor"),
             zero_point: if symmetric {
                 None
             } else {
-                Some(Tensor::zeros(shape).expect("Failed to create zero point"))
+                Some(Tensor::zeros(shape).expect("valid shape yields a zeros tensor"))
             },
-            running_min: Tensor::full(f32::INFINITY, shape.to_vec()).expect("Failed to create min"),
+            running_min: Tensor::full(f32::INFINITY, shape.to_vec())
+                .expect("valid shape yields a full tensor"),
             running_max: Tensor::full(f32::NEG_INFINITY, shape.to_vec())
-                .expect("Failed to create max"),
+                .expect("valid shape yields a full tensor"),
             num_observations: 0,
         }
     }
@@ -491,7 +495,7 @@ impl Layer for QATLinear {
     type Input = Tensor;
     type Output = Tensor;
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        let mut step = self.step.lock().expect("lock should not be poisoned");
+        let mut step = self.step.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         *step += 1;
         let current_step = *step;
         drop(step);
@@ -506,17 +510,15 @@ impl Layer for QATLinear {
         let weight = self.get_layer_weights()?;
 
         // Update statistics if not frozen
-        if self.config.freeze_step.is_none()
-            || current_step
-                < self.config.freeze_step.expect("freeze_step checked as Some in condition")
-        {
-            let mut params = self.quant_params.lock().expect("lock should not be poisoned");
+        if self.config.freeze_step.is_none_or(|freeze_step| current_step < freeze_step) {
+            let mut params =
+                self.quant_params.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             params.update_stats(&weight, self.config.observer_momentum)?;
             params.compute_params(self.config.default_bits, self.config.symmetric)?;
         }
 
         // Simulate quantization on weights
-        let params = self.quant_params.lock().expect("lock should not be poisoned");
+        let params = self.quant_params.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let _quantized_weight = fake_quantize(
             &weight,
             &params.scale,
@@ -539,7 +541,6 @@ pub struct QATConv2d {
     /// QAT configuration
     config: QATConfig,
     /// Weight quantization parameters
-    #[allow(dead_code)]
     weight_params: Arc<Mutex<QuantizationParams>>,
     /// Activation quantization parameters (optional)
     activation_params: Option<Arc<Mutex<QuantizationParams>>>,
@@ -579,7 +580,7 @@ impl Layer for QATConv2d {
     type Input = Tensor;
     type Output = Tensor;
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        let mut step = self.step.lock().expect("lock should not be poisoned");
+        let mut step = self.step.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         *step += 1;
         let current_step = *step;
         drop(step);
@@ -590,16 +591,13 @@ impl Layer for QATConv2d {
 
         // Quantize input activations if configured
         let quantized_input = if let Some(act_params) = &self.activation_params {
-            if self.config.freeze_step.is_none()
-                || current_step
-                    < self.config.freeze_step.expect("freeze_step checked as Some in condition")
-            {
-                let mut params = act_params.lock().expect("lock should not be poisoned");
+            if self.config.freeze_step.is_none_or(|freeze_step| current_step < freeze_step) {
+                let mut params = act_params.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 params.update_stats(&input, self.config.observer_momentum)?;
                 params.compute_params(self.config.default_bits, self.config.symmetric)?;
             }
 
-            let params = act_params.lock().expect("lock should not be poisoned");
+            let params = act_params.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             fake_quantize(
                 &input,
                 &params.scale,
@@ -798,17 +796,13 @@ impl QATModel {
 }
 
 /// Quantized model after QAT
-#[allow(dead_code)]
 pub struct QuantizedModel {
-    #[allow(dead_code)]
     layers: HashMap<String, QuantizedLayer>,
     config: QATConfig,
 }
 
 /// Quantized layer representation
-#[allow(dead_code)]
 pub struct QuantizedLayer {
-    #[allow(dead_code)]
     weights: Vec<u8>,
     scale: Vec<f32>,
     zero_point: Vec<i32>,
@@ -949,10 +943,11 @@ impl MixedBitQATTrainer {
             self.init_layer(layer_name.to_string(), &weights.shape())?;
         }
 
-        let params = self
-            .layer_params
-            .get_mut(layer_name)
-            .expect("layer_params entry exists after initialization check");
+        let params = self.layer_params.get_mut(layer_name).ok_or_else(|| {
+            trustformers_core::TrustformersError::invalid_state(format!(
+                "layer_params entry for '{layer_name}' missing after initialization"
+            ))
+        })?;
 
         // Update statistics if we're in the calibration phase
         if self.current_step < self.config.start_step {

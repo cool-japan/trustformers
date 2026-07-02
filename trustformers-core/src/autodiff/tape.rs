@@ -460,7 +460,7 @@ impl TapeContext {
     /// Create a new tape context
     pub fn new(tape: Arc<std::sync::Mutex<GradientTape>>) -> Self {
         let was_enabled = {
-            let tape_guard = tape.lock().expect("Lock poisoned");
+            let tape_guard = tape.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             tape_guard.is_enabled()
         };
 
@@ -469,13 +469,13 @@ impl TapeContext {
 
     /// Enable recording
     pub fn enable(&self) {
-        let mut tape = self.tape.lock().expect("Lock poisoned");
+        let mut tape = self.tape.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         tape.enable();
     }
 
     /// Disable recording
     pub fn disable(&self) {
-        let mut tape = self.tape.lock().expect("Lock poisoned");
+        let mut tape = self.tape.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         tape.disable();
     }
 
@@ -489,7 +489,7 @@ impl TapeContext {
         input_shapes: Vec<Vec<usize>>,
         output_shape: Vec<usize>,
     ) -> Result<usize> {
-        let mut tape = self.tape.lock().expect("Lock poisoned");
+        let mut tape = self.tape.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         tape.record_operation(
             operation,
             inputs,
@@ -503,7 +503,7 @@ impl TapeContext {
 
 impl Drop for TapeContext {
     fn drop(&mut self) {
-        let mut tape = self.tape.lock().expect("Lock poisoned");
+        let mut tape = self.tape.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if self.was_enabled {
             tape.enable();
         } else {

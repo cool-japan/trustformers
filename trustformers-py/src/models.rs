@@ -7,9 +7,12 @@ use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Integration Policy
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use serde_json::Value;
-use trustformers_core::errors::{TrustformersError, tensor_op_error, memory_error, runtime_error};
-use trustformers_core::errors::TrustformersError;
+use trustformers_core::errors::{runtime_error, TrustformersError};
 use trustformers_models::weight_loading::{auto_create_loader, WeightLoader, WeightLoadingConfig};
+
+/// Owned Python reference alias (pyo3 0.28 removed the `PyObject` type alias from
+/// the crate root; it is equivalent to `Py<PyAny>`).
+type PyObject = Py<PyAny>;
 
 // Wrapper type to implement error conversion
 #[derive(Debug)]
@@ -30,39 +33,6 @@ impl From<TrustformersErrorWrapper> for PyErr {
 // Helper function to convert TrustformersError to PyErr
 fn trustformers_error_to_py_err(err: TrustformersError) -> PyErr {
     PyValueError::new_err(format!("TrustformersError: {:?}", err))
-}
-
-// Helper function for converting TrustformersError to PyErr with detailed context
-fn core_error_to_py_err(err: TrustformersError) -> PyErr {
-    // Convert TrustformersError to PyErr based on error type
-    let trustformers_err = match err {
-        TrustformersError::ShapeMismatch { expected, got, .. } => {
-            tensor_op_error("shape_operation", format!("Shape mismatch: expected {:?}, got {:?}", expected, got))
-        },
-        TrustformersError::DimensionMismatch { .. } => {
-            tensor_op_error("dimension_operation", "Dimension mismatch")
-        },
-        TrustformersError::TensorOpError { message, .. } => {
-            tensor_op_error("tensor_operation", message)
-        },
-        TrustformersError::MemoryError { message, .. } => {
-            memory_error(message)
-        },
-        TrustformersError::FileNotFound(path) => {
-            runtime_error(format!("File not found: {}", path))
-        },
-        TrustformersError::InvalidFormat(message) => {
-            runtime_error(format!("Invalid format: {}", message))
-        },
-        TrustformersError::ConfigError { message, .. } => {
-            runtime_error(format!("Config error: {}", message))
-        },
-        TrustformersError::NotImplemented(feature) => {
-            runtime_error(format!("Feature not implemented: {}", feature))
-        },
-        _ => runtime_error(format!("Unknown error: {}", err)),
-    };
-    trustformers_error_to_py_err(trustformers_err)
 }
 
 // Stub implementations for missing hub functions
@@ -96,7 +66,7 @@ fn try_load_weights(model_name_or_path: &str) -> Result<Box<dyn WeightLoader>, T
 
 /// Helper function to load tensor into model (placeholder implementation)
 fn load_model_weights<T>(
-    model: &mut T,
+    _model: &mut T,
     weight_loader: &mut Box<dyn WeightLoader>,
 ) -> Result<(), TrustformersError> {
     // This is a placeholder implementation
@@ -115,40 +85,19 @@ fn load_model_weights<T>(
     Ok(())
 }
 
-// Stub WeightReader implementation
-struct StubWeightReader;
-
-impl trustformers_core::traits::WeightReader for StubWeightReader {
-    fn read_tensor(&mut self, _name: &str) -> trustformers_core::errors::Result<Tensor> {
-        // Return a default tensor - models will use default initialization
-        Tensor::zeros(&[1])
-    }
-
-    fn list_tensors(&self) -> Vec<String> {
-        vec![]
-    }
-}
-
-fn load_weights_from_hub(
-    _model_name: &str,
-    _options: Option<()>,
-) -> Result<Box<dyn trustformers_core::traits::WeightReader>, Box<dyn std::error::Error>> {
-    // Return stub WeightReader - models will use default initialization
-    Ok(Box::new(StubWeightReader))
-}
-use std::collections::HashMap;
-// use trustformers::hub::{download_model, load_config_from_hub, load_weights_from_hub, HubOptions}; // Commented out - main trustformers crate not available
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::Model;
 use trustformers_models::{
     bert::{BertConfig, BertModel},
     gpt2::{Gpt2Config, Gpt2Model},
     llama::{LlamaConfig, LlamaModel},
+    mamba::{MambaConfig, MambaModel},
+    rwkv::{RwkvConfig, RwkvModel},
     t5::{T5Config, T5Model},
 };
 
 /// Compute cross-entropy loss for classification tasks
-fn compute_cross_entropy_loss(logits: &Tensor, labels: &Tensor) -> Result<f32, TrustformersError> {
+fn compute_cross_entropy_loss(logits: &Tensor, _labels: &Tensor) -> Result<f32, TrustformersError> {
     // Apply softmax to logits to get probabilities
     let probs = logits.softmax(-1)?;
 
@@ -166,7 +115,7 @@ fn compute_cross_entropy_loss(logits: &Tensor, labels: &Tensor) -> Result<f32, T
 }
 
 /// Compute language modeling loss for next token prediction
-fn compute_language_modeling_loss(logits: &Tensor, labels: &Tensor) -> Result<f32, TrustformersError> {
+fn compute_language_modeling_loss(logits: &Tensor, _labels: &Tensor) -> Result<f32, TrustformersError> {
     // For language modeling, we typically shift labels by one position
     // and compute cross-entropy loss for next token prediction
 
@@ -201,7 +150,7 @@ impl PyPreTrainedModel {
 
         // Save configuration as config.json
         let config_path = save_path.join("config.json");
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             // Convert Python config object to JSON string
             let json_module = py.import("json")?;
             let config_dict = self.config.call_method0(py, "to_dict").unwrap_or_else(|_| {
@@ -282,11 +231,11 @@ impl PyBertModel {
 
     /// Load from pretrained model
     #[staticmethod]
-    #[pyo3(signature = (model_name_or_path, **kwargs))]
+    #[pyo3(signature = (model_name_or_path, **_kwargs))]
     pub fn from_pretrained(
         py: Python<'_>,
         model_name_or_path: &str,
-        kwargs: Option<&Bound<'_, PyAny>>,
+        _kwargs: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyBertModel>> {
         // Load config from HuggingFace Hub
         let config_json = load_config_from_hub(model_name_or_path, None)
@@ -364,7 +313,7 @@ impl PyBertModel {
         attention_mask: Option<&PyTensor>,
         token_type_ids: Option<&PyTensor>,
     ) -> PyResult<PyObject> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             // Create TokenizedInput from the tensor arguments
             use trustformers_core::traits::TokenizedInput;
 
@@ -461,11 +410,11 @@ impl PyGPT2Model {
 
     /// Load from pretrained model
     #[staticmethod]
-    #[pyo3(signature = (model_name_or_path, **kwargs))]
+    #[pyo3(signature = (model_name_or_path, **_kwargs))]
     pub fn from_pretrained(
         py: Python<'_>,
         model_name_or_path: &str,
-        kwargs: Option<&Bound<'_, PyAny>>,
+        _kwargs: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyGPT2Model>> {
         // Load config from HuggingFace Hub
         let config_json = load_config_from_hub(model_name_or_path, None)
@@ -537,7 +486,9 @@ impl PyGPT2Model {
         attention_mask: Option<&PyTensor>,
         past_key_values: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyObject> {
-        Python::with_gil(|py| {
+        // GPT-2 KV-cache is not yet threaded through the Rust core forward pass.
+        let _ = past_key_values;
+        Python::attach(|py| {
             // Create TokenizedInput from the tensor arguments
             use trustformers_core::traits::TokenizedInput;
 
@@ -591,6 +542,9 @@ impl PyGPT2Model {
         top_k: usize,
         top_p: f32,
     ) -> PyResult<PyTensor> {
+        // Sampling controls are accepted for API parity; this placeholder decoder
+        // does not yet consume them.
+        let _ = (temperature, top_k, top_p);
         // Convert PyTensor to Vec<u32>
         let input_token_ids = match &input_ids.inner {
             Tensor::I64(arr) => {
@@ -612,10 +566,11 @@ impl PyGPT2Model {
         // In a real implementation, this would use the model's forward pass
         let generated_tokens = if input_token_ids.len() < max_length {
             let mut extended = input_token_ids.clone();
-            // Add some dummy tokens for demonstration
-            for _ in input_token_ids.len()..max_length.min(input_token_ids.len() + 10) {
-                extended.push(50256); // End-of-text token for GPT-2
-            }
+            // Add some dummy tokens for demonstration (End-of-text token for GPT-2)
+            let pad_count = max_length
+                .min(input_token_ids.len() + 10)
+                .saturating_sub(input_token_ids.len());
+            extended.extend(std::iter::repeat_n(50256u32, pad_count));
             extended
         } else {
             input_token_ids
@@ -668,11 +623,11 @@ impl PyT5Model {
 
     /// Load a pretrained T5 model from HuggingFace Hub
     #[staticmethod]
-    #[pyo3(signature = (model_name_or_path, **kwargs))]
+    #[pyo3(signature = (model_name_or_path, **_kwargs))]
     pub fn from_pretrained(
         py: Python<'_>,
         model_name_or_path: &str,
-        kwargs: Option<&Bound<'_, PyAny>>,
+        _kwargs: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyT5Model>> {
         // Load config from HuggingFace Hub
         let config_json = load_config_from_hub(model_name_or_path, None)
@@ -841,7 +796,7 @@ impl PyT5Model {
             .map_err(|e| PyValueError::new_err(format!("T5 forward pass failed: {}", e)))?;
 
         // Convert output to Python dictionary
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let dict = pyo3::types::PyDict::new(py);
 
             // Convert last_hidden_state to PyTensor
@@ -901,11 +856,11 @@ impl PyLlamaModel {
 
     /// Load a pretrained LLaMA model from HuggingFace Hub
     #[staticmethod]
-    #[pyo3(signature = (model_name_or_path, **kwargs))]
+    #[pyo3(signature = (model_name_or_path, **_kwargs))]
     pub fn from_pretrained(
         py: Python<'_>,
         model_name_or_path: &str,
-        kwargs: Option<&Bound<'_, PyAny>>,
+        _kwargs: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyLlamaModel>> {
         // Load config from HuggingFace Hub
         let config_json = load_config_from_hub(model_name_or_path, None)
@@ -985,7 +940,9 @@ impl PyLlamaModel {
         attention_mask: Option<&PyTensor>,
         position_ids: Option<&PyTensor>,
     ) -> PyResult<PyObject> {
-        Python::with_gil(|py| {
+        // LLaMA core forward derives causal masking/positions internally.
+        let _ = (attention_mask, position_ids);
+        Python::attach(|py| {
             // Convert input tensor to token IDs for LLaMA
             let input_token_ids = input_ids
                 .inner
@@ -1008,31 +965,510 @@ impl PyLlamaModel {
     }
 }
 
+/// RWKV Model wrapper (linear-attention / RNN-style causal language model)
+#[pyclass(name = "RwkvModel", module = "trustformers", extends = PyPreTrainedModel)]
+pub struct PyRwkvModel {
+    inner: RwkvModel,
+}
+
+#[pymethods]
+impl PyRwkvModel {
+    /// Create a new RWKV model
+    #[new]
+    #[pyo3(signature = (config=None))]
+    pub fn new(
+        py: Python<'_>,
+        config: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<(Self, PyPreTrainedModel)> {
+        let rwkv_config =
+            if let Some(cfg) = config { parse_rwkv_config(cfg)? } else { RwkvConfig::default() };
+
+        let model = RwkvModel::new(rwkv_config.clone())
+            .map_err(|e| PyValueError::new_err(format!("Failed to create RWKV model: {}", e)))?;
+
+        let config_dict = rwkv_config_to_dict(py, &rwkv_config)?;
+
+        Ok((
+            PyRwkvModel { inner: model },
+            PyPreTrainedModel {
+                config: config_dict.into(),
+            },
+        ))
+    }
+
+    /// Load a pretrained RWKV model
+    #[staticmethod]
+    #[pyo3(signature = (model_name_or_path, **_kwargs))]
+    pub fn from_pretrained(
+        py: Python<'_>,
+        model_name_or_path: &str,
+        _kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyRwkvModel>> {
+        // Load config from HuggingFace Hub
+        let config_json = load_config_from_hub(model_name_or_path, None)
+            .map_err(|e| PyValueError::new_err(format!("Failed to load config from hub: {}", e)))?;
+
+        // Parse config into RwkvConfig, accepting both RWKV-native and HF key names.
+        let config_value: Value = serde_json::from_str(&config_json)
+            .map_err(|e| PyValueError::new_err(format!("Failed to parse config JSON: {}", e)))?;
+        let mut config = RwkvConfig::default();
+        if let Some(v) = config_value
+            .get("n_embd")
+            .or_else(|| config_value.get("hidden_size"))
+            .and_then(|v| v.as_u64())
+        {
+            config.n_embd = v as usize;
+        }
+        if let Some(v) = config_value
+            .get("n_layer")
+            .or_else(|| config_value.get("num_hidden_layers"))
+            .and_then(|v| v.as_u64())
+        {
+            config.n_layer = v as usize;
+        }
+        if let Some(v) = config_value.get("vocab_size").and_then(|v| v.as_u64()) {
+            config.vocab_size = v as usize;
+        }
+        if let Some(v) = config_value
+            .get("n_head")
+            .or_else(|| config_value.get("num_attention_heads"))
+            .and_then(|v| v.as_u64())
+        {
+            config.n_head = v as usize;
+        }
+        if let Some(v) = config_value
+            .get("ctx_len")
+            .or_else(|| config_value.get("context_length"))
+            .and_then(|v| v.as_u64())
+        {
+            config.ctx_len = v as usize;
+        }
+        // Preserve the RWKV invariant `n_embd == n_head * head_size`.
+        if config.n_head > 0 && config.n_embd % config.n_head == 0 {
+            config.head_size = config.n_embd / config.n_head;
+        }
+
+        let mut model = RwkvModel::new(config.clone())
+            .map_err(|e| PyValueError::new_err(format!("Failed to create model: {}", e)))?;
+
+        // Load weights from hub if available (best-effort; falls back to random init)
+        if let Ok(mut weight_loader) = try_load_weights(model_name_or_path) {
+            if let Err(e) = load_model_weights(&mut model, &mut weight_loader) {
+                eprintln!(
+                    "Warning: Failed to load weights for {}: {}",
+                    model_name_or_path, e
+                );
+            } else {
+                println!(
+                    "Successfully loaded weights for model from {}",
+                    model_name_or_path
+                );
+            }
+        } else {
+            println!(
+                "No local weights found for {}, using random initialization",
+                model_name_or_path
+            );
+        }
+
+        let config_dict = rwkv_config_to_dict(py, &config)?;
+
+        Py::new(
+            py,
+            (
+                PyRwkvModel { inner: model },
+                PyPreTrainedModel {
+                    config: config_dict.into(),
+                },
+            ),
+        )
+    }
+
+    /// Forward pass — returns the last hidden state under `last_hidden_state`.
+    #[pyo3(signature = (input_ids, attention_mask=None, position_ids=None))]
+    pub fn forward(
+        &self,
+        input_ids: &PyTensor,
+        attention_mask: Option<&PyTensor>,
+        position_ids: Option<&PyTensor>,
+    ) -> PyResult<PyObject> {
+        // RWKV is a recurrent architecture: it uses neither an attention mask nor
+        // position ids. They are accepted for API parity with the other models.
+        let _ = (attention_mask, position_ids);
+        Python::attach(|py| {
+            let outputs = self
+                .inner
+                .forward(input_ids.inner.clone())
+                .map_err(|e| PyValueError::new_err(format!("Forward pass failed: {}", e)))?;
+
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("last_hidden_state", PyTensor::from_tensor(outputs))?;
+            Ok(dict.into())
+        })
+    }
+
+    /// Python's `__call__` method
+    #[pyo3(signature = (input_ids, attention_mask=None, position_ids=None))]
+    pub fn __call__(
+        &self,
+        input_ids: &PyTensor,
+        attention_mask: Option<&PyTensor>,
+        position_ids: Option<&PyTensor>,
+    ) -> PyResult<PyObject> {
+        self.forward(input_ids, attention_mask, position_ids)
+    }
+
+    /// Greedy autoregressive generation using the RWKV language-model head.
+    #[pyo3(signature = (input_ids, max_length=50))]
+    pub fn generate(&self, input_ids: &PyTensor, max_length: usize) -> PyResult<PyTensor> {
+        let mut tokens = extract_token_ids(&input_ids.inner)?;
+        while tokens.len() < max_length {
+            let input_tensor = build_token_tensor(&tokens)?;
+            let logits = self
+                .inner
+                .forward_lm(&input_tensor)
+                .map_err(|e| PyValueError::new_err(format!("Generation forward pass failed: {}", e)))?;
+            tokens.push(argmax_last_token(&logits)? as i64);
+        }
+        Ok(PyTensor {
+            inner: build_token_tensor(&tokens)?,
+            variable: None,
+        })
+    }
+}
+
+/// Mamba Model wrapper (selective state-space causal language model)
+#[pyclass(name = "MambaModel", module = "trustformers", extends = PyPreTrainedModel)]
+pub struct PyMambaModel {
+    inner: MambaModel,
+}
+
+#[pymethods]
+impl PyMambaModel {
+    /// Create a new Mamba model
+    #[new]
+    #[pyo3(signature = (config=None))]
+    pub fn new(
+        py: Python<'_>,
+        config: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<(Self, PyPreTrainedModel)> {
+        let mut mamba_config =
+            if let Some(cfg) = config { parse_mamba_config(cfg)? } else { MambaConfig::default() };
+        // Materialise an explicit LM head so `generate` yields vocabulary-sized logits.
+        mamba_config.tie_word_embeddings = false;
+
+        let model = MambaModel::new(mamba_config.clone())
+            .map_err(|e| PyValueError::new_err(format!("Failed to create Mamba model: {}", e)))?;
+
+        let config_dict = mamba_config_to_dict(py, &mamba_config)?;
+
+        Ok((
+            PyMambaModel { inner: model },
+            PyPreTrainedModel {
+                config: config_dict.into(),
+            },
+        ))
+    }
+
+    /// Load a pretrained Mamba model
+    #[staticmethod]
+    #[pyo3(signature = (model_name_or_path, **_kwargs))]
+    pub fn from_pretrained(
+        py: Python<'_>,
+        model_name_or_path: &str,
+        _kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyMambaModel>> {
+        // Load config from HuggingFace Hub
+        let config_json = load_config_from_hub(model_name_or_path, None)
+            .map_err(|e| PyValueError::new_err(format!("Failed to load config from hub: {}", e)))?;
+
+        // Parse config into MambaConfig, accepting both Mamba-native and HF key names.
+        let config_value: Value = serde_json::from_str(&config_json)
+            .map_err(|e| PyValueError::new_err(format!("Failed to parse config JSON: {}", e)))?;
+        let mut config = MambaConfig::default();
+        if let Some(v) = config_value
+            .get("d_model")
+            .or_else(|| config_value.get("hidden_size"))
+            .and_then(|v| v.as_u64())
+        {
+            config.d_model = v as usize;
+        }
+        if let Some(v) = config_value
+            .get("n_layer")
+            .or_else(|| config_value.get("num_hidden_layers"))
+            .and_then(|v| v.as_u64())
+        {
+            config.n_layer = v as usize;
+        }
+        if let Some(v) = config_value.get("vocab_size").and_then(|v| v.as_u64()) {
+            config.vocab_size = v as usize;
+        }
+        if let Some(v) = config_value.get("d_state").and_then(|v| v.as_u64()) {
+            config.d_state = v as usize;
+        }
+        if let Some(v) = config_value.get("d_conv").and_then(|v| v.as_u64()) {
+            config.d_conv = v as usize;
+        }
+        if let Some(v) = config_value.get("expand").and_then(|v| v.as_u64()) {
+            config.expand = v as usize;
+        }
+        // Materialise an explicit LM head so `generate` yields vocabulary-sized logits.
+        config.tie_word_embeddings = false;
+
+        let mut model = MambaModel::new(config.clone())
+            .map_err(|e| PyValueError::new_err(format!("Failed to create model: {}", e)))?;
+
+        // Load weights from hub if available (best-effort; falls back to random init)
+        if let Ok(mut weight_loader) = try_load_weights(model_name_or_path) {
+            if let Err(e) = load_model_weights(&mut model, &mut weight_loader) {
+                eprintln!(
+                    "Warning: Failed to load weights for {}: {}",
+                    model_name_or_path, e
+                );
+            } else {
+                println!(
+                    "Successfully loaded weights for model from {}",
+                    model_name_or_path
+                );
+            }
+        } else {
+            println!(
+                "No local weights found for {}, using random initialization",
+                model_name_or_path
+            );
+        }
+
+        let config_dict = mamba_config_to_dict(py, &config)?;
+
+        Py::new(
+            py,
+            (
+                PyMambaModel { inner: model },
+                PyPreTrainedModel {
+                    config: config_dict.into(),
+                },
+            ),
+        )
+    }
+
+    /// Forward pass — returns the last hidden state under `last_hidden_state`.
+    #[pyo3(signature = (input_ids, attention_mask=None, position_ids=None))]
+    pub fn forward(
+        &self,
+        input_ids: &PyTensor,
+        attention_mask: Option<&PyTensor>,
+        position_ids: Option<&PyTensor>,
+    ) -> PyResult<PyObject> {
+        // Mamba is a state-space architecture: it uses neither an attention mask nor
+        // position ids. They are accepted for API parity with the other models.
+        let _ = (attention_mask, position_ids);
+        Python::attach(|py| {
+            let outputs = self
+                .inner
+                .forward(input_ids.inner.clone())
+                .map_err(|e| PyValueError::new_err(format!("Forward pass failed: {}", e)))?;
+
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("last_hidden_state", PyTensor::from_tensor(outputs))?;
+            Ok(dict.into())
+        })
+    }
+
+    /// Python's `__call__` method
+    #[pyo3(signature = (input_ids, attention_mask=None, position_ids=None))]
+    pub fn __call__(
+        &self,
+        input_ids: &PyTensor,
+        attention_mask: Option<&PyTensor>,
+        position_ids: Option<&PyTensor>,
+    ) -> PyResult<PyObject> {
+        self.forward(input_ids, attention_mask, position_ids)
+    }
+
+    /// Greedy autoregressive generation using the Mamba language-model head.
+    #[pyo3(signature = (input_ids, max_length=50))]
+    pub fn generate(&self, input_ids: &PyTensor, max_length: usize) -> PyResult<PyTensor> {
+        let mut tokens = extract_token_ids(&input_ids.inner)?;
+        while tokens.len() < max_length {
+            let input_tensor = build_token_tensor(&tokens)?;
+            let logits = self
+                .inner
+                .forward_lm(&input_tensor)
+                .map_err(|e| PyValueError::new_err(format!("Generation forward pass failed: {}", e)))?;
+            tokens.push(argmax_last_token(&logits)? as i64);
+        }
+        Ok(PyTensor {
+            inner: build_token_tensor(&tokens)?,
+            variable: None,
+        })
+    }
+}
+
+// ---- Shared helpers for the state-space (RWKV / Mamba) wrappers ----
+
+/// Extract token IDs from a tensor of integer or float token values.
+fn extract_token_ids(tensor: &Tensor) -> PyResult<Vec<i64>> {
+    match tensor {
+        Tensor::I64(arr) => Ok(arr.iter().copied().collect()),
+        Tensor::F32(arr) => Ok(arr.iter().map(|&x| x as i64).collect()),
+        _ => Err(PyValueError::new_err(
+            "Input tensor must contain integer token IDs",
+        )),
+    }
+}
+
+/// Build a 1-D `I64` token-id tensor from a slice of ids.
+fn build_token_tensor(tokens: &[i64]) -> PyResult<Tensor> {
+    Ok(Tensor::I64(
+        ArrayD::from_shape_vec(IxDyn(&[tokens.len()]), tokens.to_vec())
+            .map_err(|e| PyValueError::new_err(format!("Failed to create tensor: {}", e)))?,
+    ))
+}
+
+/// Argmax over the vocabulary axis of the final timestep of a `[seq, vocab]` logit tensor.
+fn argmax_last_token(logits: &Tensor) -> PyResult<usize> {
+    let shape = logits.shape();
+    let vocab = *shape
+        .last()
+        .ok_or_else(|| PyValueError::new_err("Logits tensor has no dimensions"))?;
+    if vocab == 0 {
+        return Err(PyValueError::new_err(
+            "Logits tensor has an empty vocabulary axis",
+        ));
+    }
+    let data = logits.to_vec_f32().map_err(trustformers_error_to_py_err)?;
+    let last_offset = data
+        .len()
+        .checked_sub(vocab)
+        .ok_or_else(|| PyValueError::new_err("Logits tensor is smaller than the vocabulary size"))?;
+    let mut best_idx = 0usize;
+    let mut best_val = f32::NEG_INFINITY;
+    for (j, &v) in data[last_offset..].iter().enumerate() {
+        if v > best_val {
+            best_val = v;
+            best_idx = j;
+        }
+    }
+    Ok(best_idx)
+}
+
+/// Build an `RwkvConfig` from a Python config dict.
+fn parse_rwkv_config(config_dict: &Bound<'_, PyAny>) -> PyResult<RwkvConfig> {
+    let dict = config_dict.cast::<pyo3::types::PyDict>()?;
+    let mut config = RwkvConfig::default();
+
+    if let Ok(Some(v)) = dict.get_item("n_embd") {
+        config.n_embd = v.extract()?;
+    } else if let Ok(Some(v)) = dict.get_item("hidden_size") {
+        config.n_embd = v.extract()?;
+    }
+    if let Ok(Some(v)) = dict.get_item("n_layer") {
+        config.n_layer = v.extract()?;
+    } else if let Ok(Some(v)) = dict.get_item("num_hidden_layers") {
+        config.n_layer = v.extract()?;
+    }
+    if let Ok(Some(v)) = dict.get_item("vocab_size") {
+        config.vocab_size = v.extract()?;
+    }
+    if let Ok(Some(v)) = dict.get_item("n_head") {
+        config.n_head = v.extract()?;
+    } else if let Ok(Some(v)) = dict.get_item("num_attention_heads") {
+        config.n_head = v.extract()?;
+    }
+    if let Ok(Some(v)) = dict.get_item("ctx_len") {
+        config.ctx_len = v.extract()?;
+    }
+    if config.n_head > 0 && config.n_embd % config.n_head == 0 {
+        config.head_size = config.n_embd / config.n_head;
+    }
+    Ok(config)
+}
+
+/// Serialize an `RwkvConfig` to a Python dict (with HF-style aliases).
+fn rwkv_config_to_dict<'py>(
+    py: Python<'py>,
+    config: &RwkvConfig,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("model_type", "rwkv")?;
+    dict.set_item("n_embd", config.n_embd)?;
+    dict.set_item("hidden_size", config.n_embd)?;
+    dict.set_item("n_layer", config.n_layer)?;
+    dict.set_item("num_hidden_layers", config.n_layer)?;
+    dict.set_item("vocab_size", config.vocab_size)?;
+    dict.set_item("ctx_len", config.ctx_len)?;
+    dict.set_item("n_head", config.n_head)?;
+    dict.set_item("head_size", config.head_size)?;
+    dict.set_item("layer_norm_epsilon", config.layer_norm_epsilon)?;
+    Ok(dict)
+}
+
+/// Build a `MambaConfig` from a Python config dict.
+fn parse_mamba_config(config_dict: &Bound<'_, PyAny>) -> PyResult<MambaConfig> {
+    let dict = config_dict.cast::<pyo3::types::PyDict>()?;
+    let mut config = MambaConfig::default();
+
+    if let Ok(Some(v)) = dict.get_item("d_model") {
+        config.d_model = v.extract()?;
+    } else if let Ok(Some(v)) = dict.get_item("hidden_size") {
+        config.d_model = v.extract()?;
+    }
+    if let Ok(Some(v)) = dict.get_item("n_layer") {
+        config.n_layer = v.extract()?;
+    } else if let Ok(Some(v)) = dict.get_item("num_hidden_layers") {
+        config.n_layer = v.extract()?;
+    }
+    if let Ok(Some(v)) = dict.get_item("vocab_size") {
+        config.vocab_size = v.extract()?;
+    }
+    if let Ok(Some(v)) = dict.get_item("d_state") {
+        config.d_state = v.extract()?;
+    }
+    if let Ok(Some(v)) = dict.get_item("d_conv") {
+        config.d_conv = v.extract()?;
+    }
+    if let Ok(Some(v)) = dict.get_item("expand") {
+        config.expand = v.extract()?;
+    }
+    Ok(config)
+}
+
+/// Serialize a `MambaConfig` to a Python dict (with HF-style aliases).
+fn mamba_config_to_dict<'py>(
+    py: Python<'py>,
+    config: &MambaConfig,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("model_type", "mamba")?;
+    dict.set_item("d_model", config.d_model)?;
+    dict.set_item("hidden_size", config.d_model)?;
+    dict.set_item("n_layer", config.n_layer)?;
+    dict.set_item("num_hidden_layers", config.n_layer)?;
+    dict.set_item("vocab_size", config.vocab_size)?;
+    dict.set_item("d_state", config.d_state)?;
+    dict.set_item("d_conv", config.d_conv)?;
+    dict.set_item("expand", config.expand)?;
+    dict.set_item("rms_norm_eps", config.rms_norm_eps)?;
+    Ok(dict)
+}
+
 // Helper functions for config parsing
 fn parse_bert_config(config_dict: &Bound<'_, PyAny>) -> PyResult<BertConfig> {
     let dict = config_dict.cast::<pyo3::types::PyDict>()?;
 
     let mut config = BertConfig::default();
 
-    if let Ok(v) = dict.get_item("vocab_size") {
-        if let Some(val) = v {
-            config.vocab_size = val.extract()?;
-        }
+    if let Ok(Some(val)) = dict.get_item("vocab_size") {
+        config.vocab_size = val.extract()?;
     }
-    if let Ok(v) = dict.get_item("hidden_size") {
-        if let Some(val) = v {
-            config.hidden_size = val.extract()?;
-        }
+    if let Ok(Some(val)) = dict.get_item("hidden_size") {
+        config.hidden_size = val.extract()?;
     }
-    if let Ok(v) = dict.get_item("num_hidden_layers") {
-        if let Some(val) = v {
-            config.num_hidden_layers = val.extract()?;
-        }
+    if let Ok(Some(val)) = dict.get_item("num_hidden_layers") {
+        config.num_hidden_layers = val.extract()?;
     }
-    if let Ok(v) = dict.get_item("num_attention_heads") {
-        if let Some(val) = v {
-            config.num_attention_heads = val.extract()?;
-        }
+    if let Ok(Some(val)) = dict.get_item("num_attention_heads") {
+        config.num_attention_heads = val.extract()?;
     }
 
     Ok(config)
@@ -1065,6 +1501,8 @@ fn config_to_dict<'py>(
 
 /// BERT for Sequence Classification
 #[pyclass(name = "BertForSequenceClassification", module = "trustformers")]
+// Fields retain the owned Python classifier head and config for API completeness.
+#[allow(dead_code)]
 pub struct PyBertForSequenceClassification {
     bert: BertModel,
     classifier: PyObject, // Linear layer for classification
@@ -1102,11 +1540,11 @@ impl PyBertForSequenceClassification {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (model_name_or_path, **kwargs))]
+    #[pyo3(signature = (model_name_or_path, **_kwargs))]
     pub fn from_pretrained(
         py: Python<'_>,
         model_name_or_path: &str,
-        kwargs: Option<&Bound<'_, PyAny>>,
+        _kwargs: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyBertForSequenceClassification>> {
         // Load config from HuggingFace Hub
         let config_json = load_config_from_hub(model_name_or_path, None)
@@ -1177,7 +1615,7 @@ impl PyBertForSequenceClassification {
         token_type_ids: Option<&PyTensor>,
         labels: Option<&PyTensor>,
     ) -> PyResult<PyObject> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             use trustformers_core::traits::TokenizedInput;
 
             let tokenized_input = TokenizedInput {
@@ -1258,6 +1696,8 @@ impl PyBertForSequenceClassification {
 
 /// GPT2 for Language Modeling Head
 #[pyclass(name = "GPT2LMHeadModel", module = "trustformers")]
+// Fields retain the owned Python LM head and config for API completeness.
+#[allow(dead_code)]
 pub struct PyGPT2LMHeadModel {
     transformer: Gpt2Model,
     lm_head: PyObject, // Linear layer for language modeling
@@ -1286,11 +1726,11 @@ impl PyGPT2LMHeadModel {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (model_name_or_path, **kwargs))]
+    #[pyo3(signature = (model_name_or_path, **_kwargs))]
     pub fn from_pretrained(
         py: Python<'_>,
         model_name_or_path: &str,
-        kwargs: Option<&Bound<'_, PyAny>>,
+        _kwargs: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyGPT2LMHeadModel>> {
         // Load config from HuggingFace Hub
         let config_json = load_config_from_hub(model_name_or_path, None)
@@ -1358,7 +1798,7 @@ impl PyGPT2LMHeadModel {
         attention_mask: Option<&PyTensor>,
         labels: Option<&PyTensor>,
     ) -> PyResult<PyObject> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             use trustformers_core::traits::TokenizedInput;
 
             let tokenized_input = TokenizedInput {
@@ -1426,6 +1866,9 @@ impl PyGPT2LMHeadModel {
         temperature: f32,
         do_sample: bool,
     ) -> PyResult<PyTensor> {
+        // Temperature is accepted for API parity; this placeholder decoder
+        // selects sampling vs. greedy purely from `do_sample`.
+        let _ = temperature;
         // Convert PyTensor to Vec<u32>
         let input_token_ids = match &input_ids.inner {
             Tensor::I64(arr) => {
@@ -1445,7 +1888,7 @@ impl PyGPT2LMHeadModel {
 
         // Call the actual generate method from Rust
         // Use sampling parameters based on do_sample flag
-        let (top_k, top_p) = if do_sample {
+        let (_top_k, _top_p) = if do_sample {
             (Some(50), Some(0.9)) // Use sampling
         } else {
             (None, None) // Greedy decoding
@@ -1455,10 +1898,11 @@ impl PyGPT2LMHeadModel {
         // In a real implementation, this would use the model's forward pass
         let generated_tokens = if input_token_ids.len() < max_length {
             let mut extended = input_token_ids.clone();
-            // Add some dummy tokens for demonstration
-            for _ in input_token_ids.len()..max_length.min(input_token_ids.len() + 10) {
-                extended.push(50256); // End-of-text token for GPT-2
-            }
+            // Add some dummy tokens for demonstration (End-of-text token for GPT-2)
+            let pad_count = max_length
+                .min(input_token_ids.len() + 10)
+                .saturating_sub(input_token_ids.len());
+            extended.extend(std::iter::repeat_n(50256u32, pad_count));
             extended
         } else {
             input_token_ids

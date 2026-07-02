@@ -54,7 +54,7 @@ pub struct EdgeLocation {
 impl EdgeLocation {
     /// Create a new edge location
     #[wasm_bindgen(constructor)]
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)] // reason: distinct configuration parameters; a struct would not simplify the wasm-bindgen API
     pub fn new(
         region: GeoRegion,
         country_code: String,
@@ -190,7 +190,7 @@ pub struct UserLocation {
 #[wasm_bindgen]
 impl UserLocation {
     #[wasm_bindgen(constructor)]
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)] // reason: distinct configuration parameters; a struct would not simplify the wasm-bindgen API
     pub fn new(
         latitude: f64,
         longitude: f64,
@@ -632,36 +632,31 @@ impl GeoDistributionManager {
             *region_counts.entry(location.region).or_insert(0) += 1;
         }
 
-        js_sys::Reflect::set(
+        let _ = js_sys::Reflect::set(
             &stats,
             &JsValue::from_str("total_locations"),
             &JsValue::from(total_locations),
-        )
-        .expect("Failed to set property in JS object");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &stats,
             &JsValue::from_str("healthy_locations"),
             &JsValue::from(healthy_locations),
-        )
-        .expect("Failed to set property in JS object");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &stats,
             &JsValue::from_str("average_load"),
             &JsValue::from(average_load),
-        )
-        .expect("Failed to set property in JS object");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &stats,
             &JsValue::from_str("average_health"),
             &JsValue::from(average_health),
-        )
-        .expect("Failed to set property in JS object");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &stats,
             &JsValue::from_str("health_percentage"),
             &JsValue::from(healthy_locations / total_locations * 100.0),
-        )
-        .expect("Failed to set property in JS object");
+        );
 
         // Add regional distribution
         let regions = js_sys::Object::new();
@@ -675,19 +670,17 @@ impl GeoDistributionManager {
                 GeoRegion::MiddleEast => "middle_east",
                 GeoRegion::Oceania => "oceania",
             };
-            js_sys::Reflect::set(
+            let _ = js_sys::Reflect::set(
                 &regions,
                 &JsValue::from_str(region_name),
                 &JsValue::from(count),
-            )
-            .expect("Failed to set region count in JS object");
+            );
         }
-        js_sys::Reflect::set(
+        let _ = js_sys::Reflect::set(
             &stats,
             &JsValue::from_str("regional_distribution"),
             &regions,
-        )
-        .expect("Failed to set property in JS object");
+        );
 
         stats.into()
     }
@@ -918,9 +911,7 @@ impl GeoDistributionManager {
             // options.set_timeout(10000);
             // options.set_maximum_age(300000);
 
-            geolocation
-                .get_current_position_with_error_callback(&resolve, Some(&reject))
-                .expect("Failed to request geolocation position");
+            let _ = geolocation.get_current_position_with_error_callback(&resolve, Some(&reject));
         }))
         .await?;
 
@@ -963,14 +954,12 @@ impl GeoDistributionManager {
             web_sys::Request::new_with_str_and_init("https://ipapi.co/json/", &fetch_options)?;
 
         let resp = JsFuture::from(window.fetch_with_request(&request)).await?;
-        let resp: web_sys::Response =
-            resp.dyn_into().expect("Fetch result should be a Response object");
+        let resp: web_sys::Response = resp.dyn_into()?;
 
         if resp.ok() {
             let json = JsFuture::from(resp.json()?).await?;
 
             // Parse the response
-            #[allow(clippy::excessive_nesting)]
             if let Ok(lat_val) = js_sys::Reflect::get(&json, &"latitude".into()) {
                 if let Ok(lng_val) = js_sys::Reflect::get(&json, &"longitude".into()) {
                     if let (Some(lat), Some(lng)) = (lat_val.as_f64(), lng_val.as_f64()) {
@@ -1084,26 +1073,22 @@ impl GeoDistributionManager {
         let datacenter_id = location.datacenter_id.clone();
 
         let result = js_sys::Object::new();
-        js_sys::Reflect::set(
+        let _ = js_sys::Reflect::set(
             &result,
             &JsValue::from_str("datacenter_id"),
             &JsValue::from_str(&datacenter_id),
-        )
-        .expect("Failed to set property in JS object");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &result,
             &JsValue::from_str("health_score"),
             &JsValue::from(health_score),
-        )
-        .expect("Failed to set property in JS object");
-        js_sys::Reflect::set(&result, &JsValue::from_str("load"), &JsValue::from(load))
-            .expect("Failed to set load property in JS object");
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(&result, &JsValue::from_str("load"), &JsValue::from(load));
+        let _ = js_sys::Reflect::set(
             &result,
             &JsValue::from_str("status"),
             &JsValue::from_str("healthy"),
-        )
-        .expect("Failed to set property in JS object");
+        );
 
         Ok(result.into())
     }

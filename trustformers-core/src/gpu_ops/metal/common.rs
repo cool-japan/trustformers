@@ -22,10 +22,6 @@ pub(crate) use std::mem;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub(crate) use std::sync::Arc;
 
-// Import scirs2-core MPS for GPU-to-GPU optimized operations
-#[cfg(all(target_os = "macos", feature = "metal"))]
-pub(crate) use scirs2_core::gpu::backends::MPSOperations;
-
 // Re-export objc2 types commonly used in Metal backend
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub(crate) use objc2::rc::Retained;

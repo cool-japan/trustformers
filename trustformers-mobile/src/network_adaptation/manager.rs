@@ -654,20 +654,22 @@ impl Default for NetworkAdaptationManager {
         let device_info = MobileDeviceInfo::default();
 
         Self::new(config, &device_info).unwrap_or_else(|_| {
-            // Fallback implementation for default
+            // reason: Default fallback path. Each sub-component is built from a
+            // known-valid default config and only fails on programmer error, so a
+            // descriptive expect documents the construction invariant.
             Self {
                 config: NetworkAdaptationConfig::default(),
                 network_monitor: NetworkMonitor::new(NetworkAdaptationConfig::default())
-                    .expect("Operation failed"),
+                    .expect("default config must yield a NetworkMonitor"),
                 communication_scheduler:
                     FederatedScheduler::new(NetworkAdaptationConfig::default())
-                        .expect("Operation failed"),
+                        .expect("default config must yield a FederatedScheduler"),
                 bandwidth_optimizer: BandwidthOptimizer::new(NetworkAdaptationConfig::default())
-                    .expect("Operation failed"),
+                    .expect("default config must yield a BandwidthOptimizer"),
                 sync_coordinator: ModelSyncCoordinator::new(NetworkAdaptationConfig::default())
-                    .expect("Operation failed"),
+                    .expect("default config must yield a ModelSyncCoordinator"),
                 network_predictor: NetworkPredictor::new(NetworkAdaptationConfig::default())
-                    .expect("Operation failed"),
+                    .expect("default config must yield a NetworkPredictor"),
                 adaptation_stats: NetworkAdaptationStats::new(),
             }
         })

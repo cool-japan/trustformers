@@ -56,7 +56,6 @@ pub struct Checkpoint {
 }
 
 /// Memory optimization manager
-#[allow(dead_code)]
 pub struct MemoryOptimizer {
     config: MemoryOptimizationConfig,
     checkpoints: VecDeque<Checkpoint>,
@@ -154,7 +153,7 @@ impl MemoryOptimizer {
 
     /// Update memory usage tracking
     pub fn update_memory_usage(&self, delta: isize) {
-        let mut usage = self.memory_usage.lock().expect("lock should not be poisoned");
+        let mut usage = self.memory_usage.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if delta < 0 {
             *usage = usage.saturating_sub((-delta) as usize);
         } else {
@@ -164,7 +163,7 @@ impl MemoryOptimizer {
 
     /// Get current memory usage
     pub fn get_memory_usage(&self) -> usize {
-        *self.memory_usage.lock().expect("lock should not be poisoned")
+        *self.memory_usage.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Check if memory cleanup is needed

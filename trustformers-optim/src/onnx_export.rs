@@ -133,41 +133,11 @@ impl ONNXOptimizerExporter {
 
         // Create Adam optimizer node
         let mut adam_attrs = HashMap::new();
-        adam_attrs.insert(
-            "alpha".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(learning_rate as f64)
-                    .expect("Invalid learning_rate: not a finite number"),
-            ),
-        );
-        adam_attrs.insert(
-            "beta".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(beta1 as f64)
-                    .expect("Invalid beta1: not a finite number"),
-            ),
-        );
-        adam_attrs.insert(
-            "beta2".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(beta2 as f64)
-                    .expect("Invalid beta2: not a finite number"),
-            ),
-        );
-        adam_attrs.insert(
-            "epsilon".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(epsilon as f64)
-                    .expect("Invalid epsilon: not a finite number"),
-            ),
-        );
-        adam_attrs.insert(
-            "weight_decay".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(weight_decay as f64)
-                    .expect("Invalid weight_decay: not a finite number"),
-            ),
-        );
+        adam_attrs.insert("alpha".to_string(), Value::from(learning_rate as f64));
+        adam_attrs.insert("beta".to_string(), Value::from(beta1 as f64));
+        adam_attrs.insert("beta2".to_string(), Value::from(beta2 as f64));
+        adam_attrs.insert("epsilon".to_string(), Value::from(epsilon as f64));
+        adam_attrs.insert("weight_decay".to_string(), Value::from(weight_decay as f64));
 
         let adam_node = ONNXNode {
             name: "adam_optimizer".to_string(),
@@ -224,25 +194,10 @@ impl ONNXOptimizerExporter {
         let mut sgd_attrs = HashMap::new();
         sgd_attrs.insert(
             "learning_rate".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(learning_rate as f64)
-                    .expect("Invalid learning_rate: not a finite number"),
-            ),
+            Value::from(learning_rate as f64),
         );
-        sgd_attrs.insert(
-            "momentum".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(momentum as f64)
-                    .expect("Invalid momentum: not a finite number"),
-            ),
-        );
-        sgd_attrs.insert(
-            "weight_decay".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(weight_decay as f64)
-                    .expect("Invalid weight_decay: not a finite number"),
-            ),
-        );
+        sgd_attrs.insert("momentum".to_string(), Value::from(momentum as f64));
+        sgd_attrs.insert("weight_decay".to_string(), Value::from(weight_decay as f64));
         sgd_attrs.insert("nesterov".to_string(), Value::Bool(nesterov));
 
         let sgd_node = ONNXNode {
@@ -299,41 +254,11 @@ impl ONNXOptimizerExporter {
 
         // Create AdamW optimizer node
         let mut adamw_attrs = HashMap::new();
-        adamw_attrs.insert(
-            "alpha".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(learning_rate as f64)
-                    .expect("Invalid learning_rate: not a finite number"),
-            ),
-        );
-        adamw_attrs.insert(
-            "beta".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(beta1 as f64)
-                    .expect("Invalid beta1: not a finite number"),
-            ),
-        );
-        adamw_attrs.insert(
-            "beta2".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(beta2 as f64)
-                    .expect("Invalid beta2: not a finite number"),
-            ),
-        );
-        adamw_attrs.insert(
-            "epsilon".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(epsilon as f64)
-                    .expect("Invalid epsilon: not a finite number"),
-            ),
-        );
-        adamw_attrs.insert(
-            "weight_decay".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(weight_decay as f64)
-                    .expect("Invalid weight_decay: not a finite number"),
-            ),
-        );
+        adamw_attrs.insert("alpha".to_string(), Value::from(learning_rate as f64));
+        adamw_attrs.insert("beta".to_string(), Value::from(beta1 as f64));
+        adamw_attrs.insert("beta2".to_string(), Value::from(beta2 as f64));
+        adamw_attrs.insert("epsilon".to_string(), Value::from(epsilon as f64));
+        adamw_attrs.insert("weight_decay".to_string(), Value::from(weight_decay as f64));
 
         let adamw_node = ONNXNode {
             name: "adamw_optimizer".to_string(),
@@ -397,34 +322,10 @@ impl ONNXOptimizerExporter {
         weight_decay: f32,
     ) -> OptimizerConfig {
         let mut parameters = HashMap::new();
-        parameters.insert(
-            "beta1".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(beta1 as f64)
-                    .expect("Invalid beta1: not a finite number"),
-            ),
-        );
-        parameters.insert(
-            "beta2".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(beta2 as f64)
-                    .expect("Invalid beta2: not a finite number"),
-            ),
-        );
-        parameters.insert(
-            "epsilon".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(epsilon as f64)
-                    .expect("Invalid epsilon: not a finite number"),
-            ),
-        );
-        parameters.insert(
-            "weight_decay".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(weight_decay as f64)
-                    .expect("Invalid weight_decay: not a finite number"),
-            ),
-        );
+        parameters.insert("beta1".to_string(), Value::from(beta1 as f64));
+        parameters.insert("beta2".to_string(), Value::from(beta2 as f64));
+        parameters.insert("epsilon".to_string(), Value::from(epsilon as f64));
+        parameters.insert("weight_decay".to_string(), Value::from(weight_decay as f64));
 
         OptimizerConfig {
             optimizer_type: "Adam".to_string(),
@@ -441,20 +342,8 @@ impl ONNXOptimizerExporter {
         nesterov: bool,
     ) -> OptimizerConfig {
         let mut parameters = HashMap::new();
-        parameters.insert(
-            "momentum".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(momentum as f64)
-                    .expect("Invalid momentum: not a finite number"),
-            ),
-        );
-        parameters.insert(
-            "weight_decay".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(weight_decay as f64)
-                    .expect("Invalid weight_decay: not a finite number"),
-            ),
-        );
+        parameters.insert("momentum".to_string(), Value::from(momentum as f64));
+        parameters.insert("weight_decay".to_string(), Value::from(weight_decay as f64));
         parameters.insert("nesterov".to_string(), Value::Bool(nesterov));
 
         OptimizerConfig {
@@ -473,34 +362,10 @@ impl ONNXOptimizerExporter {
         weight_decay: f32,
     ) -> OptimizerConfig {
         let mut parameters = HashMap::new();
-        parameters.insert(
-            "beta1".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(beta1 as f64)
-                    .expect("Invalid beta1: not a finite number"),
-            ),
-        );
-        parameters.insert(
-            "beta2".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(beta2 as f64)
-                    .expect("Invalid beta2: not a finite number"),
-            ),
-        );
-        parameters.insert(
-            "epsilon".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(epsilon as f64)
-                    .expect("Invalid epsilon: not a finite number"),
-            ),
-        );
-        parameters.insert(
-            "weight_decay".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(weight_decay as f64)
-                    .expect("Invalid weight_decay: not a finite number"),
-            ),
-        );
+        parameters.insert("beta1".to_string(), Value::from(beta1 as f64));
+        parameters.insert("beta2".to_string(), Value::from(beta2 as f64));
+        parameters.insert("epsilon".to_string(), Value::from(epsilon as f64));
+        parameters.insert("weight_decay".to_string(), Value::from(weight_decay as f64));
 
         OptimizerConfig {
             optimizer_type: "AdamW".to_string(),
@@ -565,13 +430,7 @@ pub mod utils {
         // Add scheduler node
         let mut scheduler_attrs = HashMap::new();
         for (key, value) in schedule_params {
-            scheduler_attrs.insert(
-                key,
-                Value::Number(
-                    serde_json::Number::from_f64(value as f64)
-                        .expect("Invalid value: not a finite number"),
-                ),
-            );
+            scheduler_attrs.insert(key, Value::from(value as f64));
         }
 
         let scheduler_node = ONNXNode {

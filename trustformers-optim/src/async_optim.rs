@@ -10,6 +10,10 @@
 //! - **Delayed Gradient**: Methods that handle stale gradients
 //! - **Elastic Averaging SGD**: Combines local and global parameter averaging
 
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
+
 use anyhow::Result;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -322,7 +326,6 @@ impl AsyncSGD {
 /// Hogwild! optimizer for sparse features.
 pub struct Hogwild {
     config: HogwildConfig,
-    #[allow(dead_code)]
     worker_id: usize,
     shared_parameters: Arc<RwLock<Vec<Tensor>>>,
     local_step: usize,
@@ -469,7 +472,6 @@ impl DelayedGradient {
 /// Elastic Averaging SGD optimizer.
 pub struct ElasticAveraging {
     config: ElasticAveragingConfig,
-    #[allow(dead_code)]
     worker_id: usize,
     local_parameters: Vec<Tensor>,
     global_parameters: Arc<RwLock<Vec<Tensor>>>,

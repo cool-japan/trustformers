@@ -4,9 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Strategies for preventing catastrophic forgetting
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum CatastrophicPreventionStrategy {
     /// Elastic Weight Consolidation
+    #[default]
     EWC,
     /// Progressive Neural Networks
     Progressive,
@@ -26,12 +27,6 @@ pub enum CatastrophicPreventionStrategy {
     MER,
     /// Combined approach using multiple strategies
     Combined(Vec<CatastrophicPreventionStrategy>),
-}
-
-impl Default for CatastrophicPreventionStrategy {
-    fn default() -> Self {
-        Self::EWC
-    }
 }
 
 /// Regularization methods for catastrophic forgetting prevention
@@ -108,9 +103,7 @@ impl RegularizationMethod for EWCRegularization {
 
 /// Learning without Forgetting regularization
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct LwFRegularization {
-    #[allow(dead_code)]
     alpha: f32,
     temperature: f32,
     old_outputs: HashMap<String, Array1<f32>>,
@@ -236,7 +229,6 @@ impl RegularizationMethod for SynapticIntelligenceRegularization {
 #[derive(Debug)]
 pub struct MemoryRegularization {
     memory_size: usize,
-    #[allow(dead_code)]
     margin: f32,
     episodic_memory: Vec<(Array1<f32>, Array1<f32>)>, // (input, target) pairs
 }

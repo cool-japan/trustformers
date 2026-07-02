@@ -8,8 +8,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
 use std::thread;
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 use super::super::types::*;
@@ -169,8 +169,7 @@ impl RealTimeMonitor {
     pub fn update_metrics(&mut self, metrics: MobileMetricsSnapshot) -> Result<()> {
         // Add metrics to live buffer
         {
-            let mut live_metrics = self.live_metrics.write()
-                .expect("live_metrics lock should not be poisoned");
+            let mut live_metrics = self.live_metrics.write().unwrap_or_else(|p| p.into_inner());
             live_metrics.push_back(metrics.clone());
 
             // Maintain buffer size limit
@@ -202,8 +201,7 @@ impl RealTimeMonitor {
 
     /// Get recent metrics from live buffer
     pub fn get_recent_metrics(&self, limit: usize) -> Vec<MobileMetricsSnapshot> {
-        let live_metrics = self.live_metrics.read()
-            .expect("live_metrics lock should not be poisoned");
+        let live_metrics = self.live_metrics.read().unwrap_or_else(|p| p.into_inner());
         live_metrics.iter().rev().take(limit).cloned().collect()
     }
 
@@ -241,12 +239,10 @@ impl RealTimeMonitor {
         };
 
         // Weighted average
-        self.current_state.performance_score = (
-            memory_score * 0.3 +
-            cpu_score * 0.3 +
-            latency_score * 0.3 +
-            thermal_score * 0.1
-        ).max(0.0).min(100.0);
+        self.current_state.performance_score =
+            (memory_score * 0.3 + cpu_score * 0.3 + latency_score * 0.3 + thermal_score * 0.1)
+                .max(0.0)
+                .min(100.0);
 
         Ok(())
     }
@@ -260,10 +256,8 @@ impl RealTimeMonitor {
         );
 
         // Update CPU trend
-        self.trending_metrics.cpu_trend = self.calculate_trend(
-            metrics.cpu_usage_percent,
-            self.trending_metrics.cpu_trend,
-        );
+        self.trending_metrics.cpu_trend =
+            self.calculate_trend(metrics.cpu_usage_percent, self.trending_metrics.cpu_trend);
 
         // Update latency trend
         self.trending_metrics.latency_trend = self.calculate_trend(
@@ -275,7 +269,11 @@ impl RealTimeMonitor {
     }
 
     /// Calculate trend direction for a metric
-    fn calculate_trend(&self, current_value: f32, previous_trend: TrendDirection) -> TrendDirection {
+    fn calculate_trend(
+        &self,
+        current_value: f32,
+        previous_trend: TrendDirection,
+    ) -> TrendDirection {
         // Simplified trend calculation
         // In reality, this would use statistical analysis over a window of values
         let threshold = 5.0; // 5% change threshold
@@ -312,13 +310,21 @@ impl RealTimeMonitor {
 
     /// Calculate system health score
     fn calculate_health_score(&self, metrics: &MobileMetricsSnapshot) -> f32 {
-        let memory_health = if metrics.memory_usage_percent < 70.0 { 100.0 }
-                          else if metrics.memory_usage_percent < 85.0 { 60.0 }
-                          else { 20.0 };
+        let memory_health = if metrics.memory_usage_percent < 70.0 {
+            100.0
+        } else if metrics.memory_usage_percent < 85.0 {
+            60.0
+        } else {
+            20.0
+        };
 
-        let cpu_health = if metrics.cpu_usage_percent < 70.0 { 100.0 }
-                        else if metrics.cpu_usage_percent < 90.0 { 60.0 }
-                        else { 20.0 };
+        let cpu_health = if metrics.cpu_usage_percent < 70.0 {
+            100.0
+        } else if metrics.cpu_usage_percent < 90.0 {
+            60.0
+        } else {
+            20.0
+        };
 
         let thermal_health = match metrics.thermal_state {
             ThermalState::Nominal => 100.0,
@@ -384,7 +390,10 @@ impl AlertManager {
     }
 
     /// Evaluate alert conditions against metrics
-    pub fn evaluate_alerts(&mut self, metrics: &MobileMetricsSnapshot) -> Result<Vec<PerformanceAlert>> {
+    pub fn evaluate_alerts(
+        &mut self,
+        metrics: &MobileMetricsSnapshot,
+    ) -> Result<Vec<PerformanceAlert>> {
         let mut triggered_alerts = Vec::new();
 
         for rule in &self.alert_rules {
@@ -451,7 +460,11 @@ impl AlertManager {
     }
 
     /// Evaluate an alert rule against current metrics
-    fn evaluate_alert_rule(&self, rule: &AlertRule, metrics: &MobileMetricsSnapshot) -> Result<bool> {
+    fn evaluate_alert_rule(
+        &self,
+        rule: &AlertRule,
+        metrics: &MobileMetricsSnapshot,
+    ) -> Result<bool> {
         match rule.rule_id.as_str() {
             "high_memory_usage" => Ok(metrics.memory_usage_percent > rule.threshold_value),
             "high_cpu_usage" => Ok(metrics.cpu_usage_percent > rule.threshold_value),
@@ -464,7 +477,11 @@ impl AlertManager {
     }
 
     /// Create a performance alert from a triggered rule
-    fn create_alert_from_rule(&self, rule: &AlertRule, metrics: &MobileMetricsSnapshot) -> Result<PerformanceAlert> {
+    fn create_alert_from_rule(
+        &self,
+        rule: &AlertRule,
+        metrics: &MobileMetricsSnapshot,
+    ) -> Result<PerformanceAlert> {
         let severity = match rule.severity.as_str() {
             "Low" => AlertSeverity::Low,
             "Medium" => AlertSeverity::Medium,
@@ -511,7 +528,10 @@ impl AlertManager {
 
 impl Default for RealTimeMonitor {
     fn default() -> Self {
+        // reason: built from a known-valid default config; the Default convenience
+        // constructor cannot return a Result, so a descriptive expect documents the
+        // construction invariant.
         Self::new(RealTimeMonitoringConfig::default())
-            .expect("Failed to create default real-time monitor")
+            .expect("default RealTimeMonitoringConfig must yield a valid monitor")
     }
 }

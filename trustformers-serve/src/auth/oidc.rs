@@ -35,32 +35,27 @@ pub enum AuthError {
 
 /// SHA-256 round constants (first 32 bits of the fractional parts of the
 /// cube roots of the first 64 primes).
+// reason: SHA-256 spec constants are kept as bare hex to match FIPS 180-4;
+// digit separators would obscure verification against the reference.
 #[allow(clippy::unreadable_literal)]
 const K: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
-    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
-    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
-    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
-    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
 /// Initial hash values for SHA-256 (first 32 bits of the fractional parts
 /// of the square roots of the first 8 primes).
+// reason: SHA-256 spec constants are kept as bare hex to match FIPS 180-4;
+// digit separators would obscure verification against the reference.
 #[allow(clippy::unreadable_literal)]
 const H0: [u32; 8] = [
-    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
 /// Compute SHA-256 over `data`, returning a 32-byte digest.
@@ -87,10 +82,7 @@ fn sha256(data: &[u8]) -> [u8; 32] {
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
             let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
+            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
         }
 
         let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
@@ -98,11 +90,7 @@ fn sha256(data: &[u8]) -> [u8; 32] {
         for i in 0..64 {
             let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
             let ch = (e & f) ^ ((!e) & g);
-            let temp1 = hh
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(K[i])
-                .wrapping_add(w[i]);
+            let temp1 = hh.wrapping_add(s1).wrapping_add(ch).wrapping_add(K[i]).wrapping_add(w[i]);
             let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
             let maj = (a & b) ^ (a & c) ^ (b & c);
             let temp2 = s0.wrapping_add(maj);
@@ -202,7 +190,7 @@ fn base64url_decode(s: &str) -> Result<Vec<u8>, AuthError> {
     match std_b64.len() % 4 {
         2 => std_b64.push_str("=="),
         3 => std_b64.push('='),
-        _ => {}
+        _ => {},
     }
 
     // Manual base64 decode
@@ -222,22 +210,15 @@ fn base64url_decode(s: &str) -> Result<Vec<u8>, AuthError> {
     let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
     let mut i = 0;
     while i + 3 < bytes.len() {
-        let v0 = char_val(bytes[i]).ok_or_else(|| {
-            AuthError::Base64Error(format!("invalid char at position {i}"))
-        })?;
-        let v1 = char_val(bytes[i + 1]).ok_or_else(|| {
-            AuthError::Base64Error(format!("invalid char at position {}", i + 1))
-        })?;
-        let v2 = char_val(bytes[i + 2]).ok_or_else(|| {
-            AuthError::Base64Error(format!("invalid char at position {}", i + 2))
-        })?;
-        let v3 = char_val(bytes[i + 3]).ok_or_else(|| {
-            AuthError::Base64Error(format!("invalid char at position {}", i + 3))
-        })?;
-        let triple = ((v0 as u32) << 18)
-            | ((v1 as u32) << 12)
-            | ((v2 as u32) << 6)
-            | (v3 as u32);
+        let v0 = char_val(bytes[i])
+            .ok_or_else(|| AuthError::Base64Error(format!("invalid char at position {i}")))?;
+        let v1 = char_val(bytes[i + 1])
+            .ok_or_else(|| AuthError::Base64Error(format!("invalid char at position {}", i + 1)))?;
+        let v2 = char_val(bytes[i + 2])
+            .ok_or_else(|| AuthError::Base64Error(format!("invalid char at position {}", i + 2)))?;
+        let v3 = char_val(bytes[i + 3])
+            .ok_or_else(|| AuthError::Base64Error(format!("invalid char at position {}", i + 3)))?;
+        let triple = ((v0 as u32) << 18) | ((v1 as u32) << 12) | ((v2 as u32) << 6) | (v3 as u32);
         out.push(((triple >> 16) & 0xff) as u8);
         if bytes[i + 2] != b'=' {
             out.push(((triple >> 8) & 0xff) as u8);
@@ -422,62 +403,40 @@ impl AuthResult {
 // ---------------------------------------------------------------------------
 
 fn parse_claims(map: &serde_json::Map<String, serde_json::Value>) -> Result<JwtClaims, AuthError> {
-    let sub = map
-        .get("sub")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let sub = map.get("sub").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
-    let iss = map
-        .get("iss")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let iss = map.get("iss").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
     // `aud` may be a string or an array of strings
     let aud = match map.get("aud") {
         Some(serde_json::Value::String(s)) => vec![s.clone()],
-        Some(serde_json::Value::Array(arr)) => arr
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect(),
+        Some(serde_json::Value::Array(arr)) => {
+            arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+        },
         _ => Vec::new(),
     };
 
-    let exp = map
-        .get("exp")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    let exp = map.get("exp").and_then(|v| v.as_u64()).unwrap_or(0);
 
-    let iat = map
-        .get("iat")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    let iat = map.get("iat").and_then(|v| v.as_u64()).unwrap_or(0);
 
-    let email = map
-        .get("email")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let email = map.get("email").and_then(|v| v.as_str()).map(|s| s.to_string());
 
     // Roles: accept array-of-strings or a single string
     let roles = match map.get("roles") {
-        Some(serde_json::Value::Array(arr)) => arr
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect(),
+        Some(serde_json::Value::Array(arr)) => {
+            arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+        },
         Some(serde_json::Value::String(s)) => vec![s.clone()],
         _ => Vec::new(),
     };
 
     // Scopes: space-separated string or array
     let scopes = match map.get("scope") {
-        Some(serde_json::Value::String(s)) => {
-            s.split_whitespace().map(|t| t.to_string()).collect()
-        }
-        Some(serde_json::Value::Array(arr)) => arr
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect(),
+        Some(serde_json::Value::String(s)) => s.split_whitespace().map(|t| t.to_string()).collect(),
+        Some(serde_json::Value::Array(arr)) => {
+            arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+        },
         _ => Vec::new(),
     };
 
@@ -536,7 +495,9 @@ impl JwtValidator {
         // --- Step 1: split ---
         let parts: Vec<&str> = token.splitn(3, '.').collect();
         if parts.len() != 3 {
-            return AuthResult::Unauthorized("token must have three dot-separated parts".to_string());
+            return AuthResult::Unauthorized(
+                "token must have three dot-separated parts".to_string(),
+            );
         }
         let (header_b64, payload_b64, sig_b64) = (parts[0], parts[1], parts[2]);
         let signing_input = format!("{header_b64}.{payload_b64}");
@@ -550,10 +511,7 @@ impl JwtValidator {
             Ok(v) => v,
             Err(e) => return AuthResult::Unauthorized(format!("header JSON: {e}")),
         };
-        let alg_str = header_val
-            .get("alg")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let alg_str = header_val.get("alg").and_then(|v| v.as_str()).unwrap_or("");
         if alg_str != self.config.algorithm.as_str() {
             return AuthResult::Unauthorized(format!(
                 "algorithm mismatch: got {alg_str}, expected {}",
@@ -641,8 +599,8 @@ impl JwtValidator {
             ));
         }
         let payload_bytes = base64url_decode(parts[1])?;
-        let payload_val: serde_json::Value =
-            serde_json::from_slice(&payload_bytes).map_err(|e| AuthError::JsonError(e.to_string()))?;
+        let payload_val: serde_json::Value = serde_json::from_slice(&payload_bytes)
+            .map_err(|e| AuthError::JsonError(e.to_string()))?;
         let payload_map = payload_val
             .as_object()
             .ok_or_else(|| AuthError::JsonError("payload is not a JSON object".to_string()))?;
@@ -658,26 +616,35 @@ impl JwtValidator {
 
         // Build payload object
         let mut payload_map = serde_json::Map::new();
-        payload_map.insert("sub".to_string(), serde_json::Value::String(claims.sub.clone()));
-        payload_map.insert("iss".to_string(), serde_json::Value::String(claims.iss.clone()));
+        payload_map.insert(
+            "sub".to_string(),
+            serde_json::Value::String(claims.sub.clone()),
+        );
+        payload_map.insert(
+            "iss".to_string(),
+            serde_json::Value::String(claims.iss.clone()),
+        );
         // `aud` as array
-        let aud_arr: Vec<serde_json::Value> = claims
-            .aud
-            .iter()
-            .map(|a| serde_json::Value::String(a.clone()))
-            .collect();
+        let aud_arr: Vec<serde_json::Value> =
+            claims.aud.iter().map(|a| serde_json::Value::String(a.clone())).collect();
         payload_map.insert("aud".to_string(), serde_json::Value::Array(aud_arr));
-        payload_map.insert("exp".to_string(), serde_json::Value::Number(claims.exp.into()));
-        payload_map.insert("iat".to_string(), serde_json::Value::Number(claims.iat.into()));
+        payload_map.insert(
+            "exp".to_string(),
+            serde_json::Value::Number(claims.exp.into()),
+        );
+        payload_map.insert(
+            "iat".to_string(),
+            serde_json::Value::Number(claims.iat.into()),
+        );
         if let Some(ref email) = claims.email {
-            payload_map.insert("email".to_string(), serde_json::Value::String(email.clone()));
+            payload_map.insert(
+                "email".to_string(),
+                serde_json::Value::String(email.clone()),
+            );
         }
         if !claims.roles.is_empty() {
-            let roles_arr: Vec<serde_json::Value> = claims
-                .roles
-                .iter()
-                .map(|r| serde_json::Value::String(r.clone()))
-                .collect();
+            let roles_arr: Vec<serde_json::Value> =
+                claims.roles.iter().map(|r| serde_json::Value::String(r.clone())).collect();
             payload_map.insert("roles".to_string(), serde_json::Value::Array(roles_arr));
         }
         if !claims.scopes.is_empty() {
@@ -709,10 +676,7 @@ impl JwtValidator {
 
 fn current_unix_timestamp() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -726,10 +690,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn now_secs() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
+        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
     }
 
     fn make_claims(sub: &str, iss: &str, aud: &[&str], exp_offset: i64) -> JwtClaims {
@@ -770,7 +731,11 @@ mod tests {
             .expect("token creation should succeed");
         let validator = JwtValidator::new(config);
         let result = validator.validate(&token);
-        assert!(result.is_ok(), "expected Authenticated, got: {:?}", result.error_message());
+        assert!(
+            result.is_ok(),
+            "expected Authenticated, got: {:?}",
+            result.error_message()
+        );
         let got = result.claims().expect("should have claims");
         assert_eq!(got.sub, "user-123");
     }
@@ -1013,6 +978,10 @@ mod tests {
         let validator = JwtValidator::new(config);
         let result = validator.validate(&rs256_token);
         // Should be Authenticated (structural checks all pass; sig skipped)
-        assert!(result.is_ok(), "RS256 structural validation should pass: {:?}", result.error_message());
+        assert!(
+            result.is_ok(),
+            "RS256 structural validation should pass: {:?}",
+            result.error_message()
+        );
     }
 }

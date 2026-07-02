@@ -584,7 +584,7 @@ impl RiscVBackend {
 
     /// Get current performance metrics
     pub fn get_metrics(&self) -> HardwareMetrics {
-        self.metrics.lock().expect("Lock poisoned").clone()
+        self.metrics.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 
     /// Optimize vector operations for specific VLEN
@@ -878,7 +878,7 @@ impl RiscVBackend {
         execution_time: Duration,
         metadata: &VectorOperationMetadata,
     ) {
-        let mut metrics = self.metrics.lock().expect("Lock poisoned");
+        let mut metrics = self.metrics.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let execution_ms = execution_time.as_millis() as f64;
 
         metrics.ops_per_second = metadata.estimated_cycles as f64 / (execution_ms / 1000.0);

@@ -89,7 +89,7 @@ impl ModelLoader {
     pub async fn load_from_url(
         &self,
         _url: &str,
-        #[allow(unused_variables)] format: ModelFormat,
+        _format: ModelFormat,
     ) -> Result<Vec<u8>, JsValue> {
         #[cfg(feature = "webgpu")]
         {

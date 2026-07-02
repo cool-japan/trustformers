@@ -68,7 +68,6 @@ pub struct ContinualLearningManager {
     tasks: Vec<TaskInfo>,
     current_task: Option<String>,
     task_transitions: Vec<TaskTransition>,
-    #[allow(dead_code)]
     prevention_strategies: HashMap<String, Box<dyn RegularizationMethod>>,
 }
 

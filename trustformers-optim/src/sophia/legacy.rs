@@ -74,6 +74,10 @@
 //! - Similar to Adam but uses second-order information
 //! - More efficient than full second-order methods (O(n²))
 
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
+
 use crate::common::{OptimizerState, StateMemoryStats};
 use crate::traits::StatefulOptimizer;
 use std::collections::HashMap;
@@ -224,7 +228,6 @@ impl Sophia {
     }
 
     /// Applies clipping to the update.
-    #[allow(dead_code)]
     fn clip_update(&self, update: f32) -> f32 {
         update.clamp(-self.config.gamma, self.config.gamma)
     }

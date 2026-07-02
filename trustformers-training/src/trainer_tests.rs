@@ -49,7 +49,7 @@ mod tests {
             epoch: 2.5,
             global_step: 1000,
             best_metric: Some(0.95),
-            best_model_checkpoint: Some(std::path::PathBuf::from("/tmp/ckpt")),
+            best_model_checkpoint: Some(std::env::temp_dir().join("ckpt")),
             log_history: vec![LogEntry {
                 step: 100,
                 epoch: 1.0,

@@ -147,7 +147,6 @@ impl SIMDMatrixOps {
     ///
     /// This is kept for cases where manual SIMD control is needed.
     /// For most use cases, prefer `matmul()` which uses BLAS acceleration.
-    #[allow(dead_code)]
     pub fn matmul_legacy(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
         let a_shape = a.shape();
         let b_shape = b.shape();

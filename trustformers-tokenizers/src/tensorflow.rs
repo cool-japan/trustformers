@@ -770,6 +770,8 @@ pub struct TfDataIterator<'a> {
     texts: &'a [String],
     batch_size: usize,
     current_index: usize,
+    // reason: stored from the constructor; reserved for planned per-batch
+    // TensorFlow configuration that the iterator does not yet consume.
     #[allow(dead_code)]
     config: TensorFlowConfig,
 }

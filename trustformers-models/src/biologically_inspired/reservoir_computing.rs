@@ -110,7 +110,11 @@ impl ReservoirLayer {
 
     /// Forward pass for a single timestep
     fn forward_timestep(&mut self, input: &Tensor) -> Result<Tensor> {
-        let reservoir_state = self.reservoir_state.as_mut().expect("operation failed");
+        let reservoir_state = self.reservoir_state.as_mut().ok_or_else(|| {
+            trustformers_core::errors::TrustformersError::model_error(
+                "Reservoir state not initialized".to_string(),
+            )
+        })?;
         let leak_rate = self.config.leak_rate;
 
         // Compute input to reservoir

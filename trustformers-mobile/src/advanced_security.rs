@@ -654,7 +654,7 @@ impl ZeroKnowledgeProofEngine {
             system: ZKProofSystem::ZkSNARKs,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("SystemTime before UNIX_EPOCH")
+                .unwrap_or_default()
                 .as_secs(),
         })
     }
@@ -669,7 +669,7 @@ impl ZeroKnowledgeProofEngine {
             system: ZKProofSystem::ZkSTARKs,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("SystemTime before UNIX_EPOCH")
+                .unwrap_or_default()
                 .as_secs(),
         })
     }
@@ -684,7 +684,7 @@ impl ZeroKnowledgeProofEngine {
             system: ZKProofSystem::Bulletproofs,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("SystemTime before UNIX_EPOCH")
+                .unwrap_or_default()
                 .as_secs(),
         })
     }
@@ -699,7 +699,7 @@ impl ZeroKnowledgeProofEngine {
             system: ZKProofSystem::Plonk,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("SystemTime before UNIX_EPOCH")
+                .unwrap_or_default()
                 .as_secs(),
         })
     }

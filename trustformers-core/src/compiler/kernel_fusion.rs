@@ -379,7 +379,9 @@ impl KernelFusion {
         }
 
         let first_node = &graph.nodes[group.nodes[0]];
-        let last_node = &graph.nodes[*group.nodes.last().expect("group is not empty")];
+        let last_node = &graph.nodes[*group.nodes.last().ok_or_else(|| {
+            crate::errors::runtime_error(format!("{} in create_fused_node", "group is not empty"))
+        })?];
 
         // Create fused operation name
         let op_types: Vec<String> =
@@ -433,7 +435,12 @@ impl KernelFusion {
 
         // Find edges that need to be updated
         let first_node = group.nodes[0];
-        let last_node = *group.nodes.last().expect("group is not empty");
+        let last_node = *group.nodes.last().ok_or_else(|| {
+            crate::errors::runtime_error(format!(
+                "{} in replace_nodes_with_fused",
+                "group is not empty"
+            ))
+        })?;
 
         // Update fused node ID
         fused_node.id = first_node;

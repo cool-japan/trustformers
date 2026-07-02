@@ -442,16 +442,9 @@ impl Optimizer for AdamWOptimizer {
         let mut parameter_updates = HashMap::new();
 
         for (param_name, grad) in &gradients.parameters {
-            // Initialize moment estimates if needed
-            if !self.m.contains_key(param_name) {
-                self.m.insert(param_name.clone(), vec![0.0; grad.len()]);
-                self.v.insert(param_name.clone(), vec![0.0; grad.len()]);
-            }
-
-            let m =
-                self.m.get_mut(param_name).expect("param_name exists in m after initialization");
-            let v =
-                self.v.get_mut(param_name).expect("param_name exists in v after initialization");
+            // Initialize moment estimates if needed (entry API avoids a fallible lookup)
+            let m = self.m.entry(param_name.clone()).or_insert_with(|| vec![0.0; grad.len()]);
+            let v = self.v.entry(param_name.clone()).or_insert_with(|| vec![0.0; grad.len()]);
 
             let mut updates = Vec::with_capacity(grad.len());
 
@@ -575,15 +568,9 @@ impl Optimizer for AdamOptimizer {
         let mut parameter_updates = HashMap::new();
 
         for (param_name, grad) in &gradients.parameters {
-            if !self.m.contains_key(param_name) {
-                self.m.insert(param_name.clone(), vec![0.0; grad.len()]);
-                self.v.insert(param_name.clone(), vec![0.0; grad.len()]);
-            }
-
-            let m =
-                self.m.get_mut(param_name).expect("param_name exists in m after initialization");
-            let v =
-                self.v.get_mut(param_name).expect("param_name exists in v after initialization");
+            // Initialize moment estimates if needed (entry API avoids a fallible lookup)
+            let m = self.m.entry(param_name.clone()).or_insert_with(|| vec![0.0; grad.len()]);
+            let v = self.v.entry(param_name.clone()).or_insert_with(|| vec![0.0; grad.len()]);
 
             let mut updates = Vec::with_capacity(grad.len());
 

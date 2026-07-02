@@ -1,7 +1,5 @@
 //! Device capability detector implementation
 
-#![allow(clippy::missing_enforced_import_renames)]
-
 use super::structs::*;
 use super::types::*;
 use crate::core::tensor::WasmTensor;
@@ -763,11 +761,10 @@ impl DeviceCapabilityDetector {
     }
 
     pub fn subscribe_to_capability_changes(&mut self, event_type: &str, callback: &Function) {
-        js_sys::Reflect::set(
+        let _ = js_sys::Reflect::set(
             &self.detection_callbacks,
             &JsValue::from_str(event_type),
             callback,
-        )
-        .expect("Failed to set capability event callback");
+        );
     }
 }

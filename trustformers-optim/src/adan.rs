@@ -155,7 +155,6 @@ impl Adan {
     /// Gets memory statistics for the optimizer state.
     pub fn memory_stats(&self) -> StateMemoryStats {
         let mut total_parameters = 0;
-        #[allow(dead_code)]
         let mut _total_buffers = 0;
 
         for buffer in self.exp_avg.values() {
@@ -386,7 +385,13 @@ impl StatefulOptimizer for Adan {
                 if let Tensor::F32(data) = value {
                     self.exp_avg.insert(
                         param_key.to_string(),
-                        data.as_slice().expect("array must have contiguous layout").to_vec(),
+                        data.as_slice()
+                            .ok_or_else(|| {
+                                TrustformersError::invalid_state(
+                                    "array must have contiguous layout".to_string(),
+                                )
+                            })?
+                            .to_vec(),
                     );
                 }
             }
@@ -398,7 +403,13 @@ impl StatefulOptimizer for Adan {
                 if let Tensor::F32(data) = value {
                     self.exp_avg_sq.insert(
                         param_key.to_string(),
-                        data.as_slice().expect("array must have contiguous layout").to_vec(),
+                        data.as_slice()
+                            .ok_or_else(|| {
+                                TrustformersError::invalid_state(
+                                    "array must have contiguous layout".to_string(),
+                                )
+                            })?
+                            .to_vec(),
                     );
                 }
             }
@@ -410,7 +421,13 @@ impl StatefulOptimizer for Adan {
                 if let Tensor::F32(data) = value {
                     self.exp_avg_diff.insert(
                         param_key.to_string(),
-                        data.as_slice().expect("array must have contiguous layout").to_vec(),
+                        data.as_slice()
+                            .ok_or_else(|| {
+                                TrustformersError::invalid_state(
+                                    "array must have contiguous layout".to_string(),
+                                )
+                            })?
+                            .to_vec(),
                     );
                 }
             }
@@ -422,7 +439,13 @@ impl StatefulOptimizer for Adan {
                 if let Tensor::F32(data) = value {
                     self.prev_grad.insert(
                         param_key.to_string(),
-                        data.as_slice().expect("array must have contiguous layout").to_vec(),
+                        data.as_slice()
+                            .ok_or_else(|| {
+                                TrustformersError::invalid_state(
+                                    "array must have contiguous layout".to_string(),
+                                )
+                            })?
+                            .to_vec(),
                     );
                 }
             }

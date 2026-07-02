@@ -182,9 +182,18 @@ impl SDPA {
                             && head_dim >= MIN_SIZE_FOR_BLAS
                         {
                             // Use direct BLAS (Accelerate on macOS) for larger matrices
-                            let q_data = q_2d.as_slice().expect("q_2d is standard layout");
-                            let k_t_data =
-                                k_t_owned.as_slice().expect("k_t_owned is standard layout");
+                            let q_data = q_2d.as_slice().ok_or_else(|| {
+                                crate::errors::compute_error(
+                                    "standard_attention",
+                                    "q_2d is standard layout",
+                                )
+                            })?;
+                            let k_t_data = k_t_owned.as_slice().ok_or_else(|| {
+                                crate::errors::compute_error(
+                                    "standard_attention",
+                                    "k_t_owned is standard layout",
+                                )
+                            })?;
                             let mut result_vec = vec![0.0f32; seq_q * seq_k];
                             blas_sgemm(
                                 scale,
@@ -264,8 +273,18 @@ impl SDPA {
                             && head_dim >= MIN_SIZE_FOR_BLAS
                         {
                             // Use direct BLAS (Accelerate on macOS) for larger matrices
-                            let scores_data = scores.as_slice().expect("scores is standard layout");
-                            let v_data = v_2d.as_slice().expect("v_2d is standard layout");
+                            let scores_data = scores.as_slice().ok_or_else(|| {
+                                crate::errors::compute_error(
+                                    "standard_attention",
+                                    "scores is standard layout",
+                                )
+                            })?;
+                            let v_data = v_2d.as_slice().ok_or_else(|| {
+                                crate::errors::compute_error(
+                                    "standard_attention",
+                                    "v_2d is standard layout",
+                                )
+                            })?;
                             let mut result_vec = vec![0.0f32; seq_q * head_dim];
                             blas_sgemm(
                                 1.0,
@@ -355,9 +374,18 @@ impl SDPA {
                             && head_dim >= MIN_SIZE_FOR_BLAS
                         {
                             // Use direct BLAS (Accelerate on macOS)
-                            let q_data = q_2d.as_slice().expect("q_2d is standard layout");
-                            let k_t_data =
-                                k_t_owned.as_slice().expect("k_t_owned is standard layout");
+                            let q_data = q_2d.as_slice().ok_or_else(|| {
+                                crate::errors::compute_error(
+                                    "small_sequence_attention",
+                                    "q_2d is standard layout",
+                                )
+                            })?;
+                            let k_t_data = k_t_owned.as_slice().ok_or_else(|| {
+                                crate::errors::compute_error(
+                                    "small_sequence_attention",
+                                    "k_t_owned is standard layout",
+                                )
+                            })?;
                             let mut result_vec = vec![0.0f32; seq_q * seq_k];
                             blas_sgemm(
                                 scale,
@@ -437,8 +465,18 @@ impl SDPA {
                             && head_dim >= MIN_SIZE_FOR_BLAS
                         {
                             // Use direct BLAS (Accelerate on macOS)
-                            let scores_data = scores.as_slice().expect("scores is standard layout");
-                            let v_data = v_2d.as_slice().expect("v_2d is standard layout");
+                            let scores_data = scores.as_slice().ok_or_else(|| {
+                                crate::errors::compute_error(
+                                    "small_sequence_attention",
+                                    "scores is standard layout",
+                                )
+                            })?;
+                            let v_data = v_2d.as_slice().ok_or_else(|| {
+                                crate::errors::compute_error(
+                                    "small_sequence_attention",
+                                    "v_2d is standard layout",
+                                )
+                            })?;
                             let mut result_vec = vec![0.0f32; seq_q * head_dim];
                             blas_sgemm(
                                 1.0,
@@ -549,10 +587,18 @@ impl SDPA {
                                     && head_dim >= MIN_SIZE_FOR_BLAS
                                 {
                                     // Use direct BLAS (Accelerate on macOS)
-                                    let q_data =
-                                        q_tile_2d.as_slice().expect("q_tile_2d is standard layout");
-                                    let k_t_data =
-                                        k_tile_t.as_slice().expect("k_tile_t is standard layout");
+                                    let q_data = q_tile_2d.as_slice().ok_or_else(|| {
+                                        crate::errors::compute_error(
+                                            "tiled_attention",
+                                            "q_tile_2d is standard layout",
+                                        )
+                                    })?;
+                                    let k_t_data = k_tile_t.as_slice().ok_or_else(|| {
+                                        crate::errors::compute_error(
+                                            "tiled_attention",
+                                            "k_tile_t is standard layout",
+                                        )
+                                    })?;
                                     let mut result_vec = vec![0.0f32; q_tile_size * k_tile_size];
                                     blas_sgemm(
                                         scale,
@@ -647,11 +693,18 @@ impl SDPA {
                                     && head_dim >= MIN_SIZE_FOR_BLAS
                                 {
                                     // Use direct BLAS with beta=1.0 to add to existing o_tile
-                                    let exp_data = exp_scores
-                                        .as_slice()
-                                        .expect("exp_scores is standard layout");
-                                    let v_data =
-                                        v_tile_2d.as_slice().expect("v_tile_2d is standard layout");
+                                    let exp_data = exp_scores.as_slice().ok_or_else(|| {
+                                        crate::errors::compute_error(
+                                            "tiled_attention",
+                                            "exp_scores is standard layout",
+                                        )
+                                    })?;
+                                    let v_data = v_tile_2d.as_slice().ok_or_else(|| {
+                                        crate::errors::compute_error(
+                                            "tiled_attention",
+                                            "v_tile_2d is standard layout",
+                                        )
+                                    })?;
                                     let o_slice = o_tile.as_slice_mut().ok_or_else(|| {
                                         TrustformersError::tensor_op_error(
                                             "Failed to get mutable slice from output tile",

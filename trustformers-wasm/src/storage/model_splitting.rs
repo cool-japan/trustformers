@@ -4,7 +4,6 @@
 //! that can be loaded progressively, reducing memory pressure and startup time.
 
 #![allow(dead_code)]
-
 use js_sys::{ArrayBuffer, Object, Uint8Array};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -316,10 +315,7 @@ impl ModelSplitter {
         });
 
         // Vocabulary chunk (medium priority)
-        let vocab_start = components
-            .last()
-            .expect("components has at least one element after config push")
-            .end_offset();
+        let vocab_start = components.last().map_or(0, |component| component.end_offset());
         components.push(ModelComponent {
             name: "vocabulary".to_string(),
             chunk_type: ChunkType::Vocabulary,
@@ -329,10 +325,7 @@ impl ModelSplitter {
         });
 
         // Embeddings (high priority)
-        let embed_start = components
-            .last()
-            .expect("components has at least two elements after vocab push")
-            .end_offset();
+        let embed_start = components.last().map_or(0, |component| component.end_offset());
         components.push(ModelComponent {
             name: "embeddings".to_string(),
             chunk_type: ChunkType::Embeddings,
@@ -342,10 +335,7 @@ impl ModelSplitter {
         });
 
         // Split remaining data into attention and FFN layers
-        let remaining_start = components
-            .last()
-            .expect("components has at least three elements after embeddings push")
-            .end_offset();
+        let remaining_start = components.last().map_or(0, |component| component.end_offset());
         let remaining_size = total_size - remaining_start;
         let num_layer_chunks = remaining_size.div_ceil(chunk_size);
 
@@ -683,10 +673,9 @@ impl ModelLoadingSession {
         let total_count = loading_order.length() as usize;
 
         for i in 0..loading_order.length() {
-            let chunk_id = loading_order
-                .get(i)
-                .as_string()
-                .expect("loading order should contain string chunk IDs");
+            let chunk_id = loading_order.get(i).as_string().ok_or_else(|| {
+                JsValue::from_str("loading order should contain string chunk IDs")
+            })?;
 
             // Simulate loading delay
             self.simulate_chunk_loading(&chunk_id).await?;

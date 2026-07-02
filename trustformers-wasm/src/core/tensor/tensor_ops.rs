@@ -21,8 +21,7 @@ impl WasmTensor {
         } else {
             self.data.iter().map(|&x| x.max(0.0)).collect()
         };
-        WasmTensor::new(data, self.shape.clone())
-            .expect("tensor creation should succeed with valid shape")
+        self.with_same_shape(data)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -76,8 +75,7 @@ impl WasmTensor {
                 .map(|&x| 0.5 * x * (1.0 + ((2.0 / PI).sqrt() * (x + 0.044715 * x.powi(3))).tanh()))
                 .collect()
         };
-        WasmTensor::new(data, self.shape.clone())
-            .expect("tensor creation should succeed with valid shape")
+        self.with_same_shape(data)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -148,8 +146,7 @@ impl WasmTensor {
         } else {
             self.data.iter().map(|&x| 1.0 / (1.0 + (-x).exp())).collect()
         };
-        WasmTensor::new(data, self.shape.clone())
-            .expect("tensor creation should succeed with valid shape")
+        self.with_same_shape(data)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -219,8 +216,7 @@ impl WasmTensor {
         } else {
             self.data.iter().map(|&x| x.tanh()).collect()
         };
-        WasmTensor::new(data, self.shape.clone())
-            .expect("tensor creation should succeed with valid shape")
+        self.with_same_shape(data)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -852,7 +848,7 @@ impl WasmTensor {
         Ok((v, beta))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)] // reason: distinct configuration parameters; a struct would not simplify the wasm-bindgen API
     fn apply_householder_transformation(
         &self,
         matrix: &mut WasmTensor,
@@ -952,7 +948,6 @@ impl WasmTensor {
         let mut result_data = vec![0.0f32; batch_size * m * n];
 
         // Advanced batch processing with memory optimization
-        #[allow(clippy::excessive_nesting)]
         for b in 0..batch_size {
             for i in 0..m {
                 for j in 0..n {
@@ -1044,7 +1039,7 @@ impl WasmTensor {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // reason: distinct configuration parameters; a struct would not simplify the wasm-bindgen API
 fn extract_slice_recursive(
     data: &[f32],
     shape: &[usize],

@@ -463,7 +463,8 @@ impl AdvancedRAGPipeline {
     /// Summarize XML content
     async fn summarize_xml(&self, content: &str) -> Result<String> {
         // Simple XML tag extraction for demonstration
-        let tag_regex = regex::Regex::new(r"<(\w+)").expect("static regex pattern is valid");
+        let tag_regex = regex::Regex::new(r"<(\w+)")
+            .map_err(|e| TrustformersError::invalid_input_simple(format!("Invalid regex: {e}")))?;
         let tags: Vec<_> = tag_regex.captures_iter(content).map(|cap| cap[1].to_string()).collect();
 
         if tags.is_empty() {

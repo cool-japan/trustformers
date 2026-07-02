@@ -189,7 +189,7 @@ impl TextGenerator {
     fn greedy_select_from_data(&self, data: &[f32]) -> Result<usize> {
         data.iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).expect("Partial comparison failed"))
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(::std::cmp::Ordering::Equal))
             .map(|(idx, _)| idx)
             .ok_or_else(|| TrustformersError::invalid_input("Empty logits".to_string()))
     }

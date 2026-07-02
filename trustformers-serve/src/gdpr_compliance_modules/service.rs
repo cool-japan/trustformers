@@ -20,13 +20,24 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 // Global metric registrations — registered exactly once, shared across all GdprComplianceService instances.
+// Registration only fails on duplicate registration; fall back to an unregistered
+// metric (compile-time-valid opts) so the server keeps running.
 static GDPR_SUBJECT_REQUESTS_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
     register_counter_vec!(
         "gdpr_subject_requests_total",
         "Total number of data subject requests",
         &["type"]
     )
-    .expect("Failed to register gdpr_subject_requests_total metric")
+    .unwrap_or_else(|_| {
+        prometheus::CounterVec::new(
+            prometheus::opts!(
+                "gdpr_subject_requests_total",
+                "Total number of data subject requests"
+            ),
+            &["type"],
+        )
+        .unwrap_or_else(|_| unreachable!("static prometheus opts are valid"))
+    })
 });
 
 static GDPR_ACTIVE_CONSENTS: Lazy<GaugeVec> = Lazy::new(|| {
@@ -35,7 +46,13 @@ static GDPR_ACTIVE_CONSENTS: Lazy<GaugeVec> = Lazy::new(|| {
         "Number of active consents",
         &["purpose"]
     )
-    .expect("Failed to register gdpr_active_consents metric")
+    .unwrap_or_else(|_| {
+        prometheus::GaugeVec::new(
+            prometheus::opts!("gdpr_active_consents", "Number of active consents"),
+            &["purpose"],
+        )
+        .unwrap_or_else(|_| unreachable!("static prometheus opts are valid"))
+    })
 });
 
 static GDPR_REQUEST_PROCESSING_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
@@ -44,7 +61,16 @@ static GDPR_REQUEST_PROCESSING_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
         "Duration of request processing",
         &["type"]
     )
-    .expect("Failed to register gdpr_request_processing_duration_seconds metric")
+    .unwrap_or_else(|_| {
+        prometheus::HistogramVec::new(
+            prometheus::histogram_opts!(
+                "gdpr_request_processing_duration_seconds",
+                "Duration of request processing"
+            ),
+            &["type"],
+        )
+        .unwrap_or_else(|_| unreachable!("static prometheus opts are valid"))
+    })
 });
 
 use super::consent_management::{ConsentEvidence, ConsentMechanism, ConsentRecord};

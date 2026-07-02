@@ -283,7 +283,7 @@ impl MetricCollector {
 
         // Calculate percentiles
         let mut sorted_values = values.clone();
-        sorted_values.sort_by(|a, b| a.partial_cmp(b).expect("Partial comparison failed"));
+        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(::std::cmp::Ordering::Equal));
 
         let percentiles = vec![50, 90, 95, 99]
             .into_iter()

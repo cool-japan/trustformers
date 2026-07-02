@@ -124,10 +124,8 @@ pub struct TokenRouting {
 }
 
 /// Expert parallelism coordinator
-#[allow(dead_code)]
 pub struct ExpertParallelism {
     config: ExpertParallelismConfig,
-    #[allow(dead_code)]
     global_rank: usize,
     world_size: usize,
 
@@ -150,10 +148,8 @@ pub struct ExpertParallelism {
 
 /// Load balancing state tracking
 #[derive(Debug, Default)]
-#[allow(dead_code)]
 struct LoadBalancingState {
     expert_loads: HashMap<usize, f32>,
-    #[allow(dead_code)]
     expert_utilization: HashMap<usize, f32>,
     token_distribution: HashMap<usize, usize>,
     imbalance_score: f32,
@@ -162,10 +158,8 @@ struct LoadBalancingState {
 
 /// Communication statistics for expert parallelism
 #[derive(Debug, Default)]
-#[allow(dead_code)]
 struct ExpertCommunicationStats {
     all_to_all_time: Duration,
-    #[allow(dead_code)]
     point_to_point_time: Duration,
     total_tokens_routed: u64,
     expert_load_variance: f32,
@@ -264,10 +258,8 @@ impl ExpertParallelism {
 
         // Update statistics
         {
-            let mut stats = self
-                .communication_stats
-                .lock()
-                .expect("communication_stats lock should not be poisoned");
+            let mut stats =
+                self.communication_stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             stats.routing_overhead += start_time.elapsed();
             stats.total_tokens_routed += tokens.shape()[0] as u64;
         }
@@ -386,7 +378,7 @@ impl ExpertParallelism {
         let load_state = self
             .load_balancing_state
             .read()
-            .expect("load_balancing_state lock should not be poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         for token_idx in 0..batch_size {
             // Find least loaded expert
@@ -453,10 +445,8 @@ impl ExpertParallelism {
 
         // Update communication statistics
         {
-            let mut stats = self
-                .communication_stats
-                .lock()
-                .expect("communication_stats lock should not be poisoned");
+            let mut stats =
+                self.communication_stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             stats.all_to_all_time += start_time.elapsed();
         }
 
@@ -468,7 +458,7 @@ impl ExpertParallelism {
         let mut load_state = self
             .load_balancing_state
             .write()
-            .expect("load_balancing_state lock should not be poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Update expert loads based on output sizes
         for (expert_id, output) in expert_outputs {
@@ -497,8 +487,9 @@ impl ExpertParallelism {
         let load_state = self
             .load_balancing_state
             .read()
-            .expect("load_balancing_state lock should not be poisoned");
-        let comm_stats = self.communication_stats.lock().expect("lock should not be poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let comm_stats =
+            self.communication_stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         LoadBalancingStats {
             expert_loads: load_state.expert_loads.clone(),

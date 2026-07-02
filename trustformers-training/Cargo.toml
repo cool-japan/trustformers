@@ -30,6 +30,7 @@ chrono.workspace = true
 fastrand.workspace = true
 tokio.workspace = true
 sha2.workspace = true
+hex.workspace = true
 half.workspace = true
 rmp-serde.workspace = true
 log.workspace = true

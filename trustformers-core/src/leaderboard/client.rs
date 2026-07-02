@@ -385,6 +385,9 @@ impl ClientBuilder {
     }
 
     /// Build client with remote storage
+    ///
+    /// Requires the `remote-leaderboard` feature (pulls in `reqwest`).
+    #[cfg(feature = "remote-leaderboard")]
     pub fn build_with_remote_storage(self) -> Result<LeaderboardClient> {
         use super::{DefaultRankingAlgorithm, DefaultValidator, RemoteStorage};
 
@@ -421,7 +424,7 @@ mod tests {
     #[tokio::test]
     async fn test_client_builder() {
         let client = ClientBuilder::new()
-            .local_dir("/tmp/test_leaderboard".to_string())
+            .local_dir(std::env::temp_dir().join("test_leaderboard").to_string_lossy().to_string())
             .default_category(LeaderboardCategory::Inference)
             .default_limit(50)
             .build_with_file_storage()

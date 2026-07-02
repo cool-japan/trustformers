@@ -4,7 +4,6 @@
 //! of TrustFormer WASM functionality into React applications.
 
 #![allow(dead_code)]
-
 use js_sys::Object;
 use std::format;
 use std::string::String;

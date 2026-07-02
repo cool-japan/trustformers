@@ -428,12 +428,16 @@ impl RealtimeDashboard {
 
             // Add to metric data
             {
-                let mut data = self.metric_data.lock().expect("lock should not be poisoned");
+                let mut data =
+                    self.metric_data.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 let category_data = data.entry(category.clone()).or_default();
                 category_data.push_back(data_point.clone());
 
-                let max_points =
-                    self.config.lock().expect("lock should not be poisoned").max_data_points;
+                let max_points = self
+                    .config
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .max_data_points;
                 while category_data.len() > max_points {
                     category_data.pop_front();
                 }
@@ -447,7 +451,8 @@ impl RealtimeDashboard {
 
         // Update total counter
         {
-            let mut total = self.total_data_points.lock().expect("lock should not be poisoned");
+            let mut total =
+                self.total_data_points.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             *total += data_points.len();
         }
 
@@ -481,7 +486,8 @@ impl RealtimeDashboard {
 
         // Add to alert history
         {
-            let mut history = self.alert_history.lock().expect("lock should not be poisoned");
+            let mut history =
+                self.alert_history.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             history.push_back(alert.clone());
 
             // Keep only last 100 alerts
@@ -499,7 +505,7 @@ impl RealtimeDashboard {
 
     /// Get historical data for a category
     pub fn get_historical_data(&self, category: &MetricCategory) -> Vec<MetricDataPoint> {
-        let data = self.metric_data.lock().expect("lock should not be poisoned");
+        let data = self.metric_data.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         data.get(category)
             .map(|deque| deque.iter().cloned().collect())
             .unwrap_or_default()
@@ -508,11 +514,12 @@ impl RealtimeDashboard {
     /// Get current system stats
     pub fn get_system_stats(&self) -> SystemStats {
         let uptime = self.start_time.elapsed().as_secs();
-        let total_alerts = self.alert_history.lock().expect("lock should not be poisoned").len();
+        let total_alerts =
+            self.alert_history.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).len();
         let active_connections =
-            *self.active_connections.lock().expect("lock should not be poisoned");
+            *self.active_connections.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let data_points_collected =
-            *self.total_data_points.lock().expect("lock should not be poisoned");
+            *self.total_data_points.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Simple memory and CPU usage estimation
         let memory_usage_mb = self.estimate_memory_usage();
@@ -533,7 +540,7 @@ impl RealtimeDashboard {
         // Increment connection counter
         {
             let mut connections =
-                self.active_connections.lock().expect("lock should not be poisoned");
+                self.active_connections.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             *connections += 1;
         }
 
@@ -543,7 +550,7 @@ impl RealtimeDashboard {
     /// Update dashboard configuration
     pub fn update_config(&self, new_config: DashboardConfig) -> Result<()> {
         {
-            let mut config = self.config.lock().expect("lock should not be poisoned");
+            let mut config = self.config.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             *config = new_config.clone();
         }
 
@@ -556,7 +563,7 @@ impl RealtimeDashboard {
 
     /// Get current configuration
     pub fn get_config(&self) -> DashboardConfig {
-        self.config.lock().expect("lock should not be poisoned").clone()
+        self.config.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 
     /// Start periodic data collection
@@ -568,10 +575,13 @@ impl RealtimeDashboard {
 
         tokio::spawn(async move {
             let mut interval = interval(Duration::from_millis(
-                config.lock().expect("lock should not be poisoned").update_frequency_ms,
+                config
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .update_frequency_ms,
             ));
 
-            while *is_running.lock().expect("lock should not be poisoned") {
+            while *is_running.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) {
                 interval.tick().await;
 
                 // Collect system metrics periodically
@@ -597,18 +607,21 @@ impl RealtimeDashboard {
         tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(5)); // Update every 5 seconds
 
-            while *is_running.lock().expect("lock should not be poisoned") {
+            while *is_running.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) {
                 interval.tick().await;
 
                 let stats = SystemStats {
                     uptime: start_time.elapsed().as_secs(),
-                    total_alerts: alert_history.lock().expect("lock should not be poisoned").len(),
+                    total_alerts: alert_history
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .len(),
                     active_connections: *active_connections
                         .lock()
-                        .expect("lock should not be poisoned"),
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()),
                     data_points_collected: *total_data_points
                         .lock()
-                        .expect("lock should not be poisoned"),
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()),
                     memory_usage_mb: 0.0,   // Placeholder
                     cpu_usage_percent: 0.0, // Placeholder
                 };
@@ -630,7 +643,7 @@ impl RealtimeDashboard {
         tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(1));
 
-            while *is_running.lock().expect("lock should not be poisoned") {
+            while *is_running.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) {
                 interval.tick().await;
 
                 // Monitor for threshold breaches and create alerts
@@ -648,7 +661,7 @@ impl RealtimeDashboard {
         let mut metrics = Vec::new();
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
 
-        let cfg = config.lock().expect("lock should not be poisoned");
+        let cfg = config.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         if cfg.enable_memory_profiling {
             // Simulate memory metrics
@@ -685,7 +698,7 @@ impl RealtimeDashboard {
 
     /// Check for alerts based on new metric value
     fn check_for_alerts(&self, category: &MetricCategory, value: f64) {
-        let config = self.config.lock().expect("lock should not be poisoned");
+        let config = self.config.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let thresholds = &config.alert_thresholds;
 
         match category {
@@ -737,8 +750,8 @@ impl RealtimeDashboard {
         config: &Arc<Mutex<DashboardConfig>>,
         metric_data: &Arc<Mutex<HashMap<MetricCategory, VecDeque<MetricDataPoint>>>>,
     ) {
-        let _config = config.lock().expect("lock should not be poisoned");
-        let _data = metric_data.lock().expect("lock should not be poisoned");
+        let _config = config.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _data = metric_data.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Implementation would check for patterns, sustained threshold breaches, etc.
         // This is a placeholder for more complex alert logic
@@ -764,7 +777,7 @@ impl RealtimeDashboard {
 
     /// Estimate memory usage of dashboard
     fn estimate_memory_usage(&self) -> f64 {
-        let data = self.metric_data.lock().expect("lock should not be poisoned");
+        let data = self.metric_data.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut total_points = 0;
 
         for deque in data.values() {
@@ -850,26 +863,25 @@ impl RealtimeDashboard {
 
             if trend_change.abs() > 0.3 {
                 // 30% change
-                anomalies.push(AnomalyDetection {
-                    timestamp: recent_window
-                        .last()
-                        .expect("recent_window has at least 10 elements")
-                        .timestamp,
-                    value: recent_avg,
-                    expected_range: (earlier_avg * 0.9, earlier_avg * 1.1),
-                    anomaly_type: if trend_change > 0.0 {
-                        AnomalyType::GradualIncrease
-                    } else {
-                        AnomalyType::GradualDecrease
-                    },
-                    confidence_score: trend_change.abs(),
-                    category: category.clone(),
-                    description: format!(
-                        "Detected gradual {} trend: {:.1}% change over recent measurements",
-                        if trend_change > 0.0 { "increase" } else { "decrease" },
-                        trend_change.abs() * 100.0
-                    ),
-                });
+                if let Some(last_point) = recent_window.last() {
+                    anomalies.push(AnomalyDetection {
+                        timestamp: last_point.timestamp,
+                        value: recent_avg,
+                        expected_range: (earlier_avg * 0.9, earlier_avg * 1.1),
+                        anomaly_type: if trend_change > 0.0 {
+                            AnomalyType::GradualIncrease
+                        } else {
+                            AnomalyType::GradualDecrease
+                        },
+                        confidence_score: trend_change.abs(),
+                        category: category.clone(),
+                        description: format!(
+                            "Detected gradual {} trend: {:.1}% change over recent measurements",
+                            if trend_change > 0.0 { "increase" } else { "decrease" },
+                            trend_change.abs() * 100.0
+                        ),
+                    });
+                }
             }
         }
 
@@ -884,7 +896,8 @@ impl RealtimeDashboard {
         let mut performance_distribution = HashMap::new();
 
         // Generate heatmap data for different metric categories
-        for (category, data) in self.metric_data.lock().expect("lock should not be poisoned").iter()
+        for (category, data) in
+            self.metric_data.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).iter()
         {
             if data.len() >= 10 {
                 let recent_data: Vec<f64> = data.iter().rev().take(10).map(|d| d.value).collect();
@@ -898,7 +911,7 @@ impl RealtimeDashboard {
                         data_points: recent_data.len(),
                         timestamp: SystemTime::now()
                             .duration_since(UNIX_EPOCH)
-                            .expect("System time should be after UNIX_EPOCH")
+                            .unwrap_or_default()
                             .as_secs(),
                     },
                 );
@@ -945,7 +958,7 @@ impl RealtimeDashboard {
             performance_distribution,
             generated_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .expect("System time should be after UNIX_EPOCH")
+                .unwrap_or_default()
                 .as_secs(),
             session_id: self.session_id.clone(),
         })
@@ -979,10 +992,8 @@ impl RealtimeDashboard {
         let intercept = (sum_y - slope * sum_x) / n;
 
         // Generate predictions
-        let current_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("System time should be after UNIX_EPOCH")
-            .as_secs();
+        let current_time =
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
         let prediction_time = current_time + (hours_ahead * 3600);
         let predicted_value = slope * prediction_time as f64 + intercept;
 
@@ -1028,10 +1039,7 @@ impl RealtimeDashboard {
         let theme_message = WebSocketMessage::Generic {
             message_type: "theme_update".to_string(),
             data: serde_json::to_value(&theme)?,
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("System time should be after UNIX_EPOCH")
-                .as_secs(),
+            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
             session_id: self.session_id.clone(),
         };
 
@@ -1125,7 +1133,7 @@ impl RealtimeDashboard {
         cat1: &MetricCategory,
         cat2: &MetricCategory,
     ) -> f64 {
-        let data = self.metric_data.lock().expect("lock should not be poisoned");
+        let data = self.metric_data.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let data1 = match data.get(cat1) {
             Some(d) => d,
@@ -1216,7 +1224,7 @@ impl RealtimeDashboard {
         start: u64,
         end: u64,
     ) -> HashMap<MetricCategory, VecDeque<MetricDataPoint>> {
-        let data = self.metric_data.lock().expect("lock should not be poisoned");
+        let data = self.metric_data.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut filtered_data = HashMap::new();
 
         for (category, points) in data.iter() {
@@ -1235,7 +1243,7 @@ impl RealtimeDashboard {
     }
 
     fn get_all_data(&self) -> HashMap<MetricCategory, VecDeque<MetricDataPoint>> {
-        self.metric_data.lock().expect("lock should not be poisoned").clone()
+        self.metric_data.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 }
 

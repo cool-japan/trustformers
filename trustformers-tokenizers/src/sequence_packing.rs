@@ -427,8 +427,6 @@ struct SequenceItem {
 pub struct AdvancedSequencePacker {
     base_packer: SequencePacker,
     length_histogram: HashMap<usize, usize>,
-    #[allow(dead_code)]
-    packing_cache: HashMap<Vec<usize>, PackedSequence>,
 }
 
 impl AdvancedSequencePacker {
@@ -437,7 +435,6 @@ impl AdvancedSequencePacker {
         Self {
             base_packer: SequencePacker::new(config),
             length_histogram: HashMap::new(),
-            packing_cache: HashMap::new(),
         }
     }
 

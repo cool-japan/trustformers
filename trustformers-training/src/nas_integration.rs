@@ -322,14 +322,12 @@ pub struct TrainingMetric {
 }
 
 /// NAS controller for managing architecture search
-#[allow(dead_code)]
 pub struct NASController {
     config: NASConfig,
     search_space: SearchSpace,
     evaluated_architectures: Vec<Architecture>,
     current_best: Option<Architecture>,
     search_history: Vec<SearchEvent>,
-    #[allow(dead_code)]
     predictor: PerformancePredictor,
     optimizer: ArchitectureOptimizer,
 }
@@ -894,9 +892,7 @@ impl NASController {
 }
 
 /// Search space representation
-#[allow(dead_code)]
 pub struct SearchSpace {
-    #[allow(dead_code)]
     operations: Vec<Operation>,
     depth_range: (usize, usize),
     width_range: (f32, f32),
@@ -914,7 +910,6 @@ impl SearchSpace {
 
 /// Performance predictor for architecture evaluation
 pub struct PerformancePredictor {
-    #[allow(dead_code)]
     trained: bool,
 }
 
@@ -937,7 +932,6 @@ impl PerformancePredictor {
 
 /// Architecture optimizer
 pub struct ArchitectureOptimizer {
-    #[allow(dead_code)]
     optimization_active: bool,
 }
 
@@ -962,7 +956,6 @@ impl ArchitectureOptimizer {
 
 /// ENAS controller
 pub struct ENASController {
-    #[allow(dead_code)]
     trained: bool,
 }
 

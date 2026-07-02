@@ -416,10 +416,8 @@ impl SearchStrategy for SuccessiveHalving {
 }
 
 /// Hyperband algorithm combining successive halving with different resource allocations
-#[allow(dead_code)]
 pub struct Hyperband {
     /// Maximum resource budget
-    #[allow(dead_code)]
     max_resource: f64,
     /// Reduction factor
     reduction_factor: usize,
@@ -591,15 +589,12 @@ pub struct PopulationBasedTraining {
     /// Name of the strategy
     name: String,
     /// Shared state for population updates
-    #[allow(dead_code)]
     shared_state: Arc<Mutex<PBTSharedState>>,
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 struct PBTSharedState {
     /// Performance updates from parallel training
-    #[allow(dead_code)]
     performance_updates: Vec<(usize, f64, usize)>, // (member_id, score, step)
     /// Completed exploitations
     exploitations: Vec<(usize, usize)>, // (exploiter_id, exploited_id)

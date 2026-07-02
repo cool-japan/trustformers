@@ -42,7 +42,7 @@ impl ThresholdAdaptationAlgorithm for MachineLearningAdaptationAlgorithm {
                 return Ok(current_threshold);
             }
         }
-        let model = self.model_state.lock().expect("Model state lock poisoned");
+        let model = self.model_state.lock().unwrap_or_else(|p| p.into_inner());
         let predicted_threshold = self.predict_with_features(&model, &features);
         let bounded_threshold =
             predicted_threshold.clamp(current_threshold * 0.5, current_threshold * 2.0);
@@ -52,7 +52,7 @@ impl ThresholdAdaptationAlgorithm for MachineLearningAdaptationAlgorithm {
         "machine_learning_adaptation"
     }
     fn confidence(&self, data_quality: f32) -> f32 {
-        let model = self.model_state.lock().expect("Model state lock poisoned");
+        let model = self.model_state.lock().unwrap_or_else(|p| p.into_inner());
         model.model_accuracy * data_quality
     }
 }

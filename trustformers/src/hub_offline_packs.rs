@@ -459,7 +459,7 @@ impl OfflineModelPackManager {
             hasher.update(&buffer[..bytes_read]);
         }
 
-        Ok(format!("{:x}", hasher.finalize()))
+        Ok(hex::encode(hasher.finalize()))
     }
 
     fn save_pack_metadata(&self, metadata: &ModelPackMetadata) -> Result<()> {

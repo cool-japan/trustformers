@@ -92,7 +92,7 @@ impl ThermalPredictionModel {
         if let Some(&min_temp) = self
             .temperature_history
             .iter()
-            .min_by(|a, b| a.partial_cmp(b).expect("Operation failed"))
+            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         {
             self.ambient_temperature = self.ambient_temperature * 0.99 + min_temp * 0.01;
         }
@@ -157,19 +157,25 @@ impl ThermalPredictionModel {
         let temp_range: f32 = self
             .temperature_history
             .iter()
-            .max_by(|a, b| a.partial_cmp(b).expect("Operation failed"))
-            .expect("Operation failed")
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .ok_or_else(|| {
+                TrustformersError::runtime_error("empty temperature history".to_string())
+            })?
             - self
                 .temperature_history
                 .iter()
-                .min_by(|a, b| a.partial_cmp(b).expect("Operation failed"))
-                .expect("Operation failed");
+                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .ok_or_else(|| {
+                    TrustformersError::runtime_error("empty temperature history".to_string())
+                })?;
 
         let workload_max = self
             .workload_history
             .iter()
-            .max_by(|a, b| a.partial_cmp(b).expect("Operation failed"))
-            .expect("Operation failed");
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .ok_or_else(|| {
+                TrustformersError::runtime_error("empty workload history".to_string())
+            })?;
 
         if *workload_max > 0.0 {
             // Estimate thermal resistance from temperature range and workload
@@ -340,7 +346,7 @@ impl MultiSensorThermalFusion {
             let cpu_max = self
                 .cpu_sensors
                 .iter()
-                .max_by(|a, b| a.partial_cmp(b).expect("Operation failed"))
+                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .copied()
                 .unwrap_or(0.0);
             weighted_sum += cpu_max * self.sensor_weights.cpu_weight;
@@ -352,7 +358,7 @@ impl MultiSensorThermalFusion {
             let gpu_max = self
                 .gpu_sensors
                 .iter()
-                .max_by(|a, b| a.partial_cmp(b).expect("Operation failed"))
+                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .copied()
                 .unwrap_or(0.0);
             weighted_sum += gpu_max * self.sensor_weights.gpu_weight;
@@ -383,13 +389,13 @@ impl MultiSensorThermalFusion {
         let cpu_max = self
             .cpu_sensors
             .iter()
-            .max_by(|a, b| a.partial_cmp(b).expect("Operation failed"))
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .copied()
             .unwrap_or(0.0);
         let gpu_max = self
             .gpu_sensors
             .iter()
-            .max_by(|a, b| a.partial_cmp(b).expect("Operation failed"))
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .copied()
             .unwrap_or(0.0);
         let battery = self.battery_temp.unwrap_or(0.0);

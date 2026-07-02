@@ -264,7 +264,6 @@ pub struct CrossTaskGeneralizer {
     config: GeneralizationConfig,
     task_embeddings: HashMap<String, TaskEmbedding>,
     transfer_knowledge: TransferKnowledge,
-    #[allow(dead_code)]
     attention_weights: Option<Array2<f32>>,
     shared_encoder: Option<SharedEncoder>,
 }
@@ -527,12 +526,10 @@ impl CrossTaskGeneralizer {
 
 /// Shared encoder for computing task embeddings
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct SharedEncoder {
     /// Encoding layers
     layers: Vec<Array2<f32>>,
     /// Layer dimensions
-    #[allow(dead_code)]
     layer_dims: Vec<usize>,
     config: GeneralizationConfig,
 }
@@ -550,9 +547,8 @@ impl SharedEncoder {
             // Xavier initialization
             let bound = (6.0 / (input_dim + output_dim) as f32).sqrt();
             let mut rng = thread_rng();
-            let uniform = Uniform::new(-bound, bound).expect("Invalid uniform distribution bounds");
             let layer =
-                Array2::from_shape_fn((input_dim, output_dim), |_| uniform.sample(&mut rng));
+                Array2::from_shape_fn((input_dim, output_dim), |_| rng.random_range(-bound..bound));
             layers.push(layer);
         }
 

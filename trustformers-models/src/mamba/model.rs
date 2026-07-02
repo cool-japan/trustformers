@@ -87,7 +87,6 @@ impl RMSNorm {
 pub struct CausalConv1d {
     weight: Tensor,
     bias: Option<Tensor>,
-    #[allow(dead_code)]
     kernel_size: usize,
     #[allow(dead_code)]
     padding: usize,

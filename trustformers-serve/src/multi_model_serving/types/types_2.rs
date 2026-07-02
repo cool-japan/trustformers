@@ -531,7 +531,7 @@ impl MultiModelServer {
             .active_experiments
             .values()
             .next()
-            .expect("active_experiments should not be empty after emptiness check");
+            .ok_or_else(|| anyhow::anyhow!("No active A/B test experiments"))?;
         let selected_variant = self.select_ab_test_variant(request_id, user_id, experiment).await?;
         let mut metrics = self.metrics.lock().await;
         if let Some(ab_metrics) = metrics.ab_test_metrics.get_mut(&experiment.id) {

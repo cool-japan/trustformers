@@ -2,6 +2,10 @@
 //!
 //! Provides step-through execution, breakpoints, variable inspection,
 //! call stack visualization, and time-travel debugging capabilities.
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -17,7 +21,6 @@ use crate::DebugConfig;
 /// Interactive debugger for step-through debugging and inspection
 #[derive(Debug)]
 pub struct InteractiveDebugger {
-    #[allow(dead_code)]
     config: DebugConfig,
     state: Arc<RwLock<DebuggerState>>,
     breakpoints: Arc<RwLock<HashMap<String, Breakpoint>>>,

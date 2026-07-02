@@ -394,7 +394,7 @@ impl AdaptiveThresholdEvaluator {
         let time_since_adaptation = Utc::now().signed_duration_since(adaptation.last_adapted);
         if time_since_adaptation
             < chrono::Duration::from_std(self.config.min_adaptation_period)
-                .expect("Duration conversion failed")
+                .unwrap_or_else(|_| chrono::Duration::zero())
         {
             return false;
         }

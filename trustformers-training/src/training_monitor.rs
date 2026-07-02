@@ -119,7 +119,6 @@ pub struct TrainingMonitor {
     recovery_attempts: HashMap<AnomalyType, usize>,
     performance_stats: PerformanceStats,
     memory_baseline: usize,
-    #[allow(dead_code)]
     last_checkpoint: Option<u64>,
 }
 
@@ -152,10 +151,7 @@ impl TrainingMonitor {
 
         let metrics = StepMetrics {
             step,
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("SystemTime should be after UNIX_EPOCH")
-                .as_secs(),
+            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
             loss,
             gradient_norm,
             learning_rate,

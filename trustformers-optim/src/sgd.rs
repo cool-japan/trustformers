@@ -89,7 +89,11 @@ impl Optimizer for SGD {
                         ));
                     }
 
-                    let d_p_vec = d_p.as_slice_mut().expect("cloned array must be contiguous");
+                    let d_p_vec = d_p.as_slice_mut().ok_or_else(|| {
+                        TrustformersError::invalid_state(
+                            "cloned array must be contiguous".to_string(),
+                        )
+                    })?;
                     for (i, (b, g)) in buf.iter_mut().zip(grad_arr.iter()).enumerate() {
                         *b = *b * self.config.momentum + (1.0 - self.config.dampening) * g;
                         if self.config.nesterov {

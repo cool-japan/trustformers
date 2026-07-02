@@ -243,10 +243,8 @@ impl ResourceScheduler {
     }
 
     pub fn submit_resource_request(&self, mut request: ResourceRequest) -> Result<String> {
-        request.created_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("SystemTime should be after UNIX_EPOCH")
-            .as_secs();
+        request.created_at =
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
 
         let priority_score = self.calculate_priority_score(&request)?;
 
@@ -282,18 +280,13 @@ impl ResourceScheduler {
         let priority_weight = policies.priority_weights.get(&request.priority).unwrap_or(&1.0);
 
         // Combine priority, age, and deadline urgency
-        let age_factor = (SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("SystemTime should be after UNIX_EPOCH")
-            .as_secs()
-            - request.created_at) as f64;
+        let age_factor =
+            (SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+                - request.created_at) as f64;
 
         let deadline_urgency = if let Some(deadline) = request.deadline {
             let time_to_deadline = deadline.saturating_sub(
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .expect("SystemTime should be after UNIX_EPOCH")
-                    .as_secs(),
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
             ) as f64;
             1.0 / (time_to_deadline + 1.0) // Higher urgency as deadline approaches
         } else {
@@ -540,10 +533,8 @@ impl ResourceScheduler {
         pool: &ResourcePool,
         request: &ResourceRequest,
     ) -> Result<bool> {
-        let current_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("SystemTime should be after UNIX_EPOCH")
-            .as_secs();
+        let current_time =
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
 
         let request_end_time = if let Some(duration) = request.duration {
             current_time + duration.as_secs()

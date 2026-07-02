@@ -4,7 +4,6 @@
 //! to generate text progressively for improved user experience.
 
 #![allow(dead_code)]
-
 use js_sys::{Array, Function, Object, Promise};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -505,11 +504,10 @@ impl StreamingGenerator {
     /// Sleep for specified milliseconds
     async fn sleep(&self, ms: u32) -> Result<(), JsValue> {
         let promise = Promise::new(&mut |resolve, _reject| {
-            let timeout_id = web_sys::window()
-                .expect("window should be available in browser context")
-                .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms as i32)
-                .expect("set_timeout should succeed with valid callback");
-            let _ = timeout_id;
+            if let Some(window) = web_sys::window() {
+                let _ = window
+                    .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms as i32);
+            }
         });
 
         wasm_bindgen_futures::JsFuture::from(promise).await?;

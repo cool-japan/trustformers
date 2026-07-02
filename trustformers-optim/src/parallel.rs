@@ -136,20 +136,16 @@ impl ParallelOptimizerState {
     pub fn get_or_create_state(&self, param_id: String, size: usize) -> Arc<Mutex<ParameterState>> {
         // Try read-only access first
         {
-            let states = self
-                .parameter_states
-                .read()
-                .expect("parameter_states lock should not be poisoned");
+            let states =
+                self.parameter_states.read().unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(state) = states.get(&param_id) {
                 return state.clone();
             }
         }
 
         // Need to create new state - upgrade to write lock
-        let mut states = self
-            .parameter_states
-            .write()
-            .expect("parameter_states lock should not be poisoned");
+        let mut states =
+            self.parameter_states.write().unwrap_or_else(|poisoned| poisoned.into_inner());
         // Double-check pattern in case another thread created it
         if let Some(state) = states.get(&param_id) {
             return state.clone();
@@ -172,10 +168,7 @@ impl ParallelOptimizerState {
 
     /// Gets memory usage statistics.
     pub fn memory_usage(&self) -> StateMemoryStats {
-        let states = self
-            .parameter_states
-            .read()
-            .expect("parameter_states lock should not be poisoned");
+        let states = self.parameter_states.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut total_momentum = 0;
         let mut total_variance = 0;
         let num_params = states.len();
@@ -198,10 +191,8 @@ impl ParallelOptimizerState {
 
     /// Clears all parameter states.
     pub fn clear(&self) {
-        let mut states = self
-            .parameter_states
-            .write()
-            .expect("parameter_states lock should not be poisoned");
+        let mut states =
+            self.parameter_states.write().unwrap_or_else(|poisoned| poisoned.into_inner());
         states.clear();
         self.global_step.store(0, std::sync::atomic::Ordering::Relaxed);
     }
@@ -292,7 +283,9 @@ impl ParallelAdam {
         let chunk_size = self.state.config.chunk_size;
 
         // Lock the parameter state
-        let mut param_state = state_arc.lock().expect("Parallel optimizer state lock poisoned");
+        let mut param_state = state_arc.lock().map_err(|_| {
+            TrustformersError::lock_error("parallel optimizer state mutex poisoned".to_string())
+        })?;
         param_state.step += 1;
         param_state.last_update = std::time::Instant::now();
 
@@ -463,8 +456,18 @@ impl Optimizer for ParallelAdam {
                 let param_id = format!("{:p}", param.as_ptr());
                 self.update_single_parameter(
                     param_id,
-                    param.as_slice_mut().expect("array must have contiguous layout"),
-                    grad_arr.as_slice().expect("array must have contiguous layout"),
+                    param.as_slice_mut().ok_or_else(|| {
+                        TrustformersError::tensor_op_error(
+                            "Parameter array must have contiguous layout",
+                            "update",
+                        )
+                    })?,
+                    grad_arr.as_slice().ok_or_else(|| {
+                        TrustformersError::tensor_op_error(
+                            "Gradient array must have contiguous layout",
+                            "update",
+                        )
+                    })?,
                 )
             },
             _ => Err(TrustformersError::tensor_op_error(
@@ -565,8 +568,18 @@ impl BatchUpdate for ParallelAdam {
                     let param_id = format!("{:p}", p.as_ptr());
                     updates.push((
                         param_id,
-                        p.as_slice_mut().expect("array must have contiguous layout"),
-                        g.as_slice().expect("array must have contiguous layout"),
+                        p.as_slice_mut().ok_or_else(|| {
+                            TrustformersError::tensor_op_error(
+                                "Parameter array must have contiguous layout",
+                                "update_batch",
+                            )
+                        })?,
+                        g.as_slice().ok_or_else(|| {
+                            TrustformersError::tensor_op_error(
+                                "Gradient array must have contiguous layout",
+                                "update_batch",
+                            )
+                        })?,
                     ));
                 },
                 _ => {

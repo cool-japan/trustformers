@@ -483,6 +483,8 @@ impl<T: Tokenizer> PyTorchTokenizer<T> {
 /// Dataset wrapper for PyTorch DataLoader compatibility
 pub struct PyTorchDataset {
     texts: Vec<String>,
+    // reason: stored from the constructor; reserved for planned dataset-side
+    // tokenization configuration that is not yet consumed here.
     #[allow(dead_code)]
     tokenizer_config: PyTorchConfig,
 }

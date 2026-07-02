@@ -502,7 +502,6 @@ impl CrossModalKnowledgeDistillation {
 
         for b in 0..batch_size {
             for i in 0..seq_len {
-                #[allow(dead_code)]
                 let mut student_entropy = 0.0f32;
                 let mut teacher_entropy = 0.0f32;
                 let mut cross_entropy = 0.0f32;

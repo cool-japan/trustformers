@@ -283,7 +283,7 @@ impl AlertManager {
 
     /// Process an alert
     pub async fn process_alert(&self, alert: AlertEvent) -> Result<()> {
-        let config = self.config.read().expect("Config RwLock poisoned");
+        let config = self.config.read().unwrap_or_else(|p| p.into_inner());
         let mut queue = self.alert_queue.lock().await;
 
         // Check queue size limits
@@ -318,11 +318,7 @@ impl AlertManager {
             alerts_suppressed: AtomicU64::new(self.stats.alerts_suppressed.load(Ordering::Relaxed)),
             alerts_correlated: AtomicU64::new(self.stats.alerts_correlated.load(Ordering::Relaxed)),
             avg_processing_time: Arc::new(Mutex::new(
-                *self
-                    .stats
-                    .avg_processing_time
-                    .lock()
-                    .expect("Avg processing time lock poisoned"),
+                *self.stats.avg_processing_time.lock().unwrap_or_else(|p| p.into_inner()),
             )),
             queue_size: AtomicU64::new(self.stats.queue_size.load(Ordering::Relaxed)),
             peak_queue_size: AtomicU64::new(self.stats.peak_queue_size.load(Ordering::Relaxed)),
@@ -346,7 +342,7 @@ impl AlertManager {
             interval.tick().await;
 
             let (batch_size, enable_suppression, enable_correlation) = {
-                let config_read = config.read().expect("Config RwLock poisoned");
+                let config_read = config.read().unwrap_or_else(|p| p.into_inner());
                 (
                     config_read.batch_size,
                     config_read.enable_suppression,
@@ -406,7 +402,7 @@ impl AlertManager {
                 // Update processing time statistics
                 let processing_time = start_time.elapsed();
                 let mut avg_time =
-                    stats.avg_processing_time.lock().expect("Avg time lock poisoned");
+                    stats.avg_processing_time.lock().unwrap_or_else(|p| p.into_inner());
                 *avg_time = (*avg_time + processing_time) / 2; // Simple moving average
             }
         }
@@ -419,7 +415,7 @@ impl AlertManager {
         channels: &Arc<Mutex<Vec<Box<dyn NotificationChannel + Send + Sync>>>>,
     ) -> Result<()> {
         let all_notifications = {
-            let processors_guard = processors.lock().expect("Processors lock poisoned");
+            let processors_guard = processors.lock().unwrap_or_else(|p| p.into_inner());
             let mut notifications = Vec::new();
 
             // Find and run appropriate processors
@@ -457,7 +453,7 @@ impl AlertManager {
         notifications: &[Notification],
         channels: &Arc<Mutex<Vec<Box<dyn NotificationChannel + Send + Sync>>>>,
     ) -> Result<()> {
-        let channels_guard = channels.lock().expect("Channels lock poisoned");
+        let channels_guard = channels.lock().unwrap_or_else(|p| p.into_inner());
 
         for notification in notifications {
             for channel in channels_guard.iter() {
@@ -488,7 +484,7 @@ impl AlertManager {
 
     /// Initialize alert processors
     async fn initialize_processors(&self) -> Result<()> {
-        let mut processors = self.processors.lock().expect("Processors lock poisoned");
+        let mut processors = self.processors.lock().unwrap_or_else(|p| p.into_inner());
         processors.push(Box::new(DefaultAlertProcessor::new()));
         processors.push(Box::new(PerformanceAlertProcessor::new()));
         processors.push(Box::new(ResourceAlertProcessor::new()));
@@ -498,7 +494,7 @@ impl AlertManager {
 
     /// Initialize notification channels
     async fn initialize_channels(&self) -> Result<()> {
-        let mut channels = self.channels.lock().expect("Channels lock poisoned");
+        let mut channels = self.channels.lock().unwrap_or_else(|p| p.into_inner());
         channels.push(Box::new(LogNotificationChannel::new()));
         channels.push(Box::new(EmailNotificationChannel::new()));
         channels.push(Box::new(WebhookNotificationChannel::new()));

@@ -257,15 +257,11 @@ impl CleanupManager {
         let mut ready_tasks = Vec::new();
 
         while let Some(task) = cleanup_queue.front() {
-            if task.scheduled_time <= now {
-                // Safe: we just checked front() returned Some
-                ready_tasks.push(
-                    cleanup_queue
-                        .pop_front()
-                        .expect("queue should not be empty after front() returned Some"),
-                );
-            } else {
+            if task.scheduled_time > now {
                 break; // Tasks are ordered by time
+            }
+            if let Some(task) = cleanup_queue.pop_front() {
+                ready_tasks.push(task);
             }
         }
         drop(cleanup_queue);

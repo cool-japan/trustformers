@@ -1,3 +1,7 @@
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
+
 use anyhow::Result;
 use std::collections::HashMap;
 use trustformers_core::parallel::CommunicationBackend;
@@ -99,11 +103,9 @@ impl HierarchicalConfig {
 /// Hierarchical aggregation coordinator
 pub struct HierarchicalAggregator {
     config: HierarchicalConfig,
-    #[allow(dead_code)]
     node_topology: NodeTopology,
     communication_groups: CommunicationGroups,
     aggregation_stats: AggregationStats,
-    #[allow(dead_code)]
     fault_detector: Option<FaultDetector>,
 }
 

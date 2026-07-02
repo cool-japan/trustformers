@@ -425,7 +425,7 @@ impl AuthService {
     }
     /// Authenticate a user with username and password
     pub fn authenticate_user(&self, username: &str, password: &str) -> Result<User, AuthError> {
-        let users = self.users.read().expect("users lock should not be poisoned");
+        let users = self.users.read().unwrap_or_else(|p| p.into_inner());
         if let Some(user) = users.get(username) {
             if !user.is_active {
                 return Err(AuthError::InvalidCredentials);
@@ -434,8 +434,7 @@ impl AuthService {
                 let mut authenticated_user = user.clone();
                 authenticated_user.update_last_login();
                 drop(users);
-                let mut users_write =
-                    self.users.write().expect("users lock should not be poisoned");
+                let mut users_write = self.users.write().unwrap_or_else(|p| p.into_inner());
                 if let Some(stored_user) = users_write.get_mut(username) {
                     stored_user.last_login_at = authenticated_user.last_login_at;
                 }
@@ -446,7 +445,7 @@ impl AuthService {
     }
     /// Create a new user account
     pub fn create_user(&self, username: String, password: String) -> Result<String, AuthError> {
-        let mut users = self.users.write().expect("users lock should not be poisoned");
+        let mut users = self.users.write().unwrap_or_else(|p| p.into_inner());
         if users.contains_key(&username) {
             return Err(AuthError::InvalidCredentials);
         }
@@ -713,8 +712,7 @@ impl AuthService {
     /// Validate OAuth2 state parameter
     fn validate_oauth2_state(&self, state: &str) -> Result<OAuth2State, AuthError> {
         let oauth2_state = {
-            let states =
-                self.oauth2_states.read().expect("oauth2_states lock should not be poisoned");
+            let states = self.oauth2_states.read().unwrap_or_else(|p| p.into_inner());
             states.get(state).cloned()
         };
         match oauth2_state {

@@ -524,13 +524,13 @@ impl PipelineJitCompiler {
 
     /// Get compiled pipeline from cache
     fn get_compiled_pipeline(&self, pipeline_id: &str) -> Option<CompiledPipeline> {
-        let cache = self.compilation_cache.lock().expect("lock should not be poisoned");
+        let cache = self.compilation_cache.lock().unwrap_or_else(|p| p.into_inner());
         cache.get(pipeline_id).cloned()
     }
 
     /// Cache compiled pipeline
     fn cache_compiled_pipeline(&self, pipeline: CompiledPipeline) {
-        let mut cache = self.compilation_cache.lock().expect("lock should not be poisoned");
+        let mut cache = self.compilation_cache.lock().unwrap_or_else(|p| p.into_inner());
 
         // Check cache size limit
         if cache.len() >= self.config.cache_size {
@@ -552,7 +552,7 @@ impl PipelineJitCompiler {
 
     /// Update execution statistics
     fn update_execution_stats(&self, pipeline_id: &str, execution_time: Duration) {
-        let mut stats = self.execution_stats.lock().expect("lock should not be poisoned");
+        let mut stats = self.execution_stats.lock().unwrap_or_else(|p| p.into_inner());
         let entry = stats.entry(pipeline_id.to_string()).or_insert_with(|| ExecutionStats {
             total_executions: 0,
             total_execution_time: Duration::from_secs(0),
@@ -584,7 +584,7 @@ impl PipelineJitCompiler {
         execution_time: Duration,
         batch_size: usize,
     ) {
-        let mut tracker = self.performance_tracker.lock().expect("lock should not be poisoned");
+        let mut tracker = self.performance_tracker.lock().unwrap_or_else(|p| p.into_inner());
 
         let sample = PerformanceSample {
             timestamp: Instant::now(),
@@ -641,25 +641,25 @@ impl PipelineJitCompiler {
 
     /// Get compilation statistics
     pub fn get_compilation_stats(&self) -> HashMap<String, ExecutionStats> {
-        let stats = self.execution_stats.lock().expect("lock should not be poisoned");
+        let stats = self.execution_stats.lock().unwrap_or_else(|p| p.into_inner());
         stats.clone()
     }
 
     /// Get performance metrics
     pub fn get_performance_metrics(&self, pipeline_id: &str) -> Option<Vec<PerformanceSample>> {
-        let tracker = self.performance_tracker.lock().expect("lock should not be poisoned");
+        let tracker = self.performance_tracker.lock().unwrap_or_else(|p| p.into_inner());
         tracker.history.get(pipeline_id).cloned()
     }
 
     /// Get detected anomalies
     pub fn get_anomalies(&self) -> Vec<PerformanceAnomaly> {
-        let tracker = self.performance_tracker.lock().expect("lock should not be poisoned");
+        let tracker = self.performance_tracker.lock().unwrap_or_else(|p| p.into_inner());
         tracker.anomaly_detector.anomalies.clone()
     }
 
     /// Clear compilation cache
     pub fn clear_cache(&self) {
-        let mut cache = self.compilation_cache.lock().expect("lock should not be poisoned");
+        let mut cache = self.compilation_cache.lock().unwrap_or_else(|p| p.into_inner());
         cache.clear();
     }
 
@@ -696,7 +696,7 @@ impl PipelineJitCompiler {
 
         // Fallback: try to estimate based on compilation cache size
         let cache_size = {
-            let cache = self.compilation_cache.lock().expect("lock should not be poisoned");
+            let cache = self.compilation_cache.lock().unwrap_or_else(|p| p.into_inner());
             cache.len() * 50 // Rough estimate: 50MB per cached pipeline
         };
 
@@ -724,7 +724,7 @@ impl PipelineJitCompiler {
         // Fallback: estimate based on recent activity
         // Check if we've had recent compilations as a proxy for activity
         let recent_activity = {
-            let cache = self.compilation_cache.lock().expect("lock should not be poisoned");
+            let cache = self.compilation_cache.lock().unwrap_or_else(|p| p.into_inner());
             let now = std::time::Instant::now();
             cache.values().any(|pipeline| {
                 now.duration_since(pipeline.compilation_time) < Duration::from_secs(10)
@@ -746,7 +746,7 @@ impl PipelineJitCompiler {
             TargetHardware::GPU => {
                 // Assume some GPU usage if we're targeting GPU
                 let recent_executions = {
-                    let stats = self.execution_stats.lock().expect("lock should not be poisoned");
+                    let stats = self.execution_stats.lock().unwrap_or_else(|p| p.into_inner());
                     stats.values().any(|stat| stat.total_executions > 0)
                 };
 

@@ -36,52 +36,63 @@
 //! ```rust,no_run
 //! use trustformers_models::t5::{T5ForConditionalGeneration, T5Config};
 //!
-//! let config = T5Config::t5_base();
-//! let mut model = T5ForConditionalGeneration::new(config)?;
-//! model.load_from_hub("t5-base")?;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let config = T5Config::base();
+//! let model = T5ForConditionalGeneration::new(config)?;
 //!
-//! // Translate English to German
+//! // Translate English to German (token ids shown here would normally come from a tokenizer)
 //! let input_text = "translate English to German: The house is wonderful.";
-//! let input_ids = tokenizer.encode(input_text)?;
+//! # let _ = input_text;
+//! # let input_ids: Vec<u32> = vec![1, 2, 3, 4, 5];
 //!
-//! let outputs = model.generate(input_ids, max_length: 50)?;
-//! let translation = tokenizer.decode(outputs)?;
+//! let translation_ids = model.generate(input_ids, 50, 1)?;
+//! # let _ = translation_ids;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### Summarization
 //! ```rust,no_run
 //! use trustformers_models::t5::{T5ForConditionalGeneration, T5Config};
 //!
-//! let config = T5Config::t5_small();
-//! let mut model = T5ForConditionalGeneration::new(config)?;
-//! model.load_from_hub("t5-small")?;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let config = T5Config::small();
+//! let model = T5ForConditionalGeneration::new(config)?;
 //!
-//! // Summarize text
+//! // Summarize text (token ids shown here would normally come from a tokenizer)
 //! let article = "summarize: The tower is 324 metres (1,063 ft) tall, ...";
-//! let input_ids = tokenizer.encode(article)?;
+//! # let _ = article;
+//! # let input_ids: Vec<u32> = vec![1, 2, 3, 4, 5];
 //!
-//! let summary_ids = model.generate(input_ids, max_length: 150)?;
-//! let summary = tokenizer.decode(summary_ids)?;
+//! let summary_ids = model.generate(input_ids, 150, 1)?;
+//! # let _ = summary_ids;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### Custom Tasks
 //! ```rust,no_run
 //! use trustformers_models::t5::{T5ForConditionalGeneration, T5Config, T5Input};
+//! use trustformers_core::traits::{Model, TokenizedInput};
 //!
-//! let config = T5Config::t5_base();
-//! let mut model = T5ForConditionalGeneration::new(config)?;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let config = T5Config::base();
+//! let model = T5ForConditionalGeneration::new(config)?;
 //!
 //! // Fine-tune for custom text-to-text task
+//! # let input_ids = TokenizedInput::new(vec![1, 2, 3], vec![1, 1, 1]);
+//! # let decoder_input_ids = TokenizedInput::new(vec![0, 1], vec![1, 1]);
 //! let input = T5Input {
 //!     input_ids,
-//!     attention_mask: Some(attention_mask),
 //!     decoder_input_ids: Some(decoder_input_ids),
-//!     decoder_attention_mask: Some(decoder_attention_mask),
-//!     labels: Some(labels),
+//!     encoder_outputs: None,
 //! };
 //!
 //! let outputs = model.forward(input)?;
-//! let loss = outputs.loss.expect("operation failed");
+//! let logits_shape = outputs.logits.shape();
+//! # let _ = logits_shape;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Pre-training Objective

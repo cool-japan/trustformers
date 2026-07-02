@@ -17,15 +17,26 @@
 //!
 //! ```rust,no_run
 //! use trustformers_models::hybrid_architectures::{
-//!     HybridArchitecture, HybridConfig, ArchitecturalComponent, FusionStrategy
+//!     HybridArchitecture, HybridConfig, ArchitecturalComponent, FusionStrategy,
+//!     CNNArchitecture, TransformerVariant,
 //! };
 //! use trustformers_core::Result;
 //!
 //! fn main() -> Result<()> {
 //!     // Create a hybrid CNN-Transformer architecture
 //!     let config = HybridConfig::builder()
-//!         .add_component(ArchitecturalComponent::CNN { layers: 3, channels: 64 })
-//!         .add_component(ArchitecturalComponent::Transformer { layers: 6, hidden_size: 512 })
+//!         .add_component(ArchitecturalComponent::CNN {
+//!             layers: 3,
+//!             channels: 64,
+//!             kernel_size: 3,
+//!             architecture: CNNArchitecture::ResNet,
+//!         })
+//!         .add_component(ArchitecturalComponent::Transformer {
+//!             layers: 6,
+//!             hidden_size: 512,
+//!             num_heads: 8,
+//!             variant: TransformerVariant::Standard,
+//!         })
 //!         .fusion_strategy(FusionStrategy::Sequential)
 //!         .build()?;
 //!

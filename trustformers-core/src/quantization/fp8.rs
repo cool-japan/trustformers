@@ -265,7 +265,7 @@ impl QuantStats {
 
         // Use percentile instead of max to be robust to outliers
         let mut sorted = self.max_history.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).expect("Partial comparison failed"));
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(::std::cmp::Ordering::Equal));
         let percentile_99 = sorted[(sorted.len() as f32 * 0.99) as usize];
 
         max_value / (percentile_99 * margin)
@@ -372,7 +372,7 @@ impl FP8Quantizer {
         let max_abs = data
             .iter()
             .map(|x| x.abs())
-            .max_by(|a, b| a.partial_cmp(b).expect("Partial comparison failed"))
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(::std::cmp::Ordering::Equal))
             .unwrap_or(1e-8);
 
         // Compute or update scale
@@ -426,7 +426,7 @@ impl FP8Quantizer {
             let max_abs = channel_data
                 .iter()
                 .map(|x| x.abs())
-                .max_by(|a, b| a.partial_cmp(b).expect("Partial comparison failed"))
+                .max_by(|a, b| a.partial_cmp(b).unwrap_or(::std::cmp::Ordering::Equal))
                 .unwrap_or(1e-8);
 
             let scale = if let Some(stats) = &mut self.stats {
@@ -485,7 +485,7 @@ impl FP8Quantizer {
             let max_abs = token_data
                 .iter()
                 .map(|x| x.abs())
-                .max_by(|a, b| a.partial_cmp(b).expect("Partial comparison failed"))
+                .max_by(|a, b| a.partial_cmp(b).unwrap_or(::std::cmp::Ordering::Equal))
                 .unwrap_or(1e-8);
 
             let scale = self.config.format.max_value() / (max_abs * 1.2);
@@ -526,7 +526,7 @@ impl FP8Quantizer {
             let max_abs = block_data
                 .iter()
                 .map(|x| x.abs())
-                .max_by(|a, b| a.partial_cmp(b).expect("Partial comparison failed"))
+                .max_by(|a, b| a.partial_cmp(b).unwrap_or(::std::cmp::Ordering::Equal))
                 .unwrap_or(1e-8);
 
             let scale = self.config.format.max_value() / (max_abs * 1.2);
@@ -765,7 +765,7 @@ pub fn select_fp8_format(tensor: &Tensor, use_case: &str) -> FP8Format {
             let max_abs = data
                 .iter()
                 .map(|x| x.abs())
-                .max_by(|a, b| a.partial_cmp(b).expect("Partial comparison failed"))
+                .max_by(|a, b| a.partial_cmp(b).unwrap_or(::std::cmp::Ordering::Equal))
                 .unwrap_or(1.0);
 
             // If range is large, use E5M2, otherwise E4M3

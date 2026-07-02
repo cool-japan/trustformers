@@ -288,8 +288,10 @@ where
 
         for (index, item) in batch_items.into_iter().enumerate() {
             let pipeline = self.pipeline.clone();
-            let permit =
-                semaphore.clone().acquire_owned().await.expect("semaphore should not be closed");
+            let permit = match semaphore.clone().acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_) => continue,
+            };
             let tx = output_tx.clone();
 
             let handle = tokio::spawn(async move {
@@ -367,7 +369,7 @@ where
 
     /// Get current streaming statistics
     pub fn get_stats(&self) -> StreamStats {
-        self.stats.lock().expect("lock should not be poisoned").clone()
+        self.stats.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 }
 
@@ -437,7 +439,7 @@ where
 
         // Add to priority queue
         {
-            let mut queues = self.priority_queues.lock().expect("lock should not be poisoned");
+            let mut queues = self.priority_queues.lock().unwrap_or_else(|p| p.into_inner());
             queues[priority].push_back(PriorityItem {
                 item,
                 timestamp: start_time,
@@ -451,7 +453,7 @@ where
 
     async fn process_next_priority_item(&self) -> Result<O> {
         let priority_item = {
-            let mut queues = self.priority_queues.lock().expect("lock should not be poisoned");
+            let mut queues = self.priority_queues.lock().unwrap_or_else(|p| p.into_inner());
 
             // Find highest priority non-empty queue
             let mut found_item = None;
@@ -505,7 +507,7 @@ where
 
     /// Get real-time processing statistics
     pub fn get_stats(&self) -> RealTimeStats {
-        self.stats.lock().expect("lock should not be poisoned").clone()
+        self.stats.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 }
 
@@ -632,12 +634,12 @@ impl BackpressureController {
     }
 
     pub fn should_throttle(&self) -> bool {
-        let load = *self.current_load.lock().expect("lock should not be poisoned");
+        let load = *self.current_load.lock().unwrap_or_else(|p| p.into_inner());
         load > self.threshold
     }
 
     pub fn update_load(&mut self, new_measurement: f64) {
-        let mut load = self.current_load.lock().expect("lock should not be poisoned");
+        let mut load = self.current_load.lock().unwrap_or_else(|p| p.into_inner());
         *load = (*load * 0.9) + (new_measurement * 0.1); // Exponential moving average
     }
 }

@@ -1,4 +1,8 @@
 //! GPU profiling and kernel analysis
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -22,18 +26,14 @@ pub struct GpuKernelProfile {
 
 /// GPU profiler for kernel analysis
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct GpuProfiler {
-    #[allow(dead_code)]
     device_count: i32,
     pub(crate) active_streams: HashMap<i32, Vec<GpuKernelProfile>>,
     memory_pools: HashMap<i32, GpuMemoryPool>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct GpuMemoryPool {
-    #[allow(dead_code)]
     device_id: i32,
     total_memory: usize,
     free_memory: usize,

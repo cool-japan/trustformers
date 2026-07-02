@@ -11,7 +11,6 @@ use trustformers_core::Tensor;
 
 /// Configuration for Ring Attention distributed training
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct RingAttentionConfig {
     /// Number of devices in the ring topology
     pub num_devices: usize,
@@ -123,13 +122,11 @@ pub struct RingAttentionManager {
     config: RingAttentionConfig,
     devices: Vec<RingAttentionBlock>,
     communication_pattern: RingCommunicationPattern,
-    #[allow(dead_code)]
     global_sequence_length: usize,
     current_ring_step: usize,
     performance_stats: HashMap<usize, RingAttentionStats>,
 }
 
-#[allow(dead_code)]
 impl RingAttentionManager {
     /// Create a new Ring Attention manager with enhanced validation
     pub fn new(config: RingAttentionConfig, global_sequence_length: usize) -> Result<Self> {
@@ -382,7 +379,6 @@ impl RingAttentionManager {
     }
 
     /// Compute attention scores between queries and keys
-    #[allow(dead_code)]
     fn compute_attention_scores(
         &self,
         queries: &Tensor,
@@ -416,7 +412,6 @@ impl RingAttentionManager {
     }
 
     /// Apply causal masking to attention scores
-    #[allow(dead_code)]
     fn apply_causal_mask(&self, scores: Tensor, device: &RingAttentionBlock) -> CoreResult<Tensor> {
         // Create causal mask based on sequence positions
         let (start_pos, _) = device.sequence_chunk;
@@ -1394,9 +1389,7 @@ impl RingAttentionConfig {
 
 /// Ring Attention Memory Pool for efficient tensor reuse
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct RingAttentionMemoryPoolV2 {
-    #[allow(dead_code)]
     num_devices: usize,
     chunk_size: usize,
     head_dim: usize,

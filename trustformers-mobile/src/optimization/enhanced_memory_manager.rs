@@ -352,7 +352,7 @@ impl EnhancedMemoryManager {
     /// Deallocate memory
     pub fn deallocate(&self, allocation_id: usize) -> Result<()> {
         let size = {
-            let mut allocations = self.allocations.lock().expect("Operation failed");
+            let mut allocations = self.allocations.lock().unwrap_or_else(|p| p.into_inner());
             let metadata = allocations.remove(&allocation_id).ok_or_else(|| {
                 TrustformersError::invalid_input("Invalid allocation ID".to_string())
             })?;
@@ -439,7 +439,7 @@ impl EnhancedMemoryManager {
                 freed_bytes += self
                     .allocations
                     .lock()
-                    .expect("Operation failed")
+                    .unwrap_or_else(|p| p.into_inner())
                     .get(&allocation_id)
                     .map(|m| m.size)
                     .unwrap_or(0);
@@ -460,8 +460,9 @@ impl EnhancedMemoryManager {
         let peak_usage = self.peak_memory.load(Ordering::Relaxed);
         let max_memory = self.config.max_memory_bytes;
 
-        let allocation_stats = self.allocation_stats.lock().expect("Operation failed").clone();
-        let pressure_level = *self.pressure_level.lock().expect("Operation failed");
+        let allocation_stats =
+            self.allocation_stats.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let pressure_level = *self.pressure_level.lock().unwrap_or_else(|p| p.into_inner());
 
         MemoryStats {
             current_usage_bytes: current_usage,
@@ -542,7 +543,7 @@ impl EnhancedMemoryManager {
         // Store allocation metadata
         self.allocations
             .lock()
-            .expect("Operation failed")
+            .unwrap_or_else(|p| p.into_inner())
             .insert(allocation_id, metadata);
 
         // Update memory usage
@@ -567,7 +568,7 @@ impl EnhancedMemoryManager {
 
     /// Find a suitable free block
     fn find_free_block(&self, size: usize, alignment: usize) -> Result<usize> {
-        let free_blocks = self.free_blocks.lock().expect("Operation failed");
+        let free_blocks = self.free_blocks.lock().unwrap_or_else(|p| p.into_inner());
 
         // Find the smallest block that fits
         for (&block_size, offsets) in free_blocks.range(size..) {
@@ -586,7 +587,7 @@ impl EnhancedMemoryManager {
     /// Add a block to the free list
     fn add_free_block(&self, size: usize) {
         // In a real implementation, this would track actual memory offsets
-        let mut free_blocks = self.free_blocks.lock().expect("Operation failed");
+        let mut free_blocks = self.free_blocks.lock().unwrap_or_else(|p| p.into_inner());
         free_blocks.entry(size).or_default().push(0);
     }
 
@@ -605,7 +606,7 @@ impl EnhancedMemoryManager {
         };
 
         let old_pressure = {
-            let mut pressure_level = self.pressure_level.lock().expect("Operation failed");
+            let mut pressure_level = self.pressure_level.lock().unwrap_or_else(|p| p.into_inner());
             let old = *pressure_level;
             *pressure_level = new_pressure;
             old
@@ -717,7 +718,7 @@ impl EnhancedMemoryManager {
     /// Calculate memory fragmentation score
     fn calculate_fragmentation_score(&self) -> f32 {
         // Simplified fragmentation calculation
-        let free_blocks = self.free_blocks.lock().expect("Operation failed");
+        let free_blocks = self.free_blocks.lock().unwrap_or_else(|p| p.into_inner());
         if free_blocks.is_empty() {
             return 0.0;
         }
@@ -739,7 +740,7 @@ impl EnhancedMemoryManager {
             return 0.0;
         }
 
-        let patterns = self.access_patterns.lock().expect("Operation failed");
+        let patterns = self.access_patterns.lock().unwrap_or_else(|p| p.into_inner());
         if patterns.is_empty() {
             return 0.0;
         }

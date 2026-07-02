@@ -73,14 +73,12 @@ mod tests {
 
     #[test]
     fn test_weight_loading_config_with_cache_dir() {
+        let cache_dir = std::env::temp_dir().join("model_cache");
         let config = WeightLoadingConfig {
-            cache_dir: Some(PathBuf::from("/tmp/model_cache")),
+            cache_dir: Some(cache_dir.clone()),
             ..Default::default()
         };
-        assert_eq!(
-            config.cache_dir,
-            Some(PathBuf::from("/tmp/model_cache"))
-        );
+        assert_eq!(config.cache_dir, Some(cache_dir));
     }
 
     // --- WeightFormat Tests ---

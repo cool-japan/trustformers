@@ -195,10 +195,8 @@ impl AdaptiveComputationStrategy for ConfidenceBasedStrategy {
         }
 
         // Adaptive halting criterion based on confidence growth rate
-        let mut confidence_history = self
-            .confidence_history
-            .write()
-            .expect("confidence_history lock should not be poisoned");
+        let mut confidence_history =
+            self.confidence_history.write().unwrap_or_else(|poisoned| poisoned.into_inner());
         confidence_history.push(metrics.confidence_score);
 
         if confidence_history.len() >= 3 {
@@ -494,7 +492,7 @@ impl AdaptiveComputationManager {
             let mut tracker = self
                 .performance_tracker
                 .write()
-                .expect("performance_tracker lock should not be poisoned");
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             tracker.record_layer_execution(layer_id, metrics.execution_time_ms);
         }
 
@@ -919,7 +917,9 @@ impl DynamicArchitectureManager {
                     .iter()
                     .enumerate()
                     .max_by(|(_, a), (_, b)| {
-                        a.confidence.partial_cmp(&b.confidence).expect("Partial comparison failed")
+                        a.confidence
+                            .partial_cmp(&b.confidence)
+                            .unwrap_or(::std::cmp::Ordering::Equal)
                     })
                     .map(|(idx, _)| idx)
                     .unwrap_or(0);
@@ -1432,7 +1432,7 @@ impl PathRouter {
                 sorted_paths.sort_by(|a, b| {
                     b.expected_accuracy
                         .partial_cmp(&a.expected_accuracy)
-                        .expect("Partial comparison failed")
+                        .unwrap_or(::std::cmp::Ordering::Equal)
                 });
                 sorted_paths
             },
@@ -1441,7 +1441,7 @@ impl PathRouter {
                 sorted_paths.sort_by(|a, b| {
                     let cost_a = a.expected_latency.as_millis() as f32 / a.expected_accuracy;
                     let cost_b = b.expected_latency.as_millis() as f32 / b.expected_accuracy;
-                    cost_a.partial_cmp(&cost_b).expect("Partial comparison failed")
+                    cost_a.partial_cmp(&cost_b).unwrap_or(::std::cmp::Ordering::Equal)
                 });
                 sorted_paths
             },

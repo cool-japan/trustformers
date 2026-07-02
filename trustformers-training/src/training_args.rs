@@ -255,10 +255,9 @@ impl TrainingArguments {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn default_args() -> TrainingArguments {
-        TrainingArguments::new("/tmp/trustformers_test_output")
+        TrainingArguments::new(std::env::temp_dir().join("trustformers_test_output"))
     }
 
     // ──────────────────── Default values ────────────────────
@@ -308,8 +307,9 @@ mod tests {
 
     #[test]
     fn test_new_sets_output_dir() {
-        let args = TrainingArguments::new("/tmp/my_output_dir");
-        assert_eq!(args.output_dir, PathBuf::from("/tmp/my_output_dir"));
+        let output_dir = std::env::temp_dir().join("my_output_dir");
+        let args = TrainingArguments::new(output_dir.clone());
+        assert_eq!(args.output_dir, output_dir);
     }
 
     // ──────────────────── get_total_steps ────────────────────

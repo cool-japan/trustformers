@@ -4,7 +4,6 @@
 //! to enable true parallel processing in browser environments.
 
 #![allow(dead_code)]
-
 use js_sys::{Atomics, Float32Array, Int32Array, SharedArrayBuffer};
 use std::format;
 use std::string::String;
@@ -404,7 +403,7 @@ impl ThreadPool {
             return Err("Matrix dimensions don't match for multiplication".into());
         }
 
-        let data_buffer = self.data_buffer.as_ref().expect("data_buffer should be initialized");
+        let data_buffer = self.data_buffer.as_ref().ok_or("data_buffer should be initialized")?;
 
         // Copy input data to shared memory
         let a_offset = 0;
@@ -470,13 +469,12 @@ impl ThreadPool {
     /// Wait for all threads to complete using atomic operations
     async fn wait_for_completion(&self) -> Result<(), JsValue> {
         let control_buffer =
-            self.control_buffer.as_ref().expect("control_buffer should be initialized");
+            self.control_buffer.as_ref().ok_or("control_buffer should be initialized")?;
 
         loop {
             let mut all_complete = true;
 
             for thread_id in 0..self.max_threads {
-                #[allow(unused_imports)]
                 let control_index = thread_id * 16;
                 let status = Atomics::load(control_buffer, control_index as u32)?;
 

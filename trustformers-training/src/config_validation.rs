@@ -759,7 +759,7 @@ mod tests {
         let config = TestConfig {
             learning_rate: 0.001,
             batch_size: 32,
-            output_dir: "/tmp/output".to_string(),
+            output_dir: std::env::temp_dir().join("output").to_string_lossy().into_owned(),
         };
 
         assert!(config.validate().is_ok());
@@ -770,7 +770,7 @@ mod tests {
         let config = TestConfig {
             learning_rate: 2.0, // Too high
             batch_size: 32,
-            output_dir: "/tmp/output".to_string(),
+            output_dir: std::env::temp_dir().join("output").to_string_lossy().into_owned(),
         };
 
         let result = config.validate();
@@ -802,7 +802,7 @@ mod tests {
         let config = TestConfig {
             learning_rate: 0.001,
             batch_size: 32,
-            output_dir: "/tmp/output".to_string(),
+            output_dir: std::env::temp_dir().join("output").to_string_lossy().into_owned(),
         };
 
         let validated = ValidatedConfig::new(config.clone()).expect("operation failed in test");

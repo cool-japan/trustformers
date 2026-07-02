@@ -1,3 +1,7 @@
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
+
 use crate::{
     adam::{Adam, AdamW},
     sgd::SGD,
@@ -67,12 +71,9 @@ pub enum CompressionRatio {
 /// GPU-optimized Adam optimizer
 pub struct GPUAdam {
     base_adam: Adam,
-    #[allow(dead_code)]
     config: HardwareAwareConfig,
     use_tensor_cores: bool,
-    #[allow(dead_code)]
     memory_pool: Option<GPUMemoryPool>,
-    #[allow(dead_code)]
     kernel_fusion_cache: HashMap<String, ComputeKernel>,
 }
 
@@ -170,13 +171,11 @@ impl Optimizer for GPUAdam {
 }
 
 impl GPUAdam {
-    #[allow(dead_code)]
     fn can_fuse_operations(&self, parameters: &[Tensor]) -> bool {
         // Check if parameters are suitable for kernel fusion
         parameters.len() < 100 && self.config.enable_fusion
     }
 
-    #[allow(dead_code)]
     fn fused_adam_step(&mut self, parameters: &mut [Tensor], gradients: &[Tensor]) -> Result<()> {
         // Implement fused Adam kernel
         // This would call optimized CUDA/ROCm kernels
@@ -191,12 +190,9 @@ impl GPUAdam {
 /// TPU-optimized optimizer
 pub struct TPUOptimizer {
     base_optimizer: Box<dyn Optimizer>,
-    #[allow(dead_code)]
     config: HardwareAwareConfig,
-    #[allow(dead_code)]
     tpu_version: TPUVersion,
     use_bfloat16: bool,
-    #[allow(dead_code)]
     sharding_strategy: TPUShardingStrategy,
 }
 
@@ -233,7 +229,6 @@ impl TPUOptimizer {
     }
 
     /// Optimize gradient computation for TPU
-    #[allow(dead_code)]
     fn tpu_optimized_gradients(&self, gradients: &[Tensor]) -> Result<Vec<Tensor>> {
         let mut optimized = Vec::new();
 
@@ -291,13 +286,9 @@ impl Optimizer for TPUOptimizer {
 /// Mobile-optimized optimizer with memory and latency constraints
 pub struct MobileOptimizer {
     base_optimizer: Box<dyn Optimizer>,
-    #[allow(dead_code)]
     config: HardwareAwareConfig,
-    #[allow(dead_code)]
     memory_budget_mb: usize,
-    #[allow(dead_code)]
     target_latency_ms: f32,
-    #[allow(dead_code)]
     quantized_states: bool,
     gradient_compression: CompressionRatio,
 }
@@ -331,7 +322,6 @@ impl MobileOptimizer {
     }
 
     /// Compress gradients for mobile efficiency
-    #[allow(dead_code)]
     fn compress_gradients(&self, gradients: &[Tensor]) -> Result<Vec<Tensor>> {
         let mut compressed = Vec::new();
 
@@ -448,7 +438,6 @@ impl MobileOptimizer {
     }
 
     /// Check if memory usage is within budget
-    #[allow(dead_code)]
     fn check_memory_budget(&self, parameters: &[Tensor]) -> Result<bool> {
         // Calculate current memory usage and compare to budget
         let mut total_memory_bytes = 0;
@@ -503,11 +492,9 @@ impl Optimizer for MobileOptimizer {
 /// Edge computing optimizer for IoT devices
 pub struct EdgeOptimizer {
     base_optimizer: Box<dyn Optimizer>,
-    #[allow(dead_code)]
     config: HardwareAwareConfig,
     power_budget_mw: f32,
     quantization_bits: u8,
-    #[allow(dead_code)]
     adaptive_precision: bool,
 }
 
@@ -536,7 +523,6 @@ impl EdgeOptimizer {
     }
 
     /// Adapt precision based on power constraints
-    #[allow(dead_code)]
     fn adapt_precision(&mut self, current_power_mw: f32) -> Result<()> {
         if current_power_mw > self.power_budget_mw * 0.9 {
             // Reduce precision to save power
@@ -549,7 +535,6 @@ impl EdgeOptimizer {
     }
 
     /// Quantize gradients to specified bit width
-    #[allow(dead_code)]
     fn quantize_gradients(&self, gradients: &[Tensor]) -> Result<Vec<Tensor>> {
         let mut quantized = Vec::new();
 
@@ -561,7 +546,6 @@ impl EdgeOptimizer {
         Ok(quantized)
     }
 
-    #[allow(dead_code)]
     fn quantize_tensor(&self, tensor: &Tensor, bits: u8) -> Result<Tensor> {
         // Implement quantization to specified bit width using dynamic range quantization
         match tensor {
@@ -623,7 +607,6 @@ impl Optimizer for EdgeOptimizer {
 }
 
 impl EdgeOptimizer {
-    #[allow(dead_code)]
     fn estimate_power_usage(&self, gradients: &[Tensor]) -> Result<f32> {
         // Estimate power consumption based on computation complexity
         let mut total_operations = 0;

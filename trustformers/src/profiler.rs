@@ -136,6 +136,14 @@ impl Profiler {
 
     /// Create a new profiler with custom configuration
     pub fn with_config(config: ProfilerConfig) -> Result<Self> {
+        Ok(Self::build(config))
+    }
+
+    /// Infallibly construct a profiler from a configuration.
+    ///
+    /// This is the shared constructor used by `with_config`, `Default`, and the
+    /// global profiler initializer so none of them need to unwrap a `Result`.
+    fn build(config: ProfilerConfig) -> Self {
         let core_profiler = CoreProfiler::new();
 
         if config.auto_enable {
@@ -146,7 +154,7 @@ impl Profiler {
         let benchmark_suite = BenchmarkSuite::new(trustformers_core::BenchmarkConfig::default());
         let metrics_tracker = MetricsTracker::new(100); // Use 100 as default window size
 
-        Ok(Self {
+        Self {
             core_profiler,
             advisor,
             benchmark_suite,
@@ -154,7 +162,7 @@ impl Profiler {
             config,
             session_start: Instant::now(),
             active_sessions: Arc::new(Mutex::new(HashMap::new())),
-        })
+        }
     }
 
     /// Enable profiling
@@ -209,9 +217,9 @@ impl Profiler {
             TrustformersError::invalid_input(format!("Session {} not found", session_id))
         })?;
 
-        session.end_time = Some(Instant::now());
-        let total_duration = session.end_time.expect("end_time just set to Some on previous line")
-            - session.start_time;
+        let end_time = Instant::now();
+        session.end_time = Some(end_time);
+        let total_duration = end_time - session.start_time;
 
         // Collect results from core profiler
         let operations = self.core_profiler.get_results();
@@ -691,7 +699,7 @@ impl Profiler {
 
 impl Default for Profiler {
     fn default() -> Self {
-        Self::new().expect("Profiler::new should not fail with default config")
+        Self::build(ProfilerConfig::default())
     }
 }
 
@@ -712,8 +720,7 @@ pub type GlobalProfiler = Profiler;
 
 /// Get the global profiler instance
 pub fn get_global_profiler() -> &'static Profiler {
-    GLOBAL_PROFILER
-        .get_or_init(|| Profiler::new().expect("Profiler::new should not fail for global instance"))
+    GLOBAL_PROFILER.get_or_init(|| Profiler::build(ProfilerConfig::default()))
 }
 
 /// Convenience macro for profiling operations

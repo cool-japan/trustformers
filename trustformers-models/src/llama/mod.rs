@@ -30,57 +30,64 @@
 //! ### Text Generation
 //! ```rust,no_run
 //! use trustformers_models::llama::{LlamaForCausalLM, LlamaConfig};
-//! use trustformers_core::generation::{GenerationConfig, SamplingStrategy};
+//! use trustformers_core::traits::Model;
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = LlamaConfig::llama_7b();
 //! let mut model = LlamaForCausalLM::new(config)?;
-//! model.load_from_hub("meta-llama/Llama-2-7b-hf")?;
+//! model.load_from_path("path/to/llama-7b-weights")?;
 //!
-//! // Generate with advanced sampling
-//! let gen_config = GenerationConfig {
-//!     max_new_tokens: 200,
-//!     temperature: 0.7,
-//!     top_p: 0.9,
-//!     repetition_penalty: 1.1,
-//!     sampling_strategy: SamplingStrategy::TopPNucleus,
-//!     ..Default::default()
-//! };
-//!
-//! let generated = model.generate(input_ids, gen_config)?;
+//! // Run a forward pass to obtain next-token logits
+//! # let input_ids: Vec<u32> = vec![1, 2, 3, 4, 5];
+//! let output = model.forward(input_ids)?;
+//! # let _ = output;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### Instruction Following
 //! ```rust,no_run
 //! use trustformers_models::llama::{LlamaForCausalLM, LlamaConfig};
+//! use trustformers_core::traits::Model;
 //!
-//! let config = LlamaConfig::llama2_7b_chat();
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let config = LlamaConfig::llama2_7b();
 //! let mut model = LlamaForCausalLM::new(config)?;
-//! model.load_from_hub("meta-llama/Llama-2-7b-chat-hf")?;
+//! model.load_from_path("path/to/llama-2-7b-chat-weights")?;
 //!
-//! // Format instruction with chat template
+//! // Format instruction with chat template, then tokenize (tokenization not shown here)
 //! let instruction = "[INST] Explain quantum computing in simple terms. [/INST]";
-//! let input_ids = tokenizer.encode(instruction)?;
+//! # let _ = instruction;
+//! # let input_ids: Vec<u32> = vec![1, 2, 3, 4, 5];
 //!
-//! let response = model.generate(input_ids, max_length: 500)?;
+//! let response = model.forward(input_ids)?;
+//! # let _ = response;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### Efficient Inference
 //! ```rust,no_run
 //! use trustformers_models::llama::{LlamaForCausalLM, LlamaConfig};
+//! use trustformers_models::llama::config::RopeScaling;
+//! use trustformers_core::traits::Model;
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = LlamaConfig {
-//!     use_flash_attention: true,  // Enable FlashAttention
-//!     rope_scaling: Some(2.0),    // Extended context
+//!     // Extended context via linear RoPE scaling
+//!     rope_scaling: Some(RopeScaling { scaling_type: "linear".to_string(), scaling_factor: 2.0 }),
 //!     ..LlamaConfig::llama_7b()
 //! };
 //!
 //! let mut model = LlamaForCausalLM::new(config)?;
-//! model.load_quantized("llama-7b-4bit.gguf")?;  // Load quantized
+//! model.load_from_path("llama-7b-weights")?;  // Load pretrained weights
 //!
-//! // Stream tokens for responsive UI
-//! for token in model.generate_stream(input_ids)? {
-//!     print!("{}", tokenizer.decode(&[token])?);
-//! }
+//! // Run inference
+//! # let input_ids: Vec<u32> = vec![1, 2, 3];
+//! let output = model.forward(input_ids)?;
+//! # let _ = output;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Key Components

@@ -4,11 +4,15 @@
 //! It combines multiple optimizer operations into fused kernels to reduce memory bandwidth
 //! and improve overall training performance.
 
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
+
 use crate::OptimizerState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use trustformers_core::errors::Result;
+use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::Tensor;
 
 /// Fused optimizer operations for performance optimization
@@ -118,7 +122,6 @@ pub struct FusedOptimizer {
     config: FusionConfig,
     state: Arc<Mutex<FusedOptimizerState>>,
     pending_operations: Arc<Mutex<Vec<(String, FusedOperation, Tensor, Tensor)>>>,
-    #[allow(dead_code)]
     operation_queue: Arc<Mutex<HashMap<String, Vec<FusedOperation>>>>,
 }
 
@@ -148,7 +151,10 @@ impl FusedOptimizer {
         gradient: Tensor,
     ) -> Result<()> {
         let should_execute = {
-            let mut pending = self.pending_operations.lock().expect("Mutex lock poisoned");
+            let mut pending = self
+                .pending_operations
+                .lock()
+                .map_err(|_| TrustformersError::lock_error("fusion mutex poisoned".to_string()))?;
             pending.push((param_name, operation, parameter, gradient));
             pending.len() >= self.config.batch_size
         };
@@ -163,7 +169,10 @@ impl FusedOptimizer {
 
     /// Execute all pending operations in a fused manner
     pub fn execute_fused_batch(&mut self) -> Result<()> {
-        let mut pending = self.pending_operations.lock().expect("Mutex lock poisoned");
+        let mut pending = self
+            .pending_operations
+            .lock()
+            .map_err(|_| TrustformersError::lock_error("fusion mutex poisoned".to_string()))?;
         if pending.is_empty() {
             return Ok(());
         }
@@ -216,7 +225,10 @@ impl FusedOptimizer {
         &mut self,
         operations: Vec<(String, FusedOperation, Tensor, Tensor)>,
     ) -> Result<()> {
-        let mut state = self.state.lock().expect("Mutex lock poisoned");
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| TrustformersError::lock_error("fusion mutex poisoned".to_string()))?;
         let batch_size = operations.len();
 
         for (param_name, op, param, grad) in operations {
@@ -272,7 +284,10 @@ impl FusedOptimizer {
         &mut self,
         operations: Vec<(String, FusedOperation, Tensor, Tensor)>,
     ) -> Result<()> {
-        let mut state = self.state.lock().expect("Mutex lock poisoned");
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| TrustformersError::lock_error("fusion mutex poisoned".to_string()))?;
         let batch_size = operations.len();
 
         for (param_name, op, param, grad) in operations {
@@ -321,7 +336,10 @@ impl FusedOptimizer {
         &mut self,
         operations: Vec<(String, FusedOperation, Tensor, Tensor)>,
     ) -> Result<()> {
-        let mut state = self.state.lock().expect("Mutex lock poisoned");
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| TrustformersError::lock_error("fusion mutex poisoned".to_string()))?;
         let batch_size = operations.len();
 
         for (param_name, op, param, grad) in operations {
@@ -369,7 +387,10 @@ impl FusedOptimizer {
         &mut self,
         operations: Vec<(String, FusedOperation, Tensor, Tensor)>,
     ) -> Result<()> {
-        let mut state = self.state.lock().expect("Mutex lock poisoned");
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| TrustformersError::lock_error("fusion mutex poisoned".to_string()))?;
         let batch_size = operations.len();
 
         // Collect all gradients for global norm computation
@@ -611,13 +632,13 @@ impl FusedOptimizer {
 
     /// Get fusion statistics
     pub fn get_fusion_stats(&self) -> FusionStats {
-        let state = self.state.lock().expect("Mutex lock poisoned");
+        let state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         state.fusion_stats.clone()
     }
 
     /// Reset fusion statistics
     pub fn reset_stats(&mut self) {
-        let mut state = self.state.lock().expect("Mutex lock poisoned");
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         state.fusion_stats = FusionStats::default();
     }
 

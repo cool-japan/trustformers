@@ -594,7 +594,7 @@ impl AndroidModelContentProvider {
         let log_entry = AccessLog {
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("Operation failed")
+                .unwrap_or_default()
                 .as_secs(),
             package_name: package_name.to_string(),
             operation,
@@ -731,7 +731,7 @@ impl ModelRegistry {
             model.metadata = metadata;
             model.modified_at = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("Operation failed")
+                .unwrap_or_default()
                 .as_secs();
             Ok(())
         } else {
@@ -871,7 +871,7 @@ impl ModelCacheManager {
         if let Some(cached) = self.cache.get_mut(model_id) {
             cached.last_accessed = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("Operation failed")
+                .unwrap_or_default()
                 .as_secs();
             cached.access_count += 1;
             Ok(Some(cached.data.clone()))
@@ -913,17 +913,17 @@ impl ModelCacheManager {
                 },
                 created_at: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .expect("Operation failed")
+                    .unwrap_or_default()
                     .as_secs(),
                 modified_at: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .expect("Operation failed")
+                    .unwrap_or_default()
                     .as_secs(),
             },
             data: data.to_vec(),
             last_accessed: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("Operation failed")
+                .unwrap_or_default()
                 .as_secs(),
             access_count: 1,
         };
@@ -949,7 +949,7 @@ impl ModelCacheManager {
         // Remove entries that haven't been accessed in a while
         let cutoff_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("Operation failed")
+            .unwrap_or_default()
             .as_secs()
             - 3600; // 1 hour
 

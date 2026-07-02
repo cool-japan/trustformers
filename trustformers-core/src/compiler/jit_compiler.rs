@@ -699,16 +699,8 @@ impl JitCompiler {
             {
                 // Parse and add constants
                 if let (Ok(a), Ok(b)) = (
-                    instruction
-                        .attributes
-                        .get("const_a")
-                        .expect("const_a must exist after contains_key check")
-                        .parse::<f64>(),
-                    instruction
-                        .attributes
-                        .get("const_b")
-                        .expect("const_b must exist after contains_key check")
-                        .parse::<f64>(),
+                    instruction.attributes.get("const_a")?.parse::<f64>(),
+                    instruction.attributes.get("const_b")?.parse::<f64>(),
                 ) {
                     return Some((a + b).to_string());
                 }
@@ -718,16 +710,8 @@ impl JitCompiler {
                     && instruction.attributes.contains_key("const_b") =>
             {
                 if let (Ok(a), Ok(b)) = (
-                    instruction
-                        .attributes
-                        .get("const_a")
-                        .expect("const_a must exist after contains_key check")
-                        .parse::<f64>(),
-                    instruction
-                        .attributes
-                        .get("const_b")
-                        .expect("const_b must exist after contains_key check")
-                        .parse::<f64>(),
+                    instruction.attributes.get("const_a")?.parse::<f64>(),
+                    instruction.attributes.get("const_b")?.parse::<f64>(),
                 ) {
                     return Some((a * b).to_string());
                 }

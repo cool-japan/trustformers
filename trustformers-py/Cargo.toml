@@ -1,6 +1,6 @@
 [package]
 name = "trustformers-py"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 rust-version = "1.75"
 authors = ["COOLJAPAN OU (Team KitaSan) <contact@cooljapan.tech>"]
@@ -25,7 +25,7 @@ crate-type = ["cdylib", "rlib"]
 # Upgrading to pyo3 0.29 is blocked until scirs2-core publishes with pyo3 0.29 support.
 # See RUSTSEC-2026-0176 / RUSTSEC-2026-0177 notes in TODO.md Security Advisories.
 pyo3 = { version = "0.28", features = ["extension-module", "abi3-py39"] }
-scirs2-numpy = { version = "0.5.0" }
+scirs2-numpy = { version = "0.6.0" }
 
 # Error handling
 anyhow = "1.0.100"
@@ -38,11 +38,11 @@ approx = "0.5"
 libc = "0.2"
 
 # SciRS2 Integration Policy: Use scirs2-core abstractions instead of direct dependencies
-scirs2-core = { version = "0.5.0", default-features = false, features = ["python", "random", "parallel", "array", "serialization"] }
+scirs2-core = { version = "0.6.0", default-features = false, features = ["python", "random", "parallel", "array", "serialization"] }
 
 # TrustformeRS dependencies (path-based for standalone build)
 trustformers-core = { path = "../trustformers-core", default-features = false }
-trustformers-models = { path = "../trustformers-models", default-features = false, features = ["bert", "gpt2", "t5", "llama"] }
+trustformers-models = { path = "../trustformers-models", default-features = false, features = ["bert", "gpt2", "t5", "llama", "mamba", "rwkv"] }
 trustformers-tokenizers = { path = "../trustformers-tokenizers", default-features = false }
 trustformers-optim = { path = "../trustformers-optim", default-features = false }
 trustformers-training = { path = "../trustformers-training", default-features = false }

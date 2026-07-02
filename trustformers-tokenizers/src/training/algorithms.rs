@@ -117,12 +117,12 @@ impl BPETrainer {
                 break;
             }
 
-            // Find most frequent pair
-            let best_pair = pair_freqs
-                .iter()
-                .max_by_key(|(_, &freq)| freq)
-                .map(|(pair, _)| pair.clone())
-                .expect("pair_freqs should be non-empty in training loop");
+            // Find most frequent pair (guaranteed present by the is_empty check above)
+            let Some(best_pair) =
+                pair_freqs.iter().max_by_key(|(_, &freq)| freq).map(|(pair, _)| pair.clone())
+            else {
+                break;
+            };
 
             // Add merged token to vocabulary
             let merged_token = format!("{}{}", best_pair.0, best_pair.1);
@@ -254,12 +254,14 @@ impl WordPieceTrainer {
                 break;
             }
 
-            // Add best scoring subword to vocabulary
-            let best_subword = subword_scores
+            // Add best scoring subword to vocabulary (guaranteed by the check above)
+            let Some(best_subword) = subword_scores
                 .iter()
                 .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(subword, _)| subword.clone())
-                .expect("subword_scores should be non-empty");
+            else {
+                break;
+            };
 
             vocab.insert(best_subword, next_id);
             next_id += 1;

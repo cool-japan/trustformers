@@ -122,11 +122,11 @@
 
 // Re-export the entire modular temp directory management system
 pub mod temp_dir_manager {
-    pub mod types;
-    pub mod core_manager;
     pub mod cleanup_scheduler;
-    pub mod quota_manager;
     pub mod conflict_resolver;
+    pub mod core_manager;
+    pub mod quota_manager;
+    pub mod types;
     pub mod utils;
 
     // Re-export the mod.rs contents
@@ -135,105 +135,105 @@ pub mod temp_dir_manager {
 
 // Re-export all public components from the modular implementation for direct access
 pub use self::temp_dir_manager::{
-    // Core types and errors
-    TempDirError,
-    TempDirResult,
-    DirectoryQuota,
-    EnhancedDirectoryStatus,
-    DirectoryConflict,
-    ConflictType,
-    ConflictResolutionStrategy,
-    DirectorySpaceUsage,
-
-    // Cleanup types
-    CleanupTask,
-    CleanupTaskType,
-    CleanupPriority,
-    CleanupEvent,
-    CleanupEventType,
-    CleanupResult,
-    CleanupStatistics,
-
-    // Configuration types
-    TempDirectoryManagerConfig,
-    ManagerInstanceInfo,
-    ManagerStatus,
-
-    // Main components
-    TempDirectoryManager,
-    DirectoryCleanupScheduler,
-    DirectoryQuotaManager,
-    DirectoryConflictResolver,
-
-    // Specialized types
-    QuotaEnforcementLevel,
-    DirectoryUsageInfo,
-    ConflictDetectionSettings,
-    ConflictSensitivity,
-    ConflictResolutionRecord,
-    ResolutionOutcome,
-    ConflictResolutionStatistics,
-
-    // Traits
-    DiskSpaceProvider,
-    ConflictDetector,
-    CleanupScheduler,
-
+    // Convenience functions
+    allocate_temp_directories_with_cleanup,
+    allocate_temp_directories_with_guard,
     // Utility functions
     calculate_directory_size,
     calculate_directory_usage,
-    get_available_disk_space,
-    has_sufficient_space,
     clean_empty_directories,
-    is_directory_empty,
-    create_directory_recursive,
-    remove_directory_recursive,
-    set_directory_permissions,
-    get_directory_permissions,
-    has_write_permission,
-    generate_unique_directory_name,
-    sanitize_path_component,
-    is_path_safe,
-    get_canonical_path,
     copy_directory_contents,
-    move_directory,
-    validate_directory_name,
-    validate_test_id,
-    format_bytes,
-    format_duration,
+    create_cleanup_scheduler,
+    create_cleanup_scheduler_with_config,
+    create_conflict_resolver,
+    create_conflict_resolver_with_settings,
 
+    create_directory_recursive,
+    create_quota_manager,
+    create_quota_manager_with_enforcement,
     // Factory functions
     create_temp_directory_manager,
     create_temp_directory_manager_with_config,
     create_temp_directory_manager_with_full_config,
-    create_cleanup_scheduler,
-    create_cleanup_scheduler_with_config,
-    create_quota_manager,
-    create_quota_manager_with_enforcement,
-    create_conflict_resolver,
-    create_conflict_resolver_with_settings,
+    decrement_counter,
+    format_bytes,
+    format_duration,
 
-    // Builder and system components
-    TempDirectoryManagerBuilder,
-    TempDirectorySystem,
+    generate_unique_directory_name,
+    get_available_disk_space,
+    get_canonical_path,
+    get_counter_value,
+    get_directory_permissions,
+    has_sufficient_space,
+    has_write_permission,
+    increment_counter,
+    is_directory_empty,
+    is_path_safe,
+    move_directory,
+    new_shared_counter,
+    remove_directory_recursive,
+    sanitize_path_component,
+    set_directory_permissions,
+    validate_directory_name,
+    validate_test_id,
+    CleanupEvent,
+    CleanupEventType,
+    CleanupPriority,
+    CleanupResult,
+    CleanupScheduler,
+
+    CleanupStatistics,
+
+    // Cleanup types
+    CleanupTask,
+    CleanupTaskType,
+    ConflictDetectionSettings,
+    ConflictDetector,
+    ConflictResolutionRecord,
+    ConflictResolutionStatistics,
+
+    ConflictResolutionStrategy,
+    ConflictSensitivity,
+    ConflictType,
+    DirectoryCleanupScheduler,
+    DirectoryConflict,
+    DirectoryConflictResolver,
+
+    DirectoryQuota,
+    DirectoryQuotaManager,
+    DirectorySpaceUsage,
+
+    DirectoryUsageInfo,
+    // Traits
+    DiskSpaceProvider,
+    EnhancedDirectoryStatus,
     MaintenanceResult,
 
-    // Convenience functions
-    allocate_temp_directories_with_cleanup,
-    allocate_temp_directories_with_guard,
-    TempDirectoryGuard,
+    ManagerInstanceInfo,
+    ManagerStatus,
 
+    // Specialized types
+    QuotaEnforcementLevel,
+    ResolutionOutcome,
     // Utility types
     SharedCounter,
-    new_shared_counter,
-    increment_counter,
-    decrement_counter,
-    get_counter_value,
+    // Core types and errors
+    TempDirError,
+    TempDirResult,
+    TempDirectoryGuard,
+
+    // Main components
+    TempDirectoryManager,
+    // Builder and system components
+    TempDirectoryManagerBuilder,
+    // Configuration types
+    TempDirectoryManagerConfig,
+    TempDirectorySystem,
 };
 
 // Additional imports needed for backward compatibility with existing code
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc, Datelike, Timelike};
+use chrono::{DateTime, Datelike, Timelike, Utc};
 use parking_lot::{Mutex, RwLock};
 use std::{
     collections::{HashMap, VecDeque},
@@ -356,7 +356,8 @@ use std::sync::OnceLock;
 static GLOBAL_MANAGER: OnceLock<Arc<TempDirectoryManager>> = OnceLock::new();
 
 /// Get or create a global temp directory manager instance
-pub async fn get_global_temp_directory_manager() -> Result<Arc<TempDirectoryManager>, TempDirError> {
+pub async fn get_global_temp_directory_manager() -> Result<Arc<TempDirectoryManager>, TempDirError>
+{
     match GLOBAL_MANAGER.get() {
         Some(manager) => Ok(manager.clone()),
         None => {
@@ -364,14 +365,12 @@ pub async fn get_global_temp_directory_manager() -> Result<Arc<TempDirectoryMana
             match GLOBAL_MANAGER.set(manager.clone()) {
                 Ok(()) => Ok(manager),
                 Err(_) => {
-                    // Another thread set it first, get the existing one
-                    Ok(GLOBAL_MANAGER
-                        .get()
-                        .expect("another thread must have set the global manager")
-                        .clone())
-                }
+                    // Another thread set it first; use the stored instance, falling
+                    // back to our own if the cell is somehow still empty.
+                    Ok(GLOBAL_MANAGER.get().cloned().unwrap_or(manager))
+                },
             }
-        }
+        },
     }
 }
 
@@ -387,7 +386,7 @@ pub async fn initialize_global_temp_directory_manager(
             Err(TempDirError::ConfigurationError {
                 message: "Global temp directory manager is already initialized".to_string(),
             })
-        }
+        },
     }
 }
 
@@ -407,14 +406,14 @@ pub async fn shutdown_global_temp_directory_manager() -> Result<(), TempDirError
 #[macro_export]
 macro_rules! with_temp_directories {
     ($count:expr, $test_id:expr, $body:block) => {{
-        let guard = $crate::resource_management::temp_dir_manager::allocate_temp_directories_with_guard(
-            $count, $test_id
-        ).await?;
+        let guard =
+            $crate::resource_management::temp_dir_manager::allocate_temp_directories_with_guard(
+                $count, $test_id,
+            )
+            .await?;
 
         let directories = guard.directories().to_vec();
-        let result = async move {
-            $body
-        }.await;
+        let result = async move { $body }.await;
 
         // Guard automatically cleans up on drop
         result
@@ -523,7 +522,10 @@ mod tests {
         let manager = create_test_manager().await.expect("async operation should succeed in test");
 
         let test_id = "integration_test";
-        let directories = manager.allocate_directories(2, test_id).await.expect("async operation should succeed in test");
+        let directories = manager
+            .allocate_directories(2, test_id)
+            .await
+            .expect("async operation should succeed in test");
 
         assert_eq!(directories.len(), 2);
 
@@ -534,20 +536,28 @@ mod tests {
         }
 
         // Clean up
-        let cleaned_count = manager.deallocate_directories_for_test(test_id).await.expect("async operation should succeed in test");
+        let cleaned_count = manager
+            .deallocate_directories_for_test(test_id)
+            .await
+            .expect("async operation should succeed in test");
         assert_eq!(cleaned_count, 2);
     }
 
     #[tokio::test]
     async fn test_system_integration() {
         let config = TempDirectoryManagerConfig::default();
-        let system = TempDirectorySystem::new(config).await.expect("async operation should succeed in test");
+        let system = TempDirectorySystem::new(config)
+            .await
+            .expect("async operation should succeed in test");
 
         let report = system.generate_system_report().await;
         assert!(!report.is_empty());
         assert!(report.contains("Temporary Directory Manager"));
 
-        let maintenance_result = system.perform_maintenance().await.expect("async operation should succeed in test");
+        let maintenance_result = system
+            .perform_maintenance()
+            .await
+            .expect("async operation should succeed in test");
         // Should be able to perform maintenance without errors
 
         system.shutdown().await.expect("async operation should succeed in test");
@@ -555,7 +565,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_directory_guard() {
-        let guard = allocate_temp_directories_with_guard(1, "guard_test").await.expect("async operation should succeed in test");
+        let guard = allocate_temp_directories_with_guard(1, "guard_test")
+            .await
+            .expect("async operation should succeed in test");
 
         assert_eq!(guard.directories().len(), 1);
         assert_eq!(guard.test_id(), "guard_test");

@@ -352,7 +352,8 @@ mod tests {
         let report = MonitoringReport::default();
 
         // Test saving and loading
-        let temp_path = "/tmp/test_monitoring_report.json";
+        let temp_path_buf = std::env::temp_dir().join("test_monitoring_report.json");
+        let temp_path = temp_path_buf.to_str().expect("temp path should be valid UTF-8");
         report.save_to_file(temp_path)?;
         let loaded_report = MonitoringReport::load_from_file(temp_path)?;
 

@@ -57,9 +57,17 @@
 //! let mut optimizer = DeepDistributedQP::for_portfolio_optimization();
 //! ```
 
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use trustformers_core::{errors::Result, tensor::Tensor, traits::Optimizer};
+use trustformers_core::{
+    errors::{Result, TrustformersError},
+    tensor::Tensor,
+    traits::Optimizer,
+};
 
 use crate::{common::StateMemoryStats, traits::StatefulOptimizer};
 
@@ -138,7 +146,6 @@ struct ConsensusNode {
     consensus_error: f32,
 
     /// Node identifier
-    #[allow(dead_code)]
     node_id: usize,
 }
 
@@ -172,12 +179,9 @@ pub struct DeepDistributedQPState {
     previous_solution: Option<Tensor>,
 
     /// Problem matrices (cached for efficiency)
-    #[allow(dead_code)]
     problem_matrix_p: Option<Tensor>,
     problem_vector_q: Option<Tensor>,
-    #[allow(dead_code)]
     constraint_matrix_a: Option<Tensor>,
-    #[allow(dead_code)]
     constraint_vector_b: Option<Tensor>,
 
     /// Iteration count
@@ -190,7 +194,6 @@ pub struct DeepDistributedQPState {
     solve_times: Vec<f32>,
 
     /// Problem size for scaling decisions
-    #[allow(dead_code)]
     problem_size: usize,
 }
 
@@ -534,10 +537,11 @@ impl DeepDistributedQP {
             self.states.insert(param_key.clone(), new_state);
         }
 
-        let state = self
-            .states
-            .get_mut(&param_key)
-            .expect("state must exist for param_key after insert");
+        let state = self.states.get_mut(&param_key).ok_or_else(|| {
+            TrustformersError::invalid_state(
+                "state must exist for param_key after insert".to_string(),
+            )
+        })?;
 
         // Initialize policy network if not present
         let needs_policy_network = state.policy_network.is_none();
@@ -546,26 +550,29 @@ impl DeepDistributedQP {
 
         if needs_policy_network {
             let policy_network = self.create_policy_network(4)?; // 4 features
-            let state = self
-                .states
-                .get_mut(&param_key)
-                .expect("state must exist for param_key after insert");
+            let state = self.states.get_mut(&param_key).ok_or_else(|| {
+                TrustformersError::invalid_state(
+                    "state must exist for param_key after insert".to_string(),
+                )
+            })?;
             state.policy_network = Some(policy_network);
         }
 
         if needs_consensus_nodes {
             let consensus_nodes = self.initialize_consensus_nodes(problem_size)?;
-            let state = self
-                .states
-                .get_mut(&param_key)
-                .expect("state must exist for param_key after insert");
+            let state = self.states.get_mut(&param_key).ok_or_else(|| {
+                TrustformersError::invalid_state(
+                    "state must exist for param_key after insert".to_string(),
+                )
+            })?;
             state.consensus_nodes = consensus_nodes;
         }
 
-        let state = self
-            .states
-            .get_mut(&param_key)
-            .expect("state must exist for param_key after insert");
+        let state = self.states.get_mut(&param_key).ok_or_else(|| {
+            TrustformersError::invalid_state(
+                "state must exist for param_key after insert".to_string(),
+            )
+        })?;
 
         // Warm start from previous solution
         if let (true, Some(prev_solution)) =
@@ -577,16 +584,15 @@ impl DeepDistributedQP {
         }
 
         let start_time = std::time::Instant::now();
-        #[allow(dead_code)]
         let mut _converged = false;
-        #[allow(unused_assignments)]
         // Main optimization loop
         for iteration in 0..self.config.max_iterations {
             // Update iteration count
-            let state = self
-                .states
-                .get_mut(&param_key)
-                .expect("state must exist for param_key after insert");
+            let state = self.states.get_mut(&param_key).ok_or_else(|| {
+                TrustformersError::invalid_state(
+                    "state must exist for param_key after insert".to_string(),
+                )
+            })?;
             state.iteration = iteration;
 
             // Extract the data we need to avoid borrowing conflicts
@@ -618,28 +624,31 @@ impl DeepDistributedQP {
             }
 
             // Update state with modified nodes
-            let state = self
-                .states
-                .get_mut(&param_key)
-                .expect("state must exist for param_key after insert");
+            let state = self.states.get_mut(&param_key).ok_or_else(|| {
+                TrustformersError::invalid_state(
+                    "state must exist for param_key after insert".to_string(),
+                )
+            })?;
             state.consensus_nodes = consensus_nodes;
             let _ = state;
 
             // Consensus update
             if iteration % consensus_frequency == 0 {
-                let state = self
-                    .states
-                    .get_mut(&param_key)
-                    .expect("state must exist for param_key after insert");
+                let state = self.states.get_mut(&param_key).ok_or_else(|| {
+                    TrustformersError::invalid_state(
+                        "state must exist for param_key after insert".to_string(),
+                    )
+                })?;
                 let mut nodes = state.consensus_nodes.clone();
                 let _ = state;
 
                 let consensus_error = self.consensus_update(&mut nodes)?;
 
-                let state = self
-                    .states
-                    .get_mut(&param_key)
-                    .expect("state must exist for param_key after insert");
+                let state = self.states.get_mut(&param_key).ok_or_else(|| {
+                    TrustformersError::invalid_state(
+                        "state must exist for param_key after insert".to_string(),
+                    )
+                })?;
                 state.consensus_nodes = nodes;
                 state.convergence_history.push(consensus_error);
                 let _ = state;
@@ -653,10 +662,11 @@ impl DeepDistributedQP {
         }
 
         let solve_time = start_time.elapsed().as_secs_f32();
-        let state = self
-            .states
-            .get_mut(&param_key)
-            .expect("state must exist for param_key after insert");
+        let state = self.states.get_mut(&param_key).ok_or_else(|| {
+            TrustformersError::invalid_state(
+                "state must exist for param_key after insert".to_string(),
+            )
+        })?;
         state.solve_times.push(solve_time);
 
         // Extract solution (average of all nodes)
@@ -897,7 +907,9 @@ impl DeepDistributedQP {
             self.states.insert(problem_key.clone(), new_state);
         }
 
-        let state = self.states.get_mut(&problem_key).expect("state must exist for problem_key");
+        let state = self.states.get_mut(&problem_key).ok_or_else(|| {
+            TrustformersError::invalid_state("state must exist for problem_key".to_string())
+        })?;
 
         // Update constraint information
         if let Some(constraint_mat) = g {

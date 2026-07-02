@@ -850,10 +850,14 @@ mod tests {
     // 20. CheckpointMetadata::new sets all fields
     #[test]
     fn test_checkpoint_metadata_new() {
+        let ckpt_path = std::env::temp_dir()
+            .join("ckpt_step_100.json")
+            .to_string_lossy()
+            .into_owned();
         let before = std::time::SystemTime::now();
-        let meta = CheckpointMetadata::new("/tmp/ckpt_step_100.json", 100, 1, 0.42);
+        let meta = CheckpointMetadata::new(ckpt_path.clone(), 100, 1, 0.42);
         let after = std::time::SystemTime::now();
-        assert_eq!(meta.path, "/tmp/ckpt_step_100.json");
+        assert_eq!(meta.path, ckpt_path);
         assert_eq!(meta.step, 100);
         assert_eq!(meta.epoch, 1);
         assert!((meta.loss - 0.42).abs() < 1e-6);
@@ -865,8 +869,9 @@ mod tests {
     // 21. CheckpointManager::new sets save_dir and max_checkpoints
     #[test]
     fn test_checkpoint_manager_new() {
-        let mgr = CheckpointManager::new("/tmp/test_ckpts", 5);
-        assert_eq!(mgr.save_dir, std::path::PathBuf::from("/tmp/test_ckpts"));
+        let save_dir = std::env::temp_dir().join("test_ckpts");
+        let mgr = CheckpointManager::new(&save_dir.to_string_lossy(), 5);
+        assert_eq!(mgr.save_dir, save_dir);
         assert_eq!(mgr.max_checkpoints, 5);
         assert_eq!(mgr.checkpoint_count(), 0);
     }
@@ -874,7 +879,7 @@ mod tests {
     // 22. should_save returns true when step is a multiple of save_every_n_steps
     #[test]
     fn test_checkpoint_manager_should_save_true() {
-        let mgr = CheckpointManager::new("/tmp", 3);
+        let mgr = CheckpointManager::new(&std::env::temp_dir().to_string_lossy(), 3);
         assert!(mgr.should_save(100, 50));
         assert!(mgr.should_save(50, 50));
     }
@@ -882,7 +887,7 @@ mod tests {
     // 23. should_save returns false when step is not a multiple
     #[test]
     fn test_checkpoint_manager_should_save_false_not_multiple() {
-        let mgr = CheckpointManager::new("/tmp", 3);
+        let mgr = CheckpointManager::new(&std::env::temp_dir().to_string_lossy(), 3);
         assert!(!mgr.should_save(51, 50));
         assert!(!mgr.should_save(99, 50));
     }
@@ -890,48 +895,79 @@ mod tests {
     // 24. should_save returns false when step == 0
     #[test]
     fn test_checkpoint_manager_should_save_false_step_zero() {
-        let mgr = CheckpointManager::new("/tmp", 3);
+        let mgr = CheckpointManager::new(&std::env::temp_dir().to_string_lossy(), 3);
         assert!(!mgr.should_save(0, 50));
     }
 
     // 25. register_checkpoint increases count
     #[test]
     fn test_checkpoint_manager_register_checkpoint() {
-        let mut mgr = CheckpointManager::new("/tmp", 5);
-        mgr.register_checkpoint(CheckpointMetadata::new("/tmp/c1.json", 10, 0, 0.5));
+        let dir = std::env::temp_dir();
+        let mut mgr = CheckpointManager::new(&dir.to_string_lossy(), 5);
+        mgr.register_checkpoint(CheckpointMetadata::new(
+            dir.join("c1.json").to_string_lossy().into_owned(),
+            10,
+            0,
+            0.5,
+        ));
         assert_eq!(mgr.checkpoint_count(), 1);
     }
 
     // 26. get_best_checkpoint returns the one with lowest loss
     #[test]
     fn test_checkpoint_manager_get_best() {
-        let mut mgr = CheckpointManager::new("/tmp", 5);
-        mgr.register_checkpoint(CheckpointMetadata::new("/tmp/a.json", 10, 0, 0.5));
-        mgr.register_checkpoint(CheckpointMetadata::new("/tmp/b.json", 20, 0, 0.3));
-        mgr.register_checkpoint(CheckpointMetadata::new("/tmp/c.json", 30, 0, 0.8));
+        let dir = std::env::temp_dir();
+        let path_b = dir.join("b.json").to_string_lossy().into_owned();
+        let mut mgr = CheckpointManager::new(&dir.to_string_lossy(), 5);
+        mgr.register_checkpoint(CheckpointMetadata::new(
+            dir.join("a.json").to_string_lossy().into_owned(),
+            10,
+            0,
+            0.5,
+        ));
+        mgr.register_checkpoint(CheckpointMetadata::new(path_b.clone(), 20, 0, 0.3));
+        mgr.register_checkpoint(CheckpointMetadata::new(
+            dir.join("c.json").to_string_lossy().into_owned(),
+            30,
+            0,
+            0.8,
+        ));
         let best = mgr.get_best_checkpoint().expect("should have best");
         assert!((best.loss - 0.3).abs() < 1e-6, "best loss should be 0.3, got {}", best.loss);
-        assert_eq!(best.path, "/tmp/b.json");
+        assert_eq!(best.path, path_b);
     }
 
     // 27. get_latest_checkpoint returns the most recently registered
     #[test]
     fn test_checkpoint_manager_get_latest() {
-        let mut mgr = CheckpointManager::new("/tmp", 5);
-        mgr.register_checkpoint(CheckpointMetadata::new("/tmp/first.json", 10, 0, 0.5));
-        mgr.register_checkpoint(CheckpointMetadata::new("/tmp/second.json", 20, 0, 0.4));
-        mgr.register_checkpoint(CheckpointMetadata::new("/tmp/third.json", 30, 0, 0.3));
+        let dir = std::env::temp_dir();
+        let path_third = dir.join("third.json").to_string_lossy().into_owned();
+        let mut mgr = CheckpointManager::new(&dir.to_string_lossy(), 5);
+        mgr.register_checkpoint(CheckpointMetadata::new(
+            dir.join("first.json").to_string_lossy().into_owned(),
+            10,
+            0,
+            0.5,
+        ));
+        mgr.register_checkpoint(CheckpointMetadata::new(
+            dir.join("second.json").to_string_lossy().into_owned(),
+            20,
+            0,
+            0.4,
+        ));
+        mgr.register_checkpoint(CheckpointMetadata::new(path_third.clone(), 30, 0, 0.3));
         let latest = mgr.get_latest_checkpoint().expect("should have latest");
-        assert_eq!(latest.path, "/tmp/third.json");
+        assert_eq!(latest.path, path_third);
     }
 
     // 28. cleanup_old_checkpoints removes excess, returns paths, count drops
     #[test]
     fn test_checkpoint_manager_cleanup() {
-        let mut mgr = CheckpointManager::new("/tmp", 2);
+        let dir = std::env::temp_dir();
+        let mut mgr = CheckpointManager::new(&dir.to_string_lossy(), 2);
         for i in 1..=4 {
             mgr.register_checkpoint(CheckpointMetadata::new(
-                format!("/tmp/ck{i}.json"),
+                dir.join(format!("ck{i}.json")).to_string_lossy().into_owned(),
                 i * 10,
                 0,
                 i as f32 * 0.1,
@@ -941,17 +977,18 @@ mod tests {
         let removed = mgr.cleanup_old_checkpoints();
         assert_eq!(removed.len(), 2, "should remove 2 checkpoints");
         assert_eq!(mgr.checkpoint_count(), 2);
-        assert!(removed.contains(&"/tmp/ck1.json".to_string()));
-        assert!(removed.contains(&"/tmp/ck2.json".to_string()));
+        assert!(removed.contains(&dir.join("ck1.json").to_string_lossy().into_owned()));
+        assert!(removed.contains(&dir.join("ck2.json").to_string_lossy().into_owned()));
     }
 
     // 29. cleanup_old_checkpoints is a no-op when under limit
     #[test]
     fn test_checkpoint_manager_cleanup_no_op() {
-        let mut mgr = CheckpointManager::new("/tmp", 5);
+        let dir = std::env::temp_dir();
+        let mut mgr = CheckpointManager::new(&dir.to_string_lossy(), 5);
         for i in 1..=3 {
             mgr.register_checkpoint(CheckpointMetadata::new(
-                format!("/tmp/ck{i}.json"),
+                dir.join(format!("ck{i}.json")).to_string_lossy().into_owned(),
                 i,
                 0,
                 0.1,
@@ -965,24 +1002,25 @@ mod tests {
     // 30. get_best_checkpoint returns None when empty
     #[test]
     fn test_checkpoint_manager_best_empty() {
-        let mgr = CheckpointManager::new("/tmp", 3);
+        let mgr = CheckpointManager::new(&std::env::temp_dir().to_string_lossy(), 3);
         assert!(mgr.get_best_checkpoint().is_none());
     }
 
     // 31. get_latest_checkpoint returns None when empty
     #[test]
     fn test_checkpoint_manager_latest_empty() {
-        let mgr = CheckpointManager::new("/tmp", 3);
+        let mgr = CheckpointManager::new(&std::env::temp_dir().to_string_lossy(), 3);
         assert!(mgr.get_latest_checkpoint().is_none());
     }
 
     // 32. max_checkpoints=1: after cleanup only 1 remains
     #[test]
     fn test_checkpoint_manager_max_1() {
-        let mut mgr = CheckpointManager::new("/tmp", 1);
+        let dir = std::env::temp_dir();
+        let mut mgr = CheckpointManager::new(&dir.to_string_lossy(), 1);
         for i in 1..=3 {
             mgr.register_checkpoint(CheckpointMetadata::new(
-                format!("/tmp/ck{i}.json"),
+                dir.join(format!("ck{i}.json")).to_string_lossy().into_owned(),
                 i,
                 0,
                 0.5,

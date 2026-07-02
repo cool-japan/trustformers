@@ -3,6 +3,10 @@
 //! Contains both the original CAME implementation and the new advanced
 //! CAME optimizer with factored second-moment estimation and confidence guidance.
 
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
+
 pub mod legacy;
 
 pub use legacy::{CAMEConfig, CAME};
@@ -305,7 +309,6 @@ pub fn came_update(
 /// Per-parameter group descriptor stored alongside the state.
 #[derive(Debug, Clone)]
 struct ParamGroupMeta {
-    #[allow(dead_code)]
     size: usize,
     rows: usize,
     cols: usize,

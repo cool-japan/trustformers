@@ -1,4 +1,8 @@
 //! Interactive dashboards for real-time monitoring and analysis
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -27,7 +31,6 @@ pub struct DashboardMetrics {
 /// Training monitor for real-time tracking
 #[derive(Debug)]
 pub struct TrainingMonitor {
-    #[allow(dead_code)]
     config: DebugConfig,
     metrics_history: VecDeque<DashboardMetrics>,
     max_history: usize,
@@ -553,10 +556,8 @@ impl ModelComparator {
 
 /// Hyperparameter explorer for optimization guidance
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct HyperparameterExplorer {
     experiments: HashMap<String, HyperparameterExperiment>,
-    #[allow(dead_code)]
     search_space: HyperparameterSearchSpace,
     optimization_history: Vec<OptimizationStep>,
 }
@@ -716,7 +717,6 @@ impl HyperparameterExplorer {
 /// Dashboard aggregator that combines all monitoring tools
 #[derive(Debug)]
 pub struct InteractiveDashboard {
-    #[allow(dead_code)]
     config: DebugConfig,
     training_monitor: TrainingMonitor,
     model_comparator: ModelComparator,
@@ -744,9 +744,7 @@ pub enum DisplayMode {
 
 /// WebSocket server for real-time dashboard updates
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct WebSocketServer {
-    #[allow(dead_code)]
     port: u16,
     connected_clients: Arc<Mutex<Vec<String>>>,
 }

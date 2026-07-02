@@ -211,7 +211,7 @@ impl AdaptiveThresholdController {
         metrics_history: &[TimestampedMetrics],
         alert_history: &[AlertEvent],
     ) -> Result<f64> {
-        let config = self.config.read().expect("Config RwLock poisoned");
+        let config = self.config.read().unwrap_or_else(|p| p.into_inner());
         if !config.enabled {
             return Ok(current_threshold);
         }
@@ -279,11 +279,8 @@ impl AdaptiveThresholdController {
 
             // Update statistics
             self.stats.total_adaptations.fetch_add(1, Ordering::Relaxed);
-            let mut algo_stats = self
-                .stats
-                .adaptations_by_algorithm
-                .lock()
-                .expect("Algorithm stats lock poisoned");
+            let mut algo_stats =
+                self.stats.adaptations_by_algorithm.lock().unwrap_or_else(|p| p.into_inner());
             *algo_stats.entry(best_algorithm).or_insert(0) += 1;
         }
 
@@ -351,7 +348,7 @@ impl AdaptiveThresholdController {
             interval.tick().await;
 
             let enabled = {
-                let config_read = config.read().expect("Config RwLock poisoned");
+                let config_read = config.read().unwrap_or_else(|p| p.into_inner());
                 config_read.enabled
             };
 
@@ -393,9 +390,8 @@ impl AdaptiveThresholdController {
             let avg_effectiveness = effectiveness_sum / count as f32;
             let avg_confidence = confidence_sum / count as f32;
 
-            *stats.avg_effectiveness.lock().expect("Avg effectiveness lock poisoned") =
-                avg_effectiveness;
-            *stats.avg_confidence.lock().expect("Avg confidence lock poisoned") = avg_confidence;
+            *stats.avg_effectiveness.lock().unwrap_or_else(|p| p.into_inner()) = avg_effectiveness;
+            *stats.avg_confidence.lock().unwrap_or_else(|p| p.into_inner()) = avg_confidence;
         }
     }
 
@@ -422,14 +418,14 @@ impl AdaptiveThresholdController {
                 self.stats
                     .adaptations_by_algorithm
                     .lock()
-                    .expect("Algorithm stats lock poisoned")
+                    .unwrap_or_else(|p| p.into_inner())
                     .clone(),
             )),
             avg_effectiveness: Arc::new(Mutex::new(
-                *self.stats.avg_effectiveness.lock().expect("Avg effectiveness lock poisoned"),
+                *self.stats.avg_effectiveness.lock().unwrap_or_else(|p| p.into_inner()),
             )),
             avg_confidence: Arc::new(Mutex::new(
-                *self.stats.avg_confidence.lock().expect("Avg confidence lock poisoned"),
+                *self.stats.avg_confidence.lock().unwrap_or_else(|p| p.into_inner()),
             )),
         }
     }

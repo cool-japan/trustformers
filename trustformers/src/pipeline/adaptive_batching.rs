@@ -107,7 +107,7 @@ impl AdaptiveBatchOptimizer {
 
     /// Get the current optimal batch size
     pub fn get_optimal_batch_size(&self) -> Option<usize> {
-        *self.optimal_batch_size.read().expect("lock should not be poisoned")
+        *self.optimal_batch_size.read().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Record a performance sample for a given batch size
@@ -116,7 +116,7 @@ impl AdaptiveBatchOptimizer {
 
         // Add sample to performance data
         {
-            let mut data = self.performance_data.write().expect("lock should not be poisoned");
+            let mut data = self.performance_data.write().unwrap_or_else(|p| p.into_inner());
             let samples = data.entry(batch_size).or_default();
             samples.push_back(sample);
 
@@ -131,7 +131,7 @@ impl AdaptiveBatchOptimizer {
 
         // Check if we should re-evaluate optimal size
         let should_reevaluate = {
-            let last_eval = self.last_evaluation.read().expect("lock should not be poisoned");
+            let last_eval = self.last_evaluation.read().unwrap_or_else(|p| p.into_inner());
             last_eval.elapsed().as_secs() >= self.config.reevaluation_interval_secs
         };
 
@@ -144,8 +144,8 @@ impl AdaptiveBatchOptimizer {
 
     /// Get the next batch size to test (for exploration)
     pub fn get_next_test_size(&self) -> Option<usize> {
-        let mut current_test = self.current_test_size.write().expect("lock should not be poisoned");
-        let mut iteration = self.test_iteration.write().expect("lock should not be poisoned");
+        let mut current_test = self.current_test_size.write().unwrap_or_else(|p| p.into_inner());
+        let mut iteration = self.test_iteration.write().unwrap_or_else(|p| p.into_inner());
 
         match *current_test {
             None => {
@@ -159,7 +159,7 @@ impl AdaptiveBatchOptimizer {
 
                 // Check if we've collected enough samples for current size
                 let enough_samples = {
-                    let data = self.performance_data.read().expect("lock should not be poisoned");
+                    let data = self.performance_data.read().unwrap_or_else(|p| p.into_inner());
                     data.get(&size)
                         .map(|samples| samples.len() >= self.config.samples_per_size)
                         .unwrap_or(false)
@@ -204,7 +204,7 @@ impl AdaptiveBatchOptimizer {
     /// Update statistics for a specific batch size
     fn update_batch_stats(&self, batch_size: usize) -> Result<()> {
         let samples = {
-            let data = self.performance_data.read().expect("lock should not be poisoned");
+            let data = self.performance_data.read().unwrap_or_else(|p| p.into_inner());
             data.get(&batch_size).cloned().unwrap_or_default()
         };
 
@@ -258,7 +258,7 @@ impl AdaptiveBatchOptimizer {
 
         // Store stats
         {
-            let mut batch_stats = self.batch_stats.write().expect("lock should not be poisoned");
+            let mut batch_stats = self.batch_stats.write().unwrap_or_else(|p| p.into_inner());
             batch_stats.insert(batch_size, stats);
         }
 
@@ -295,7 +295,7 @@ impl AdaptiveBatchOptimizer {
 
     /// Evaluate and update the optimal batch size
     fn evaluate_optimal_batch_size(&self) -> Result<()> {
-        let stats = self.batch_stats.read().expect("lock should not be poisoned");
+        let stats = self.batch_stats.read().unwrap_or_else(|p| p.into_inner());
 
         if stats.is_empty() {
             return Ok(());
@@ -310,19 +310,19 @@ impl AdaptiveBatchOptimizer {
 
         if let Some(optimal_size) = optimal {
             let mut current_optimal =
-                self.optimal_batch_size.write().expect("lock should not be poisoned");
+                self.optimal_batch_size.write().unwrap_or_else(|p| p.into_inner());
             *current_optimal = Some(optimal_size);
 
             tracing::info!(
                 "Updated optimal batch size to {}: score {:.3}",
                 optimal_size,
-                stats.get(&optimal_size).expect("optimal_size came from stats").score
+                stats.get(&optimal_size).map(|s| s.score).unwrap_or(0.0)
             );
         }
 
         // Update last evaluation time
         {
-            let mut last_eval = self.last_evaluation.write().expect("lock should not be poisoned");
+            let mut last_eval = self.last_evaluation.write().unwrap_or_else(|p| p.into_inner());
             *last_eval = Instant::now();
         }
 
@@ -331,8 +331,8 @@ impl AdaptiveBatchOptimizer {
 
     /// Get comprehensive performance report
     pub fn get_performance_report(&self) -> PerformanceReport {
-        let stats = self.batch_stats.read().expect("lock should not be poisoned");
-        let optimal = *self.optimal_batch_size.read().expect("lock should not be poisoned");
+        let stats = self.batch_stats.read().unwrap_or_else(|p| p.into_inner());
+        let optimal = *self.optimal_batch_size.read().unwrap_or_else(|p| p.into_inner());
 
         let mut batch_performances: Vec<_> = stats.values().cloned().collect();
         batch_performances.sort_by_key(|s| s.batch_size);
@@ -341,13 +341,13 @@ impl AdaptiveBatchOptimizer {
             optimal_batch_size: optimal,
             batch_performances,
             total_evaluations: stats.len(),
-            last_evaluation: *self.last_evaluation.read().expect("lock should not be poisoned"),
+            last_evaluation: *self.last_evaluation.read().unwrap_or_else(|p| p.into_inner()),
         }
     }
 
     /// Export performance data for analysis
     pub fn export_data(&self) -> Result<String> {
-        let stats = self.batch_stats.read().expect("lock should not be poisoned");
+        let stats = self.batch_stats.read().unwrap_or_else(|p| p.into_inner());
         let data = stats.values().collect::<Vec<_>>();
         serde_json::to_string_pretty(&data)
             .map_err(|e| TrustformersError::runtime_error(format!("Failed to export data: {}", e)))
@@ -360,7 +360,7 @@ impl AdaptiveBatchOptimizer {
         })?;
 
         {
-            let mut stats = self.batch_stats.write().expect("lock should not be poisoned");
+            let mut stats = self.batch_stats.write().unwrap_or_else(|p| p.into_inner());
             for stat in imported_stats {
                 stats.insert(stat.batch_size, stat);
             }

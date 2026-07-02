@@ -631,7 +631,6 @@ impl NetworkAdaptationUtils {
         network_conditions: &NetworkConditions,
         current_stats: &NetworkAdaptationStats,
     ) -> u32 {
-        #[allow(dead_code)]
         let mut base_frequency = 60u32; // Default 60 minutes
 
         // Adjust for network quality

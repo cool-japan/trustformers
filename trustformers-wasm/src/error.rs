@@ -902,14 +902,12 @@ impl RetryStrategy {
 
     async fn sleep(&self, ms: u64) {
         let promise = js_sys::Promise::new(&mut |resolve, _| {
-            web_sys::window()
-                .expect("window should be available in browser context")
-                .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms as i32)
-                .expect("set_timeout should succeed with valid callback");
+            if let Some(window) = web_sys::window() {
+                let _ = window
+                    .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms as i32);
+            }
         });
-        wasm_bindgen_futures::JsFuture::from(promise)
-            .await
-            .expect("sleep promise should resolve successfully");
+        let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
     }
 }
 
@@ -966,7 +964,7 @@ impl ErrorRecoverySystem {
     }
 
     /// Execute operation with comprehensive error handling and recovery
-    #[allow(clippy::result_large_err)]
+    #[allow(clippy::result_large_err)] // reason: TrustformersError is the exported error type; boxing would change the Result shape
     pub async fn execute_with_recovery<F, T, Fut>(
         &mut self,
         operation: F,
@@ -979,6 +977,7 @@ impl ErrorRecoverySystem {
         let operation_clone = operation.clone();
 
         #[allow(clippy::result_large_err)]
+        // reason: TrustformersError is the exported error type; boxing would change the Result shape
         match circuit_breaker.execute(|| -> Result<(), TrustformersError> {
             // This is a sync wrapper for the async operation
             // In real implementation, this would need proper async handling

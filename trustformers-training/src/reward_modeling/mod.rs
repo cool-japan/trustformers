@@ -6,9 +6,9 @@
 
 pub mod training;
 pub use training::{
-    PoolingType, RewardLossType as TrainingRewardLossType, RewardModelConfig as RmTrainingConfig,
-    RewardModelTrainingExample, RewardTrainError, RewardTrainingOutput, batch_reward_loss,
-    compute_reward_score, pool_hidden_states, reward_loss,
+    batch_reward_loss, compute_reward_score, pool_hidden_states, reward_loss, PoolingType,
+    RewardLossType as TrainingRewardLossType, RewardModelConfig as RmTrainingConfig,
+    RewardModelTrainingExample, RewardTrainError, RewardTrainingOutput,
 };
 
 use std::fmt;
@@ -118,10 +118,8 @@ impl Default for RmRewardModelConfig {
 pub struct RmRewardModel {
     config: RmRewardModelConfig,
     /// Linear reward head weights (length = hidden_size).
-    #[allow(dead_code)]
     reward_head: Vec<f64>,
     /// Bias of the linear reward head.
-    #[allow(dead_code)]
     bias: f64,
 }
 
@@ -187,9 +185,7 @@ impl RmRewardModel {
                     let diff = rc - rr - self.config.margin;
                     -sigmoid(diff).ln()
                 },
-                RewardLossType::Regression => {
-                    (rc - 1.0).powi(2) + (rr + 1.0).powi(2)
-                },
+                RewardLossType::Regression => (rc - 1.0).powi(2) + (rr + 1.0).powi(2),
             };
 
             total_loss += loss;
@@ -217,10 +213,8 @@ impl RmRewardModel {
         if pairs.is_empty() {
             return 0.0;
         }
-        let correct = pairs
-            .iter()
-            .filter(|p| self.score(&p.chosen) > self.score(&p.rejected))
-            .count();
+        let correct =
+            pairs.iter().filter(|p| self.score(&p.chosen) > self.score(&p.rejected)).count();
         correct as f64 / pairs.len() as f64
     }
 
@@ -328,18 +322,36 @@ impl RewardNormalizer {
     /// Create a normalizer initialised from a non-empty slice of samples.
     pub fn new_from_samples(samples: &[f32]) -> Self {
         if samples.is_empty() {
-            return Self { mean: 0.0, std: 1.0, clip_range: None, count: 0, m2: 0.0 };
+            return Self {
+                mean: 0.0,
+                std: 1.0,
+                clip_range: None,
+                count: 0,
+                m2: 0.0,
+            };
         }
         let n = samples.len() as f32;
         let mean = samples.iter().sum::<f32>() / n;
         let variance = samples.iter().map(|s| (s - mean) * (s - mean)).sum::<f32>() / n;
         let std = variance.sqrt().max(1e-8);
-        Self { mean, std, clip_range: None, count: samples.len() as u64, m2: variance * n }
+        Self {
+            mean,
+            std,
+            clip_range: None,
+            count: samples.len() as u64,
+            m2: variance * n,
+        }
     }
 
     /// Create a normalizer with no prior samples.
     pub fn new() -> Self {
-        Self { mean: 0.0, std: 1.0, clip_range: None, count: 0, m2: 0.0 }
+        Self {
+            mean: 0.0,
+            std: 1.0,
+            clip_range: None,
+            count: 0,
+            m2: 0.0,
+        }
     }
 
     /// Normalise a single reward: `(reward − mean) / std`, then clip.
@@ -477,8 +489,12 @@ impl PreferenceDataset {
     pub fn split(&self, train_fraction: f64) -> (Self, Self) {
         let fraction = train_fraction.max(0.0).min(1.0);
         let train_size = (self.pairs.len() as f64 * fraction).floor() as usize;
-        let train = Self { pairs: self.pairs[..train_size].to_vec() };
-        let val = Self { pairs: self.pairs[train_size..].to_vec() };
+        let train = Self {
+            pairs: self.pairs[..train_size].to_vec(),
+        };
+        let val = Self {
+            pairs: self.pairs[train_size..].to_vec(),
+        };
         (train, val)
     }
 
@@ -507,11 +523,7 @@ impl PreferenceDataset {
         let mean_score_margin = if pairs_with_scores == 0 {
             None
         } else {
-            let sum: f64 = self
-                .pairs
-                .iter()
-                .filter_map(|p| p.margin())
-                .sum();
+            let sum: f64 = self.pairs.iter().filter_map(|p| p.margin()).sum();
             Some(sum / pairs_with_scores as f64)
         };
 
@@ -601,7 +613,11 @@ mod tests {
         let model = default_model();
         let pairs = vec![pair("response A chosen", "response B rejected")];
         let result = model.compute_loss(&pairs).expect("should succeed");
-        assert!(result.mean_loss > 0.0, "BT loss should be positive, got {}", result.mean_loss);
+        assert!(
+            result.mean_loss > 0.0,
+            "BT loss should be positive, got {}",
+            result.mean_loss
+        );
     }
 
     // ── Test 5: BradleyTerryWithMargin larger when margin > 0 ────────────
@@ -626,7 +642,8 @@ mod tests {
         assert!(
             loss_yes >= loss_no,
             "margin loss ({}) should be >= no-margin loss ({})",
-            loss_yes, loss_no
+            loss_yes,
+            loss_no
         );
     }
 
@@ -683,7 +700,11 @@ mod tests {
         let mean = normed.iter().sum::<f64>() / n;
         let var = normed.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
         assert!(mean.abs() < 1e-9, "mean should be ≈ 0, got {}", mean);
-        assert!((var.sqrt() - 1.0).abs() < 1e-9, "std should be ≈ 1, got {}", var.sqrt());
+        assert!(
+            (var.sqrt() - 1.0).abs() < 1e-9,
+            "std should be ≈ 1, got {}",
+            var.sqrt()
+        );
     }
 
     // ── Test 9: RewardLossResult display ─────────────────────────────────
@@ -698,8 +719,14 @@ mod tests {
             batch_size: 10,
         };
         let s = format!("{}", result);
-        assert!(s.contains("mean_loss"), "display should contain 'mean_loss'");
-        assert!(s.contains("0.6930"), "display should contain formatted loss");
+        assert!(
+            s.contains("mean_loss"),
+            "display should contain 'mean_loss'"
+        );
+        assert!(
+            s.contains("0.6930"),
+            "display should contain formatted loss"
+        );
     }
 
     // ── Test 10: empty batch error ────────────────────────────────────────
@@ -776,16 +803,20 @@ mod tests {
             }
             if sa > sb {
                 correct_pairs.push(pair(a, b)); // chosen=a scores higher → correct
-                wrong_pairs.push(pair(b, a));   // chosen=b scores lower  → wrong
+                wrong_pairs.push(pair(b, a)); // chosen=b scores lower  → wrong
             } else {
                 correct_pairs.push(pair(b, a)); // chosen=b scores higher → correct
-                wrong_pairs.push(pair(a, b));   // chosen=a scores lower  → wrong
+                wrong_pairs.push(pair(a, b)); // chosen=a scores lower  → wrong
             }
         }
 
         if !correct_pairs.is_empty() {
             let acc_all = model.pairwise_accuracy(&correct_pairs);
-            assert!((acc_all - 1.0).abs() < 1e-10, "expected 1.0, got {}", acc_all);
+            assert!(
+                (acc_all - 1.0).abs() < 1e-10,
+                "expected 1.0, got {}",
+                acc_all
+            );
         }
 
         if !wrong_pairs.is_empty() {
@@ -831,7 +862,10 @@ mod tests {
         // BT loss = -log P(r_w=2 > r_l=0) = -log σ(2)
         let loss = bt.bt_loss(2.0, 0.0);
         let expected = -(1.0f32 / (1.0 + (-2.0f32).exp())).ln();
-        assert!((loss - expected).abs() < 1e-5, "expected {expected}, got {loss}");
+        assert!(
+            (loss - expected).abs() < 1e-5,
+            "expected {expected}, got {loss}"
+        );
     }
 
     // ── Test 19: BradleyTerryModel bt_loss positive ───────────────────────
@@ -841,7 +875,10 @@ mod tests {
         let loss1 = bt.bt_loss(1.0, 0.0);
         let loss2 = bt.bt_loss(-1.0, 2.0);
         assert!(loss1 > 0.0, "BT loss should be positive");
-        assert!(loss2 > 0.0, "BT loss should be positive even for bad ordering");
+        assert!(
+            loss2 > 0.0,
+            "BT loss should be positive even for bad ordering"
+        );
     }
 
     // ── Test 20: BradleyTerryModel invalid temperature ───────────────────
@@ -869,10 +906,18 @@ mod tests {
         let samples = vec![1.0f32, 2.0, 3.0, 4.0, 5.0];
         let norm = RewardNormalizer::new_from_samples(&samples);
         // mean should be 3.0
-        assert!((norm.mean - 3.0).abs() < 1e-5, "expected mean=3.0, got {}", norm.mean);
+        assert!(
+            (norm.mean - 3.0).abs() < 1e-5,
+            "expected mean=3.0, got {}",
+            norm.mean
+        );
         // population std = sqrt(mean_sq_deviation) = sqrt(2.0)
         let expected_std = 2.0_f32.sqrt();
-        assert!((norm.std - expected_std).abs() < 1e-4, "expected std={expected_std}, got {}", norm.std);
+        assert!(
+            (norm.std - expected_std).abs() < 1e-4,
+            "expected std={expected_std}, got {}",
+            norm.std
+        );
     }
 
     // ── Test 23: RewardNormalizer normalize ───────────────────────────────
@@ -893,7 +938,10 @@ mod tests {
         let mut norm = RewardNormalizer::new_from_samples(&samples);
         norm.clip_range = Some((-1.0, 1.0));
         let far_out = norm.normalize(100.0);
-        assert!((far_out - 1.0f32).abs() < 1e-5, "clipped at max=1.0, got {far_out}");
+        assert!(
+            (far_out - 1.0f32).abs() < 1e-5,
+            "clipped at max=1.0, got {far_out}"
+        );
     }
 
     // ── Test 25: RewardNormalizer online update convergence ───────────────
@@ -905,7 +953,11 @@ mod tests {
             norm.update(v);
         }
         assert_eq!(norm.count(), 5);
-        assert!((norm.mean - 3.0).abs() < 1e-4, "online mean should be 3.0, got {}", norm.mean);
+        assert!(
+            (norm.mean - 3.0).abs() < 1e-4,
+            "online mean should be 3.0, got {}",
+            norm.mean
+        );
     }
 
     // ── Test 26: margin_ranking_loss zero when margin satisfied ───────────
@@ -921,7 +973,10 @@ mod tests {
     fn test_margin_ranking_loss_positive() {
         // r_w - r_l = 0.5, margin = 2.0 → loss = 1.5
         let loss = margin_ranking_loss(1.0, 0.5, 2.0);
-        assert!((loss - 1.5f32).abs() < 1e-5, "expected loss=1.5, got {loss}");
+        assert!(
+            (loss - 1.5f32).abs() < 1e-5,
+            "expected loss=1.5, got {loss}"
+        );
     }
 
     // ── New tests 28-50 ───────────────────────────────────────────────────
@@ -944,8 +999,11 @@ mod tests {
         let r_b = 0.3f32;
         let p_ab = bt.preference_probability(r_a, r_b);
         let p_ba = bt.preference_probability(r_b, r_a);
-        assert!((p_ab + p_ba - 1.0f32).abs() < 1e-5,
-            "P(A>B) + P(B>A) should be 1.0, got {}", p_ab + p_ba);
+        assert!(
+            (p_ab + p_ba - 1.0f32).abs() < 1e-5,
+            "P(A>B) + P(B>A) should be 1.0, got {}",
+            p_ab + p_ba
+        );
     }
 
     // 30. margin_ranking_loss with margin=0 is always non-negative
@@ -954,8 +1012,14 @@ mod tests {
         // margin=0 means any positive diff gives 0 loss; negative diff gives positive loss
         let loss_pos = margin_ranking_loss(2.0, 0.5, 0.0);
         let loss_neg = margin_ranking_loss(0.5, 2.0, 0.0);
-        assert!(loss_pos >= 0.0, "margin=0, positive diff → non-negative loss, got {loss_pos}");
-        assert!(loss_neg > 0.0, "margin=0, negative diff → positive loss, got {loss_neg}");
+        assert!(
+            loss_pos >= 0.0,
+            "margin=0, positive diff → non-negative loss, got {loss_pos}"
+        );
+        assert!(
+            loss_neg > 0.0,
+            "margin=0, negative diff → positive loss, got {loss_neg}"
+        );
     }
 
     // 31. pairwise_accuracy returns value in [0, 1]
@@ -966,7 +1030,10 @@ mod tests {
             .map(|i| pair(&format!("chosen_{i}"), &format!("rejected_{i}")))
             .collect();
         let acc = model.pairwise_accuracy(&pairs);
-        assert!(acc >= 0.0 && acc <= 1.0, "accuracy should be in [0,1], got {acc}");
+        assert!(
+            acc >= 0.0 && acc <= 1.0,
+            "accuracy should be in [0,1], got {acc}"
+        );
     }
 
     // 32. normalize_rewards: mean≈0 and std≈1 after z-score normalisation
@@ -979,7 +1046,11 @@ mod tests {
         let mean = normed.iter().sum::<f64>() / n;
         let var = normed.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
         assert!(mean.abs() < 1e-9, "z-score mean should be ≈0, got {mean}");
-        assert!((var.sqrt() - 1.0).abs() < 1e-9, "z-score std should be ≈1, got {}", var.sqrt());
+        assert!(
+            (var.sqrt() - 1.0).abs() < 1e-9,
+            "z-score std should be ≈1, got {}",
+            var.sqrt()
+        );
     }
 
     // 33. normalize_rewards with identical inputs returns same vector (zero variance)
@@ -989,7 +1060,10 @@ mod tests {
         let scores = vec![3.0, 3.0, 3.0, 3.0];
         let normed = model.normalize_rewards(&scores);
         for (orig, norm) in scores.iter().zip(normed.iter()) {
-            assert!((orig - norm).abs() < 1e-10, "identical scores should be returned as-is");
+            assert!(
+                (orig - norm).abs() < 1e-10,
+                "identical scores should be returned as-is"
+            );
         }
     }
 
@@ -1002,7 +1076,10 @@ mod tests {
         assert_eq!(scores.len(), 4);
         let avg = scores.iter().sum::<f64>() / scores.len() as f64;
         // average should be in [-2, 2]
-        assert!(avg >= -2.0 && avg <= 2.0, "ensemble average should be in [-2,2], got {avg}");
+        assert!(
+            avg >= -2.0 && avg <= 2.0,
+            "ensemble average should be in [-2,2], got {avg}"
+        );
     }
 
     // 35. Length bias: same content different lengths → different scores
@@ -1010,7 +1087,8 @@ mod tests {
     fn test_score_different_for_different_length_texts() {
         let model = default_model();
         let short = model.score("hello");
-        let long_text = model.score("hello this is a much longer text that should have a different hash");
+        let long_text =
+            model.score("hello this is a much longer text that should have a different hash");
         // The two strings should almost certainly differ (djb2 hash is sensitive to content)
         assert!((short - long_text).abs() > 1e-10,
             "different-length texts should produce different scores (short={short}, long={long_text})");
@@ -1020,11 +1098,22 @@ mod tests {
     #[test]
     fn test_score_always_in_range() {
         let model = default_model();
-        let texts = ["", "a", "hello world", "the quick brown fox jumps over the lazy dog",
-                     "12345", "!@#$%^&*()", "UPPER CASE", "mixed Case With Numbers 123"];
+        let texts = [
+            "",
+            "a",
+            "hello world",
+            "the quick brown fox jumps over the lazy dog",
+            "12345",
+            "!@#$%^&*()",
+            "UPPER CASE",
+            "mixed Case With Numbers 123",
+        ];
         for text in &texts {
             let s = model.score(text);
-            assert!(s >= -2.0 && s <= 2.0, "score for '{text}' = {s} should be in [-2,2]");
+            assert!(
+                s >= -2.0 && s <= 2.0,
+                "score for '{text}' = {s} should be in [-2,2]"
+            );
         }
     }
 
@@ -1069,7 +1158,10 @@ mod tests {
     fn test_margin_ranking_loss_exact_margin() {
         // r_w - r_l = 1.5 = margin → loss = max(0, 0) = 0
         let loss = margin_ranking_loss(2.0, 0.5, 1.5);
-        assert!((loss).abs() < 1e-5, "exact margin should give loss=0, got {loss}");
+        assert!(
+            (loss).abs() < 1e-5,
+            "exact margin should give loss=0, got {loss}"
+        );
     }
 
     // 41. BradleyTerryModel::batch_bt_loss empty batch → RewardError::EmptyBatch
@@ -1087,7 +1179,10 @@ mod tests {
         let text = "The same text should always score the same";
         let s1 = model.score(text);
         let s2 = model.score(text);
-        assert!((s1 - s2).abs() < 1e-15, "score should be deterministic: {s1} vs {s2}");
+        assert!(
+            (s1 - s2).abs() < 1e-15,
+            "score should be deterministic: {s1} vs {s2}"
+        );
     }
 
     // 43. RewardLossResult display contains accuracy
@@ -1102,8 +1197,10 @@ mod tests {
             batch_size: 4,
         };
         let s = format!("{result}");
-        assert!(s.contains("accuracy") || s.contains("0.7500"),
-            "display should contain accuracy info: {s}");
+        assert!(
+            s.contains("accuracy") || s.contains("0.7500"),
+            "display should contain accuracy info: {s}"
+        );
     }
 
     // 44. PreferenceDataset::is_empty on empty dataset → true
@@ -1145,7 +1242,10 @@ mod tests {
         ds.add(pair("chosen_a", "rejected_a"));
         ds.add(pair("chosen_b", "rejected_b"));
         let stats = ds.statistics();
-        assert!(stats.mean_score_margin.is_none(), "no scores → mean_score_margin should be None");
+        assert!(
+            stats.mean_score_margin.is_none(),
+            "no scores → mean_score_margin should be None"
+        );
         assert_eq!(stats.pairs_with_scores, 0);
     }
 
@@ -1156,9 +1256,15 @@ mod tests {
             normalize_rewards: true,
             ..Default::default()
         };
-        assert!(cfg.normalize_rewards, "normalize_rewards should be settable");
+        assert!(
+            cfg.normalize_rewards,
+            "normalize_rewards should be settable"
+        );
         let cfg_default = RmRewardModelConfig::default();
-        assert!(!cfg_default.normalize_rewards, "default normalize_rewards should be false");
+        assert!(
+            !cfg_default.normalize_rewards,
+            "default normalize_rewards should be false"
+        );
     }
 
     // 49. RewardNormalizer clip_range lower bound
@@ -1169,7 +1275,10 @@ mod tests {
         norm.clip_range = Some((-1.0, 1.0));
         // Very low value should be clipped to lower bound
         let clipped = norm.normalize(-1000.0);
-        assert!((clipped - (-1.0f32)).abs() < 1e-5, "should clip at -1.0, got {clipped}");
+        assert!(
+            (clipped - (-1.0f32)).abs() < 1e-5,
+            "should clip at -1.0, got {clipped}"
+        );
     }
 
     // 50. BT loss with very large reward difference → loss approaches 0
@@ -1178,6 +1287,9 @@ mod tests {
         let bt = BradleyTerryModel::default_temperature();
         // r_w >> r_l → P(A>B) → 1 → loss → 0
         let loss = bt.bt_loss(100.0, -100.0);
-        assert!(loss < 1e-5, "BT loss with huge margin should approach 0, got {loss}");
+        assert!(
+            loss < 1e-5,
+            "BT loss with huge margin should approach 0, got {loss}"
+        );
     }
 }

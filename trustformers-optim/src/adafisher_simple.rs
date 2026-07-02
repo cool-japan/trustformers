@@ -104,13 +104,14 @@ impl Optimizer for AdaFisher {
                 .fold(0u64, |acc, &x| acc.wrapping_add(x.to_bits() as u64))
         );
 
-        let state = self.states.entry(param_id).or_insert_with(|| AdaFisherState {
-            momentum: Tensor::zeros_like(parameter)
-                .expect("zeros_like should always succeed for valid parameter"),
-            variance: Tensor::zeros_like(parameter)
-                .expect("zeros_like should always succeed for valid parameter"),
-            step: 0,
-        });
+        let state = match self.states.entry(param_id) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => entry.insert(AdaFisherState {
+                momentum: Tensor::zeros_like(parameter)?,
+                variance: Tensor::zeros_like(parameter)?,
+                step: 0,
+            }),
+        };
 
         state.step += 1;
 

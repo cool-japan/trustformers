@@ -20,10 +20,13 @@
 //!
 //! # Example
 //!
-//! ```no_run
+//! ```
 //! use trustformers_models::sparse_attention::{SparseAttention, SparseAttentionConfig, SparsePattern};
 //! use trustformers_core::tensor::Tensor;
+//! use trustformers_core::traits::Layer;
+//! use trustformers_core::layers::AttentionInput;
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create sparse attention with local window pattern
 //! let config = SparseAttentionConfig::new()
 //!     .with_pattern(SparsePattern::Local { window_size: 64 })
@@ -31,8 +34,11 @@
 //!     .with_num_heads(12);
 //!
 //! let attention = SparseAttention::new(config)?;
-//! let input = Tensor::randn(&[2, 512, 768])?;
-//! let output = attention.forward(input)?;
+//! let input = Tensor::randn(&[8, 768])?; // 2D: [seq_len, hidden_size]
+//! let output = attention.forward(AttentionInput::new(input))?;
+//! # let _ = output;
+//! # Ok(())
+//! # }
 //! ```
 
 use scirs2_core::Array2; // SciRS2 Integration Policy

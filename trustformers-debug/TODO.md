@@ -1,10 +1,10 @@
 # trustformers-debug TODO List
 
-**Version:** 0.1.3 | **Status:** Alpha | **Tests:** 323 | **SLoC:** 61,841+ | **Updated:** 2026-06-24
+**Version:** 0.1.4 | **Status:** Alpha | **Tests:** ~899 | **SLoC:** ~101,000 | **Updated:** 2026-07-02
 
 ## Overview
 
-The `trustformers-debug` crate provides debugging and visualization tools for model development and troubleshooting. It includes profilers, memory analyzers, graph visualizers, flame graph generation, AI code analysis, and interactive debugging interfaces with VS Code integration.
+The `trustformers-debug` crate provides debugging and visualization tools for model development and troubleshooting. It includes profilers, memory analyzers, graph visualizers, flame graph generation, AI code analysis, interpretability/simulation tooling, and interactive debugging interfaces with VS Code integration.
 
 **Key Responsibilities:**
 - Tensor/gradient analysis with NaN/Inf detection
@@ -12,12 +12,14 @@ The `trustformers-debug` crate provides debugging and visualization tools for mo
 - Memory profiling with deadlock-safe mutex scoping
 - Visualization via Plotters, Ratatui, and TensorBoard
 - Performance profiling and flame graph generation
+- Model interpretability (SHAP, LIME, feature attribution, counterfactual, attention analysis)
+- Simulation & robustness testing (what-if, perturbation, adversarial, edge-case discovery)
 - AI code analysis with architecture smell detection
 - VS Code integration via LSP/DAP diagnostics
-- Interactive debugging interface
-- Export to various visualization formats
+- Interactive, guided, and tutorial-based debugging interfaces
+- Export to various visualization and data formats (TensorBoard, Netron, Excel, JSON, ...)
 
-**Feature Flags:** `visual`, `video`, `gif`, `wasm`, `atomics`, `headless`
+**Feature Flags:** `visual`, `video`, `gif`, `wasm`, `atomics`, `headless`, `cuda`, `rocm`, `tpu` (the last three are reserved placeholders for future GPU/TPU backends; see README's Feature Flags section for what they do today)
 
 ---
 
@@ -32,14 +34,19 @@ The `trustformers-debug` crate provides debugging and visualization tools for mo
 - [x] **FLAME GRAPHS** - Inferno-compatible flamegraph output
 - [x] **AI CODE ANALYSIS** - Architecture smell detection, anti-pattern matching
 - [x] **VS CODE INTEGRATION** - LSP diagnostic JSON and DAP event emission
+- [x] **INTERPRETABILITY** - SHAP, LIME, feature attribution, counterfactual, and attention-pattern analysis
+- [x] **SIMULATION & GUIDED TOOLS** - What-if/perturbation/adversarial/edge-case testing, guided debugger, tutorial mode
 
 ### Feature Coverage
 - **Profiling:** CPU, memory (deadlock-safe), latency analysis, flame graphs
 - **Visualization:** Plotters (`visual`), Ratatui TUI (`headless`), TensorBoard, GIF (`gif`), video (`video`)
 - **Analysis:** Gradient flow, weight distribution, NaN/Inf detection, dead neurons, numerical stability
+- **Interpretability:** SHAP, LIME, 13 feature-attribution methods (Integrated Gradients, Grad-CAM, etc.), counterfactual generation, attention-pattern analysis
+- **Simulation & Robustness:** What-if analysis, perturbation/robustness testing, adversarial probing, edge-case discovery
 - **AI Analysis:** Architecture pattern matching, anti-pattern detection, actionable suggestions
 - **VS Code:** LSP diagnostic output, DAP event emission, tensor shape hover annotations
-- **Export:** TensorBoard, Netron, GraphViz, JSON
+- **Guided Learning:** Step-by-step guided debugger, lesson-based tutorial mode
+- **Export:** TensorBoard, Netron, Excel (real `.xlsx` via `oxiarc-archive`), GraphViz, JSON
 
 ---
 
@@ -381,6 +388,41 @@ for issue in issues {
 
 ---
 
+#### Interpretability Analyzer
+
+**SHAP, LIME, feature attribution, counterfactual, and attention-pattern analysis**
+
+- [x] **SHAP Analysis** — Shapley-value feature contributions with background-dataset sampling (`analyze_shap`)
+- [x] **LIME Analysis** — local surrogate-model explanations via perturbation sampling (`analyze_lime`)
+- [x] **Feature Attribution** — 13 methods: Integrated Gradients, Gradient×Input, SmoothGrad, Gradient SHAP, DeepLIFT, LRP, Guided Backprop, Grad-CAM, Grad-CAM++, Score-CAM, Expected Gradients, Attention Rollout, Path Integrated Gradients (`analyze_feature_attribution`, `AttributionMethod`)
+- [x] **Counterfactual Generation** — minimal-change counterfactuals, feature sensitivity, decision-boundary crossing analysis, actionable insights (`generate_counterfactuals`)
+- [x] **Attention Pattern Analysis** — per-layer/per-head statistics, head-specialization typing, attention-flow tracing (`analyze_attention`)
+
+**Example:**
+```rust
+use std::collections::HashMap;
+use trustformers_debug::{InterpretabilityAnalyzer, InterpretabilityConfig};
+
+let mut analyzer = InterpretabilityAnalyzer::new(InterpretabilityConfig::default());
+
+let mut instance: HashMap<String, f64> = HashMap::new();
+instance.insert("feature_a".to_string(), 0.7);
+instance.insert("feature_b".to_string(), 1.2);
+
+let model_predictions = vec![0.65, 0.70, 0.68];
+let background_data = vec![instance.clone()];
+
+let shap_result = analyzer
+    .analyze_shap(&instance, &model_predictions, &background_data)
+    .await?;
+println!("Top SHAP feature: {:?}", shap_result.top_positive_features.first());
+
+let report = analyzer.generate_report().await?;
+println!("SHAP analyses recorded: {}", report.shap_analyses_count);
+```
+
+---
+
 ### AI Code Analysis
 
 **Automated architecture smell and anti-pattern detection**
@@ -402,6 +444,38 @@ let report = analyzer.analyze_model_config(&model_config)?;
 for suggestion in report.suggestions() {
     println!("[{}] {}: {}", suggestion.severity, suggestion.layer, suggestion.message);
 }
+```
+
+---
+
+### Simulation & Robustness Testing
+
+**Systematic model-behavior probing (`simulation_tools`)**
+
+- [x] **What-If Analysis** — scenario generation, impact analysis, feature-sensitivity and decision-boundary exploration (`analyze_what_if`)
+- [x] **Perturbation Testing** — robustness scoring across perturbation intensities, sensitivity-hotspot identification, failure-mode analysis (`test_perturbations`)
+- [x] **Adversarial Probing** — adversarial-example generation (FGSM/PGD/CW/DeepFool), attack-success analysis, certified-robustness estimation, defense recommendations (`probe_adversarial`)
+- [x] **Edge Case Discovery** — automated edge-case search, classification, coverage analysis, risk assessment (`discover_edge_cases`)
+
+**Example:**
+```rust
+use std::collections::HashMap;
+use trustformers_debug::{SimulationAnalyzer, SimulationConfig};
+
+let mut analyzer = SimulationAnalyzer::new(SimulationConfig::default());
+
+let mut base_input: HashMap<String, f64> = HashMap::new();
+base_input.insert("age".to_string(), 35.0);
+base_input.insert("income".to_string(), 55000.0);
+
+let model_fn: Box<dyn Fn(&HashMap<String, f64>) -> f64 + Send + Sync> =
+    Box::new(|input| input.values().sum::<f64>() / 1000.0);
+
+let robustness = analyzer.test_perturbations(&base_input, model_fn).await?;
+println!("Robustness score: {:.3}", robustness.robustness_assessment.robustness_score);
+
+let report = analyzer.generate_report().await?;
+println!("Perturbation tests run: {}", report.perturbation_tests_count);
 ```
 
 ---
@@ -461,6 +535,55 @@ console.run(&model, input)?;
 
 ---
 
+#### Guided Debugger
+
+**Step-by-step guided debugging wizard**
+
+- [x] **Features**
+  - Automatic 6-step plan: health check, gradient analysis, architecture analysis, memory profiling, performance profiling, anomaly detection
+  - Progress tracking, step skipping, and reset
+
+**Example:**
+```rust
+use trustformers_debug::GuidedDebugger;
+
+let mut wizard = GuidedDebugger::new();
+
+while !wizard.is_complete() {
+    let step_name = wizard.current_step().map(|s| s.name.clone());
+    let result = wizard.execute_current_step().await?;
+    println!("[{:.0}%] {:?} -> {:?}", wizard.progress(), step_name, result);
+}
+```
+
+---
+
+#### Tutorial Mode
+
+**Lesson-based interactive tutorial for onboarding**
+
+- [x] **Features**
+  - Built-in lessons (Getting Started, One-Line Debugging, Guided Debugging) with objectives, example code, tips, and common mistakes
+  - Per-lesson navigation and completion tracking
+
+**Example:**
+```rust
+use trustformers_debug::TutorialMode;
+
+let mut tutorial = TutorialMode::new();
+
+while !tutorial.is_complete() {
+    if let Some(lesson) = tutorial.current_lesson() {
+        println!("Lesson: {}", lesson.title);
+    }
+    tutorial.complete_current_lesson()?;
+}
+
+println!("Tutorial progress: {:.0}%", tutorial.progress());
+```
+
+---
+
 ### Export and Integration
 
 #### Netron Export
@@ -474,11 +597,41 @@ console.run(&model, input)?;
 
 ---
 
+#### Excel (.xlsx) Export
+
+**Real Office Open XML (OOXML) workbook export**
+
+- [x] **Features**
+  - Genuine `.xlsx` package (`[Content_Types].xml`, `_rels/.rels`, `xl/workbook.xml`, `xl/_rels/workbook.xml.rels`, `xl/worksheets/sheet1.xml`) built with COOLJAPAN's pure-Rust `oxiarc-archive` crate (`oxiarc_archive::zip::ZipWriter`)
+  - Replaces the previous CSV-with-`.xlsx`-extension placeholder
+  - Selected via the `ExportFormat::Excel` variant on `DataExportManager`
+
+**Example:**
+```rust
+use trustformers_debug::data_export::{
+    DataExportManager, ExportConfig, ExportFormat, ExportableData, ExportOptions,
+};
+
+let mut manager = DataExportManager::new(ExportConfig::default());
+
+// `export_data: Vec<ExportableData>` populated from your debug session
+let job_id = manager.start_export(
+    "debug_metrics".to_string(),
+    export_data,
+    ExportFormat::Excel,
+    "report.xlsx".to_string(),
+    ExportOptions::default(),
+)?;
+```
+
+---
+
 ## Known Limitations
 
 - Some visualizations require the `visual` feature flag (GUI environment)
 - Large models may take time to visualize
 - GPU profiling requires CUDA/ROCm support
+- `cuda`/`rocm`/`tpu` feature flags are placeholders for future GPU/TPU backends; today they only change which hardware-specific recommendation text `performance_tuning::PerformanceTuner` surfaces, not actual GPU/TPU kernel execution
 - Interactive debugging may slow down execution
 - `wasm` feature disables filesystem I/O; use in-memory buffers only
 
@@ -537,7 +690,7 @@ cargo run --example interactive_debug
 
 ---
 
-**Last Updated:** 2026-06-24 - v0.1.3 Development
+**Last Updated:** 2026-07-02 - v0.1.4 Development
 **Status:** Alpha - core features implemented, API may change
-**Tests:** 323 (100% pass rate)
-**Tools:** Profiling, flame graphs, visualization (Plotters/Ratatui/TensorBoard), analysis, AI code analysis, VS Code integration, Perfetto/Tracy export, lock-free ring buffer, SSE streaming dashboard
+**Tests:** ~899 (100% pass rate)
+**Tools:** Profiling, flame graphs, visualization (Plotters/Ratatui/TensorBoard), analysis, interpretability (SHAP/LIME/attribution/counterfactual/attention), simulation & robustness testing, guided debugger, tutorial mode, AI code analysis, VS Code integration, Excel/.xlsx (real OOXML), Perfetto/Tracy export, lock-free ring buffer, SSE streaming dashboard

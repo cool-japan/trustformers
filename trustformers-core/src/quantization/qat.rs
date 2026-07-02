@@ -362,10 +362,13 @@ impl FakeQuantLayer {
             self.zero_point = Some(zero_point);
         }
 
-        // Safe: scale and zero_point are set in the block above if None
-        let scale = self.scale.expect("scale should be set after observer initialization");
-        let zero_point =
-            self.zero_point.expect("zero_point should be set after observer initialization");
+        // scale and zero_point are set in the block above if they were None
+        let scale = self.scale.ok_or_else(|| {
+            crate::errors::runtime_error("scale should be set after observer initialization")
+        })?;
+        let zero_point = self.zero_point.ok_or_else(|| {
+            crate::errors::runtime_error("zero_point should be set after observer initialization")
+        })?;
 
         // Apply fake quantization with straight-through estimator
         self.fake_quantize(tensor, scale, zero_point)

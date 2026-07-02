@@ -137,12 +137,23 @@ impl TextProcessor {
     /// Extract sentences from text
     pub fn extract_sentences(text: &str) -> Vec<String> {
         // Simple sentence splitting on common sentence endings
-        let sentence_regex = Regex::new(r"[.!?]+\s+").expect("static regex pattern is valid");
-        sentence_regex
-            .split(text)
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| s.trim().to_string())
-            .collect()
+        match Regex::new(r"[.!?]+\s+") {
+            Ok(sentence_regex) => sentence_regex
+                .split(text)
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().to_string())
+                .collect(),
+            // Pattern is a compile-time constant; on the unreachable error path,
+            // fall back to treating the whole input as a single sentence.
+            Err(_) => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![trimmed.to_string()]
+                }
+            },
+        }
     }
 
     /// Count words in text

@@ -5,8 +5,9 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use oxisql_sqlite_compat::blocking::SqliteConnectionBlocking;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 /// Data export manager for debugging tools
@@ -595,16 +596,71 @@ impl DataExportManager {
         Ok(())
     }
 
-    /// Export to SQLite database
+    /// Export to a real SQLite database file.
+    ///
+    /// Uses the COOLJAPAN Pure-Rust `oxisql-sqlite-compat` backend (a C-free fork
+    /// of Limbo) — never `libsqlite3`/`rusqlite`. Each [`ExportableData`] item is
+    /// written into its own table:
+    ///
+    /// * [`ExportDataContent::Table`] → a table with one column per header,
+    ///   with SQL column types taken from the explicit `column_types` map or
+    ///   inferred from the data (`INTEGER` / `REAL` / `TEXT`).
+    /// * [`ExportDataContent::TimeSeries`] → a table with a `timestamp` column
+    ///   plus one `REAL` column per series.
+    /// * Any other content → a single-column `content TEXT` table holding the
+    ///   JSON serialization so nothing is silently dropped.
     fn export_sqlite(
         &mut self,
         data: &[ExportableData],
         output_path: &str,
-        _options: &ExportOptions,
+        options: &ExportOptions,
     ) -> Result<()> {
-        // This would use rusqlite or similar library
-        // For now, we'll create a JSON file as a placeholder
-        self.export_json(data, output_path, _options)
+        // Create the database file fresh so the export is deterministic.
+        if std::path::Path::new(output_path).exists() {
+            std::fs::remove_file(output_path).map_err(|e| {
+                anyhow::anyhow!("failed to clear existing SQLite file '{output_path}': {e}")
+            })?;
+        }
+
+        let conn = SqliteConnectionBlocking::open(output_path)
+            .map_err(|e| anyhow::anyhow!("failed to open SQLite database '{output_path}': {e}"))?;
+
+        let mut used_names: HashSet<String> = HashSet::new();
+        for (index, item) in data.iter().enumerate() {
+            let table_name = unique_table_name(&item.name, index, &mut used_names);
+            match &item.content {
+                ExportDataContent::Table(table) => {
+                    write_sqlite_table(
+                        &conn,
+                        &table_name,
+                        &table.headers,
+                        &table.rows,
+                        &table.column_types,
+                    )?;
+                },
+                ExportDataContent::TimeSeries(ts) => {
+                    write_sqlite_timeseries(&conn, &table_name, ts, options)?;
+                },
+                other => {
+                    let json = serde_json::to_string(other)?;
+                    conn.execute(
+                        &format!("CREATE TABLE IF NOT EXISTS \"{table_name}\" (content TEXT)"),
+                        &[],
+                    )
+                    .map_err(|e| anyhow::anyhow!("CREATE TABLE '{table_name}' failed: {e}"))?;
+                    conn.execute(
+                        &format!(
+                            "INSERT INTO \"{table_name}\" (content) VALUES ({})",
+                            quote_sql_string(&json)
+                        ),
+                        &[],
+                    )
+                    .map_err(|e| anyhow::anyhow!("INSERT into '{table_name}' failed: {e}"))?;
+                },
+            }
+        }
+
+        Ok(())
     }
 
     /// Helper function to format values for CSV
@@ -905,6 +961,205 @@ fn build_xlsx_sheet(rows: &[Vec<XlsxCell>]) -> String {
     sheet
 }
 
+// ── SQLite export helpers ───────────────────────────────────────────────────────
+
+/// Sanitize an arbitrary name into a safe, double-quotable SQL identifier.
+///
+/// Non-alphanumeric characters become `_`; a leading non-alphabetic character is
+/// prefixed so the identifier is always valid.
+fn sanitize_sql_identifier(name: &str) -> String {
+    let mut sanitized: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .collect();
+    let needs_prefix = sanitized
+        .chars()
+        .next()
+        .map(|c| !(c.is_ascii_alphabetic() || c == '_'))
+        .unwrap_or(true);
+    if needs_prefix {
+        sanitized = format!("t_{sanitized}");
+    }
+    sanitized
+}
+
+/// Produce a collision-free table name for the export, recording it in `used`.
+fn unique_table_name(name: &str, index: usize, used: &mut HashSet<String>) -> String {
+    let base = sanitize_sql_identifier(name);
+    if used.insert(base.clone()) {
+        return base;
+    }
+    let candidate = format!("{base}_{index}");
+    used.insert(candidate.clone());
+    candidate
+}
+
+/// Quote and escape a string for use as a SQL string literal.
+fn quote_sql_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+/// Convert a single JSON value into an inline SQL literal.
+///
+/// * `null`  → `NULL`
+/// * `bool`  → `1` / `0` (SQLite has no native boolean)
+/// * number  → verbatim numeric literal
+/// * string  → single-quote-escaped string literal
+/// * array / object → JSON text stored as a string literal
+fn json_value_to_sql_literal(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "NULL".to_string(),
+        serde_json::Value::Bool(b) => if *b { "1" } else { "0" }.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => quote_sql_string(s),
+        other => quote_sql_string(&other.to_string()),
+    }
+}
+
+/// Infer a SQL column affinity (`INTEGER` / `REAL` / `TEXT`) from the data in a
+/// column when no explicit [`ColumnType`] is supplied.
+fn infer_sql_column_type(rows: &[Vec<serde_json::Value>], col: usize) -> &'static str {
+    let mut integers = 0usize;
+    let mut floats = 0usize;
+    let mut bools = 0usize;
+    let mut others = 0usize;
+    for row in rows {
+        match row.get(col) {
+            None | Some(serde_json::Value::Null) => {},
+            Some(serde_json::Value::Number(n)) => {
+                if n.is_i64() || n.is_u64() {
+                    integers += 1;
+                } else {
+                    floats += 1;
+                }
+            },
+            Some(serde_json::Value::Bool(_)) => bools += 1,
+            Some(_) => others += 1,
+        }
+    }
+    if others > 0 {
+        "TEXT"
+    } else if floats > 0 {
+        "REAL"
+    } else if integers > 0 || bools > 0 {
+        "INTEGER"
+    } else {
+        "TEXT"
+    }
+}
+
+/// Map an explicit [`ColumnType`] to its SQL affinity.
+fn column_type_to_sql(column_type: &ColumnType) -> &'static str {
+    match column_type {
+        ColumnType::Integer | ColumnType::Boolean => "INTEGER",
+        ColumnType::Float => "REAL",
+        ColumnType::Binary => "BLOB",
+        ColumnType::String | ColumnType::DateTime => "TEXT",
+    }
+}
+
+/// Create and populate a SQLite table from [`TableData`].
+fn write_sqlite_table(
+    conn: &SqliteConnectionBlocking,
+    table_name: &str,
+    headers: &[String],
+    rows: &[Vec<serde_json::Value>],
+    column_types: &HashMap<String, ColumnType>,
+) -> Result<()> {
+    if headers.is_empty() {
+        return Ok(());
+    }
+
+    let column_idents: Vec<String> = headers.iter().map(|h| sanitize_sql_identifier(h)).collect();
+    let column_defs: Vec<String> = headers
+        .iter()
+        .enumerate()
+        .map(|(idx, header)| {
+            let sql_type = column_types
+                .get(header)
+                .map(column_type_to_sql)
+                .unwrap_or_else(|| infer_sql_column_type(rows, idx));
+            format!("\"{}\" {}", column_idents[idx], sql_type)
+        })
+        .collect();
+
+    let create = format!(
+        "CREATE TABLE IF NOT EXISTS \"{table_name}\" ({})",
+        column_defs.join(", ")
+    );
+    conn.execute(&create, &[])
+        .map_err(|e| anyhow::anyhow!("CREATE TABLE '{table_name}' failed: {e}"))?;
+
+    let column_list =
+        column_idents.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ");
+
+    for row in rows {
+        let values: Vec<String> = (0..headers.len())
+            .map(|idx| match row.get(idx) {
+                Some(value) => json_value_to_sql_literal(value),
+                None => "NULL".to_string(),
+            })
+            .collect();
+        let insert = format!(
+            "INSERT INTO \"{table_name}\" ({column_list}) VALUES ({})",
+            values.join(", ")
+        );
+        conn.execute(&insert, &[])
+            .map_err(|e| anyhow::anyhow!("INSERT into '{table_name}' failed: {e}"))?;
+    }
+
+    Ok(())
+}
+
+/// Create and populate a SQLite table from [`TimeSeriesData`].
+fn write_sqlite_timeseries(
+    conn: &SqliteConnectionBlocking,
+    table_name: &str,
+    ts: &TimeSeriesData,
+    options: &ExportOptions,
+) -> Result<()> {
+    // Deterministic series ordering.
+    let mut series_names: Vec<String> = ts.series.keys().cloned().collect();
+    series_names.sort();
+
+    let mut column_defs = vec!["\"timestamp\" TEXT".to_string()];
+    for name in &series_names {
+        column_defs.push(format!("\"{}\" REAL", sanitize_sql_identifier(name)));
+    }
+    let create = format!(
+        "CREATE TABLE IF NOT EXISTS \"{table_name}\" ({})",
+        column_defs.join(", ")
+    );
+    conn.execute(&create, &[])
+        .map_err(|e| anyhow::anyhow!("CREATE TABLE '{table_name}' failed: {e}"))?;
+
+    let mut column_list = vec!["\"timestamp\"".to_string()];
+    for name in &series_names {
+        column_list.push(format!("\"{}\"", sanitize_sql_identifier(name)));
+    }
+    let column_list = column_list.join(", ");
+
+    for (i, timestamp) in ts.timestamps.iter().enumerate() {
+        let mut values = vec![quote_sql_string(
+            &timestamp.format(&options.date_format).to_string(),
+        )];
+        for name in &series_names {
+            match ts.series.get(name).and_then(|series| series.get(i)) {
+                Some(value) => values.push(value.to_string()),
+                None => values.push("NULL".to_string()),
+            }
+        }
+        let insert = format!(
+            "INSERT INTO \"{table_name}\" ({column_list}) VALUES ({})",
+            values.join(", ")
+        );
+        conn.execute(&insert, &[])
+            .map_err(|e| anyhow::anyhow!("INSERT into '{table_name}' failed: {e}"))?;
+    }
+
+    Ok(())
+}
+
 /// Export statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportStatistics {
@@ -1170,6 +1425,74 @@ mod tests {
         assert!(sheet_xml.contains("id"), "sheet missing header text");
         assert!(sheet_xml.contains("value"), "sheet missing header text");
         assert!(sheet_xml.contains("timestamp"), "sheet missing header text");
+
+        let _ = std::fs::remove_file(&output_path);
+    }
+
+    #[test]
+    // 3.14 is test data from create_test_data(), not an approximation of PI.
+    #[allow(clippy::approx_constant)]
+    fn test_sqlite_export_roundtrip() {
+        let config = ExportConfig::default();
+        let mut manager = DataExportManager::new(config);
+        let test_data = create_test_data();
+
+        let file_name = format!("trustformers_sqlite_test_{}.sqlite3", Uuid::new_v4());
+        let output_path = std::env::temp_dir().join(file_name).to_string_lossy().to_string();
+
+        let job_id = manager
+            .start_export(
+                "Test SQLite Export".to_string(),
+                test_data,
+                ExportFormat::Sqlite,
+                output_path.clone(),
+                ExportOptions::default(),
+            )
+            .expect("sqlite export should succeed");
+
+        // The job must have completed (not silently failed back to JSON).
+        let status = manager.get_job_status(job_id).expect("job should exist");
+        assert!(
+            matches!(status.status, ExportStatus::Completed),
+            "export status = {:?}",
+            status.status
+        );
+        assert!(
+            std::path::Path::new(&output_path).exists(),
+            "sqlite file should exist"
+        );
+
+        // Re-open the real SQLite file and read the rows back.
+        let conn = SqliteConnectionBlocking::open(&output_path).expect("open sqlite file");
+        let tables = conn.tables().expect("list tables");
+        assert!(!tables.is_empty(), "expected at least one table");
+
+        // create_test_data() names the item "Test Data" -> sanitized "Test_Data".
+        let rows = conn
+            .query(
+                "SELECT \"id\", \"value\", \"timestamp\" FROM \"Test_Data\"",
+                &[],
+            )
+            .expect("query rows back");
+        assert_eq!(rows.len(), 2, "two rows should persist");
+
+        // Collect ids to verify both rows persisted regardless of row order.
+        let mut ids: Vec<i64> = rows
+            .iter()
+            .map(|r| r.try_get::<i64>("id").expect("id column is INTEGER"))
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 2]);
+
+        // Find the row with id == 1 and verify the float + string columns.
+        let first = rows
+            .iter()
+            .find(|r| r.try_get::<i64>("id").map(|v| v == 1).unwrap_or(false))
+            .expect("row with id=1");
+        let value: f64 = first.try_get("value").expect("value column is REAL");
+        assert!((value - 3.14).abs() < 1e-9, "value = {value}");
+        let timestamp: String = first.try_get("timestamp").expect("timestamp column is TEXT");
+        assert_eq!(timestamp, "2023-01-01T12:00:00Z");
 
         let _ = std::fs::remove_file(&output_path);
     }

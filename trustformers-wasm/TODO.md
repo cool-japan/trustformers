@@ -2,7 +2,7 @@
 
 ## Overview
 
-The `trustformers-wasm` crate enables browser and edge deployment of transformer models via WebAssembly. It provides comprehensive WebGPU acceleration, SIMD optimization, and production-ready infrastructure for running transformer models in web browsers, edge runtimes, and mobile web environments.
+The `trustformers-wasm` crate enables browser and edge deployment of transformer models via WebAssembly. It provides WebGPU acceleration, SIMD optimization, and production-ready infrastructure for running transformer models in web browsers, edge runtimes, and mobile web environments.
 
 **Key Responsibilities:**
 - WebAssembly compilation and optimization
@@ -18,22 +18,24 @@ The `trustformers-wasm` crate enables browser and edge deployment of transformer
 
 ## Current Status
 
-**Version:** 0.1.3 | **Date:** 2026-06-24 | **Status:** Stable
+**Version:** 0.1.4 | **Date:** 2026-07-02 | **Status:** Stable
 
 ### Implementation Status
 ✅ **STABLE** - Complete WASM infrastructure
-✅ **WEBGPU ENABLED** - Full GPU acceleration in browsers (wgpu 29.0)
+✅ **WEBGPU (web-sys-based)** - Browser WebGPU compute via web-sys/js-sys bindings (no wgpu crate); real CPU fallback; see "WebGPU Notes" for which dispatch path is fully wired vs. still CPU-backed
 ✅ **EDGE OPTIMIZED** - Multi-platform edge runtime support
 ✅ **FRAMEWORK INTEGRATED** - React, Vue, Angular, Web Components support
 ✅ **MOBILE OPTIMIZED** - Battery and network-aware deployment
-✅ **128 TESTS PASSING** - 100% test success rate
+✅ **~130 TESTS PASSING** - 100% pass rate for this crate (see Testing and Validation section for the workspace-wide figure)
 ✅ **BERT WASM MODEL** - Complete BERT implementation in WASM
 ✅ **STREAMING INFERENCE** - Token-by-token streaming generation
 ✅ **INDEXEDDB CACHING** - Persistent model and KV-cache storage
-✅ **SCIRS2 INTEGRATION** - scirs2-core tensor operations
+✅ **SCIRS2 (optional dependency)** - scirs2-core wired in behind the scirs2 feature; not yet consumed by in-crate tensor ops
+
+Workspace-wide (`cargo nextest run --workspace --all-features`, 2026-07-01): 18,102 passed / 0 failed / 119 skipped; 0 clippy warnings; 0 rustdoc warnings. This crate contributes ~130 of those passing tests.
 
 ### Feature Coverage
-- **WebGPU (wgpu 29.0):** Complete compute shaders, memory management, kernel fusion; `InstanceDescriptor::new_without_display_handle()`, `bind_group_layouts: &[Option<&BindGroupLayout>]`
+- **WebGPU:** Browser WebGPU via web-sys/js-sys bindings (no wgpu crate); compute shaders, buffer pooling, kernel-fusion source, real CPU fallback — see "WebGPU Notes" for dispatch-path completeness
 - **WASM:** SIMD128, threads, streaming compilation, binary optimization, memory64
 - **Edge:** Cloudflare Workers, Deno Deploy, Vercel Edge, AWS Lambda@Edge
 - **Mobile:** Adaptive loading, touch gestures, camera integration, battery optimization
@@ -508,11 +510,11 @@ const optimized = await autoQuantize(model, {
 **Cross-browser and performance testing**
 
 - ✅ **Test Coverage**
-  - 128 unit tests (100% pass rate)
-  - Cross-browser tests (Chrome, Firefox, Safari)
-  - Performance benchmarks
-  - Memory leak detection
-  - Visual regression testing
+  - ~130 Rust unit tests (100% pass rate; plain `#[test]`, run via `cargo test`/`cargo nextest` on the host target — see "Development Guidelines" for commands)
+  - Cross-browser tests (Chrome, Firefox, Safari) — separate JS suite (`tests/*.js`, Playwright/Jest)
+  - Performance benchmarks — separate JS suite
+  - Memory leak detection — separate JS suite
+  - Visual regression testing — separate JS suite
 
 - ✅ **Integration Tests**
   - Framework integration (React, Vue, Angular, Svelte)
@@ -522,13 +524,30 @@ const optimized = await autoQuantize(model, {
 
 ---
 
+## WebGPU Notes
+
+This crate has **no dependency on the native `wgpu` crate**. WebGPU support is implemented by calling the browser's WebGPU API directly through hand-written `web-sys`/`js-sys` bindings:
+
+- **Types**: `GpuAdapter`, `GpuDevice`, `GpuQueue`, etc. are `js_sys::Object` aliases (`src/compute/webgpu/types.rs`), with extension traits (`GpuDeviceExt`, `GpuAdapterExt`, `GpuQueueExt`, `GpuBufferExt`) that use JS reflection for methods web-sys doesn't bind natively.
+- **Device negotiation**: `navigator.gpu` → `requestAdapter()` → `requestDevice()`, each awaited via `wasm_bindgen_futures::JsFuture` with explicit null/undefined checks (`GpuTensor::init_webgpu` in `src/compute/gpu_tensor.rs`; `WebGPUOps::initialize` in `src/compute/webgpu_simple.rs`).
+- **Shared backend handle**: the negotiated backend is wrapped in `Rc<RefCell<WebGPUBackend>>` (`src/compute/gpu_tensor.rs`) for cheap sharing across derived tensors plus interior mutability for pipeline caching; `RefCell` borrows are scoped so none is ever held across an `.await`.
+- **CPU fallback is real** at multiple levels: `WebGPUBackend::is_available()` probes for `navigator.gpu` before attempting GPU init; `GpuTensorFactory::create_tensor` falls back silently on any initialization error; per-op methods on `GpuTensor` (`matmul`/`add`/`relu`) route to CPU tensor math whenever no GPU backend is active.
+- **Two dispatch paths of different completeness** coexist — know which one you're using:
+  - `WebGPUOps` (`src/compute/webgpu_simple.rs`) is fully wired end-to-end: it compiles 7 real WGSL compute shaders (matmul, add, relu, sigmoid, tanh, gelu, softmax), builds storage buffers/bind groups/command encoders, dispatches compute passes, and reads results back via a staging buffer + `map_async`/`getMappedRange`.
+  - `WebGPUBackend`/`SimpleGpuOps` (`src/compute/webgpu/backend.rs`, `simple_ops.rs`) — the path behind the `Rc<RefCell>`-wrapped `GpuTensor` — allocate real GPU buffers and pipelines, but their dispatch methods (`dispatch_add`/`dispatch_relu`/`dispatch_matmul`, and `SimpleGpuOps::matmul`/`softmax`/`layer_norm`/`attention`) currently execute the CPU fallback path by explicit documented design; GPU dispatch for these ops isn't wired in yet.
+  - **Recommendation**: use `WebGPUOps` directly if you need guaranteed end-to-end GPU execution today; `GpuTensor` is convenient but currently CPU-backed for most ops even when a GPU device was successfully acquired.
+
+---
+
 ## Known Limitations
 
 - WebGPU not available in all browsers yet (Chrome 113+, Edge 113+, Safari experimental)
 - SharedArrayBuffer requires cross-origin isolation
 - SIMD requires browser support for WASM SIMD128
-- Some WebGPU features limited by web-sys 0.3.77 API availability
+- Some WebGPU features limited by web-sys 0.3.95 API availability
 - Large models may require quantization for browser deployment
+- `WebGPUBackend`/`SimpleGpuOps` (the dispatch path behind `GpuTensor`) currently execute the CPU fallback for matmul/add/relu/softmax/layer_norm/attention by documented design — use `WebGPUOps` directly for guaranteed end-to-end GPU dispatch today (see "WebGPU Notes")
+- 0 `todo!()`/`unimplemented!()` macros in source, but several documented simplifications remain (none block compilation or panic): a no-op cache-clear recovery action (`src/error.rs`), fixed-bytes-per-element quantization stats (`src/optimization/quantization/quantizer.rs`), hardcoded device-capability probes (`src/device_capability/detector.rs`), fixed-constant (non-bit-width-aware) basic quantization math (`src/optimization/quantization/algorithms/basic.rs`), synthesized `blob:`/`data:` URLs in place of `URL.createObjectURL()` (`src/storage/model_splitting.rs`, `src/compute/threads.rs`), and default (non-queried) device capabilities (`src/compute/webgpu/mod.rs`)
 
 ---
 
@@ -543,6 +562,15 @@ const optimized = await autoQuantize(model, {
   - **Note:** BitsAndBytes is Python-only. Consider: Pure Rust quantization equivalents already in trustformers-core.
 - [ ] WebNN maturity tracking (currently experimental)
   - **Refinement needed:** this is a browser-spec tracking task, not implementation. Define: which WebNN API level (currently at CR status)? Target browsers?
+
+### Correctness & De-Simplification
+- [ ] Wire real GPU dispatch into `WebGPUBackend`/`SimpleGpuOps` (`dispatch_add`/`dispatch_relu`/`dispatch_matmul` in `backend.rs`; `matmul`/`softmax`/`layer_norm`/`attention` in `simple_ops.rs`) — currently CPU fallback by documented design; `WebGPUOps` in `webgpu_simple.rs` already does this end-to-end and can serve as the reference implementation
+- [ ] Implement real cache clearing for `RecoveryAction::ClearCache` (`src/error.rs`) instead of the current no-op
+- [ ] Make quantization `get_stats()` bit-width-aware instead of assuming a fixed 4 bytes/element (`src/optimization/quantization/quantizer.rs`)
+- [ ] Replace hardcoded/simplified device-capability probes (`detect_webgl_support`, `detect_low_power_mode`, `get_screen_orientation`, and related helpers) with real detection (`src/device_capability/detector.rs`)
+- [ ] Implement real bit-width-aware math in `apply_dynamic_quantization`/`apply_static_quantization`/`apply_post_training_quantization` instead of fixed-constant scaling (0.5/0.75/0.8) (`src/optimization/quantization/algorithms/basic.rs`)
+- [ ] Use real `URL.createObjectURL()` once available in web-sys instead of synthesized `blob:`/`data:` URL strings (`src/storage/model_splitting.rs`, `src/compute/threads.rs`)
+- [ ] Query real adapter limits in `get_device_capabilities()` instead of returning `DeviceCapabilities::default()` (`src/compute/webgpu/mod.rs`)
 
 ### Performance
 - [ ] Multi-Query Attention optimization (MQA reduces KV memory in WASM context)
@@ -562,7 +590,7 @@ const optimized = await autoQuantize(model, {
 
 ### Code Standards
 - **TypeScript:** All public APIs have TypeScript definitions
-- **Testing:** Use wasm-pack test for unit tests, Playwright for browser tests
+- **Testing:** Plain `cargo test`/`cargo nextest` (host target) for the ~130 in-source Rust unit tests; Playwright/Jest (`tests/*.js`) for the separate browser/E2E suite
 - **Documentation:** Comprehensive inline documentation
 - **Naming:** snake_case for Rust, camelCase for JavaScript/TypeScript
 
@@ -581,17 +609,22 @@ wasm-pack build --target nodejs --release
 # Minimal build (size-optimized)
 wasm-pack build --target web --release -- --features minimal
 
-# Full build (all features)
+# Full build (all features except webgpu; combine with --features full,webgpu for GPU too)
 wasm-pack build --target web --release -- --features full
 
-# Run tests
-wasm-pack test --headless --firefox --chrome
+# Run the Rust unit tests (host target; no browser required)
+cargo test
+cargo nextest run
 
 # Run with specific features
-cargo test --target wasm32-unknown-unknown --features webgpu
+cargo test --features webgpu
 
-# Check compilation
+# Check that the actual wasm32 build compiles
 cargo check --target wasm32-unknown-unknown
+
+# Run the browser/E2E JS suite (from tests/)
+cd tests && npm test               # Jest-based suite
+cd tests && npx playwright test    # Playwright cross-browser/e2e suite
 
 # Optimize WASM binary
 wasm-opt -Oz -o optimized.wasm input.wasm
@@ -624,34 +657,34 @@ brotli -c pkg/trustformers_wasm_bg.wasm | wc -c
 
 ### Feature Flags
 
+The real feature set, verbatim from `Cargo.toml` (see README.md's "Feature Flags" section for a one-line description of each):
+
 ```toml
 [features]
-default = ["webgpu", "simd"]
-
-# Core features
-minimal = []
-full = ["webgpu", "simd", "threads", "memory64", "plugins"]
-
-# GPU acceleration
-webgpu = ["web-sys/Gpu*"]
-
-# SIMD optimization
-simd = []
-
-# Parallel processing
-threads = ["web-sys/SharedArrayBuffer"]
-
-# Large model support
+default = ["console_panic", "dlmalloc-alloc"]
+size-optimized = ["dlmalloc-alloc", "console_panic"]
+performance-optimized = ["dlmalloc-alloc", "kernel-fusion", "async-executor", "scirs2"]
+console_panic = ["console_error_panic_hook"]
+webgpu = []
+web-workers = []
+shared-memory = []
+kernel-fusion = []
+async-executor = []
+indexeddb = []
 memory64 = []
-
-# Plugin system
-plugins = []
-
-# Framework integrations
-react = []
-vue = []
-angular = []
-svelte = []
+streaming-loader = []
+model-splitting = []
+react-components = []
+vue-components = []
+angular-components = []
+web-components = []
+playground = []
+streaming-generation = []
+mobile-optimization = []
+dlmalloc-alloc = ["dlmalloc"]
+scirs2 = ["scirs2-core"]
+minimal = ["dlmalloc-alloc"]
+full = ["web-workers", "shared-memory", "kernel-fusion", "async-executor", "indexeddb", "memory64", "streaming-loader", "model-splitting", "react-components", "vue-components", "angular-components", "web-components", "playground", "streaming-generation", "mobile-optimization", "scirs2", "dlmalloc-alloc"]
 ```
 
 ---
@@ -667,9 +700,9 @@ svelte = []
 
 ---
 
-**Last Updated:** 2026-06-24
-**Version:** 0.1.3
+**Last Updated:** 2026-07-02
+**Version:** 0.1.4
 **Status:** Stable
-**Test Suite:** 128 tests, 100% pass rate
-**SLoC:** 55,504
-**Key Features:** WebGPU backend (50-100x speedup, wgpu 29.0), Web Workers, IndexedDB caching, BERT WASM model, React/Vue/Angular/Web Components, streaming inference, SIMD, WebNN, GGUF quantization, kernel fusion, memory coalescing, progressive loading, Core ML export
+**Test Suite:** ~130 tests, 100% pass rate (workspace-wide `cargo nextest run --workspace --all-features` on 2026-07-01: 18,102 passed / 0 failed / 119 skipped; 0 clippy warnings; 0 rustdoc warnings)
+**SLoC:** 55,721
+**Key Features:** WebGPU backend (web-sys/js-sys based, no wgpu crate, real CPU fallback), Web Workers, IndexedDB caching, BERT WASM model, React/Vue/Angular/Web Components, streaming inference, SIMD, WebNN, GGUF quantization, kernel fusion, memory coalescing, progressive loading, Core ML export

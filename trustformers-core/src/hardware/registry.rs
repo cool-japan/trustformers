@@ -382,7 +382,7 @@ impl HardwareRegistry {
         let backend_id = format!("{}_{}", backend.name(), backend.version());
 
         // Check if backend already exists
-        let backends = self.backends.read().expect("Read lock poisoned");
+        let backends = self.backends.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         if backends.contains_key(&backend_id) {
             return Err(TrustformersError::invalid_config(format!(
                 "Backend {} already registered",
@@ -406,11 +406,12 @@ impl HardwareRegistry {
         };
 
         // Store backend and registration
-        let mut backends = self.backends.write().expect("Write lock poisoned");
+        let mut backends = self.backends.write().unwrap_or_else(|poisoned| poisoned.into_inner());
         backends.insert(backend_id.clone(), registration);
         drop(backends);
 
-        let mut backend_instances = self.backend_instances.write().expect("Write lock poisoned");
+        let mut backend_instances =
+            self.backend_instances.write().unwrap_or_else(|poisoned| poisoned.into_inner());
         backend_instances.insert(backend_id.clone(), backend);
         drop(backend_instances);
 
@@ -428,8 +429,9 @@ impl HardwareRegistry {
 
     /// Unregister hardware backend
     pub fn unregister_backend(&self, backend_id: &str) -> HardwareResult<()> {
-        let mut backends = self.backends.write().expect("Write lock poisoned");
-        let mut backend_instances = self.backend_instances.write().expect("Write lock poisoned");
+        let mut backends = self.backends.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut backend_instances =
+            self.backend_instances.write().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         if backends.remove(backend_id).is_none() {
             return Err(TrustformersError::model_error(format!(
@@ -454,13 +456,14 @@ impl HardwareRegistry {
 
     /// Get backend by ID
     pub fn get_backend(&self, backend_id: &str) -> Option<BackendRegistration> {
-        let backends = self.backends.read().expect("Read lock poisoned");
+        let backends = self.backends.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         backends.get(backend_id).cloned()
     }
 
     /// Get backend instance
     pub fn get_backend_instance(&self, backend_id: &str) -> Option<Box<dyn HardwareBackend>> {
-        let backend_instances = self.backend_instances.read().expect("Read lock poisoned");
+        let backend_instances =
+            self.backend_instances.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         // This is a simplified implementation
         // In practice, you'd need to implement proper cloning or use Arc<>
         None
@@ -468,13 +471,13 @@ impl HardwareRegistry {
 
     /// List all backends
     pub fn list_backends(&self) -> Vec<BackendRegistration> {
-        let backends = self.backends.read().expect("Read lock poisoned");
+        let backends = self.backends.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         backends.values().cloned().collect()
     }
 
     /// List backends by type
     pub fn list_backends_by_type(&self, hardware_type: HardwareType) -> Vec<BackendRegistration> {
-        let backends = self.backends.read().expect("Read lock poisoned");
+        let backends = self.backends.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         backends
             .values()
             .filter(|backend| backend.hardware_type == hardware_type)
@@ -484,7 +487,8 @@ impl HardwareRegistry {
 
     /// Get all backend instances
     pub fn get_backends(&self) -> Vec<Box<dyn HardwareBackend>> {
-        let backend_instances = self.backend_instances.read().expect("Read lock poisoned");
+        let backend_instances =
+            self.backend_instances.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         // This is a simplified implementation
         // In practice, you'd need to implement proper cloning or use Arc<>
         vec![]
@@ -499,7 +503,7 @@ impl HardwareRegistry {
         let device_id = device.device_id().to_string();
 
         // Check if device already exists
-        let devices = self.devices.read().expect("Read lock poisoned");
+        let devices = self.devices.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         if devices.contains_key(&device_id) {
             return Err(TrustformersError::invalid_config(format!(
                 "Device {} already registered",
@@ -523,7 +527,7 @@ impl HardwareRegistry {
         };
 
         // Store device registration
-        let mut devices = self.devices.write().expect("Write lock poisoned");
+        let mut devices = self.devices.write().unwrap_or_else(|poisoned| poisoned.into_inner());
         devices.insert(device_id.clone(), registration);
         drop(devices);
 
@@ -542,7 +546,7 @@ impl HardwareRegistry {
 
     /// Unregister device
     pub fn unregister_device(&self, device_id: &str) -> HardwareResult<()> {
-        let mut devices = self.devices.write().expect("Write lock poisoned");
+        let mut devices = self.devices.write().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         if devices.remove(device_id).is_none() {
             return Err(TrustformersError::model_error(format!(
@@ -565,19 +569,19 @@ impl HardwareRegistry {
 
     /// Get device registration
     pub fn get_device(&self, device_id: &str) -> Option<DeviceRegistration> {
-        let devices = self.devices.read().expect("Read lock poisoned");
+        let devices = self.devices.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         devices.get(device_id).cloned()
     }
 
     /// List all devices
     pub fn list_devices(&self) -> Vec<DeviceRegistration> {
-        let devices = self.devices.read().expect("Read lock poisoned");
+        let devices = self.devices.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         devices.values().cloned().collect()
     }
 
     /// List devices by type
     pub fn list_devices_by_type(&self, hardware_type: HardwareType) -> Vec<DeviceRegistration> {
-        let devices = self.devices.read().expect("Read lock poisoned");
+        let devices = self.devices.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         devices
             .values()
             .filter(|device| device.hardware_type == hardware_type)
@@ -594,7 +598,7 @@ impl HardwareRegistry {
         let operation_id = format!("{}_{}", operation.name(), backend_id);
 
         // Check if operation already exists
-        let operations = self.operations.read().expect("Read lock poisoned");
+        let operations = self.operations.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         if operations.contains_key(&operation_id) {
             return Err(TrustformersError::invalid_config(format!(
                 "Operation {} already registered",
@@ -616,7 +620,8 @@ impl HardwareRegistry {
         };
 
         // Store operation registration
-        let mut operations = self.operations.write().expect("Write lock poisoned");
+        let mut operations =
+            self.operations.write().unwrap_or_else(|poisoned| poisoned.into_inner());
         operations.insert(operation_id.clone(), registration);
         drop(operations);
 
@@ -637,9 +642,9 @@ impl HardwareRegistry {
     pub fn query(&self, query: &RegistryQuery) -> RegistryQueryResult {
         let start_time = std::time::Instant::now();
 
-        let backends = self.backends.read().expect("Read lock poisoned");
-        let devices = self.devices.read().expect("Read lock poisoned");
-        let operations = self.operations.read().expect("Read lock poisoned");
+        let backends = self.backends.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let devices = self.devices.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let operations = self.operations.read().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Filter backends
         let mut matching_backends: Vec<BackendRegistration> = backends
@@ -704,19 +709,21 @@ impl HardwareRegistry {
 
     /// Add event listener
     pub fn add_event_listener(&self, listener: Box<dyn RegistryEventListener>) {
-        let mut listeners = self.event_listeners.write().expect("Write lock poisoned");
+        let mut listeners =
+            self.event_listeners.write().unwrap_or_else(|poisoned| poisoned.into_inner());
         listeners.push(listener);
     }
 
     /// Remove event listener
     pub fn remove_event_listener(&self, listener_name: &str) {
-        let mut listeners = self.event_listeners.write().expect("Write lock poisoned");
+        let mut listeners =
+            self.event_listeners.write().unwrap_or_else(|poisoned| poisoned.into_inner());
         listeners.retain(|l| l.name() != listener_name);
     }
 
     /// Get registry statistics
     pub fn get_statistics(&self) -> RegistryStatistics {
-        let stats = self.statistics.read().expect("Read lock poisoned");
+        let stats = self.statistics.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         stats.clone()
     }
 
@@ -726,7 +733,7 @@ impl HardwareRegistry {
         device_id: &str,
         status: DeviceStatus,
     ) -> HardwareResult<()> {
-        let mut devices = self.devices.write().expect("Write lock poisoned");
+        let mut devices = self.devices.write().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         if let Some(device) = devices.get_mut(device_id) {
             let old_status = device.status;
@@ -756,7 +763,7 @@ impl HardwareRegistry {
         backend_id: &str,
         status: BackendStatus,
     ) -> HardwareResult<()> {
-        let mut backends = self.backends.write().expect("Write lock poisoned");
+        let mut backends = self.backends.write().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         if let Some(backend) = backends.get_mut(backend_id) {
             let old_status = backend.status;
@@ -782,7 +789,7 @@ impl HardwareRegistry {
 
     /// Get registry events
     pub fn get_events(&self, limit: Option<usize>) -> Vec<RegistryEvent> {
-        let events = self.events.read().expect("Read lock poisoned");
+        let events = self.events.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(limit) = limit {
             events.iter().rev().take(limit).cloned().collect()
         } else {
@@ -792,14 +799,14 @@ impl HardwareRegistry {
 
     /// Clear registry events
     pub fn clear_events(&self) {
-        let mut events = self.events.write().expect("Write lock poisoned");
+        let mut events = self.events.write().unwrap_or_else(|poisoned| poisoned.into_inner());
         events.clear();
     }
 
     /// Emit registry event
     fn emit_event(&self, event: RegistryEvent) {
         // Store event
-        let mut events = self.events.write().expect("Write lock poisoned");
+        let mut events = self.events.write().unwrap_or_else(|poisoned| poisoned.into_inner());
         events.push(event.clone());
 
         // Keep only last 1000 events
@@ -809,7 +816,8 @@ impl HardwareRegistry {
         drop(events);
 
         // Notify listeners
-        let listeners = self.event_listeners.read().expect("Read lock poisoned");
+        let listeners =
+            self.event_listeners.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         for listener in listeners.iter() {
             listener.handle_event(&event);
         }
@@ -817,11 +825,11 @@ impl HardwareRegistry {
 
     /// Update registry statistics
     fn update_statistics(&self) {
-        let backends = self.backends.read().expect("Read lock poisoned");
-        let devices = self.devices.read().expect("Read lock poisoned");
-        let operations = self.operations.read().expect("Read lock poisoned");
+        let backends = self.backends.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let devices = self.devices.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let operations = self.operations.read().unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let mut stats = self.statistics.write().expect("Write lock poisoned");
+        let mut stats = self.statistics.write().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         stats.total_backends = backends.len();
         stats.active_backends =

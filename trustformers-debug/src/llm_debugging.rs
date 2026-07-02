@@ -3,6 +3,10 @@
 //! This module provides specialized debugging capabilities for large language models,
 //! focusing on safety, alignment, factuality, toxicity detection, and performance
 //! characteristics specific to modern LLMs.
+// reason: debug/profiling scaffolding — structs are constructed and their fields/methods
+// are retained for the data model, serialization completeness, and future consumers that
+// do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
+#![allow(dead_code)]
 
 use anyhow::Result;
 // use scirs2_core::ndarray::*; // SciRS2 Integration Policy - was: use ndarray::{Array, ArrayD, IxDyn};
@@ -70,9 +74,7 @@ impl Default for LLMDebugConfig {
 
 /// Safety analyzer for detecting harmful, toxic, or inappropriate content
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct SafetyAnalyzer {
-    #[allow(dead_code)]
     toxic_patterns: HashSet<String>,
     harm_categories: Vec<HarmCategory>,
     safety_metrics: SafetyMetrics,
@@ -116,7 +118,6 @@ pub enum SafetyTrend {
 /// Factuality checker for verifying the accuracy of LLM outputs
 #[derive(Debug)]
 pub struct FactualityChecker {
-    #[allow(dead_code)]
     fact_databases: Vec<String>,
     uncertainty_indicators: HashSet<String>,
     factuality_metrics: FactualityMetrics,
@@ -135,10 +136,8 @@ pub struct FactualityMetrics {
 }
 
 /// Alignment monitor for ensuring LLM outputs align with intended behavior
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct AlignmentMonitor {
-    #[allow(dead_code)]
     alignment_objectives: Vec<AlignmentObjective>,
     alignment_metrics: AlignmentMetrics,
     value_alignment_score: f32,
@@ -177,11 +176,9 @@ pub enum AlignmentTrend {
     Inconsistent,
 }
 
-#[allow(dead_code)]
 /// Hallucination detector for identifying false or fabricated information
 #[derive(Debug)]
 pub struct HallucinationDetector {
-    #[allow(dead_code)]
     confidence_thresholds: HashMap<String, f32>,
     consistency_checker: ConsistencyChecker,
     hallucination_metrics: HallucinationMetrics,
@@ -203,15 +200,12 @@ pub struct HallucinationMetrics {
 #[derive(Debug)]
 pub struct ConsistencyChecker {
     previous_responses: Vec<String>,
-    #[allow(dead_code)]
     consistency_cache: HashMap<String, f32>,
 }
-#[allow(dead_code)]
 
 /// Bias detector for identifying various forms of bias in LLM outputs
 #[derive(Debug)]
 pub struct BiasDetector {
-    #[allow(dead_code)]
     bias_categories: Vec<BiasCategory>,
     demographic_groups: Vec<String>,
     bias_metrics: BiasMetrics,
@@ -250,7 +244,6 @@ pub struct LLMPerformanceProfiler {
     generation_metrics: GenerationMetrics,
     efficiency_metrics: EfficiencyMetrics,
     quality_metrics: QualityMetrics,
-    #[allow(dead_code)]
     scalability_metrics: ScalabilityMetrics,
 }
 
@@ -337,9 +330,7 @@ pub struct DialogMetrics {
 
 /// Context tracking for conversation continuity
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct ContextTracker {
-    #[allow(dead_code)]
     active_topics: HashSet<String>,
     entity_mentions: HashMap<String, usize>,
     context_window: Vec<String>,

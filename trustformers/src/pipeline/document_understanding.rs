@@ -572,24 +572,24 @@ where
     fn is_structured_value(&self, value: &str) -> bool {
         // Date patterns
         if regex::Regex::new(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}")
-            .expect("static regex pattern is valid")
-            .is_match(value)
+            .map(|re| re.is_match(value))
+            .unwrap_or(false)
         {
             return true;
         }
 
         // Email pattern
         if regex::Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b")
-            .expect("static regex pattern is valid")
-            .is_match(value)
+            .map(|re| re.is_match(value))
+            .unwrap_or(false)
         {
             return true;
         }
 
         // Phone number pattern
         if regex::Regex::new(r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b")
-            .expect("static regex pattern is valid")
-            .is_match(value)
+            .map(|re| re.is_match(value))
+            .unwrap_or(false)
         {
             return true;
         }

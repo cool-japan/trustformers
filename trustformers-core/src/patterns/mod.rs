@@ -290,7 +290,6 @@ pub mod examples {
     }
 
     /// Example usage function showing how to use the standardized patterns
-    #[allow(dead_code)]
     pub fn example_usage() -> crate::errors::Result<ExampleConfig> {
         let config = ExampleConfig {
             custom_setting: "example_value".to_string(),

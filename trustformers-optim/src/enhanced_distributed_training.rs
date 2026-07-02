@@ -19,13 +19,15 @@
 //! ## Usage Example
 //!
 //! ```rust,no_run
-//! use trustformers_optim::{AveragedAdam, EnhancedDistributedTrainer};
-//! use trustformers_core::traits::Optimizer;
+//! use trustformers_optim::{AveragedAdam, CompressionType, DistributedConfig, EnhancedDistributedTrainer};
+//! # use std::collections::HashMap;
+//! # use trustformers_core::tensor::Tensor;
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create distributed configuration
 //! let config = DistributedConfig::new()
 //!     .with_gpus(8)
-//!     .with_gradient_compression(CompressionType::PowerSGD)
+//!     .with_gradient_compression(CompressionType::PowerSGD { rank: 4 })
 //!     .with_dynamic_batching(true)
 //!     .with_fault_tolerance(true);
 //!
@@ -36,13 +38,21 @@
 //! let mut trainer = EnhancedDistributedTrainer::new(config, optimizer)?;
 //!
 //! // Register model parameters
+//! # let model_parameters: HashMap<String, Tensor> = HashMap::new();
 //! trainer.register_model(model_parameters)?;
 //!
 //! // Training loop with automatic optimization
+//! # let data_loader: Vec<HashMap<String, Tensor>> = Vec::new();
 //! for batch in data_loader {
 //!     trainer.train_step(batch)?;
 //! }
+//! # Ok(())
+//! # }
 //! ```
+
+// reason: research-stage module — reserved API/scaffolding fields and methods
+// retained intentionally for in-progress features; not yet on active call paths.
+#![allow(dead_code)]
 
 use crate::averaged_adam::{AveragedAdam, AveragedAdamConfig};
 use crate::multinode::{MultiNodeConfig, MultiNodeTrainer};
@@ -52,7 +62,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use trustformers_core::errors::Result;
+use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::parallel::CommunicationBackend;
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::Optimizer;
@@ -340,7 +350,6 @@ pub struct PerformanceMetrics {
 
 /// Real-time performance monitoring
 pub struct PerformanceMonitor {
-    #[allow(dead_code)]
     config: MonitoringConfig,
     metrics_history: Vec<PerformanceMetrics>,
     last_collection: Instant,
@@ -367,17 +376,37 @@ impl PerformanceMonitor {
 
         let gpu_utilization: Vec<f32> = gpu_contexts
             .iter()
-            .map(|ctx| *ctx.utilization.lock().expect("GPU context lock poisoned"))
-            .collect();
+            .map(|ctx| {
+                ctx.utilization.lock().map(|guard| *guard).map_err(|_| {
+                    TrustformersError::lock_error(
+                        "GPU context utilization mutex poisoned".to_string(),
+                    )
+                })
+            })
+            .collect::<Result<Vec<f32>>>()?;
 
         let memory_usage: Vec<f32> = gpu_contexts
             .iter()
-            .map(|ctx| *ctx.memory_usage.lock().expect("GPU context lock poisoned"))
-            .collect();
+            .map(|ctx| {
+                ctx.memory_usage.lock().map(|guard| *guard).map_err(|_| {
+                    TrustformersError::lock_error(
+                        "GPU context memory_usage mutex poisoned".to_string(),
+                    )
+                })
+            })
+            .collect::<Result<Vec<f32>>>()?;
 
         let bandwidth_utilization: f32 = gpu_contexts
             .iter()
-            .map(|ctx| *ctx.communication_bandwidth.lock().expect("GPU context lock poisoned"))
+            .map(|ctx| {
+                ctx.communication_bandwidth.lock().map(|guard| *guard).map_err(|_| {
+                    TrustformersError::lock_error(
+                        "GPU context communication_bandwidth mutex poisoned".to_string(),
+                    )
+                })
+            })
+            .collect::<Result<Vec<f32>>>()?
+            .iter()
             .sum::<f32>()
             / gpu_contexts.len() as f32;
 
@@ -537,7 +566,6 @@ pub enum Bottleneck {
 /// Throughput tracking utility
 pub struct ThroughputTracker {
     sample_count: usize,
-    #[allow(dead_code)]
     start_time: Instant,
     last_reset: Instant,
 }
@@ -1066,9 +1094,7 @@ impl DynamicBatcher {
 pub struct FaultHandler {
     config: FaultToleranceConfig,
     failed_nodes: Vec<usize>,
-    #[allow(dead_code)]
     checkpoint_manager: CheckpointManager,
-    #[allow(dead_code)]
     heartbeat_tracker: HeartbeatTracker,
 }
 
@@ -1264,8 +1290,14 @@ impl<T: Optimizer + StatefulOptimizer + Clone> EnhancedDistributedTrainer<T> {
         let gpu_utilizations: Vec<f32> = self
             .gpu_contexts
             .iter()
-            .map(|ctx| *ctx.utilization.lock().expect("GPU context lock poisoned"))
-            .collect();
+            .map(|ctx| {
+                ctx.utilization.lock().map(|guard| *guard).map_err(|_| {
+                    TrustformersError::lock_error(
+                        "GPU context utilization mutex poisoned".to_string(),
+                    )
+                })
+            })
+            .collect::<Result<Vec<f32>>>()?;
 
         let batch_size_adjusted = self.dynamic_batcher.update_batch_sizes(&gpu_utilizations)?;
 
@@ -1318,14 +1350,20 @@ impl<T: Optimizer + StatefulOptimizer + Clone> EnhancedDistributedTrainer<T> {
     fn update_gpu_metrics(&mut self) -> Result<()> {
         for ctx in &self.gpu_contexts {
             // Simulate GPU metrics (in real implementation, would query GPU)
-            *ctx.utilization.lock().expect("GPU context lock poisoned") =
-                0.8 + (random::<f32>() - 0.5) * 0.3;
-            *ctx.memory_usage.lock().expect("GPU context lock poisoned") =
-                0.7 + (random::<f32>() - 0.5) * 0.2;
-            *ctx.temperature.lock().expect("GPU context lock poisoned") =
-                75.0 + (random::<f32>() - 0.5) * 10.0;
-            *ctx.communication_bandwidth.lock().expect("GPU context lock poisoned") =
-                800.0 + (random::<f32>() - 0.5) * 200.0;
+            *ctx.utilization.lock().map_err(|_| {
+                TrustformersError::lock_error("GPU context utilization mutex poisoned".to_string())
+            })? = 0.8 + (random::<f32>() - 0.5) * 0.3;
+            *ctx.memory_usage.lock().map_err(|_| {
+                TrustformersError::lock_error("GPU context memory_usage mutex poisoned".to_string())
+            })? = 0.7 + (random::<f32>() - 0.5) * 0.2;
+            *ctx.temperature.lock().map_err(|_| {
+                TrustformersError::lock_error("GPU context temperature mutex poisoned".to_string())
+            })? = 75.0 + (random::<f32>() - 0.5) * 10.0;
+            *ctx.communication_bandwidth.lock().map_err(|_| {
+                TrustformersError::lock_error(
+                    "GPU context communication_bandwidth mutex poisoned".to_string(),
+                )
+            })? = 800.0 + (random::<f32>() - 0.5) * 200.0;
         }
         Ok(())
     }
@@ -1338,13 +1376,13 @@ impl<T: Optimizer + StatefulOptimizer + Clone> EnhancedDistributedTrainer<T> {
         let memory_usage: Vec<f32> = self
             .gpu_contexts
             .iter()
-            .map(|ctx| *ctx.memory_usage.lock().expect("GPU context lock poisoned"))
+            .map(|ctx| *ctx.memory_usage.lock().unwrap_or_else(|p| p.into_inner()))
             .collect();
 
         let gpu_utilization: Vec<f32> = self
             .gpu_contexts
             .iter()
-            .map(|ctx| *ctx.utilization.lock().expect("GPU context lock poisoned"))
+            .map(|ctx| *ctx.utilization.lock().unwrap_or_else(|p| p.into_inner()))
             .collect();
 
         DistributedTrainingStats {

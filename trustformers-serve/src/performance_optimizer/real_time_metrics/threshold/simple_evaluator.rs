@@ -88,7 +88,7 @@ impl SimpleThresholdEvaluator {
 
     /// Get evaluator statistics
     pub fn get_stats(&self) -> EvaluatorStats {
-        self.stats.lock().expect("Stats lock poisoned").clone()
+        self.stats.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 }
 
@@ -146,7 +146,7 @@ impl ThresholdEvaluator for SimpleThresholdEvaluator {
 
         // Update statistics
         if self.config.track_performance {
-            let mut stats = self.stats.lock().expect("Stats lock poisoned");
+            let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
             stats.total_evaluations += 1;
             stats.total_evaluation_time += start_time.elapsed();
             if violated {

@@ -1,14 +1,16 @@
 # trustformers-serve TODO List
 
-**Version:** 0.1.3 | **Status:** Stable | **Tests:** 216 | **SLoC:** 206,636 | **Updated:** 2026-06-24
+**Version:** 0.1.4 | **Status:** Stable | **Tests:** ~4,321 | **Public API Items:** 7,319 | **SLoC:** 283,692 | **Updated:** 2026-07-02
 
 ## Overview
 
 The `trustformers-serve` crate provides high-performance inference serving infrastructure for production deployment of transformer models. It includes REST/gRPC/GraphQL APIs, dynamic batching, distributed serving, and comprehensive monitoring.
 
+This is the largest crate in the `trustformers` workspace by public API surface: **7,319** public items (top-level `pub fn`/`struct`/`enum`/`trait` declarations plus indented `pub fn` methods inside impl blocks) — for comparison, the sibling `trustformers-training` crate has 846. Counting only top-level declarations (excluding impl-block methods) gives a more conservative 4,999.
+
 **Key Responsibilities:**
 - REST API with dynamic batching and caching
-- gRPC API for high-throughput serving
+- gRPC API for high-throughput serving (proto compilation/serving restored in 0.1.4 — see "gRPC API (Tonic)" below)
 - GraphQL API for flexible queries
 - Distributed serving with load balancing
 - Model management (hot-swapping, versioning, A/B testing)
@@ -19,8 +21,8 @@ The `trustformers-serve` crate provides high-performance inference serving infra
 - NUMA/topology-aware performance optimizer (Linux sysfs, macOS sysctl)
 - Speculative decoding with draft models
 - Kernel fusion for GPU operations
-- Message queue integration (Kafka, RabbitMQ)
-- Cloud provider support (AWS, GCP, Azure)
+- Message queue integration (Kafka — production; RabbitMQ/Redis Streams/NATS/SQS — interface complete, real backend wiring pending)
+- Cloud provider support (AWS, GCP, Azure — orchestration layer real; per-provider inference calls simulated pending real SDK integration)
 - GDPR compliance
 
 ---
@@ -30,7 +32,7 @@ The `trustformers-serve` crate provides high-performance inference serving infra
 ### Implementation Status
 - [x] **PRODUCTION-READY** - Complete serving infrastructure
 - [x] **ZERO COMPILATION ERRORS** - Clean compilation
-- [x] **COMPREHENSIVE TESTING** - 255 tests, 100% pass rate (216 + 22 queue + 17 scheduler)
+- [x] **COMPREHENSIVE TESTING** - ~4,321 tests passing, 0 failures (workspace-wide `cargo nextest run --workspace --all-features`, 2026-07-01: 18,102 passed / 0 failed / 119 skipped, 0 clippy warnings, 0 rustdoc warnings)
 - [x] **REQUEST QUEUING** - Priority queue with deadline awareness and cancellation (`queue` module)
 - [x] **PRIORITY SCHEDULING** - WRR, EDF, fair queuing, priority, and FIFO strategies (`scheduler` module)
 - [x] **HARDWARE ACCELERATED** - CUDA, ROCm, Metal support
@@ -43,8 +45,8 @@ The `trustformers-serve` crate provides high-performance inference serving infra
 - **Monitoring:** Prometheus metrics (once_cell lazy statics), Jaeger tracing, OpenTelemetry, SLO monitoring
 - **Security:** Authentication, TLS, GDPR compliance, encryption
 - **Deployment:** Docker, Kubernetes, Helm, service mesh integration
-- **Cloud:** AWS (EKS, S3, CloudWatch), GCP (GKE, GCS), Azure (AKS, Blob)
-- **Messaging:** Kafka, RabbitMQ
+- **Cloud:** AWS (EKS, S3, CloudWatch), GCP (GKE, GCS), Azure (AKS, Blob) — deployment orchestration real; per-provider inference (SageMaker/Vertex AI/Azure ML) simulated pending real SDK integration
+- **Messaging:** Kafka (production, feature-gated); RabbitMQ/Redis Streams/NATS/SQS (interface/scaffold, no-op backend — real broker wiring pending)
 
 ---
 
@@ -91,6 +93,7 @@ curl -N -X POST http://localhost:8080/v1/generate/stream \
 
 **High-throughput binary protocol**
 
+- [x] **Restored in 0.1.4** — proto compilation and serving re-enabled; build migrated to the tonic 0.14 split `tonic-build`/`tonic-prost-build` API (`build.rs` runs `tonic_prost_build::configure().build_server(true).build_client(true).compile_protos(...)` against `proto/inference.proto`; see workspace `CHANGELOG.md` `[0.1.4] - 2026-07-01`)
 - [x] **Services**
   - InferenceService - Model inference
   - ModelService - Model management
@@ -362,33 +365,31 @@ server.enable_tracing(tracing_config)?;
 
 #### Apache Kafka
 
-**High-throughput asynchronous request ingestion**
+**High-throughput asynchronous request ingestion — production-ready wire protocol**
 
-- [x] **Features**
+- [x] **Features** (feature-gated behind the `kafka` Cargo feature, requires system librdkafka via the `rdkafka` crate)
   - Topic-based routing for request types
   - Consumer group support
   - Exactly-once semantics
   - Configurable partition assignment
   - Back-pressure with bounded queues
 
-#### RabbitMQ
+#### RabbitMQ / Redis Streams / NATS / AWS SQS
 
-**AMQP-based queue integration**
+**Trait-based interface/scaffold — not yet wired to a real broker**
 
-- [x] **Features**
-  - AMQP 0-9-1 protocol support
-  - Priority queues
-  - Dead-letter exchanges for failed requests
-  - TTL-based expiry
-  - Publisher confirms for reliability
+- [x] **Interface/orchestration: done** — `MessageQueueProducer`/`MessageQueueConsumer` traits fully implemented for all four backends (`RabbitMQProducer`/`Consumer`, `RedisProducer`/`Consumer`, `NatsProducer`/`Consumer`, `SqsProducer`/`Consumer` in `src/message_queue.rs`), sufficient to exercise the request routing/orchestration layer end-to-end today.
+- [ ] **Real backend integration: pending / currently simulated** — all four share one `impl_placeholder_backend!` macro: `send_message`/`send_batch` fabricate a success result with no network I/O, `poll` always returns an empty vec, and transactions/flush/close are no-ops. The `redis` and `lapin` crates are already unconditional Cargo.toml dependencies, but their APIs are never called anywhere in the crate. Previously documented as delivered "AMQP 0-9-1 protocol support / dead-letter exchanges / publisher confirms" — corrected here; that wire-protocol work is still open. See it tracked under [Future Enhancements](#future-enhancements).
 
 ---
 
 ### Cloud Provider Support
 
-- [x] **AWS**: EKS, SageMaker endpoint compatibility, S3 model storage, CloudWatch metrics
-- [x] **GCP**: GKE autopilot, Vertex AI serving compatibility, GCS model storage, Cloud Monitoring
-- [x] **Azure**: AKS, Azure ML serving compatibility, Blob Storage, Azure Monitor
+- [x] **Unified provider abstraction: done** — `CloudProvider` trait, health-check orchestration, and unified request/response types implemented and tested across AWS/GCP/Azure/HuggingFace/OpenAI/Anthropic provider stand-ins (`src/cloud_providers.rs`)
+- [x] **AWS**: EKS deployment, S3 model storage, CloudWatch metrics
+- [x] **GCP**: GKE autopilot, GCS model storage, Cloud Monitoring
+- [x] **Azure**: AKS, Blob Storage, Azure Monitor
+- [ ] **Real per-provider inference/deployment calls: pending / currently simulated** — `AwsSagemakerProvider`, `GoogleVertexAiProvider`, `AzureMachineLearningProvider` (and the `HuggingFaceProvider`/`OpenAiProvider`/`AnthropicProvider` stand-ins) all share one `impl_provider!` macro whose `inference()` unconditionally returns a fabricated `OutputData::Text("Mock response")` with canned latency/cost/token metadata, and whose `deploy_model()` returns a canned `https://example.com/endpoint` URL, regardless of which provider is selected. The corresponding AWS/GCP/Azure SDK crates are unconditional dependencies but are never invoked by this code path. Previously documented as "SageMaker endpoint compatibility" / "Vertex AI serving compatibility" / "Azure ML serving compatibility" — corrected here; real SDK-backed inference/deployment per provider is still open work. See it tracked under [Future Enhancements](#future-enhancements).
 
 ---
 
@@ -566,6 +567,17 @@ helm install trustformers ./helm/trustformers \
 - CUDA requires NVIDIA GPUs with compute capability 7.0+
 - ROCm requires AMD GPUs (RX 5000 series+)
 - Kubernetes autoscaling requires metrics-server
+- RabbitMQ, Redis Streams, NATS, and AWS SQS message-queue backends are trait-complete but currently no-op placeholders (no real broker I/O); only Apache Kafka is a genuine wire-protocol implementation — see "Message Queue Integration" above
+- Per-provider cloud inference/deployment (AWS SageMaker, GCP Vertex AI, Azure ML) is simulated/mocked pending real SDK integration; the multi-cloud orchestration layer itself (`CloudProvider` trait, health checks, unified types) is real — see "Cloud Provider Support" above
+- The AWS Lambda serverless adapter (`src/serverless/awslambdaprovider_traits.rs`) is not yet wired to real AWS Lambda: `deploy()` fabricates an ARN using a hardcoded placeholder AWS account ID, `invoke()` echoes the input payload back instead of invoking the function, and `get_metrics()` returns hardcoded constants; the struct holds a real `aws_sdk_lambda::Client` field but it is unused at its one call site
+
+---
+
+## Security Notes
+
+- `cargo audit` (workspace-wide run, 2026-07-01) found 7 `rustls-webpki` advisories pulled in transitively: via the AWS SDK stack (`aws-smithy-http-client` → `rustls` 0.21), and via `async-nats` 0.46 → `rustls-webpki` 0.102.8.
+- `cargo update --dry-run` confirmed there is no safe patch-level fix available — resolving this requires a major version bump of the AWS SDK crates and/or `async-nats`.
+- **Deferred by explicit maintainer decision.** This is a larger cross-cutting upgrade (AWS SDK crates are unconditional dependencies throughout this crate) rather than a quick patch, so it is tracked here rather than fixed immediately. Revisit when the AWS SDK for Rust or `async-nats` ship a `rustls`/`rustls-webpki` upgrade.
 
 ---
 
@@ -591,6 +603,9 @@ helm install trustformers ./helm/trustformers \
   - **Refinement needed:** Grafana dashboards? Prometheus alert rules? What metrics to surface?
 - [ ] Improved A/B testing with statistical significance detection (add t-test / Mann-Whitney U significance testing to A/B reporting)
 - [ ] Real-time model updates with zero-downtime hot-reload (blue-green model swap with atomic pointer update)
+- [ ] Real broker wiring for message-queue backends: RabbitMQ (AMQP 0-9-1, dead-letter exchanges, publisher confirms), Redis Streams, NATS, and AWS SQS currently share a no-op `impl_placeholder_backend!` macro (`src/message_queue.rs`) — only Kafka is genuinely wired today
+- [ ] Real SDK-backed inference/deployment for cloud providers: `AwsSagemakerProvider`, `GoogleVertexAiProvider`, and `AzureMachineLearningProvider` currently share a simulated `impl_provider!` macro (`src/cloud_providers.rs`) that returns a fixed mock response regardless of provider
+- [ ] Real AWS Lambda wiring for the serverless adapter: `deploy()`/`invoke()`/`get_metrics()` in `src/serverless/awslambdaprovider_traits.rs` currently fabricate results instead of calling the held `aws_sdk_lambda::Client`
 
 ---
 
@@ -733,9 +748,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ---
 
-**Last Updated:** 2026-06-24 - v0.1.3 Development
-**Status:** Production-ready serving infrastructure
-**Tests:** 216 (100% pass rate)
-**APIs:** REST, gRPC, GraphQL
+**Last Updated:** 2026-07-02 - v0.1.4
+**Status:** Production-ready serving infrastructure (see Known Limitations / Security Notes for the mock/placeholder subsystems and the deferred audit finding)
+**Tests:** ~4,321 passing, 0 failing (workspace-wide `cargo nextest run --workspace --all-features`)
+**Public API:** 7,319 items (largest crate in the `trustformers` workspace by this measure)
+**APIs:** REST, gRPC (proto compilation restored in 0.1.4), GraphQL
 **Deployment:** Docker, Kubernetes, Helm
-**Cloud:** AWS, GCP, Azure
+**Cloud:** AWS, GCP, Azure (orchestration real; per-provider inference simulated — see Cloud Provider Support)
+**Messaging:** Kafka (production); RabbitMQ/Redis Streams/NATS/SQS (interface/scaffold, no-op backend)

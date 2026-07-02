@@ -418,7 +418,7 @@ impl RocmKernel {
     /// Get memory statistics for a device
     pub fn get_memory_stats(&self, device_id: usize) -> Result<(u64, u64, u64)> {
         if let Some(pool) = self.memory_pools.get(&device_id) {
-            let pool = pool.lock().expect("Lock poisoned");
+            let pool = pool.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             Ok(pool.stats())
         } else {
             Err(TrustformersError::tensor_op_error(

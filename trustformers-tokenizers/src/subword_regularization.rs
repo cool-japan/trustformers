@@ -231,16 +231,14 @@ impl UnigramSubwordRegularizer {
         }
 
         // Backtrack to get the segmentation
-        self.backtrack_segmentation(&best_seg, 0, n, &chars)
+        self.backtrack_segmentation(&best_seg, 0, n)
     }
 
-    #[allow(clippy::only_used_in_recursion)]
     fn backtrack_segmentation(
         &self,
         best_seg: &[Vec<Option<String>>],
         start: usize,
         end: usize,
-        chars: &[char],
     ) -> Result<Vec<String>> {
         if start == end {
             return Ok(vec![]);
@@ -263,8 +261,8 @@ impl UnigramSubwordRegularizer {
             }
         }
 
-        let mut result = self.backtrack_segmentation(best_seg, start, best_split, chars)?;
-        let mut right_part = self.backtrack_segmentation(best_seg, best_split, end, chars)?;
+        let mut result = self.backtrack_segmentation(best_seg, start, best_split)?;
+        let mut right_part = self.backtrack_segmentation(best_seg, best_split, end)?;
         result.append(&mut right_part);
 
         Ok(result)

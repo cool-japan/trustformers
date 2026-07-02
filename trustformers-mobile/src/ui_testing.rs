@@ -1270,7 +1270,7 @@ impl UITestingFramework {
                     attempts += 1;
 
                     if attempts < max_attempts
-                        && self.should_retry(last_error.as_ref().expect("just set above"))
+                        && last_error.as_ref().is_some_and(|e| self.should_retry(e))
                     {
                         println!(
                             "Retrying UI test: {} (attempt {}/{})",

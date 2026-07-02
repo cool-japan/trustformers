@@ -311,8 +311,7 @@ impl CacheWarmer {
         let mut tasks = Vec::new();
 
         for query in queries {
-            let permit =
-                semaphore.clone().acquire_owned().await.expect("Semaphore should not be closed");
+            let permit = semaphore.clone().acquire_owned().await.ok();
             let result_cache = self.result_cache.clone();
 
             let task = tokio::spawn(async move {

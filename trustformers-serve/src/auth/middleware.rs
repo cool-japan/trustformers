@@ -181,7 +181,7 @@ impl std::fmt::Display for AuthError {
             AuthError::ExpiredToken => write!(f, "credential has expired"),
             AuthError::InsufficientScope(scope) => {
                 write!(f, "insufficient scope: required '{}'", scope)
-            }
+            },
             AuthError::InvalidJwt(msg) => write!(f, "invalid JWT: {}", msg),
         }
     }
@@ -231,7 +231,7 @@ impl AuthMiddleware {
             Some(h) => {
                 self.valid_api_keys.remove(&h);
                 true
-            }
+            },
             None => false,
         }
     }
@@ -250,11 +250,7 @@ impl AuthMiddleware {
         }
 
         // Check expiry before returning a reference.
-        let expired = self
-            .valid_api_keys
-            .get(&hash)
-            .map(|k| k.is_expired())
-            .unwrap_or(true);
+        let expired = self.valid_api_keys.get(&hash).map(|k| k.is_expired()).unwrap_or(true);
 
         if expired {
             self.auth_stats.auth_failures += 1;
@@ -263,8 +259,8 @@ impl AuthMiddleware {
         }
 
         self.auth_stats.auth_successes += 1;
-        // Safety: we confirmed the key exists above.
-        Ok(self.valid_api_keys.get(&hash).expect("key must exist after contains_key check"))
+        // We confirmed the key exists above; treat an unexpected absence as invalid.
+        self.valid_api_keys.get(&hash).ok_or(AuthError::InvalidApiKey)
     }
 
     /// Authenticate using pre-parsed JWT claims.
@@ -538,7 +534,11 @@ mod tests {
             AuthError::InvalidJwt("bad sig".to_string()),
         ];
         for e in errors {
-            assert!(!e.to_string().is_empty(), "Display must be non-empty for {:?}", e);
+            assert!(
+                !e.to_string().is_empty(),
+                "Display must be non-empty for {:?}",
+                e
+            );
         }
     }
 

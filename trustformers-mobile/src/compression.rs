@@ -943,7 +943,8 @@ impl DynamicQuantizer {
         for (name, tensor) in weights {
             let data = tensor.data()?;
             let mut sorted_data = data.to_vec();
-            sorted_data.sort_by(|a, b| a.abs().partial_cmp(&b.abs()).expect("Operation failed"));
+            sorted_data
+                .sort_by(|a, b| a.abs().partial_cmp(&b.abs()).unwrap_or(std::cmp::Ordering::Equal));
 
             // Find outlier threshold
             let outlier_idx = ((1.0 - outlier_threshold) * sorted_data.len() as f32) as usize;
@@ -1203,7 +1204,8 @@ impl MobilePruner {
                 }
 
                 // Sort by norm and keep top rows
-                row_norms.sort_by(|a, b| b.0.partial_cmp(&a.0).expect("Operation failed"));
+                row_norms
+                    .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
                 let kept_rows: Vec<usize> =
                     row_norms.iter().take(target_rows).map(|(_, idx)| *idx).collect();
 

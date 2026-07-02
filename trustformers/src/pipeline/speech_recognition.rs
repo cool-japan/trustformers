@@ -1011,7 +1011,7 @@ mod tests {
 
     #[test]
     fn test_audio_input_from_path() {
-        let input = AudioInput::from_path("/tmp/test.wav");
+        let input = AudioInput::from_path(std::env::temp_dir().join("test.wav"));
         matches!(input, AudioInput::FilePath(_));
     }
 

@@ -62,6 +62,7 @@ pub mod caching;
 pub mod canary;
 pub mod chaos_testing;
 pub mod cloud_providers;
+pub mod continuous_batching;
 pub mod contract_testing;
 pub mod cpu_gpu_load_balancer;
 pub mod custom_metrics;
@@ -78,9 +79,7 @@ pub mod gpu_profiler;
 pub mod gpu_scheduler;
 pub mod graph_optimization;
 pub mod graphql;
-// TODO: Re-enable when proto compilation is fixed
-// pub mod grpc;
-pub mod continuous_batching;
+pub mod grpc;
 pub mod health;
 pub mod kernel_fusion;
 pub mod kv_cache;
@@ -332,8 +331,7 @@ pub use test_cicd_integration::RotationStrategy;
 //     InferenceInput, InferenceResult, BatchInferenceInput, BatchInferenceResult,
 //     StatsInfo, ModelInfo, QueryRoot, MutationRoot
 // }; // Temporarily disabled due to axum compatibility
-// TODO: Re-enable when proto compilation is fixed
-// pub use grpc::{inference, InferenceServiceImpl};
+pub use grpc::{inference, InferenceServiceImpl};
 pub use health::{
     CircuitBreaker, FailoverManager, HAConfig, HealthCheckService, HealthStatus,
     HighAvailabilityService, RetryPolicy,

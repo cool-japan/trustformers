@@ -20,7 +20,7 @@ pub(crate) fn hash_password(password: &str) -> String {
     let salt = "trustformers_salt_2024";
     let mut hasher = Sha256::new();
     hasher.update(format!("{}{}", password, salt));
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 /// Verify a password against its hash
 pub(crate) fn verify_password(password: &str, hash: &str) -> bool {

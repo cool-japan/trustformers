@@ -21,6 +21,7 @@ use trustformers_models::meta_learning::{
     MetaLearner, MetaLearningConfig, MetaAlgorithm, TaskBatch
 };
 
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
 let config = MetaLearningConfig {
     algorithm: MetaAlgorithm::MAML,
     inner_lr: 0.01,
@@ -30,6 +31,8 @@ let config = MetaLearningConfig {
 };
 
 let mut meta_learner = MetaLearner::new(config)?;
+# Ok(())
+# }
 ```
 */
 

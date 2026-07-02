@@ -277,22 +277,18 @@ pub struct AsyncInferenceResponse {
         "top_p":0.9}
     )
 )]
+// reason: request DTO fields are deserialized from API payloads; several are not
+// read directly in the current handlers.
+#[allow(dead_code)]
 pub struct InferenceRequest {
     pub(crate) text: String,
     pub(crate) max_length: Option<usize>,
-    #[allow(dead_code)]
     pub(crate) temperature: Option<f32>,
-    #[allow(dead_code)]
     pub(crate) top_p: Option<f32>,
-    #[allow(dead_code)]
     pub(crate) model: Option<String>,
-    #[allow(dead_code)]
     pub(crate) enable_cache: Option<bool>,
-    #[allow(dead_code)]
     pub(crate) priority: Option<u8>,
-    #[allow(dead_code)]
     pub(crate) shadow_mode: Option<bool>,
-    #[allow(dead_code)]
     pub(crate) parameters: Option<serde_json::Value>,
 }
 /// Service health information
@@ -345,6 +341,7 @@ pub struct InferenceResponse {
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[schema(example = json!({"target_node":"node-2"}))]
 pub struct FailoverRequest {
+    // reason: deserialized from the failover request payload; not read directly yet.
     #[allow(dead_code)]
     pub(crate) target_node: String,
 }
@@ -362,6 +359,7 @@ pub struct MockTokenRequest {
     pub password: String,
 }
 /// Server state for sharing between handlers
+// reason: retained for an in-development handler-sharing path; not yet constructed.
 #[derive(Clone)]
 #[allow(dead_code)]
 struct ServerState {

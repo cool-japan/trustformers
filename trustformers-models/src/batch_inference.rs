@@ -17,7 +17,8 @@
 //! ## Usage Example
 //!
 //! ```rust
-//! use trustformers_models::batch_inference::{BatchProcessor, BatchConfig};
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! use trustformers_models::batch_inference::{BatchProcessor, BatchConfig, PaddingStrategy};
 //!
 //! // Configure batch processing
 //! let config = BatchConfig {
@@ -27,10 +28,13 @@
 //!     ..Default::default()
 //! };
 //!
-//! let processor = BatchProcessor::new(config);
+//! let processor = BatchProcessor::new(config)?;
 //!
 //! // Process requests in batches
 //! // let results = processor.process_batch(requests)?;
+//! # let _ = processor;
+//! # Ok(())
+//! # }
 //! ```
 
 use scirs2_core::ndarray::Array2;

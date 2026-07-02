@@ -476,7 +476,7 @@ impl AdvancedProfiler {
             "prof_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("Operation failed")
+                .unwrap_or_default()
                 .as_secs()
         );
 
@@ -498,7 +498,7 @@ impl AdvancedProfiler {
             "session_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("Operation failed")
+                .unwrap_or_default()
                 .as_secs()
         );
 
@@ -716,7 +716,7 @@ impl AdvancedProfiler {
         Ok(PerformanceMetrics {
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("Operation failed")
+                .unwrap_or_default()
                 .as_secs(),
             cpu_usage: self.get_cpu_usage(),
             memory_usage: self.get_memory_usage(),

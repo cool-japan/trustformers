@@ -1,7 +1,6 @@
 //! WebGPU-accelerated tensor operations
 
 #![allow(dead_code)]
-
 use super::shaders;
 use super::types::{
     buffer_usage, GpuBindGroup, GpuBuffer, GpuCommandEncoderExt, GpuComputePassEncoderExt,

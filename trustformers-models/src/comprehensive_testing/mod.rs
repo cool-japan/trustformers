@@ -17,19 +17,42 @@
 //!
 //! ## Usage
 //!
-//! ```rust
-//! use trustformers_models::comprehensive_testing::{
-//!     ModelTestSuite, ValidationConfig, PerformanceProfiler
+//! ```rust,no_run
+//! use trustformers_models::comprehensive_testing::{ModelTestSuite, PerformanceProfiler};
+//! use trustformers_core::{
+//!     traits::{Config, Model},
+//!     tensor::Tensor,
+//!     Result,
 //! };
+//! use serde::{Deserialize, Serialize};
 //!
+//! # #[derive(Debug, Clone, Serialize, Deserialize)]
+//! # struct DocConfig;
+//! # impl Config for DocConfig {
+//! #     fn architecture(&self) -> &'static str { "doc" }
+//! # }
+//! # struct DocModel;
+//! # impl Model for DocModel {
+//! #     type Config = DocConfig;
+//! #     type Input = Tensor;
+//! #     type Output = Tensor;
+//! #     fn forward(&self, input: Tensor) -> Result<Tensor> { Ok(input) }
+//! #     fn load_pretrained(&mut self, _r: &mut dyn std::io::Read) -> Result<()> { Ok(()) }
+//! #     fn get_config(&self) -> &DocConfig { &DocConfig }
+//! #     fn num_parameters(&self) -> usize { 0 }
+//! # }
+//!
+//! # fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 //! // Create a test suite for a model
-//! let test_suite = ModelTestSuite::new("llama-7b");
-//! test_suite.run_numerical_parity_tests()?;
-//! test_suite.run_performance_benchmarks()?;
+//! let mut test_suite = ModelTestSuite::new("llama-7b");
+//! # let model = DocModel;
+//! let _parity_results = test_suite.run_numerical_parity_tests(&model)?;
 //!
 //! // Profile model performance
 //! let profiler = PerformanceProfiler::new();
-//! let results = profiler.profile_model(&model, &inputs)?;
+//! let _perf_results = profiler.profile_model(&model)?;
+//! # Ok(())
+//! # }
 //! ```
 
 pub mod config;

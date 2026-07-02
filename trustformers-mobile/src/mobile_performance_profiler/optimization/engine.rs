@@ -549,7 +549,9 @@ impl OptimizationEngine {
 
 impl Default for OptimizationEngine {
     fn default() -> Self {
+        // reason: built from a known-valid default config; construction is infallible
+        // for the default config and Default cannot return a Result.
         Self::new(OptimizationEngineConfig::default())
-            .expect("Failed to create default optimization engine")
+            .expect("default OptimizationEngineConfig must yield a valid engine")
     }
 }

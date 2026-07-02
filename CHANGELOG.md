@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Copyright 2025-2026 COOLJAPAN OU (Team KitaSan)
 
+## [0.1.4] - 2026-07-02
+
+### Added
+- Real `PyRwkvModel` / `PyMambaModel` Python classes; `AutoModel` now loads RWKV/Mamba checkpoints correctly instead of silently falling back to BERT. (Re-enabled and modernized the Python bindings to PyO3 0.28.)
+- WebGPU device/queue initialization in the WebAssembly compute backend (falls back to CPU when no adapter).
+- 12 CPU↔CUDA golden-parity tests (GEMM, GELU, LayerNorm, causal softmax, RoPE — both host and GPU-resident paths, plus cached-weight GEMM) proving the oxicuda CUDA backend is numerically correct against the CPU reference; runtime-verified 12/12 passing on real NVIDIA hardware (RTX A4000, CUDA 12.0).
+
+### Changed
+- **CUDA backend migrated from `cudarc` to the Pure-Rust `oxicuda`** (COOLJAPAN Pure-Rust policy): the `cuda` feature now pulls in `oxicuda-blas`/`-dnn`/`-memory`/`-driver` instead of `cudarc`; `cuda-oxicuda` is kept as a deprecated alias for `cuda`. Runtime-verified end-to-end on real NVIDIA hardware. GPU-resident `matmul_gpu_to_gpu` confirmed genuinely zero-copy (cached `DeviceBuffer`, no host round-trip). The `cuda` feature is now propagated through `trustformers-models` and the `trustformers` umbrella crate.
+- The CUDA transformer-layer forward pass now runs as a real GPU-resident pre-norm causal self-attention layer (LayerNorm→QKV→bias→RoPE→causal-softmax attention→proj→residual, chained via cached device buffers with no host round-trips), replacing the previous CPU-fallback placeholder.
+- Metal GPU compute (matmul + resident attention) migrated from scirs2 MPS to oxicuda-metal (Pure Rust); dropped the `scirs2-core/"gpu"` dependency; GPU-resident matmul is now zero-copy. Verified on Apple Silicon.
+- Eliminated production-code `unwrap()`/`expect()` across the entire workspace (replaced with proper error propagation, lock-poison recovery, and documented infallible invariants); reduced `#[allow]` suppressions by fixing the underlying lints. No public API changes; all workspace tests pass unchanged.
+- Default feature trees are now Pure-Rust (C/C++-free) for all crates except `trustformers-serve` (HTTP server; keeps rustls/aws-lc-rs TLS). Networking (HuggingFace hub downloads, remote leaderboard), debug visualization, and serve's AWS-Lambda/Swagger-UI adapters are now opt-in behind features (`hub`, `remote-leaderboard`, `visual`, `lambda`, `swagger-ui`). Switched the tokenizer regex backend to pure-Rust `fancy-regex` and removed an unused `jieba-rs`/`zstd` dependency. No default public API removed; all default tests pass.
+- GPT-2 feed-forward uses a single fused matmul+bias+GELU Metal kernel on Apple Silicon (one GPU dispatch instead of three).
+- Bumped workspace dependency versions across the board, including `sha2` 0.10.9→0.11.0, `nalgebra` 0.34.2→0.35.0, `tokenizers` 0.22→0.23, `candle-core`/`candle-nn` 0.9.2→0.11.0, `tch` 0.23→0.24, `safetensors` 0.7→0.8, `tower-http` 0.6→0.7, `axum-test` 19.1→21.0, and `azure_core`/`azure_identity` 0.33→1.0, plus patch-level updates to `anyhow`, `tokio`, `reqwest`, `wasm-bindgen`/`web-sys`, the AWS SDK crates, and others. The `sha2` 0.11 bump changes `Sha256::finalize()`'s output type (now backed by `hybrid-array` instead of `generic-array`), so hash-to-hex formatting switched from `format!("{:x}", hasher.finalize())` to explicit `hex::encode(hasher.finalize())` (identical lowercase-hex output) in `trustformers-core::versioning::storage`, `trustformers-serve::auth::functions`/`migration::model_migration`, `trustformers-training::model_versioning`, and `trustformers::hub_local_mirror`/`hub_offline_packs`; `trustformers-core` and `trustformers-training` gained an explicit `hex` workspace dependency for this.
+- `wgpu` upgraded from 29.0 to 30.0 (now a `[workspace.dependencies]` entry, consumed via `workspace = true` in `trustformers-core`), behind the `wgpu_backend` feature (part of `full`): `WebGpuBackend`'s adapter request now sets the new required `apply_limit_buckets: false` (this is a native, trusted compute backend rather than untrusted web content, so real adapter limits are wanted over fingerprinting-resistant buckets), and the 4 call sites in `gpu_ops::webgpu` reading `BufferSlice::get_mapped_range()` were migrated to handle its new `Result<BufferView, MapRangeError>` return via `.map_err(...)` into `TrustformersError::hardware_error` (no `unwrap()` introduced). Verified clean (`check`/`build`/`test --no-run`/`clippy`) with `--features wgpu_backend`.
+
+### Removed
+- The `cudarc` dependency and the entire legacy cudarc-based CUDA backend in `trustformers-core` (`gpu_ops/cuda/cuda_split/`, duplicate `gpu_ops/cuda/{backend,types,buffer_ops}.rs`, `gpu_ops/advanced_kernels.rs`, `kernels/cuda_impl.rs`, and the stubbed-out `kernels/cuda_kernels.rs`) — superseded by the oxicuda backend above. `cudarc` remains only in the out-of-workspace legacy `trustformers-c` FFI crate.
+- The orphaned `rope/mod.rs` module (~1,693 lines; never mounted in the module tree, and used a RoPE convention inconsistent with the live kernel) — the compiled CPU RoPE reference is `kernels/rope.rs` (GPT-NeoX half-split convention), which now has a CPU↔CUDA parity test.
+
+### Fixed
+- Restored gRPC proto compilation and serving (migrated build to the tonic 0.14 split `tonic-build`/`tonic-prost-build` API); re-enabled the gRPC service module.
+
 ## [0.1.3] - 2026-06-24
 
 ### Added
@@ -163,6 +187,7 @@ Copyright 2025-2026 COOLJAPAN OU (Team KitaSan)
 
 ---
 
+[0.1.4]: https://github.com/cool-japan/trustformers/compare/v0.1.3...HEAD
 [0.1.3]: https://github.com/cool-japan/trustformers/releases/tag/v0.1.3
 [0.1.2]: https://github.com/cool-japan/trustformers/releases/tag/v0.1.2
 [0.1.1]: https://github.com/cool-japan/trustformers/releases/tag/v0.1.1

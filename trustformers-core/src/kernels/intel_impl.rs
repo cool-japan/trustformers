@@ -151,7 +151,8 @@ impl IntelImpl {
     pub fn matmul(&self, a: &Tensor, b: &Tensor, c: &mut Tensor) -> Result<()> {
         let start_time = std::time::Instant::now();
 
-        let mut kernel_manager = self.kernel_manager.lock().expect("Lock poisoned");
+        let mut kernel_manager =
+            self.kernel_manager.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let precision = IntelUtils::get_recommended_precision(&self.device);
 
         // Execute GEMM operation
@@ -159,7 +160,7 @@ impl IntelImpl {
 
         // Update statistics
         let elapsed = start_time.elapsed();
-        let mut stats = self.stats.lock().expect("Lock poisoned");
+        let mut stats = self.stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         stats.total_operations += 1;
         stats.total_time_us += elapsed.as_micros() as u64;
         stats.kernel_launches += 1;
@@ -177,7 +178,8 @@ impl IntelImpl {
     ) -> Result<()> {
         let start_time = std::time::Instant::now();
 
-        let mut kernel_manager = self.kernel_manager.lock().expect("Lock poisoned");
+        let mut kernel_manager =
+            self.kernel_manager.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let precision = IntelUtils::get_recommended_precision(&self.device);
 
         // Calculate attention scale
@@ -189,7 +191,7 @@ impl IntelImpl {
 
         // Update statistics
         let elapsed = start_time.elapsed();
-        let mut stats = self.stats.lock().expect("Lock poisoned");
+        let mut stats = self.stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         stats.total_operations += 1;
         stats.total_time_us += elapsed.as_micros() as u64;
         stats.kernel_launches += 1;
@@ -208,7 +210,8 @@ impl IntelImpl {
     ) -> Result<()> {
         let start_time = std::time::Instant::now();
 
-        let mut kernel_manager = self.kernel_manager.lock().expect("Lock poisoned");
+        let mut kernel_manager =
+            self.kernel_manager.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let precision = IntelUtils::get_recommended_precision(&self.device);
 
         // Execute layer normalization
@@ -216,7 +219,7 @@ impl IntelImpl {
 
         // Update statistics
         let elapsed = start_time.elapsed();
-        let mut stats = self.stats.lock().expect("Lock poisoned");
+        let mut stats = self.stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         stats.total_operations += 1;
         stats.total_time_us += elapsed.as_micros() as u64;
         stats.kernel_launches += 1;
@@ -239,7 +242,8 @@ impl IntelImpl {
 
     /// Get memory statistics
     pub fn memory_stats(&self) -> Result<(usize, usize)> {
-        let kernel_manager = self.kernel_manager.lock().expect("Lock poisoned");
+        let kernel_manager =
+            self.kernel_manager.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let memory_stats = kernel_manager.memory_stats()?;
 
         // Return (used_memory, total_memory)
@@ -248,12 +252,12 @@ impl IntelImpl {
 
     /// Get performance statistics
     pub fn get_stats(&self) -> IntelStats {
-        self.stats.lock().expect("Lock poisoned").clone()
+        self.stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 
     /// Reset performance statistics
     pub fn reset_stats(&self) {
-        let mut stats = self.stats.lock().expect("Lock poisoned");
+        let mut stats = self.stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         *stats = IntelStats::default();
     }
 

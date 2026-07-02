@@ -13,7 +13,6 @@ use legacy::SophiaConfig as LegacySophiaConfig;
 pub use legacy::SophiaConfig as SophiaLegacyConfig;
 
 // Ensure LegacySophiaConfig is used (it is re-exported, but suppress dead_code)
-#[allow(dead_code)]
 fn _use_legacy(_: &LegacySophiaConfig) {}
 
 use trustformers_core::errors::TrustformersError;

@@ -118,7 +118,6 @@ pub struct BanditOptimizer {
     /// Arm statistics
     arm_stats: Vec<ArmStatistics>,
     /// Current exploration factor
-    #[allow(dead_code)]
     exploration_factor: f64,
 }
 
@@ -236,14 +235,12 @@ pub struct ArmStatistics {
 }
 
 /// Surrogate model optimization for expensive hyperparameter evaluations
-#[allow(dead_code)]
 pub struct SurrogateOptimizer {
     /// Surrogate model configuration
     config: SurrogateConfig,
     /// Observed data points
     observations: Vec<(HashMap<String, ParameterValue>, f64)>,
     /// Surrogate model
-    #[allow(dead_code)]
     model: Box<dyn SurrogateModel>,
     /// Acquisition function
     acquisition: Box<dyn AcquisitionFunction>,
@@ -339,12 +336,10 @@ pub enum AcquisitionFunctionType {
 }
 
 /// Parallel evaluation strategies for hyperparameter optimization
-#[allow(dead_code)]
 pub struct ParallelEvaluator {
     /// Configuration for parallel evaluation
     config: ParallelEvaluationConfig,
     /// Active evaluation jobs
-    #[allow(dead_code)]
     active_jobs: Arc<Mutex<HashMap<String, EvaluationJob>>>,
     /// Completed jobs queue
     completed_jobs: Arc<Mutex<VecDeque<EvaluationResult>>>,
@@ -490,8 +485,7 @@ pub struct ResourceUsage {
     pub network_io: f64,
 }
 
-/// Traits for extensibility
-
+// Traits for extensibility
 pub trait SurrogateModel: Send + Sync {
     /// Fit the model to observed data
     fn fit(&mut self, observations: &[(HashMap<String, ParameterValue>, f64)]) -> Result<()>;

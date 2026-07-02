@@ -233,7 +233,7 @@ impl LongPollingService {
                 interval.tick().await;
 
                 // Clean up expired connections
-                let mut connections_lock = connections.write().expect("RwLock poisoned");
+                let mut connections_lock = connections.write().unwrap_or_else(|p| p.into_inner());
                 let now = Instant::now();
 
                 let expired_connections: Vec<String> = connections_lock
@@ -355,7 +355,7 @@ impl LongPollingService {
                 while let Ok(event) = event_receiver.recv().await {
                     // Check if connection is still active
                     let connection_active = {
-                        let connections_lock = self.connections.read().expect("RwLock poisoned");
+                        let connections_lock = self.connections.read().unwrap_or_else(|p| p.into_inner());
                         connections_lock.contains_key(&connection_id)
                     };
 
@@ -364,7 +364,7 @@ impl LongPollingService {
                     }
 
                     // Check if event matches subscription
-                    let connections_lock = self.connections.read().expect("RwLock poisoned");
+                    let connections_lock = self.connections.read().unwrap_or_else(|p| p.into_inner());
                     if let Some(conn) = connections_lock.get(&connection_id) {
                         if conn.event_types.contains(&event.event_type) ||
                            conn.event_types.contains(&"*".to_string()) {
@@ -484,13 +484,13 @@ impl LongPollingService {
 
     /// Get service statistics
     pub async fn get_stats(&self) -> LongPollingStats {
-        let stats = self.stats.read().expect("RwLock poisoned");
+        let stats = self.stats.read().unwrap_or_else(|p| p.into_inner());
         stats.clone()
     }
 
     /// Get active connection count
     pub fn get_active_connections(&self) -> usize {
-        self.connections.read().expect("RwLock poisoned").len()
+        self.connections.read().unwrap_or_else(|p| p.into_inner()).len()
     }
 }
 

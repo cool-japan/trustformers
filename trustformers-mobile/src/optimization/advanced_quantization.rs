@@ -269,7 +269,7 @@ impl MobileQuantizationEngine {
     pub fn quantize_model(&self, model_id: &str, model_data: &[u8]) -> Result<QuantizedModel> {
         // Check cache first
         {
-            let cache = self.quantization_cache.lock().expect("Operation failed");
+            let cache = self.quantization_cache.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(cached_model) = cache.get(model_id) {
                 return Ok(cached_model.clone());
             }
@@ -296,7 +296,7 @@ impl MobileQuantizationEngine {
 
         // Cache the result
         {
-            let mut cache = self.quantization_cache.lock().expect("Operation failed");
+            let mut cache = self.quantization_cache.lock().unwrap_or_else(|p| p.into_inner());
             cache.insert(model_id.to_string(), final_model.clone());
         }
 
@@ -607,7 +607,6 @@ impl MobileQuantizationEngine {
     /// Advanced model weight parsing with format detection
     fn parse_model_weights(&self, model_data: &[u8]) -> Result<HashMap<String, Tensor>> {
         // Enhanced model parsing with format detection and error handling
-        #[allow(dead_code)]
         let mut weights = HashMap::new();
 
         // Detect model format by magic bytes

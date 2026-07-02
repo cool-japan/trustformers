@@ -931,7 +931,11 @@ impl MPSConvolution2DDescriptor {
 #[cfg(target_os = "ios")]
 impl Default for MPSConvolution2DDescriptor {
     fn default() -> Self {
-        Self::new().expect("Failed to create default convolution descriptor")
+        // reason: fall back to a null descriptor (Drop guards against null) rather
+        // than panicking if the Metal descriptor cannot be created.
+        Self::new().unwrap_or_else(|_| Self {
+            descriptor: std::ptr::null_mut(),
+        })
     }
 }
 
@@ -990,7 +994,11 @@ impl MPSPooling2DDescriptor {
 #[cfg(target_os = "ios")]
 impl Default for MPSPooling2DDescriptor {
     fn default() -> Self {
-        Self::new().expect("Failed to create default pooling descriptor")
+        // reason: fall back to a null descriptor (Drop guards against null) rather
+        // than panicking if the Metal descriptor cannot be created.
+        Self::new().unwrap_or_else(|_| Self {
+            descriptor: std::ptr::null_mut(),
+        })
     }
 }
 

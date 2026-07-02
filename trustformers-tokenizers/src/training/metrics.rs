@@ -192,11 +192,11 @@ impl IncrementalTrainer {
                 break;
             }
 
-            let best_pair = pair_freqs
-                .iter()
-                .max_by_key(|(_, &freq)| freq)
-                .map(|(pair, _)| pair.clone())
-                .expect("pair_freqs validated to be non-empty");
+            let Some(best_pair) =
+                pair_freqs.iter().max_by_key(|(_, &freq)| freq).map(|(pair, _)| pair.clone())
+            else {
+                break;
+            };
 
             let merged_token = format!("{}{}", best_pair.0, best_pair.1);
             existing_vocab.insert(merged_token, next_id);

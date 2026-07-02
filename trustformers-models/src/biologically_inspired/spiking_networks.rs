@@ -238,7 +238,6 @@ impl SpikingLayer {
     }
 
     /// Update Leaky Integrate-and-Fire dynamics
-    #[allow(dead_code)]
     fn update_lif_dynamics(&self, current: &Tensor, states: &mut NeuronState) -> Result<()> {
         let dt = self.config.dt;
         let tau_mem = self.config.tau_mem;
@@ -445,7 +444,6 @@ impl SpikingLayer {
     }
 
     /// Update weights using STDP
-    #[allow(dead_code)]
     fn update_stdp_weights(
         &self,
         neuron_states: &NeuronState,
@@ -472,7 +470,6 @@ impl SpikingLayer {
     }
 
     /// Update weights using Hebbian learning
-    #[allow(dead_code)]
     fn update_hebbian_weights(
         &self,
         neuron_states: &NeuronState,
@@ -488,7 +485,6 @@ impl SpikingLayer {
     }
 
     /// Update weights using Anti-Hebbian learning
-    #[allow(dead_code)]
     fn update_anti_hebbian_weights(
         &self,
         neuron_states: &NeuronState,
@@ -504,7 +500,6 @@ impl SpikingLayer {
     }
 
     /// Update weights using homeostatic plasticity
-    #[allow(dead_code)]
     fn update_homeostatic_weights(
         &self,
         neuron_states: &NeuronState,
@@ -523,7 +518,6 @@ impl SpikingLayer {
     }
 
     /// Update weights using metaplasticity
-    #[allow(dead_code)]
     fn update_metaplasticity_weights(
         &self,
         neuron_states: &NeuronState,

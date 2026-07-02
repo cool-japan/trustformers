@@ -20,6 +20,7 @@ anyhow.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 oxiarc-archive = { workspace = true }
+oxisql-sqlite-compat = { workspace = true }
 thiserror.workspace = true
 uuid = { workspace = true, features = ["v4", "serde"] }
 tokio = { workspace = true, features = ["full"] }
@@ -56,10 +57,10 @@ regex.workspace = true
 md5.workspace = true
 
 # WebAssembly dependencies
-wasm-bindgen = { version = "0.2", optional = true }
-wasm-bindgen-futures = { version = "0.4", optional = true }
-js-sys = { version = "0.3", optional = true }
-web-sys = { version = "0.3", features = ["console"], optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
+js-sys = { workspace = true, optional = true }
+web-sys = { workspace = true, optional = true }
 
 # Internal dependencies
 trustformers-core.workspace = true
@@ -71,8 +72,11 @@ criterion.workspace = true
 tempfile.workspace = true
 
 [features]
-default = ["visual"]
-visual = ["plotters", "ratatui", "crossterm"]  # Using ratatui (maintained fork of tui)
+# Default features are Pure-Rust only (COOLJAPAN Pure-Rust policy): no flate2/miniz_oxide.
+# `visual` is intentionally NOT in `default` — it pulls plotters -> image -> png ->
+# flate2/miniz_oxide (policy-banned compression). Opt in explicitly via `--features visual`.
+default = []
+visual = ["plotters", "ratatui", "crossterm"]  # ratatui (maintained tui fork); pulls flate2 (non-default only)
 video = ["gif", "image", "ffmpeg-next"]
 gif = ["dep:gif", "image"]
 wasm = ["wasm-bindgen", "wasm-bindgen-futures", "js-sys", "web-sys"]

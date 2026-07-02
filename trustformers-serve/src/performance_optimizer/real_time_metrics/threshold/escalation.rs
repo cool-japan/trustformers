@@ -284,7 +284,7 @@ impl EscalationManager {
 
     /// Start escalation for an alert
     pub async fn start_escalation(&self, alert: &AlertEvent, policy_name: &str) -> Result<()> {
-        let policies = self.policies.read().expect("Policies RwLock poisoned");
+        let policies = self.policies.read().unwrap_or_else(|p| p.into_inner());
         let policy = policies.get(policy_name).ok_or_else(|| {
             ThresholdError::EscalationError(format!("Policy {} not found", policy_name))
         })?;
@@ -306,7 +306,7 @@ impl EscalationManager {
             started_at: Utc::now(),
             next_escalation: Utc::now()
                 + chrono::Duration::from_std(policy.levels[0].time_to_escalate)
-                    .expect("Duration conversion failed"),
+                    .unwrap_or_else(|_| chrono::Duration::zero()),
             escalation_history: vec![EscalationEvent {
                 timestamp: Utc::now(),
                 event_type: EscalationEventType::Started,
@@ -381,7 +381,7 @@ impl EscalationManager {
 
             let mut state_guard = state.lock().await;
             let auto_escalation_enabled = {
-                let config_read = config.read().expect("Config RwLock poisoned");
+                let config_read = config.read().unwrap_or_else(|p| p.into_inner());
                 config_read.enable_auto_escalation
             };
 
@@ -414,7 +414,7 @@ impl EscalationManager {
         policies: &Arc<RwLock<HashMap<String, EscalationPolicy>>>,
         stats: &Arc<EscalationStats>,
     ) {
-        let policies_guard = policies.read().expect("Policies RwLock poisoned");
+        let policies_guard = policies.read().unwrap_or_else(|p| p.into_inner());
 
         // Find appropriate policy (simplified - in practice, this would be more sophisticated)
         if let Some(policy) = policies_guard.values().next() {
@@ -430,7 +430,7 @@ impl EscalationManager {
                     // Schedule next escalation
                     escalation_state.next_escalation = Utc::now()
                         + chrono::Duration::from_std(level.time_to_escalate)
-                            .expect("Duration conversion failed");
+                            .unwrap_or_else(|_| chrono::Duration::zero());
 
                     // Record escalation event
                     escalation_state.escalation_history.push(EscalationEvent {
@@ -447,7 +447,7 @@ impl EscalationManager {
 
                     // Update statistics
                     let mut level_stats =
-                        stats.escalations_by_level.lock().expect("Escalation stats lock poisoned");
+                        stats.escalations_by_level.lock().unwrap_or_else(|p| p.into_inner());
                     *level_stats.entry(escalation_state.current_level).or_insert(0) += 1;
                 }
             }
@@ -551,7 +551,7 @@ impl EscalationManager {
             enabled: true,
         };
 
-        let mut policies = self.policies.write().expect("Policies RwLock poisoned");
+        let mut policies = self.policies.write().unwrap_or_else(|p| p.into_inner());
         policies.insert(default_policy.name.clone(), default_policy);
         policies.insert(performance_policy.name.clone(), performance_policy);
 
@@ -560,13 +560,13 @@ impl EscalationManager {
 
     /// Add escalation policy
     pub fn add_policy(&self, policy: EscalationPolicy) {
-        let mut policies = self.policies.write().expect("Policies RwLock poisoned");
+        let mut policies = self.policies.write().unwrap_or_else(|p| p.into_inner());
         policies.insert(policy.name.clone(), policy);
     }
 
     /// Remove escalation policy
     pub fn remove_policy(&self, policy_name: &str) {
-        let mut policies = self.policies.write().expect("Policies RwLock poisoned");
+        let mut policies = self.policies.write().unwrap_or_else(|p| p.into_inner());
         policies.remove(policy_name);
     }
 
@@ -581,22 +581,14 @@ impl EscalationManager {
                 self.stats
                     .escalations_by_level
                     .lock()
-                    .expect("Escalation stats lock poisoned")
+                    .unwrap_or_else(|p| p.into_inner())
                     .clone(),
             )),
             avg_escalation_time: Arc::new(Mutex::new(
-                *self
-                    .stats
-                    .avg_escalation_time
-                    .lock()
-                    .expect("Avg escalation time lock poisoned"),
+                *self.stats.avg_escalation_time.lock().unwrap_or_else(|p| p.into_inner()),
             )),
             acknowledgment_rate: Arc::new(Mutex::new(
-                *self
-                    .stats
-                    .acknowledgment_rate
-                    .lock()
-                    .expect("Acknowledgment rate lock poisoned"),
+                *self.stats.acknowledgment_rate.lock().unwrap_or_else(|p| p.into_inner()),
             )),
         }
     }

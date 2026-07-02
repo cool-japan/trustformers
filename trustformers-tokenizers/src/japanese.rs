@@ -90,6 +90,9 @@ unsafe impl Sync for ThreadSafeTagger {}
 
 #[cfg(feature = "mecab")]
 impl ThreadSafeTagger {
+    // reason: MeCab's `Tagger` is an FFI handle that is neither `Send` nor `Sync`;
+    // wrapping it in `Arc<Mutex<_>>` is intentional and the synchronization this
+    // type provides is what makes shared access sound.
     #[allow(clippy::arc_with_non_send_sync)]
     fn new(config: &str) -> Result<Self> {
         let tagger = Tagger::new(config);
@@ -99,7 +102,10 @@ impl ThreadSafeTagger {
     }
 
     fn parse_to_node(&self, text: &str) -> Result<Vec<(String, String)>> {
-        let mut tagger = self.tagger.lock().expect("lock should not be poisoned");
+        let mut tagger = self
+            .tagger
+            .lock()
+            .map_err(|_| TrustformersError::lock_error("MeCab tagger lock poisoned".to_string()))?;
         let node = tagger.parse_to_node(text);
         let mut result = Vec::new();
 

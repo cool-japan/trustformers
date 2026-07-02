@@ -578,7 +578,7 @@ impl OneApiBackend {
 
         // Execute kernel
         {
-            let context = self.context.lock().expect("Lock poisoned");
+            let context = self.context.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let local_ptr = local_size.map(|ls| ls.as_ptr()).unwrap_or(std::ptr::null());
 
             let event = unsafe {
@@ -707,7 +707,7 @@ impl OneApiBackend {
             vec![0.0f32; output_shape.iter().product()]
         };
 
-        let context = self.context.lock().expect("Lock poisoned");
+        let context = self.context.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let result = unsafe {
             onemkl_gemm(
                 context.queue,
@@ -794,7 +794,7 @@ impl OneApiBackend {
 
     /// Get current performance metrics
     pub fn get_metrics(&self) -> HardwareMetrics {
-        self.metrics.lock().expect("Lock poisoned").clone()
+        self.metrics.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 
     // Private helper methods
@@ -984,7 +984,7 @@ impl OneApiBackend {
         execution_time: Duration,
         metadata: &OneApiCompilationMetadata,
     ) {
-        let mut metrics = self.metrics.lock().expect("Lock poisoned");
+        let mut metrics = self.metrics.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let execution_ms = execution_time.as_millis() as f64;
 
         // Simplified metrics update

@@ -165,11 +165,8 @@ impl DependencyGraph {
             rev_adj_list.entry(target.to_string()).or_default();
 
             // Add edges
-            adj_list.get_mut(source).expect("Entry exists from or_default()").push(edge);
-            rev_adj_list
-                .get_mut(target)
-                .expect("Entry exists from or_default()")
-                .push(reverse_edge);
+            adj_list.entry(source.to_string()).or_default().push(edge);
+            rev_adj_list.entry(target.to_string()).or_default().push(reverse_edge);
         }
 
         // Update metadata
@@ -631,8 +628,7 @@ impl GraphAlgorithms {
 
         if v_lowlink == v_index {
             let mut scc = Vec::new();
-            loop {
-                let w = stack.pop().expect("SCC algorithm invariant: stack not empty");
+            while let Some(w) = stack.pop() {
                 on_stack.remove(&w);
                 scc.push(w.clone());
                 if w == v {
@@ -678,13 +674,12 @@ impl GraphAlgorithms {
 
             if let Some(edges) = adj_list.get(&node) {
                 for edge in edges {
-                    let target_degree = in_degree
-                        .get_mut(&edge.target)
-                        .expect("Target node exists in in_degree map");
-                    *target_degree -= 1;
+                    if let Some(target_degree) = in_degree.get_mut(&edge.target) {
+                        *target_degree -= 1;
 
-                    if *target_degree == 0 {
-                        queue.push_back(edge.target.clone());
+                        if *target_degree == 0 {
+                            queue.push_back(edge.target.clone());
+                        }
                     }
                 }
             }

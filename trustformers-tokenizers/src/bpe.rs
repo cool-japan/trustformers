@@ -27,10 +27,12 @@ pub struct BPETokenizer {
 }
 
 // GPT-2 uses a special byte-level BPE
+// reason: compile-time-constant pattern; `Regex::new` cannot fail at runtime and
+// a `static` initializer has no fallible channel to propagate an error through.
 static GPT2_PATTERN: Lazy<Regex> = Lazy::new(|| {
     // Simplified regex without lookahead - matches the same patterns but less precisely
     Regex::new(r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+")
-        .expect("valid regex")
+        .expect("built-in GPT-2 byte-level BPE regex must compile")
 });
 
 impl Clone for BPETokenizer {
@@ -282,11 +284,14 @@ impl BPETokenizer {
         let mut char_val = 256u32;
         for b in 0..=255u8 {
             if let std::collections::hash_map::Entry::Vacant(e) = byte_encoder.entry(b) {
-                let ch = char::from_u32(char_val)
-                    .expect("char_val in range 256-511 must be valid Unicode");
-                e.insert(ch);
-                byte_decoder.insert(ch, b);
-                char_val += 1;
+                // char_val stays within 256..=511 here, which contains no surrogate
+                // code points, so `from_u32` always yields `Some`; skip gracefully
+                // rather than panicking on the impossible `None`.
+                if let Some(ch) = char::from_u32(char_val) {
+                    e.insert(ch);
+                    byte_decoder.insert(ch, b);
+                    char_val += 1;
+                }
             }
         }
 
@@ -351,11 +356,10 @@ impl BPETokenizer {
                 }
             }
 
-            if best_pair.is_none() {
-                break;
-            }
-
-            let (first, second) = best_pair.expect("best_pair must be Some after is_none check");
+            let (first, second) = match best_pair {
+                Some(pair) => pair,
+                None => break,
+            };
             let mut new_word = Vec::with_capacity(word.len());
             let mut i = 0;
 

@@ -146,7 +146,9 @@ pub struct P2PConfig {
 impl Default for P2PConfig {
     fn default() -> Self {
         Self {
-            listen_address: "127.0.0.1:8080".parse().expect("failed to parse"),
+            listen_address: "127.0.0.1:8080"
+                .parse()
+                .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], 8080))),
             discovery_port: 8081,
             max_peers: 100,
             heartbeat_interval: Duration::from_secs(30),
@@ -438,7 +440,7 @@ impl P2PNode {
 
             loop {
                 interval.tick().await;
-                let mut reputation_lock = reputation.lock().expect("lock should not be poisoned");
+                let mut reputation_lock = reputation.lock().unwrap_or_else(|p| p.into_inner());
                 reputation_lock.decay_reputations();
             }
         });
@@ -728,7 +730,7 @@ impl P2PNode {
 
     async fn select_best_peer(&self, peers: &[PeerInfo]) -> PeerInfo {
         // Simple selection based on reputation and bandwidth
-        let reputation_lock = self.reputation.lock().expect("lock should not be poisoned");
+        let reputation_lock = self.reputation.lock().unwrap_or_else(|p| p.into_inner());
 
         peers
             .iter()
@@ -865,7 +867,7 @@ impl P2PNode {
         hasher.update(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .expect("SystemTime should be after UNIX_EPOCH")
+                .unwrap_or_default()
                 .as_nanos()
                 .to_be_bytes(),
         );

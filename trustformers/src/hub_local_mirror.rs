@@ -178,7 +178,7 @@ impl HubMirror {
 
         tracing::info!(
             "Hub mirror initialized with {} cached models",
-            self.cache.read().expect("lock should not be poisoned").len()
+            self.cache.read().unwrap_or_else(|p| p.into_inner()).len()
         );
         Ok(())
     }
@@ -190,14 +190,14 @@ impl HubMirror {
 
         // Check cache first
         {
-            let mut cache = self.cache.write().expect("lock should not be poisoned");
+            let mut cache = self.cache.write().unwrap_or_else(|p| p.into_inner());
             if let Some(cached_model) = cache.get_mut(&cache_key) {
                 if cached_model.download_complete && cached_model.local_path.exists() {
                     // Update access statistics
                     cached_model.last_accessed = SystemTime::now();
                     cached_model.access_count += 1;
 
-                    let mut stats = self.stats.lock().expect("lock should not be poisoned");
+                    let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
                     stats.cache_hits += 1;
 
                     tracing::debug!("Cache hit for {}:{}", model_id, version);
@@ -208,7 +208,7 @@ impl HubMirror {
 
         // Cache miss - download the model
         {
-            let mut stats = self.stats.lock().expect("lock should not be poisoned");
+            let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
             stats.cache_misses += 1;
         }
 
@@ -222,7 +222,7 @@ impl HubMirror {
 
         // Check if already downloading
         {
-            let queue = self.download_queue.read().expect("lock should not be poisoned");
+            let queue = self.download_queue.read().unwrap_or_else(|p| p.into_inner());
             if let Some(progress) = queue.get(&cache_key) {
                 if progress.status == DownloadStatus::Downloading {
                     // Wait for existing download to complete
@@ -242,7 +242,7 @@ impl HubMirror {
 
         // Initialize download progress
         {
-            let mut queue = self.download_queue.write().expect("lock should not be poisoned");
+            let mut queue = self.download_queue.write().unwrap_or_else(|p| p.into_inner());
             queue.insert(
                 cache_key.clone(),
                 DownloadProgress {
@@ -316,23 +316,21 @@ impl HubMirror {
                 };
 
                 {
-                    let mut cache = self.cache.write().expect("lock should not be poisoned");
+                    let mut cache = self.cache.write().unwrap_or_else(|p| p.into_inner());
                     cache.insert(cache_key.clone(), cached_model);
                 }
 
                 // Update statistics
                 {
-                    let mut stats = self.stats.lock().expect("lock should not be poisoned");
+                    let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
                     stats.downloads_completed += 1;
-                    stats.total_models =
-                        self.cache.read().expect("lock should not be poisoned").len();
+                    stats.total_models = self.cache.read().unwrap_or_else(|p| p.into_inner()).len();
                     stats.total_size_gb += file_size as f64 / (1024.0 * 1024.0 * 1024.0);
                 }
 
                 // Remove from download queue
                 {
-                    let mut queue =
-                        self.download_queue.write().expect("lock should not be poisoned");
+                    let mut queue = self.download_queue.write().unwrap_or_else(|p| p.into_inner());
                     queue.remove(&cache_key);
                 }
 
@@ -351,8 +349,7 @@ impl HubMirror {
             Err(e) => {
                 // Update download queue with error
                 {
-                    let mut queue =
-                        self.download_queue.write().expect("lock should not be poisoned");
+                    let mut queue = self.download_queue.write().unwrap_or_else(|p| p.into_inner());
                     if let Some(progress) = queue.get_mut(&cache_key) {
                         progress.status = DownloadStatus::Failed(e.to_string());
                     }
@@ -360,7 +357,7 @@ impl HubMirror {
 
                 // Update statistics
                 {
-                    let mut stats = self.stats.lock().expect("lock should not be poisoned");
+                    let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
                     stats.downloads_failed += 1;
                 }
 
@@ -412,7 +409,7 @@ impl HubMirror {
     async fn attempt_download(&self, url: &str, local_path: &Path, cache_key: &str) -> Result<()> {
         // Update status to downloading
         {
-            let mut queue = self.download_queue.write().expect("lock should not be poisoned");
+            let mut queue = self.download_queue.write().unwrap_or_else(|p| p.into_inner());
             if let Some(progress) = queue.get_mut(cache_key) {
                 progress.status = DownloadStatus::Downloading;
             }
@@ -481,7 +478,7 @@ impl HubMirror {
             };
 
             {
-                let mut queue = self.download_queue.write().expect("lock should not be poisoned");
+                let mut queue = self.download_queue.write().unwrap_or_else(|p| p.into_inner());
                 if let Some(progress) = queue.get_mut(cache_key) {
                     progress.bytes_downloaded = downloaded;
                     progress.progress_percent = progress_percent;
@@ -516,12 +513,12 @@ impl HubMirror {
         loop {
             interval.tick().await;
 
-            let queue = self.download_queue.read().expect("lock should not be poisoned");
+            let queue = self.download_queue.read().unwrap_or_else(|p| p.into_inner());
             if let Some(progress) = queue.get(cache_key) {
                 match &progress.status {
                     DownloadStatus::Completed => {
                         drop(queue);
-                        let cache = self.cache.read().expect("lock should not be poisoned");
+                        let cache = self.cache.read().unwrap_or_else(|p| p.into_inner());
                         if let Some(cached_model) = cache.get(cache_key) {
                             return Ok(cached_model.local_path.clone());
                         } else {
@@ -547,7 +544,7 @@ impl HubMirror {
                 }
             } else {
                 // Download no longer in queue, check cache
-                let cache = self.cache.read().expect("lock should not be poisoned");
+                let cache = self.cache.read().unwrap_or_else(|p| p.into_inner());
                 if let Some(cached_model) = cache.get(cache_key) {
                     return Ok(cached_model.local_path.clone());
                 } else {
@@ -605,7 +602,7 @@ impl HubMirror {
                 if let Err(e) = Self::sync_with_remote(&cache, &stats, &config, &http_client).await
                 {
                     tracing::error!("Background sync failed: {}", e);
-                    let mut stats_lock = stats.lock().expect("lock should not be poisoned");
+                    let mut stats_lock = stats.lock().unwrap_or_else(|p| p.into_inner());
                     stats_lock.sync_errors += 1;
                 }
             }
@@ -649,7 +646,7 @@ impl HubMirror {
         // Check for updates to cached models
         let mut updates_found = 0;
         {
-            let cache_read = cache.read().expect("lock should not be poisoned");
+            let cache_read = cache.read().unwrap_or_else(|p| p.into_inner());
             for cached_model in cache_read.values() {
                 if let Some(remote_model) =
                     remote_models.iter().find(|m| m.model_id == cached_model.model_id)
@@ -669,7 +666,7 @@ impl HubMirror {
 
         // Update statistics
         {
-            let mut stats_lock = stats.lock().expect("lock should not be poisoned");
+            let mut stats_lock = stats.lock().unwrap_or_else(|p| p.into_inner());
             stats_lock.last_sync = Some(SystemTime::now());
         }
 
@@ -702,7 +699,7 @@ impl HubMirror {
         let target_size = max_size * 0.7; // Clean up to 70% of max size
 
         {
-            let cache = self.cache.read().expect("lock should not be poisoned");
+            let cache = self.cache.read().unwrap_or_else(|p| p.into_inner());
             let mut cache_items: Vec<_> = cache.values().collect();
 
             // Sort by priority (keep priority models) and last access time
@@ -740,7 +737,7 @@ impl HubMirror {
         let cache_key = format!("{}:{}", model_id, version);
 
         let local_path = {
-            let cache = self.cache.read().expect("lock should not be poisoned");
+            let cache = self.cache.read().unwrap_or_else(|p| p.into_inner());
             cache.get(&cache_key).map(|m| m.local_path.clone())
         };
 
@@ -757,14 +754,14 @@ impl HubMirror {
 
             // Remove from cache
             {
-                let mut cache = self.cache.write().expect("lock should not be poisoned");
+                let mut cache = self.cache.write().unwrap_or_else(|p| p.into_inner());
                 cache.remove(&cache_key);
             }
 
             // Update statistics
             {
-                let mut stats = self.stats.lock().expect("lock should not be poisoned");
-                stats.total_models = self.cache.read().expect("lock should not be poisoned").len();
+                let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
+                stats.total_models = self.cache.read().unwrap_or_else(|p| p.into_inner()).len();
             }
 
             self.save_cache().await?;
@@ -775,14 +772,14 @@ impl HubMirror {
 
     /// Get mirror statistics
     pub fn get_stats(&self) -> MirrorStats {
-        self.stats.lock().expect("lock should not be poisoned").clone()
+        self.stats.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     /// Get download progress for all active downloads
     pub fn get_download_progress(&self) -> Vec<DownloadProgress> {
         self.download_queue
             .read()
-            .expect("lock should not be poisoned")
+            .unwrap_or_else(|p| p.into_inner())
             .values()
             .cloned()
             .collect()
@@ -790,7 +787,7 @@ impl HubMirror {
 
     /// Calculate total cache size
     async fn calculate_total_size(&self) -> Result<f64> {
-        let cache = self.cache.read().expect("lock should not be poisoned");
+        let cache = self.cache.read().unwrap_or_else(|p| p.into_inner());
         Ok(cache.values().map(|m| m.file_size as f64).sum())
     }
 
@@ -821,7 +818,7 @@ impl HubMirror {
             hasher.update(&buffer[..n]);
         }
 
-        Ok(format!("{:x}", hasher.finalize()))
+        Ok(hex::encode(hasher.finalize()))
     }
 
     /// Load cache from disk
@@ -853,13 +850,13 @@ impl HubMirror {
             }
 
             {
-                let mut cache = self.cache.write().expect("lock should not be poisoned");
+                let mut cache = self.cache.write().unwrap_or_else(|p| p.into_inner());
                 *cache = valid_models;
             }
 
             tracing::info!(
                 "Loaded {} models from cache",
-                self.cache.read().expect("lock should not be poisoned").len()
+                self.cache.read().unwrap_or_else(|p| p.into_inner()).len()
             );
         }
 
@@ -869,7 +866,7 @@ impl HubMirror {
     /// Save cache to disk
     async fn save_cache(&self) -> Result<()> {
         let cache_file = self.config.storage_path.join("cache.json");
-        let cache = self.cache.read().expect("lock should not be poisoned");
+        let cache = self.cache.read().unwrap_or_else(|p| p.into_inner());
 
         let content = serde_json::to_string_pretty(&*cache).map_err(|e| {
             TrustformersError::Core(CoreTrustformersError::other(format!(
@@ -1090,7 +1087,7 @@ mod tests {
         let cached = CachedModel {
             model_id: "test_model".to_string(),
             version: "1.0".to_string(),
-            local_path: PathBuf::from("/tmp/test_model"),
+            local_path: std::env::temp_dir().join("test_model"),
             remote_url: "https://example.com/model".to_string(),
             cached_at: SystemTime::now(),
             last_accessed: SystemTime::now(),
@@ -1228,7 +1225,7 @@ mod tests {
         let cached = CachedModel {
             model_id: "priority_model".to_string(),
             version: "1.0".to_string(),
-            local_path: PathBuf::from("/tmp/priority"),
+            local_path: std::env::temp_dir().join("priority"),
             remote_url: "https://example.com".to_string(),
             cached_at: SystemTime::now(),
             last_accessed: SystemTime::now(),

@@ -410,7 +410,7 @@ impl TensorOptimizer {
         let seq_len = shape[shape.len() - 2];
         let d_model = shape[shape.len() - 1];
 
-        if d_model % 2 != 0 {
+        if !d_model.is_multiple_of(2) {
             return Err(TrustformersPyError::InvalidInputError {
                 message: "Model dimension must be even for RoPE".to_string(),
             });

@@ -500,14 +500,13 @@ impl BatchProcessor {
 
         // Simulate inference delay (in a real implementation, this would be actual model inference)
         let delay_promise = Promise::new(&mut |resolve, _| {
-            let _timeout_id = web_sys::window()
-                .expect("window should be available in browser context")
-                .set_timeout_with_callback_and_timeout_and_arguments_0(
+            if let Some(window) = web_sys::window() {
+                let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
                     &resolve,
                     processing_delay as i32,
-                )
-                .expect("set_timeout should succeed with valid callback");
-            // Note: In a real app, you'd want to track timeout_id for cleanup
+                );
+                // Note: In a real app, you'd want to track timeout_id for cleanup
+            }
         });
 
         JsFuture::from(delay_promise).await?;
