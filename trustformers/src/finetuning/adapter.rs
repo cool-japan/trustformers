@@ -133,7 +133,10 @@ impl AdapterConfig {
                 parameter: Some("bottleneck_size".to_string()),
                 expected: Some(format!("< {}", self.hidden_size)),
                 received: Some(self.bottleneck_size.to_string()),
-                suggestion: Some("The adapter bottleneck should be much smaller than the hidden dimension".to_string()),
+                suggestion: Some(
+                    "The adapter bottleneck should be much smaller than the hidden dimension"
+                        .to_string(),
+                ),
             });
         }
         if !(0.0..1.0).contains(&self.dropout) {
@@ -254,15 +257,13 @@ impl BottleneckAdapter {
     /// Returns an error if tensor shapes are incompatible or an operation fails.
     pub fn forward(&self, hidden_states: &Tensor) -> Result<Tensor> {
         let shape = hidden_states.shape();
-        let last_dim = *shape
-            .last()
-            .ok_or_else(|| TrustformersError::InvalidInput {
-                message: "hidden_states has no dimensions".to_string(),
-                parameter: Some("hidden_states".to_string()),
-                expected: Some(format!("[*, {}]", self.config.hidden_size)),
-                received: Some("[]".to_string()),
-                suggestion: None,
-            })?;
+        let last_dim = *shape.last().ok_or_else(|| TrustformersError::InvalidInput {
+            message: "hidden_states has no dimensions".to_string(),
+            parameter: Some("hidden_states".to_string()),
+            expected: Some(format!("[*, {}]", self.config.hidden_size)),
+            received: Some("[]".to_string()),
+            suggestion: None,
+        })?;
 
         if last_dim != self.config.hidden_size {
             return Err(TrustformersError::InvalidInput {
@@ -280,44 +281,29 @@ impl BottleneckAdapter {
         // Optional layer-norm
         let normed = if self.config.use_layer_norm {
             // Approximate layer norm: normalise over last dimension
-            hidden_states
-                .layer_norm(-1, 1e-5)
-                .map_err(TrustformersError::Core)?
+            hidden_states.layer_norm(-1, 1e-5).map_err(TrustformersError::Core)?
         } else {
             hidden_states.clone()
         };
 
         // Down projection: [..., hidden] × [hidden, bottleneck] = [..., bottleneck]
-        let down_t = self
-            .down_proj
-            .transpose(0, 1)
-            .map_err(TrustformersError::Core)?;
+        let down_t = self.down_proj.transpose(0, 1).map_err(TrustformersError::Core)?;
         let down_out = normed.matmul(&down_t).map_err(TrustformersError::Core)?;
         // Add bias (broadcast over batch dims)
-        let down_out = down_out
-            .add(&self.down_bias)
-            .map_err(TrustformersError::Core)?;
+        let down_out = down_out.add(&self.down_bias).map_err(TrustformersError::Core)?;
 
         // Activation
         let activated = self.apply_activation(&down_out)?;
 
         // Up projection: [..., bottleneck] × [bottleneck, hidden] = [..., hidden]
-        let up_t = self
-            .up_proj
-            .transpose(0, 1)
-            .map_err(TrustformersError::Core)?;
+        let up_t = self.up_proj.transpose(0, 1).map_err(TrustformersError::Core)?;
         let up_out = activated.matmul(&up_t).map_err(TrustformersError::Core)?;
-        let up_out = up_out
-            .add(&self.up_bias)
-            .map_err(TrustformersError::Core)?;
+        let up_out = up_out.add(&self.up_bias).map_err(TrustformersError::Core)?;
 
         // Residual connection: x + scale * adapter(x)
-        let scaled = up_out
-            .mul_scalar(self.config.residual_scale)
-            .map_err(TrustformersError::Core)?;
-        hidden_states
-            .add(&scaled)
-            .map_err(TrustformersError::Core)
+        let scaled =
+            up_out.mul_scalar(self.config.residual_scale).map_err(TrustformersError::Core)?;
+        hidden_states.add(&scaled).map_err(TrustformersError::Core)
     }
 
     /// Apply the configured activation function to a tensor.

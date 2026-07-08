@@ -76,8 +76,8 @@ impl Tensor {
             },
             #[cfg(feature = "cuda")]
             Tensor::CUDA(data) => {
-                // Use buffer_id as a unique identifier for CUDA tensors
-                data.buffer_id.hash(&mut hasher);
+                // Use the buffer id as a unique identifier for CUDA tensors
+                data.buffer_id().hash(&mut hasher);
                 self.len().hash(&mut hasher);
             },
             _ => {
@@ -105,8 +105,6 @@ impl Tensor {
             Tensor::CF16(a) => a.shape().to_vec(),
             Tensor::CBF16(a) => a.shape().to_vec(),
             Tensor::Sparse(s) => s.shape().to_vec(),
-            #[cfg(feature = "torch")]
-            Tensor::Torch(t) => t.size().iter().map(|&d| d as usize).collect(),
             #[cfg(feature = "candle")]
             Tensor::Candle(t) => t.shape().dims().to_vec(),
             #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -133,8 +131,6 @@ impl Tensor {
             Tensor::CF16(a) => a.len(),
             Tensor::CBF16(a) => a.len(),
             Tensor::Sparse(s) => s.nnz(), // Non-zero elements for sparse tensors
-            #[cfg(feature = "torch")]
-            Tensor::Torch(t) => t.numel(),
             #[cfg(feature = "candle")]
             Tensor::Candle(t) => t.elem_count(),
             #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -179,8 +175,6 @@ impl Tensor {
             Tensor::CF16(a) => a.len() * std::mem::size_of::<scirs2_core::Complex<half::f16>>(),
             Tensor::CBF16(a) => a.len() * std::mem::size_of::<scirs2_core::Complex<half::bf16>>(),
             Tensor::Sparse(s) => s.nnz() * std::mem::size_of::<f32>(), // Simplified estimate
-            #[cfg(feature = "torch")]
-            Tensor::Torch(t) => t.numel() * std::mem::size_of::<f32>(), // Simplified
             #[cfg(feature = "candle")]
             Tensor::Candle(t) => t.elem_count() * std::mem::size_of::<f32>(), // Simplified
             #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -470,11 +464,12 @@ impl Tensor {
                     let backend = get_cuda_backend(*device_id)?;
                     let data_vec: Vec<f32> = arr.iter().copied().collect();
                     let buffer_id = backend.create_persistent_buffer(&data_vec)?;
-                    Ok(Tensor::CUDA(super::CudaTensorData {
+                    Ok(Tensor::CUDA(super::CudaTensorData::new(
                         buffer_id,
-                        shape: arr.shape().to_vec(),
-                        dtype: DType::F32,
-                    }))
+                        *device_id,
+                        arr.shape().to_vec(),
+                        DType::F32,
+                    )))
                 }
                 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
                 {
@@ -495,11 +490,12 @@ impl Tensor {
                     let backend = get_cuda_backend(*device_id)?;
                     let data_vec: Vec<f32> = arr.iter().map(|&x| x as f32).collect();
                     let buffer_id = backend.create_persistent_buffer(&data_vec)?;
-                    Ok(Tensor::CUDA(super::CudaTensorData {
+                    Ok(Tensor::CUDA(super::CudaTensorData::new(
                         buffer_id,
-                        shape: arr.shape().to_vec(),
-                        dtype: DType::F32,
-                    }))
+                        *device_id,
+                        arr.shape().to_vec(),
+                        DType::F32,
+                    )))
                 }
                 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
                 {
@@ -517,14 +513,15 @@ impl Tensor {
                 #[cfg(any(target_os = "linux", target_os = "windows"))]
                 {
                     use crate::gpu_ops::cuda::get_cuda_backend;
-                    // Use device 0 by default for downloading
-                    let backend = get_cuda_backend(0)?;
+                    // Download from the device the buffer actually lives on (the
+                    // handle carries the ordinal), not a hardcoded device 0.
+                    let backend = get_cuda_backend(cuda_data.device_id())?;
 
                     // Handle different dtypes
                     match cuda_data.dtype {
                         DType::F32 => {
                             // Download from GPU to CPU
-                            let data_vec = backend.download_buffer(&cuda_data.buffer_id)?;
+                            let data_vec = backend.download_buffer(&cuda_data.buffer_id())?;
 
                             // Convert to ArrayD
                             use scirs2_core::ndarray::ArrayD;
@@ -555,12 +552,19 @@ impl Tensor {
                 }
             },
 
-            // CUDA → CUDA (different device, currently just clone)
+            // CUDA → CUDA
             #[cfg(feature = "cuda")]
-            (Tensor::CUDA(cuda_data), crate::device::Device::CUDA(_)) => {
-                // For now, just return a clone (buffer is reference counted)
-                // TODO: Implement actual device-to-device transfer if needed
-                Ok(Tensor::CUDA(cuda_data.clone()))
+            (Tensor::CUDA(cuda_data), crate::device::Device::CUDA(target_device)) => {
+                if *target_device == cuda_data.device_id() {
+                    // Same device: the clone shares the same reference-counted
+                    // resident buffer (no copy, refcount increment only).
+                    Ok(Tensor::CUDA(cuda_data.clone()))
+                } else {
+                    // Cross-device transfer: bounce through the host (download from
+                    // the source device, re-upload to the target device).
+                    let host_tensor = self.to_device_enum(&crate::device::Device::CPU)?;
+                    host_tensor.to_device_enum(device)
+                }
             },
 
             // CUDA not available in this build
@@ -868,8 +872,6 @@ impl Tensor {
             | Tensor::CF16(_)
             | Tensor::CBF16(_) => "cpu".to_string(),
             Tensor::Sparse(_) => "cpu".to_string(),
-            #[cfg(feature = "torch")]
-            Tensor::Torch(t) => format!("{:?}", t.device()),
             #[cfg(feature = "candle")]
             Tensor::Candle(t) => format!("{:?}", t.device()),
             #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -905,8 +907,6 @@ impl Tensor {
             Tensor::CF16(a) => a.len() * std::mem::size_of::<scirs2_core::Complex<half::f16>>(),
             Tensor::CBF16(a) => a.len() * std::mem::size_of::<scirs2_core::Complex<half::bf16>>(),
             Tensor::Sparse(s) => s.memory_usage(),
-            #[cfg(feature = "torch")]
-            Tensor::Torch(t) => t.numel() * 4, // Approximate
             #[cfg(feature = "candle")]
             Tensor::Candle(t) => t.elem_count() * 4, // Approximate
             #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -933,8 +933,6 @@ impl Tensor {
             Tensor::CF16(_) => DType::CF16,
             Tensor::CBF16(_) => DType::CBF16,
             Tensor::Sparse(_) => DType::F32, // Sparse tensors use f32 by default
-            #[cfg(feature = "torch")]
-            Tensor::Torch(_) => DType::F32, // Default assumption
             #[cfg(feature = "candle")]
             Tensor::Candle(_) => DType::F32, // Default assumption
             #[cfg(all(target_os = "macos", feature = "metal"))]

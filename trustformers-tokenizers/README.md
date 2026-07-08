@@ -1,8 +1,8 @@
 # trustformers-tokenizers
 
-Tokenization library for transformer models, providing Byte-Pair Encoding (BPE), WordPiece, SentencePiece (Unigram), TikToken, and Fairseq-dictionary tokenizers, plus language-specific (Arabic, Chinese, Japanese, Korean, Thai) and domain-specific (Chemical, Music, Math, Code, BIO, Multimodal) tokenizers for the TrustformeRS ecosystem. Version 0.1.4 — Development.
+Tokenization library for transformer models, providing Byte-Pair Encoding (BPE), WordPiece, SentencePiece (Unigram), TikToken, and Fairseq-dictionary tokenizers, plus language-specific (Arabic, Chinese, Japanese, Korean, Thai) and domain-specific (Chemical, Music, Math, Code, BIO, Multimodal) tokenizers for the TrustformeRS ecosystem. Version 0.2.0 — Development.
 
-**Version:** 0.1.4 | **Status:** Stable | **Tests:** ~500 | **SLoC:** 51,372 | **Last Updated:** 2026-07-02
+**Version:** 0.2.0 | **Status:** Stable | **Tests:** ~500 | **SLoC:** 51,372 | **Last Updated:** 2026-07-02
 
 ## Current State
 
@@ -260,7 +260,6 @@ for rec in &result.actionable_recommendations {
 - SIMD acceleration is AVX2/x86_64-only; no ARM/NEON path yet
 - The `gpu`, `jax`, `tensorflow`, `pytorch`, and `onnx` features provide detection/data-structure/metadata layers, not real CUDA/ROCm/OpenCL/JAX/TensorFlow/PyTorch/ONNX-Runtime execution
 - NFKC/NFKD normalizers are not yet exposed as dedicated `Normalizer` types (only NFC/NFD)
-- The `hangul = "0.1.3"` Cargo dependency does not appear to be referenced anywhere in `src/`; Korean Hangul decomposition is implemented directly via Unicode code-point arithmetic instead
 - `AutoTokenizer` exists only in the Python package (`python/trustformers_tokenizers`) — there is no Rust-level `AutoTokenizer` type; use `TokenizerWrapper` for enum-based dispatch across the built-in Rust tokenizer families
 - This crate's own `pyproject.toml` is configured for a `maturin` extension-module build, but `Cargo.toml`'s `[lib]` only declares `crate-type = ["rlib"]` (no `cdylib`) — that responsibility was moved to `trustformers-py`. Building the Python package straight from this crate directory will not currently produce a loadable native module; `python/trustformers_tokenizers/tokenizers.py` falls back to `unittest.mock.MagicMock` when the native import fails
 

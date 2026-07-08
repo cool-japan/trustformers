@@ -32,6 +32,18 @@ pub struct TestPerformanceMonitoringConfig {
     pub monitoring_config: MonitoringConfig,
     /// Data retention configuration
     pub data_retention_config: DataRetentionConfig,
+    /// Analytics engine configuration
+    pub analytics_config: AnalyticsConfig,
+    /// Event manager configuration
+    pub event_config: EventConfig,
+    /// Historical data manager configuration
+    pub historical_data_config: HistoricalDataConfig,
+    /// Alert manager configuration
+    pub alert_config: AlertConfig,
+    /// Dashboard manager configuration
+    pub dashboard_config: DashboardConfig,
+    /// Subscription manager configuration
+    pub subscription_config: SubscriptionConfig,
 }
 
 impl Default for TestPerformanceMonitoringConfig {
@@ -45,6 +57,12 @@ impl Default for TestPerformanceMonitoringConfig {
             stream_config: StreamConfig::default(),
             monitoring_config: MonitoringConfig::default(),
             data_retention_config: DataRetentionConfig::default(),
+            analytics_config: AnalyticsConfig::default(),
+            event_config: EventConfig::default(),
+            historical_data_config: HistoricalDataConfig::default(),
+            alert_config: AlertConfig::default(),
+            dashboard_config: DashboardConfig::default(),
+            subscription_config: SubscriptionConfig::default(),
         }
     }
 }
@@ -56,6 +74,8 @@ pub struct ReportConfig {
     pub export_formats: Vec<String>,
     pub auto_generate_interval: Option<Duration>,
     pub report_sections: Vec<ReportSection>,
+    /// Enable compliance-oriented reporting (audit-ready report sections/metadata)
+    pub compliance_reporting: bool,
 }
 
 impl Default for ReportConfig {
@@ -71,6 +91,7 @@ impl Default for ReportConfig {
                 ReportSection::ResourceUsage,
                 ReportSection::Performance,
             ],
+            compliance_reporting: false,
         }
     }
 }
@@ -267,6 +288,8 @@ pub struct EventConfig {
     pub aggregation_config: AggregationConfig,
     /// Event enrichment configuration
     pub enrichment_config: EnrichmentConfig,
+    /// Enable compliance logging (tamper-evident audit trail for event processing)
+    pub compliance_logging: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -496,6 +519,8 @@ pub struct AlertConfig {
     pub enabled: bool,
     pub evaluation_interval: Duration,
     pub notification_channels: Vec<String>,
+    /// Enable rate limiting of outbound alert notifications
+    pub rate_limiting_enabled: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -590,6 +615,8 @@ pub struct HistoricalDataConfig {
     pub partitioning_strategy: PartitioningStrategy,
     pub storage_optimization: StorageOptimization,
     pub cache_config: HistoricalCacheConfig,
+    /// Enable tamper-evident audit trail logging for historical data operations
+    pub audit_trail_enabled: bool,
 }
 
 impl Default for HistoricalDataConfig {
@@ -610,6 +637,7 @@ impl Default for HistoricalDataConfig {
             },
             storage_optimization: StorageOptimization::default(),
             cache_config: HistoricalCacheConfig::default(),
+            audit_trail_enabled: false,
         }
     }
 }
@@ -799,6 +827,18 @@ mod tests {
         assert!(config.enable_real_time);
         assert_eq!(config.monitoring_interval, Duration::from_secs(5));
         assert_eq!(config.retention_period, Duration::from_secs(7 * 24 * 3600));
+        // The 6 sub-manager configs must be real, independently-defaulted values
+        // (not silently dropped), so every sub-manager constructor in service.rs
+        // can pass real configuration instead of falling back to Default::default().
+        assert!(!config.analytics_config.enabled);
+        assert_eq!(config.analytics_config.retention_days, 0);
+        assert_eq!(config.event_config.channel_capacity, 1000);
+        assert!(config.event_config.compression_enabled);
+        assert_eq!(config.historical_data_config.retention_days, 30);
+        assert!(config.historical_data_config.compression_enabled);
+        assert!(!config.alert_config.enabled);
+        assert!(config.dashboard_config.dashboard_id.is_empty());
+        assert!(!config.subscription_config.enabled);
     }
 
     #[test]
@@ -809,6 +849,16 @@ mod tests {
         assert_eq!(config.export_formats.len(), 2);
         assert!(config.auto_generate_interval.is_some());
         assert_eq!(config.report_sections.len(), 4);
+        assert!(!config.compliance_reporting);
+    }
+
+    #[test]
+    fn test_event_config_default() {
+        let config = EventConfig::default();
+        assert_eq!(config.channel_capacity, 1000);
+        assert_eq!(config.buffer_size, 10000);
+        assert!(config.compression_enabled);
+        assert!(!config.compliance_logging);
     }
 
     #[test]
@@ -950,6 +1000,7 @@ mod tests {
         let config = HistoricalDataConfig::default();
         assert_eq!(config.retention_days, 30);
         assert!(config.compression_enabled);
+        assert!(!config.audit_trail_enabled);
     }
 
     #[test]
@@ -976,6 +1027,7 @@ mod tests {
         let config = AlertConfig::default();
         assert!(!config.enabled);
         assert!(config.notification_channels.is_empty());
+        assert!(!config.rate_limiting_enabled);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # trustformers-core
 
-![Version](https://img.shields.io/badge/version-0.1.4-blue)
+![Version](https://img.shields.io/badge/version-0.2.0-blue)
 ![Status](https://img.shields.io/badge/status-Stable-brightgreen)
 ![Tests](https://img.shields.io/badge/tests-2%2C353%2B%20passing-brightgreen)
 ![SLoC](https://img.shields.io/badge/SLoC-155%2C280-informational)
@@ -10,7 +10,7 @@ Core infrastructure crate providing fundamental abstractions and utilities for t
 
 ## Current State
 
-**Version 0.1.4 — Stable (2026-07-02)**
+**Version 0.2.0 — Stable (2026-07-02)**
 
 This crate is **stable and production-ready**, serving as the foundation for all other TrustformeRS components. It provides high-performance tensor operations, layer implementations, and advanced optimization techniques. ~2,353 tests pass for this crate specifically, with zero stubs or unimplemented items, and zero clippy/rustdoc warnings workspace-wide.
 

@@ -61,12 +61,7 @@ impl DeiTForImageClassification {
         };
 
         Ok(Self {
-            cls_head: Linear::new_with_device(
-                config.hidden_size,
-                config.num_labels,
-                true,
-                device,
-            ),
+            cls_head: Linear::new_with_device(config.hidden_size, config.num_labels, true, device),
             distill_head,
             deit: DeiTModel::new_with_device(config, device)?,
             device,

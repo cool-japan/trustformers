@@ -1,6 +1,6 @@
 # trustformers-optim
 
-**Version:** 0.1.4 | **Status:** Stable | **Tests:** ~960 | **SLoC:** 52,189 | **Public API:** ~1,925 items | **Updated:** 2026-07-02
+**Version:** 0.2.0 | **Status:** Stable | **Tests:** ~960 | **SLoC:** 52,189 | **Public API:** ~1,925 items | **Updated:** 2026-07-02
 
 Comprehensive optimization algorithms, learning rate schedulers, and distributed/advanced training
 infrastructure for training transformer models in the TrustformeRS ecosystem.

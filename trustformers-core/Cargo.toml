@@ -62,7 +62,6 @@ tokenizers.workspace = true  # Re-exported for trustformers-tokenizers per SciRS
 scirs2-core = { workspace = true, features = ["array", "random", "parallel", "simd"] }
 
 # Optional backends
-tch = { workspace = true, optional = true }
 candle-core = { workspace = true, optional = true }
 
 # MPI for multi-node communication (optional - only needed for multi-node training)
@@ -86,10 +85,10 @@ opencl3 = { version = "0.12", optional = true }
 libloading = { workspace = true, optional = true }
 
 # Campaign C0 spike: oxicuda Pure-Rust CUDA replacement (compile-validation; runtime-loads libcuda)
-oxicuda-blas = { version = "0.4.0", optional = true }
-oxicuda-dnn = { version = "0.4.0", optional = true }
-oxicuda-memory = { version = "0.4.0", optional = true }
-oxicuda-driver = { version = "0.4.0", optional = true }
+oxicuda-blas = { version = "0.4.1", optional = true }
+oxicuda-dnn = { version = "0.4.1", optional = true }
+oxicuda-memory = { version = "0.4.1", optional = true }
+oxicuda-driver = { version = "0.4.1", optional = true }
 
 [dev-dependencies]
 rstest.workspace = true
@@ -105,9 +104,6 @@ linalg = ["scirs2-core/linalg"]  # Linear algebra operations
 # Remote (HTTP) leaderboard storage backend. Opt-in because it pulls reqwest ->
 # rustls -> aws-lc-sys (C/C++). The file/in-memory backends work without it.
 remote-leaderboard = ["dep:reqwest"]
-# torch feature disabled - requires matching libtorch version at runtime
-# Enable only when you have a properly configured libtorch environment
-torch = ["dep:tch"]
 candle = ["dep:candle-core"]
 parallel = []
 mpi = ["dep:mpi"]
@@ -129,7 +125,7 @@ backtrace = []
 # --- Campaign C1: oxicuda Pure-Rust CUDA backend ---
 # Deprecated alias: oxicuda is now the `cuda` backend
 cuda-oxicuda = ["cuda"]
-# Full feature set for testing (excludes torch due to libtorch version requirements)
+# Full feature set for testing
 full = ["linalg", "candle", "parallel", "vulkan", "metal", "wgpu_backend", "opencl", "backtrace"]
 
 [[bench]]
@@ -157,5 +153,5 @@ oxiblas = { workspace = true }
 oxiblas-blas = { workspace = true }
 oxiblas-matrix = { workspace = true }
 # Campaign C0 spike: oxicuda Metal backend + compute-backend trait (macOS only)
-oxicuda-metal = { version = "0.4.0", optional = true }
-oxicuda-backend = { version = "0.4.0", optional = true }
+oxicuda-metal = { version = "0.4.1", optional = true }
+oxicuda-backend = { version = "0.4.1", optional = true }

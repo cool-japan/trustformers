@@ -136,14 +136,13 @@ impl DType {
 /// - `F32`: 32-bit floating point tensors (most common for neural networks)
 /// - `F64`: 64-bit floating point tensors (for high precision requirements)
 /// - `I64`: 64-bit integer tensors (for indices and discrete values)
-/// - `Torch`: PyTorch backend (requires `torch` feature)
 /// - `Candle`: Candle backend (requires `candle` feature)
 ///
 /// # Backend Selection
 ///
 /// The default backend is ndarray (CPU), which provides good performance for
 /// small to medium models. For larger models or when GPU acceleration is needed,
-/// enable the `torch` or `candle` features.
+/// enable the `candle` feature.
 ///
 /// # Example
 ///
@@ -179,25 +178,64 @@ impl Clone for MetalTensorData {
     }
 }
 
-/// CUDA GPU buffer wrapper for GPU-resident tensors
+/// CUDA GPU buffer wrapper for GPU-resident tensors.
+///
+/// Holds a reference-counted [`BufferHandle`](crate::gpu_ops::cuda::BufferHandle) rather
+/// than a raw buffer id: cloning shares the same device allocation (refcount increment
+/// only), and when the last clone drops the buffer is removed from the backend cache and
+/// its device memory freed. The handle also carries the CUDA device ordinal the buffer
+/// lives on, so downstream ops address the correct device on multi-GPU machines.
 #[cfg(feature = "cuda")]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CudaTensorData {
-    pub buffer_id: crate::gpu_ops::cuda::BufferId,
+    /// Lifecycle-managed reference to the GPU-resident buffer (id + device ordinal).
+    pub buffer: crate::gpu_ops::cuda::BufferHandle,
     pub shape: Vec<usize>,
     pub dtype: DType,
 }
 
 #[cfg(feature = "cuda")]
-impl Clone for CudaTensorData {
-    fn clone(&self) -> Self {
-        // Note: This creates a reference to the same GPU buffer
-        // Actual data is not copied - buffer is reference counted
+impl CudaTensorData {
+    /// Wrap a freshly minted resident buffer id (owned by the backend for `device_id`)
+    /// into a lifecycle-managed CUDA tensor payload. Each raw id must be wrapped at most
+    /// once; all sharing then goes through `clone()`.
+    pub fn new(
+        buffer_id: crate::gpu_ops::cuda::BufferId,
+        device_id: usize,
+        shape: Vec<usize>,
+        dtype: DType,
+    ) -> Self {
         Self {
-            buffer_id: self.buffer_id,
-            shape: self.shape.clone(),
-            dtype: self.dtype,
+            buffer: crate::gpu_ops::cuda::BufferHandle::new(buffer_id, device_id),
+            shape,
+            dtype,
         }
+    }
+
+    /// Build from an existing handle (test seam for mocked release callbacks).
+    #[cfg(test)]
+    pub(crate) fn from_handle(
+        buffer: crate::gpu_ops::cuda::BufferHandle,
+        shape: Vec<usize>,
+        dtype: DType,
+    ) -> Self {
+        Self {
+            buffer,
+            shape,
+            dtype,
+        }
+    }
+
+    /// The resident buffer id backing this tensor.
+    #[inline]
+    pub fn buffer_id(&self) -> crate::gpu_ops::cuda::BufferId {
+        self.buffer.id()
+    }
+
+    /// The CUDA device ordinal this tensor's buffer lives on.
+    #[inline]
+    pub fn device_id(&self) -> usize {
+        self.buffer.device_id()
     }
 }
 
@@ -216,9 +254,7 @@ pub enum Tensor {
     // Sparse tensor variant
     Sparse(crate::sparse_tensor::SparseTensor),
     // GPU support available via hardware acceleration module (CUDA, ROCm, Intel OneAPI, Vulkan, Metal)
-    // and backend-specific implementations (Torch, Candle)
-    #[cfg(feature = "torch")]
-    Torch(tch::Tensor),
+    // and backend-specific implementations (Candle)
     #[cfg(feature = "candle")]
     Candle(candle_core::Tensor),
     // Metal GPU-resident tensor (data lives on GPU)
@@ -229,7 +265,7 @@ pub enum Tensor {
     CUDA(CudaTensorData),
 }
 
-// Manual Clone implementation because tch::Tensor doesn't implement Clone
+// Manual Clone implementation because some backend tensor types require custom clone semantics
 impl Clone for Tensor {
     fn clone(&self) -> Self {
         match self {
@@ -243,8 +279,6 @@ impl Clone for Tensor {
             Tensor::CF16(arr) => Tensor::CF16(arr.clone()),
             Tensor::CBF16(arr) => Tensor::CBF16(arr.clone()),
             Tensor::Sparse(s) => Tensor::Sparse(s.clone()),
-            #[cfg(feature = "torch")]
-            Tensor::Torch(t) => Tensor::Torch(t.shallow_clone()),
             #[cfg(feature = "candle")]
             Tensor::Candle(t) => Tensor::Candle(t.clone()),
             #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -269,8 +303,6 @@ impl std::fmt::Debug for Tensor {
             Tensor::CF16(_) => write!(f, "Tensor::CF16(shape: {:?}, dtype: CF16)", self.shape()),
             Tensor::CBF16(_) => write!(f, "Tensor::CBF16(shape: {:?}, dtype: CBF16)", self.shape()),
             Tensor::Sparse(s) => write!(f, "Tensor::Sparse({:?})", s),
-            #[cfg(feature = "torch")]
-            Tensor::Torch(_) => write!(f, "Tensor::Torch(shape: {:?})", self.shape()),
             #[cfg(feature = "candle")]
             Tensor::Candle(_) => write!(f, "Tensor::Candle(shape: {:?})", self.shape()),
             #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -282,19 +314,17 @@ impl std::fmt::Debug for Tensor {
             #[cfg(feature = "cuda")]
             Tensor::CUDA(data) => write!(
                 f,
-                "Tensor::CUDA(shape: {:?}, dtype: {:?}, buffer_id: {:?})",
-                data.shape, data.dtype, data.buffer_id
+                "Tensor::CUDA(shape: {:?}, dtype: {:?}, buffer: {:?})",
+                data.shape, data.dtype, data.buffer
             ),
         }
     }
 }
 
-// Safety: Both PyTorch and Candle backends are internally thread-safe:
-// - PyTorch: The tch::Tensor uses reference counting and the underlying data is managed
-//   by PyTorch's thread-safe memory allocator. The raw pointer is just an FFI wrapper.
+// Safety: The Candle backend is internally thread-safe:
 // - Candle: Tensors are designed to be thread-safe with reference-counted storage.
 // Multiple threads can safely hold references to the same tensor.
-#[cfg(any(feature = "torch", feature = "candle"))]
+#[cfg(feature = "candle")]
 unsafe impl Sync for Tensor {}
 
 // The implementations are in separate modules but the methods are part of the Tensor impl blocks

@@ -139,8 +139,9 @@ impl WebQuantizer {
 
     /// Get quantization statistics
     pub fn get_stats(&self, original_data: &[f32], quantized_data: &[f32]) -> QuantizationStats {
-        let original_size = original_data.len() * 4; // 4 bytes per f32
-        let quantized_size = quantized_data.len() * 4; // Simplified for placeholder
+        let bytes_per_element = self.adaptive_state.current_precision.bytes_per_element();
+        let original_size = original_data.len() * 4; // 4 bytes per f32, always — original is raw f32
+        let quantized_size = (quantized_data.len() as f32 * bytes_per_element).ceil() as usize;
         let compression_ratio = original_size as f32 / quantized_size as f32;
         let size_reduction = (1.0 - quantized_size as f32 / original_size as f32) * 100.0;
 
@@ -277,5 +278,30 @@ mod tests {
         let data = QuantizedModelData::new(QuantizationStrategy::AWQ, QuantizationPrecision::INT8);
         assert_eq!(data.metadata.strategy, QuantizationStrategy::AWQ);
         assert_eq!(data.metadata.precision, QuantizationPrecision::INT8);
+    }
+
+    #[test]
+    fn test_get_stats_is_bit_width_aware_for_int4() {
+        let config =
+            QuantizationConfig::new(QuantizationStrategy::Dynamic, QuantizationPrecision::INT4);
+        let quantizer = WebQuantizer::new(config);
+        let original = vec![1.0f32; 100];
+        let quantized = vec![0.5f32; 100]; // same length as original, matching real apply_* output
+        let stats = quantizer.get_stats(&original, &quantized);
+
+        assert_eq!(stats.original_size_bytes(), 400); // 100 * 4 bytes, unaffected by target precision
+        assert_eq!(stats.quantized_size_bytes(), 50); // 100 * 0.5 bytes (INT4) = 50, not 400 like before the fix
+        assert!(stats.compression_ratio() > 4.0); // real ~8x compression, far more than the old fixed 1.0x
+    }
+
+    #[test]
+    fn test_get_stats_scales_per_precision_not_just_a_new_fixed_constant() {
+        let config =
+            QuantizationConfig::new(QuantizationStrategy::Dynamic, QuantizationPrecision::INT8);
+        let quantizer = WebQuantizer::new(config);
+        let original = vec![1.0f32; 100];
+        let quantized = vec![0.5f32; 100];
+        let stats = quantizer.get_stats(&original, &quantized);
+        assert_eq!(stats.quantized_size_bytes(), 100); // INT8 = 1 byte/element, different from INT4's 50
     }
 }

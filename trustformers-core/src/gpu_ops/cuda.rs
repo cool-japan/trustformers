@@ -18,3 +18,8 @@ pub use oxicuda::*;
 pub use oxicuda::oxicuda_backend as get_cuda_backend;
 #[cfg(feature = "cuda")]
 pub use oxicuda::OxiCudaBufferId as BufferId;
+// Reference-counted RAII handle over a resident `BufferId`: `CudaTensorData` (and the
+// `Linear` weight cache) hold this instead of a raw id so the device allocation is freed
+// when the last clone drops instead of leaking until `clear_buffer_cache()`.
+#[cfg(feature = "cuda")]
+pub use oxicuda::OxiCudaBufferHandle as BufferHandle;

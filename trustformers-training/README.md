@@ -4,7 +4,7 @@ Training infrastructure for TrustformeRS.
 
 ## Current State
 
-**Version:** 0.1.4 | **Status:** Alpha | **Updated:** 2026-07-02
+**Version:** 0.2.0 | **Status:** Alpha | **Updated:** 2026-07-02
 
 This crate provides HuggingFace-`Trainer`-inspired training infrastructure: a core `Trainer`/`TrainingArguments` loop (plus a simpler `SimpleTrainer` builder API), mixed-precision/AMP, quantization-aware training, RLHF (PPO/DPO), few-shot and meta-learning, continual learning, hyperparameter optimization, a large data-pipeline/augmentation/curriculum system, and a family of distributed/parallel-training abstractions (tensor, sequence, 3D, expert and ring-attention parallelism, plus elastic and multi-cloud orchestration).
 
@@ -91,13 +91,12 @@ This crate provides HuggingFace-`Trainer`-inspired training infrastructure: a co
 
 ```toml
 [dependencies]
-trustformers-training = "0.1.4"
+trustformers-training = "0.2.0"
 ```
 
 - `default = []` — no backend feature is enabled by default.
-- `torch` — enables `trustformers-core/torch`. Disabled by default; requires a matching `libtorch` version installed at runtime.
 - `candle` — enables `trustformers-core/candle`.
-- `full` — enables `candle` plus `trustformers-core/full` (used for full-feature testing; excludes `torch`).
+- `full` — enables `candle` plus `trustformers-core/full` (used for full-feature testing).
 
 ## API Overview
 

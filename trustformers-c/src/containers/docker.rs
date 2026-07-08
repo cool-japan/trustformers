@@ -60,6 +60,9 @@ pub enum BaseImage {
     },
     /// Scratch (empty base)
     Scratch,
+    /// An arbitrary, already-fully-qualified image reference (registry/name:tag) not
+    /// covered by the other named variants.
+    Custom(String),
 }
 
 /// Distroless variants
@@ -400,6 +403,7 @@ impl DockerImageBuilder {
                 }
             },
             BaseImage::Scratch => "scratch".to_string(),
+            BaseImage::Custom(image_ref) => image_ref.clone(),
         }
     }
 
@@ -1020,5 +1024,71 @@ mod tests {
         assert!(dockerfile.contains("FROM debian:bullseye-slim"));
         assert!(dockerfile.contains("USER trustformers"));
         assert!(dockerfile.contains("HEALTHCHECK"));
+    }
+
+    #[test]
+    fn test_base_image_custom_variant_maps_to_raw_image_reference() {
+        let builder = DockerImageBuilder::new(DockerImageConfig {
+            base_image: BaseImage::Custom("myregistry.io/myimage:v2".to_string()),
+            build_config: BuildConfig {
+                multi_stage: false,
+                target_arch: TargetArchitecture::AMD64,
+                build_args: HashMap::new(),
+                env_vars: HashMap::new(),
+                workdir: "/app".to_string(),
+                build_dependencies: vec![],
+                runtime_dependencies: vec![],
+            },
+            runtime_config: RuntimeConfig {
+                ports: vec![],
+                volumes: vec![],
+                resources: ResourceLimits {
+                    memory: None,
+                    cpu: None,
+                    swap: None,
+                    pids: None,
+                },
+                user: UserConfig {
+                    uid: 1000,
+                    gid: 1000,
+                    username: None,
+                    groupname: None,
+                },
+                entrypoint: EntrypointConfig {
+                    command: vec!["/usr/local/bin/trustformers-c".to_string()],
+                    args: vec![],
+                    signal_handling: true,
+                },
+            },
+            security_config: SecurityConfig {
+                non_root: false,
+                read_only_root: false,
+                security_opts: vec![],
+                drop_capabilities: vec![],
+                add_capabilities: vec![],
+                security_profile: None,
+            },
+            optimization: OptimizationConfig {
+                layer_caching: false,
+                minimize_layers: false,
+                strip_debug: false,
+                compress_binary: false,
+                clean_package_cache: false,
+                remove_dev_tools: false,
+                enable_scanning: false,
+            },
+            health_check: None,
+        });
+
+        // A `Custom` base image should pass the arbitrary image reference straight
+        // through into the generated `FROM` line, unlike the structured variants
+        // which build up a name from sub-fields (version/slim/minimal/etc).
+        let name = builder.get_base_image_name(&BaseImage::Custom(
+            "myregistry.io/myimage:v2".to_string(),
+        ));
+        assert_eq!(name, "myregistry.io/myimage:v2");
+
+        let dockerfile = builder.generate_dockerfile().expect("generation should succeed in test");
+        assert!(dockerfile.contains("FROM myregistry.io/myimage:v2"));
     }
 }

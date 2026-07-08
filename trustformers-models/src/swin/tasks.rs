@@ -154,7 +154,10 @@ impl SwinForImageClassification {
         }
 
         // Final norm & head
-        map.insert("swin.layernorm.weight".to_string(), "swin.norm.weight".to_string());
+        map.insert(
+            "swin.layernorm.weight".to_string(),
+            "swin.norm.weight".to_string(),
+        );
         map.insert("classifier.weight".to_string(), "head.weight".to_string());
         map.insert("classifier.bias".to_string(), "head.bias".to_string());
 

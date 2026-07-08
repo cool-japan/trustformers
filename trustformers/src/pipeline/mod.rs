@@ -23,6 +23,7 @@ pub mod adaptive_inference;
 pub mod advanced_caching;
 pub mod advanced_rag;
 pub mod audio_classification;
+pub mod audio_generation;
 pub mod code_generation;
 pub mod composition;
 #[cfg(feature = "async")]
@@ -30,12 +31,15 @@ pub mod conversational;
 pub mod coreml_backend;
 pub mod custom_backend;
 pub mod depth_estimation;
+pub mod document_classification;
 pub mod document_understanding;
 pub mod dynamic_batching;
 pub mod early_exit;
 pub mod ensemble;
+pub mod feature_extraction;
 pub mod fill_mask;
 pub mod image_classification;
+pub mod image_segmentation;
 pub mod image_to_text;
 pub mod jit_compilation;
 pub mod mamba2_pipeline;
@@ -52,17 +56,23 @@ pub mod pose_estimation;
 pub mod question_answering;
 pub mod rag;
 pub mod speculative_decoding;
+pub mod speech_recognition;
 pub mod speech_to_text;
 pub mod streaming;
 pub mod summarization;
+pub mod table_question_answering;
 pub mod tensorrt_backend;
 pub mod text_classification;
 pub mod text_generation;
+pub mod text_to_image;
 pub mod text_to_speech;
 pub mod token_classification;
 pub mod translation;
 pub mod translation_enhanced;
+pub mod video_classification;
+pub mod visual_grounding;
 pub mod visual_question_answering;
+pub mod zero_shot_audio_classification;
 
 pub use adaptive_batching::{
     AdaptiveBatchConfig, AdaptiveBatchOptimizer, BatchComparison, BatchSizeStats,

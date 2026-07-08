@@ -160,9 +160,9 @@ impl NASManager {
             success: 1,
             architectures_evaluated,
             search_time_seconds: search_time,
-            best_accuracy: 0.952 + (rng.gen::<f32>() * 0.03), // 95.2-98.2%
-            best_efficiency: 0.85 + (rng.gen::<f32>() * 0.1), // 85-95%
-            best_parameters: (85_000_000 + rng.gen::<u32>() % 20_000_000) as c_int, // 85-105M parameters
+            best_accuracy: 0.952 + (rng.random::<f32>() * 0.03), // 95.2-98.2%
+            best_efficiency: 0.85 + (rng.random::<f32>() * 0.1), // 85-95%
+            best_parameters: (85_000_000 + rng.random::<u32>() % 20_000_000) as c_int, // 85-105M parameters
             best_architecture_json: best_architecture,
             search_stats_json: search_stats,
         };
@@ -226,9 +226,9 @@ impl NASManager {
             ],
             "optimization": {
                 "algorithm": self.algorithm_name(),
-                "accuracy": format!("{:.3}", 0.952 + (rng.gen::<f32>() * 0.03)),
-                "efficiency": format!("{:.3}", 0.85 + (rng.gen::<f32>() * 0.1)),
-                "parameters": format!("{}", 85_000_000 + rng.gen::<u32>() % 20_000_000)
+                "accuracy": format!("{:.3}", 0.952 + (rng.random::<f32>() * 0.03)),
+                "efficiency": format!("{:.3}", 0.85 + (rng.random::<f32>() * 0.1)),
+                "parameters": format!("{}", 85_000_000 + rng.random::<u32>() % 20_000_000)
             }
         });
 
@@ -274,7 +274,7 @@ impl NASManager {
             "hardware_analysis": {
                 "memory_usage_mb": self.config.memory_constraint_mb as f32 * 0.85,
                 "inference_latency_ms": self.config.latency_constraint_ms as f32 * 0.78,
-                "throughput_samples_per_sec": 150.0 + rng.gen::<f32>() * 50.0
+                "throughput_samples_per_sec": 150.0 + rng.random::<f32>() * 50.0
             }
         });
 

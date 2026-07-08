@@ -152,6 +152,204 @@ impl GPTNeoXAttention {
         self.dense.weights_to_gpu_cuda(device)?;
         Ok(())
     }
+
+    /// GPU-resident attention over the oxicuda CUDA backend (prefill, no
+    /// cache — this layer's `forward` carries none).
+    ///
+    /// Returns `Ok(None)` when the resident fast path does not apply (input
+    /// not resident / unsupported shape or dtype / QKV projection produced a
+    /// host tensor because the weights are not device-cached); the caller then
+    /// takes the download-to-CPU fallback below. When it applies, the whole
+    /// chain — QKV split, NeoX RoPE on Q and K, per-head causal attention,
+    /// head merge, output projection — runs on device buffers with zero
+    /// per-layer host round-trips.
+    #[cfg(feature = "cuda")]
+    fn cuda_resident_forward(&self, input: &Tensor) -> Result<Option<Tensor>> {
+        use trustformers_core::gpu_ops::cuda::get_cuda_backend;
+        use trustformers_core::tensor::{CudaTensorData, DType};
+
+        let Tensor::CUDA(input_data) = input else {
+            return Ok(None);
+        };
+        let num_heads = self._num_heads;
+        let head_dim = self._head_dim;
+        let rotary_ndims = self._rotary_ndims;
+        let hidden = num_heads * head_dim;
+        // Resident path scope: 2D [seq, hidden] F32 inputs (the host path
+        // below rejects 3D QKV as well) and an even, non-zero rotary width
+        // (the device RoPE kernel's contract).
+        let seq_len = match input_data.shape.as_slice() {
+            [seq, h] if *h == hidden && *seq > 0 => *seq,
+            _ => return Ok(None),
+        };
+        if input_data.dtype != DType::F32 || rotary_ndims == 0 || !rotary_ndims.is_multiple_of(2) {
+            return Ok(None);
+        }
+
+        // Project to combined QKV; a host result means the weights are not
+        // resident on this device — let the host path redo the projection.
+        let qkv = self.query_key_value.forward(input.clone())?;
+        let Tensor::CUDA(qkv_data) = &qkv else {
+            return Ok(None);
+        };
+        if qkv_data.shape.last().copied() != Some(3 * hidden) {
+            return Ok(None);
+        }
+
+        let device_id = qkv_data.device_id();
+        let backend = get_cuda_backend(device_id)?;
+        let row_stride = 3 * hidden;
+        let dtype = qkv_data.dtype;
+        // Every intermediate id is wrapped in a `Tensor::CUDA` immediately so
+        // the refcounted handle lifecycle frees it (on success and on every
+        // error path alike).
+        let wrap =
+            |id, shape: Vec<usize>| Tensor::CUDA(CudaTensorData::new(id, device_id, shape, dtype));
+        let id_of = |t: &Tensor| -> Result<trustformers_core::gpu_ops::cuda::BufferId> {
+            match t {
+                Tensor::CUDA(data) => Ok(data.buffer_id()),
+                _ => Err(tensor_op_error(
+                    "GPTNeoXAttention::cuda_resident_forward",
+                    "expected resident tensor",
+                )),
+            }
+        };
+
+        // GPT-NeoX QKV packing: each row is [h0: q|k|v, h1: q|k|v, ...], so
+        // head h's Q/K/V slices start at h*3d + {0, d, 2d}. Q and K are
+        // gathered into the RoPE layout [seq, H, d]; V directly into the
+        // per-head GEMM layout [H, seq, d].
+        let q_rope_layout = wrap(
+            backend.gather_heads_gpu_to_gpu(
+                &qkv_data.buffer_id(),
+                seq_len,
+                row_stride,
+                0,
+                3 * head_dim,
+                num_heads,
+                head_dim,
+                false,
+            )?,
+            vec![seq_len, hidden],
+        );
+        let k_rope_layout = wrap(
+            backend.gather_heads_gpu_to_gpu(
+                &qkv_data.buffer_id(),
+                seq_len,
+                row_stride,
+                head_dim,
+                3 * head_dim,
+                num_heads,
+                head_dim,
+                false,
+            )?,
+            vec![seq_len, hidden],
+        );
+        let v_heads = wrap(
+            backend.gather_heads_gpu_to_gpu(
+                &qkv_data.buffer_id(),
+                seq_len,
+                row_stride,
+                2 * head_dim,
+                3 * head_dim,
+                num_heads,
+                head_dim,
+                true,
+            )?,
+            vec![num_heads, seq_len, head_dim],
+        );
+
+        // Rotary position embeddings on Q and K (positions 0..seq, matching
+        // the host loop below).
+        let base = self._rotary_emb.base;
+        let q_roped = wrap(
+            backend.rope_neox_gpu_to_gpu(
+                &id_of(&q_rope_layout)?,
+                seq_len,
+                num_heads,
+                head_dim,
+                rotary_ndims,
+                base,
+                0,
+            )?,
+            vec![seq_len, hidden],
+        );
+        let k_roped = wrap(
+            backend.rope_neox_gpu_to_gpu(
+                &id_of(&k_rope_layout)?,
+                seq_len,
+                num_heads,
+                head_dim,
+                rotary_ndims,
+                base,
+                0,
+            )?,
+            vec![seq_len, hidden],
+        );
+
+        // Re-pack Q and K as [H, seq, d]; the score GEMM applies K^T as a
+        // transpose flag (transpose-aware since oxicuda 0.4.1 — see the
+        // backend module docs).
+        let q_heads = wrap(
+            backend.gather_heads_gpu_to_gpu(
+                &id_of(&q_roped)?,
+                seq_len,
+                hidden,
+                0,
+                head_dim,
+                num_heads,
+                head_dim,
+                true,
+            )?,
+            vec![num_heads, seq_len, head_dim],
+        );
+        let k_heads = wrap(
+            backend.gather_heads_gpu_to_gpu(
+                &id_of(&k_roped)?,
+                seq_len,
+                hidden,
+                0,
+                head_dim,
+                num_heads,
+                head_dim,
+                true,
+            )?,
+            vec![num_heads, seq_len, head_dim],
+        );
+
+        // Fused per-head causal attention: softmax(scale * Q K^T) @ V.
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        let attn_heads = wrap(
+            backend.attention_prefill_gpu_to_gpu(
+                &id_of(&q_heads)?,
+                &id_of(&k_heads)?,
+                &id_of(&v_heads)?,
+                num_heads,
+                seq_len,
+                head_dim,
+                scale,
+            )?,
+            vec![num_heads, seq_len, head_dim],
+        );
+
+        // Merge heads back to [seq, hidden] and apply the output projection
+        // (which stays resident via the Linear GPU path).
+        let merged = wrap(
+            backend.gather_heads_gpu_to_gpu(
+                &id_of(&attn_heads)?,
+                seq_len,
+                head_dim,
+                0,
+                seq_len * head_dim,
+                num_heads,
+                head_dim,
+                false,
+            )?,
+            vec![seq_len, hidden],
+        );
+
+        self.dense.forward(merged).map(Some)
+    }
 }
 
 impl Layer for GPTNeoXAttention {
@@ -161,16 +359,26 @@ impl Layer for GPTNeoXAttention {
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
         use scirs2_core::ndarray::{s, Array2};
 
-        // GPU-resident attention is not yet available: the oxicuda CUDA backend exposes host-in/
-        // host-out matmul + resident elementwise ops, but not on-device QKV-split/RoPE/attention.
-        // CUDA/Metal operands are therefore downloaded to CPU F32 for attention (correct, not a stub).
-        // On-device attention residency is tracked as future work.
+        // GPU-resident attention (oxicuda CUDA backend): QKV split, NeoX RoPE,
+        // per-head causal attention and head merge all run on device buffers —
+        // no per-layer host round-trip. The path applies to resident 2D F32
+        // inputs with device-cached QKV weights; anything else falls through
+        // to the download-to-CPU fallback below (correct, not a stub).
+        #[cfg(feature = "cuda")]
+        if let Some(output) = self.cuda_resident_forward(&input)? {
+            return Ok(output);
+        }
+
+        // Metal operands are still downloaded to CPU F32 for attention (the
+        // per-head Metal fast path below reuses the backend's host-in/host-out
+        // kernels); full Metal residency for this layer is tracked separately.
         #[cfg(all(target_os = "macos", feature = "metal"))]
         let input = match &input {
             Tensor::Metal(_) => input.to_device_enum(&trustformers_core::device::Device::CPU)?,
             _ => input,
         };
 
+        // CUDA fallback (resident fast path above did not apply).
         #[cfg(feature = "cuda")]
         let input = match &input {
             Tensor::CUDA(_) => input.to_device_enum(&trustformers_core::device::Device::CPU)?,

@@ -43,6 +43,7 @@ impl Default for EventConfig {
             pattern_config: PatternConfig::default(),
             aggregation_config: AggregationConfig::default(),
             enrichment_config: EnrichmentConfig::default(),
+            compliance_logging: false,
         }
     }
 }

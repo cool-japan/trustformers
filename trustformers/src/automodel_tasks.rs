@@ -8,6 +8,12 @@ use crate::pipeline::image_classification::{
     ImageClassificationConfig, ImageClassificationInput, ImageClassificationPipeline,
     ImageClassificationResult,
 };
+use crate::pipeline::image_segmentation::{
+    ImageSegmentationConfig, ImageSegmentationPipeline, SegmentationError, SegmentationResult,
+};
+use crate::pipeline::object_detection::{
+    DetectionError, DetectionResult, ObjectDetectionConfig, ObjectDetectionPipeline,
+};
 use std::path::Path;
 use trustformers_core::errors::TrustformersError as CoreTrustformersError;
 
@@ -711,6 +717,207 @@ impl AutoModelForImageClassification {
     }
 }
 
+// ---------------------------------------------------------------------------
+// AutoModelForObjectDetection
+// ---------------------------------------------------------------------------
+
+/// Automatic class for loading object detection models.
+///
+/// Provides a high-level interface for object detection tasks such as
+/// bounding-box localisation and classification of multiple objects within a
+/// single image. Compatible with DETR and YOLO-style architectures.
+///
+/// **Mock notice:** this wrapper uses a deterministic placeholder pipeline
+/// pending a real object-detection model — see TODO.md for status.
+/// [`ObjectDetectionPipeline::detect`] does not run real inference: it
+/// derives a deterministic number of bounding boxes from the input buffer's
+/// length, exactly like the equally mock
+/// [`AutoModelForImageClassification`]/[`AutoModelForAudioClassification`]
+/// siblings. Do not treat the returned boxes, labels, or confidence scores as
+/// real detections.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use trustformers::AutoModelForObjectDetection;
+///
+/// let model = AutoModelForObjectDetection::from_pretrained("facebook/detr-resnet-50")?;
+///
+/// let image = vec![0.5f32; 800 * 800 * 3];
+/// let result = model.detect(&image, 800, 800)?;
+/// for det in &result.detections {
+///     println!("{}: {:.2} @ {:?}", det.label, det.confidence, det.bbox);
+/// }
+/// # Ok::<(), trustformers::pipeline::object_detection::DetectionError>(())
+/// ```
+pub struct AutoModelForObjectDetection {
+    pipeline: ObjectDetectionPipeline,
+    model_name: String,
+}
+
+impl AutoModelForObjectDetection {
+    /// Load an object detection model from a pretrained checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrustformersError`] if the pipeline configuration is invalid.
+    pub fn from_pretrained(model_name: &str) -> Result<Self> {
+        let config = ObjectDetectionConfig {
+            model_name: model_name.to_string(),
+            ..Default::default()
+        };
+        let pipeline = ObjectDetectionPipeline::new(config)
+            .map_err(|e| TrustformersError::pipeline(e.to_string(), "object_detection"))?;
+        Ok(Self {
+            pipeline,
+            model_name: model_name.to_string(),
+        })
+    }
+
+    /// Load from a local directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrustformersError::Io`] if the directory does not exist.
+    pub fn from_local(path: &str) -> Result<Self> {
+        let dir = std::path::Path::new(path);
+        if !dir.is_dir() {
+            return Err(TrustformersError::Io {
+                message: format!("Model directory not found: {path}"),
+                path: Some(path.to_string()),
+                suggestion: Some(
+                    "Ensure the path points to a directory with config.json.".to_string(),
+                ),
+            });
+        }
+        Self::from_pretrained(path)
+    }
+
+    /// Detect objects in a single image.
+    ///
+    /// `image` is a flat `f32` buffer, `height` and `width` describe its spatial
+    /// dimensions. Returns deterministic mock detections — see the struct-level
+    /// documentation for details.
+    pub fn detect(
+        &self,
+        image: &[f32],
+        height: usize,
+        width: usize,
+    ) -> std::result::Result<DetectionResult, DetectionError> {
+        self.pipeline.detect(image, height, width)
+    }
+
+    /// Access the underlying [`ObjectDetectionPipeline`].
+    pub fn pipeline(&self) -> &ObjectDetectionPipeline {
+        &self.pipeline
+    }
+
+    /// Return the model name or path.
+    pub fn model_name(&self) -> &str {
+        &self.model_name
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AutoModelForImageSegmentation
+// ---------------------------------------------------------------------------
+
+/// Automatic class for loading image segmentation models.
+///
+/// Provides a high-level interface for semantic segmentation tasks that
+/// assign a class label to every pixel of an image. Compatible with
+/// SegFormer and Mask2Former-style architectures.
+///
+/// **Mock notice:** this wrapper uses a deterministic placeholder pipeline
+/// pending a real image-segmentation model — see TODO.md for status.
+/// [`ImageSegmentationPipeline::segment`] does not run real inference: it
+/// derives the per-pixel class mask deterministically from pixel values,
+/// exactly like the equally mock
+/// [`AutoModelForImageClassification`]/[`AutoModelForAudioClassification`]
+/// siblings. Do not treat the returned mask as a real segmentation.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use trustformers::AutoModelForImageSegmentation;
+///
+/// let model = AutoModelForImageSegmentation::from_pretrained(
+///     "nvidia/segformer-b0-finetuned-ade-512-512",
+/// )?;
+///
+/// let image = vec![0.5f32; 512 * 512 * 3];
+/// let result = model.segment(&image, 512, 512)?;
+/// println!("Dominant class: {:?}", result.mask.dominant_class());
+/// # Ok::<(), trustformers::pipeline::image_segmentation::SegmentationError>(())
+/// ```
+pub struct AutoModelForImageSegmentation {
+    pipeline: ImageSegmentationPipeline,
+    model_name: String,
+}
+
+impl AutoModelForImageSegmentation {
+    /// Load an image segmentation model from a pretrained checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrustformersError`] if the pipeline configuration is invalid.
+    pub fn from_pretrained(model_name: &str) -> Result<Self> {
+        let config = ImageSegmentationConfig {
+            model_name: model_name.to_string(),
+            ..Default::default()
+        };
+        let pipeline = ImageSegmentationPipeline::new(config)
+            .map_err(|e| TrustformersError::pipeline(e.to_string(), "image_segmentation"))?;
+        Ok(Self {
+            pipeline,
+            model_name: model_name.to_string(),
+        })
+    }
+
+    /// Load from a local directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrustformersError::Io`] if the directory does not exist.
+    pub fn from_local(path: &str) -> Result<Self> {
+        let dir = std::path::Path::new(path);
+        if !dir.is_dir() {
+            return Err(TrustformersError::Io {
+                message: format!("Model directory not found: {path}"),
+                path: Some(path.to_string()),
+                suggestion: Some(
+                    "Ensure the path points to a directory with config.json.".to_string(),
+                ),
+            });
+        }
+        Self::from_pretrained(path)
+    }
+
+    /// Segment a single image.
+    ///
+    /// `image` is a flat `f32` buffer, `height` and `width` describe its spatial
+    /// dimensions. Returns a deterministic mock segmentation mask — see the
+    /// struct-level documentation for details.
+    pub fn segment(
+        &self,
+        image: &[f32],
+        height: usize,
+        width: usize,
+    ) -> std::result::Result<SegmentationResult, SegmentationError> {
+        self.pipeline.segment(image, height, width)
+    }
+
+    /// Access the underlying [`ImageSegmentationPipeline`].
+    pub fn pipeline(&self) -> &ImageSegmentationPipeline {
+        &self.pipeline
+    }
+
+    /// Return the model name or path.
+    pub fn model_name(&self) -> &str {
+        &self.model_name
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -955,6 +1162,237 @@ mod tests {
             model.model_name(),
             name,
             "Special-char model name must be preserved exactly"
+        );
+    }
+
+    // ---- AutoModelForObjectDetection tests ----
+
+    #[test]
+    fn test_object_detection_from_pretrained_returns_model() {
+        let model = AutoModelForObjectDetection::from_pretrained("facebook/detr-resnet-50");
+        assert!(model.is_ok(), "Expected Ok result from from_pretrained");
+    }
+
+    #[test]
+    fn test_object_detection_model_name_stored_correctly() {
+        let model_name = "facebook/detr-resnet-50";
+        let model = AutoModelForObjectDetection::from_pretrained(model_name)
+            .expect("from_pretrained should succeed");
+        assert_eq!(
+            model.model_name(),
+            model_name,
+            "model_name should match input"
+        );
+    }
+
+    #[test]
+    fn test_object_detection_from_local_missing_dir_returns_error() {
+        let result = AutoModelForObjectDetection::from_local("/nonexistent/detect_path_xyz");
+        assert!(result.is_err(), "Expected error for missing directory");
+    }
+
+    #[test]
+    fn test_object_detection_from_local_error_contains_path() {
+        let path = "/nonexistent/object_detection_automodel_test";
+        let result = AutoModelForObjectDetection::from_local(path);
+        match result {
+            Err(TrustformersError::Io { message, .. }) => {
+                assert!(
+                    message.contains(path),
+                    "Error message should mention the missing path"
+                );
+            },
+            _ => panic!("Expected Io error for missing directory"),
+        }
+    }
+
+    #[test]
+    fn test_object_detection_pipeline_access() {
+        let model = AutoModelForObjectDetection::from_pretrained("test-detr-model")
+            .expect("from_pretrained should succeed");
+        // Simply accessing pipeline must not panic
+        let _pipeline = model.pipeline();
+    }
+
+    #[test]
+    fn test_object_detect_single_input_returns_detections() {
+        let model = AutoModelForObjectDetection::from_pretrained("test-detr-model")
+            .expect("from_pretrained should succeed");
+        let image = vec![0.5f32; 32 * 32 * 3];
+        let result = model.detect(&image, 32, 32);
+        assert!(
+            result.is_ok(),
+            "detect should succeed for a non-empty image"
+        );
+    }
+
+    #[test]
+    fn test_object_detect_empty_image_returns_error() {
+        let model = AutoModelForObjectDetection::from_pretrained("test-detr-model")
+            .expect("from_pretrained should succeed");
+        let result = model.detect(&[], 32, 32);
+        assert!(result.is_err(), "detect should fail for an empty image");
+    }
+
+    #[test]
+    fn test_object_detection_model_name_is_nonempty() {
+        let model = AutoModelForObjectDetection::from_pretrained("detr-resnet-50")
+            .expect("from_pretrained should succeed");
+        assert!(
+            !model.model_name().is_empty(),
+            "model_name must not be empty"
+        );
+    }
+
+    #[test]
+    fn test_object_detection_from_local_with_existing_dir_does_not_return_io_error() {
+        let tmp_dir = std::env::temp_dir();
+        let tmp_path = tmp_dir.to_str().expect("temp dir path should be valid UTF-8");
+        let result = AutoModelForObjectDetection::from_local(tmp_path);
+        // Either Ok or a non-Io error is acceptable – just must not be the Io "not found" variant.
+        if let Err(TrustformersError::Io { message, .. }) = result {
+            assert!(
+                !message.contains("not found"),
+                "Should not return 'not found' Io error for existing dir"
+            );
+        }
+    }
+
+    #[test]
+    fn test_multiple_object_detection_models_have_independent_names() {
+        let m1 = AutoModelForObjectDetection::from_pretrained("detr-model-a")
+            .expect("from_pretrained for detr-model-a should succeed");
+        let m2 = AutoModelForObjectDetection::from_pretrained("detr-model-b")
+            .expect("from_pretrained for detr-model-b should succeed");
+        assert_ne!(
+            m1.model_name(),
+            m2.model_name(),
+            "Different models must have different names"
+        );
+    }
+
+    #[test]
+    fn test_object_detection_special_chars_in_model_name() {
+        let name = "facebook/detr-resnet-50_v2.0";
+        let model = AutoModelForObjectDetection::from_pretrained(name)
+            .expect("from_pretrained should succeed");
+        assert_eq!(
+            model.model_name(),
+            name,
+            "Special-char model name must be preserved exactly"
+        );
+    }
+
+    // ---- AutoModelForImageSegmentation tests ----
+
+    #[test]
+    fn test_image_segmentation_from_pretrained_returns_model() {
+        let model = AutoModelForImageSegmentation::from_pretrained(
+            "nvidia/segformer-b0-finetuned-ade-512-512",
+        );
+        assert!(model.is_ok(), "Expected Ok result from from_pretrained");
+    }
+
+    #[test]
+    fn test_image_segmentation_model_name_stored_correctly() {
+        let model_name = "nvidia/segformer-b0-finetuned-ade-512-512";
+        let model = AutoModelForImageSegmentation::from_pretrained(model_name)
+            .expect("from_pretrained should succeed");
+        assert_eq!(
+            model.model_name(),
+            model_name,
+            "model_name should match input"
+        );
+    }
+
+    #[test]
+    fn test_image_segmentation_from_local_missing_dir_returns_error() {
+        let result = AutoModelForImageSegmentation::from_local("/nonexistent/segment_path_xyz");
+        assert!(result.is_err(), "Expected error for missing directory");
+    }
+
+    #[test]
+    fn test_image_segmentation_from_local_error_is_io_variant() {
+        let path = "/nonexistent/image_segmentation_automodel_test";
+        let result = AutoModelForImageSegmentation::from_local(path);
+        assert!(
+            matches!(result, Err(TrustformersError::Io { .. })),
+            "Expected Io variant for missing directory"
+        );
+    }
+
+    #[test]
+    fn test_image_segmentation_pipeline_access() {
+        let model = AutoModelForImageSegmentation::from_pretrained("test-segformer-model")
+            .expect("from_pretrained should succeed");
+        let _pipeline = model.pipeline();
+    }
+
+    #[test]
+    fn test_image_segment_single_input_returns_mask() {
+        let model = AutoModelForImageSegmentation::from_pretrained("test-segformer-model")
+            .expect("from_pretrained should succeed");
+        let image = vec![0.5f32; 32 * 32 * 3];
+        let result = model.segment(&image, 32, 32);
+        assert!(
+            result.is_ok(),
+            "segment should succeed for a non-empty image"
+        );
+    }
+
+    #[test]
+    fn test_image_segment_empty_image_returns_error() {
+        let model = AutoModelForImageSegmentation::from_pretrained("test-segformer-model")
+            .expect("from_pretrained should succeed");
+        let result = model.segment(&[], 32, 32);
+        assert!(result.is_err(), "segment should fail for an empty image");
+    }
+
+    #[test]
+    fn test_image_segmentation_model_name_is_nonempty() {
+        let model = AutoModelForImageSegmentation::from_pretrained("segformer-b0")
+            .expect("from_pretrained should succeed");
+        assert!(
+            !model.model_name().is_empty(),
+            "model_name must not be empty"
+        );
+    }
+
+    #[test]
+    fn test_image_segmentation_from_local_with_existing_dir_does_not_return_io_error() {
+        let tmp_dir = std::env::temp_dir();
+        let tmp_path = tmp_dir.to_str().expect("temp dir path should be valid UTF-8");
+        let result = AutoModelForImageSegmentation::from_local(tmp_path);
+        if let Err(TrustformersError::Io { message, .. }) = result {
+            assert!(
+                !message.contains("not found"),
+                "Should not return 'not found' Io error for existing dir"
+            );
+        }
+    }
+
+    #[test]
+    fn test_multiple_image_segmentation_models_have_independent_names() {
+        let m1 = AutoModelForImageSegmentation::from_pretrained("segformer-model-a")
+            .expect("from_pretrained for segformer-model-a should succeed");
+        let m2 = AutoModelForImageSegmentation::from_pretrained("segformer-model-b")
+            .expect("from_pretrained for segformer-model-b should succeed");
+        assert_ne!(
+            m1.model_name(),
+            m2.model_name(),
+            "Different models must have different names"
+        );
+    }
+
+    #[test]
+    fn test_image_segmentation_long_model_name() {
+        let long_name = "s".repeat(256);
+        let model = AutoModelForImageSegmentation::from_pretrained(&long_name)
+            .expect("from_pretrained should succeed even with long name");
+        assert_eq!(
+            model.model_name(),
+            long_name.as_str(),
+            "Long model name must be preserved"
         );
     }
 }

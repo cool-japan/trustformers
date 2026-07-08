@@ -1042,8 +1042,30 @@ impl ErrorRecoverySystem {
                 Ok(())
             },
             RecoveryAction::ClearCache => {
-                // Clear various caches - implementation would clear model caches
-                // This is a placeholder for actual cache clearing logic
+                // Clear all browser Cache Storage entries. Self-contained: reaches for
+                // web_sys::window() directly (matching the ReduceMemoryUsage arm below),
+                // rather than routing through this crate's other cache-clearing mechanisms
+                // (ServiceWorker, IndexedDB, WebGPU buffer pool), which are gated behind
+                // optional Cargo features — deliberately not coupled to this fix.
+                if let Some(window) = web_sys::window() {
+                    if let Ok(cache_storage) = window.caches() {
+                        if let Ok(keys_value) =
+                            wasm_bindgen_futures::JsFuture::from(cache_storage.keys()).await
+                        {
+                            if let Ok(keys) = keys_value.dyn_into::<js_sys::Array>() {
+                                for key in keys.iter() {
+                                    if let Some(cache_name) = key.as_string() {
+                                        // Best-effort: one failed deletion shouldn't abort the rest.
+                                        let _ = wasm_bindgen_futures::JsFuture::from(
+                                            cache_storage.delete(&cache_name),
+                                        )
+                                        .await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 Ok(())
             },
             RecoveryAction::ReduceMemoryUsage => {
@@ -1253,5 +1275,33 @@ mod tests {
         use ErrorSeverity::*;
         assert_ne!(Info, Error);
         assert_ne!(Warning, Fatal);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_recovery_action_clear_cache_mapping() {
+        let recovery = ErrorRecoverySystem::new();
+        assert!(matches!(
+            recovery.recovery_strategies.get(&ErrorCode::E4001),
+            Some(RecoveryAction::ClearCache)
+        ));
+        assert!(matches!(
+            recovery.recovery_strategies.get(&ErrorCode::E7001),
+            Some(RecoveryAction::ClearCache)
+        ));
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::*;
+
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+
+    #[wasm_bindgen_test]
+    #[cfg(target_arch = "wasm32")]
+    async fn test_clear_cache_recovery_action_runs_without_error() {
+        let recovery = ErrorRecoverySystem::new();
+        let result = recovery.execute_recovery_action(RecoveryAction::ClearCache).await;
+        assert!(result.is_ok());
     }
 }

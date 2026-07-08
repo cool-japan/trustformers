@@ -216,7 +216,9 @@ impl ParallelWeightLoader {
             return Err(TrustformersError::Io {
                 message: format!("'{}' is not a directory", dir.display()),
                 path: Some(dir.to_string_lossy().to_string()),
-                suggestion: Some("Provide a path to a model directory containing weight files".to_string()),
+                suggestion: Some(
+                    "Provide a path to a model directory containing weight files".to_string(),
+                ),
             });
         }
 
@@ -225,7 +227,9 @@ impl ParallelWeightLoader {
             return Err(TrustformersError::Io {
                 message: format!("No weight files found in '{}'", dir.display()),
                 path: Some(dir.to_string_lossy().to_string()),
-                suggestion: Some("Ensure the directory contains .safetensors or .bin weight files".to_string()),
+                suggestion: Some(
+                    "Ensure the directory contains .safetensors or .bin weight files".to_string(),
+                ),
             });
         }
 
@@ -255,10 +259,7 @@ impl ParallelWeightLoader {
     }
 
     /// Load multiple shard files, dispatching reads across worker threads.
-    pub fn load_files(
-        &self,
-        files: &[PathBuf],
-    ) -> Result<Vec<WeightChunk>, TrustformersError> {
+    pub fn load_files(&self, files: &[PathBuf]) -> Result<Vec<WeightChunk>, TrustformersError> {
         let total_bytes = files
             .iter()
             .filter_map(|p| p.metadata().ok())
@@ -298,7 +299,8 @@ impl ParallelWeightLoader {
                             Ok(chunk) => {
                                 let byte_count = chunk.total_bytes();
                                 let throughput = {
-                                    let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
+                                    let mut state =
+                                        shared.lock().unwrap_or_else(|e| e.into_inner());
                                     state.record_chunk(byte_count)
                                 };
 
@@ -323,11 +325,11 @@ impl ParallelWeightLoader {
 
                                 let mut res = results.lock().unwrap_or_else(|e| e.into_inner());
                                 res.push((chunk_id, chunk));
-                            }
+                            },
                             Err(e) => {
                                 let mut errs = errors.lock().unwrap_or_else(|e| e.into_inner());
                                 errs.push(format!("{}: {}", path.display(), e));
-                            }
+                            },
                         }
                     }
                 });
@@ -342,11 +344,7 @@ impl ParallelWeightLoader {
 
         if !errs.is_empty() {
             return Err(TrustformersError::Io {
-                message: format!(
-                    "{} file(s) failed to load: {}",
-                    errs.len(),
-                    errs.join("; ")
-                ),
+                message: format!("{} file(s) failed to load: {}", errs.len(), errs.join("; ")),
                 path: None,
                 suggestion: Some("Check file permissions and disk integrity".to_string()),
             });
@@ -404,10 +402,7 @@ impl ParallelWeightLoader {
 
     /// Return a snapshot of accumulated loading statistics.
     pub fn stats(&self) -> LoadingStats {
-        self.stats
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.stats.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     // -----------------------------------------------------------------------
@@ -435,17 +430,13 @@ impl ParallelWeightLoader {
                 match ext {
                     "safetensors" => safetensor_files.push(path),
                     "bin" => bin_files.push(path),
-                    _ => {}
+                    _ => {},
                 }
             }
         }
 
         // Prefer safetensors; fall back to bin
-        let mut files = if !safetensor_files.is_empty() {
-            safetensor_files
-        } else {
-            bin_files
-        };
+        let mut files = if !safetensor_files.is_empty() { safetensor_files } else { bin_files };
 
         // Sort for deterministic ordering
         files.sort();
@@ -469,11 +460,7 @@ fn load_file_as_chunk(
     _use_mmap: bool,
 ) -> Result<WeightChunk, std::io::Error> {
     let bytes = std::fs::read(path)?;
-    let tensor_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown")
-        .to_string();
+    let tensor_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string();
 
     let mut tensors = HashMap::new();
     let mut dtype_map = HashMap::new();
@@ -537,11 +524,7 @@ fn extract_safetensor_tensor_names(bytes: &[u8], header_len: usize) -> Option<Ve
     let json_str = std::str::from_utf8(json_bytes).ok()?;
     let value: serde_json::Value = serde_json::from_str(json_str).ok()?;
     let obj = value.as_object()?;
-    let names = obj
-        .keys()
-        .filter(|k| k.as_str() != "__metadata__")
-        .cloned()
-        .collect::<Vec<_>>();
+    let names = obj.keys().filter(|k| k.as_str() != "__metadata__").cloned().collect::<Vec<_>>();
     if names.is_empty() {
         None
     } else {
@@ -692,9 +675,7 @@ mod tests {
         write_temp_file(&tmp, "model-00002-of-00002.safetensors", &payload);
 
         let loader = ParallelWeightLoader::new(ParallelLoaderConfig::default());
-        let result = loader
-            .load_sharded_directory(&tmp)
-            .expect("load_sharded_directory");
+        let result = loader.load_sharded_directory(&tmp).expect("load_sharded_directory");
         assert_eq!(result.len(), 2);
 
         std::fs::remove_dir_all(&tmp).ok();
@@ -729,9 +710,8 @@ mod tests {
         let tmp = std::env::temp_dir().join("tf_parallel_test_progress");
         std::fs::create_dir_all(&tmp).unwrap();
 
-        let paths: Vec<PathBuf> = (0..4)
-            .map(|i| write_temp_file(&tmp, &format!("s{i}.bin"), b"data"))
-            .collect();
+        let paths: Vec<PathBuf> =
+            (0..4).map(|i| write_temp_file(&tmp, &format!("s{i}.bin"), b"data")).collect();
 
         let call_count = Arc::new(Mutex::new(0usize));
         let cc = Arc::clone(&call_count);
@@ -748,7 +728,10 @@ mod tests {
 
         loader.load_files(&paths).expect("load");
         let count = *call_count.lock().unwrap_or_else(|e| e.into_inner());
-        assert!(count >= 1, "progress callback should have been called at least once");
+        assert!(
+            count >= 1,
+            "progress callback should have been called at least once"
+        );
 
         std::fs::remove_dir_all(&tmp).ok();
     }

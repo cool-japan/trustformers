@@ -51,6 +51,7 @@ pub async fn is_webgpu_supported() -> bool {
 
 /// Get device capabilities
 pub async fn get_device_capabilities() -> Result<DeviceCapabilities, ComputeError> {
-    // Return default capabilities as placeholder
-    Ok(DeviceCapabilities::default())
+    DeviceSelector::analyze_device_capabilities()
+        .await
+        .map_err(|e| ComputeError::DeviceError(format!("{e:?}")))
 }

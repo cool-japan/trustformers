@@ -95,23 +95,16 @@ pub struct TableQaTable {
 impl TableQaTable {
     /// Construct a table from separate header and data vectors.
     pub fn new(headers: Vec<String>, rows: Vec<Vec<String>>) -> Self {
-        let rows = rows
-            .into_iter()
-            .map(|cells| TableRow { cells })
-            .collect();
+        let rows = rows.into_iter().map(|cells| TableRow { cells }).collect();
         Self { headers, rows }
     }
 
     /// Parse a CSV string: first line = headers, remaining lines = rows.
     pub fn from_csv(csv: &str) -> Result<Self, TableError> {
         let mut lines = csv.lines();
-        let header_line = lines.next().ok_or_else(|| {
-            TableError::ParseError("CSV is empty".to_string())
-        })?;
-        let headers: Vec<String> = header_line
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .collect();
+        let header_line =
+            lines.next().ok_or_else(|| TableError::ParseError("CSV is empty".to_string()))?;
+        let headers: Vec<String> = header_line.split(',').map(|s| s.trim().to_string()).collect();
 
         if headers.is_empty() || headers.iter().all(|h| h.is_empty()) {
             return Err(TableError::ParseError("No headers found".to_string()));
@@ -155,12 +148,7 @@ impl TableQaTable {
     /// Return all values in the named column.
     pub fn column(&self, col_name: &str) -> Option<Vec<&str>> {
         let col_idx = self.headers.iter().position(|h| h == col_name)?;
-        Some(
-            self.rows
-                .iter()
-                .map(|r| r.cells[col_idx].as_str())
-                .collect(),
-        )
+        Some(self.rows.iter().map(|r| r.cells[col_idx].as_str()).collect())
     }
 
     /// Linearise the table into TAPAS-style text.
@@ -168,15 +156,9 @@ impl TableQaTable {
     /// Format: `col: h1 | h2 ... row: v1 | v2 ... row: v1 | v2 ...`
     pub fn to_linear_form(&self) -> String {
         let header_part = format!("col: {}", self.headers.join(" | "));
-        let row_parts: Vec<String> = self
-            .rows
-            .iter()
-            .map(|r| format!("row: {}", r.cells.join(" | ")))
-            .collect();
-        std::iter::once(header_part)
-            .chain(row_parts)
-            .collect::<Vec<_>>()
-            .join(" ")
+        let row_parts: Vec<String> =
+            self.rows.iter().map(|r| format!("row: {}", r.cells.join(" | "))).collect();
+        std::iter::once(header_part).chain(row_parts).collect::<Vec<_>>().join(" ")
     }
 
     /// Return a new table containing only rows for which `predicate(cell)` is true
@@ -196,11 +178,7 @@ impl TableQaTable {
     }
 
     /// Apply a numeric aggregation over the named column.
-    pub fn aggregate_column(
-        &self,
-        col_name: &str,
-        agg: Aggregation,
-    ) -> Result<f64, TableError> {
+    pub fn aggregate_column(&self, col_name: &str, agg: Aggregation) -> Result<f64, TableError> {
         let values = self
             .column(col_name)
             .ok_or_else(|| TableError::ColumnNotFound(col_name.to_string()))?;
@@ -211,11 +189,7 @@ impl TableQaTable {
 
         let nums: Vec<f64> = values
             .iter()
-            .map(|v| {
-                v.parse::<f64>().map_err(|_| {
-                    TableError::NonNumeric(col_name.to_string())
-                })
-            })
+            .map(|v| v.parse::<f64>().map_err(|_| TableError::NonNumeric(col_name.to_string())))
             .collect::<Result<Vec<_>, _>>()?;
 
         if nums.is_empty() {
@@ -226,16 +200,8 @@ impl TableQaTable {
             Aggregation::Sum => nums.iter().sum(),
             Aggregation::Average => nums.iter().sum::<f64>() / nums.len() as f64,
             Aggregation::Count => nums.len() as f64,
-            Aggregation::Min => nums
-                .iter()
-                .cloned()
-                .reduce(f64::min)
-                .unwrap_or(0.0),
-            Aggregation::Max => nums
-                .iter()
-                .cloned()
-                .reduce(f64::max)
-                .unwrap_or(0.0),
+            Aggregation::Min => nums.iter().cloned().reduce(f64::min).unwrap_or(0.0),
+            Aggregation::Max => nums.iter().cloned().reduce(f64::max).unwrap_or(0.0),
         };
         Ok(result)
     }
@@ -332,14 +298,9 @@ impl TableQaPipeline {
             if let Some(col_name) = find_numeric_column(table) {
                 if let Ok(value) = table.aggregate_column(&col_name, agg.clone()) {
                     let answer = format_numeric(value, &agg);
-                    let col_idx = table
-                        .headers
-                        .iter()
-                        .position(|h| h == &col_name)
-                        .unwrap_or(0);
-                    let coords: Vec<(usize, usize)> = (0..table.num_rows())
-                        .map(|r| (r, col_idx))
-                        .collect();
+                    let col_idx = table.headers.iter().position(|h| h == &col_name).unwrap_or(0);
+                    let coords: Vec<(usize, usize)> =
+                        (0..table.num_rows()).map(|r| (r, col_idx)).collect();
                     return Ok(TableQaAnswer {
                         answer,
                         cells: coords.clone(),
@@ -418,22 +379,19 @@ fn format_numeric(value: f64, agg: &Aggregation) -> String {
             } else {
                 format!("{:.2}", value)
             }
-        }
+        },
     }
 }
 
 /// Extract simple non-stopword keywords from a question.
 fn extract_question_keywords(question: &str) -> Vec<String> {
     let stopwords = [
-        "what", "is", "the", "of", "a", "an", "in", "for", "how", "many", "which",
-        "where", "when", "who", "does", "do", "are", "was", "were", "has", "have",
+        "what", "is", "the", "of", "a", "an", "in", "for", "how", "many", "which", "where", "when",
+        "who", "does", "do", "are", "was", "were", "has", "have",
     ];
     question
         .split_whitespace()
-        .map(|w| {
-            w.trim_matches(|c: char| !c.is_alphanumeric())
-                .to_lowercase()
-        })
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
         .filter(|w| !w.is_empty() && !stopwords.contains(&w.as_str()))
         .collect()
 }
@@ -447,9 +405,7 @@ fn find_best_matching_cell(table: &Table, keywords: &[String]) -> (usize, usize,
                 let val_lower = val.to_lowercase();
                 let header_lower = table.headers[col].to_lowercase();
                 for kw in keywords {
-                    if val_lower.contains(kw.as_str())
-                        || header_lower.contains(kw.as_str())
-                    {
+                    if val_lower.contains(kw.as_str()) || header_lower.contains(kw.as_str()) {
                         return (row, col, val.to_string());
                     }
                 }
@@ -629,13 +585,15 @@ mod tests {
     #[test]
     fn table_filter_rows() {
         let t = sample_table();
-        let filtered = t.filter_rows("age", |v| v.parse::<u32>().map(|n| n >= 30).unwrap_or(false));
+        let filtered = t.filter_rows("age", |v| {
+            v.parse::<u32>().map(|n| n >= 30).unwrap_or(false)
+        });
         assert_eq!(filtered.num_rows(), 2); // Alice(30) and Carol(35)
     }
 
     // 7. aggregate Sum.
     #[test]
-    fn aggregate_sum() {
+    fn aggregate_column_sum() {
         let t = sample_table();
         let sum = t.aggregate_column("age", Aggregation::Sum).unwrap();
         assert!((sum - 90.0).abs() < 1e-9);
@@ -643,7 +601,7 @@ mod tests {
 
     // 8. aggregate Average.
     #[test]
-    fn aggregate_average() {
+    fn aggregate_column_average() {
         let t = sample_table();
         let avg = t.aggregate_column("age", Aggregation::Average).unwrap();
         assert!((avg - 30.0).abs() < 1e-9);
@@ -651,7 +609,7 @@ mod tests {
 
     // 9. aggregate Count.
     #[test]
-    fn aggregate_count() {
+    fn aggregate_column_count() {
         let t = sample_table();
         let count = t.aggregate_column("age", Aggregation::Count).unwrap();
         assert!((count - 3.0).abs() < 1e-9);
@@ -659,7 +617,7 @@ mod tests {
 
     // 10. aggregate Min.
     #[test]
-    fn aggregate_min() {
+    fn aggregate_column_min() {
         let t = sample_table();
         let min = t.aggregate_column("age", Aggregation::Min).unwrap();
         assert!((min - 25.0).abs() < 1e-9);
@@ -667,7 +625,7 @@ mod tests {
 
     // 11. aggregate Max.
     #[test]
-    fn aggregate_max() {
+    fn aggregate_column_max() {
         let t = sample_table();
         let max = t.aggregate_column("age", Aggregation::Max).unwrap();
         assert!((max - 35.0).abs() < 1e-9);

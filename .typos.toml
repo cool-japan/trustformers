@@ -160,7 +160,6 @@ extend-words = {
     "serde" = "serde",
     "ndarray" = "ndarray",
     "candle" = "candle",
-    "tch" = "tch",
     "ort" = "ort",
     "tract" = "tract",
     "hf" = "hf",

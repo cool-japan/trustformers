@@ -126,9 +126,14 @@ pub struct Linear {
     device: Device,
     #[cfg(all(target_os = "macos", feature = "metal"))]
     weight_buffer_id: std::sync::Arc<std::sync::RwLock<Option<crate::gpu_ops::BufferId>>>,
+    /// Reference-counted handle to the CUDA-resident (transposed) weight buffer.
+    ///
+    /// Holding a `BufferHandle` (rather than a raw `BufferId`) means invalidating the
+    /// cache (`to_device`, `set_weight`) or dropping the last `Linear` clone releases
+    /// the device allocation automatically instead of leaking it.
     #[cfg(feature = "cuda")]
     weight_buffer_id_cuda:
-        std::sync::Arc<std::sync::RwLock<Option<crate::gpu_ops::cuda::BufferId>>>,
+        std::sync::Arc<std::sync::RwLock<Option<crate::gpu_ops::cuda::BufferHandle>>>,
 }
 
 impl Linear {
@@ -237,8 +242,9 @@ impl Linear {
         }
         #[cfg(feature = "cuda")]
         {
-            if let Ok(mut buffer_id) = self.weight_buffer_id_cuda.write() {
-                *buffer_id = None;
+            // Dropping the handle releases the stale device allocation (refcounted).
+            if let Ok(mut buffer_handle) = self.weight_buffer_id_cuda.write() {
+                *buffer_handle = None;
             }
         }
         self
@@ -268,8 +274,9 @@ impl Linear {
         }
         #[cfg(feature = "cuda")]
         {
-            if let Ok(mut buffer_id) = self.weight_buffer_id_cuda.write() {
-                *buffer_id = None;
+            // Dropping the handle releases the stale device allocation (refcounted).
+            if let Ok(mut buffer_handle) = self.weight_buffer_id_cuda.write() {
+                *buffer_handle = None;
             }
         }
         Ok(())
@@ -463,7 +470,12 @@ impl Linear {
                     };
                     let backend = get_cuda_backend(device_id)?;
                     let new_buffer_id = backend.create_persistent_buffer(&weight_data)?;
-                    *buffer_id_guard = Some(new_buffer_id);
+                    // Wrap in a refcounted handle so the allocation is released when the
+                    // cache entry is invalidated or the last `Linear` clone drops.
+                    *buffer_id_guard = Some(crate::gpu_ops::cuda::BufferHandle::new(
+                        new_buffer_id,
+                        device_id,
+                    ));
                 },
                 _ => {
                     return Err(TrustformersError::tensor_op_error(
@@ -660,8 +672,10 @@ impl Layer for Linear {
             // Ensure weight buffer is cached on GPU
             self.ensure_weight_buffer_cached_cuda()?;
 
-            // Get cached weight buffer ID
-            let weight_buffer_id = {
+            // Get cached weight buffer handle. Cloning the handle bumps the refcount,
+            // keeping the weight buffer alive for the whole forward pass even if another
+            // thread invalidates the cache concurrently.
+            let weight_handle = {
                 let buffer_id_guard = self.weight_buffer_id_cuda.read().map_err(|_| {
                     TrustformersError::hardware_error(
                         "Failed to acquire read lock on CUDA buffer cache",
@@ -669,8 +683,8 @@ impl Layer for Linear {
                     )
                 })?;
 
-                if let Some(id) = *buffer_id_guard {
-                    id
+                if let Some(handle) = buffer_id_guard.as_ref() {
+                    handle.clone()
                 } else {
                     // Weight not cached - fallback to CPU
                     let cpu_input = input.to_device_enum(&crate::device::Device::CPU)?;
@@ -678,12 +692,16 @@ impl Layer for Linear {
                 }
             };
 
-            // Get CUDA backend
-            let device_id = if let Device::CUDA(id) = self.device {
-                id
-            } else {
-                0 // Default to device 0
-            };
+            // The resident input and the cached weight must live on the same CUDA
+            // device for a GPU-to-GPU kernel; otherwise fall back to the host path.
+            let device_id = input_cuda.device_id();
+            if weight_handle.device_id() != device_id {
+                let cpu_input = input.to_device_enum(&crate::device::Device::CPU)?;
+                return self.forward(cpu_input);
+            }
+            let weight_buffer_id = weight_handle.id();
+
+            // Get CUDA backend for the device the operands live on
             let backend = get_cuda_backend(device_id)?;
 
             // Extract input shape and calculate matmul dimensions
@@ -708,39 +726,41 @@ impl Layer for Linear {
 
             // Perform GPU-to-GPU matmul (ZERO CPU TRANSFERS!)
             let output_buffer_id =
-                backend.matmul_gpu_to_gpu(&input_cuda.buffer_id, &weight_buffer_id, m, k, n)?;
+                backend.matmul_gpu_to_gpu(&input_cuda.buffer_id(), &weight_buffer_id, m, k, n)?;
 
             // Calculate output shape (preserve batch dimensions, change last dim)
             let mut output_shape = shape[..shape.len() - 1].to_vec();
             output_shape.push(n);
 
             // Create output CUDA tensor
-            let mut output = Tensor::CUDA(CudaTensorData {
-                buffer_id: output_buffer_id,
-                shape: output_shape.clone(),
-                dtype: input_cuda.dtype,
-            });
+            let mut output = Tensor::CUDA(CudaTensorData::new(
+                output_buffer_id,
+                device_id,
+                output_shape.clone(),
+                input_cuda.dtype,
+            ));
 
             // Handle bias if present
             if let Some(ref bias) = self.bias {
-                // Try GPU-to-GPU bias addition if bias is on GPU
+                // Try GPU-to-GPU bias addition if bias is resident on the same device
                 match bias {
                     #[cfg(feature = "cuda")]
-                    Tensor::CUDA(bias_data) => {
-                        // Both output and bias are CUDA tensors - use GPU kernel!
+                    Tensor::CUDA(bias_data) if bias_data.device_id() == device_id => {
+                        // Both output and bias are CUDA tensors on one device - GPU kernel!
                         if let Tensor::CUDA(output_data) = &output {
                             let output_buffer_id = backend.add_bias_gpu_to_gpu(
-                                &output_data.buffer_id,
-                                &bias_data.buffer_id,
+                                &output_data.buffer_id(),
+                                &bias_data.buffer_id(),
                                 batch_dims,
                                 n,
                             )?;
 
-                            return Ok(Tensor::CUDA(CudaTensorData {
-                                buffer_id: output_buffer_id,
-                                shape: output_shape.clone(),
-                                dtype: output_data.dtype,
-                            }));
+                            return Ok(Tensor::CUDA(CudaTensorData::new(
+                                output_buffer_id,
+                                device_id,
+                                output_shape.clone(),
+                                output_data.dtype,
+                            )));
                         }
                     },
                     _ => {},

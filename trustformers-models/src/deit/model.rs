@@ -208,9 +208,8 @@ impl DeiTEmbeddings {
         let patch_emb = self.patch_embeddings.forward(images)?;
 
         // Expand [CLS] token: (B, 1, H)
-        let cls_broadcast = Array3::from_shape_fn((batch_size, 1, hidden_size), |(_, _, k)| {
-            self.cls_token[k]
-        });
+        let cls_broadcast =
+            Array3::from_shape_fn((batch_size, 1, hidden_size), |(_, _, k)| self.cls_token[k]);
 
         // Concatenate [CLS | patches] → (B, 1+num_patches, H)
         let embeddings = concatenate![Axis(1), cls_broadcast, patch_emb];
@@ -242,9 +241,7 @@ impl DeiTEmbeddings {
 
         let mut embeddings = embeddings;
         for b in 0..batch_size {
-            embeddings
-                .slice_mut(s![b, .., ..])
-                .zip_mut_with(&pos_array, |a, &p| *a += p);
+            embeddings.slice_mut(s![b, .., ..]).zip_mut_with(&pos_array, |a, &p| *a += p);
         }
 
         // Dropout (training-mode approximation)
@@ -324,11 +321,7 @@ impl DeiTAttention {
             },
         };
 
-        let attn_out = if self.dropout > 0.0 {
-            attn_out * (1.0 - self.dropout)
-        } else {
-            attn_out
-        };
+        let attn_out = if self.dropout > 0.0 { attn_out * (1.0 - self.dropout) } else { attn_out };
 
         Ok(hidden_states + &attn_out)
     }
@@ -607,7 +600,12 @@ mod tests {
     }
 
     fn make_images(batch: usize, config: &DeiTConfig) -> Array4<f32> {
-        Array4::zeros((batch, config.image_size, config.image_size, config.num_channels))
+        Array4::zeros((
+            batch,
+            config.image_size,
+            config.image_size,
+            config.num_channels,
+        ))
     }
 
     // ── Config tests ──────────────────────────────────────────────────────────
@@ -626,15 +624,23 @@ mod tests {
     #[test]
     fn test_config_seq_length_with_distillation_token() {
         let cfg = tiny_config(); // use_distillation_token = true
-        // seq_length = num_patches + CLS + distillation = 4 + 2 = 6
-        assert_eq!(cfg.seq_length(), cfg.num_patches() + 2, "with distillation: num_patches + 2");
+                                 // seq_length = num_patches + CLS + distillation = 4 + 2 = 6
+        assert_eq!(
+            cfg.seq_length(),
+            cfg.num_patches() + 2,
+            "with distillation: num_patches + 2"
+        );
     }
 
     #[test]
     fn test_config_seq_length_without_distillation_token() {
         let mut cfg = tiny_config();
         cfg.use_distillation_token = false;
-        assert_eq!(cfg.seq_length(), cfg.num_patches() + 1, "without distillation: num_patches + 1");
+        assert_eq!(
+            cfg.seq_length(),
+            cfg.num_patches() + 1,
+            "without distillation: num_patches + 1"
+        );
     }
 
     #[test]
@@ -646,7 +652,10 @@ mod tests {
     #[test]
     fn test_tiny_config_uses_distillation_token() {
         let cfg = DeiTConfig::deit_tiny_patch16_224();
-        assert!(cfg.use_distillation_token, "DeiT-Tiny should use distillation token");
+        assert!(
+            cfg.use_distillation_token,
+            "DeiT-Tiny should use distillation token"
+        );
     }
 
     // ── PatchEmbedding tests ───────────────────────────────────────────────────
@@ -659,7 +668,11 @@ mod tests {
         let output = pe.forward(&images).expect("patch embedding should succeed");
         let (batch, num_patches, hidden) = output.dim();
         assert_eq!(batch, 1, "batch preserved");
-        assert_eq!(num_patches, cfg.num_patches(), "num_patches must equal config num_patches");
+        assert_eq!(
+            num_patches,
+            cfg.num_patches(),
+            "num_patches must equal config num_patches"
+        );
         assert_eq!(hidden, cfg.hidden_size, "hidden_size must match config");
     }
 
@@ -685,7 +698,11 @@ mod tests {
         let output = emb.forward(&images).expect("embeddings forward should succeed");
         let (_batch, seq, _hidden) = output.dim();
         // With distillation token: seq = num_patches + 2
-        assert_eq!(seq, cfg.num_patches() + 2, "seq includes CLS + DIST + patches");
+        assert_eq!(
+            seq,
+            cfg.num_patches() + 2,
+            "seq includes CLS + DIST + patches"
+        );
     }
 
     #[test]
@@ -697,7 +714,11 @@ mod tests {
         let output = emb.forward(&images).expect("embeddings forward should succeed");
         let (_batch, seq, _hidden) = output.dim();
         // Without distillation: seq = num_patches + 1 (CLS only)
-        assert_eq!(seq, cfg.num_patches() + 1, "seq includes CLS + patches only");
+        assert_eq!(
+            seq,
+            cfg.num_patches() + 1,
+            "seq includes CLS + patches only"
+        );
     }
 
     // ── DeiTModel tests ────────────────────────────────────────────────────────
@@ -716,8 +737,15 @@ mod tests {
         let output = model.forward(&images).expect("model forward should succeed");
         let (batch, seq, hidden) = output.dim();
         assert_eq!(batch, 1, "batch preserved");
-        assert_eq!(seq, cfg.seq_length(), "output seq_len must match config seq_length");
-        assert_eq!(hidden, cfg.hidden_size, "output hidden_size must match config");
+        assert_eq!(
+            seq,
+            cfg.seq_length(),
+            "output seq_len must match config seq_length"
+        );
+        assert_eq!(
+            hidden, cfg.hidden_size,
+            "output hidden_size must match config"
+        );
     }
 
     #[test]
@@ -728,7 +756,10 @@ mod tests {
         let cls = model.get_cls_output(&images).expect("get_cls_output should succeed");
         let (batch, hidden) = cls.dim();
         assert_eq!(batch, 2, "batch preserved in CLS output");
-        assert_eq!(hidden, cfg.hidden_size, "CLS output dim must equal hidden_size");
+        assert_eq!(
+            hidden, cfg.hidden_size,
+            "CLS output dim must equal hidden_size"
+        );
     }
 
     #[test]
@@ -736,11 +767,15 @@ mod tests {
         let cfg = tiny_config(); // use_distillation_token = true
         let model = DeiTModel::new(cfg.clone()).expect("model creation should succeed");
         let images = make_images(1, &cfg);
-        let dist = model.get_distillation_output(&images)
+        let dist = model
+            .get_distillation_output(&images)
             .expect("get_distillation_output should succeed");
         let (batch, hidden) = dist.dim();
         assert_eq!(batch, 1, "batch preserved in distillation output");
-        assert_eq!(hidden, cfg.hidden_size, "distillation output dim must equal hidden_size");
+        assert_eq!(
+            hidden, cfg.hidden_size,
+            "distillation output dim must equal hidden_size"
+        );
     }
 
     #[test]
@@ -748,7 +783,7 @@ mod tests {
         let mut cfg = tiny_config();
         cfg.use_distillation_token = false;
         let model = DeiTModel::new(cfg).expect("model creation should succeed");
-        let images = make_images(1, &DeiTConfig::deit_tiny_patch16_224());
+        let _images = make_images(1, &DeiTConfig::deit_tiny_patch16_224());
         // Use tiny_config image size
         let small_images = Array4::<f32>::zeros((1, 8, 8, 3));
         assert!(

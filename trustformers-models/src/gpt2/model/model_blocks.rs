@@ -221,6 +221,333 @@ impl Gpt2Attention {
         Ok(())
     }
 
+    /// GPU-resident attention with a GPU-resident KV cache over the oxicuda
+    /// CUDA backend — the CUDA counterpart of the Metal fast path above.
+    ///
+    /// Returns `Ok(None)` when the fast path does not apply (batch != 1,
+    /// non-F32 resident dtype, dimension mismatch, or a host-format cache
+    /// left by earlier CPU steps); the caller then downloads QKV once and
+    /// continues on the host path. Like the Metal path, the resident chain
+    /// ignores `attention_mask` (batch-1 causal generation).
+    ///
+    /// Cache layout (device-resident, this path's private convention):
+    /// `cache.key` and `cache.value` both hold heads-major
+    /// `[1, n_head, kv_len, d_head]` buffers — `K^T` is applied as a GEMM
+    /// transpose flag by the backend (transpose-aware since oxicuda 0.4.1),
+    /// so decode steps append a contiguous row per head to either cache.
+    ///
+    /// Routing: an empty cache runs bulk causal prefill; a non-empty cache
+    /// runs single-query decode per new token (exact causal semantics for any
+    /// `seq_len`, one token at a time). Once this path has populated a CUDA
+    /// cache, mixed configurations that would silently drop that cache on the
+    /// host path are reported as hard errors instead.
+    #[cfg(feature = "cuda")]
+    fn cuda_resident_attention(
+        &self,
+        qkv: &Tensor,
+        batch_size: usize,
+        seq_len: usize,
+        hidden_size: usize,
+        was_2d: bool,
+        layer_cache: Option<&mut LayerCache>,
+    ) -> Result<Option<Tensor>> {
+        use trustformers_core::gpu_ops::cuda::get_cuda_backend;
+        use trustformers_core::tensor::{CudaTensorData, DType};
+
+        let Tensor::CUDA(qkv_data) = qkv else {
+            return Ok(None);
+        };
+        let n_head = self.n_head;
+        let d_head = self.d_head;
+        let device_id = qkv_data.device_id();
+
+        // Inspect the cache first: a resident cache must never leak into the
+        // host fallback (the CPU path only merges F32 caches and would
+        // silently drop the history).
+        let (cached_k, cached_v, cached_len) = match &layer_cache {
+            Some(cache) => match (&cache.key, &cache.value) {
+                (Some(Tensor::CUDA(k)), Some(Tensor::CUDA(v)))
+                    if k.device_id() == device_id
+                        && v.device_id() == device_id
+                        && matches!(
+                            (k.shape.as_slice(), v.shape.as_slice()),
+                            ([1, kh, k_kv, kd], [1, vh, v_kv, vd])
+                                if *kh == n_head && *kd == d_head && *vh == n_head
+                                    && *vd == d_head && k_kv == v_kv
+                        ) =>
+                {
+                    let kv_len = k.shape[2];
+                    (
+                        Some(Tensor::CUDA(k.clone())),
+                        Some(Tensor::CUDA(v.clone())),
+                        kv_len,
+                    )
+                },
+                (Some(Tensor::CUDA(_)), _) | (_, Some(Tensor::CUDA(_))) => {
+                    return Err(tensor_op_error(
+                        "Gpt2Attention::cuda_resident_attention",
+                        "GPU-resident KV cache has an unexpected layout or device; \
+                         cannot continue on the host path without dropping it",
+                    ));
+                },
+                (None, None) => (None, None, 0),
+                // Host-format cache (populated by earlier CPU steps): the
+                // host path owns that history — decline the resident path
+                // instead of restarting from an "empty" cache.
+                _ => return Ok(None),
+            },
+            None => (None, None, 0),
+        };
+        if batch_size != 1
+            || qkv_data.dtype != DType::F32
+            || hidden_size != n_head * d_head
+            || seq_len == 0
+        {
+            if cached_len > 0 {
+                return Err(tensor_op_error(
+                    "Gpt2Attention::cuda_resident_attention",
+                    "GPU-resident KV cache exists but the resident path no longer \
+                     applies (batch/dtype/shape changed mid-generation)",
+                ));
+            }
+            return Ok(None);
+        }
+
+        let backend = get_cuda_backend(device_id)?;
+        let row_stride = 3 * hidden_size;
+        let scale = 1.0 / (d_head as f32).sqrt();
+        let dtype = qkv_data.dtype;
+        // Every intermediate id is wrapped in a `Tensor::CUDA` immediately so
+        // the refcounted handle lifecycle frees it on all paths.
+        let wrap =
+            |id, shape: Vec<usize>| Tensor::CUDA(CudaTensorData::new(id, device_id, shape, dtype));
+        let id_of = |t: &Tensor| -> Result<trustformers_core::gpu_ops::cuda::BufferId> {
+            match t {
+                Tensor::CUDA(data) => Ok(data.buffer_id()),
+                _ => Err(tensor_op_error(
+                    "Gpt2Attention::cuda_resident_attention",
+                    "expected resident tensor",
+                )),
+            }
+        };
+        let out_shape = |rows: usize| {
+            if was_2d {
+                vec![rows, hidden_size]
+            } else {
+                vec![1, rows, hidden_size]
+            }
+        };
+
+        if cached_len == 0 {
+            // Prefill from an empty cache: bulk per-head causal attention.
+            // GPT-2 QKV packing: row = [Q(hidden) | K(hidden) | V(hidden)],
+            // head h at column h * d_head inside each component.
+            let q_heads = wrap(
+                backend.gather_heads_gpu_to_gpu(
+                    &qkv_data.buffer_id(),
+                    seq_len,
+                    row_stride,
+                    0,
+                    d_head,
+                    n_head,
+                    d_head,
+                    true,
+                )?,
+                vec![1, n_head, seq_len, d_head],
+            );
+            // K is gathered heads-major [1, H, seq, d] like Q/V: the score
+            // GEMM applies K^T as a transpose flag (transpose-aware since
+            // oxicuda 0.4.1) and the same buffer doubles as the cache entry.
+            let k_heads = wrap(
+                backend.gather_heads_gpu_to_gpu(
+                    &qkv_data.buffer_id(),
+                    seq_len,
+                    row_stride,
+                    hidden_size,
+                    d_head,
+                    n_head,
+                    d_head,
+                    true,
+                )?,
+                vec![1, n_head, seq_len, d_head],
+            );
+            let v_heads = wrap(
+                backend.gather_heads_gpu_to_gpu(
+                    &qkv_data.buffer_id(),
+                    seq_len,
+                    row_stride,
+                    2 * hidden_size,
+                    d_head,
+                    n_head,
+                    d_head,
+                    true,
+                )?,
+                vec![1, n_head, seq_len, d_head],
+            );
+
+            let attn_heads = wrap(
+                backend.attention_prefill_gpu_to_gpu(
+                    &id_of(&q_heads)?,
+                    &id_of(&k_heads)?,
+                    &id_of(&v_heads)?,
+                    n_head,
+                    seq_len,
+                    d_head,
+                    scale,
+                )?,
+                vec![1, n_head, seq_len, d_head],
+            );
+            let merged = wrap(
+                backend.gather_heads_gpu_to_gpu(
+                    &id_of(&attn_heads)?,
+                    seq_len,
+                    d_head,
+                    0,
+                    seq_len * d_head,
+                    n_head,
+                    d_head,
+                    false,
+                )?,
+                out_shape(seq_len),
+            );
+
+            if let Some(cache) = layer_cache {
+                cache.key = Some(k_heads.clone());
+                cache.value = Some(v_heads.clone());
+            }
+
+            return self.c_proj.forward(merged).map(Some);
+        }
+
+        // Cached generation: single-query decode per new token (each token
+        // appends its K/V and attends to everything before and including it).
+        let mut k_cur = cached_k.ok_or_else(|| {
+            tensor_op_error(
+                "Gpt2Attention::cuda_resident_attention",
+                "resident cache length > 0 but key tensor missing",
+            )
+        })?;
+        let mut v_cur = cached_v.ok_or_else(|| {
+            tensor_op_error(
+                "Gpt2Attention::cuda_resident_attention",
+                "resident cache length > 0 but value tensor missing",
+            )
+        })?;
+        let mut kv_len = cached_len;
+        let mut merged: Option<Tensor> = None;
+
+        for t in 0..seq_len {
+            let token_base = t * row_stride;
+            // For a single row the Q/K/V component slices are contiguous
+            // [n_head, d_head] blocks — the same bytes serve as [H, d] and
+            // [H, 1, d] (one K or V row per head).
+            let q_t = wrap(
+                backend.gather_heads_gpu_to_gpu(
+                    &qkv_data.buffer_id(),
+                    1,
+                    row_stride,
+                    token_base,
+                    d_head,
+                    n_head,
+                    d_head,
+                    true,
+                )?,
+                vec![n_head, d_head],
+            );
+            let k_new = wrap(
+                backend.gather_heads_gpu_to_gpu(
+                    &qkv_data.buffer_id(),
+                    1,
+                    row_stride,
+                    token_base + hidden_size,
+                    d_head,
+                    n_head,
+                    d_head,
+                    true,
+                )?,
+                vec![n_head, 1, d_head],
+            );
+            let v_new = wrap(
+                backend.gather_heads_gpu_to_gpu(
+                    &qkv_data.buffer_id(),
+                    1,
+                    row_stride,
+                    token_base + 2 * hidden_size,
+                    d_head,
+                    n_head,
+                    d_head,
+                    true,
+                )?,
+                vec![n_head, 1, d_head],
+            );
+
+            k_cur = wrap(
+                backend.concat_v_cache_gpu_to_gpu(
+                    Some(&id_of(&k_cur)?),
+                    &id_of(&k_new)?,
+                    n_head,
+                    kv_len,
+                    1,
+                    d_head,
+                )?,
+                vec![1, n_head, kv_len + 1, d_head],
+            );
+            v_cur = wrap(
+                backend.concat_v_cache_gpu_to_gpu(
+                    Some(&id_of(&v_cur)?),
+                    &id_of(&v_new)?,
+                    n_head,
+                    kv_len,
+                    1,
+                    d_head,
+                )?,
+                vec![1, n_head, kv_len + 1, d_head],
+            );
+            kv_len += 1;
+
+            let out_t = wrap(
+                backend.attention_decode_gpu_to_gpu(
+                    &id_of(&q_t)?,
+                    &id_of(&k_cur)?,
+                    &id_of(&v_cur)?,
+                    n_head,
+                    kv_len,
+                    d_head,
+                    scale,
+                )?,
+                out_shape(1),
+            );
+            merged = Some(match merged {
+                None => out_t,
+                Some(prev) => wrap(
+                    backend.concat_v_cache_gpu_to_gpu(
+                        Some(&id_of(&prev)?),
+                        &id_of(&out_t)?,
+                        1,
+                        t,
+                        1,
+                        hidden_size,
+                    )?,
+                    out_shape(t + 1),
+                ),
+            });
+        }
+
+        let merged = merged.ok_or_else(|| {
+            tensor_op_error(
+                "Gpt2Attention::cuda_resident_attention",
+                "decode loop produced no output rows",
+            )
+        })?;
+
+        if let Some(cache) = layer_cache {
+            cache.key = Some(k_cur.clone());
+            cache.value = Some(v_cur.clone());
+        }
+
+        self.c_proj.forward(merged).map(Some)
+    }
+
     fn load_weights(&mut self, reader: &mut dyn WeightReader, prefix: &str) -> Result<()> {
         // Load combined QKV weights
         // PyTorch stores as [out, in], we need [in, out], so transpose
@@ -428,6 +755,39 @@ impl Gpt2Attention {
                 Ok(output)
             };
         }
+
+        // GPU attention path with GPU-resident KV-cache (CUDA / oxicuda).
+        // Mirrors the Metal fast path above: prefill runs bulk causal
+        // attention, generation runs single-query decode against the resident
+        // cache. `Ok(None)` means the fast path declined; the download
+        // fallback below then applies.
+        // Rebind mutably only for the CUDA path: `as_deref_mut` needs a
+        // mutable binding, and adding `mut` to the parameter itself would
+        // trip `unused_mut` in non-CUDA builds.
+        #[cfg(feature = "cuda")]
+        let mut layer_cache = layer_cache;
+        #[cfg(feature = "cuda")]
+        if matches!(&qkv, Tensor::CUDA(_)) {
+            if let Some(output) = self.cuda_resident_attention(
+                &qkv,
+                batch_size,
+                seq_len,
+                hidden_size,
+                was_2d,
+                layer_cache.as_deref_mut(),
+            )? {
+                return Ok(output);
+            }
+        }
+
+        // CUDA fallback: the resident fast path declined (batch > 1,
+        // host-format cache from earlier CPU steps, ...) — download QKV once
+        // and continue on the host path below.
+        #[cfg(feature = "cuda")]
+        let qkv = match &qkv {
+            Tensor::CUDA(_) => qkv.to_device_enum(&Device::CPU)?,
+            _ => qkv,
+        };
 
         // Fallback: CPU attention path (with cache support)
         #[cfg(all(target_os = "macos", feature = "metal"))]

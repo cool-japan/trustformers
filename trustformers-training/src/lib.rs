@@ -148,6 +148,7 @@ pub mod few_shot;
 pub mod framework_integration;
 pub mod gradient;
 pub mod gradient_anomaly_recovery;
+pub mod hpo;
 pub mod hyperopt;
 pub mod losses;
 pub mod memory_optimization;
@@ -195,6 +196,12 @@ pub use few_shot::{
     SupportSet, TaskAdapter, TaskDescriptor, TaskEmbedding,
 };
 pub use gradient::GradientUtils;
+pub use hpo::{
+    compute_pareto_front, hypervolume_indicator, non_domination_sort, AutoLrConfig,
+    AutoLrModelType, AutoLrResult, AutoLrSelector, AutoLrStrategy, HpConfig, HpSearchSpace,
+    HpValue, LrRangeTest, MultiObjectiveHpo, MultiObjectiveHpoConfig, MultiObjectiveResult,
+    ObjectiveDirection, ParetoFront, RecommendedSchedule, TrainingLrConfig,
+};
 pub use hyperopt::{
     // Efficiency features
     AcquisitionFunction,

@@ -7,9 +7,9 @@ The project provides a comprehensive ecosystem for transformer model development
 with support for 49+ architectures and multiple deployment targets.
 
 ### Version Information
-- **Current Version:** 0.1.4 (Unreleased — CHANGELOG finalized 2026-07-02)
-- **Previous Release:** 0.1.3 (Released 2026-06-25)
-- **Status:** Active Development (v0.1.4)
+- **Current Version:** 0.2.0 (Unreleased)
+- **Previous Release:** 0.1.4 (Released 2026-07-02)
+- **Status:** Active Development (v0.2.0)
 - **License:** Apache-2.0
 - **Repository:** https://github.com/cool-japan/trustformers
 
@@ -847,7 +847,7 @@ failed) is machine-verified locally, 2026-07-01** — see Project Health above.
 - **scirs2-core 0.3.0 MPSGraph — SUPERSEDED (2026-07-01):** no longer a follow-up. 0.1.4 migrated Metal GPU compute to `oxicuda-metal` and dropped the `scirs2-core` GPU dependency entirely, so the 3 checkbox items under Track A are moot rather than "awaiting upstream release." See the SciRS2 Policy Compliance section above.
 - **`trustformers-js` workspace governance gap:** still open as of 2026-07-01 — the `trustformers-js/` directory is not declared in root `Cargo.toml` workspace `members` or `exclude`. Consider: add to `exclude` (explicit), or create a bridge Cargo.toml for the npm monorepo.
 - **Branch/version gap:** Resolved — workspace `Cargo.toml` and all package files are now at version `0.1.4`.
-- **Broader oxicuda GPU coverage (new, 2026-07-01):** GPU-resident `forward` is still GPT-2/RetNet-only; the fused CUDA megakernel (CUDA-6) and on-device GPT-NeoX attention residency (CUDA-7) remain future work — see "Deferred stubs" below.
+- **Broader oxicuda GPU coverage (new, 2026-07-01):** GPU-resident `forward` is still GPT-2/RetNet-only; the fused CUDA megakernel (CUDA-6) and on-device GPT-NeoX attention residency (CUDA-7) remain future work — see "Deferred stubs" below. **CUDA-7 UPDATE (2026-07-06):** on-device GPT-NeoX attention residency (prefill) landed this session (`cuda_resident_forward`); CUDA-6 fused megakernel is still open.
 
 ---
 
@@ -957,7 +957,7 @@ cargo run -p trustformers --example clip_multimodal_example --features "clip,vit
 
 ---
 
-**Last Updated:** 2026-07-02 - v0.1.4 Development
+**Last Updated:** 2026-07-06 - v0.2.0 Development
 **Next Milestone:** Beta 1.0 Release — no longer pending scirs2-core/MPSGraph (superseded by the 0.1.4 `oxicuda`/`oxicuda-metal` migration, see the SciRS2 Policy Compliance section above); remaining work is broadening GPU-resident `forward` coverage beyond GPT-2/RetNet and re-benchmarking end-to-end tok/sec on the new backend
 **Target Audience:** ML engineers, researchers, and production deployment teams
 
@@ -1095,16 +1095,24 @@ cargo run -p trustformers --example clip_multimodal_example --features "clip,vit
   - Priority: P2 | Scope: large | Hint: none
   - Locations: :117,:122,:196,:201,:271,:280,:396,:401,:417,:881 (10 stub methods)
 
-- [ ] `trustformers-c`: `src/containers/deployment.rs:57` — `DockerImageConfig` conversion from `containers::types::DockerImageConfig` to `docker::DockerImageConfig` is a placeholder; implement the struct field mapping.
-  - Priority: P2 | Scope: small | Hint: none
+- [~] Implement proper DockerImageConfig conversion in deployment.rs (planned 2026-07-05)
+  - Goal: generate_deployment_artifacts() produces real Dockerfile/compose/dockerignore/build-script content (build_args, env_vars, ports, volumes) instead of ignoring them.
+  - Design: add `to_docker_builder_config(&containers::types::DockerImageConfig) -> containers::docker::DockerImageConfig` in deployment.rs; add a `BaseImage::Custom(String)` variant to `docker::BaseImage` (+ one match arm in `get_base_image_name`) since the target enum has no arbitrary-image-reference variant today; route through the existing `DockerImageBuilder::{generate_dockerfile, generate_docker_compose, generate_dockerignore, generate_build_script}` instead of hand-rolled `format!`.
+  - Files: trustformers-c/src/containers/deployment.rs, trustformers-c/src/containers/docker.rs.
+  - Tests: build a ContainerDeploymentConfig with populated build_args/ports/volumes; assert generated Dockerfile/compose actually contain those values.
+  - Risk: do not add `use super::docker::*;` to deployment.rs — it already has `use super::types::*;` and both modules export a type named `DockerImageConfig`, causing an ambiguous-glob compile error (E0659). Use qualified paths.
 
 - [ ] **[DEFERRED — needs NVIDIA GPU box / real hardware]** `trustformers-c`: `src/cloud/aws_lambda.rs,azure_functions.rs,google_cloud_functions.rs` — Cloud function handlers set `TrustformersModel` and `TrustformersPipeline` handles to `0` (null) and return placeholder JSON; wire real model loading and pipeline execution.
   - Priority: P2 | Scope: large | Hint: none
   - Locations: aws_lambda.rs:204,208,324,342,358,383 / azure_functions.rs:285,289,418,424,528 / google_cloud_functions.rs:271,274,431,437,494
   - **DEFERRED (2026-06-29 session):** the `trustformers-c` ASIC/cloud device + cloud-function bindings need FFI to real ASIC/cloud hardware/SDKs that aren't present here (and should follow the Pure-Rust/noffi policy); needs real hardware.
 
-- [ ] `trustformers-c`: `src/utils.rs:236` and `src/utils_impl/mod.rs:184` — Tests reference old `validate_string_comprehensive` / `validate_string` / `safe_c_string` signatures that no longer exist; update tests to current API or restore the functions.
-  - Priority: P2 | Scope: small | Hint: none
+- [~] Reconcile utils.rs/utils_impl tests with current validation API (planned 2026-07-05)
+  - Goal: re-enable the 3 disabled test blocks in utils.rs/utils_impl/mod.rs against the current (post-refactor) validation API.
+  - Design: uncomment `#[cfg(test)] mod tests` (drop the `/* */` + stale TODO comments) in both files; fix call sites to the real signatures — `validate_string_comprehensive(s: *const c_char, max_len: Option<usize>, allow_unicode: bool)`, `validate_string` = alias for `validate_c_string_safe(s: *const c_char, max_len: Option<usize>)`, and wrap the `safe_c_string!` macro call inside a small `fn() -> *mut c_char` helper.
+  - Files: trustformers-c/src/utils.rs, trustformers-c/src/utils_impl/mod.rs.
+  - Tests: the re-enabled blocks themselves; fix test_utils_statistics's `>= 0` comparison on a usize field (clippy absurd_extreme_comparisons) while in the file.
+  - Risk: leave the separate utils_impl::validate_model_name shadowing bug as a comment/flag only — out of scope for this fix.
 
 - [ ] **[CUDA-6 — oxicuda fused megakernel, future work]** `trustformers-core` — fully fused LayerNorm+QKV+RoPE+Attention+Proj+Residual kernel path. **PATH SUPERSEDED (2026-06-29, Campaign E):** the old cudarc file `src/gpu_ops/cuda/cuda_split/cuda_backend_ext.rs:457` was **deleted** with the cudarc backend; the current oxicuda path executes ops individually (correct). A fused megakernel is now an oxicuda-backend (`oxicuda-dnn`) task, not a cudarc one.
   - Priority: P2 | Scope: large | Hint: implement via oxicuda-ptx template + a resident `*_gpu_to_gpu` chain; optimization only, not a correctness gap.
@@ -1128,20 +1136,22 @@ cargo run -p trustformers --example clip_multimodal_example --features "clip,vit
   - **Risk:** Known-wrong correctness bug — silently returns a BERT model for RWKV/Mamba checkpoints, producing garbage outputs; needs the model crates' loaders to exist and be Python-exposed.
   - **DONE (2026-06-29 session):** found the entire Python binding layer had been disabled since v0.1.0 (pyo3 0.26→0.28 API drift); modernized + re-enabled it, created real `PyRwkvModel`/`PyMambaModel` classes, and routed the arm to them instead of the BERT fallback. (Weight loading uses the same pre-existing stubbed path as all py model classes.)
 
-- [ ] **trustformers** `trustformers-core`: `src/ops/activations.rs:42` — `TODO`: `let device_id = 0; // TODO: Get from tensor metadata`
+- [x] **trustformers** `trustformers-core`: `src/ops/activations.rs:42` — `TODO`: `let device_id = 0; // TODO: Get from tensor metadata`
   - **Priority:** P2  **Scope:** small  **Cross-project:** none
   - **Approach:** Read the CUDA device id from `cuda_data` tensor metadata (e.g. `cuda_data.device_id()`/its `Device::CUDA(id)`) instead of hardcoding `0` before `get_cuda_backend`.
   - **Risk:** Wrong on multi-GPU — activations dispatched to device 0 regardless of where the tensor lives, causing cross-device faults or silent corruption.
+  - **DONE (2026-07-06, CUDA leak/device-id session):** GELU now reads `cuda_data.device_id()` and threads it through to `get_cuda_backend`/the resident op instead of hardcoding `0`.
 
 - [ ] **trustformers** `trustformers-core`: `src/tensor/utils.rs:440` — `TODO`: `// For now, just return a clone (buffer is reference counted) ... device-to-device transfer (Metal)`
   - **Priority:** P2  **Scope:** medium  **Cross-project:** none
   - **Approach:** Implement a real Metal device→device buffer copy (blit encoder) when source and destination Metal devices differ, instead of cloning the reference-counted buffer.
   - **Risk:** Multi-device Metal transfers alias the source buffer rather than copying, so data is not actually moved to the target device.
 
-- [ ] **trustformers** `trustformers-core`: `src/tensor/utils.rs:562` — `TODO`: `// For now, just return a clone (buffer is reference counted) ... device-to-device transfer (CUDA)`
+- [x] **trustformers** `trustformers-core`: `src/tensor/utils.rs:562` — `TODO`: `// For now, just return a clone (buffer is reference counted) ... device-to-device transfer (CUDA)`
   - **Priority:** P2  **Scope:** medium  **Cross-project:** none
   - **Approach:** Implement direct CUDA device→device copy (`cudaMemcpyPeer`/equivalent in the CUDA backend) when the destination device differs; avoid the host round-trip / clone shortcut.
   - **Risk:** Same as the Metal case — CUDA peer transfers silently alias instead of relocating data across GPUs.
+  - **DONE (2026-07-06, CUDA leak/device-id session):** CUDA→CUDA transfer now checks `target_device == cuda_data.device_id()`; same-device stays a cheap refcounted clone (no copy needed), cross-device now genuinely bounces through the host (download then re-upload to the target device) instead of silently aliasing the source buffer.
 
 - [ ] **trustformers** `trustformers-core`: `src/tensor/math_ops/arithmetic.rs:141` — `TODO`: `// Mixed Metal/CPU - convert to CPU for now // TODO: Could upload CPU tensor to GPU instead`
   - **Priority:** P2  **Scope:** small  **Cross-project:** none
@@ -1169,21 +1179,24 @@ cargo run -p trustformers --example clip_multimodal_example --features "clip,vit
   - **Risk:** Perf only (current MPS/Accelerate path is correct); integration requires GPU-resident buffer ops in the Linear layer.
   - **DONE (2026-06-29 session):** wired the existing `MetalBackend::matmul_bias_gelu_f32` kernel into `Gpt2MLP` (gated `metal,gpt2`), collapsing matmul→bias→GELU into one GPU dispatch. GPU parity test on Apple Silicon: bit-identical (max diff 0) vs the separate-ops path.
 
-- [ ] **trustformers** `trustformers-models`: `src/gpt_neox/model.rs:165` — `TODO`: `// Temporary fallback: Convert Metal/CUDA tensors to F32 // TODO: Implement full Tensor::Metal/CUDA support in Attention`
+- [x] **trustformers** `trustformers-models`: `src/gpt_neox/model.rs:165` — `TODO`: `// Temporary fallback: Convert Metal/CUDA tensors to F32 // TODO: Implement full Tensor::Metal/CUDA support in Attention`
   - **Priority:** P2  **Scope:** medium  **Cross-project:** none
   - **Approach:** Implement native Metal/CUDA tensor support in GPT-NeoX attention (QKV split + RoPE on-device) instead of downcasting GPU tensors to CPU F32.
   - **Risk:** Perf/correctness — GPU GPT-NeoX attention silently round-trips to CPU F32, losing GPU residency and precision flexibility.
   - **PARTIAL (2026-06-29, Campaign E CUDA-7):** the CPU-download fallback is now **honestly documented** (oxicuda host-in/host-out; attention downloads to CPU; parity-correct). On-device CUDA attention residency (QKV split + RoPE resident on the oxicuda device, no host round-trip) remains the open future-work item — keep this unchecked until residency lands.
+  - **DONE (2026-07-06, CUDA-7 resident-attention session):** added `cuda_resident_forward` — a genuinely GPU-resident prefill path (NeoX-packing QKV gather into RoPE layout, device RoPE on Q/K, per-head causal attention, head merge, resident dense projection) that `forward` now tries first, falling back to the existing CPU-download path only when the resident fast path declines (non-2D/non-F32 input, weights not device-cached, etc.). Prefill-only by construction — the NeoX `Layer` trait carries no KV cache. Metal still uses the CPU-download fallback (out of this session's CUDA-only scope).
 
 - [x] **trustformers** `trustformers-serve`: `src/resource_management/gpu_manager/manager.rs:259` — `TODO`: `// TODO: In production, add real GPU discovery:` — **DONE (2026-06-29, Campaign E Tier-2):** real `nvidia-smi`-based GPU discovery with an honest empty fallback when no GPUs are present (Pure-Rust probe, no FFI).
   - **Priority:** P2  **Scope:** medium  **Cross-project:** none
   - **Approach:** Implement real GPU discovery (NVIDIA via NVML/Pure-Rust probe, AMD via ROCm, cross-vendor via the project's compute backends) and driver-compatibility checks instead of the placeholder enumeration.
   - **Risk:** Serve cannot see actual GPUs in production; scheduling/placement runs on stubbed device info. (Real bindings should follow the Pure-Rust/noffi policy.)
 
-- [ ] **trustformers** `trustformers-c`: `src/tensor.rs:1153` — `TODO`: `/// Clamp tensor values to [min, max] range (NOT YET IMPLEMENTED) // TODO: Implement clamp() method`
-  - **Priority:** P2  **Scope:** small  **Cross-project:** none
-  - **Approach:** Add a `clamp(min, max)` method to `trustformers_core::tensor::Tensor`, then uncomment and wire the `trustformers_tensor_clamp` C export.
-  - **Risk:** C API advertises clamp but the entry point is commented out; consumers cannot clamp via FFI until the core method lands.
+- [~] Implement Tensor::clamp FFI export (planned 2026-07-05)
+  - Goal: trustformers_tensor_clamp FFI function works (TODO was stale — core Tensor::clamp(min, max) already exists).
+  - Design: uncomment the stub, implement it by mirroring trustformers_tensor_leaky_relu's body exactly (null-check output, look up handle in TENSOR_REGISTRY, call .clamp(min_val, max_val), register result, write through output). Delete the now-inaccurate "not yet implemented" doc lines for clamp specifically (leave the note for concat/stack, which genuinely still need it).
+  - Files: trustformers-c/src/tensor.rs only.
+  - Tests: value-level test (clamp [-5.0, 0.5, 10.0] to [0.0,1.0], assert [0.0,0.5,1.0]) plus a null/invalid-handle negative test.
+  - Risk: verify via cargo build -p trustformers-c that the new symbol appears in the generated trustformers.h.
 
 ### Known external-blocked placeholders (not actionable)
 
@@ -1197,15 +1210,41 @@ cargo run -p trustformers --example clip_multimodal_example --features "clip,vit
 Real but non-actionable-now stubs found in workspace member crates during nagare Phase 2; each needs cross-cutting wiring, external resources, GPU hardware, or upstream fixes. Documented for future passes.
 
 - [ ] `trustformers-serve`: `src/openai_compat/mod.rs:742,769` — route_chat/route_completion return hardcoded stub responses; need real model inference wired through serve (reason: crosscut, needs inference path + weights)
-- [ ] `trustformers-serve`: `src/graphql.rs:181` — models() returns a single hardcoded entry; model_service not wired into GraphQL context (reason: crosscut)
+- [~] Wire real model_service into GraphQL models() resolver (planned 2026-07-05)
+  - Goal: QueryRoot::models() lists real registered/loaded models instead of one hardcoded row.
+  - Design: add model_manager: Arc<ModelManager> to TrustformerServer (constructed like the other services) with a pub fn model_manager() accessor. Add the field to GraphQLContext, set it in create_context(). Rewrite models() to enumerate ModelRegistry::list_models() + ModelManager::get_loaded_model(), mapping ModelMetadata's fields onto ModelInfo (use ModelMetadata.created_at for loaded_at, not LoadedModel.loaded_at which is a monotonic Instant).
+  - Files: trustformers-serve/src/graphql.rs, src/server/types.rs.
+  - Tests: unit test the resolver logic directly against a ModelManager built on an in-memory/tempdir registry — no HTTP needed.
+  - Documented caveat, not a blocker: the live /graphql HTTP route uses a separate, still-mock handler in server/functions.rs — this schema is currently unreachable dead code (pub use commented out, "disabled due to axum compatibility"). This fix corrects the schema layer only; re-enabling the live route is a separate follow-up.
+  - Risk: ModelManager::new needs an async ModelRegistry::initialize() while TrustformerServer::new() is currently sync — thread this through by making construction async or deferring registry init to start().
 - [ ] `trustformers-serve`: `src/model_management/manager.rs:47,56` — ModelInstance::infer() returns a placeholder string (reason: crosscut, needs inference)
 - [x] `trustformers-serve`: `src/performance_optimizer/real_time_metrics/optimization/advanced_algorithms.rs:150,285,406,523,651,707,777` — update_with_feedback is a no-op across 7 algorithms; AlgorithmStatistics lost feedback_count/positive_feedback/negative_feedback fields (reason: crosscut, type API drift) — **DONE (2026-06-29, Campaign E Tier-2):** restored the three `AlgorithmStatistics` feedback fields and implemented real `update_with_feedback` across all 7 algorithms.
 - [ ] `trustformers-serve`: `src/performance_optimizer/real_time_metrics/mod.rs:167` — threshold module disabled (only stub impls); comment cites 1,700+ compile errors to restore from .bak2 (reason: oversized)
-- [ ] `trustformers-serve`: `src/test_performance_monitoring/types/storage.rs:35` — StorageManager::get_report returns a stub Report (reason: crosscut)
-- [ ] `trustformers-serve`: `src/test_performance_monitoring/types/reporting.rs:36` — ReportExporter::export_report returns a stub ExportResult without writing a file (reason: crosscut)
-- [ ] `trustformers-serve`: `src/test_performance_monitoring/mod.rs:205-207,223` and `src/test_performance_monitoring/service.rs:111,115,120` — config fields (compliance_reporting/historical_data_config/event_config/alert_config) absent on the config types; API drift (reason: external/crosscut)
+- [~] Implement real ReportStorage store_report/get_report (planned 2026-07-05)
+  - Goal: reports can actually be persisted and retrieved instead of both being fabricated stubs.
+  - Design: add ReportStorage::store_report(&self, report: &Report) -> Result<()> (serialize to JSON, write to {storage_path}/{report_id}.json); rewrite get_report to read that file back, returning a real Err on a missing id instead of a fabricated stub. Resolve the Report vs GeneratedReport type mismatch by converting GeneratedReport -> Report at generation time inside ReportingSystem::generate_report(), which must be updated to call store_report after generating. Make storage_path configurable rather than hardcoded /tmp/reports.
+  - Files: trustformers-serve/src/test_performance_monitoring/types/storage.rs, reporting.rs.
+  - Tests: round-trip tests using std::env::temp_dir() for store/get.
+  - Risk: concurrent access to a shared fixed path — use a per-instance/per-test unique subdirectory.
+- [~] Implement real ExportManager export_report (planned 2026-07-05, depends on the store_report/get_report item above landing first)
+  - Goal: exported reports write real content to a real file instead of being fabricated.
+  - Design: implement export_report for real, scoped to text-representable formats only (Json via serde_json::to_string_pretty, Csv flattening Report's fields+metadata, Html/Xml minimal string templates). Fix the existing hardcoded ReportFormat::Json default at the ExportFormat -> ReportFormat call site to a real match; return an explicit "unsupported format" error for Excel/PowerPoint (no ReportFormat variant exists for either) rather than silently mapping them to JSON. Explicitly exclude true binary PDF generation — out of scope for this batch.
+  - Files: trustformers-serve/src/test_performance_monitoring/types/reporting.rs, reporting.rs.
+  - Tests: round-trip tests using std::env::temp_dir() for each export format; a dedicated test for the ExportFormat->ReportFormat mapping covering all 6 source variants.
+  - Risk: depends on the store_report/get_report fix landing first (export_report calls get_report).
+- [~] Fix TestPerformanceMonitoringConfig field drift (planned 2026-07-05)
+  - Goal: add the 6 missing config struct fields (AnalyticsConfig, EventConfig, HistoricalDataConfig, AlertConfig, DashboardConfig, SubscriptionConfig) to TestPerformanceMonitoringConfig, wire real configs into service.rs instead of Default::default() everywhere, uncomment the specialized-service field assignments in mod.rs.
+  - Design: add the 6 fields + update Default impls in types/config.rs; add the 2 missing leaf fields (audit_trail_enabled, compliance_logging, rate_limiting_enabled) referenced in the commented-out lines; update TestPerformanceMonitoringService::new() in service.rs to pass the real configs.
+  - Files: trustformers-serve/src/test_performance_monitoring/types/config.rs, service.rs, mod.rs.
+  - Tests: extend existing config-default tests; extend test_specialized_service_creation to actually assert the effect (not just .is_ok()).
+  - Risk: double check there isn't a second, shadowing definition of any of these config types elsewhere (this module was split via SplitRS from a monolithic types.rs, and a stale types.rs.bak_refactored sits alongside).
 - [ ] `trustformers`: `src/auto/feature_extractors/vision.rs:251,291` — preprocess_image and extract_visual_features return zero vectors (reason: crosscut)
-- [ ] `trustformers`: `src/hub_offline_packs.rs:356` — get_model_info returns a mock ModelInfo; needs a HuggingFace Hub HTTP call (reason: external)
+- [x] Implement real HF Hub HTTP call for get_model_info (planned 2026-07-05) — **DONE (2026-07-05):** split into `#[cfg(feature = "hub")]` (real `reqwest` GET to `/api/models/{model_id}`, mapped via new pure `model_info_from_hub_json` helper) / `#[cfg(not(feature = "hub"))]` (unchanged deterministic mock) bodies in `hub_offline_packs.rs`; added field-mapping unit tests (no network) plus a mock-mode regression test.
+  - Goal: get_model_info queries the real HF Hub API instead of returning fabricated metadata.
+  - Design: split into #[cfg(feature = "hub")]/#[cfg(not(feature = "hub"))] bodies, mirroring hub.rs::download_file's existing split. Real body: reqwest GET to huggingface.co/api/models/{model_id}, parse as serde_json::Value, map fields, mirroring hub.rs::get_download_stats's existing pattern for this exact endpoint.
+  - Files: trustformers/src/hub_offline_packs.rs only.
+  - Tests: mock-mode (no hub feature) regression test; real path needs an HTTP-mocking boundary, no live network in unit tests.
+  - Risk: must be feature-gated correctly — reqwest is optional; an unconditional `use reqwest` breaks the default (non-hub) build (hard compile error).
 - [x] `trustformers`: `src/pipeline/conversational/config/presets.rs:409,462,488` — references AnalysisConfigBuilder/ReasoningConfigBuilder that may not exist; verify whether live or dead before implementing (reason: needs-clarification) — **DONE (2026-06-29, Campaign E Tier-2):** verified dead; removed the references to the non-existent `AnalysisConfigBuilder`/`ReasoningConfigBuilder`.
 - [ ] `trustformers-mobile`: `src/react_native_fabric.rs:410` — execute_standard_inference returns a placeholder vec (reason: crosscut)
 - [ ] `trustformers-optim`: `src/genie_stub.rs`, `src/sofo_stub.rs`, `src/lora_rite_stub.rs` — simplified GENIE/SOFO/LoRA-RITE optimizer steps; full research algorithms pending API-compat resolution (reason: research/needs-clarification)
@@ -1429,7 +1468,11 @@ is currently blocked by this; the D6 run above succeeded only by reusing a cache
   `kernels/cuda_kernels.rs` (hardcoded "RTX 4090" device, todo!/zero returns).
 - **D4 (deferred):** add `device_id` to `CudaTensorData` (currently only buffer_id/shape/dtype)
   + real CUDA→CUDA copy (`tensor/utils.rs:561` clones) + stop hardcoding device 0 — needs ≥2
-  GPUs to fully verify.
+  GPUs to fully verify. **DONE (2026-07-06, CUDA leak/device-id session):** `CudaTensorData`
+  now carries its device ordinal via the new refcounted `OxiCudaBufferHandle`; `to_device_enum`
+  CUDA→CUDA does a real device-id check (same-device clone, cross-device host bounce instead of
+  aliasing); GELU/layernorm/linear dispatch use the tensor's device instead of hardcoded `0`.
+  Multi-GPU hardware verification still needs ≥2 GPUs.
 - **Mount-or-delete the orphaned `rope/mod.rs`** (~1670 lines, not in the module tree).
 
 ---
@@ -1475,8 +1518,136 @@ is currently blocked by this; the D6 run above succeeded only by reusing a cache
 ### Campaign E — remaining CUDA follow-ups (not blockers)
 - **CUDA-6** fused transformer-layer megakernel (perf optimization; the cudarc fused path from
   Campaign D was deleted with `cuda_split` — oxicuda runs the layer as individual ops, correct/unfused).
-- **CUDA-7** real on-device gpt_neox attention residency (needs oxicuda-dnn resident QKV-split/RoPE/attn).
+- **CUDA-7** real on-device gpt_neox attention residency (needs oxicuda-dnn resident QKV-split/RoPE/attn). **DONE (2026-07-06):** `cuda_resident_forward` added (prefill-only, since the NeoX `Layer` trait carries no KV cache); `forward` tries it first and falls back to the CPU-download path otherwise.
 - **CUDA-3 follow-up** port `gpu_accelerated`/`hardware_acceleration` onto oxicuda (re-enable under `cuda`).
-- **CUDA-9** legacy `trustformers-c` (excluded crate, cudarc 0.17).
+- **CUDA-9** legacy `trustformers-c` (excluded crate, cudarc 0.17). **SUPERSEDED (2026-07-06):** `trustformers-c` is now deprecated (its `TODO.md` rewritten as an English deprecation notice); this cudarc-retirement task is dropped, not carried forward.
 - The oxicuda repo (`oxicuda/`) retains the owner's large uncommitted in-progress rewrite
   (gemm/conv/solver/sparse) with `cargo fmt` diffs — **left untouched; the owner finishes/commits it.**
+
+---
+
+## 0.2.0 release scope — workspace dependency hygiene: OxiCUDA GPU migration tail + PyTorch (tch) removal (planned 2026-07-06)
+
+**Status (2026-07-06): all Track 1 and Track 2 items below landed this session** (workspace check +
+clippy + full nextest run green: 12033/12033 passed, 113 skipped availability-gated GPU tests, zero
+warnings). The 0.3.x P2 (`torsh-interop`) remains unstarted by design, out of 0.2.0 scope. Additional
+hygiene fixes uncovered and landed alongside this work: `PlatformCapabilities`-based GPU detection in
+`trustformers-core/src/device.rs` was actually broken (`cuda_available`/`metal_available` never truly
+reflected hardware) — `cuda_if_available`/`best_available` now probe real backends
+(`oxicuda_cuda_available()` / `metal::Device::system_default()`) instead; a dead
+`scirs2_core::linalg`/`tensor` import pair was removed from `trustformers-mobile`'s
+`advanced_neural_engine_v4.rs`; the dead `scirs2-core` dependency and `scirs2` feature were removed
+from `trustformers-wasm`; `trustformers-c`'s `TODO.md` was rewritten as an English deprecation notice
+(the crate's C FFI surface is superseded by the pure-Rust core + language-binding crates).
+
+Two tracks for the 0.2.0 branch, both workspace-root Cargo.toml surgery plus doc alignment.
+**Track 1 — OxiCUDA GPU migration (scirs2-core gpu → OxiCUDA):** the compute migration itself is
+DONE (Campaign C/D/E above — `oxicuda` is the `cuda` backend, `oxicuda-metal` the Metal one, and
+`trustformers-core` dropped scirs2 GPU features in 0.1.4), but the **workspace-level** scirs2-core
+dependency still requests the `gpu` feature and two dead scirs2 deps/docs mandates linger — this
+track finishes that tail. **Track 2 — PyTorch (tch) dependency removal, DECISION:** delete the
+`tch` dependency and the `torch` feature entirely in 0.2.0 (workspace `Cargo.toml:82`,
+trustformers-core `torch` feature + ~40 lines of cfg arms, and the forwarder features in
+`trustformers`, `trustformers-training`, `trustformers-c`). Do NOT adopt ToRSh as a replacement
+now; a P2 task below records evaluating an optional `torsh-interop` feature in 0.3.x once torsh
+0.2.0 ships on crates.io. Sub-decision on candle: drop the unused `candle-nn` workspace dep now,
+keep the `candle` feature/variant through 0.2.0 (it is in every `full` set), and decide
+implement-vs-remove in 0.3.x.
+
+**Rationale (tch):** `Tensor::Torch` (`trustformers-core/src/tensor/mod.rs:220-221`) is never
+constructed anywhere in the workspace — every op hits wildcard error arms, and the `cfg(torch)`
+"PyTorch validation" is simulated with hardcoded results
+(`trustformers-core/src/testing/cross_framework.rs:309-325`) — so zero functionality is lost.
+Keeping tch costs a multi-GB libtorch download plus policy violations: `torch-sys` pulls `cc`
+(C++), the OxiARC-banned `zip 0.6.6`, `ureq`, and duplicate old ndarray/rand/safetensors pins
+(`Cargo.lock:10598-10610`). All real PyTorch interop is pure Rust already (`safetensors`
+non-optional at `trustformers-core/Cargo.toml:34`; `checkpoint/formats.rs`,
+`utils/weight_loading.rs`, optim `pytorch_compat.rs` — all kept). ToRSh cannot replace it today:
+crates.io torsh 0.1.3 pins scirs2 0.5.1 (type-incompatible duplicate of trustformers' scirs2 0.6.0
+stack), torsh 0.2.0 is unpublished with a workspace-blocking compile error, and torsh adds no
+missing capability (no real pickle `.pt` parser either). Both tch-focused investigation reports
+independently reached the same verdict; the only inter-report disagreement (candle) is resolved by
+deferring the variant decision to 0.3.x while removing the definitively-dead `candle-nn` dep now.
+
+### Track 1 — OxiCUDA GPU migration tail (scirs2-core gpu → OxiCUDA)
+
+- [x] **[P0] Remove `"gpu"` from the workspace scirs2-core feature list.** — **DONE (2026-07-06):**
+  the `"gpu"` entry and its comment were deleted from the workspace-root `scirs2-core` dependency's
+  feature list in `Cargo.toml`. Delete the `"gpu",`
+  entry from the scirs2-core workspace dependency in the root `Cargo.toml` (line 285, comment
+  "GPU acceleration abstractions"). Verified safe: zero scirs2-core GPU API usage exists anywhere
+  in the repo (no `scirs2_core::gpu` / `gpu_registry` / `tensor_cores` references, no glob/prelude
+  imports, checked against scirs2-core 0.6.0's crate-root `pub use crate::gpu::*` re-export), and
+  the only flag-sensitive field trustformers could observe (`PlatformCapabilities.gpu_available`)
+  is never read. In scirs2-core 0.6.0 `gpu = ["std"]` pulls zero extra deps, so this is purely a
+  build-time win across all 10 members plus `trustformers-c`/`-py` via feature unification.
+  Verify: `cargo check --workspace --all-features` green, plus a `cargo check` inside
+  `trustformers-c` and `trustformers-py`.
+  Evidence: `Cargo.toml:276-287` (feature list, `"gpu"` at :285);
+  `trustformers-core/src/device.rs:80-113` (only `PlatformCapabilities` consumer).
+- [x] **[P1] Remove the dead scirs2-linalg workspace dependency.** — **DONE (2026-07-06):** the
+  `scirs2-linalg` workspace dependency and the `trustformers-mobile` consumer line were both
+  deleted (zero usage confirmed via `rg scirs2_linalg`). Delete
+  `scirs2-linalg = { version = "0.6.0" }` from the root `Cargo.toml` (line 288).
+  `rg scirs2_linalg` over all .rs files returns zero matches — the crate is declared but never
+  used. Land together with the trustformers-mobile task that removes its
+  `scirs2-linalg.workspace = true` line (`trustformers-mobile/Cargo.toml:33`), the only member
+  that declares it. (Note: the Campaign C scope decision above listed `scirs2-linalg` as
+  "out of scope substrate" — superseded by this finding: it is declared but has zero usage.)
+  Verify: rg confirms zero usage, `cargo check --workspace` green.
+  Evidence: `Cargo.toml:288`; `trustformers-mobile/Cargo.toml:33`.
+- [x] **[P1] Rewrite GPU sections of SCIRS2_INTEGRATION_POLICY.md and CONTRIBUTING.md for the
+  oxicuda reality.** — **DONE (2026-07-06):** both documents rewritten to codify scirs2-core as
+  CPU-only substrate and `oxicuda-*`/`oxicuda-metal`/`oxicuda-backend` as the GPU path; policy
+  version bumped to 2.1.0. `SCIRS2_INTEGRATION_POLICY.md` (sections around lines 129-154, 234, 339-344,
+  363-368, 386, 405-408, 617-628, 697, 798) still mandates scirs2-core GPU features and
+  `scirs2_core::gpu_ops::MetalBackend/CudaBackend` — APIs that do not exist under those paths in
+  scirs2-core 0.6.0 — and `CONTRIBUTING.md:330` says "Use SciRS2's GPU context management".
+  Rewrite both to codify: scirs2-core is the CPU substrate only (ndarray/random/simd_ops/
+  parallel_ops); GPU acceleration is `oxicuda-*` (CUDA), `oxicuda-metal`/`oxicuda-backend`
+  (Metal), and trustformers' own wgpu backend.
+  Verify: rg for `scirs2.*gpu|gpu_ops::.*Backend` in both docs returns no stale mandates.
+  Evidence: `SCIRS2_INTEGRATION_POLICY.md:129-154,234,339-344,363-368,617-628`;
+  `CONTRIBUTING.md:330`.
+
+### Track 2 — PyTorch (tch) dependency removal
+
+- [x] **[P0] Delete the tch workspace dependency and purge torch-sys from the lockfile.** —
+  **DONE (2026-07-06):** `tch` removed from the root `Cargo.toml`, the `torch` feature and all
+  `cfg`/match arms removed from `trustformers-core`, and the forwarder features removed from
+  `trustformers`, `trustformers-training`, and `trustformers-c`; `.typos.toml`'s `"tch" = "tch"`
+  entry removed. Confirmed via `rg '"tch"|torch-sys'` over `Cargo.lock`: no matches — tch/torch-sys
+  and their `cc`/`zip 0.6.6`/`ureq`/duplicate-pin baggage are gone. Remove
+  `tch = { version = "0.24", features = ["download-libtorch"] }` from the root `Cargo.toml`
+  (line 82). Must land in the same change as the `torch`-feature removals in `trustformers-core`,
+  `trustformers`, `trustformers-training`, and `trustformers-c` (forwarders referencing a deleted
+  feature fail Cargo resolution). After removal, regenerate `Cargo.lock` and verify tch 0.24.0
+  (`Cargo.lock:10001`) and torch-sys 0.24.0 (`Cargo.lock:10598`) drop out, taking `cc`, the
+  policy-banned `zip 0.6.6`, `ureq`, and duplicate ndarray 0.16.1 / rand 0.8.6 /
+  safetensors 0.3.3 pins with them. Optionally remove the `"tch" = "tch"` entry from
+  `.typos.toml:163`.
+  Evidence: `Cargo.toml:82`; `Cargo.lock:10001, 10598-10610`; `.typos.toml:163`.
+- [x] **[P1] Remove the unused candle-nn workspace dependency.** — **DONE (2026-07-06):**
+  `candle-nn = "0.11.0"` deleted from the root `Cargo.toml`; `candle-core` and the `candle`
+  feature/variant were kept untouched, per the 0.3.x-deferred decision. Delete `candle-nn = "0.11.0"`
+  from the root `Cargo.toml` (line 81) — no member crate references it at all. Keep `candle-core`
+  (line 80) for 0.2.0 because the `candle` feature remains in the `full` feature sets of
+  `trustformers-core` and `trustformers`; its implement-or-remove decision is a recorded P2 in
+  `trustformers-core/TODO.md`.
+  Verify: `cargo tree` shows no candle-nn; `cargo check --workspace --all-features` green.
+  Evidence: `Cargo.toml:80-81`; `trustformers-core/Cargo.toml:133` (`full` includes `candle`);
+  `trustformers/Cargo.toml:93`.
+
+### Post-0.2.0 (0.3.x) — deferred follow-ups
+
+- [ ] **[P2] Evaluate an optional `torsh-interop` feature (0.3.x, record-only).** — Not started
+  this session (out of 0.2.0 scope by design; blocked on torsh 0.2.0 publishing to crates.io with a
+  scirs2 0.6-aligned stack). Once torsh
+  0.2.0 is published on crates.io with its scirs2 0.6-aligned stack, evaluate an optional
+  `torsh-interop` feature for tensor conversion via the shared scirs2 0.6 ndarray types. Do NOT
+  depend on torsh 0.1.3 (pins scirs2 0.5.1 — would duplicate the scirs2 stack at an incompatible
+  version), and note torsh 0.2.0-dev currently has a workspace-blocking compile error (torsh-data
+  `Tensor::cat` signature). Real pickle `.pt` loading would still need a pure-Rust pickle
+  deserializer that neither project has; `safetensors` remains the checkpoint bridge.
+  Evidence: `Cargo.toml:83` (safetensors workspace dep); `trustformers-core/Cargo.toml:34`;
+  external: `~/work/torsh` `Cargo.toml:134-152`, `TODO.md:56`.

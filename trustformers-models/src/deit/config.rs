@@ -104,14 +104,14 @@ impl Config for DeiTConfig {
             ));
         }
 
-        if self.hidden_size % self.num_attention_heads != 0 {
+        if !self.hidden_size.is_multiple_of(self.num_attention_heads) {
             return Err(trustformers_core::errors::invalid_config(
                 "hidden_size",
                 "hidden_size must be divisible by num_attention_heads",
             ));
         }
 
-        if self.image_size % self.patch_size != 0 {
+        if !self.image_size.is_multiple_of(self.patch_size) {
             return Err(trustformers_core::errors::invalid_config(
                 "image_size",
                 "image_size must be divisible by patch_size",
@@ -314,7 +314,10 @@ mod tests {
 
     #[test]
     fn test_num_patches_per_side_tiny() {
-        assert_eq!(DeiTConfig::deit_tiny_patch16_224().num_patches_per_side(), 14);
+        assert_eq!(
+            DeiTConfig::deit_tiny_patch16_224().num_patches_per_side(),
+            14
+        );
     }
 
     #[test]
@@ -351,36 +354,46 @@ mod tests {
 
     #[test]
     fn test_validate_zero_patch_size() {
-        let mut cfg = DeiTConfig::default();
-        cfg.patch_size = 0;
+        let cfg = DeiTConfig {
+            patch_size: 0,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_validate_zero_hidden_size() {
-        let mut cfg = DeiTConfig::default();
-        cfg.hidden_size = 0;
+        let cfg = DeiTConfig {
+            hidden_size: 0,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_validate_zero_attention_heads() {
-        let mut cfg = DeiTConfig::default();
-        cfg.num_attention_heads = 0;
+        let cfg = DeiTConfig {
+            num_attention_heads: 0,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_validate_hidden_not_divisible_by_heads() {
-        let mut cfg = DeiTConfig::default();
-        cfg.hidden_size = 769;
+        let cfg = DeiTConfig {
+            hidden_size: 769,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_validate_image_not_divisible_by_patch() {
-        let mut cfg = DeiTConfig::default();
-        cfg.image_size = 225;
+        let cfg = DeiTConfig {
+            image_size: 225,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
@@ -409,10 +422,12 @@ mod tests {
             let mult = ((s % 16) + 1) as usize;
             let img_size = mult * patch;
             let heads = 8usize;
-            let mut cfg = DeiTConfig::default();
-            cfg.image_size = img_size;
-            cfg.hidden_size = heads * 16;
-            cfg.num_attention_heads = heads;
+            let cfg = DeiTConfig {
+                image_size: img_size,
+                hidden_size: heads * 16,
+                num_attention_heads: heads,
+                ..Default::default()
+            };
             assert!(cfg.validate().is_ok(), "img={img_size} failed");
         }
     }

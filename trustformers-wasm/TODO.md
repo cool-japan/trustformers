@@ -30,7 +30,6 @@ The `trustformers-wasm` crate enables browser and edge deployment of transformer
 ✅ **BERT WASM MODEL** - Complete BERT implementation in WASM
 ✅ **STREAMING INFERENCE** - Token-by-token streaming generation
 ✅ **INDEXEDDB CACHING** - Persistent model and KV-cache storage
-✅ **SCIRS2 (optional dependency)** - scirs2-core wired in behind the scirs2 feature; not yet consumed by in-crate tensor ops
 
 Workspace-wide (`cargo nextest run --workspace --all-features`, 2026-07-01): 18,102 passed / 0 failed / 119 skipped; 0 clippy warnings; 0 rustdoc warnings. This crate contributes ~130 of those passing tests.
 
@@ -551,6 +550,23 @@ This crate has **no dependency on the native `wgpu` crate**. WebGPU support is i
 
 ---
 
+## 0.2.0 Release Scope
+
+Two workspace-wide tracks land in 0.2.0: (1) **OxiCUDA GPU migration** — moving GPU acceleration from scirs2-core's `gpu` feature to the OxiCUDA stack (~/work/oxicuda, oxicuda 0.4.x already integrated in trustformers-core behind the `cuda`/`metal` features); this crate's WebGPU compute is web-sys-based and unaffected, but its dead scirs2 wiring is cleaned up as part of the same sweep. (2) **PyTorch (tch) dependency removal** — the tch dependency and the `torch` feature are deleted entirely in 0.2.0 (workspace Cargo.toml:82, trustformers-core torch feature + ~40 lines of cfg arms, and the forwarder features in trustformers, trustformers-training, trustformers-c); ToRSh is NOT adopted as a replacement now (a P2 task tracks evaluating an optional `torsh-interop` feature in 0.3.x once torsh 0.2.0 ships on crates.io), and the unused candle-nn workspace dep is dropped while the `candle` feature/variant is kept through 0.2.0. Neither tch nor candle touches this crate, so the tch track requires no trustformers-wasm changes.
+
+### OxiCUDA GPU migration (scirs2-core gpu → OxiCUDA)
+
+- [x] **[P1]** Remove the dead optional scirs2-core dependency and the `scirs2` feature
+  - `trustformers-wasm/src` contained ZERO scirs2 references; the crate declared an optional scirs2-core dep (Cargo.toml:33) activated by the `scirs2` feature (:67), which was also listed in `performance-optimized` (:48) and `full` (:69). Dep, feature, and its entries in both feature lists removed. The crate's WebGPU compute is web-sys-based and unaffected; `src/compute/webgpu/backend.rs:79,95` (`is_available`/`is_shared_memory_supported`) do not reference scirs2 and needed no changes.
+  - Superseded the "SCIRS2 (optional dependency)" status line above and the corresponding `scirs2` entries in the "Feature Flags" snippet.
+  - Verify: `cargo check -p trustformers-wasm --features full` (wasm32 target) green with no scirs2-core in `cargo tree`.
+
+### PyTorch (tch) dependency removal
+
+- No trustformers-wasm tasks: this crate has no tch/torch or candle dependency. The 0.2.0 deletion of the `torch` feature and the 0.3.x `torsh-interop` evaluation (P2) are tracked in the root TODO.md and the affected crates (trustformers-core, trustformers, trustformers-training). Status update (2026-07-06): the torch/tch removal landed this session across the workspace (root Cargo.toml, trustformers-core, trustformers, trustformers-training) — confirmed via `rg` that no `tch`/`feature = "torch"` references remain outside harmless prose/comments. **Superseded: trustformers-c deprecated** — its `torch` forwarder feature removal is moot since trustformers-c's own TODO.md was rewritten as a deprecation notice this session (C FFI surface superseded by the pure-Rust core plus trustformers-wasm and other language-binding crates); no further trustformers-c-specific tracking is needed here.
+
+---
+
 ## Future Enhancements
 
 ### High Priority
@@ -564,13 +580,33 @@ This crate has **no dependency on the native `wgpu` crate**. WebGPU support is i
   - **Refinement needed:** this is a browser-spec tracking task, not implementation. Define: which WebNN API level (currently at CR status)? Target browsers?
 
 ### Correctness & De-Simplification
-- [ ] Wire real GPU dispatch into `WebGPUBackend`/`SimpleGpuOps` (`dispatch_add`/`dispatch_relu`/`dispatch_matmul` in `backend.rs`; `matmul`/`softmax`/`layer_norm`/`attention` in `simple_ops.rs`) — currently CPU fallback by documented design; `WebGPUOps` in `webgpu_simple.rs` already does this end-to-end and can serve as the reference implementation
-- [ ] Implement real cache clearing for `RecoveryAction::ClearCache` (`src/error.rs`) instead of the current no-op
-- [ ] Make quantization `get_stats()` bit-width-aware instead of assuming a fixed 4 bytes/element (`src/optimization/quantization/quantizer.rs`)
-- [ ] Replace hardcoded/simplified device-capability probes (`detect_webgl_support`, `detect_low_power_mode`, `get_screen_orientation`, and related helpers) with real detection (`src/device_capability/detector.rs`)
-- [ ] Implement real bit-width-aware math in `apply_dynamic_quantization`/`apply_static_quantization`/`apply_post_training_quantization` instead of fixed-constant scaling (0.5/0.75/0.8) (`src/optimization/quantization/algorithms/basic.rs`)
+- [~] Wire real GPU dispatch for matmul/add/relu only (planned 2026-07-05)
+  - Goal: WebGPUBackend::dispatch_add/dispatch_relu/dispatch_matmul and SimpleGpuOps::matmul actually run on the GPU instead of silently falling back to CPU.
+  - Design: port WebGPUOps's existing, complete buffer/bind-group/dispatch/mapAsync-readback sequence (a genuine working reference for exactly these 3 ops) into SimpleGpuOps. PRIMARY DESIGN DECISION, flag prominently: dispatch is currently kept synchronous specifically because GpuTensor holds an Rc<RefCell<WebGPUBackend>> and real GPU readback is fundamentally async (mapAsync is a JS Promise) — holding a RefCell borrow across an .await panics at runtime if re-entered. Resolve via eager pipeline creation (like WebGPUOps::initialize() does) or by cloning device/queue/pipeline out of a short borrow_mut() before awaiting. layer_norm/attention are EXPLICITLY OUT OF SCOPE for this item — zero existing bind-group reference exists for either, deferred to backlog.
+  - Files: trustformers-wasm/src/compute/webgpu/backend.rs, simple_ops.rs, gpu_tensor.rs.
+  - Tests: needs wasm-pack test --chrome --headless or the existing tests/*.js Playwright suite (nothing here is natively testable). webgpu is a non-default Cargo feature — tests need --features webgpu explicitly.
+  - Risk: the RefCell-across-await hazard is real and will produce a runtime panic (not a compile error) if ported naively — budget for a design iteration inside the implementation pass itself.
+- [x] Implement real cache clearing for RecoveryAction::ClearCache (planned 2026-07-05)
+  - Goal: the ClearCache recovery action (triggered on OOM/storage-quota errors) actually clears something instead of Ok(())-no-op.
+  - Design: self-contained fix using the browser Cache Storage API directly (window.caches().keys() -> caches.delete(key) for each) — matches the existing style of the sibling ReduceMemoryUsage arm right next to it. (3 other real cache-clearing mechanisms exist elsewhere in the crate but deliberately NOT wired through here, to avoid coupling this fix to optional feature flags.)
+  - Files: trustformers-wasm/src/error.rs only.
+  - Tests: the E4001/E7001 -> ClearCache mapping is testable natively; the actual browser-API call needs wasm-bindgen-test in browser mode.
+  - Risk: low.
+- [x] Make quantization bit-width-aware: get_stats() + apply_* math (planned 2026-07-05)
+  - Goal: get_stats() and the apply_dynamic/static/post_training_quantization functions stop assuming a fixed 4-bytes/element regardless of requested precision.
+  - Design: add impl QuantizationPrecision { fn bits(&self) -> u32 } covering all 8 variants explicitly (including an explicit, not silently-defaulted, decision for Mixed/Adaptive), mirroring trustformers-core's QuantDtype::bits()/bytes_per_element() exactly. Wire get_stats() to use real byte counts; replace the 3 apply_* functions' fixed-constant scaling with real affine quantize/dequantize.
+  - Files: trustformers-wasm/src/optimization/quantization/config.rs, quantizer.rs, algorithms/basic.rs.
+  - Tests: fully native, no browser needed — pure functions. Assert get_stats reports ~0.5x size for INT4 vs FP32; assert apply_* actually clips into the bit-width's representable range.
+  - Risk: Mixed/Adaptive don't have one fixed bit-width by design — document the chosen nominal value explicitly. (Note: algorithms/advanced.rs has the identical anti-pattern, out of scope here.)
+- [x] Real device-capability detection: get_device_capabilities() + probe functions (planned 2026-07-05)
+  - Goal: get_device_capabilities(), detect_webgl_support, get_screen_orientation stop returning hardcoded defaults.
+  - Design: get_device_capabilities() — make the already-correct, already-real DeviceSelector::analyze_device_capabilities() pub(crate) and call it instead of DeviceCapabilities::default() (near-zero-risk). detect_webgl_support — canvas + webgl2/webgl context + real parameter queries, mirroring the file's own existing detect_gpu_info pattern. get_screen_orientation — window.screen()?.orientation() -> real OrientationType match.
+  - Files: trustformers-wasm/src/compute/webgpu/mod.rs, device_selector.rs (visibility change only), src/device_capability/detector.rs.
+  - Tests: needs wasm-pack test --chrome --headless or the existing Playwright suite (nothing natively testable — needs window/navigator/a real adapter).
+  - Risk: do NOT also "fix" detect_low_power_mode in this pass — confirmed no standardized cross-browser API exists for it at all; if touched, must be documented as a best-effort heuristic, not presented as equally real as the other three. Leaving it as-is is acceptable for this batch.
+- [x] (same fix as get_stats() bit-width-aware item above — implemented once, not twice) (planned 2026-07-05)
 - [ ] Use real `URL.createObjectURL()` once available in web-sys instead of synthesized `blob:`/`data:` URL strings (`src/storage/model_splitting.rs`, `src/compute/threads.rs`)
-- [ ] Query real adapter limits in `get_device_capabilities()` instead of returning `DeviceCapabilities::default()` (`src/compute/webgpu/mod.rs`)
+- [x] (same fix as the device-capability-detection item above — implemented once, not twice) (planned 2026-07-05)
 
 ### Performance
 - [ ] Multi-Query Attention optimization (MQA reduces KV memory in WASM context)
@@ -663,7 +699,7 @@ The real feature set, verbatim from `Cargo.toml` (see README.md's "Feature Flags
 [features]
 default = ["console_panic", "dlmalloc-alloc"]
 size-optimized = ["dlmalloc-alloc", "console_panic"]
-performance-optimized = ["dlmalloc-alloc", "kernel-fusion", "async-executor", "scirs2"]
+performance-optimized = ["dlmalloc-alloc", "kernel-fusion", "async-executor"]
 console_panic = ["console_error_panic_hook"]
 webgpu = []
 web-workers = []
@@ -682,9 +718,8 @@ playground = []
 streaming-generation = []
 mobile-optimization = []
 dlmalloc-alloc = ["dlmalloc"]
-scirs2 = ["scirs2-core"]
 minimal = ["dlmalloc-alloc"]
-full = ["web-workers", "shared-memory", "kernel-fusion", "async-executor", "indexeddb", "memory64", "streaming-loader", "model-splitting", "react-components", "vue-components", "angular-components", "web-components", "playground", "streaming-generation", "mobile-optimization", "scirs2", "dlmalloc-alloc"]
+full = ["web-workers", "shared-memory", "kernel-fusion", "async-executor", "indexeddb", "memory64", "streaming-loader", "model-splitting", "react-components", "vue-components", "angular-components", "web-components", "playground", "streaming-generation", "mobile-optimization", "dlmalloc-alloc"]
 ```
 
 ---
@@ -700,7 +735,7 @@ full = ["web-workers", "shared-memory", "kernel-fusion", "async-executor", "inde
 
 ---
 
-**Last Updated:** 2026-07-02
+**Last Updated:** 2026-07-06
 **Version:** 0.1.4
 **Status:** Stable
 **Test Suite:** ~130 tests, 100% pass rate (workspace-wide `cargo nextest run --workspace --all-features` on 2026-07-01: 18,102 passed / 0 failed / 119 skipped; 0 clippy warnings; 0 rustdoc warnings)

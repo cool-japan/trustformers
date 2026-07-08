@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Copyright 2025-2026 COOLJAPAN OU (Team KitaSan)
 
+## [0.2.0] - Unreleased
+
 ## [0.1.4] - 2026-07-02
 
 ### Added

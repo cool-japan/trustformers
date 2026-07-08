@@ -112,20 +112,22 @@ impl TestPerformanceMonitoringService {
         let real_time_monitor = Arc::new(RealTimePerformanceMonitor::new(
             RealTimeMonitoringConfig::default(),
         ));
-        // TODO: TestPerformanceMonitoringConfig needs to be refactored to include these fields
         let analytics_engine = Arc::new(RwLock::new(PerformanceAnalyticsEngine::new(
-            Default::default(), // analytics_config field doesn't exist
+            config.analytics_config.clone(),
         )));
-        let event_manager = Arc::new(EventManager::new(Default::default())); // event_config field doesn't exist
-                                                                             // TODO: Convert DataRetentionConfig to HistoricalDataConfig properly
+        let event_manager = Arc::new(EventManager::new(config.event_config.clone()));
+        // Note: `historical_data_config` is independent of `data_retention_config` above
+        // (different shape/purpose) and is passed straight through; `data_retention_config`
+        // itself is not consumed by any sub-manager today, which is a separate, pre-existing
+        // gap out of scope for this fix.
         let historical_data_manager = Arc::new(HistoricalDataManager::new(
-            Default::default(), // Using default HistoricalDataConfig for now
+            config.historical_data_config.clone(),
         ));
-        let alert_manager = Arc::new(AlertManager::new(Default::default())); // alert_config field doesn't exist, using default
+        let alert_manager = Arc::new(AlertManager::new(config.alert_config.clone()));
         let reporting_system = Arc::new(ReportingSystem::new(config.report_config.clone()));
-        let dashboard_manager = Arc::new(DashboardManager::new(Default::default())); // dashboard_config field doesn't exist
+        let dashboard_manager = Arc::new(DashboardManager::new(config.dashboard_config.clone()));
         let subscription_manager = Arc::new(super::subscriptions::SubscriptionManager::new(
-            Default::default(), // subscription_config field doesn't exist
+            config.subscription_config.clone(),
         ));
 
         let service = Self {
@@ -398,6 +400,11 @@ impl TestPerformanceMonitoringService {
             .map_err(|e| ServiceError::ReportError {
                 reason: format!("{:?}", e),
             })
+    }
+
+    /// Get the configuration this service was constructed with
+    pub fn config(&self) -> &TestPerformanceMonitoringConfig {
+        &self.config
     }
 
     /// Get service status

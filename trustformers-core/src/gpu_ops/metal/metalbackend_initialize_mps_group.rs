@@ -132,17 +132,19 @@ impl MetalBackend {
         })?;
         let a_buffer = self.get_persistent_buffer(a_buffer_id)?;
         let b_buffer = self.get_persistent_buffer(b_buffer_id)?;
-        // Resident output buffer (Private; GPU-resident output of the scaled matmul).
-        let c_private = Arc::new(self.device.new_buffer(
+        // Resident output buffer (Shared so oxicuda's resident GEMM can import it via
+        // `register_external`, which requires a CPU-accessible buffer; on Apple Silicon
+        // unified memory Shared is still GPU-resident, so there is no readback penalty).
+        let c_out = Arc::new(self.device.new_buffer(
             (m * n * mem::size_of::<f32>()) as u64,
-            MTLResourceOptions::StorageModePrivate,
+            MTLResourceOptions::StorageModeShared,
         ));
         // Zero-copy: scaled GEMM (alpha) runs directly into the resident buffers.
         oxi_resident_gemm(
             oxi,
             &a_buffer,
             &b_buffer,
-            &c_private,
+            &c_out,
             m,
             k,
             n,
@@ -156,7 +158,7 @@ impl MetalBackend {
                 "matmul_gpu_to_gpu_mps_scaled",
             )
         })?;
-        cache.insert(result_id, c_private);
+        cache.insert(result_id, c_out);
         Ok(result_id)
     }
     /// Execute GELU on GPU buffer → GPU buffer (ZERO CPU TRANSFERS!)
@@ -1753,8 +1755,9 @@ fn oxi_resident_gemm(
 mod tests {
     use super::*;
 
-    // Read back a GPU-private result buffer by blitting it into a CPU-mappable
-    // staging buffer (the scaled matmul output is StorageModePrivate).
+    // Read back a resident result buffer by blitting it into a CPU-mappable staging
+    // buffer. The scaled matmul output is StorageModeShared, but exercising the blit
+    // readback path here keeps coverage of that mechanism.
     fn read_private_result(
         backend: &MetalBackend,
         id: &BufferId,
@@ -1826,7 +1829,7 @@ mod tests {
             );
         }
 
-        // 2) Scaled path (Private output → blit-readback). Use an attention-like scale.
+        // 2) Scaled path (Shared resident output → blit-readback). Use an attention-like scale.
         let alpha = 1.0f32 / (k as f32).sqrt();
         let c_scaled_id = backend.matmul_gpu_to_gpu_mps_scaled(&a_id, &b_id, m, k, n, alpha)?;
         let got_scaled = read_private_result(&backend, &c_scaled_id, m * n)?;

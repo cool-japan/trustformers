@@ -519,10 +519,56 @@ impl DeviceCapabilityDetector {
 
     async fn detect_webgl_support(
         &self,
-        _window: &web_sys::Window,
+        window: &web_sys::Window,
     ) -> (bool, bool, u32, Vec<String>) {
-        // Simplified WebGL detection
-        (true, true, 4096, vec!["basic".to_string()])
+        let document = match window.document() {
+            Some(doc) => doc,
+            None => return (false, false, 0, Vec::new()),
+        };
+
+        let mut supports_webgl1 = false;
+        let mut max_texture_size = 0u32;
+        let mut extensions: Vec<String> = Vec::new();
+
+        if let Ok(canvas_element) = document.create_element("canvas") {
+            if let Ok(canvas) = canvas_element.dyn_into::<HtmlCanvasElement>() {
+                if let Ok(Some(gl_context)) = canvas.get_context("webgl") {
+                    if let Ok(gl) = gl_context.dyn_into::<WebGlRenderingContext>() {
+                        supports_webgl1 = true;
+
+                        if let Ok(size) = gl.get_parameter(WebGlRenderingContext::MAX_TEXTURE_SIZE)
+                        {
+                            if let Some(size) = size.as_f64() {
+                                max_texture_size = size as u32;
+                            }
+                        }
+
+                        if let Some(supported) = gl.get_supported_extensions() {
+                            extensions =
+                                supported.iter().filter_map(|ext| ext.as_string()).collect();
+                        }
+                    }
+                }
+            }
+        }
+
+        // WebGL2 support is probed independently on its own canvas (a canvas can only be
+        // bound to one context type at a time, so it can't share the canvas used above).
+        let mut supports_webgl2 = false;
+        if let Ok(canvas_element) = document.create_element("canvas") {
+            if let Ok(canvas) = canvas_element.dyn_into::<HtmlCanvasElement>() {
+                if let Ok(Some(_gl2_context)) = canvas.get_context("webgl2") {
+                    supports_webgl2 = true;
+                }
+            }
+        }
+
+        (
+            supports_webgl1,
+            supports_webgl2,
+            max_texture_size,
+            extensions,
+        )
     }
 
     async fn detect_wasm_features(&self) -> (bool, bool, bool) {
@@ -636,8 +682,19 @@ impl DeviceCapabilityDetector {
     fn detect_low_power_mode(&self, _window: &web_sys::Window) -> bool {
         false
     }
-    fn get_screen_orientation(&self, _window: &web_sys::Window) -> String {
-        "portrait".to_string()
+    fn get_screen_orientation(&self, window: &web_sys::Window) -> String {
+        let orientation_type =
+            window.screen().ok().map(|screen| screen.orientation()).and_then(|orientation| {
+                js_sys::Reflect::get(&orientation, &JsValue::from_str("type"))
+                    .ok()
+                    .and_then(|v| v.as_string())
+            });
+
+        match orientation_type.as_deref() {
+            Some(t) if t.starts_with("landscape") => "landscape".to_string(),
+            Some(t) if t.starts_with("portrait") => "portrait".to_string(),
+            _ => "unknown".to_string(),
+        }
     }
     fn supports_orientation_lock(&self, _window: &web_sys::Window) -> bool {
         false

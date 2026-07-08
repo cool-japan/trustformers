@@ -132,10 +132,7 @@ impl ZeroShotAudioProcessor {
     /// assert_eq!(hypotheses[1], "This audio is music");
     /// ```
     pub fn format_hypotheses(labels: &[String], template: &str) -> Vec<String> {
-        labels
-            .iter()
-            .map(|lbl| template.replace("{}", lbl))
-            .collect()
+        labels.iter().map(|lbl| template.replace("{}", lbl)).collect()
     }
 
     /// Cosine similarity between two variable-length embedding slices.
@@ -154,11 +151,7 @@ impl ZeroShotAudioProcessor {
                 text: text_embed.len(),
             });
         }
-        let dot: f32 = audio_embed
-            .iter()
-            .zip(text_embed.iter())
-            .map(|(a, b)| a * b)
-            .sum();
+        let dot: f32 = audio_embed.iter().zip(text_embed.iter()).map(|(a, b)| a * b).sum();
         let na = (audio_embed.iter().map(|x| x * x).sum::<f32>()).sqrt();
         let nb = (text_embed.iter().map(|x| x * x).sum::<f32>()).sqrt();
         if na < f32::EPSILON || nb < f32::EPSILON {
@@ -185,9 +178,7 @@ impl ZeroShotAudioProcessor {
                 Ok((i, sim))
             })
             .collect::<Result<Vec<_>, ZeroShotAudioError>>()?;
-        scored.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         Ok(scored)
     }
 
@@ -277,11 +268,7 @@ fn audio_embedding(audio: &AudioWaveform, normalize: bool) -> [f32; 4] {
     let zcr = if audio.samples.len() < 2 {
         0.0
     } else {
-        let crossings = audio
-            .samples
-            .windows(2)
-            .filter(|w| (w[0] >= 0.0) != (w[1] >= 0.0))
-            .count();
+        let crossings = audio.samples.windows(2).filter(|w| (w[0] >= 0.0) != (w[1] >= 0.0)).count();
         crossings as f32 / (audio.samples.len() - 1) as f32
     };
     let mut emb = [rms, peak, dur, zcr];
@@ -329,17 +316,21 @@ fn cosine_similarity(a: &[f32; 4], b: &[f32; 4]) -> f32 {
 }
 
 /// Stable softmax over a slice, returning a new vector of probabilities.
+///
+/// Exponentials are accumulated in `f64` and each probability is floored at
+/// `f32::MIN_POSITIVE`, so outputs stay strictly positive even when widely
+/// spread logits would underflow in `f32` (softmax is mathematically > 0).
 fn softmax(logits: &[f32]) -> Vec<f32> {
     if logits.is_empty() {
         return Vec::new();
     }
-    let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let exps: Vec<f32> = logits.iter().map(|v| (v - max).exp()).collect();
-    let sum: f32 = exps.iter().sum();
-    if sum < f32::EPSILON {
+    let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max) as f64;
+    let exps: Vec<f64> = logits.iter().map(|&v| (f64::from(v) - max).exp()).collect();
+    let sum: f64 = exps.iter().sum();
+    if sum < f64::EPSILON {
         vec![1.0 / logits.len() as f32; logits.len()]
     } else {
-        exps.iter().map(|v| v / sum).collect()
+        exps.iter().map(|&v| ((v / sum) as f32).max(f32::MIN_POSITIVE)).collect()
     }
 }
 
@@ -421,10 +412,7 @@ impl ZeroShotAudioClassificationPipeline {
         audios: &[&AudioWaveform],
         candidate_labels: &[&str],
     ) -> Result<Vec<ZeroShotAudioResult>, ZeroShotAudioError> {
-        audios
-            .iter()
-            .map(|a| self.classify(a, candidate_labels))
-            .collect()
+        audios.iter().map(|a| self.classify(a, candidate_labels)).collect()
     }
 
     /// Classify a single [`AudioInput`] against `candidate_labels` using the
@@ -472,9 +460,7 @@ impl ZeroShotAudioClassificationPipeline {
                 score,
             })
             .collect();
-        items.sort_by(|a, b| {
-            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        items.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         Ok(items)
     }
 
@@ -490,10 +476,7 @@ impl ZeroShotAudioClassificationPipeline {
         audios: Vec<AudioInput>,
         candidate_labels: &[String],
     ) -> Result<Vec<Vec<ZeroShotAudioItem>>, ZeroShotAudioError> {
-        audios
-            .iter()
-            .map(|a| self.classify_input(a, candidate_labels))
-            .collect()
+        audios.iter().map(|a| self.classify_input(a, candidate_labels)).collect()
     }
 
     /// Access the pipeline configuration.
@@ -573,9 +556,7 @@ mod tests {
     fn test_empty_audio_error() {
         let p = default_pipeline();
         let audio = make_waveform(vec![]);
-        let err = p
-            .classify(&audio, &["speech"])
-            .expect_err("empty audio should fail");
+        let err = p.classify(&audio, &["speech"]).expect_err("empty audio should fail");
         assert!(matches!(err, ZeroShotAudioError::EmptyAudio));
     }
 
@@ -583,9 +564,7 @@ mod tests {
     fn test_no_labels_error() {
         let p = default_pipeline();
         let audio = make_waveform(vec![0.1_f32; 100]);
-        let err = p
-            .classify(&audio, &[])
-            .expect_err("empty labels should fail");
+        let err = p.classify(&audio, &[]).expect_err("empty labels should fail");
         assert!(matches!(err, ZeroShotAudioError::NoLabels));
     }
 
@@ -594,7 +573,11 @@ mod tests {
         let p = default_pipeline();
         let audio = make_waveform(vec![0.2_f32; 16_000]);
         let result = p.classify(&audio, &["music"]).expect("ok");
-        assert!((result.score - 1.0).abs() < 1e-5, "score was {}", result.score);
+        assert!(
+            (result.score - 1.0).abs() < 1e-5,
+            "score was {}",
+            result.score
+        );
     }
 
     #[test]
@@ -612,7 +595,10 @@ mod tests {
             .iter()
             .zip(r2.all_scores.iter())
             .any(|(a, b)| (a.1 - b.1).abs() > 1e-6);
-        assert!(scores_differ, "expected different score distributions for different audio");
+        assert!(
+            scores_differ,
+            "expected different score distributions for different audio"
+        );
     }
 
     #[test]
@@ -624,7 +610,10 @@ mod tests {
     #[test]
     fn test_normalize_flags_present_in_default() {
         let config = ZeroShotAudioConfig::default();
-        assert!(config.normalize_audio, "normalize_audio should default to true");
+        assert!(
+            config.normalize_audio,
+            "normalize_audio should default to true"
+        );
         assert!(
             config.normalize_embeddings,
             "normalize_embeddings should default to true"
@@ -635,7 +624,11 @@ mod tests {
 
     #[test]
     fn test_format_hypotheses_basic() {
-        let labels = vec!["speech".to_string(), "music".to_string(), "noise".to_string()];
+        let labels = vec![
+            "speech".to_string(),
+            "music".to_string(),
+            "noise".to_string(),
+        ];
         let hyps = ZeroShotAudioProcessor::format_hypotheses(&labels, "This audio is {}");
         assert_eq!(hyps.len(), 3);
         assert_eq!(hyps[0], "This audio is speech");
@@ -717,7 +710,10 @@ mod tests {
         let b = vec![1.0_f32, 0.0, 0.0];
         let err = ZeroShotAudioProcessor::cosine_similarity(&a, &b).unwrap_err();
         assert!(
-            matches!(err, ZeroShotAudioError::DimensionMismatch { audio: 2, text: 3 }),
+            matches!(
+                err,
+                ZeroShotAudioError::DimensionMismatch { audio: 2, text: 3 }
+            ),
             "expected DimensionMismatch"
         );
     }
@@ -761,14 +757,20 @@ mod tests {
         let logits = vec![2.0_f32, 1.0, -1.0, 0.5];
         let scores = ZeroShotAudioProcessor::entmax_scores(&logits);
         let sum: f32 = scores.iter().sum();
-        assert!((sum - 1.0).abs() < 1e-5, "entmax scores must sum to 1.0, got {sum}");
+        assert!(
+            (sum - 1.0).abs() < 1e-5,
+            "entmax scores must sum to 1.0, got {sum}"
+        );
     }
 
     #[test]
     fn test_entmax_scores_all_positive() {
         let logits = vec![1.0_f32, -2.0, 0.0, 3.0, -5.0];
         let scores = ZeroShotAudioProcessor::entmax_scores(&logits);
-        assert!(scores.iter().all(|&s| s >= 0.0), "all entmax scores must be >= 0");
+        assert!(
+            scores.iter().all(|&s| s >= 0.0),
+            "all entmax scores must be >= 0"
+        );
     }
 
     #[test]
@@ -776,7 +778,11 @@ mod tests {
         // Very large logit at index 0 should dominate after entmax.
         let logits = vec![100.0_f32, 0.0, 0.0, 0.0];
         let scores = ZeroShotAudioProcessor::entmax_scores(&logits);
-        assert!(scores[0] > 0.9, "dominant logit should dominate: score={}", scores[0]);
+        assert!(
+            scores[0] > 0.9,
+            "dominant logit should dominate: score={}",
+            scores[0]
+        );
     }
 
     #[test]
@@ -791,10 +797,7 @@ mod tests {
     fn test_classify_input_basic() {
         let p = default_pipeline();
         let audio = AudioInput::from_samples(vec![0.5_f32; 16_000], 16_000).expect("ok");
-        let labels = ["speech", "music", "noise"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
+        let labels = ["speech", "music", "noise"].iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let result = p.classify_input(&audio, &labels).expect("classify_input ok");
         assert_eq!(result.len(), labels.len());
     }
@@ -803,10 +806,8 @@ mod tests {
     fn test_classify_input_scores_sorted() {
         let p = default_pipeline();
         let audio = AudioInput::from_samples(vec![0.3_f32; 8_000], 16_000).expect("ok");
-        let labels = ["cat", "dog", "bird", "rain"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
+        let labels =
+            ["cat", "dog", "bird", "rain"].iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let result = p.classify_input(&audio, &labels).expect("ok");
         for w in result.windows(2) {
             assert!(w[0].score >= w[1].score, "scores not sorted descending");
@@ -819,7 +820,10 @@ mod tests {
         let audio = AudioInput::from_samples(vec![0.1_f32; 4_000], 16_000).expect("ok");
         let labels = vec!["music".to_string()];
         let result = p.classify_input(&audio, &labels).expect("ok");
-        assert!((result[0].score - 1.0).abs() < 1e-5, "single label score should be 1.0");
+        assert!(
+            (result[0].score - 1.0).abs() < 1e-5,
+            "single label score should be 1.0"
+        );
     }
 
     #[test]
@@ -846,18 +850,10 @@ mod tests {
     fn test_classify_inputs_batch_shape() {
         let p = default_pipeline();
         let audios: Vec<AudioInput> = (0..3)
-            .map(|i| {
-                AudioInput::from_samples(vec![(i as f32) * 0.1; 4_000], 16_000)
-                    .expect("ok")
-            })
+            .map(|i| AudioInput::from_samples(vec![(i as f32) * 0.1; 4_000], 16_000).expect("ok"))
             .collect();
-        let labels = ["speech", "music", "noise"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
-        let results = p
-            .classify_inputs_batch(audios, &labels)
-            .expect("batch ok");
+        let labels = ["speech", "music", "noise"].iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let results = p.classify_inputs_batch(audios, &labels).expect("batch ok");
         assert_eq!(results.len(), 3, "batch should return one result per audio");
         for r in &results {
             assert_eq!(r.len(), labels.len());
@@ -886,7 +882,10 @@ mod tests {
     fn test_softmax_all_positive() {
         let logits = vec![-100.0_f32, -200.0, -50.0];
         let probs = softmax(&logits);
-        assert!(probs.iter().all(|&p| p > 0.0), "all softmax outputs must be positive");
+        assert!(
+            probs.iter().all(|&p| p > 0.0),
+            "all softmax outputs must be positive"
+        );
     }
 
     #[test]

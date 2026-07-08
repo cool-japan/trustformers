@@ -40,8 +40,6 @@ memmap2.workspace = true
 # (`chinese.rs`) uses an in-crate pure-Rust dictionary/char-frequency segmenter,
 # not jieba. Re-add as an optional, feature-gated dep if jieba is ever wired in.
 mecab = { version = "0.1.6", optional = true }
-# Korean tokenization support
-hangul = "0.1.3"
 # Binary format dependencies
 oxiarc-deflate.workspace = true
 crc32fast = "1.5.0"

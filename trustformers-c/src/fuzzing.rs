@@ -74,7 +74,7 @@ pub fn generate_fuzz_string(config: &FuzzConfig) -> Option<CString> {
     let mut rng = thread_rng();
 
     // Randomly return null
-    if rng.gen::<f64>() < config.null_probability {
+    if rng.random::<f64>() < config.null_probability {
         return None;
     }
 
@@ -82,7 +82,7 @@ pub fn generate_fuzz_string(config: &FuzzConfig) -> Option<CString> {
     let mut bytes = Vec::with_capacity(length);
 
     for _ in 0..length {
-        if rng.gen::<f64>() < config.invalid_utf8_probability {
+        if rng.random::<f64>() < config.invalid_utf8_probability {
             // Generate invalid UTF-8 byte
             bytes.push(rng.gen_range(0x80..=0xFF));
         } else {
@@ -102,7 +102,7 @@ pub fn generate_fuzz_string(config: &FuzzConfig) -> Option<CString> {
         Ok(s) => Some(s),
         Err(_) => {
             // Contains null bytes, create a string without them
-            let safe_string = format!("fuzz_string_{}", rng.gen::<u32>());
+            let safe_string = format!("fuzz_string_{}", rng.random::<u32>());
             CString::new(safe_string).ok()
         },
     }
@@ -112,7 +112,7 @@ pub fn generate_fuzz_string(config: &FuzzConfig) -> Option<CString> {
 pub fn generate_fuzz_array(config: &FuzzConfig) -> Option<Vec<c_int>> {
     let mut rng = thread_rng();
 
-    if rng.gen::<f64>() < config.null_probability {
+    if rng.random::<f64>() < config.null_probability {
         return None;
     }
 
@@ -125,7 +125,7 @@ pub fn generate_fuzz_array(config: &FuzzConfig) -> Option<Vec<c_int>> {
             1 => c_int::MIN,
             2 => 0,
             3 => -1,
-            4 => rng.gen::<c_int>(),
+            4 => rng.random::<c_int>(),
             _ => rng.gen_range(-1000..=1000),
         };
         array.push(value);

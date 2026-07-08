@@ -2,8 +2,11 @@
 //!
 //! This module is the Campaign C1 successor to the Campaign C0 `oxicuda_spike`
 //! probe: it graduates the validated oxicuda API surface into a real, feature-gated
-//! CUDA backend. For this sub-slice it provides a single host-in / host-out f32
-//! matrix-multiply path implemented on top of `oxicuda-blas` GEMM.
+//! CUDA backend. It provides host-in / host-out f32 kernels (GEMM, GELU, LayerNorm,
+//! causal softmax, RoPE), a GPU-resident persistent-buffer subsystem with a
+//! refcounted handle lifecycle, and — in the [`batched`] submodule — the batched /
+//! broadcast matrix-multiply routing used by `Tensor::matmul` for both host and
+//! GPU-resident (`Tensor::CUDA`) operands.
 //!
 //! oxicuda is a Pure-Rust CUDA stack that loads `libcuda` at runtime (rather than
 //! linking a CUDA toolkit at build time). Consequently this module *compiles* on any
@@ -14,6 +17,11 @@
 //! The whole module is compiled only under `feature = "cuda"` (see the parent
 //! `#[cfg(feature = "cuda")] mod oxicuda;` in `gpu_ops/cuda.rs`), so the imports
 //! and items below carry no per-item `cfg`.
+
+mod attention;
+mod batched;
+
+pub use batched::{dispatch_oxicuda_matmul, dispatch_oxicuda_matmul_resident, BatchedMatmulPlan};
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -56,6 +64,162 @@ impl Default for OxiCudaBufferId {
     }
 }
 
+/// Callback fired exactly once when the last clone of an [`OxiCudaBufferHandle`] drops.
+///
+/// Receives the device ordinal and the buffer id so the callee can locate the owning
+/// backend registry entry. Boxed so tests can substitute a host-side mock and verify the
+/// refcount bookkeeping without CUDA hardware.
+type ReleaseFn = Box<dyn Fn(usize, OxiCudaBufferId) + Send + Sync + 'static>;
+
+/// Shared interior of an [`OxiCudaBufferHandle`]: identity plus the release callback.
+///
+/// Lives behind an [`Arc`]; its [`Drop`] runs exactly once — when the *last* handle clone
+/// drops — which is precisely when the device allocation must be returned to the backend.
+struct BufferHandleInner {
+    buffer_id: OxiCudaBufferId,
+    device_id: usize,
+    release: ReleaseFn,
+}
+
+impl Drop for BufferHandleInner {
+    fn drop(&mut self) {
+        // Runs on the last handle drop only (Arc guarantees single execution). The
+        // callback itself is infallible/best-effort: Drop must never panic.
+        (self.release)(self.device_id, self.buffer_id);
+    }
+}
+
+/// Reference-counted RAII handle to a GPU-resident persistent buffer.
+///
+/// This is the lifecycle layer the raw [`OxiCudaBufferId`] lacks: the backend's
+/// `buffer_cache` owns the [`DeviceBuffer<f32>`] allocations, and without a handle every
+/// resident op output would stay parked on the device until [`clear_buffer_cache`]
+/// (`OxicudaCudaBackend::clear_buffer_cache`) — a leak in any long-running forward loop.
+/// Cloning a handle is a pure refcount increment ([`Arc::clone`]); when the last clone
+/// drops, the release callback removes the buffer from the owning backend's cache,
+/// freeing the device memory.
+///
+/// Interaction with the escape hatch: `clear_buffer_cache()` (and explicit
+/// `remove_persistent_buffer`) stay valid. Buffer ids are minted from a process-wide
+/// monotonic counter and never reused, and removal of an absent id is an idempotent
+/// no-op — so a handle dropping *after* the cache was force-cleared cannot double-free,
+/// it simply removes nothing.
+///
+/// Thread safety: no `unsafe` is involved. `OxiCudaBufferId` is a `Copy` `u64`,
+/// `device_id` is a `usize`, and the callback is `Send + Sync` by construction, so
+/// `Send`/`Sync` for the handle are auto-derived soundly by the compiler.
+pub struct OxiCudaBufferHandle {
+    inner: Arc<BufferHandleInner>,
+}
+
+impl OxiCudaBufferHandle {
+    /// Wrap a freshly minted resident buffer id in a lifecycle-managed handle.
+    ///
+    /// The id must identify a buffer owned by the [`oxicuda_backend`] registry entry for
+    /// `device_id` (i.e. it came from `create_persistent_buffer` / a `*_gpu_to_gpu` op on
+    /// that backend). Each raw id must be wrapped **at most once**; the wrap point is the
+    /// single owner and all sharing goes through clones of the returned handle.
+    pub fn new(buffer_id: OxiCudaBufferId, device_id: usize) -> Self {
+        Self::with_release(buffer_id, device_id, Box::new(release_persistent_buffer))
+    }
+
+    /// Construct a handle with a custom release callback.
+    ///
+    /// Test seam: lets the host-side refcount tests observe the free call without any
+    /// CUDA hardware. Production code should use [`new`](Self::new).
+    pub(crate) fn with_release(
+        buffer_id: OxiCudaBufferId,
+        device_id: usize,
+        release: ReleaseFn,
+    ) -> Self {
+        Self {
+            inner: Arc::new(BufferHandleInner {
+                buffer_id,
+                device_id,
+                release,
+            }),
+        }
+    }
+
+    /// The resident buffer id this handle keeps alive.
+    #[inline]
+    pub fn id(&self) -> OxiCudaBufferId {
+        self.inner.buffer_id
+    }
+
+    /// The CUDA device ordinal the buffer lives on.
+    #[inline]
+    pub fn device_id(&self) -> usize {
+        self.inner.device_id
+    }
+
+    /// Number of live handle clones sharing this buffer (test/diagnostic aid).
+    #[inline]
+    pub fn ref_count(&self) -> usize {
+        Arc::strong_count(&self.inner)
+    }
+}
+
+impl Clone for OxiCudaBufferHandle {
+    fn clone(&self) -> Self {
+        // Pure refcount increment; the device buffer itself is never copied.
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl std::fmt::Debug for OxiCudaBufferHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OxiCudaBufferHandle")
+            .field("buffer_id", &self.inner.buffer_id)
+            .field("device_id", &self.inner.device_id)
+            .field("ref_count", &Arc::strong_count(&self.inner))
+            .finish()
+    }
+}
+
+/// Default release path for [`OxiCudaBufferHandle`]: free the buffer via the backend registry.
+///
+/// Best-effort by design — this runs from `Drop` and must never panic or block on driver
+/// initialization:
+/// - If no backend exists for `device_id` (e.g. the cache entry was never created, or the
+///   process is tearing down), the release is a silent no-op; a backend is deliberately
+///   **not** constructed here (backend construction touches the CUDA driver).
+/// - The registry lock guard is released *before* the backend's own cache lock is taken
+///   (the `match` scrutinee's guard drops at the end of the `let` statement), so the two
+///   mutexes are never held simultaneously and no lock-order inversion can occur.
+/// - `remove_persistent_buffer` is idempotent, so racing `clear_buffer_cache()` or an
+///   explicit removal is harmless (ids are never reused).
+fn release_persistent_buffer(device_id: usize, buffer_id: OxiCudaBufferId) {
+    let backend = match OXICUDA_BACKENDS.lock() {
+        Ok(cache) => cache.get(&device_id).cloned(),
+        // A poisoned registry means another thread panicked mid-insert; freeing is
+        // no longer safe to attempt and leaking one buffer at panic time is acceptable.
+        Err(_) => None,
+    };
+    if let Some(backend) = backend {
+        let _ = backend.remove_persistent_buffer(&buffer_id);
+    }
+}
+
+/// Default CUDA device ordinal for operations with no resident tensor to carry one
+/// (e.g. the host-in/host-out matmul dispatch in `Tensor::matmul`).
+///
+/// Defaults to `0`. Multi-GPU machines can redirect host-dispatched work with the
+/// `TRUSTFORMERS_CUDA_DEVICE` environment variable (a non-negative integer, parsed once
+/// per process; malformed values fall back to `0`). The ordinal is still validated
+/// against the real device count when the backend is constructed.
+pub fn default_cuda_device_id() -> usize {
+    static DEFAULT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *DEFAULT.get_or_init(|| {
+        std::env::var("TRUSTFORMERS_CUDA_DEVICE")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0)
+    })
+}
+
 /// Pure-Rust oxicuda CUDA backend.
 ///
 /// Owns the CUDA [`Context`](oxicuda_driver::Context) (kept alive via an [`Arc`] so it
@@ -75,8 +239,9 @@ pub struct OxicudaCudaBackend {
 impl OxicudaCudaBackend {
     /// Create a new oxicuda CUDA backend bound to the given device ordinal.
     ///
-    /// Initializes the CUDA driver, selects the device, creates a context and a BLAS
-    /// handle on it. Fails on any host without a usable NVIDIA GPU / `libcuda`.
+    /// Initializes the CUDA driver, validates `device_id` against the enumerated device
+    /// count, selects the device, creates a context and a BLAS handle on it. Fails on any
+    /// host without a usable NVIDIA GPU / `libcuda`, and on an out-of-range ordinal.
     pub fn new(device_id: usize) -> crate::errors::Result<Self> {
         oxicuda_driver::init().map_err(|e| {
             TrustformersError::hardware_error(
@@ -84,6 +249,25 @@ impl OxicudaCudaBackend {
                 "OxicudaCudaBackend::new",
             )
         })?;
+
+        // Validate the requested ordinal against the real device count so multi-GPU
+        // callers get a precise range error instead of an opaque driver failure.
+        let device_count = oxicuda_driver::Device::count().map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to enumerate CUDA devices: {}", e),
+                "OxicudaCudaBackend::new",
+            )
+        })?;
+        let device_count = usize::try_from(device_count).unwrap_or(0);
+        if device_id >= device_count {
+            return Err(TrustformersError::hardware_error(
+                &format!(
+                    "CUDA device index {} out of range: {} device(s) available",
+                    device_id, device_count
+                ),
+                "OxicudaCudaBackend::new",
+            ));
+        }
 
         let device = oxicuda_driver::Device::get(device_id as i32).map_err(|e| {
             TrustformersError::hardware_error(
@@ -242,6 +426,29 @@ impl OxicudaCudaBackend {
         Ok(cache.len())
     }
 
+    /// Block the host until every kernel queued on this backend's BLAS stream
+    /// has completed.
+    ///
+    /// The oxicuda-blas GEMM / DNN kernels launch **asynchronously** on the
+    /// handle's stream, which [`oxicuda_driver::Stream::new`] creates with the
+    /// `CU_STREAM_NON_BLOCKING` flag. A synchronous device→host `copy_to_host`
+    /// (`cuMemcpyDtoH_v2`) runs on the legacy *default* stream, and a
+    /// non-blocking stream does **not** implicitly synchronise with the default
+    /// stream. Without this barrier the host therefore reads a result buffer
+    /// *before* the kernel that fills it has run — returning the
+    /// zero-initialised allocation (`DeviceBuffer::zeroed`) or uninitialised
+    /// garbage (`DeviceBuffer::alloc`). Every device→host read-back must call
+    /// this first. Kept private: it is an internal invariant of the read-back
+    /// paths, not part of the public backend surface.
+    fn synchronize_stream(&self, op: &'static str) -> crate::errors::Result<()> {
+        self.handle.stream().synchronize().map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to synchronize CUDA stream: {}", e),
+                op,
+            )
+        })
+    }
+
     /// Copy a GPU-resident persistent buffer back to a freshly allocated host `Vec<f32>`.
     ///
     /// Mirrors the cudarc backend's `download_buffer`.
@@ -258,6 +465,7 @@ impl OxicudaCudaBackend {
         })?;
 
         let mut result = vec![0.0f32; buffer.len()];
+        self.synchronize_stream("download_buffer")?;
         buffer.copy_to_host(&mut result).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy data from device: {}", e),
@@ -754,6 +962,7 @@ impl OxicudaCudaBackend {
         })?;
 
         let mut result = vec![0.0f32; m * n];
+        self.synchronize_stream("matmul_with_cached_weight")?;
         c_buf.copy_to_host(&mut result).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy result back to host: {}", e),
@@ -865,6 +1074,7 @@ impl OxicudaCudaBackend {
         })?;
 
         let mut result = vec![0.0f32; m * n];
+        self.synchronize_stream("matmul_f32")?;
         c_buf.copy_to_host(&mut result).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy result back to host: {}", e),
@@ -908,6 +1118,7 @@ impl OxicudaCudaBackend {
         )?;
 
         let mut result = vec![0.0f32; size];
+        self.synchronize_stream("gelu_f32")?;
         out_buf.copy_to_host(&mut result).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy result back to host: {}", e),
@@ -1014,6 +1225,7 @@ impl OxicudaCudaBackend {
         }
 
         let mut result = vec![0.0f32; total_size];
+        self.synchronize_stream("layernorm_f32")?;
         out_buf.copy_to_host(&mut result).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy result back to host: {}", e),
@@ -1061,8 +1273,11 @@ impl OxicudaCudaBackend {
             )
         })?;
 
+        // One square [seq_len, seq_len] matrix: rows == cols == seq_len (the
+        // kernel's seq_len parameter batches flattened matrices; unused here).
         oxicuda_blas::reduction::causal_softmax::<f32>(
             &self.handle,
+            seq_len as u32,
             seq_len as u32,
             seq_len as u32,
             &in_buf,
@@ -1076,6 +1291,7 @@ impl OxicudaCudaBackend {
         })?;
 
         let mut result = vec![0.0f32; total_size];
+        self.synchronize_stream("softmax_causal_f32")?;
         out_buf.copy_to_host(&mut result).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy result back to host: {}", e),
@@ -1152,6 +1368,7 @@ impl OxicudaCudaBackend {
         })?;
 
         let mut result = vec![0.0f32; total_size];
+        self.synchronize_stream("rope_f32")?;
         out_buf.copy_to_host(&mut result).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy result back to host: {}", e),
@@ -1237,66 +1454,6 @@ pub fn oxicuda_backend(device_id: usize) -> crate::errors::Result<Arc<OxicudaCud
     cache.get(&device_id).cloned().ok_or_else(|| {
         TrustformersError::hardware_error("oxicuda backend not found", "oxicuda_backend")
     })
-}
-
-/// Dispatch matrix multiplication to the oxicuda CUDA backend.
-///
-/// For `F32` tensors this uploads both operands to the GPU, runs GEMM via
-/// [`OxicudaCudaBackend::matmul_f32`], and returns a host-resident `Tensor::F32`.
-/// All other dtypes fall back to the CPU `Tensor::matmul` path.
-///
-/// The backend is obtained through the per-device [`oxicuda_backend()`] singleton rather than
-/// constructed fresh per call, so the CUDA context / cuBLAS handle and any GPU-resident
-/// buffers are shared across invocations on the same device ordinal.
-pub fn dispatch_oxicuda_matmul(
-    a: &crate::tensor::Tensor,
-    b: &crate::tensor::Tensor,
-    device_id: usize,
-) -> crate::errors::Result<crate::tensor::Tensor> {
-    match (a, b) {
-        (crate::tensor::Tensor::F32(a_arr), crate::tensor::Tensor::F32(b_arr)) => {
-            if a_arr.ndim() != 2 || b_arr.ndim() != 2 {
-                return Err(TrustformersError::shape_error(
-                    "oxicuda CUDA dispatch currently only supports 2D tensors".to_string(),
-                ));
-            }
-
-            let a_2d =
-                a_arr.clone().into_dimensionality::<scirs2_core::ndarray::Ix2>().map_err(|e| {
-                    TrustformersError::shape_error(format!("Failed to convert to 2D: {}", e))
-                })?;
-            let b_2d =
-                b_arr.clone().into_dimensionality::<scirs2_core::ndarray::Ix2>().map_err(|e| {
-                    TrustformersError::shape_error(format!("Failed to convert to 2D: {}", e))
-                })?;
-
-            let (m, k) = a_2d.dim();
-            let (k2, n) = b_2d.dim();
-
-            if k != k2 {
-                return Err(TrustformersError::shape_error(format!(
-                    "Matrix dimension mismatch: {}×{} vs {}×{}",
-                    m, k, k2, n
-                )));
-            }
-
-            let a_data: Vec<f32> = a_2d.iter().copied().collect();
-            let b_data: Vec<f32> = b_2d.iter().copied().collect();
-
-            // Reuse the per-device backend singleton so the CUDA context / handle and any
-            // resident buffers persist across calls (instead of `OxicudaCudaBackend::new`).
-            let backend = oxicuda_backend(device_id)?;
-            let result_data = backend.matmul_f32(&a_data, &b_data, m, k, n)?;
-
-            let result_2d = scirs2_core::ndarray::Array2::from_shape_vec((m, n), result_data)
-                .map_err(|e| {
-                    TrustformersError::shape_error(format!("Failed to reshape result: {}", e))
-                })?;
-
-            Ok(crate::tensor::Tensor::F32(result_2d.into_dyn()))
-        },
-        _ => a.matmul(b),
-    }
 }
 
 #[cfg(all(
@@ -1886,5 +2043,145 @@ mod tests {
         b3.remove_persistent_buffer(&id)?;
 
         Ok(())
+    }
+}
+
+/// Host-side refcount tests for the resident-buffer lifecycle.
+///
+/// These exercise only the [`OxiCudaBufferHandle`] / registry bookkeeping — the release
+/// callback is mocked — so they never touch `libcuda` and run on any platform (including
+/// the macOS development hosts where the `cuda` feature merely *compiles*). This follows
+/// the module's existing pattern of keeping hardware-dependent parity tests OS-gated
+/// while pure bookkeeping stays universally testable.
+#[cfg(test)]
+mod resident_handle_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    /// Build a handle whose release callback increments a shared counter and records
+    /// the `(device_id, buffer_id)` pair it was invoked with.
+    #[allow(clippy::type_complexity)]
+    fn counting_handle(
+        device_id: usize,
+    ) -> (
+        OxiCudaBufferHandle,
+        Arc<AtomicUsize>,
+        Arc<Mutex<Option<(usize, OxiCudaBufferId)>>>,
+    ) {
+        let releases = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::new(Mutex::new(None));
+        let releases_hook = Arc::clone(&releases);
+        let observed_hook = Arc::clone(&observed);
+        let handle = OxiCudaBufferHandle::with_release(
+            OxiCudaBufferId::new(),
+            device_id,
+            Box::new(move |dev, id| {
+                releases_hook.fetch_add(1, AtomicOrdering::SeqCst);
+                if let Ok(mut slot) = observed_hook.lock() {
+                    *slot = Some((dev, id));
+                }
+            }),
+        );
+        (handle, releases, observed)
+    }
+
+    #[test]
+    fn buffer_handle_releases_exactly_once_after_last_clone() {
+        let (handle, releases, _) = counting_handle(0);
+        let clone_a = handle.clone();
+        let clone_b = clone_a.clone();
+        assert_eq!(handle.ref_count(), 3);
+
+        // Drop in an order different from creation: no release until the last one.
+        drop(clone_a);
+        assert_eq!(releases.load(AtomicOrdering::SeqCst), 0);
+        drop(handle);
+        assert_eq!(releases.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(clone_b.ref_count(), 1);
+
+        drop(clone_b);
+        assert_eq!(
+            releases.load(AtomicOrdering::SeqCst),
+            1,
+            "release must fire exactly once, on the last drop"
+        );
+    }
+
+    #[test]
+    fn buffer_handle_clones_share_identity() {
+        let (handle, _, _) = counting_handle(2);
+        let clone = handle.clone();
+        assert_eq!(handle.id(), clone.id());
+        assert_eq!(handle.device_id(), clone.device_id());
+        assert_eq!(clone.device_id(), 2);
+    }
+
+    #[test]
+    fn buffer_handle_release_receives_device_and_buffer_id() {
+        let (handle, releases, observed) = counting_handle(7);
+        let expected_id = handle.id();
+        drop(handle);
+
+        assert_eq!(releases.load(AtomicOrdering::SeqCst), 1);
+        let slot = observed.lock().unwrap_or_else(|poison| poison.into_inner());
+        assert_eq!(
+            *slot,
+            Some((7, expected_id)),
+            "release must be invoked with the handle's device ordinal and buffer id"
+        );
+    }
+
+    #[test]
+    fn cuda_tensor_data_clone_and_drop_frees_exactly_once() {
+        // End-to-end over the tensor wrapper: cloning `Tensor::CUDA` bumps the refcount,
+        // and only the final drop of the last clone triggers the (mocked) device free.
+        let (handle, releases, _) = counting_handle(0);
+        let data = crate::tensor::CudaTensorData::from_handle(
+            handle,
+            vec![2, 2],
+            crate::tensor::DType::F32,
+        );
+        let t1 = crate::tensor::Tensor::CUDA(data);
+        let t2 = t1.clone();
+        let t3 = t2.clone();
+
+        drop(t1);
+        drop(t3);
+        assert_eq!(
+            releases.load(AtomicOrdering::SeqCst),
+            0,
+            "buffer must stay alive while any tensor clone remains"
+        );
+
+        drop(t2);
+        assert_eq!(
+            releases.load(AtomicOrdering::SeqCst),
+            1,
+            "buffer must be freed exactly once when the last tensor clone drops"
+        );
+    }
+
+    #[test]
+    fn release_without_backend_is_a_noop_and_never_constructs_one() {
+        // A device ordinal no test ever instantiates a backend for.
+        let device_id = usize::MAX;
+        // Must neither panic nor lazily construct a backend (construction would require
+        // real CUDA hardware and must never happen from a Drop path).
+        release_persistent_buffer(device_id, OxiCudaBufferId::new());
+
+        let registry = OXICUDA_BACKENDS.lock().unwrap_or_else(|poison| poison.into_inner());
+        assert!(
+            !registry.contains_key(&device_id),
+            "release path must not create backend registry entries"
+        );
+    }
+
+    #[test]
+    fn default_cuda_device_id_is_zero_without_override() {
+        // The environment override is parsed once per process; the test environment does
+        // not set it, so the default ordinal must be 0.
+        if std::env::var("TRUSTFORMERS_CUDA_DEVICE").is_err() {
+            assert_eq!(default_cuda_device_id(), 0);
+        }
     }
 }

@@ -168,15 +168,12 @@ val output = engine.inference(model, inputTensor)
 
 #### GPU Acceleration
 
-**OpenGL ES and Vulkan compute, plus legacy RenderScript**
+**OpenGL ES and Vulkan compute**
 
 - ✅ **Vulkan Compute**
   - Vulkan compute pipelines
   - Descriptor sets for memory
   - Command buffer optimization
-
-- ⚠️ **RenderScript (Legacy)** (`android_renderscript.rs`)
-  - RenderScript kernels present, but several bindings (context/script/allocation pointers) are placeholder null-pointer stand-ins, not a working RenderScript backend — treat as scaffolding for a future migration, not a functional path
 
 ---
 
@@ -221,8 +218,6 @@ let model_path = manager.get_model_path("gpt2-medium");
 #### On-Device Training
 
 **Federated learning and incremental training (feature `on-device-training`)**
-
-⚠️ **Two federated-learning implementations exist on disk.** Only `federated.rs`'s `FederatedLearningClient` is declared as a module in `lib.rs` and actually compiles. `federated_learning.rs` and `federated_learning_v2/` (with a similarly-named `FederatedLearningClient`) are **not** mounted anywhere in `lib.rs` and are unreachable dead code as of 2026-07-01. Use `federated::FederatedLearningClient` — do not rely on the orphaned files.
 
 - ✅ **Federated Learning** (`federated.rs`)
   - `FederatedLearningClient::new/train_local_model/apply_global_update/get_fl_stats`
@@ -468,11 +463,29 @@ let recommendations = battery_mgr.get_optimization_recommendations();
 - ARKit requires iPhone XS or newer
 - Some features iOS 16+/Android 12+ only
 - ⚠️ `advanced_security.rs` implements post-quantum KEM (Kyber/McEliece stand-ins), homomorphic encryption, and secure multi-party computation as simplified/mock reference code, not audited cryptography
-- ⚠️ `federated_learning.rs` and `federated_learning_v2/` are orphaned (not declared in `lib.rs`) and do not compile into the crate; use `federated::FederatedLearningClient` instead
 - ⚠️ `react-native-plugin/` ships an example only — no installable npm package source is present in this repository
-- ⚠️ `ios`, `android`, and `mobile-optimized` Cargo features currently have no `#[cfg(feature = ...)]` gates in `src/`
 - ⚠️ Flutter/Unity/iOS/Android sub-packages version independently at `1.0.0` and do not track the workspace `0.1.4` release
-- ⚠️ `android_renderscript.rs` targets a deprecated Android API and several of its bindings are placeholder null-pointer stand-ins, not a working backend
+
+---
+
+## 0.2.0 Release Scope
+
+Two workspace-wide tracks land in 0.2.0: **OxiCUDA GPU migration** (scirs2-core `gpu` → OxiCUDA, see `~/work/oxicuda`) and **PyTorch (tch) dependency removal**. The tch decision: delete the `tch` dependency and the `torch` feature entirely in 0.2.0 (workspace `Cargo.toml:82`, trustformers-core `torch` feature + ~40 lines of cfg arms, and the forwarder features in `trustformers`, `trustformers-training`, `trustformers-c`); do not adopt ToRSh now — a P2 task (tracked in the root TODO.md) will evaluate an optional `torsh-interop` feature in 0.3.x once torsh 0.2.0 ships on crates.io. Sub-decision on candle: drop the unused `candle-nn` workspace dep now, keep the `candle` feature/variant through 0.2.0 (it is in every `full` set), and decide implement-vs-remove in 0.3.x. `trustformers-mobile` has no direct tch/candle usage; its 0.2.0 items below belong to the OxiCUDA/scirs2 cleanup track.
+
+### OxiCUDA GPU migration (scirs2-core gpu → OxiCUDA)
+
+- [x] **[P1]** Remove the unused `scirs2-linalg` dependency (done 2026-07-06)
+  - Deleted `scirs2-linalg.workspace = true` from `trustformers-mobile/Cargo.toml` together with the root `scirs2-linalg` workspace dep removal (landed atomically as part of the wider tch/torch + workspace-dependency-hygiene cleanup this session).
+  - Evidence: `trustformers-mobile/Cargo.toml:33`; root `Cargo.toml:288`
+  - Verify: workspace-wide convergence (round 3) confirms `cargo check --workspace --all-features` and `cargo clippy --workspace --all-features --all-targets` both green with zero warnings.
+- [x] **[P1]** Fix iOS-only imports of nonexistent scirs2-core APIs in `advanced_neural_engine_v4` (done 2026-07-06)
+  - Removed the dead `scirs2_core::linalg::LinalgOps` and `scirs2_core::tensor::Tensor as SciTensor` imports at `src/advanced_neural_engine_v4.rs:23-24` (verified unused anywhere in the file via `rg`; all real tensor ops already used `trustformers_core::Tensor`). Also trimmed the now-unused `CoreError` import in the same block.
+  - Evidence: `trustformers-mobile/src/advanced_neural_engine_v4.rs` — `rg -n "SciTensor|LinalgOps|scirs2_core"` now returns no matches.
+  - Verify: could not run `cargo check -p trustformers-mobile --target aarch64-apple-ios` directly (target not installed; instructed not to install it), but workspace-wide convergence (round 3) confirms `cargo check --workspace --all-features` green, and the removed symbols are confirmed unused by exhaustive grep.
+
+### PyTorch (tch) dependency removal
+
+- No trustformers-mobile tasks — this crate has no `tch`/`torch`/`candle` dependency or cfg arms. The removal work lives in the root `Cargo.toml`, `trustformers-core`, `trustformers`, `trustformers-training`, and `trustformers-c` TODOs; the P2 `torsh-interop` evaluation is deferred to post-0.2.0 (0.3.x).
 
 ---
 
@@ -485,7 +498,12 @@ let recommendations = battery_mgr.get_optimization_recommendations();
 - [ ] Improved model compression techniques
   - **Refinement needed:** target compression ratio? Which techniques: GPTQ, AWQ, SqueezeLLM?
 - [ ] Replace the `advanced_security.rs` placeholder cryptography (post-quantum KEM, homomorphic encryption, MPC) with audited implementations before advertising real confidentiality guarantees
-- [ ] Reconcile or remove the orphaned `federated_learning.rs` / `federated_learning_v2/` modules (dead code as of 2026-07-01; duplicate the `FederatedLearningClient` name used by the real, compiled `federated.rs`)
+- [x] Delete orphaned federated_learning.rs / federated_learning_v2/ (planned 2026-07-05)
+  - Goal: remove dead code; keep the one real, mounted, tested implementation (federated.rs).
+  - Design: delete src/federated_learning.rs, src/federated_learning_v2/ (mod.rs, crypto.rs, privacy.rs), and src/federated_core.rs (bonus orphan found, same rot, zero references) — none are mod-declared in lib.rs, confirmed zero references anywhere in the workspace. Remove the dead commented-out `pub mod federated_learning_v2;` line pair in lib.rs.
+  - Files: delete the files above; edit lib.rs, README.md, TODO.md.
+  - Tests: cargo build --all-features + cargo nextest run --all-features — count unaffected (these files' tests never compiled).
+  - Risk: none — no mod statement ever included these files.
 
 ### Performance
 - [ ] Further memory optimizations
@@ -498,7 +516,12 @@ let recommendations = battery_mgr.get_optimization_recommendations();
 - [ ] Hardware optimization: Android NPU via NNAPI/QNN
 - [ ] Hardware optimization: Android Hexagon DSP acceleration
 - [ ] Hardware optimization: Qualcomm AI Engine Direct (QAI-Hub integration)
-- [ ] Replace the placeholder RenderScript bindings in `android_renderscript.rs` with a working backend, or drop the module given RenderScript's deprecation
+- [x] Delete android_renderscript.rs (planned 2026-07-05)
+  - Goal: remove a fully-stubbed, unreachable module; the real Android GPU path (android::gpu + android::engine::AndroidInferenceEngine, Vulkan/OpenGL-ES) already exists and is wired.
+  - Design: delete src/android_renderscript.rs (every native primitive is a stub returning null/zero/no-op; not reachable through MobileBackend's real dispatch enum at all; RenderScript is deprecated upstream). Remove its mod/pub use lines from lib.rs.
+  - Files: delete the file; edit lib.rs, README.md, TODO.md.
+  - Tests: cargo build --all-features -p trustformers-mobile.
+  - Risk: none — zero call sites found anywhere.
 
 ### Features
 - [ ] More AR/VR integrations
@@ -511,7 +534,12 @@ let recommendations = battery_mgr.get_optimization_recommendations();
 - [ ] Real-time collaboration
   - **Refinement needed:** protocol (WebRTC? CRDT? operational transform?), transport, use-case definition.
 - [ ] Publish `react-native-plugin` as an actual npm package (currently example-only; see Known Limitations)
-- [ ] Wire up or remove the `ios`/`android`/`mobile-optimized` Cargo features (currently inert markers with no `#[cfg(feature = ...)]` gates)
+- [x] Remove 3 inert Cargo features (ios, android, mobile-optimized) (planned 2026-07-05)
+  - Goal: these features either do something or don't exist — currently they gate nothing.
+  - Design: remove all 3 from [features]; change `default = ["mobile-optimized"]` to `default = []` (mandatory — Cargo hard-errors on a default pointing at a removed feature). Update example build commands and Known-Limitations/Feature-Flags sections in TODO.md/README.md.
+  - Files: trustformers-mobile/Cargo.toml, TODO.md, README.md.
+  - Tests: cargo check -p trustformers-mobile and --all-features before/after — must produce identical compiled output.
+  - Risk: none — confirmed zero cfg(feature = "ios"|"android"|"mobile-optimized") anywhere in src/.
 
 ---
 
@@ -527,10 +555,10 @@ let recommendations = battery_mgr.get_optimization_recommendations();
 
 ```bash
 # Build for iOS
-cargo build --target aarch64-apple-ios --release --features ios
+cargo build --target aarch64-apple-ios --release
 
 # Build for Android
-cargo build --target aarch64-linux-android --release --features android
+cargo build --target aarch64-linux-android --release
 
 # Run tests (~742 passing, all features, verified 2026-07-01)
 cargo nextest run --all-features -p trustformers-mobile
@@ -641,7 +669,7 @@ fun TrustformersDemo() {
 
 ---
 
-**Last Updated:** 2026-07-02
+**Last Updated:** 2026-07-06
 **Version:** 0.1.4
 **Status:** Alpha
 **Test Suite:** ~742 crate tests passing · 26 doctests passing (0 failed, 2 ignored)

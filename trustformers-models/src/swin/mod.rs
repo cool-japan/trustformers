@@ -26,8 +26,7 @@ mod tests;
 
 pub use config::SwinConfig;
 pub use model::{
-    window_partition, window_reverse, cyclic_shift,
-    SwinPatchEmbedding, PatchMerging, WindowAttention,
-    SwinTransformerBlock, SwinStage, SwinModel,
+    cyclic_shift, window_partition, window_reverse, PatchMerging, SwinModel, SwinPatchEmbedding,
+    SwinStage, SwinTransformerBlock, WindowAttention,
 };
 pub use tasks::SwinForImageClassification;

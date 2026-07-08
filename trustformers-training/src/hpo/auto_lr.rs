@@ -63,7 +63,7 @@ impl AutoLrModelType {
                 // Geometric mean of the range.
                 let (lo, hi) = *suggested_range;
                 (lo * hi).sqrt()
-            }
+            },
         }
     }
 }
@@ -237,7 +237,11 @@ impl AutoLrSelector {
             .map(|i| {
                 let dloss = smoothed[i].1 - smoothed[i - 1].1;
                 let dlr = smoothed[i].0 - smoothed[i - 1].0;
-                if dlr.abs() < 1e-30 { 0.0 } else { dloss / dlr }
+                if dlr.abs() < 1e-30 {
+                    0.0
+                } else {
+                    dloss / dlr
+                }
             })
             .collect();
 
@@ -378,7 +382,12 @@ impl LrRangeTest {
     /// `smoothing` defaults to 0.98 (heavy smoothing), appropriate for noisy
     /// mini-batch loss curves.
     pub fn new(min_lr: f32, max_lr: f32, num_iters: usize) -> Self {
-        Self { min_lr, max_lr, num_iters, smoothing: 0.98 }
+        Self {
+            min_lr,
+            max_lr,
+            num_iters,
+            smoothing: 0.98,
+        }
     }
 
     /// Return the learning rate at iteration `step` (0-based).
@@ -411,7 +420,11 @@ impl LrRangeTest {
                 ema = beta * ema + (1.0 - beta) * loss;
                 // Bias-correction factor.
                 let correction = 1.0 - beta.powi((i + 1) as i32);
-                if correction.abs() < 1e-9 { ema } else { ema / correction }
+                if correction.abs() < 1e-9 {
+                    ema
+                } else {
+                    ema / correction
+                }
             })
             .collect()
     }
@@ -443,7 +456,11 @@ impl LrRangeTest {
             .map(|i| {
                 let dloss = smoothed[i] - smoothed[i - 1];
                 let dlr = loss_history[i].0 - loss_history[i - 1].0;
-                if dlr.abs() < f32::EPSILON { 0.0 } else { dloss / dlr }
+                if dlr.abs() < f32::EPSILON {
+                    0.0
+                } else {
+                    dloss / dlr
+                }
             })
             .collect();
 
@@ -492,8 +509,16 @@ mod tests {
         let res = sel.select_from_heuristics(110_000_000); // 110M params
         let (lo, hi) = AutoLrModelType::Bert.suggested_range();
         // The adjusted LR should lie within a reasonable neighbourhood of the range.
-        assert!(res.suggested_lr >= lo * 0.4, "lr too low: {:.2e}", res.suggested_lr);
-        assert!(res.suggested_lr <= hi * 2.5, "lr too high: {:.2e}", res.suggested_lr);
+        assert!(
+            res.suggested_lr >= lo * 0.4,
+            "lr too low: {:.2e}",
+            res.suggested_lr
+        );
+        assert!(
+            res.suggested_lr <= hi * 2.5,
+            "lr too high: {:.2e}",
+            res.suggested_lr
+        );
     }
 
     #[test]
@@ -564,7 +589,10 @@ mod tests {
         let short_curve = vec![(1e-5, 3.0), (1e-4, 2.8)];
         let res = sel.select_from_range_test(&short_curve);
         assert!(res.suggested_lr > 0.0);
-        assert!(res.confidence < 0.5, "should have low confidence on fallback");
+        assert!(
+            res.confidence < 0.5,
+            "should have low confidence on fallback"
+        );
     }
 
     #[test]
@@ -595,21 +623,30 @@ mod tests {
         let ft_res = ft_sel.select_from_heuristics(300_000_000);
         let pt_res = pt_sel.select_from_heuristics(300_000_000);
         // Fine-tuning LR should typically be lower than pre-training LR.
-        assert!(ft_res.suggested_lr < pt_res.suggested_lr,
-            "FT LR ({:.2e}) should < PT LR ({:.2e})", ft_res.suggested_lr, pt_res.suggested_lr);
+        assert!(
+            ft_res.suggested_lr < pt_res.suggested_lr,
+            "FT LR ({:.2e}) should < PT LR ({:.2e})",
+            ft_res.suggested_lr,
+            pt_res.suggested_lr
+        );
     }
 
     #[test]
     fn test_custom_model_type() {
         let custom_sel = AutoLrSelector::new(AutoLrConfig {
-            model_type: AutoLrModelType::Custom { suggested_range: (1e-4, 1e-2) },
+            model_type: AutoLrModelType::Custom {
+                suggested_range: (1e-4, 1e-2),
+            },
             use_warmup: false,
             warmup_fraction: 0.0,
             strategy: AutoLrStrategy::Heuristic,
         });
         let res = custom_sel.select_from_heuristics(50_000_000);
-        assert!(res.suggested_lr >= 1e-4 * 0.5 && res.suggested_lr <= 1e-2 * 2.0,
-            "custom LR out of expected range: {:.2e}", res.suggested_lr);
+        assert!(
+            res.suggested_lr >= 1e-4 * 0.5 && res.suggested_lr <= 1e-2 * 2.0,
+            "custom LR out of expected range: {:.2e}",
+            res.suggested_lr
+        );
     }
 
     // ─── LrRangeTest tests ────────────────────────────────────────────────
@@ -636,7 +673,10 @@ mod tests {
         let mut prev = t.lr_at_step(0);
         for step in 1..50 {
             let cur = t.lr_at_step(step);
-            assert!(cur >= prev, "lr not monotone at step {step}: {cur} < {prev}");
+            assert!(
+                cur >= prev,
+                "lr not monotone at step {step}: {cur} < {prev}"
+            );
             prev = cur;
         }
     }
@@ -660,7 +700,12 @@ mod tests {
     // ── Test 16: smooth_losses with constant input converges to that value ──
     #[test]
     fn test_smooth_losses_constant_input() {
-        let t = LrRangeTest { min_lr: 1e-5, max_lr: 1e-1, num_iters: 50, smoothing: 0.9 };
+        let t = LrRangeTest {
+            min_lr: 1e-5,
+            max_lr: 1e-1,
+            num_iters: 50,
+            smoothing: 0.9,
+        };
         let losses = vec![2.5_f32; 100];
         let smoothed = t.smooth_losses(&losses);
         // The last smoothed value should be close to 2.5 after many steps.
@@ -681,11 +726,7 @@ mod tests {
         let curve: Vec<(f32, f32)> = (0..30)
             .map(|i| {
                 let lr = 1e-6_f32 * 10f32.powf(i as f32 * 0.15);
-                let loss = if i < 18 {
-                    3.0 - 0.1 * i as f32
-                } else {
-                    1.2 + (i - 18) as f32 * 1.5
-                };
+                let loss = if i < 18 { 3.0 - 0.1 * i as f32 } else { 1.2 + (i - 18) as f32 * 1.5 };
                 (lr, loss)
             })
             .collect();
@@ -717,6 +758,9 @@ mod tests {
         let min_lr = curve[0].0;
         let max_lr = curve.last().map(|(lr, _)| *lr).unwrap_or(1.0);
         let opt = LrRangeTest::find_optimal_lr(&curve).expect("should find LR");
-        assert!(opt >= min_lr && opt <= max_lr, "optimal LR {opt} outside [{min_lr}, {max_lr}]");
+        assert!(
+            opt >= min_lr && opt <= max_lr,
+            "optimal LR {opt} outside [{min_lr}, {max_lr}]"
+        );
     }
 }

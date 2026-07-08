@@ -141,11 +141,7 @@ impl GeneratedImage {
             return (0, 0, 0);
         }
         let idx = (row * self.width + col) * 3;
-        (
-            self.pixels[idx],
-            self.pixels[idx + 1],
-            self.pixels[idx + 2],
-        )
+        (self.pixels[idx], self.pixels[idx + 1], self.pixels[idx + 2])
     }
 
     /// Convert the image to grayscale (ITU-R BT.601 luminance).
@@ -411,18 +407,19 @@ impl DiffusionScheduler {
         let alphas = Self::compute_alphas(&betas);
         let alphas_cumprod = Self::compute_alphas_cumprod(&alphas);
         let num_timesteps = betas.len();
-        Self { num_timesteps, betas, alphas, alphas_cumprod }
+        Self {
+            num_timesteps,
+            betas,
+            alphas,
+            alphas_cumprod,
+        }
     }
 
     /// Build a `DiffusionScheduler` with a **linear** beta schedule.
     ///
     /// β linearly interpolates from `beta_start` to `beta_end` over
     /// `num_timesteps` steps.
-    pub fn linear_beta_schedule(
-        num_timesteps: usize,
-        beta_start: f32,
-        beta_end: f32,
-    ) -> Vec<f32> {
+    pub fn linear_beta_schedule(num_timesteps: usize, beta_start: f32, beta_end: f32) -> Vec<f32> {
         if num_timesteps == 0 {
             return Vec::new();
         }
@@ -844,7 +841,11 @@ mod tests {
     #[test]
     fn test_linear_beta_schedule_endpoints() {
         let betas = DiffusionScheduler::linear_beta_schedule(1000, 0.0001, 0.02);
-        assert!((betas[0] - 0.0001).abs() < 1e-6, "first beta mismatch: {}", betas[0]);
+        assert!(
+            (betas[0] - 0.0001).abs() < 1e-6,
+            "first beta mismatch: {}",
+            betas[0]
+        );
         assert!(
             (betas[999] - 0.02).abs() < 1e-6,
             "last beta mismatch: {}",
@@ -938,7 +939,11 @@ mod tests {
         let alphas = DiffusionScheduler::compute_alphas(&betas);
         let acp = DiffusionScheduler::compute_alphas_cumprod(&alphas);
         // ᾱ_2 = 0.9 * 0.8 * 0.7 = 0.504
-        assert!((acp[2] - 0.9 * 0.8 * 0.7).abs() < 1e-5, "cumprod[2]={}", acp[2]);
+        assert!(
+            (acp[2] - 0.9 * 0.8 * 0.7).abs() < 1e-5,
+            "cumprod[2]={}",
+            acp[2]
+        );
     }
 
     // ── DiffusionScheduler::snr ───────────────────────────────────────────────
@@ -951,8 +956,14 @@ mod tests {
         let snr_0 = DiffusionScheduler::snr(&acp, 0);
         let snr_50 = DiffusionScheduler::snr(&acp, 50);
         let snr_99 = DiffusionScheduler::snr(&acp, 99);
-        assert!(snr_0 > snr_50, "SNR should decrease: snr_0={snr_0}, snr_50={snr_50}");
-        assert!(snr_50 > snr_99, "SNR should decrease: snr_50={snr_50}, snr_99={snr_99}");
+        assert!(
+            snr_0 > snr_50,
+            "SNR should decrease: snr_0={snr_0}, snr_50={snr_50}"
+        );
+        assert!(
+            snr_50 > snr_99,
+            "SNR should decrease: snr_50={snr_50}, snr_99={snr_99}"
+        );
     }
 
     #[test]
@@ -961,7 +972,10 @@ mod tests {
         let alphas = DiffusionScheduler::compute_alphas(&betas);
         let acp = DiffusionScheduler::compute_alphas_cumprod(&alphas);
         for t in 0..50 {
-            assert!(DiffusionScheduler::snr(&acp, t) > 0.0, "SNR must be positive at t={t}");
+            assert!(
+                DiffusionScheduler::snr(&acp, t) > 0.0,
+                "SNR must be positive at t={t}"
+            );
         }
     }
 
@@ -1060,7 +1074,11 @@ mod tests {
         let uncond = vec![0.0_f32];
         let guided = TextToImageProcessor::cfg_guidance(&cond, &uncond, 7.5);
         // output = 0 + 7.5*(1 - 0) = 7.5
-        assert!((guided[0] - 7.5).abs() < 1e-5, "CFG scale 7.5: got {}", guided[0]);
+        assert!(
+            (guided[0] - 7.5).abs() < 1e-5,
+            "CFG scale 7.5: got {}",
+            guided[0]
+        );
     }
 
     #[test]
@@ -1070,8 +1088,16 @@ mod tests {
         let scale = 3.0_f32;
         let guided = TextToImageProcessor::cfg_guidance(&cond, &uncond, scale);
         // uncond + scale*(cond - uncond) = 1 + 3*(2-1) = 4.0; 2 + 3*(4-2) = 8.0
-        assert!((guided[0] - 4.0).abs() < 1e-5, "CFG formula check: {}", guided[0]);
-        assert!((guided[1] - 8.0).abs() < 1e-5, "CFG formula check: {}", guided[1]);
+        assert!(
+            (guided[0] - 4.0).abs() < 1e-5,
+            "CFG formula check: {}",
+            guided[0]
+        );
+        assert!(
+            (guided[1] - 8.0).abs() < 1e-5,
+            "CFG formula check: {}",
+            guided[1]
+        );
     }
 
     // ── DiffusionConfig defaults ──────────────────────────────────────────────
@@ -1081,6 +1107,9 @@ mod tests {
         let cfg = DiffusionConfig::default();
         assert_eq!(cfg.num_timesteps, 1000);
         assert_eq!(cfg.guidance_scale, 7.5);
-        assert!(cfg.beta_start < cfg.beta_end, "beta_start must be < beta_end");
+        assert!(
+            cfg.beta_start < cfg.beta_end,
+            "beta_start must be < beta_end"
+        );
     }
 }

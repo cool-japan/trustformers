@@ -53,31 +53,30 @@ impl ContainerDeploymentManager {
     pub fn generate_deployment_artifacts(&self) -> TrustformersResult<DeploymentArtifacts> {
         let mut artifacts = HashMap::new();
 
-        // Generate Docker image configuration
-        // TODO: Implement proper conversion from containers::types::DockerImageConfig to docker::DockerImageConfig
-        // For now, generate a basic Dockerfile
-        let dockerfile = format!(
-            "FROM {}\nCOPY . /app\nWORKDIR /app\nCMD [\"./start.sh\"]",
-            self.config.image_config.base_image
-        );
+        // Generate Docker image configuration by converting the simple, C-API-facing
+        // `types::DockerImageConfig` into the rich `docker::DockerImageConfig` consumed by
+        // `DockerImageBuilder`, so that build_args/env_vars/ports/volumes actually flow
+        // through into the generated artifacts instead of being silently dropped.
+        let docker_builder_config = self.to_docker_builder_config(&self.config.image_config);
+        let docker_builder = super::docker::DockerImageBuilder::new(docker_builder_config);
+
+        let dockerfile = docker_builder.generate_dockerfile()?;
         artifacts.insert("Dockerfile".to_string(), dockerfile);
 
-        let docker_compose = format!(
-            "version: '3'\nservices:\n  {}:\n    build: .\n    image: {}:{}",
-            self.config.app_name, self.config.app_name, self.config.image_config.tag
-        );
+        let docker_compose = docker_builder.generate_docker_compose(&self.config.app_name)?;
         artifacts.insert("docker-compose.yml".to_string(), docker_compose);
 
         // Generate .dockerignore
-        let dockerignore = "*.swp\n*.pyc\n__pycache__\n.git\n.gitignore\nREADME.md".to_string();
-        artifacts.insert(".dockerignore".to_string(), dockerignore);
+        artifacts.insert(
+            ".dockerignore".to_string(),
+            docker_builder.generate_dockerignore(),
+        );
 
         // Generate build.sh
-        let build_script = format!(
-            "#!/bin/bash\ndocker build -t {}:{} .",
-            self.config.app_name, self.config.image_config.tag
+        artifacts.insert(
+            "build.sh".to_string(),
+            docker_builder.generate_build_script(),
         );
-        artifacts.insert("build.sh".to_string(), build_script);
 
         // Generate orchestration-specific artifacts
         match &self.config.orchestration {
@@ -107,6 +106,94 @@ impl ContainerDeploymentManager {
         artifacts.extend(self.generate_security_artifacts()?);
 
         Ok(artifacts)
+    }
+
+    /// Convert the simple, C-API-facing `types::DockerImageConfig` (a flat struct with a
+    /// plain-string base image plus build args/env vars maps, exposed ports and volume
+    /// mounts) into the richer `docker::DockerImageConfig` that `DockerImageBuilder`
+    /// actually consumes.
+    ///
+    /// `base_image`, `build_args`, `env_vars`, `exposed_ports` and `volumes` all have a
+    /// direct source field on `image_config` and are mapped faithfully below - this is the
+    /// data that previously never reached the generated artifacts. Every other field on the
+    /// richer output config (multi-stage/target arch, resource limits, user, entrypoint,
+    /// security/optimization flags, health check) has no corresponding source field
+    /// anywhere reachable from `ContainerDeploymentConfig`, so it is filled with a
+    /// sensible, secure-by-default value instead (multi-stage build, AMD64 target, `/app`
+    /// workdir, non-root user named after the app, no health check).
+    fn to_docker_builder_config(
+        &self,
+        image_config: &super::types::DockerImageConfig,
+    ) -> super::docker::DockerImageConfig {
+        let volumes = image_config
+            .volumes
+            .iter()
+            .map(|volume_mount| super::docker::VolumeMount {
+                // `docker::VolumeMount` has no field for the host-side `source` path, only
+                // the in-container mount point - which is also the only half of the pair
+                // that actually matters to the generated Dockerfile `VOLUME` instruction
+                // and docker-compose volume entries, so `source` is intentionally dropped.
+                path: volume_mount.target.clone(),
+                // `Bind` is the closest match for a mount that was described with an
+                // explicit host source/container target pair (as opposed to an anonymous
+                // named `Volume` or an in-memory `Tmpfs` mount, neither of which fits a
+                // config that was given a concrete `source` path).
+                mount_type: super::docker::MountType::Bind,
+                read_only: volume_mount.read_only,
+            })
+            .collect();
+
+        super::docker::DockerImageConfig {
+            base_image: super::docker::BaseImage::Custom(image_config.base_image.clone()),
+            build_config: super::docker::BuildConfig {
+                multi_stage: true,
+                target_arch: super::docker::TargetArchitecture::AMD64,
+                build_args: image_config.build_args.clone(),
+                env_vars: image_config.env_vars.clone(),
+                workdir: "/app".to_string(),
+                build_dependencies: Vec::new(),
+                runtime_dependencies: Vec::new(),
+            },
+            runtime_config: super::docker::RuntimeConfig {
+                ports: image_config.exposed_ports.clone(),
+                volumes,
+                resources: super::docker::ResourceLimits {
+                    memory: None,
+                    cpu: None,
+                    swap: None,
+                    pids: None,
+                },
+                user: super::docker::UserConfig {
+                    uid: 1000,
+                    gid: 1000,
+                    username: Some(self.config.app_name.clone()),
+                    groupname: Some(self.config.app_name.clone()),
+                },
+                entrypoint: super::docker::EntrypointConfig {
+                    command: vec![format!("/usr/local/bin/{}", self.config.app_name)],
+                    args: Vec::new(),
+                    signal_handling: true,
+                },
+            },
+            security_config: super::docker::SecurityConfig {
+                non_root: true,
+                read_only_root: false,
+                security_opts: Vec::new(),
+                drop_capabilities: Vec::new(),
+                add_capabilities: Vec::new(),
+                security_profile: None,
+            },
+            optimization: super::docker::OptimizationConfig {
+                layer_caching: true,
+                minimize_layers: true,
+                strip_debug: false,
+                compress_binary: false,
+                clean_package_cache: true,
+                remove_dev_tools: false,
+                enable_scanning: false,
+            },
+            health_check: None,
+        }
     }
 
     /// Generate Docker Swarm specific artifacts
@@ -446,9 +533,8 @@ echo "Deployment completed successfully!"
             }]
         });
 
-        serde_json::to_string_pretty(&task_def).map_err(|e| {
-            TrustformersError::from_string(format!("Failed to serialize task definition: {}", e))
-        })
+        serde_json::to_string_pretty(&task_def)
+            .map_err(|_| TrustformersError::SerializationError)
     }
 
     fn generate_ecs_service_definition(&self, config: &ECSConfig) -> TrustformersResult<String> {
@@ -461,9 +547,8 @@ echo "Deployment completed successfully!"
             "launchType": config.launch_type
         });
 
-        serde_json::to_string_pretty(&service_def).map_err(|e| {
-            TrustformersError::from_string(format!("Failed to serialize service definition: {}", e))
-        })
+        serde_json::to_string_pretty(&service_def)
+            .map_err(|_| TrustformersError::SerializationError)
     }
 
     fn generate_ecs_cloudformation_template(
@@ -886,9 +971,8 @@ roleRef:
 
         artifacts.insert(
             "aci-template.json".to_string(),
-            serde_json::to_string_pretty(&arm_template).map_err(|e| {
-                TrustformersError::from_string(format!("Failed to serialize ACI template: {}", e))
-            })?,
+            serde_json::to_string_pretty(&arm_template)
+                .map_err(|_| TrustformersError::SerializationError)?,
         );
 
         // Azure CLI deployment script
@@ -1092,8 +1176,229 @@ echo "Application available at: https://$ROUTE"
 }
 
 // Import external dependencies that might be needed
-use crate::containers::docker::{DockerImageBuilder, DockerImageConfig};
 use crate::containers::kubernetes::KubernetesGenerator;
 
 // For time handling
 use chrono;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a fully-populated `ContainerDeploymentConfig` whose `image_config` carries
+    /// non-empty `build_args`, `exposed_ports`, and `volumes` - exactly the fields the old,
+    /// hand-rolled `format!`-based artifact generation silently ignored - and return the
+    /// config alongside those three fixtures so tests can assert on them directly.
+    fn build_test_config() -> (
+        ContainerDeploymentConfig,
+        HashMap<String, String>,
+        Vec<u16>,
+        Vec<VolumeMount>,
+    ) {
+        let mut build_args = HashMap::new();
+        build_args.insert("APP_VERSION".to_string(), "1.2.3".to_string());
+        build_args.insert("FEATURE_FLAG".to_string(), "enabled".to_string());
+
+        let mut env_vars = HashMap::new();
+        env_vars.insert("RUST_LOG".to_string(), "debug".to_string());
+
+        // Deliberately distinctive port numbers that can't collide with any hardcoded
+        // literal in docker.rs's templates (e.g. the default healthcheck's `:8080`).
+        let exposed_ports: Vec<u16> = vec![47001, 47002];
+
+        let volumes = vec![
+            VolumeMount {
+                source: "/host/data".to_string(),
+                target: "/mnt/custom-data".to_string(),
+                read_only: false,
+            },
+            VolumeMount {
+                source: "/host/config".to_string(),
+                target: "/mnt/custom-config".to_string(),
+                read_only: true,
+            },
+        ];
+
+        let config = ContainerDeploymentConfig {
+            platform: ContainerPlatform::Docker,
+            app_name: "test-app".to_string(),
+            environment: "test".to_string(),
+            image_config: DockerImageConfig {
+                base_image: "python:3.11-slim".to_string(),
+                tag: "1.0.0".to_string(),
+                build_context: ".".to_string(),
+                dockerfile_path: "Dockerfile".to_string(),
+                build_args: build_args.clone(),
+                env_vars: env_vars.clone(),
+                exposed_ports: exposed_ports.clone(),
+                volumes: volumes.clone(),
+            },
+            // CloudRunConfig is the flattest orchestration variant (plain scalars only),
+            // which keeps this fixture focused on the DockerImageConfig conversion.
+            orchestration: OrchestrationConfig::CloudRun(CloudRunConfig {
+                service_name: "test-service".to_string(),
+                region: "us-central1".to_string(),
+                memory: 2.0,
+                cpu: 1.0,
+                max_instances: 10,
+                min_instances: 1,
+                timeout: 300,
+                concurrency: 80,
+            }),
+            serverless: None,
+            monitoring: MonitoringConfig {
+                enabled: false,
+                metrics_interval: 60,
+                log_aggregation: LogAggregationConfig {
+                    enabled: false,
+                    log_level: "info".to_string(),
+                    format: "json".to_string(),
+                    destination: "stdout".to_string(),
+                },
+                health_checks: HealthCheckConfig {
+                    enabled: true,
+                    endpoint: "/health".to_string(),
+                    interval: 30,
+                    timeout: 5,
+                    failure_threshold: 3,
+                },
+                alerting: AlertingConfig {
+                    enabled: false,
+                    rules: vec![],
+                    notification_channels: vec![],
+                },
+            },
+            auto_scaling: None,
+            security: SecurityConfig {
+                security_scanning: false,
+                image_scanning: ImageScanningConfig {
+                    enabled: false,
+                    scan_on_push: false,
+                    vulnerability_thresholds: VulnerabilityThresholds {
+                        critical: 0,
+                        high: 0,
+                        medium: 0,
+                    },
+                },
+                runtime_security: RuntimeSecurityConfig {
+                    enabled: false,
+                    policies: vec![],
+                    compliance_checks: vec![],
+                },
+                network_policies: vec![],
+                secret_management: SecretManagementConfig {
+                    store_type: "none".to_string(),
+                    encryption: EncryptionConfig {
+                        algorithm: "AES256".to_string(),
+                        key_management: "local".to_string(),
+                    },
+                    rotation_policy: RotationPolicy {
+                        interval: "30d".to_string(),
+                        automatic: false,
+                    },
+                },
+            },
+            network: NetworkConfig {
+                network_mode: "bridge".to_string(),
+                port_mappings: vec![],
+                load_balancer: None,
+                service_mesh: None,
+            },
+            storage: StorageConfig {
+                persistent_volumes: vec![],
+                temp_storage: TempStorageConfig {
+                    size_limit: "1Gi".to_string(),
+                    cleanup_policy: "always".to_string(),
+                },
+                backup: None,
+            },
+        };
+
+        (config, build_args, exposed_ports, volumes)
+    }
+
+    #[test]
+    fn test_generate_deployment_artifacts_routes_build_args_ports_and_volumes() {
+        let (config, build_args, exposed_ports, volumes) = build_test_config();
+        let manager = ContainerDeploymentManager::new(config);
+        let artifacts = manager
+            .generate_deployment_artifacts()
+            .expect("artifact generation should succeed for a well-formed config");
+
+        let dockerfile = artifacts
+            .get("Dockerfile")
+            .expect("Dockerfile artifact should be present");
+        let compose = artifacts
+            .get("docker-compose.yml")
+            .expect("docker-compose.yml artifact should be present");
+        let build_script = artifacts
+            .get("build.sh")
+            .expect("build.sh artifact should be present");
+
+        // (a) build_args must flow into the generated Dockerfile (as `ARG key=value`,
+        // emitted by the multi-stage build path) and into build.sh (as `--build-arg`).
+        for (key, value) in &build_args {
+            let pair = format!("{}={}", key, value);
+            assert!(
+                dockerfile.contains(&pair),
+                "Dockerfile should contain build arg `{}`\n--- Dockerfile ---\n{}",
+                pair,
+                dockerfile
+            );
+            assert!(
+                build_script.contains(&pair),
+                "build.sh should contain build arg `{}`\n--- build.sh ---\n{}",
+                pair,
+                build_script
+            );
+        }
+
+        // (b) exposed ports must flow into the Dockerfile (`EXPOSE`) and into the
+        // docker-compose ports section.
+        for port in &exposed_ports {
+            assert!(
+                dockerfile.contains(&format!("EXPOSE {}", port)),
+                "Dockerfile should EXPOSE port {}\n--- Dockerfile ---\n{}",
+                port,
+                dockerfile
+            );
+            assert!(
+                compose.contains(&port.to_string()),
+                "docker-compose.yml should reference port {}\n--- docker-compose.yml ---\n{}",
+                port,
+                compose
+            );
+        }
+
+        // (c) volume mount target paths must flow into the Dockerfile (`VOLUME [...]`).
+        // `docker::VolumeMount` has no field for the host-side `source`, so only `target`
+        // (the in-container mount point) is expected to survive the conversion.
+        for volume in &volumes {
+            assert!(
+                dockerfile.contains(&volume.target),
+                "Dockerfile should VOLUME the target path `{}`\n--- Dockerfile ---\n{}",
+                volume.target,
+                dockerfile
+            );
+        }
+
+        // Bonus: env_vars and the base image (routed through `BaseImage::Custom`) should
+        // also flow through, since the old hand-rolled implementation dropped env_vars
+        // entirely and hardcoded a "COPY . /app" Dockerfile regardless of base_image.
+        assert!(
+            dockerfile.contains("RUST_LOG=debug"),
+            "Dockerfile should contain env var RUST_LOG=debug\n--- Dockerfile ---\n{}",
+            dockerfile
+        );
+        assert!(
+            dockerfile.contains("python:3.11-slim"),
+            "Dockerfile should FROM the custom base image\n--- Dockerfile ---\n{}",
+            dockerfile
+        );
+
+        let dockerignore = artifacts
+            .get(".dockerignore")
+            .expect(".dockerignore artifact should be present");
+        assert!(!dockerignore.is_empty());
+    }
+}

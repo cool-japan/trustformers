@@ -51,20 +51,75 @@ drafts of this document.
   networking (no `TcpStream`/sockets) and no FFI dependency on libnccl/OpenMPI/gloo in `Cargo.toml`. Only
   `SimulatedProcessGroup` is honestly named; the other three should either get real bindings or be renamed/
   documented as simulations to avoid misleading users planning real multi-node training.
-- [ ] **`DPOLossType::Kto` is currently identical to `DPOLossType::Sigmoid`** (`rlhf/dpo.rs`): both compute
-  `-log(sigmoid(logits))`. This is not yet a distinct prospect-theory-based KTO loss.
+- [~] Implement real, distinct KTO loss (Kahneman-Tversky Optimization) (planned 2026-07-05)
+  - Goal: DPOLossType::Kto computes the real KTO loss instead of being byte-for-byte identical to Sigmoid DPO.
+  - Prerequisites: the existing paired-batch data model (DPOExample/DPOBatch/PreferencePair) has no per-example desirable/undesirable label the real KTO formula needs — this must be built. Major mitigating factor: a complete, mathematically-correct, already-tested (29 tests) scalar reference implementation already exists, orphaned, at src/kto/mod.rs — the work is adapting its math to a batched Tensor path, not deriving KTO from the paper from scratch.
+  - Design: add KtoBatch/KtoExample tensor types + a KtoDataCollator (single-sided, allows unbalanced group sizes unlike paired DPO) mirroring DPOBatch/DPODataCollator's shape. Implement the vectorized loss using existing Tensor primitives (no new Tensor infrastructure needed). Add a bootstrap converter PreferencePair -> [KtoExample; 2] so existing paired data can feed KTO immediately. Redirect DPOLossType::Kto's match arm to the new path AND add a dedicated KtoTrainer.
+  - Files: src/rlhf/dpo.rs, src/kto/mod.rs, new src/rlhf/kto.rs, lib.rs, a converter fn near rlhf/feedback.rs.
+  - Tests: port kto/mod.rs's 29 scalar tests as a parity oracle; a new collator test; an unbalanced-group-size test; a regression test proving DPOLossType::Kto's output now differs from Sigmoid on an asymmetric-lambda batch.
+  - Risk: note for the record — DPOTrainer::get_batch_logps is itself a whole-tensor-mean approximation (real per-token gather isn't wired up yet), so the new KTO path inherits that same approximation until separately fixed; also there's a third, unrelated "DPO" implementation (RLHFTrainer::compute_dpo_update) elsewhere in the crate — don't confuse it with either DPO or the new KTO path.
 - [ ] **`DPOTrainer::get_batch_logps` uses a simplified approximation**: per its own source comment, it
   currently averages log-probabilities over the whole tensor rather than gathering per-token log-probs
   indexed by `labels`, because tensor indexing for this case isn't wired up yet.
-- [ ] **`examples/basic_training/simple_classification.rs` references a stale API**: it imports
-  `trainer::TrainerConfig`, `training_args::TrainingArgs`, and `metrics::MetricResult`, none of which exist
-  in the current crate (the real names are `Trainer`, `TrainingArguments`, `MetricCollection`/`Metric`).
-  The example likely predates a `Trainer`/`TrainingArguments` API rename and needs updating; it is not
-  covered by `cargo nextest` since examples aren't compiled by a plain `--all-features` test run.
-- [ ] **5 stray `*.rs.prelude_fix` backup files** (`gradient_anomaly_recovery.rs.prelude_fix`,
-  `hyperopt/auto_tuner.rs.prelude_fix`, `hyperopt/search_space.rs.prelude_fix`,
-  `continual/memory_replay.rs.prelude_fix`, `hyperopt/sampler.rs.prelude_fix`) are leftover, non-compiled
-  debris sitting next to their real counterparts. Low priority, but worth deleting.
+- [~] Fix stale API in examples/basic_training/simple_classification.rs (planned 2026-07-05)
+  - Goal: the example compiles and runs against the current API (currently comprehensively stale: wrong Trainer::new arity, wrong Loss/Model/TrainerCallback trait shapes throughout).
+  - Design: full rewrite against the current real API, using the crate's own passing lib.rs doctest as the template.
+  - Files: trustformers-training/examples/basic_training/simple_classification.rs only.
+  - Tests: add cargo check --examples -p trustformers-training so this can't silently regress again.
+  - Risk: low, bounded to one file. (Note for the record, out of scope here: the identical staleness pattern recurs in 3 other example files.)
+- [~] Delete 5 stray *.rs.prelude_fix backup files (planned 2026-07-05)
+  - Goal/Design: delete src/gradient_anomaly_recovery.rs.prelude_fix, src/continual/memory_replay.rs.prelude_fix, src/hyperopt/auto_tuner.rs.prelude_fix, src/hyperopt/sampler.rs.prelude_fix, src/hyperopt/search_space.rs.prelude_fix — confirmed zero references, dead pre-migration snapshots.
+  - Files: the 5 files.
+  - Tests: cargo check -p trustformers-training --all-features (no-op diff).
+  - Risk: none.
+
+---
+
+## 0.2.0 Release Scope (added 2026-07-06)
+
+Two workspace-wide tracks are in scope for 0.2.0: the **OxiCUDA GPU migration** (scirs2-core `gpu` →
+OxiCUDA 0.4.x, driven from trustformers-core — no `trustformers-training` code is gated on GPU features,
+so no work lands in this crate for that track) and the **PyTorch (tch) dependency removal**. Decision for
+the latter: delete the `tch` dependency and the `torch` feature entirely in 0.2.0 (workspace
+`Cargo.toml:82`, the trustformers-core `torch` feature plus ~40 lines of cfg arms, and the forwarder
+features in `trustformers`, `trustformers-training`, `trustformers-c`); do **not** adopt ToRSh as a
+replacement now — a P2 task records evaluating an optional `torsh-interop` feature in 0.3.x once
+torsh 0.2.0 ships on crates.io. Sub-decision on candle: drop the unused `candle-nn` workspace dep now,
+keep the `candle` feature/variant through 0.2.0 (it is in every `full` set), and decide
+implement-vs-remove in 0.3.x. Rationale (verified): `Tensor::Torch`
+(`trustformers-core/src/tensor/mod.rs:220-221`) is never constructed anywhere in the workspace, and the
+cfg(torch) "PyTorch validation" is simulated with hardcoded results
+(`trustformers-core/src/testing/cross_framework.rs:309-325`), so zero functionality is lost — while
+keeping `tch` costs a multi-GB libtorch download plus policy violations (torch-sys pulls `cc` (C++), the
+OxiARC-banned `zip 0.6.6`, `ureq`, and duplicate old ndarray/rand/safetensors pins,
+`Cargo.lock:10598-10610`). All real PyTorch interop is already pure Rust and is kept (safetensors
+non-optional at `trustformers-core/Cargo.toml:34`; `checkpoint/formats.rs`, `utils/weight_loading.rs`,
+trustformers-optim `pytorch_compat.rs`).
+
+### PyTorch (tch) dependency removal — this crate's tasks
+
+- [x] **[P0] Remove the `torch` forwarder feature.** DONE 2026-07-06: the `torch` forwarder feature was
+  deleted from `trustformers-training/Cargo.toml` and the `full` feature comment updated to drop the torch
+  mention; `trustformers-training/README.md` had its `torch` feature-flag documentation line removed and
+  the `full` line's parenthetical updated accordingly. Landed atomically with the workspace-wide
+  `tch`/`torch` removal (root `Cargo.toml`, `trustformers-core`, `trustformers`, `trustformers-c`).
+  Verified green in the session's convergence pass: `cargo check --workspace --all-features` and
+  `cargo clippy --workspace --all-features --all-targets` both pass with zero warnings; full workspace
+  nextest run (12033/12033 passed, 113 skipped GPU-availability-gated) confirms no regression.
+  Evidence: `trustformers-training/Cargo.toml`, `trustformers-training/README.md`.
+
+### Post-0.2.0 (0.3.x)
+
+- [ ] **[P2] Track the workspace-level ToRSh evaluation.** Once torsh 0.2.0 ships on crates.io (its
+  crates.io 0.1.3 pins scirs2 0.5.1, type-incompatible with this workspace's scirs2 0.6.0 stack), the
+  workspace will evaluate an optional `torsh-interop` feature; if adopted, this crate may regain a thin
+  forwarder feature. No action here until that decision lands (~/work/torsh).
+
+### OxiCUDA GPU migration
+
+- No tasks in this crate: GPU backends live in trustformers-core (`cuda`/`metal` features, oxicuda
+  0.4.x — see `trustformers-core/Cargo.toml:88-131`, `trustformers-core/src/gpu_ops/cuda.rs`).
+  `trustformers-training` has no GPU-feature-gated code.
 
 ---
 
@@ -117,7 +172,8 @@ drafts of this document.
 ### RLHF and Alignment (`rlhf` module)
 - [x] PPO: `PPOTrainer`, `PPOConfig`, `PPOStepResult`, `PolicyModel`, `ValueModel` (`rlhf/ppo.rs`)
 - [x] DPO: `DPOTrainer`, `DPOConfig`, distinct `Sigmoid`/`Hinge`/`Ipo` loss formulas (`rlhf/dpo.rs`)
-- [ ] KTO as a *distinct* prospect-theory loss — currently aliases the Sigmoid DPO formula (see Known Issues)
+- [~] KTO as a *distinct* prospect-theory loss — currently aliases the Sigmoid DPO formula; real KTO
+  implementation planned 2026-07-05 (see "Known Issues" above for the full plan)
 - [~] Faithful per-token log-probability computation in `get_batch_logps` — currently a simplified
   whole-sequence-mean approximation (see Known Issues)
 - [x] Reward modeling: `RewardModel`, `RewardModelConfig`, `RewardPrediction` (`rlhf/reward_model.rs`)
@@ -149,9 +205,12 @@ drafts of this document.
 - [x] Hyperband / successive halving (`Hyperband`, `SuccessiveHalving`)
 - [x] Population-Based Training (`PopulationBasedTraining`, `PBTConfig`)
 - [x] Bandit-based optimization (`BanditOptimizer`)
-- [~] Multi-objective optimization — supported as an early-stopping/reward-composition criterion
-  (`hyperopt::efficiency::EarlyStoppingStrategy::MultiObjective`), not as a standalone Pareto-front
-  optimizer; the more fully-featured `hpo::multi_objective` on disk is orphaned/unwired (see Known Issues)
+- [~] Wire in hpo::multi_objective (planned 2026-07-05)
+  - Goal: expose the already-complete (1332 lines) NSGA-II Pareto-front hyperparameter-search engine.
+  - Design: add `pub mod hpo;` to lib.rs next to the existing `pub mod hyperopt;` — zero missing dependencies, zero name collisions confirmed against the ~90 names hyperopt already exports.
+  - Files: trustformers-training/src/lib.rs only.
+  - Tests: cargo nextest run -p trustformers-training (its ~30 pre-written tests run for the first time); fix the module doctest's .unwrap() to comply with no-unwrap policy while touching this.
+  - Risk: none beyond the doctest unwrap fix.
 
 ### Experiment Management & Tracking
 - [x] Native experiment tracking, A/B testing, data/model lineage and provenance
@@ -187,24 +246,38 @@ drafts of this document.
 - [ ] Implement a real ZeRO optimizer (stage 1 at minimum) if distributed memory sharding is still a goal
 - [ ] Give `NCCLProcessGroup`/`GlooProcessGroup`/`MPIProcessGroup` real backend bindings, or rename/document
   them clearly as simulations until they do
-- [ ] Fix `examples/basic_training/simple_classification.rs` to use the current `Trainer`/`TrainingArguments`
-  API (and consider adding a `cargo check --examples` step to CI so this doesn't recur silently)
-- [ ] Implement a distinct KTO loss (prospect-theory utility, asymmetric loss aversion) rather than aliasing
-  Sigmoid DPO
+- [~] Fix `examples/basic_training/simple_classification.rs` to use the current `Trainer`/`TrainingArguments`
+  API (and consider adding a `cargo check --examples` step to CI so this doesn't recur silently) — planned
+  2026-07-05 (see "Known Issues" above for the full plan)
+- [~] Implement a distinct KTO loss (prospect-theory utility, asymmetric loss aversion) rather than aliasing
+  Sigmoid DPO — planned 2026-07-05 (see "Known Issues" above for the full plan)
 - [ ] Wire up proper per-token indexed log-probability gathering in `DPOTrainer::get_batch_logps`
 - [ ] Recent PEFT/alignment techniques not yet present anywhere in the tree: DoRA, GaLore, AdaLoRA (the
   orphaned `lora/` directory has *some* LoRA-family code, but it is unwired and none of these newer variants
   were found in it)
 
 ### Performance
-- [ ] Verify/benchmark the `gradient_compression` flag on `DistributedConfig` — the field exists but its
-  runtime effect wasn't independently verified during this pass
-- [ ] Add a `benches/` directory with `criterion` benchmarks; none currently exist for this crate (the
-  previous README's benchmark table had no backing harness and has been removed)
+- [~] Wire real gradient_compression (recharacterized from "benchmark" to "implement") (planned 2026-07-05)
+  - Goal: the gradient_compression: bool flag on DistributedConfig actually changes runtime behavior (confirmed 100% inert today — the only reference anywhere is a test asserting the field round-trips its own assigned value; synchronize_gradients never reads it).
+  - Design: thread the flag (or a CompressionType choice) through DataParallelTrainer::synchronize_gradients before its all_reduce call, delegating actual compress/decompress to trustformers-optim's existing, real CompressionType machinery (already a normal workspace dependency) — wiring to existing real logic, not inventing a new algorithm.
+  - Files: trustformers-training/src/distributed.rs.
+  - Tests: a test that the flag now actually changes behavior (not just a round-trip test); a correctness test that compressed+decompressed all-reduce stays within tolerance of the uncompressed sum.
+  - Risk: low — the compression logic is borrowed, tested, real code; the only new work is the plumbing and the behavioral test.
+- [~] Add benches/ directory with criterion benchmarks (planned 2026-07-05)
+  - Goal: cargo bench -p trustformers-training works.
+  - Design: criterion.workspace = true dev-dependency + [[bench]] entries, mirroring trustformers-optim's existing bench setup. 3 targets: training-loop micro-step, loss functions, mixed-precision loss scaling.
+  - Files: new trustformers-training/benches/*.rs, Cargo.toml.
+  - Tests: cargo bench --no-run to confirm compilation, then a real cargo bench run.
+  - Risk: known pitfall — this workspace's own root TODO.md documents a prior criterion_main!-nested-inside-mod-benches compile failure (E0601) in trustformers-core's bench; keep criterion_main! at file top level.
 
 ### Housekeeping
-- [ ] Delete the 5 stray `*.rs.prelude_fix` backup files
-- [ ] Delete or wire in the legacy `src/mod.rs` (currently dead; a minimal alternate `lib.rs`-shaped file)
+- [~] Delete the 5 stray `*.rs.prelude_fix` backup files — planned 2026-07-05 (see "Known Issues" above for
+  the full plan)
+- [~] Delete dead src/mod.rs (planned 2026-07-05)
+  - Goal/Design: delete the legacy src/mod.rs — crate root is lib.rs; everything mod.rs declares already exists, more completely, in lib.rs.
+  - Files: trustformers-training/src/mod.rs.
+  - Tests: cargo check --all-features (no-op diff).
+  - Risk: none.
 
 ---
 
@@ -230,7 +303,7 @@ cargo check -p trustformers-training --all-features
 
 ---
 
-**Last Updated:** 2026-07-02 — v0.1.4
+**Last Updated:** 2026-07-06 — 0.2.0 release-scope section added (tch/torch removal, OxiCUDA note); torch forwarder feature removal task marked done
 **Version:** 0.1.4
 **Status:** Alpha — ~930 tests passing, 1,673 reachable public API items, 0 stubs, but see "Known Issues"
 for the distributed-training and orphaned-module caveats that keep this crate from being labeled Stable.

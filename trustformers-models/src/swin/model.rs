@@ -17,9 +17,7 @@ use crate::swin::config::SwinConfig;
 use scirs2_core::ndarray::{s, Array1, Array2, Array3, Array4, Axis, Ix3};
 use trustformers_core::device::Device;
 use trustformers_core::errors::{Result, TrustformersError};
-use trustformers_core::layers::{
-    feedforward::FeedForward, layernorm::LayerNorm, linear::Linear,
-};
+use trustformers_core::layers::{feedforward::FeedForward, layernorm::LayerNorm, linear::Linear};
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::{Config, Layer};
 
@@ -106,8 +104,7 @@ pub fn window_reverse(
                 let sh = wh * window_size;
                 let sw = ww * window_size;
                 let win = windows.slice(s![win_idx, .., .., ..]);
-                x.slice_mut(s![bi, sh..sh + window_size, sw..sw + window_size, ..])
-                    .assign(&win);
+                x.slice_mut(s![bi, sh..sh + window_size, sw..sw + window_size, ..]).assign(&win);
                 win_idx += 1;
             }
         }
@@ -135,13 +132,21 @@ pub fn cyclic_shift(x: &Array4<f32>, shift: usize) -> Array4<f32> {
 
     // Roll along axis 1 (height) by -sh, i.e. bring rows [sh..] to front
     let mut rolled_h = Array4::<f32>::zeros((b, h, w, c));
-    rolled_h.slice_mut(s![.., ..h - sh, .., ..]).assign(&x.slice(s![.., sh.., .., ..]));
-    rolled_h.slice_mut(s![.., h - sh.., .., ..]).assign(&x.slice(s![.., ..sh, .., ..]));
+    rolled_h
+        .slice_mut(s![.., ..h - sh, .., ..])
+        .assign(&x.slice(s![.., sh.., .., ..]));
+    rolled_h
+        .slice_mut(s![.., h - sh.., .., ..])
+        .assign(&x.slice(s![.., ..sh, .., ..]));
 
     // Roll along axis 2 (width) by -sw
     let mut rolled = Array4::<f32>::zeros((b, h, w, c));
-    rolled.slice_mut(s![.., .., ..w - sw, ..]).assign(&rolled_h.slice(s![.., .., sw.., ..]));
-    rolled.slice_mut(s![.., .., w - sw.., ..]).assign(&rolled_h.slice(s![.., .., ..sw, ..]));
+    rolled
+        .slice_mut(s![.., .., ..w - sw, ..])
+        .assign(&rolled_h.slice(s![.., .., sw.., ..]));
+    rolled
+        .slice_mut(s![.., .., w - sw.., ..])
+        .assign(&rolled_h.slice(s![.., .., ..sw, ..]));
 
     rolled
 }
@@ -219,8 +224,12 @@ impl SwinPatchEmbedding {
                 for j in 0..pw {
                     let sh = i * self.patch_size;
                     let sw = j * self.patch_size;
-                    let patch =
-                        images.slice(s![bi, sh..sh + self.patch_size, sw..sw + self.patch_size, ..]);
+                    let patch = images.slice(s![
+                        bi,
+                        sh..sh + self.patch_size,
+                        sw..sw + self.patch_size,
+                        ..
+                    ]);
                     let flat: Array1<f32> = patch.iter().cloned().collect();
                     patches.slice_mut(s![bi, pidx, ..]).assign(&flat);
                     pidx += 1;
@@ -291,11 +300,7 @@ impl PatchMerging {
     pub fn new(in_channels: usize, layer_norm_eps: f32, device: Device) -> Result<Self> {
         Ok(Self {
             reduction: Linear::new_with_device(4 * in_channels, 2 * in_channels, false, device),
-            layer_norm: LayerNorm::new_with_device(
-                vec![4 * in_channels],
-                layer_norm_eps,
-                device,
-            )?,
+            layer_norm: LayerNorm::new_with_device(vec![4 * in_channels], layer_norm_eps, device)?,
             in_channels,
             device,
         })
@@ -456,7 +461,7 @@ impl WindowAttention {
                 "num_heads must be > 0".to_string(),
             ));
         }
-        if dim % num_heads != 0 {
+        if !dim.is_multiple_of(num_heads) {
             return Err(TrustformersError::invalid_input_simple(format!(
                 "dim {} is not divisible by num_heads {}",
                 dim, num_heads
@@ -559,8 +564,9 @@ impl WindowAttention {
                 let rel_c = (ci as isize - cj as isize + ws as isize - 1) as usize;
                 // Average bias over heads (keeps bias contribution without
                 // restructuring the per-head attention loop)
-                let bias_sum: f32 =
-                    (0..self.num_heads).map(|h| self.relative_position_bias_table[[rel_r, rel_c, h]]).sum();
+                let bias_sum: f32 = (0..self.num_heads)
+                    .map(|h| self.relative_position_bias_table[[rel_r, rel_c, h]])
+                    .sum();
                 let bias_mean = bias_sum / self.num_heads as f32;
                 for b in 0..nw_b {
                     attn[[b, i, j]] += bias_mean;
@@ -736,8 +742,11 @@ impl SwinTransformerBlock {
         };
 
         // Cyclic shift for SW-MSA
-        let x_shifted =
-            if self.shift_size > 0 { cyclic_shift(&x_padded, self.shift_size) } else { x_padded };
+        let x_shifted = if self.shift_size > 0 {
+            cyclic_shift(&x_padded, self.shift_size)
+        } else {
+            x_padded
+        };
 
         // Flatten spatial → (B, ph*pw, C)
         let mut x_flat = Array3::<f32>::zeros((b, ph * pw, c));
@@ -785,9 +794,7 @@ impl SwinTransformerBlock {
             for i in 0..ws {
                 for j in 0..ws {
                     let pidx = i * ws + j;
-                    win_flat
-                        .slice_mut(s![wi, pidx, ..])
-                        .assign(&windows.slice(s![wi, i, j, ..]));
+                    win_flat.slice_mut(s![wi, pidx, ..]).assign(&windows.slice(s![wi, i, j, ..]));
                 }
             }
         }
@@ -801,9 +808,11 @@ impl SwinTransformerBlock {
             for i in 0..ws {
                 for j in 0..ws {
                     let pidx = i * ws + j;
-                    attn_win
-                        .slice_mut(s![wi, i, j, ..])
-                        .assign(&attn_out_flat.slice(s![wi, pidx, ..]));
+                    attn_win.slice_mut(s![wi, i, j, ..]).assign(&attn_out_flat.slice(s![
+                        wi,
+                        pidx,
+                        ..
+                    ]));
                 }
             }
         }
@@ -817,8 +826,8 @@ impl SwinTransformerBlock {
             let rev_h = (ph - self.shift_size % ph) % ph;
             let rev_w = (pw - self.shift_size % pw) % pw;
             let shift_back = rev_h.min(rev_w); // same in both dims for square
-            // We need to roll back, but cyclic_shift only handles equal shifts.
-            // Because ph == pw in practice (square images), we can use one value.
+                                               // We need to roll back, but cyclic_shift only handles equal shifts.
+                                               // Because ph == pw in practice (square images), we can use one value.
             cyclic_shift(&attn_spatial, shift_back)
         } else {
             attn_spatial
@@ -833,9 +842,12 @@ impl SwinTransformerBlock {
             for i in 0..h {
                 for j in 0..w {
                     let pidx = i * w + j;
-                    attn_flat
-                        .slice_mut(s![bi, pidx, ..])
-                        .assign(&attn_trimmed.slice(s![bi, i, j, ..]));
+                    attn_flat.slice_mut(s![bi, pidx, ..]).assign(&attn_trimmed.slice(s![
+                        bi,
+                        i,
+                        j,
+                        ..
+                    ]));
                 }
             }
         }
@@ -972,7 +984,11 @@ impl SwinStage {
             None
         };
 
-        Ok(Self { blocks, downsample: downsample_layer, device })
+        Ok(Self {
+            blocks,
+            downsample: downsample_layer,
+            device,
+        })
     }
 
     /// Active device.
@@ -1065,7 +1081,13 @@ impl SwinModel {
         let final_dim = config.final_dim();
         let norm = LayerNorm::new_with_device(vec![final_dim], config.layer_norm_eps, device)?;
 
-        Ok(Self { patch_embed, stages, norm, config, device })
+        Ok(Self {
+            patch_embed,
+            stages,
+            norm,
+            config,
+            device,
+        })
     }
 
     /// Active device.
@@ -1111,11 +1133,9 @@ impl SwinModel {
         };
 
         // Average over the spatial sequence dimension
-        let pooled = normed
-            .mean_axis(Axis(1))
-            .ok_or_else(|| TrustformersError::invalid_input_simple(
-                "Mean over spatial axis failed".to_string(),
-            ))?;
+        let pooled = normed.mean_axis(Axis(1)).ok_or_else(|| {
+            TrustformersError::invalid_input_simple("Mean over spatial axis failed".to_string())
+        })?;
 
         Ok(pooled)
     }
@@ -1142,10 +1162,8 @@ mod tests {
         }
 
         fn next_u64(&mut self) -> u64 {
-            self.state = self
-                .state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
+            self.state =
+                self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             self.state
         }
 
@@ -1166,8 +1184,7 @@ mod tests {
     fn test_window_partition_shape() {
         // B=1, H=14, W=14, C=4, ws=7 → 4 windows of (7,7,4)
         let x = Array4::<f32>::zeros((1, 14, 14, 4));
-        let windows =
-            window_partition(&x, 7).expect("window_partition should succeed for 14x14/7");
+        let windows = window_partition(&x, 7).expect("window_partition should succeed for 14x14/7");
         assert_eq!(windows.dim(), (4, 7, 7, 4));
     }
 
@@ -1175,8 +1192,7 @@ mod tests {
     fn test_window_partition_batch_2() {
         // B=2, H=14, W=14, C=3, ws=7 → 2*(14/7)*(14/7) = 8 windows
         let x = Array4::<f32>::zeros((2, 14, 14, 3));
-        let windows =
-            window_partition(&x, 7).expect("window_partition batch=2 should succeed");
+        let windows = window_partition(&x, 7).expect("window_partition batch=2 should succeed");
         assert_eq!(windows.dim().0, 8);
     }
 
@@ -1208,8 +1224,7 @@ mod tests {
         let mut rng = Lcg::new(42);
         let mut x = Array4::<f32>::zeros((1, 14, 14, 2));
         rng.fill_array4(&mut x);
-        let windows =
-            window_partition(&x, 7).expect("window_partition should succeed");
+        let windows = window_partition(&x, 7).expect("window_partition should succeed");
         // First window should match top-left 7x7 block of x
         for i in 0..7 {
             for j in 0..7 {
@@ -1229,11 +1244,10 @@ mod tests {
         let mut x = Array4::<f32>::zeros((1, 14, 14, 4));
         rng.fill_array4(&mut x);
         let windows = window_partition(&x, 7).expect("partition should succeed");
-        let reconstructed =
-            window_reverse(&windows, 7, 14, 14).expect("reverse should succeed");
-        for ((a, b_val), (c_val, d)) in x.iter().zip(reconstructed.iter()).map(|(a, b)| (a, b)).zip(
-            reconstructed.iter().zip(x.iter()),
-        ) {
+        let reconstructed = window_reverse(&windows, 7, 14, 14).expect("reverse should succeed");
+        for ((a, b_val), (c_val, d)) in
+            x.iter().zip(reconstructed.iter()).zip(reconstructed.iter().zip(x.iter()))
+        {
             let _ = (a, b_val, c_val, d); // avoid unused
         }
         // Check shape
@@ -1263,11 +1277,8 @@ mod tests {
         let mut x = Array4::<f32>::zeros((1, 8, 8, 2));
         rng.fill_array4(&mut x);
         let shifted = cyclic_shift(&x, 0);
-        let max_diff = x
-            .iter()
-            .zip(shifted.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f32, f32::max);
+        let max_diff =
+            x.iter().zip(shifted.iter()).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
         assert!(max_diff < 1e-6, "shift by 0 should be identity");
     }
 
@@ -1290,12 +1301,11 @@ mod tests {
         let shifted = cyclic_shift(&x, shift);
         // inverse shift: 14 - 3 = 11
         let back = cyclic_shift(&shifted, 14 - shift);
-        let max_diff = x
-            .iter()
-            .zip(back.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f32, f32::max);
-        assert!(max_diff < 1e-5, "double cyclic shift should recover original");
+        let max_diff = x.iter().zip(back.iter()).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(
+            max_diff < 1e-5,
+            "double cyclic shift should recover original"
+        );
     }
 
     // --- SwinConfig helpers ---
@@ -1325,7 +1335,10 @@ mod tests {
         // 224 / 4 = 56 → initial resolution
         let cfg = SwinConfig::swin_tiny_patch4_window7_224();
         let init_res = cfg.initial_resolution();
-        assert_eq!(init_res, 56, "Initial resolution should be H/patch_size = 56");
+        assert_eq!(
+            init_res, 56,
+            "Initial resolution should be H/patch_size = 56"
+        );
         // After stage0 (no downsample if not last): remains 56
         // PatchMerging halves: 56→28→14→7
         // final_dim = 96 * 8 = 768
@@ -1350,7 +1363,10 @@ mod tests {
             patch_size: 0,
             ..SwinConfig::swin_tiny_patch4_window7_224()
         };
-        assert!(cfg.validate().is_err(), "patch_size=0 should fail validation");
+        assert!(
+            cfg.validate().is_err(),
+            "patch_size=0 should fail validation"
+        );
     }
 
     #[test]
@@ -1399,7 +1415,10 @@ mod tests {
     fn test_window_attention_dim_not_divisible() {
         // dim=97 is not divisible by 3
         let result = WindowAttention::new(97, 7, 3, true, 0.0, 0.0, Device::CPU);
-        assert!(result.is_err(), "dim not divisible by num_heads should fail");
+        assert!(
+            result.is_err(),
+            "dim not divisible by num_heads should fail"
+        );
     }
 
     // --- WindowAttention forward ---
@@ -1424,19 +1443,21 @@ mod tests {
     #[test]
     fn test_patch_merging_shape() {
         // Input (B=1, H=8, W=8, C=4) → output (B=1, 4, 4, 8)
-        let pm = PatchMerging::new(4, 1e-5, Device::CPU)
-            .expect("PatchMerging should construct");
+        let pm = PatchMerging::new(4, 1e-5, Device::CPU).expect("PatchMerging should construct");
         let x = Array4::<f32>::zeros((1, 8, 8, 4));
         let out = pm.forward(&x).expect("PatchMerging forward should succeed");
-        assert_eq!(out.dim(), (1, 4, 4, 8), "PatchMerging should halve spatial and double channels");
+        assert_eq!(
+            out.dim(),
+            (1, 4, 4, 8),
+            "PatchMerging should halve spatial and double channels"
+        );
     }
 
     #[test]
     fn test_patch_merging_channel_quadrupling_then_reduction() {
         // 4C → 2C: for C=96, output channels = 192
         let c = 96usize;
-        let pm = PatchMerging::new(c, 1e-5, Device::CPU)
-            .expect("PatchMerging should construct");
+        let pm = PatchMerging::new(c, 1e-5, Device::CPU).expect("PatchMerging should construct");
         let x = Array4::<f32>::zeros((1, 56, 56, c));
         let out = pm.forward(&x).expect("PatchMerging forward should succeed");
         assert_eq!(out.dim(), (1, 28, 28, 2 * c));
@@ -1444,8 +1465,7 @@ mod tests {
 
     #[test]
     fn test_patch_merging_odd_size_error() {
-        let pm = PatchMerging::new(4, 1e-5, Device::CPU)
-            .expect("PatchMerging should construct");
+        let pm = PatchMerging::new(4, 1e-5, Device::CPU).expect("PatchMerging should construct");
         let x = Array4::<f32>::zeros((1, 7, 7, 4)); // 7 is odd → error
         let result = pm.forward(&x);
         assert!(result.is_err(), "odd spatial dims should fail");
@@ -1506,18 +1526,20 @@ mod tests {
 
     #[test]
     fn test_swin_block_construction() {
-        let block = SwinTransformerBlock::new(
-            96, 3, 7, 0, 4.0, true, 0.0, 0.0, 1e-5, Device::CPU,
+        let block = SwinTransformerBlock::new(96, 3, 7, 0, 4.0, true, 0.0, 0.0, 1e-5, Device::CPU);
+        assert!(
+            block.is_ok(),
+            "SwinTransformerBlock (W-MSA) should construct"
         );
-        assert!(block.is_ok(), "SwinTransformerBlock (W-MSA) should construct");
     }
 
     #[test]
     fn test_swin_block_shifted_construction() {
-        let block = SwinTransformerBlock::new(
-            96, 3, 7, 3, 4.0, true, 0.0, 0.0, 1e-5, Device::CPU,
+        let block = SwinTransformerBlock::new(96, 3, 7, 3, 4.0, true, 0.0, 0.0, 1e-5, Device::CPU);
+        assert!(
+            block.is_ok(),
+            "SwinTransformerBlock (SW-MSA) should construct"
         );
-        assert!(block.is_ok(), "SwinTransformerBlock (SW-MSA) should construct");
     }
 
     #[test]
@@ -1531,9 +1553,8 @@ mod tests {
     #[test]
     fn test_swin_stage_blocks_alternating() {
         // Even block index → shift=0 (W-MSA), odd → shift>0 (SW-MSA)
-        let stage = SwinStage::new(
-            96, 4, 3, 7, 4.0, true, 0.0, 0.0, 1e-5, false, Device::CPU,
-        ).expect("SwinStage should construct");
+        let stage = SwinStage::new(96, 4, 3, 7, 4.0, true, 0.0, 0.0, 1e-5, false, Device::CPU)
+            .expect("SwinStage should construct");
         assert_eq!(stage.blocks.len(), 4);
         assert_eq!(stage.blocks[0].shift_size, 0);
         assert_eq!(stage.blocks[1].shift_size, 3);

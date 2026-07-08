@@ -33,6 +33,22 @@ impl Normalizer for NFDNormalizer {
     }
 }
 
+pub struct NFKCNormalizer;
+
+impl Normalizer for NFKCNormalizer {
+    fn normalize(&self, text: &str) -> String {
+        text.nfkc().collect()
+    }
+}
+
+pub struct NFKDNormalizer;
+
+impl Normalizer for NFKDNormalizer {
+    fn normalize(&self, text: &str) -> String {
+        text.nfkd().collect()
+    }
+}
+
 pub struct LowercaseNormalizer;
 
 impl Normalizer for LowercaseNormalizer {
@@ -151,5 +167,47 @@ mod tests {
         ];
         let chained = ChainedNormalizer::new(normalizers);
         assert_eq!(chained.normalize("  CAFÉ   WORLD  "), "cafe world");
+    }
+
+    // U+00B2 SUPERSCRIPT TWO has a *compatibility* decomposition to "2" but no
+    // *canonical* decomposition, so NFKC/NFKD fold it away while NFC/NFD must
+    // leave it untouched. This proves the K-variants are doing genuinely
+    // different work rather than being aliases of the plain variants.
+    #[test]
+    fn test_nfkc_normalizer_superscript_two() {
+        let normalizer = NFKCNormalizer;
+        assert_eq!(normalizer.normalize("\u{00b2}"), "2");
+    }
+
+    #[test]
+    fn test_nfkd_normalizer_superscript_two() {
+        let normalizer = NFKDNormalizer;
+        assert_eq!(normalizer.normalize("\u{00b2}"), "2");
+    }
+
+    #[test]
+    fn test_nfc_and_nfd_leave_superscript_two_unchanged() {
+        assert_eq!(NFCNormalizer.normalize("\u{00b2}"), "\u{00b2}");
+        assert_eq!(NFDNormalizer.normalize("\u{00b2}"), "\u{00b2}");
+    }
+
+    // U+FB01 LATIN SMALL LIGATURE FI is the same story: only a compatibility
+    // decomposition to "fi", none canonical, so NFC/NFD keep the ligature intact.
+    #[test]
+    fn test_nfkc_normalizer_fi_ligature() {
+        let normalizer = NFKCNormalizer;
+        assert_eq!(normalizer.normalize("\u{fb01}"), "fi");
+    }
+
+    #[test]
+    fn test_nfkd_normalizer_fi_ligature() {
+        let normalizer = NFKDNormalizer;
+        assert_eq!(normalizer.normalize("\u{fb01}"), "fi");
+    }
+
+    #[test]
+    fn test_nfc_and_nfd_leave_fi_ligature_unchanged() {
+        assert_eq!(NFCNormalizer.normalize("\u{fb01}"), "\u{fb01}");
+        assert_eq!(NFDNormalizer.normalize("\u{fb01}"), "\u{fb01}");
     }
 }

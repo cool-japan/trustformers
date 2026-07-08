@@ -26,8 +26,9 @@
 //!     use_pareto_front: true,
 //! };
 //!
-//! let mut hpo = MultiObjectiveHpo::new(config).unwrap();
+//! let mut hpo = MultiObjectiveHpo::new(config)?;
 //! let cfg = hpo.suggest();
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -134,7 +135,9 @@ pub struct ParetoFront {
 impl ParetoFront {
     /// Create an empty Pareto front.
     pub fn new() -> Self {
-        Self { solutions: Vec::new() }
+        Self {
+            solutions: Vec::new(),
+        }
     }
 
     /// Update the front with a new candidate result.
@@ -167,11 +170,7 @@ impl ParetoFront {
     ///
     /// Dominance means `a` is **no worse** than `b` in every objective **and
     /// strictly better** in at least one.
-    pub fn dominates(
-        a: &[f64],
-        b: &[f64],
-        directions: &[(String, ObjectiveDirection)],
-    ) -> bool {
+    pub fn dominates(a: &[f64], b: &[f64], directions: &[(String, ObjectiveDirection)]) -> bool {
         if a.len() != b.len() || a.len() != directions.len() {
             return false;
         }
@@ -222,7 +221,11 @@ impl ParetoFront {
                 ObjectiveDirection::Minimize => cur_val < best_val,
                 ObjectiveDirection::Maximize => cur_val > best_val,
             };
-            if cur_is_better { cur } else { best }
+            if cur_is_better {
+                cur
+            } else {
+                best
+            }
         })
     }
 
@@ -233,8 +236,7 @@ impl ParetoFront {
         }
         let mut lines = vec![format!("ParetoFront ({} solutions):", self.solutions.len())];
         for (i, sol) in self.solutions.iter().enumerate() {
-            let obj_str: Vec<String> =
-                sol.objectives.iter().map(|v| format!("{:.4}", v)).collect();
+            let obj_str: Vec<String> = sol.objectives.iter().map(|v| format!("{:.4}", v)).collect();
             lines.push(format!(
                 "  [{}] trial={} objectives=[{}]",
                 i,
@@ -311,7 +313,9 @@ impl MultiObjectiveHpo {
     /// no search space parameters).
     pub fn new(config: MultiObjectiveHpoConfig) -> Result<Self, TrainingError> {
         if config.objectives.is_empty() {
-            return Err(make_config_error("MultiObjectiveHpo requires at least one objective"));
+            return Err(make_config_error(
+                "MultiObjectiveHpo requires at least one objective",
+            ));
         }
         if config.search_space.is_empty() {
             return Err(make_config_error(
@@ -345,12 +349,8 @@ impl MultiObjectiveHpo {
 
         // Collect the search space entries first to avoid a simultaneous
         // mutable (rng_state) + immutable (config.search_space) borrow.
-        let entries: Vec<(String, HpSearchSpace)> = self
-            .config
-            .search_space
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        let entries: Vec<(String, HpSearchSpace)> =
+            self.config.search_space.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
         let mut params: HashMap<String, HpValue> = HashMap::new();
         for (name, space) in &entries {
@@ -424,23 +424,14 @@ impl MultiObjectiveHpo {
         }
 
         // Collect all parameter names in sorted order.
-        let mut param_names: Vec<String> = self
-            .config
-            .search_space
-            .keys()
-            .cloned()
-            .collect();
+        let mut param_names: Vec<String> = self.config.search_space.keys().cloned().collect();
         param_names.sort();
 
         let obj_names: Vec<String> =
             self.config.objectives.iter().map(|(n, _)| n.clone()).collect();
 
         let mut lines = Vec::new();
-        let header = format!(
-            "trial_id,{},{}",
-            param_names.join(","),
-            obj_names.join(",")
-        );
+        let header = format!("trial_id,{},{}", param_names.join(","), obj_names.join(","));
         lines.push(header);
 
         for r in &self.results {
@@ -455,7 +446,12 @@ impl MultiObjectiveHpo {
                 })
                 .collect();
             let objs: Vec<String> = r.objectives.iter().map(|v| format!("{:.6}", v)).collect();
-            lines.push(format!("{},{},{}", r.config.trial_id, params.join(","), objs.join(",")));
+            lines.push(format!(
+                "{},{},{}",
+                r.config.trial_id,
+                params.join(","),
+                objs.join(",")
+            ));
         }
 
         lines.join("\n")
@@ -468,12 +464,8 @@ impl MultiObjectiveHpo {
             .results
             .iter()
             .map(|r| {
-                let params_json: serde_json::Map<String, serde_json::Value> = r
-                    .config
-                    .params
-                    .iter()
-                    .map(|(k, v)| (k.clone(), hp_value_to_json(v)))
-                    .collect();
+                let params_json: serde_json::Map<String, serde_json::Value> =
+                    r.config.params.iter().map(|(k, v)| (k.clone(), hp_value_to_json(v))).collect();
                 serde_json::json!({
                     "trial_id": r.config.trial_id,
                     "params": params_json,
@@ -483,9 +475,8 @@ impl MultiObjectiveHpo {
             })
             .collect();
 
-        serde_json::to_string_pretty(&serde_json::json!({ "trials": entries })).map_err(|e| {
-            make_config_error(&format!("JSON serialisation failed: {}", e))
-        })
+        serde_json::to_string_pretty(&serde_json::json!({ "trials": entries }))
+            .map_err(|e| make_config_error(&format!("JSON serialisation failed: {}", e)))
     }
 
     // -----------------------------------------------------------------------
@@ -494,7 +485,11 @@ impl MultiObjectiveHpo {
 
     fn sample_from_space(&mut self, space: &HpSearchSpace) -> HpValue {
         match space {
-            HpSearchSpace::Float { min, max, log_scale } => {
+            HpSearchSpace::Float {
+                min,
+                max,
+                log_scale,
+            } => {
                 let u = rng_f64(&mut self.rng_state);
                 let v = if *log_scale {
                     let log_min = min.ln();
@@ -504,23 +499,23 @@ impl MultiObjectiveHpo {
                     min + u * (max - min)
                 };
                 HpValue::Float(v)
-            }
+            },
             HpSearchSpace::Int { min, max } => {
                 let range = (max - min + 1) as usize;
                 let v = *min + rng_usize(&mut self.rng_state, range) as i64;
                 HpValue::Int(v)
-            }
+            },
             HpSearchSpace::Categorical { choices } => {
                 if choices.is_empty() {
                     return HpValue::String(String::new());
                 }
                 let idx = rng_usize(&mut self.rng_state, choices.len());
                 choices[idx].clone()
-            }
+            },
             HpSearchSpace::Bool => {
                 let bit = xorshift64(&mut self.rng_state) & 1;
                 HpValue::Bool(bit == 1)
-            }
+            },
         }
     }
 }
@@ -545,11 +540,7 @@ fn weighted_score(
                 return 0.0;
             }
             let range = obj_max[i] - obj_min[i];
-            let norm = if range.abs() < 1e-12 {
-                0.5
-            } else {
-                (v - obj_min[i]) / range
-            };
+            let norm = if range.abs() < 1e-12 { 0.5 } else { (v - obj_min[i]) / range };
             // Flip minimised objectives so that "higher normalised score = better".
             let oriented = match &objectives[i].1 {
                 ObjectiveDirection::Minimize => 1.0 - norm,
@@ -738,11 +729,8 @@ fn hypervolume_monte_carlo(front: &[Vec<f32>], reference: &[f32], n_samples: u64
             .collect();
 
         // Check if dominated by any Pareto point.
-        let is_dominated = front.iter().any(|pt| {
-            pt.iter()
-                .zip(sample.iter())
-                .all(|(&pv, &sv)| pv <= sv)
-        });
+        let is_dominated =
+            front.iter().any(|pt| pt.iter().zip(sample.iter()).all(|(&pv, &sv)| pv <= sv));
         if is_dominated {
             dominated_count += 1;
         }
@@ -787,9 +775,7 @@ pub fn non_domination_sort(objectives: &[Vec<f32>]) -> Vec<usize> {
 
     // ── Step 2: build Pareto fronts ───────────────────────────────────────
     let mut fronts: Vec<Vec<usize>> = Vec::new();
-    let mut current_front: Vec<usize> = (0..n)
-        .filter(|&i| domination_count[i] == 0)
-        .collect();
+    let mut current_front: Vec<usize> = (0..n).filter(|&i| domination_count[i] == 0).collect();
 
     while !current_front.is_empty() {
         fronts.push(current_front.clone());
@@ -810,14 +796,9 @@ pub fn non_domination_sort(objectives: &[Vec<f32>]) -> Vec<usize> {
     for front in &fronts {
         let crowding = crowding_distances(front, objectives);
         // Pair each index with its crowding distance, sort descending.
-        let mut front_with_cd: Vec<(usize, f32)> = front
-            .iter()
-            .zip(crowding.iter())
-            .map(|(&idx, &cd)| (idx, cd))
-            .collect();
-        front_with_cd.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        let mut front_with_cd: Vec<(usize, f32)> =
+            front.iter().zip(crowding.iter()).map(|(&idx, &cd)| (idx, cd)).collect();
+        front_with_cd.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         result.extend(front_with_cd.iter().map(|(idx, _)| *idx));
     }
     result
@@ -911,12 +892,20 @@ mod tests {
         let mut search_space = HashMap::new();
         search_space.insert(
             "lr".to_string(),
-            HpSearchSpace::Float { min: 1e-5, max: 1e-2, log_scale: true },
+            HpSearchSpace::Float {
+                min: 1e-5,
+                max: 1e-2,
+                log_scale: true,
+            },
         );
         search_space.insert("batch".to_string(), HpSearchSpace::Int { min: 8, max: 128 });
         search_space.insert(
             "dropout".to_string(),
-            HpSearchSpace::Float { min: 0.0, max: 0.5, log_scale: false },
+            HpSearchSpace::Float {
+                min: 0.0,
+                max: 0.5,
+                log_scale: false,
+            },
         );
 
         MultiObjectiveHpoConfig {
@@ -992,7 +981,11 @@ mod tests {
         let mut space = HashMap::new();
         space.insert(
             "lr".to_string(),
-            HpSearchSpace::Float { min: 0.001, max: 0.1, log_scale: false },
+            HpSearchSpace::Float {
+                min: 0.001,
+                max: 0.1,
+                log_scale: false,
+            },
         );
         let config = MultiObjectiveHpoConfig {
             search_space: space,
@@ -1056,9 +1049,18 @@ mod tests {
         ];
         let mut front = ParetoFront::new();
 
-        let cfg_a = HpConfig { params: HashMap::new(), trial_id: 0 };
-        let cfg_b = HpConfig { params: HashMap::new(), trial_id: 1 };
-        let cfg_c = HpConfig { params: HashMap::new(), trial_id: 2 };
+        let cfg_a = HpConfig {
+            params: HashMap::new(),
+            trial_id: 0,
+        };
+        let cfg_b = HpConfig {
+            params: HashMap::new(),
+            trial_id: 1,
+        };
+        let cfg_c = HpConfig {
+            params: HashMap::new(),
+            trial_id: 2,
+        };
 
         // Insert A (0.9, 10)
         front.update(make_result(cfg_a, 0.9, 10.0), &dirs);
@@ -1094,8 +1096,22 @@ mod tests {
         let config = simple_config(10);
         let mut hpo = MultiObjectiveHpo::new(config).expect("valid");
 
-        let r1 = make_result(HpConfig { params: HashMap::new(), trial_id: 0 }, 0.9, 50.0);
-        let r2 = make_result(HpConfig { params: HashMap::new(), trial_id: 1 }, 0.6, 10.0);
+        let r1 = make_result(
+            HpConfig {
+                params: HashMap::new(),
+                trial_id: 0,
+            },
+            0.9,
+            50.0,
+        );
+        let r2 = make_result(
+            HpConfig {
+                params: HashMap::new(),
+                trial_id: 1,
+            },
+            0.6,
+            10.0,
+        );
         hpo.record(r1);
         hpo.record(r2);
 
@@ -1117,7 +1133,10 @@ mod tests {
 
         let csv = hpo.to_csv();
         let lines: Vec<&str> = csv.lines().collect();
-        assert!(lines.len() >= 2, "CSV should have header + at least one row");
+        assert!(
+            lines.len() >= 2,
+            "CSV should have header + at least one row"
+        );
         assert!(lines[0].contains("trial_id"));
         assert!(lines[0].contains("accuracy"));
         assert!(lines[0].contains("latency_ms"));
@@ -1161,8 +1180,12 @@ mod tests {
             let s = hpo.suggest();
             match s.params.get("optimiser") {
                 Some(HpValue::Choice(v)) => {
-                    assert!(["adam", "sgd", "adamw"].contains(&v.as_str()), "unexpected: {}", v);
-                }
+                    assert!(
+                        ["adam", "sgd", "adamw"].contains(&v.as_str()),
+                        "unexpected: {}",
+                        v
+                    );
+                },
                 other => panic!("Expected Choice, got {:?}", other),
             }
         }
@@ -1172,8 +1195,18 @@ mod tests {
     fn test_pareto_front_summary_non_empty() {
         let dirs = vec![("acc".to_string(), ObjectiveDirection::Maximize)];
         let mut front = ParetoFront::new();
-        let cfg = HpConfig { params: HashMap::new(), trial_id: 0 };
-        front.update(MultiObjectiveResult { config: cfg, objectives: vec![0.9], metadata: HashMap::new() }, &dirs);
+        let cfg = HpConfig {
+            params: HashMap::new(),
+            trial_id: 0,
+        };
+        front.update(
+            MultiObjectiveResult {
+                config: cfg,
+                objectives: vec![0.9],
+                metadata: HashMap::new(),
+            },
+            &dirs,
+        );
         let summary = front.summary();
         assert!(summary.contains("ParetoFront"));
         assert!(summary.contains("solutions"));
@@ -1265,13 +1298,13 @@ mod tests {
     fn test_hypervolume_2d_multiple_points() {
         // Two-point front at (0.0, 0.5) and (0.5, 0.0), reference (1.0, 1.0).
         // Expected HV = 0.5*0.5 + 0.5*1.0 = ... use sweep for exact value.
-        let front = vec![
-            vec![0.0_f32, 0.5_f32],
-            vec![0.5_f32, 0.0_f32],
-        ];
+        let front = vec![vec![0.0_f32, 0.5_f32], vec![0.5_f32, 0.0_f32]];
         let hv = hypervolume_indicator(&front, &[1.0_f32, 1.0_f32]);
         assert!(hv > 0.0, "hypervolume should be positive, got {hv}");
-        assert!(hv <= 1.0, "hypervolume should be at most reference volume, got {hv}");
+        assert!(
+            hv <= 1.0,
+            "hypervolume should be at most reference volume, got {hv}"
+        );
     }
 
     // ─── non_domination_sort tests ────────────────────────────────────────
@@ -1319,9 +1352,8 @@ mod tests {
     // ── Test 29: result contains all indices exactly once ──
     #[test]
     fn test_non_domination_sort_all_indices_once() {
-        let objs: Vec<Vec<f32>> = (0..10)
-            .map(|i| vec![i as f32 * 0.1, (10 - i) as f32 * 0.1])
-            .collect();
+        let objs: Vec<Vec<f32>> =
+            (0..10).map(|i| vec![i as f32 * 0.1, (10 - i) as f32 * 0.1]).collect();
         let sorted = non_domination_sort(&objs);
         assert_eq!(sorted.len(), 10);
         let mut seen = sorted.clone();

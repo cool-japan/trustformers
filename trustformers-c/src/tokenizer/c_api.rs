@@ -527,7 +527,7 @@ pub extern "C" fn trustformers_batch_decoded_texts_free(
 
         let layout = match std::alloc::Layout::array::<*mut c_char>(num_sequences) {
             Ok(l) => l,
-            Err(_) => return TrustformersError::OutOfMemory,
+            Err(_) => return,
         };
         std::alloc::dealloc(decoded_texts as *mut u8, layout);
     }

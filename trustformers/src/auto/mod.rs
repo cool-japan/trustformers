@@ -18,8 +18,7 @@
 //!
 //! ```rust,ignore
 //! use trustformers::auto::{
-//!     AutoFeatureExtractor, AutoMetric, AutoOptimizer, // Available now
-//!     // AutoDataCollator, // TODO: Available in future
+//!     AutoDataCollator, AutoFeatureExtractor, AutoMetric, AutoOptimizer,
 //!     FeatureInput, ImageFormat, ImageMetadata
 //! };
 //!
@@ -99,19 +98,17 @@ pub use types::{
 };
 
 // Auto submodules
-pub mod feature_extractors;
-// TODO: Add remaining auto submodules when they are implemented
 pub mod data_collators;
+pub mod feature_extractors;
 pub mod metrics;
 pub mod optimizers;
 
 // Re-export auto classes
+pub use data_collators::*;
 pub use feature_extractors::{
     AudioFeatureExtractor, AutoFeatureExtractor, DocumentFeatureExtractor, FeatureExtractor,
     FeatureExtractorConfig, GenericFeatureExtractor, VisionFeatureExtractor,
 };
-// TODO: Re-export remaining auto classes when modules are restructured
-pub use data_collators::*;
 pub use metrics::*;
 pub use optimizers::{
     AdamConfig, AdamOptimizer, AdamWConfig, AdamWOptimizer, AutoOptimizer, LearningRateSchedule,

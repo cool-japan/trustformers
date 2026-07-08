@@ -198,16 +198,13 @@ pub async fn create_compliance_focused_service(
 ) -> MonitoringResult<TestPerformanceMonitoringService> {
     // Optimize for compliance and auditing
     // TODO: Replaced unstable Duration::from_days(90) with stable Duration::from_secs(7776000)
-    let config = TestPerformanceMonitoringConfig {
+    let mut config = TestPerformanceMonitoringConfig {
         retention_period: std::time::Duration::from_secs(7776000),
         ..Default::default()
     };
-    // TODO: report_config.compliance_reporting field doesn't exist
-    // TODO: historical_data_config field doesn't exist on TestPerformanceMonitoringConfig
-    // TODO: event_config field doesn't exist on TestPerformanceMonitoringConfig
-    // config.report_config.compliance_reporting = true;
-    // config.historical_data_config.audit_trail_enabled = true;
-    // config.event_config.compliance_logging = true;
+    config.report_config.compliance_reporting = true;
+    config.historical_data_config.audit_trail_enabled = true;
+    config.event_config.compliance_logging = true;
 
     TestPerformanceMonitoringService::new(config).await
 }
@@ -216,14 +213,13 @@ pub async fn create_compliance_focused_service(
 pub async fn create_resource_efficient_service(
 ) -> MonitoringResult<TestPerformanceMonitoringService> {
     // Optimize for minimal resource usage
-    let config = TestPerformanceMonitoringConfig {
+    let mut config = TestPerformanceMonitoringConfig {
         monitoring_interval: std::time::Duration::from_secs(5),
         ..Default::default()
     };
-    // TODO: historical_data_config, event_config, alert_config fields don't exist on TestPerformanceMonitoringConfig
-    // config.historical_data_config.compression_enabled = true;
-    // config.event_config.compression_enabled = true;
-    // config.alert_config.rate_limiting_enabled = true;
+    config.historical_data_config.compression_enabled = true;
+    config.event_config.compression_enabled = true;
+    config.alert_config.rate_limiting_enabled = true;
 
     TestPerformanceMonitoringService::new(config).await
 }
@@ -347,11 +343,25 @@ mod tests {
         let perf_service = create_performance_optimized_service().await;
         assert!(perf_service.is_ok());
 
-        let compliance_service = create_compliance_focused_service().await;
-        assert!(compliance_service.is_ok());
+        // Regression guard: these specialized constructors must actually thread their
+        // config knobs through to the constructed service, not just return Ok(..) while
+        // silently discarding the requested configuration (which is exactly what happened
+        // before TestPerformanceMonitoringConfig grew the 6 sub-manager config fields).
+        let compliance_service = create_compliance_focused_service()
+            .await
+            .expect("compliance-focused service should construct successfully");
+        let compliance_config = compliance_service.config();
+        assert!(compliance_config.report_config.compliance_reporting);
+        assert!(compliance_config.historical_data_config.audit_trail_enabled);
+        assert!(compliance_config.event_config.compliance_logging);
 
-        let efficient_service = create_resource_efficient_service().await;
-        assert!(efficient_service.is_ok());
+        let efficient_service = create_resource_efficient_service()
+            .await
+            .expect("resource-efficient service should construct successfully");
+        let efficient_config = efficient_service.config();
+        assert!(efficient_config.historical_data_config.compression_enabled);
+        assert!(efficient_config.event_config.compression_enabled);
+        assert!(efficient_config.alert_config.rate_limiting_enabled);
     }
 
     #[test]

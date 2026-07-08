@@ -2,7 +2,7 @@
 
 WebAssembly bindings for the TrustformeRS transformer library, enabling transformer models to run directly in web browsers and Node.js environments with WebGPU hardware acceleration.
 
-**Version:** 0.1.4 | **Status:** Stable | **Tests:** ~130 | **SLoC:** 55,721 | **Last Updated:** 2026-07-02
+**Version:** 0.2.0 | **Status:** Stable | **Tests:** ~130 | **SLoC:** 55,721 | **Last Updated:** 2026-07-02
 
 ## Features
 
@@ -14,7 +14,6 @@ WebAssembly bindings for the TrustformeRS transformer library, enabling transfor
 - **Streaming Inference**: Token-by-token generation with streaming API
 - **SIMD Support**: Hardware-accelerated tensor ops where available
 - **Mobile Optimization**: Battery-aware, network-adaptive loading
-- **SciRS2 (optional)**: `scirs2-core` wired in as an optional dependency behind the `scirs2` feature for future tensor-op acceleration (not yet called from any in-crate tensor op)
 
 ## Building
 
@@ -47,7 +46,7 @@ async function run() {
     await init();
 
     const tf = new TrustformersWasm();
-    console.log('Version:', tf.version);  // "0.1.4"
+    console.log('Version:', tf.version);  // "0.2.0"
 
     // Create and manipulate tensors
     const tensor = WasmTensor.new([1, 2, 3, 4], [2, 2]);
@@ -93,7 +92,7 @@ Main entry point for the library.
 
 ```javascript
 const tf = new TrustformersWasm();
-console.log(tf.version);     // "0.1.4"
+console.log(tf.version);     // "0.2.0"
 console.log(tf.initialized); // true
 ```
 
@@ -239,14 +238,13 @@ console.log(`Features: ${features()}`);
 - `playground` — Interactive browser playground (`src/playground.rs`)
 - `streaming-generation` — Token-by-token streaming inference (`src/streaming_generation.rs`)
 - `mobile-optimization` — Battery/network-adaptive loading, touch gestures, camera integration, device-capability detection (`src/mobile.rs`, `touch_gestures.rs`, `camera_integration.rs`, `device_capability*`)
-- `scirs2` — Enables the optional `scirs2-core` dependency; not yet consumed by any tensor op in this crate (reserved for future acceleration)
 - `console_panic` — Routes Rust panics to the browser console via `console_error_panic_hook` (part of `default`)
 - `dlmalloc-alloc` — Swaps the global allocator to `dlmalloc` (`src/allocator.rs`) for wasm32 (part of `default`)
 - `default` — `console_panic` + `dlmalloc-alloc`
 - `size-optimized` — Same composition as `default` today (`dlmalloc-alloc` + `console_panic`)
-- `performance-optimized` — `dlmalloc-alloc` + `kernel-fusion` + `async-executor` + `scirs2`; does **not** include `webgpu` itself, so the fusion/executor code (gated behind `webgpu` at the module level) won't actually compile in unless `webgpu` is enabled too
+- `performance-optimized` — `dlmalloc-alloc` + `kernel-fusion` + `async-executor`; does **not** include `webgpu` itself, so the fusion/executor code (gated behind `webgpu` at the module level) won't actually compile in unless `webgpu` is enabled too
 - `minimal` — Smallest viable build: `dlmalloc-alloc` only
-- `full` — Enables every additive feature except `webgpu` and `console_panic` (web-workers, shared-memory, kernel-fusion, async-executor, indexeddb, memory64, streaming-loader, model-splitting, react-components, vue-components, angular-components, web-components, playground, streaming-generation, mobile-optimization, scirs2, dlmalloc-alloc); combine with `--features full,webgpu` for GPU support too
+- `full` — Enables every additive feature except `webgpu` and `console_panic` (web-workers, shared-memory, kernel-fusion, async-executor, indexeddb, memory64, streaming-loader, model-splitting, react-components, vue-components, angular-components, web-components, playground, streaming-generation, mobile-optimization, dlmalloc-alloc); combine with `--features full,webgpu` for GPU support too
 
 ## WebGPU Notes
 

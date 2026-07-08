@@ -141,12 +141,8 @@ pub struct GroundingResult {
 impl GroundingResult {
     /// Return a copy keeping only boxes whose `score >= threshold`.
     pub fn filter_by_score(&self, threshold: f32) -> Self {
-        let boxes: Vec<GroundedBox> = self
-            .boxes
-            .iter()
-            .filter(|b| b.score >= threshold)
-            .cloned()
-            .collect();
+        let boxes: Vec<GroundedBox> =
+            self.boxes.iter().filter(|b| b.score >= threshold).cloned().collect();
         GroundingResult {
             boxes,
             query: self.query.clone(),
@@ -296,8 +292,8 @@ impl VisualGroundingPipeline {
                 continue;
             }
             let phrase_h = djb2_hash(phrase);
-            let phrase_score = (((phrase_h >> 32) & 0xFF) as f32 / 255.0)
-                .clamp(self.config.text_threshold, 1.0);
+            let phrase_score =
+                (((phrase_h >> 32) & 0xFF) as f32 / 255.0).clamp(self.config.text_threshold, 1.0);
             let bbox = mock_box_for_phrase(phrase, height, width);
             boxes.push(GroundedBox {
                 phrase: phrase.clone(),
@@ -331,10 +327,7 @@ impl VisualGroundingPipeline {
         images: &[(&[f32], usize, usize)],
         text_query: &str,
     ) -> Result<Vec<GroundingResult>, GroundingError> {
-        images
-            .iter()
-            .map(|(img, h, w)| self.ground(img, *h, *w, text_query))
-            .collect()
+        images.iter().map(|(img, h, w)| self.ground(img, *h, *w, text_query)).collect()
     }
 
     /// Access the pipeline configuration.
@@ -412,9 +405,7 @@ impl GroundingProcessor {
         phrase
             .split_whitespace()
             .map(|word| {
-                let lower = word
-                    .trim_matches(|c: char| !c.is_alphanumeric())
-                    .to_lowercase();
+                let lower = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
                 let mut h: u64 = 5381;
                 for b in lower.bytes() {
                     h = h.wrapping_mul(33).wrapping_add(b as u64);
@@ -532,9 +523,9 @@ impl PhraseGroundingMetrics {
         if ground_truth.is_empty() {
             return 1.0;
         }
-        let matched = ground_truth.iter().filter(|gt| {
-            predictions.iter().any(|pred| pred.bbox.iou(gt) >= iou_threshold)
-        });
+        let matched = ground_truth
+            .iter()
+            .filter(|gt| predictions.iter().any(|pred| pred.bbox.iou(gt) >= iou_threshold));
         matched.count() as f32 / ground_truth.len() as f32
     }
 }
@@ -666,7 +657,12 @@ mod tests {
             image_width: 100,
         };
         let phrases = result.unique_phrases();
-        assert_eq!(phrases.len(), 3, "expected 3 unique phrases, got {:?}", phrases);
+        assert_eq!(
+            phrases.len(),
+            3,
+            "expected 3 unique phrases, got {:?}",
+            phrases
+        );
     }
 
     // --- Pipeline::ground ---
@@ -680,14 +676,9 @@ mod tests {
         };
         let p = VisualGroundingPipeline::new(config).expect("valid");
         let img = dummy_image(800 * 600 * 3);
-        let result = p
-            .ground(&img, 800, 600, "a cat . a dog . a bird")
-            .expect("ground ok");
+        let result = p.ground(&img, 800, 600, "a cat . a dog . a bird").expect("ground ok");
         // Three phrases → at most three boxes (before filtering).
-        assert!(
-            !result.boxes.is_empty(),
-            "expected at least one box"
-        );
+        assert!(!result.boxes.is_empty(), "expected at least one box");
     }
 
     // --- Pipeline::ground_batch ---
@@ -701,8 +692,7 @@ mod tests {
         let p = VisualGroundingPipeline::new(config).expect("valid");
         let img1 = dummy_image(100 * 100 * 3);
         let img2 = dummy_image(200 * 200 * 3);
-        let images: Vec<(&[f32], usize, usize)> =
-            vec![(&img1, 100, 100), (&img2, 200, 200)];
+        let images: Vec<(&[f32], usize, usize)> = vec![(&img1, 100, 100), (&img2, 200, 200)];
         let results = p.ground_batch(&images, "cat").expect("batch ok");
         assert_eq!(results.len(), 2);
     }
@@ -712,9 +702,7 @@ mod tests {
     #[test]
     fn test_empty_image_error() {
         let p = default_pipeline();
-        let err = p
-            .ground(&[], 100, 100, "cat")
-            .expect_err("empty image should fail");
+        let err = p.ground(&[], 100, 100, "cat").expect_err("empty image should fail");
         assert!(matches!(err, GroundingError::EmptyImage));
     }
 
@@ -722,9 +710,7 @@ mod tests {
     fn test_empty_query_error() {
         let p = default_pipeline();
         let img = dummy_image(100);
-        let err = p
-            .ground(&img, 10, 10, "   ")
-            .expect_err("empty query should fail");
+        let err = p.ground(&img, 10, 10, "   ").expect_err("empty query should fail");
         assert!(matches!(err, GroundingError::EmptyQuery));
     }
 
@@ -738,14 +724,19 @@ mod tests {
         };
         let p = VisualGroundingPipeline::new(config).expect("valid");
         let img = dummy_image(800 * 600 * 3);
-        let result = p
-            .ground(&img, 800, 600, "tree, car, person, building")
-            .expect("ok");
+        let result = p.ground(&img, 800, 600, "tree, car, person, building").expect("ok");
         for b in &result.boxes {
             let (x1, y1, x2, y2) = b.bbox;
-            assert!(x1 >= 0.0 && y1 >= 0.0 && x2 <= 1.0 && y2 <= 1.0,
-                "box out of unit square: {:?}", b.bbox);
-            assert!(x2 >= x1 && y2 >= y1, "box coordinates inverted: {:?}", b.bbox);
+            assert!(
+                x1 >= 0.0 && y1 >= 0.0 && x2 <= 1.0 && y2 <= 1.0,
+                "box out of unit square: {:?}",
+                b.bbox
+            );
+            assert!(
+                x2 >= x1 && y2 >= y1,
+                "box coordinates inverted: {:?}",
+                b.bbox
+            );
         }
     }
 
@@ -757,9 +748,7 @@ mod tests {
         };
         let p = VisualGroundingPipeline::new(config).expect("valid");
         let img = dummy_image(400 * 300 * 3);
-        let result = p
-            .ground(&img, 400, 300, "window, door, roof")
-            .expect("ok");
+        let result = p.ground(&img, 400, 300, "window, door, roof").expect("ok");
         for b in &result.boxes {
             assert!(
                 b.score <= 1.0,
@@ -776,30 +765,73 @@ mod tests {
 
     #[test]
     fn test_bounding_box_area() {
-        let bb = BoundingBox { x1: 0.1, y1: 0.1, x2: 0.5, y2: 0.6 };
+        let bb = BoundingBox {
+            x1: 0.1,
+            y1: 0.1,
+            x2: 0.5,
+            y2: 0.6,
+        };
         let expected = (0.5 - 0.1) * (0.6 - 0.1);
-        assert!((bb.area() - expected).abs() < 1e-6, "area was {}", bb.area());
+        assert!(
+            (bb.area() - expected).abs() < 1e-6,
+            "area was {}",
+            bb.area()
+        );
     }
 
     #[test]
     fn test_bounding_box_iou_identical() {
-        let bb = BoundingBox { x1: 0.1, y1: 0.1, x2: 0.5, y2: 0.5 };
-        assert!((bb.iou(&bb) - 1.0).abs() < 1e-5, "iou of identical box should be 1.0");
+        let bb = BoundingBox {
+            x1: 0.1,
+            y1: 0.1,
+            x2: 0.5,
+            y2: 0.5,
+        };
+        assert!(
+            (bb.iou(&bb) - 1.0).abs() < 1e-5,
+            "iou of identical box should be 1.0"
+        );
     }
 
     #[test]
     fn test_bounding_box_iou_no_overlap() {
-        let a = BoundingBox { x1: 0.0, y1: 0.0, x2: 0.3, y2: 0.3 };
-        let b = BoundingBox { x1: 0.5, y1: 0.5, x2: 0.8, y2: 0.8 };
-        assert!((a.iou(&b)).abs() < 1e-6, "non-overlapping boxes should have iou ~0");
+        let a = BoundingBox {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 0.3,
+            y2: 0.3,
+        };
+        let b = BoundingBox {
+            x1: 0.5,
+            y1: 0.5,
+            x2: 0.8,
+            y2: 0.8,
+        };
+        assert!(
+            (a.iou(&b)).abs() < 1e-6,
+            "non-overlapping boxes should have iou ~0"
+        );
     }
 
     #[test]
     fn test_bounding_box_iou_partial_overlap() {
-        let a = BoundingBox { x1: 0.0, y1: 0.0, x2: 0.6, y2: 0.6 };
-        let b = BoundingBox { x1: 0.4, y1: 0.4, x2: 1.0, y2: 1.0 };
+        let a = BoundingBox {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 0.6,
+            y2: 0.6,
+        };
+        let b = BoundingBox {
+            x1: 0.4,
+            y1: 0.4,
+            x2: 1.0,
+            y2: 1.0,
+        };
         let iou = a.iou(&b);
-        assert!(iou > 0.0 && iou < 1.0, "partial overlap iou should be in (0,1), got {iou}");
+        assert!(
+            iou > 0.0 && iou < 1.0,
+            "partial overlap iou should be in (0,1), got {iou}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -834,7 +866,10 @@ mod tests {
         let patch: Vec<f32> = (1..=4).map(|i| i as f32).collect();
         let phrase: Vec<u32> = (1..=4).collect();
         let sim = GroundingProcessor::score_region(&patch, &phrase);
-        assert!(sim > 0.9, "self-similarity should be close to 1.0, got {sim}");
+        assert!(
+            sim > 0.9,
+            "self-similarity should be close to 1.0, got {sim}"
+        );
     }
 
     #[test]
@@ -847,7 +882,12 @@ mod tests {
     fn test_extract_image_patch_basic() {
         // 4x4 RGB image
         let image: Vec<u8> = (0..(4 * 4 * 3)).map(|i| i as u8).collect();
-        let bbox = BoundingBox { x1: 0.0, y1: 0.0, x2: 0.5, y2: 0.5 };
+        let bbox = BoundingBox {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 0.5,
+            y2: 0.5,
+        };
         let patch = GroundingProcessor::extract_image_patch(&image, 4, 4, &bbox);
         // 2x2 pixels * 3 channels = 12 bytes
         assert_eq!(patch.len(), 12, "expected 12 bytes, got {}", patch.len());
@@ -856,7 +896,12 @@ mod tests {
     #[test]
     fn test_extract_image_patch_full_image() {
         let image: Vec<u8> = vec![255u8; 3 * 3 * 3];
-        let bbox = BoundingBox { x1: 0.0, y1: 0.0, x2: 1.0, y2: 1.0 };
+        let bbox = BoundingBox {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 1.0,
+            y2: 1.0,
+        };
         let patch = GroundingProcessor::extract_image_patch(&image, 3, 3, &bbox);
         assert_eq!(patch.len(), 3 * 3 * 3);
     }
@@ -864,7 +909,12 @@ mod tests {
     #[test]
     fn test_extract_image_patch_inverted_bbox() {
         let image: Vec<u8> = vec![0u8; 10 * 10 * 3];
-        let bbox = BoundingBox { x1: 0.8, y1: 0.8, x2: 0.2, y2: 0.2 };
+        let bbox = BoundingBox {
+            x1: 0.8,
+            y1: 0.8,
+            x2: 0.2,
+            y2: 0.2,
+        };
         let patch = GroundingProcessor::extract_image_patch(&image, 10, 10, &bbox);
         assert!(patch.is_empty(), "inverted bbox should return empty patch");
     }
@@ -876,23 +926,31 @@ mod tests {
         // y positions: 0,10,20,...,90 -> 10 positions
         // total: 10 * 10 = 100 proposals
         let proposals = GroundingProcessor::sliding_window_proposals(100, 100, 10, &[10]);
-        assert_eq!(proposals.len(), 100, "expected 100 proposals, got {}", proposals.len());
+        assert_eq!(
+            proposals.len(),
+            100,
+            "expected 100 proposals, got {}",
+            proposals.len()
+        );
     }
 
     #[test]
     fn test_sliding_window_proposals_multiple_sizes() {
-        let proposals =
-            GroundingProcessor::sliding_window_proposals(20, 20, 5, &[5, 10]);
+        let proposals = GroundingProcessor::sliding_window_proposals(20, 20, 5, &[5, 10]);
         // size=5: (20-5)/5 + 1 = 4 positions per axis -> 16 proposals
         // size=10: (20-10)/5 + 1 = 3 positions per axis -> 9 proposals
         // total = 25
-        assert_eq!(proposals.len(), 25, "expected 25 proposals, got {}", proposals.len());
+        assert_eq!(
+            proposals.len(),
+            25,
+            "expected 25 proposals, got {}",
+            proposals.len()
+        );
     }
 
     #[test]
     fn test_sliding_window_proposals_normalised() {
-        let proposals =
-            GroundingProcessor::sliding_window_proposals(50, 50, 25, &[25]);
+        let proposals = GroundingProcessor::sliding_window_proposals(50, 50, 25, &[25]);
         for p in &proposals {
             assert!(p.x1 >= 0.0 && p.x2 <= 1.0, "x out of range: {:?}", p);
             assert!(p.y1 >= 0.0 && p.y2 <= 1.0, "y out of range: {:?}", p);
@@ -911,22 +969,45 @@ mod tests {
 
     #[test]
     fn test_recall_at_iou_perfect() {
-        let gt = vec![BoundingBox { x1: 0.0, y1: 0.0, x2: 0.5, y2: 0.5 }];
+        let gt = vec![BoundingBox {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 0.5,
+            y2: 0.5,
+        }];
         let pred = vec![GroundingResultNew {
             phrase: "cat".to_string(),
-            bbox: BoundingBox { x1: 0.0, y1: 0.0, x2: 0.5, y2: 0.5 },
+            bbox: BoundingBox {
+                x1: 0.0,
+                y1: 0.0,
+                x2: 0.5,
+                y2: 0.5,
+            },
             score: 0.9,
         }];
         let recall = PhraseGroundingMetrics::recall_at_iou(&pred, &gt, 0.5);
-        assert!((recall - 1.0).abs() < 1e-5, "perfect match should give recall 1.0");
+        assert!(
+            (recall - 1.0).abs() < 1e-5,
+            "perfect match should give recall 1.0"
+        );
     }
 
     #[test]
     fn test_recall_at_iou_no_match() {
-        let gt = vec![BoundingBox { x1: 0.0, y1: 0.0, x2: 0.3, y2: 0.3 }];
+        let gt = vec![BoundingBox {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 0.3,
+            y2: 0.3,
+        }];
         let pred = vec![GroundingResultNew {
             phrase: "dog".to_string(),
-            bbox: BoundingBox { x1: 0.7, y1: 0.7, x2: 1.0, y2: 1.0 },
+            bbox: BoundingBox {
+                x1: 0.7,
+                y1: 0.7,
+                x2: 1.0,
+                y2: 1.0,
+            },
             score: 0.8,
         }];
         let recall = PhraseGroundingMetrics::recall_at_iou(&pred, &gt, 0.5);
@@ -935,8 +1016,10 @@ mod tests {
 
     #[test]
     fn test_recall_at_iou_empty_gt() {
-        let recall =
-            PhraseGroundingMetrics::recall_at_iou(&[], &[], 0.5);
-        assert!((recall - 1.0).abs() < 1e-5, "empty gt should give recall 1.0");
+        let recall = PhraseGroundingMetrics::recall_at_iou(&[], &[], 0.5);
+        assert!(
+            (recall - 1.0).abs() < 1e-5,
+            "empty gt should give recall 1.0"
+        );
     }
 }

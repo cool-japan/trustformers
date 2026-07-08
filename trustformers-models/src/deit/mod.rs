@@ -25,5 +25,7 @@ pub mod tasks;
 mod tests;
 
 pub use config::DeiTConfig;
-pub use model::{DeiTAttention, DeiTEmbeddings, DeiTEncoder, DeiTLayer, DeiTMLP, DeiTModel, DeiTPatchEmbedding};
+pub use model::{
+    DeiTAttention, DeiTEmbeddings, DeiTEncoder, DeiTLayer, DeiTMLP, DeiTModel, DeiTPatchEmbedding,
+};
 pub use tasks::DeiTForImageClassification;

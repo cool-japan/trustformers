@@ -6,6 +6,6 @@
 pub mod parallel_loader;
 
 pub use parallel_loader::{
-    load_model_parallel, LoadingProgress, LoadingStats, ParallelLoaderConfig,
-    ParallelWeightLoader, WeightChunk,
+    load_model_parallel, LoadingProgress, LoadingStats, ParallelLoaderConfig, ParallelWeightLoader,
+    WeightChunk,
 };

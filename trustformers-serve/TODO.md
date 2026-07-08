@@ -584,7 +584,19 @@ helm install trustformers ./helm/trustformers \
 ## Future Enhancements
 
 ### High Priority
-- [ ] Enhanced semantic caching (embedding-based cache lookup — use cosine similarity on embeddings to find semantically equivalent cached requests)
+- [x] Fix TestPerformanceMonitoringConfig field drift (completed 2026-07-05)
+  - Goal: 6 sub-configuration types (`AnalyticsConfig`, `EventConfig`, `HistoricalDataConfig`, `AlertConfig`, `DashboardConfig`, `SubscriptionConfig`) already existed and were fully real, but the top-level `TestPerformanceMonitoringConfig` struct had never grown fields to hold them, so every sub-system constructor in `service.rs` fell back to `Default::default()` instead of the caller's real configuration.
+  - Fix: added the 6 fields (+ `Default` impl) to `TestPerformanceMonitoringConfig`; added the 2 previously-missing leaf fields referenced by dead commented-out call sites (`audit_trail_enabled: bool` on `HistoricalDataConfig`, `compliance_logging: bool` on `EventConfig`, `rate_limiting_enabled: bool` on `AlertConfig`) plus `compliance_reporting: bool` on `ReportConfig`; rewired `TestPerformanceMonitoringService::new()` in `service.rs` to pass `config.analytics_config.clone()` / `.event_config` / `.historical_data_config` / `.alert_config` / `.dashboard_config` / `.subscription_config` into each sub-manager constructor instead of `Default::default()`; uncommented the now-valid field assignments in `create_compliance_focused_service`/`create_resource_efficient_service` in `mod.rs`.
+  - Files: `test_performance_monitoring/types/config.rs`, `types/events.rs` (`EventConfig`'s `Default` impl lives here after an earlier SplitRS split), `service.rs`, `mod.rs`.
+  - Tests: extended `test_test_performance_monitoring_config_default` / `test_report_config_default` / `test_historical_data_config_default` / `test_alert_config_default` and added `test_event_config_default` in `types/config.rs`; extended `test_specialized_service_creation` in `mod.rs` to assert the compliance-focused/resource-efficient services' *resulting* config actually carries the requested flags (via a new `TestPerformanceMonitoringService::config()` accessor) rather than only checking `.is_ok()`, which would have passed even if the fields were silently ignored.
+  - Behavior confirmed real, not cosmetic, for most of the 6: `EventConfig.channel_capacity` now sizes the real `broadcast::channel` inside `EventManager`, `buffer_size` sizes its `CircularEventBuffer`, and `compression_enabled`/`indexing_config`/`retention_config`/`correlation_config`/`pattern_config`/`aggregation_config`/`enrichment_config` all reach their respective sub-components; `HistoricalDataConfig.compression_enabled`/`indexing_config`/`partitioning_strategy`/`storage_optimization` reach `HistoricalDataManager`'s `CompressionEngine`/`TimeSeriesStore`; `DashboardConfig.layout`/`refresh_interval` reach `DashboardManager`'s `WidgetManager`/`LayoutEngine`. By contrast, `AlertConfig` and `SubscriptionConfig` are now threaded through as real, stored objects but remain otherwise inert today — `AlertRuleEngine::new` takes `_config: &AlertConfig` (deliberately unused) and every other `AlertManager` sub-component takes no config at all, and `SubscriptionManager` only stores its config without reading any field from it — the same "real code, no live consumer yet" pattern already flagged elsewhere in this file (SemanticCache/GraphQL model_service), noted here rather than silently implied as fully wired.
+- [~] Mount SemanticCache as an opt-in caching tier (planned 2026-07-05)
+  - Goal: the already-complete, already-tested (15 tests, 510 lines) SemanticCache becomes part of the compiled crate.
+  - Design: add `pub mod semantic_cache;` + re-exports to caching/mod.rs. Add an Option<Arc<SemanticCache>> tier to CachingService, gated by a new config flag, mirroring how distributed_cache is already gated. Define a small EmbeddingProvider trait as the lookup seam — do NOT fabricate embeddings: when none is supplied (always, today — no real embedding generation exists anywhere in this crate), semantic lookup is simply skipped and result_cache is used alone, exactly as today.
+  - Files: trustformers-serve/src/caching/mod.rs, caching/semantic_cache.rs, caching/config.rs.
+  - Tests: the file's existing 15 unit tests run once mounted; a new integration test using a deterministic test-double EmbeddingProvider to verify tier composition.
+  - Documented caveat, not a blocker: the live inference endpoint uses a third, separate, ad-hoc REQUEST_CACHE static today — not CachingService at all. Mounting SemanticCache here does not make it reachable from real requests; that rewiring plus real embedding generation is a separate, larger follow-up.
+  - Risk: same "real code, no live consumer yet" pattern as the GraphQL model_service item — document both that way rather than implying either is fully live.
 - ~~Better request scheduling algorithms~~ ✅ Done — priority queue + WRR/EDF/fair/FIFO scheduler
 - [ ] Improved GPU memory management
   - **Refinement needed:** target metric (peak GPU memory %, allocation fragmentation?), which strategy (buddy allocator? memory pool tunability?)?
@@ -601,11 +613,21 @@ helm install trustformers ./helm/trustformers \
 - [ ] Auth: SAML 2.0 SSO integration
 - [ ] Enhanced monitoring dashboards
   - **Refinement needed:** Grafana dashboards? Prometheus alert rules? What metrics to surface?
-- [ ] Improved A/B testing with statistical significance detection (add t-test / Mann-Whitney U significance testing to A/B reporting)
+- [~] Wire real Welch's t-test + implement Mann-Whitney U for A/B tests (planned 2026-07-05)
+  - Goal: AbTestManager::compute_results() uses the crate's own rigorous, already-tested (27 tests) Welch's t-test instead of a cruder homegrown z-test, plus a new Mann-Whitney U test (zero existing implementation confirmed).
+  - Design: decide up front — bounded reservoir sampling, NOT an unbounded Vec<f64> (unbounded growth is a real production memory risk). Add reservoir-sampled raw-latency retention to ExperimentVariantStats. Rewire compute_results() to call the existing statistics::welch_t_test on the reservoir samples. Implement mann_whitney_u_test(control, treatment, alpha) in statistics.rs following welch_t_test's exact structure. Report both TTestResult and MannWhitneyResult on ExperimentResult.
+  - Files: trustformers-serve/src/ab_testing/statistics.rs, ab_testing/mod.rs.
+  - Tests: pure numerical unit tests mirroring statistics.rs's existing 27-test style; an AbTestManager integration test with a real (not faked) latency distribution.
+  - Risk: check for other callers of the homegrown StatisticalTest/two_sample_z_test before removing it (it's pub).
 - [ ] Real-time model updates with zero-downtime hot-reload (blue-green model swap with atomic pointer update)
 - [ ] Real broker wiring for message-queue backends: RabbitMQ (AMQP 0-9-1, dead-letter exchanges, publisher confirms), Redis Streams, NATS, and AWS SQS currently share a no-op `impl_placeholder_backend!` macro (`src/message_queue.rs`) — only Kafka is genuinely wired today
 - [ ] Real SDK-backed inference/deployment for cloud providers: `AwsSagemakerProvider`, `GoogleVertexAiProvider`, and `AzureMachineLearningProvider` currently share a simulated `impl_provider!` macro (`src/cloud_providers.rs`) that returns a fixed mock response regardless of provider
-- [ ] Real AWS Lambda wiring for the serverless adapter: `deploy()`/`invoke()`/`get_metrics()` in `src/serverless/awslambdaprovider_traits.rs` currently fabricate results instead of calling the held `aws_sdk_lambda::Client`
+- [~] Wire real AWS Lambda calls in serverless adapter (planned 2026-07-05)
+  - Goal: deploy/update/invoke/get_metrics make real AWS calls instead of fabricating every response.
+  - Design: with_aws_config() also builds/stores the already-present-but-unused CloudWatch client. deploy() -> real client.create_function(). update() MUST get its own real body (update_function_code/update_function_configuration) — it currently delegates to deploy(), which will start erroring once deploy is real (CreateFunction fails on an existing function name). invoke() -> real client.invoke(), surfacing function_error as Err. get_metrics() -> parallel cloudwatch_client.get_metric_statistics() calls. Document, don't fabricate: cost_usd and cold_starts can't be fully sourced from these two SDKs alone — mark as approximations in code comments.
+  - Files: trustformers-serve/src/serverless/awslambdaprovider_traits.rs, serverless/types.rs.
+  - Tests: NO live AWS calls — use the AWS SDK's own test-replay HTTP client with canned responses; also test that deploy/invoke/get_metrics return Err (not fabricated success) when no client is configured.
+  - Risk: update()'s current delegation-to-deploy() breaking is the single most important cross-effect to get right.
 
 ---
 

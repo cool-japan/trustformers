@@ -206,19 +206,12 @@ impl DocumentClassificationPipeline {
         let num_chunks = chunks.len();
 
         // Classify each chunk.
-        let chunk_results: Vec<Vec<(String, f32)>> = chunks
-            .iter()
-            .map(|c| self.classify_chunk(c))
-            .collect::<Result<Vec<_>, _>>()?;
+        let chunk_results: Vec<Vec<(String, f32)>> =
+            chunks.iter().map(|c| self.classify_chunk(c)).collect::<Result<Vec<_>, _>>()?;
 
         let chunk_predictions: Vec<String> = chunk_results
             .iter()
-            .map(|scores| {
-                scores
-                    .first()
-                    .map(|(l, _)| l.clone())
-                    .unwrap_or_default()
-            })
+            .map(|scores| scores.first().map(|(l, _)| l.clone()).unwrap_or_default())
             .collect();
 
         let all_scores = self.aggregate_scores(&chunk_results);
@@ -250,10 +243,7 @@ impl DocumentClassificationPipeline {
     // -----------------------------------------------------------------------
 
     /// Aggregate per-chunk score vectors into a single ranking.
-    fn aggregate_scores(
-        &self,
-        chunk_results: &[Vec<(String, f32)>],
-    ) -> Vec<(String, f32)> {
+    fn aggregate_scores(&self, chunk_results: &[Vec<(String, f32)>]) -> Vec<(String, f32)> {
         if chunk_results.is_empty() {
             return vec![];
         }
@@ -267,24 +257,18 @@ impl DocumentClassificationPipeline {
                 // Use label index mapping from the first chunk (scores are sorted, so re-map).
                 let label_order: Vec<String> = self.config.labels.clone();
                 for chunk_scores in chunk_results {
-                    let score_map: std::collections::HashMap<&str, f32> = chunk_scores
-                        .iter()
-                        .map(|(l, s)| (l.as_str(), *s))
-                        .collect();
+                    let score_map: std::collections::HashMap<&str, f32> =
+                        chunk_scores.iter().map(|(l, s)| (l.as_str(), *s)).collect();
                     for (i, label) in label_order.iter().enumerate() {
                         sums[i] += score_map.get(label.as_str()).copied().unwrap_or(0.0);
                     }
                 }
                 let n = chunk_results.len() as f32;
-                let mut averaged: Vec<(String, f32)> = label_order
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, l)| (l, sums[i] / n))
-                    .collect();
+                let mut averaged: Vec<(String, f32)> =
+                    label_order.into_iter().enumerate().map(|(i, l)| (l, sums[i] / n)).collect();
+                averaged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 averaged
-                    .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                averaged
-            }
+            },
 
             ChunkAggregation::MajorityVote => {
                 let mut vote_counts: std::collections::HashMap<String, usize> =
@@ -305,10 +289,9 @@ impl DocumentClassificationPipeline {
                         (l.clone(), votes / total_votes)
                     })
                     .collect();
+                scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 scored
-                    .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                scored
-            }
+            },
 
             ChunkAggregation::MaxConfidence => {
                 // Pick the chunk with the highest top score.
@@ -317,14 +300,12 @@ impl DocumentClassificationPipeline {
                     .max_by(|a, b| {
                         let score_a = a.first().map(|(_, s)| *s).unwrap_or(0.0);
                         let score_b = b.first().map(|(_, s)| *s).unwrap_or(0.0);
-                        score_a
-                            .partial_cmp(&score_b)
-                            .unwrap_or(std::cmp::Ordering::Equal)
+                        score_a.partial_cmp(&score_b).unwrap_or(std::cmp::Ordering::Equal)
                     })
                     .cloned()
                     .unwrap_or_default();
                 best_chunk
-            }
+            },
         }
     }
 }
@@ -367,7 +348,9 @@ impl DocumentFeatureExtractor {
     /// Compute the TF-IDF score for `term` in `doc` against a `corpus` of documents.
     ///
     /// TF = (occurrences of term in doc) / (total words in doc).
-    /// IDF = ln((1 + N) / (1 + df)) + 1  where df = count of corpus docs containing term.
+    /// IDF = ln((1 + N) / (1 + df))  where df = count of corpus docs containing term.
+    /// The add-one smoothing on N and df avoids division by zero while keeping the
+    /// classic discriminative property: terms occurring in fewer documents score higher.
     pub fn tfidf_score(term: &str, doc: &str, corpus: &[String]) -> f32 {
         let doc_words: Vec<&str> = doc.split_whitespace().collect();
         let doc_len = doc_words.len();
@@ -375,21 +358,15 @@ impl DocumentFeatureExtractor {
             return 0.0;
         }
         let term_lower = term.to_lowercase();
-        let tf_count = doc_words
-            .iter()
-            .filter(|w| w.to_lowercase() == term_lower)
-            .count();
+        let tf_count = doc_words.iter().filter(|w| w.to_lowercase() == term_lower).count();
         if tf_count == 0 {
             return 0.0;
         }
         let tf = tf_count as f32 / doc_len as f32;
 
         let n = corpus.len() as f32;
-        let df = corpus
-            .iter()
-            .filter(|d| d.to_lowercase().contains(&term_lower))
-            .count() as f32;
-        let idf = ((1.0 + n) / (1.0 + df)).ln() + 1.0;
+        let df = corpus.iter().filter(|d| d.to_lowercase().contains(&term_lower)).count() as f32;
+        let idf = ((1.0 + n) / (1.0 + df)).ln();
         tf * idf
     }
 
@@ -405,7 +382,12 @@ impl DocumentFeatureExtractor {
         } else {
             words.iter().map(|w| w.chars().count()).sum::<usize>() as f32 / word_count as f32
         };
-        DocumentLengthFeatures { char_count, word_count, sentence_count, avg_word_length }
+        DocumentLengthFeatures {
+            char_count,
+            word_count,
+            sentence_count,
+            avg_word_length,
+        }
     }
 }
 
@@ -431,8 +413,7 @@ impl DocumentHierarchy {
             current.push(c);
             if matches!(c, '.' | '!' | '?') {
                 // Peek ahead — if next char is whitespace or we're at end, treat as boundary
-                let next_is_boundary = i + 1 >= len
-                    || chars[i + 1].is_whitespace();
+                let next_is_boundary = i + 1 >= len || chars[i + 1].is_whitespace();
                 if next_is_boundary {
                     let trimmed = current.trim().to_string();
                     if !trimmed.is_empty() {
@@ -519,7 +500,9 @@ impl LegalDocumentClassifier {
             aggregation: ChunkAggregation::MeanScore,
             max_chunks: 20,
         };
-        Ok(Self { pipeline: DocumentClassificationPipeline::new(config)? })
+        Ok(Self {
+            pipeline: DocumentClassificationPipeline::new(config)?,
+        })
     }
 
     pub fn classify(&self, document: &str) -> Result<DocumentClassification, DocClassError> {
@@ -549,7 +532,9 @@ impl ScientificDocumentClassifier {
             aggregation: ChunkAggregation::MeanScore,
             max_chunks: 10,
         };
-        Ok(Self { pipeline: DocumentClassificationPipeline::new(config)? })
+        Ok(Self {
+            pipeline: DocumentClassificationPipeline::new(config)?,
+        })
     }
 
     pub fn classify(&self, document: &str) -> Result<DocumentClassification, DocClassError> {
@@ -638,7 +623,13 @@ mod tests {
     fn classify_valid_label() {
         let pipe = default_pipeline();
         let result = pipe.classify("This is a test document about technology and AI.").unwrap();
-        let labels = vec!["technology", "business", "sports", "politics", "entertainment"];
+        let labels = [
+            "technology",
+            "business",
+            "sports",
+            "politics",
+            "entertainment",
+        ];
         assert!(labels.contains(&result.label.as_str()));
     }
 
@@ -680,7 +671,13 @@ mod tests {
         };
         let pipe = DocumentClassificationPipeline::new(config).unwrap();
         let result = pipe.classify("politics government news election vote parliament").unwrap();
-        let labels = vec!["technology", "business", "sports", "politics", "entertainment"];
+        let labels = [
+            "technology",
+            "business",
+            "sports",
+            "politics",
+            "entertainment",
+        ];
         assert!(labels.contains(&result.label.as_str()));
     }
 
@@ -797,10 +794,15 @@ mod tests {
     #[test]
     fn tfidf_rare_term_higher_than_common() {
         let doc = "the the the rare_word".to_string();
-        let corpus: Vec<String> = (0..100).map(|i| {
-            if i < 90 { "the common words".to_string() }
-            else { "rare_word here".to_string() }
-        }).collect();
+        let corpus: Vec<String> = (0..100)
+            .map(|i| {
+                if i < 90 {
+                    "the common words".to_string()
+                } else {
+                    "rare_word here".to_string()
+                }
+            })
+            .collect();
         let tf_common = DocumentFeatureExtractor::tfidf_score("the", &doc, &corpus);
         let tf_rare = DocumentFeatureExtractor::tfidf_score("rare_word", &doc, &corpus);
         // rare_word appears in fewer docs → higher IDF → higher TF-IDF despite lower TF

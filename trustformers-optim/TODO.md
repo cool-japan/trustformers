@@ -60,15 +60,22 @@ hardware-targeted variants, and PyTorch/JAX/TensorFlow compatibility layers.
 - [x] All compiled source files are under the 2000-line refactor threshold — largest is `convergence.rs`
       at 1,964 lines (worth watching; next largest are `performance_validation.rs` at 1,725 and
       `enhanced_distributed_training.rs` at 1,678)
-- [ ] Delete 3 stray, uncompiled backup files sitting in `src/` (dated 2025-10-01, not `.rs` so cargo
-      ignores them, but they are dead clutter): `federated.rs.prelude_fix`,
-      `hyperparameter_tuning.rs.prelude_fix`, `quantum_inspired.rs.prelude_fix`
-- [ ] Remove or properly wire up 4 orphaned `.rs` files that are not declared as modules anywhere in the
-      crate (dead code, excluded from the build): `adafactor.rs` (superseded by `adafactor_new.rs`),
-      `adafisher.rs` (superseded by `adafisher_simple.rs`), `advanced_benchmarking.rs` (1,306 lines,
-      never declared in `lib.rs`), `second_order_new.rs` (superseded by the `second_order/` directory)
-- [ ] Re-export `fsdp`, `optimizer_surgery`, and `per_layer_quant` types at the crate root for
-      discoverability (currently only reachable via their full module paths)
+- [x] Delete 3 stray *.prelude_fix backup files (planned 2026-07-05)
+  - Goal/Design: delete src/federated.rs.prelude_fix, src/hyperparameter_tuning.rs.prelude_fix, src/quantum_inspired.rs.prelude_fix — confirmed pre-migration snapshots, zero references, not part of the build graph.
+  - Files: the 3 files.
+  - Tests: cargo check -p trustformers-optim --all-features (no-op diff).
+  - Risk: none.
+- [x] Delete 4 orphaned files (adafactor.rs, adafisher.rs, advanced_benchmarking.rs, second_order_new.rs) (planned 2026-07-05)
+  - Goal/Design: delete all 4 — adafactor.rs implements a stale non-current Optimizer trait shape (wouldn't compile if mounted); adafisher.rs calls ~8 Tensor methods that don't exist anywhere in trustformers-core (cholesky_inverse, pinverse, diag, eye, etc — wouldn't compile); advanced_benchmarking.rs fabricates every benchmark number while importing-but-never-instantiating 6 real optimizers; second_order_new.rs is pure scaffolding with no Optimizer impl and an inner `pub mod lbfgs;` that doesn't resolve to any real path. All 4 confirmed outside the build graph already.
+  - Files: the 4 files.
+  - Tests: cargo check/cargo nextest run -p trustformers-optim --all-features (no-op diff).
+  - Risk: none for the compiler. These existed as (non-compiling) design references for a future real AdaFisher/Shampoo/KFAC, recoverable via git history if ever wanted.
+- [x] Re-export fsdp/optimizer_surgery/per_layer_quant at crate root (planned 2026-07-05)
+  - Goal: FsdpConfig, OptimizerSurgeon, PerLayerQuantSelector, etc (21 types total) reachable at crate root.
+  - Design: add 3 pub use blocks to lib.rs, alphabetized, mirroring the existing re-export style.
+  - Files: trustformers-optim/src/lib.rs only.
+  - Tests: cargo doc --no-deps; a smoke test importing all 3 from the crate root path.
+  - Risk: none — zero naming collisions confirmed against the full existing public surface.
 
 ---
 
@@ -257,7 +264,12 @@ let optimizer = Adam8bit::new(1e-4); // single-argument constructor (learning_ra
 
 #### Adam4bit
 - [x] 4-bit optimizer state via `QuantizationMethod` (e.g. NF4), ~8x memory reduction
-- [ ] There is no separate "AdamW4bit" type — `Adam4bit` is the only 4-bit constructor exported
+- [~] Add AdamW4bit mirroring Adam4bit, with decoupled weight decay (planned 2026-07-05, implement AFTER the save_state/load_state trait-defaults item below)
+  - Goal: AdamW4bit alongside the existing Adam4bit, with decoupled (AdamW-style) weight decay instead of Adam4bit's coupled decay.
+  - Design: structurally mirror Adam4bit exactly (same QuantizedTensor/NF4 block-wise quantization — this crate's "4-bit" storage is f32-backed with codebook values, not literally nibble-packed; that's a pre-existing crate-wide simplification, out of scope to fix here). Only formula difference: apply weight decay directly to the parameter before the Adam update, instead of folding it into the gradient. Implement a COMPLETE load_state_dict — Adam4bit's own version was found broken (only restores learning_rate) — do not copy that bug.
+  - Files: trustformers-optim/src/quantized_advanced.rs (new struct+impl), lib.rs (extend existing pub use block).
+  - Tests: creation test; numerical-divergence test (decoupled vs coupled decay diverge under nonzero weight_decay); state_dict/load_state_dict round-trip test (the regression test that would have caught Adam4bit's bug); integration test round-tripping through the save_state/load_state trait defaults below.
+  - Risk: must reuse the exact same NF4 quantize/dequantize utilities Adam4bit uses — don't invent a third quantization scheme.
 ```rust
 use trustformers_optim::Adam4bit;
 // (lr, beta1, beta2, eps, weight_decay)
@@ -333,8 +345,12 @@ GradientProcessor::clip_by_value(&mut grad, -0.5, 0.5); // element-wise clip
 #### Optimizer State Management
 - [x] `StatefulOptimizer::state_dict(&self) -> Result<HashMap<String, Tensor>>` and
       `load_state_dict(&mut self, state: HashMap<String, Tensor>) -> Result<()>`
-- [ ] There is no built-in file-path convenience method (no `save_state("checkpoint.pt")`/`load_state(...)`
-      as earlier revisions of this document showed) — callers serialize the returned `HashMap` themselves
+- [~] Add save_state/load_state default trait methods on StatefulOptimizer (planned 2026-07-05, implement BEFORE AdamW4bit above)
+  - Goal: every one of the ~29 StatefulOptimizer implementors gets a working save_state(path)/load_state(path) for free.
+  - Design: add a small private TensorSnapshot { data: Vec<f32>, shape: Vec<usize> } type (derive Serialize/Deserialize) to traits.rs — needed because Tensor itself has no Serialize/Deserialize impl anywhere in trustformers-core. Add 2 default trait methods on StatefulOptimizer: save_state converts state_dict()'s HashMap<String,Tensor> to HashMap<String,TensorSnapshot>, encodes with oxicode::serde::encode_to_vec (NOT bincode, per COOLJAPAN policy — already a declared-but-unused workspace dependency of this crate), writes to disk; load_state reverses it. Mirror the existing oxicode save/load pattern already used in trustformers-core/src/checkpoint/formats.rs and trustformers-tokenizers/src/binary_format.rs.
+  - Files: trustformers-optim/src/traits.rs only.
+  - Tests: round-trip test using a real optimizer (AdamW) against std::env::temp_dir(); multi-dimensional-shape round-trip; error-path test (nonexistent path returns Err, not panic).
+  - Risk: document explicitly this is a private, crate-internal binary layout, not a cross-framework checkpoint format (this crate has separate pytorch_compat.rs/cross_framework.rs files — a reader could otherwise assume interoperability that doesn't exist).
 
 #### Parameter Groups
 - [x] Per-group learning rates and hyperparameters supported across the standard optimizers
@@ -502,10 +518,22 @@ optimizer.register_parameters(parameters)?;
       re-exported at crate root
 
 ### Housekeeping (new)
-- [ ] Delete the 3 stray `*.prelude_fix` backup files in `src/`
-- [ ] Remove or re-wire the 4 orphaned `.rs` files not declared as modules anywhere
-      (`adafactor.rs`, `adafisher.rs`, `advanced_benchmarking.rs`, `second_order_new.rs`)
-- [ ] Re-export `fsdp`, `optimizer_surgery`, and `per_layer_quant` at the crate root
+- [x] Delete 3 stray *.prelude_fix backup files (planned 2026-07-05)
+  - Goal/Design: delete src/federated.rs.prelude_fix, src/hyperparameter_tuning.rs.prelude_fix, src/quantum_inspired.rs.prelude_fix — confirmed pre-migration snapshots, zero references, not part of the build graph.
+  - Files: the 3 files.
+  - Tests: cargo check -p trustformers-optim --all-features (no-op diff).
+  - Risk: none.
+- [x] Delete 4 orphaned files (adafactor.rs, adafisher.rs, advanced_benchmarking.rs, second_order_new.rs) (planned 2026-07-05)
+  - Goal/Design: delete all 4 — adafactor.rs implements a stale non-current Optimizer trait shape (wouldn't compile if mounted); adafisher.rs calls ~8 Tensor methods that don't exist anywhere in trustformers-core (cholesky_inverse, pinverse, diag, eye, etc — wouldn't compile); advanced_benchmarking.rs fabricates every benchmark number while importing-but-never-instantiating 6 real optimizers; second_order_new.rs is pure scaffolding with no Optimizer impl and an inner `pub mod lbfgs;` that doesn't resolve to any real path. All 4 confirmed outside the build graph already.
+  - Files: the 4 files.
+  - Tests: cargo check/cargo nextest run -p trustformers-optim --all-features (no-op diff).
+  - Risk: none for the compiler. These existed as (non-compiling) design references for a future real AdaFisher/Shampoo/KFAC, recoverable via git history if ever wanted.
+- [x] Re-export fsdp/optimizer_surgery/per_layer_quant at crate root (planned 2026-07-05)
+  - Goal: FsdpConfig, OptimizerSurgeon, PerLayerQuantSelector, etc (21 types total) reachable at crate root.
+  - Design: add 3 pub use blocks to lib.rs, alphabetized, mirroring the existing re-export style.
+  - Files: trustformers-optim/src/lib.rs only.
+  - Tests: cargo doc --no-deps; a smoke test importing all 3 from the crate root path.
+  - Risk: none — zero naming collisions confirmed against the full existing public surface.
 - [ ] Keep an eye on `convergence.rs` (1,964 lines) — closest file to the 2,000-line refactor threshold;
       consider splitting with `splitrs` if it grows further
 

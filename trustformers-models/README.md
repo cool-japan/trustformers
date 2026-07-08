@@ -2,7 +2,7 @@
 
 Comprehensive transformer model implementations for NLP, vision, speech, and multimodal tasks — plus a large surrounding toolkit (quantization, distillation, NAS, continual/meta learning, serving, dev tools).
 
-**Version:** 0.1.4 (Alpha) | **Date:** 2026-07-02 | **Tests:** ~4,479 passing | **SLoC:** 151,766 | **Public API items:** ~5,165
+**Version:** 0.2.0 (Alpha) | **Date:** 2026-07-02 | **Tests:** ~4,479 passing | **SLoC:** 151,766 | **Public API items:** ~5,165
 
 ## Current State
 
@@ -82,7 +82,7 @@ Default feature is `bert`. 53 architecture-specific flags plus `all`, `metal`, `
 
 ```toml
 [dependencies]
-trustformers-models = { version = "0.1.4", features = ["bert", "llama", "mistral", "clip"] }
+trustformers-models = { version = "0.2.0", features = ["bert", "llama", "mistral", "clip"] }
 ```
 
 `bert`, `roberta`, `distilbert`, `gpt2`, `gpt_neo`, `gpt_j`, `t5`, `albert`, `electra`, `deberta`, `vit`, `llama`, `llama2`, `llama3`, `codellama`, `deepseek`, `gpt_neox`, `mistral`, `clip`, `gemma`, `qwen`, `phi3`, `gemma2`, `mamba`, `rwkv`, `s4`, `stablelm`, `falcon`, `blip2`, `llava`, `dalle`, `flamingo`, `linformer`, `internlm2`, `falcon2`, `deepseek_v2`, `qwen2_5`, `opt`, `granite`, `aya`, `jamba`, `jamba2`, `sd3`, `llama3_2`, `mistral_v3`, `mixtral`, `phi2`, `mamba2`, `phi4`, `nemotron`, `whisper`, `yi`, `starcoder2`
@@ -172,7 +172,7 @@ trustformers-models/
 ## Known Limitations
 
 - **Vestigial feature flags**: `mamba`, `rwkv`, `s4`, `stablelm`, `falcon`, `linformer` are declared in `Cargo.toml` but don't gate their module's compilation (see [Feature Flags](#feature-flags)).
-- **Orphaned implementations**: `src/swin/` (2,502 lines), `src/deit/` (1,692 lines), and a legacy `src/qwen2/` (2,090 lines, superseded by `qwen2_5`, and itself has the same weight-loading gap as the list above) all exist with real, documented APIs but have no `pub mod` declaration anywhere in `lib.rs` — they're unreachable dead code today. Swin and DeiT look ready to wire up behind new feature flags; `qwen2` should probably be removed rather than finished, since `qwen2_5` supersedes it.
+- **Orphaned implementations**: `src/swin/` (2,502 lines) and `src/deit/` (1,692 lines) exist with real, documented APIs but have no `pub mod` declaration anywhere in `lib.rs` — they're unreachable dead code today. Both look ready to wire up behind new feature flags. (A third, legacy `src/qwen2/`, had the same problem — superseded by `qwen2_5` — and has been deleted after confirming it had zero references anywhere in the workspace.)
 - **`all` meta-feature gap**: excludes `llama3_2` and `mistral_v3` in addition to the intentional `cuda`/`metal` exclusion.
 - **Weight-loading gaps**: 7 of 53 feature-gated architectures (see [Weight Loading](#weight-loading)).
 - **GPU coverage**: `cuda`/`metal` features exist and forward to `trustformers-core`, but within this crate real GPU-resident `#[cfg(feature = "cuda"/"metal")]` code paths currently exist only for `gpt2` and `gpt_neox`; the rest run on CPU (`f32`) regardless of GPU features being enabled, consistent with the workspace-wide GPU maturity notes in the top-level README.

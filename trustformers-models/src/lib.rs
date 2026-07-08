@@ -170,6 +170,14 @@ pub mod deberta;
 #[cfg(feature = "vit")]
 pub mod vit;
 
+// Swin Transformer: hierarchical ViT with shifted windows
+#[cfg(feature = "swin")]
+pub mod swin;
+
+// DeiT: data-efficient image transformers with distillation token
+#[cfg(feature = "deit")]
+pub mod deit;
+
 #[cfg(feature = "llama")]
 pub mod llama;
 
@@ -239,13 +247,18 @@ pub mod qwen2_5;
 
 // State-space and efficient models
 pub mod hyena;
+#[cfg(feature = "mamba")]
 pub mod mamba;
 pub mod retnet;
+#[cfg(feature = "rwkv")]
 pub mod rwkv;
+#[cfg(feature = "s4")]
 pub mod s4;
 
 // Modern LLM models
+#[cfg(feature = "falcon")]
 pub mod falcon;
+#[cfg(feature = "stablelm")]
 pub mod stablelm;
 
 // Meta Models
@@ -323,6 +336,7 @@ pub mod moe;
 
 // Efficient attention architectures
 pub mod fnet;
+#[cfg(feature = "linformer")]
 pub mod linformer;
 pub mod performer;
 
@@ -486,6 +500,15 @@ pub use deberta::{
 #[cfg(feature = "vit")]
 pub use vit::{ViTConfig, ViTForImageClassification, ViTModel};
 
+#[cfg(feature = "swin")]
+pub use swin::{SwinConfig, SwinForImageClassification, SwinModel};
+
+#[cfg(feature = "deit")]
+pub use deit::{
+    DeiTAttention, DeiTConfig, DeiTEmbeddings, DeiTEncoder, DeiTForImageClassification, DeiTLayer,
+    DeiTMLP, DeiTModel, DeiTPatchEmbedding,
+};
+
 #[cfg(feature = "llama")]
 pub use llama::{LlamaConfig, LlamaForCausalLM, LlamaModel};
 
@@ -599,6 +622,7 @@ pub use error_recovery::{
     ErrorCategory, ErrorRecoveryManager, ErrorTrends, ModelCheckpoint, RecoverableOperation,
     RecoveryAttempt, RecoveryConfig, RecoveryMetrics, RecoveryReport, RecoveryStrategy,
 };
+#[cfg(feature = "falcon")]
 pub use falcon::{FalconConfig, FalconForCausalLM, FalconModel};
 pub use fnet::{FNetConfig, FNetForMaskedLM, FNetForSequenceClassification, FNetModel};
 pub use hierarchical::{
@@ -624,9 +648,11 @@ pub use legal_medical_specialized::{
     LegalMedicalConfig, LegalMedicalDomain, LegalMedicalForCausalLM, LegalMedicalModel,
     LegalMedicalSpecialTokens, LegalSystem, MedicalStandard, PrivacyRequirement,
 };
+#[cfg(feature = "linformer")]
 pub use linformer::{
     LinformerConfig, LinformerForMaskedLM, LinformerForSequenceClassification, LinformerModel,
 };
+#[cfg(feature = "mamba")]
 pub use mamba::{MambaConfig, MambaModel};
 #[cfg(feature = "llama")]
 pub use math_specialized::{
@@ -698,7 +724,9 @@ pub use progressive_training::{
 pub use retnet::{
     RetNetConfig, RetNetForLanguageModeling, RetNetForSequenceClassification, RetNetModel,
 };
+#[cfg(feature = "rwkv")]
 pub use rwkv::{RwkvConfig, RwkvModel};
+#[cfg(feature = "s4")]
 pub use s4::{S4Config, S4ForLanguageModeling, S4Model};
 pub use scientific_specialized::{
     CitationStyle, ScientificAnalysis, ScientificConfig, ScientificDomain, ScientificForCausalLM,
@@ -708,6 +736,7 @@ pub use sparse_attention::{
     utils as sparse_attention_utils, SparseAttention, SparseAttentionConfig, SparseAttentionMask,
     SparsePattern,
 };
+#[cfg(feature = "stablelm")]
 pub use stablelm::{StableLMConfig, StableLMForCausalLM, StableLMModel};
 pub use weight_loading::{
     auto_create_loader, create_distributed_loader, create_gguf_loader, create_huggingface_loader,

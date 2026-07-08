@@ -148,12 +148,13 @@ pub mod utils {
     }
 }
 
-// TODO: These tests use types that don't exist in current module structure
-// (PersonaConfigBuilder, ConfigurationPresets, etc.). Need to be rewritten.
-// #[cfg(test)]
-#[cfg(test_disabled)]
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::conversational::config::builder::PersonaConfigBuilder;
+    use crate::pipeline::conversational::config::manager::ConfigurationManager;
+    use crate::pipeline::conversational::config::merging::ConfigurationMerger;
+    use crate::pipeline::conversational::config::presets::ConfigurationPresets;
     use std::env;
 
     #[test]

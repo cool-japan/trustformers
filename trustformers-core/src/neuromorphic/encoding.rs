@@ -95,7 +95,6 @@ impl SpikeEncoder {
     fn population_encode(&self, data: &[f32], time_step: f64) -> Result<Vec<SpikeEvent>> {
         let mut spikes = Vec::new();
         let population_size = 10; // Use 10 neurons per input value
-        let mut rng = thread_rng();
 
         for (input_id, &value) in data.iter().enumerate() {
             let normalized_value = (value + 1.0) / 2.0; // Normalize to [0,1]
@@ -106,7 +105,11 @@ impl SpikeEncoder {
                 let activation =
                     (-0.5 * ((normalized_value as f64 - center) / sigma).powi(2)).exp();
 
-                if activation > 0.5 && rng.random::<f64>() < activation {
+                // Population coding is a deterministic place code: every neuron whose
+                // Gaussian tuning curve is sufficiently activated fires, carrying the
+                // analog activation as the spike value. A stochastic gate here could
+                // drop all spikes for a valid input, violating the encoding contract.
+                if activation > 0.5 {
                     let neuron_id = input_id * population_size + pop_neuron;
                     spikes.push(SpikeEvent::new(neuron_id, 0.0, activation as f32));
                 }

@@ -10,13 +10,13 @@ pub mod auto_lr;
 pub mod multi_objective;
 
 pub use auto_lr::{
-    AutoLrConfig, AutoLrModelType, AutoLrResult, AutoLrSelector, AutoLrStrategy,
-    LrRangeTest, RecommendedSchedule, TrainingLrConfig,
+    AutoLrConfig, AutoLrModelType, AutoLrResult, AutoLrSelector, AutoLrStrategy, LrRangeTest,
+    RecommendedSchedule, TrainingLrConfig,
 };
 pub use multi_objective::{
-    compute_pareto_front, hypervolume_indicator, non_domination_sort,
-    HpConfig, HpSearchSpace, HpValue, MultiObjectiveHpo, MultiObjectiveHpoConfig,
-    MultiObjectiveResult, ObjectiveDirection, ParetoFront,
+    compute_pareto_front, hypervolume_indicator, non_domination_sort, HpConfig, HpSearchSpace,
+    HpValue, MultiObjectiveHpo, MultiObjectiveHpoConfig, MultiObjectiveResult, ObjectiveDirection,
+    ParetoFront,
 };
 
 #[cfg(test)]
@@ -30,7 +30,11 @@ mod tests {
         let mut search_space = HashMap::new();
         search_space.insert(
             "lr".to_string(),
-            HpSearchSpace::Float { min: 1e-5, max: 1e-2, log_scale: true },
+            HpSearchSpace::Float {
+                min: 1e-5,
+                max: 1e-2,
+                log_scale: true,
+            },
         );
         search_space.insert(
             "batch".to_string(),
@@ -50,7 +54,10 @@ mod tests {
 
     fn make_result(trial_id: usize, obj: Vec<f64>) -> MultiObjectiveResult {
         MultiObjectiveResult {
-            config: HpConfig { params: HashMap::new(), trial_id },
+            config: HpConfig {
+                params: HashMap::new(),
+                trial_id,
+            },
             objectives: obj,
             metadata: HashMap::new(),
         }
@@ -62,7 +69,10 @@ mod tests {
     fn test_lr_range_test_step_zero_returns_min_lr() {
         let t = LrRangeTest::new(1e-6, 1e-1, 50);
         let lr = t.lr_at_step(0);
-        assert!((lr - 1e-6_f32).abs() < 1e-12_f32, "expected min_lr at step 0, got {lr}");
+        assert!(
+            (lr - 1e-6_f32).abs() < 1e-12_f32,
+            "expected min_lr at step 0, got {lr}"
+        );
     }
 
     // ── LrRangeTest: last step returns max_lr ──────────────────────────────
@@ -71,7 +81,10 @@ mod tests {
     fn test_lr_range_test_last_step_returns_max_lr() {
         let t = LrRangeTest::new(1e-6, 1e-1, 50);
         let lr = t.lr_at_step(49);
-        assert!((lr - 1e-1_f32).abs() < 1e-6_f32, "expected max_lr at last step, got {lr}");
+        assert!(
+            (lr - 1e-1_f32).abs() < 1e-6_f32,
+            "expected max_lr at last step, got {lr}"
+        );
     }
 
     // ── LrRangeTest: midpoint is geometric mean ────────────────────────────
@@ -85,20 +98,31 @@ mod tests {
         let mid_lr = t.lr_at_step(50);
         let expected = (min_lr * max_lr).sqrt();
         let rel_err = (mid_lr - expected).abs() / expected;
-        assert!(rel_err < 1e-4_f32, "midpoint lr={mid_lr} expected≈{expected}, rel_err={rel_err}");
+        assert!(
+            rel_err < 1e-4_f32,
+            "midpoint lr={mid_lr} expected≈{expected}, rel_err={rel_err}"
+        );
     }
 
     // ── smooth_losses: smoothing=0.0 reproduces input exactly ─────────────
 
     #[test]
     fn test_smooth_losses_zero_smoothing_passthrough() {
-        let t = LrRangeTest { min_lr: 1e-5, max_lr: 1e-1, num_iters: 10, smoothing: 0.0 };
+        let t = LrRangeTest {
+            min_lr: 1e-5,
+            max_lr: 1e-1,
+            num_iters: 10,
+            smoothing: 0.0,
+        };
         let losses = vec![1.0_f32, 2.0, 3.0, 4.0];
         let smoothed = t.smooth_losses(&losses);
         assert_eq!(smoothed.len(), losses.len());
         // With beta=0 each smoothed[i] = loss[i] (bias-corrected ema = loss directly).
         for (s, l) in smoothed.iter().zip(losses.iter()) {
-            assert!((s - l).abs() < 1e-5_f32, "expected passthrough, got {s} vs {l}");
+            assert!(
+                (s - l).abs() < 1e-5_f32,
+                "expected passthrough, got {s} vs {l}"
+            );
         }
     }
 
@@ -106,11 +130,19 @@ mod tests {
 
     #[test]
     fn test_smooth_losses_constant_converges() {
-        let t = LrRangeTest { min_lr: 1e-5, max_lr: 1e-1, num_iters: 200, smoothing: 0.9 };
+        let t = LrRangeTest {
+            min_lr: 1e-5,
+            max_lr: 1e-1,
+            num_iters: 200,
+            smoothing: 0.9,
+        };
         let losses = vec![3.0_f32; 200];
         let smoothed = t.smooth_losses(&losses);
         let last = *smoothed.last().expect("non-empty");
-        assert!((last - 3.0_f32).abs() < 0.01_f32, "expected ~3.0, got {last}");
+        assert!(
+            (last - 3.0_f32).abs() < 0.01_f32,
+            "expected ~3.0, got {last}"
+        );
     }
 
     // ── find_optimal_lr: None for fewer than 4 points ─────────────────────
@@ -144,8 +176,8 @@ mod tests {
     fn test_compute_pareto_front_dominates() {
         // Point [0.1, 0.2] dominates [0.5, 0.8] under minimisation.
         let points = vec![
-            (vec![], vec![0.5_f32, 0.8_f32]),  // dominated
-            (vec![], vec![0.1_f32, 0.2_f32]),  // Pareto-optimal
+            (vec![], vec![0.5_f32, 0.8_f32]), // dominated
+            (vec![], vec![0.1_f32, 0.2_f32]), // Pareto-optimal
         ];
         let front = compute_pareto_front(&points);
         // Only index 1 should be on the front.
@@ -163,7 +195,11 @@ mod tests {
             (vec![], vec![0.9_f32, 0.1_f32]),
         ];
         let front = compute_pareto_front(&points);
-        assert_eq!(front.len(), 2, "both incomparable points should be on front");
+        assert_eq!(
+            front.len(),
+            2,
+            "both incomparable points should be on front"
+        );
     }
 
     // ── compute_pareto_front: single point is always on front ────────────
@@ -199,17 +235,17 @@ mod tests {
         let front = vec![vec![0.0_f32, 0.0_f32]];
         let reference = vec![1.0_f32, 1.0_f32];
         let hv = hypervolume_indicator(&front, &reference);
-        assert!((hv - 1.0_f32).abs() < 0.01_f32, "expected hypervolume ~1.0, got {hv}");
+        assert!(
+            (hv - 1.0_f32).abs() < 0.01_f32,
+            "expected hypervolume ~1.0, got {hv}"
+        );
     }
 
     // ── hypervolume_indicator: positive area for valid 2D front ──────────
 
     #[test]
     fn test_hypervolume_indicator_two_points_2d() {
-        let front = vec![
-            vec![0.2_f32, 0.8_f32],
-            vec![0.8_f32, 0.2_f32],
-        ];
+        let front = vec![vec![0.2_f32, 0.8_f32], vec![0.8_f32, 0.2_f32]];
         let reference = vec![1.0_f32, 1.0_f32];
         let hv = hypervolume_indicator(&front, &reference);
         assert!(hv > 0.0_f32, "hypervolume should be positive, got {hv}");
@@ -235,8 +271,8 @@ mod tests {
     #[test]
     fn test_non_domination_sort_dominated_after_dominator() {
         let objectives = vec![
-            vec![0.1_f32, 0.1_f32],  // index 0: dominates everything
-            vec![0.9_f32, 0.9_f32],  // index 1: dominated
+            vec![0.1_f32, 0.1_f32], // index 0: dominates everything
+            vec![0.9_f32, 0.9_f32], // index 1: dominated
         ];
         let sorted = non_domination_sort(&objectives);
         assert_eq!(sorted.len(), 2);
@@ -296,8 +332,14 @@ mod tests {
         let config = two_obj_config();
         let mut hpo = MultiObjectiveHpo::new(config).expect("valid config");
         let hp_cfg = hpo.suggest();
-        assert!(hp_cfg.params.contains_key("lr"), "should contain 'lr' param");
-        assert!(hp_cfg.params.contains_key("batch"), "should contain 'batch' param");
+        assert!(
+            hp_cfg.params.contains_key("lr"),
+            "should contain 'lr' param"
+        );
+        assert!(
+            hp_cfg.params.contains_key("batch"),
+            "should contain 'batch' param"
+        );
     }
 
     // ── MultiObjectiveHpo: trial_id increments on each suggest ───────────
@@ -344,7 +386,10 @@ mod tests {
             hpo.record(result);
         }
         // Pareto front should be non-empty.
-        assert!(!hpo.pareto_front().is_empty(), "Pareto front should be populated");
+        assert!(
+            !hpo.pareto_front().is_empty(),
+            "Pareto front should be populated"
+        );
     }
 
     // ── ParetoFront: empty front has 0 solutions ──────────────────────────
@@ -370,10 +415,15 @@ mod tests {
 
     #[test]
     fn test_custom_model_type_sweet_spot_geometric_mean() {
-        let model_type = AutoLrModelType::Custom { suggested_range: (1e-4, 1e-2) };
+        let model_type = AutoLrModelType::Custom {
+            suggested_range: (1e-4, 1e-2),
+        };
         let sweet = model_type.sweet_spot();
         let expected = (1e-4_f64 * 1e-2_f64).sqrt();
-        assert!((sweet - expected).abs() < 1e-10, "expected geometric mean {expected}, got {sweet}");
+        assert!(
+            (sweet - expected).abs() < 1e-10,
+            "expected geometric mean {expected}, got {sweet}"
+        );
     }
 
     // ── AutoLrStrategy variants exist ────────────────────────────────────
@@ -407,9 +457,13 @@ mod tests {
         });
         let result = selector.select_from_heuristics(110_000_000);
         let (lo, hi) = AutoLrModelType::Bert.suggested_range();
-        assert!(result.suggested_lr >= lo * 0.4 && result.suggested_lr <= hi * 2.5,
+        assert!(
+            result.suggested_lr >= lo * 0.4 && result.suggested_lr <= hi * 2.5,
             "Bert LR {:.2e} out of expected range [{:.2e}, {:.2e}]",
-            result.suggested_lr, lo * 0.4, hi * 2.5);
+            result.suggested_lr,
+            lo * 0.4,
+            hi * 2.5
+        );
     }
 
     // ── AutoLrSelector: recommend_training_config returns valid config ────
@@ -420,7 +474,10 @@ mod tests {
         let cfg = selector.recommend_training_config(100_000_000, 10_000);
         assert!(cfg.initial_lr > 0.0, "initial_lr must be positive");
         assert!(cfg.max_lr >= cfg.min_lr, "max_lr must be >= min_lr");
-        assert!(cfg.warmup_steps > 0, "warmup_steps should be > 0 with use_warmup=true");
+        assert!(
+            cfg.warmup_steps > 0,
+            "warmup_steps should be > 0 with use_warmup=true"
+        );
         assert!(cfg.weight_decay >= 0.0, "weight_decay must be non-negative");
     }
 }

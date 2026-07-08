@@ -24,3 +24,7 @@ cc 590d0def31dc1b55239e09880a639d873ef31d283ad66f793ca6a36c27eb2fd8 # shrinks to
 cc b1269d5392f4a53a9f6ee15da09c6e0d27b57702d17313c5e1071c3bd186dad3 # shrinks to m = 7, k1 = 7, k2 = 5, n = 6
 cc 21d2792ca2f3b2f36e151386242bc5eda18040d81883835f0ca2b00eae44d6dc # shrinks to m = 6, k1 = 6, k2 = 2, n = 5
 cc e5f5264d4a222c6fe9a9d24442d232f5e1834c65b4267ab77f3e79df377e9b5d # shrinks to m = 4, k1 = 4, k2 = 4, n = 4
+cc 0dd1d6859d91e92b502f3c5b6e33ba9acd08a35fa0c094323ff2c92bd6e49e68 # shrinks to m = 6, k1 = 6, k2 = 5, n = 4
+cc fb548cfe11255112a006baf842ed3f5de16401d86f0e47681cc8792a8c7662a7 # shrinks to m = 7, n = 9
+cc 35d0c94d79901d75ca053e2228150c5684e413cede573c819df9b7b36a57b337 # shrinks to m = 8, n = 9
+cc fddd7acd19fbfc57bd362274229e6385bf7fcfa0066678a6e7fe61968dba0add # shrinks to m = 4, k1 = 7, k2 = 6, n = 7

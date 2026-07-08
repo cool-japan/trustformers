@@ -174,37 +174,57 @@ impl Tensor {
     /// # }
     /// ```
     pub fn matmul(&self, other: &Tensor) -> Result<Tensor> {
-        // GPU dispatch guard: if either operand is a GPU-resident tensor, route the
-        // operation to the matching GPU backend in `crate::gpu_ops`. The data is first
-        // downloaded to a host `Tensor::F32` (the GPU backends operate on host slices),
-        // then the dispatch function executes the matmul on the GPU and returns a host
-        // tensor. These arms are `#[cfg]`-gated behind the respective GPU features, so
-        // the default (CPU-only) build is completely unaffected.
-        // The `cuda` feature is the Pure-Rust oxicuda backend. 2D F32 matmuls are uploaded,
-        // multiplied via oxicuda-blas GEMM, and returned as a host `Tensor::F32`; device 0 is
-        // used by default. oxicuda never constructs a `Tensor::CUDA` variant, so the operands
-        // here are always host `Tensor::F32` (there is no GPU-resident operand to download).
+        // GPU dispatch guards: route CUDA/Metal-capable operand combinations to the
+        // matching GPU backend in `crate::gpu_ops`. These arms are `#[cfg]`-gated behind
+        // the respective GPU features, so the default (CPU-only) build is unaffected.
         //
-        // Unlike the tag-gated GPU arms elsewhere in this crate (which only activate for an
-        // already GPU-resident `Tensor::CUDA`/`Tensor::Metal`, i.e. a tensor that could only
-        // exist if a prior runtime-checked upload succeeded), this arm operates on plain host
-        // `Tensor::F32` operands that exist on *every* build, CUDA-capable hardware or not. So
-        // `#[cfg(feature = "cuda")]` alone (a compile-time check) is not a sufficient guard here
-        // — it must also be confirmed with a genuine runtime probe via `oxicuda_cuda_available()`
-        // (cached after the first call, so this stays cheap on this hot path). Without that
-        // check, any 2D F32 matmul on a `cuda`-enabled build with no actual GPU present would
-        // unconditionally hard-error instead of falling through to the CPU path below.
+        // The `cuda` feature is the Pure-Rust oxicuda backend, reached through two arms:
+        //
+        // (1) GPU-resident operands. If either side is `Tensor::CUDA`, the resident
+        //     dispatcher runs the multiply on the device: CUDA x CUDA on one device is a
+        //     fully resident batched GEMM producing a `Tensor::CUDA` (its buffer owned by
+        //     the refcounted handle lifecycle, freed when the last clone drops); a mixed
+        //     host-F32 operand is uploaded to the resident operand's device (temporary
+        //     buffer freed on drop); cross-device and non-F32-host mixes bounce through
+        //     the host. A `Tensor::CUDA` can only exist if a runtime-checked upload
+        //     already succeeded, so no availability probe is needed in this arm.
+        //
+        // (2) Host F32 operands. Rank >= 2 F32 matmuls (2D plus batched/broadcast N-D —
+        //     see `BatchedMatmulPlan` for the broadcasting rules) are uploaded, multiplied
+        //     via oxicuda-blas GEMM, and returned as a host `Tensor::F32`.
+        //
+        //     Unlike arm (1) (which only activates for an already GPU-resident tensor),
+        //     arm (2) operates on plain host `Tensor::F32` operands that exist on *every*
+        //     build, CUDA-capable hardware or not. So `#[cfg(feature = "cuda")]` alone (a
+        //     compile-time check) is not a sufficient guard here — it must also be
+        //     confirmed with a genuine runtime probe via `oxicuda_cuda_available()`
+        //     (cached after the first call, so this stays cheap on this hot path).
+        //     Without that check, any F32 matmul on a `cuda`-enabled build with no actual
+        //     GPU present would unconditionally hard-error instead of falling through to
+        //     the CPU path below. Empty operands (zero-sized dims) stay on the CPU path,
+        //     which produces the correct empty result without touching the driver.
+        //
+        // Half-precision (F16/BF16) operands never enter either arm: they keep using the
+        // CPU upcast path below (device-side f16 GEMM is planned 0.3.x work).
         #[cfg(feature = "cuda")]
         {
-            if matches!(self, Tensor::F32(_)) && matches!(other, Tensor::F32(_)) {
-                let a_2d = matches!(self, Tensor::F32(a) if a.ndim() == 2);
-                let b_2d = matches!(other, Tensor::F32(b) if b.ndim() == 2);
-                if a_2d && b_2d && crate::gpu_ops::cuda::oxicuda_cuda_available() {
-                    const OXICUDA_DEVICE_ID: usize = 0;
+            if matches!(self, Tensor::CUDA(_)) || matches!(other, Tensor::CUDA(_)) {
+                return crate::gpu_ops::cuda::dispatch_oxicuda_matmul_resident(self, other);
+            }
+            if let (Tensor::F32(a_arr), Tensor::F32(b_arr)) = (self, other) {
+                if a_arr.ndim() >= 2
+                    && b_arr.ndim() >= 2
+                    && !a_arr.is_empty()
+                    && !b_arr.is_empty()
+                    && crate::gpu_ops::cuda::oxicuda_cuda_available()
+                {
+                    // Host operands carry no device tag, so use the process-wide default
+                    // ordinal (0 unless overridden via `TRUSTFORMERS_CUDA_DEVICE`); the
+                    // ordinal is validated against the device count at backend creation.
                     return crate::gpu_ops::cuda::dispatch_oxicuda_matmul(
                         self,
                         other,
-                        OXICUDA_DEVICE_ID,
+                        crate::gpu_ops::cuda::default_cuda_device_id(),
                     );
                 }
             }

@@ -30,6 +30,77 @@ pub struct ModelInfo {
     pub architecture: Option<String>,
 }
 
+/// Parse a Hugging Face Hub `/api/models/{id}` JSON response into a [`ModelInfo`].
+///
+/// This is a pure, network-free mapping function so the field-extraction logic
+/// (including the nested `cardData`/`config` lookups) can be unit-tested
+/// without making any HTTP calls. Only the `hub`-feature body of
+/// `OfflineModelPackManager::get_model_info` performs the actual request;
+/// this function just maps the resulting JSON.
+///
+/// Field mapping mirrors `hub.rs::get_download_stats`'s manual-field-pull
+/// pattern for this exact same endpoint:
+/// - `downloads`, `likes`, `pipeline_tag`, `tags`, `library_name` map directly
+/// - `createdAt` -> `created_at`, `lastModified` -> `updated_at`
+/// - `cardData.license` / `cardData.language` / `cardData.datasets` -> `license` / `language` / `dataset`
+/// - `config.model_type` -> `model_type`, `config.architectures[0]` -> `architecture`
+#[cfg(feature = "hub")]
+fn model_info_from_hub_json(model_id: &str, json: &serde_json::Value) -> ModelInfo {
+    // `cardData.language`/`cardData.datasets` may be a single string or an
+    // array of strings depending on the model's metadata; normalize both.
+    fn as_string_vec(value: Option<&serde_json::Value>) -> Vec<String> {
+        match value {
+            Some(serde_json::Value::String(s)) => vec![s.clone()],
+            Some(serde_json::Value::Array(items)) => {
+                items.iter().filter_map(|item| item.as_str().map(str::to_string)).collect()
+            },
+            _ => Vec::new(),
+        }
+    }
+
+    let pipeline_tag = json.get("pipeline_tag").and_then(|v| v.as_str()).map(str::to_string);
+    let card_data = json.get("cardData");
+    let config_obj = json.get("config");
+
+    ModelInfo {
+        model_id: model_id.to_string(),
+        library_name: json.get("library_name").and_then(|v| v.as_str()).map(str::to_string),
+        pipeline_tag: pipeline_tag.clone(),
+        tags: json
+            .get("tags")
+            .and_then(|v| v.as_array())
+            .map(|items| items.iter().filter_map(|t| t.as_str().map(str::to_string)).collect())
+            .unwrap_or_default(),
+        config: config_obj
+            .and_then(|c| c.as_object())
+            .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default(),
+        downloads: json.get("downloads").and_then(|v| v.as_u64()),
+        likes: json.get("likes").and_then(|v| v.as_u64()),
+        created_at: json.get("createdAt").and_then(|v| v.as_str()).map(str::to_string),
+        updated_at: json.get("lastModified").and_then(|v| v.as_str()).map(str::to_string),
+        author: json.get("author").and_then(|v| v.as_str()).map(str::to_string),
+        description: None,
+        license: card_data
+            .and_then(|c| c.get("license"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        task: pipeline_tag,
+        language: as_string_vec(card_data.and_then(|c| c.get("language"))),
+        dataset: as_string_vec(card_data.and_then(|c| c.get("datasets"))),
+        model_type: config_obj
+            .and_then(|c| c.get("model_type"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        architecture: config_obj
+            .and_then(|c| c.get("architectures"))
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+    }
+}
+
 /// Offline Model Pack System for TrustformeRS
 /// Enables packaging and distribution of model collections for offline deployment
 
@@ -352,8 +423,66 @@ impl OfflineModelPackManager {
 
     // Private helper methods
 
+    /// Query the real Hugging Face Hub API for model metadata.
+    ///
+    /// Mirrors `hub.rs::get_download_stats`'s existing pattern for this exact
+    /// endpoint (`GET /api/models/{id}`): fetch, parse as a generic
+    /// `serde_json::Value`, then hand off to [`model_info_from_hub_json`] for
+    /// the actual field mapping.
+    #[cfg(feature = "hub")]
     async fn get_model_info(&self, model_id: &str) -> Result<ModelInfo> {
-        // Mock implementation - in real scenario, this would query the hub
+        let url = format!("https://huggingface.co/api/models/{model_id}");
+        let client = reqwest::Client::new();
+
+        let response = client.get(&url).send().await.map_err(|e| TrustformersError::Hub {
+            message: format!("Failed to fetch model info for '{}': {}", model_id, e),
+            model_id: model_id.to_string(),
+            endpoint: Some(url.clone()),
+            suggestion: Some(
+                "Check network connectivity and that the model ID is correct".to_string(),
+            ),
+            recovery_actions: vec![],
+        })?;
+
+        if !response.status().is_success() {
+            return Err(TrustformersError::Hub {
+                message: format!(
+                    "Failed to fetch model info for '{}': HTTP {}",
+                    model_id,
+                    response.status()
+                ),
+                model_id: model_id.to_string(),
+                endpoint: Some(url.clone()),
+                suggestion: Some(
+                    "Check that the model ID exists on the Hugging Face Hub".to_string(),
+                ),
+                recovery_actions: vec![],
+            });
+        }
+
+        let json: serde_json::Value = response.json().await.map_err(|e| {
+            TrustformersError::invalid_input(
+                format!(
+                    "Failed to parse model info response for '{}': {}",
+                    model_id, e
+                ),
+                Some("api_response"),
+                Some("valid JSON model info object"),
+                Some("invalid JSON format"),
+            )
+        })?;
+
+        Ok(model_info_from_hub_json(model_id, &json))
+    }
+
+    /// Mock model info used when the `hub` feature (networking) is disabled.
+    ///
+    /// Kept deterministic — mirroring `hub.rs:769-792`'s fallback pattern of
+    /// keeping default/offline builds fully functional — so pack creation
+    /// still works without any network access; only real Hub metadata
+    /// requires the `hub` feature.
+    #[cfg(not(feature = "hub"))]
+    async fn get_model_info(&self, model_id: &str) -> Result<ModelInfo> {
         Ok(ModelInfo {
             model_id: model_id.to_string(),
             pipeline_tag: Some("text-generation".to_string()),
@@ -1237,5 +1366,112 @@ mod tests {
         assert_eq!(info.model_id, "test/model");
         assert_eq!(info.pipeline_tag.as_deref(), Some("text-generation"));
         assert_eq!(info.downloads, Some(5000));
+    }
+
+    // --- get_model_info tests (Hub integration) ---
+
+    /// Regression test: with the `hub` feature disabled, `get_model_info`
+    /// must keep returning the same deterministic mock data it always has
+    /// (no network access is possible without the `hub` feature).
+    #[cfg(not(feature = "hub"))]
+    #[tokio::test]
+    async fn test_get_model_info_mock_mode_is_deterministic() {
+        let path = temp_dir_path();
+        let manager = OfflineModelPackManager::new(&path)
+            .expect("OfflineModelPackManager::new should succeed");
+        let info = manager
+            .get_model_info("some-arbitrary-model-id")
+            .await
+            .expect("mock get_model_info should not fail without the hub feature");
+        assert_eq!(info.model_id, "some-arbitrary-model-id");
+        assert_eq!(info.pipeline_tag.as_deref(), Some("text-generation"));
+        assert_eq!(info.library_name.as_deref(), Some("transformers"));
+        assert_eq!(info.downloads, Some(1000));
+        assert_eq!(info.likes, Some(50));
+        assert!(info.tags.is_empty());
+        assert!(info.config.is_empty());
+        std::fs::remove_dir_all(&path).ok();
+    }
+
+    /// The real HTTP call itself just mirrors `hub.rs::get_download_stats`'s
+    /// already-established `reqwest` usage, so the part worth unit-testing
+    /// without a live network call is the JSON field-mapping logic. This
+    /// exercises `model_info_from_hub_json` directly against a hand-built
+    /// `serde_json::Value` shaped like a real `/api/models/{id}` response.
+    #[cfg(feature = "hub")]
+    #[test]
+    fn test_model_info_from_hub_json_maps_all_fields() {
+        let json = serde_json::json!({
+            "downloads": 12345,
+            "likes": 678,
+            "pipeline_tag": "text-classification",
+            "library_name": "transformers",
+            "tags": ["nlp", "bert"],
+            "createdAt": "2022-01-01T00:00:00.000Z",
+            "lastModified": "2023-06-15T00:00:00.000Z",
+            "author": "some-org",
+            "cardData": {
+                "license": "apache-2.0",
+                "language": ["en", "fr"],
+                "datasets": ["squad"]
+            },
+            "config": {
+                "model_type": "bert",
+                "architectures": ["BertForMaskedLM"]
+            }
+        });
+
+        let info = model_info_from_hub_json("some-org/some-model", &json);
+
+        assert_eq!(info.model_id, "some-org/some-model");
+        assert_eq!(info.downloads, Some(12345));
+        assert_eq!(info.likes, Some(678));
+        assert_eq!(info.pipeline_tag.as_deref(), Some("text-classification"));
+        assert_eq!(info.task.as_deref(), Some("text-classification"));
+        assert_eq!(info.library_name.as_deref(), Some("transformers"));
+        assert_eq!(info.tags, vec!["nlp".to_string(), "bert".to_string()]);
+        assert_eq!(info.created_at.as_deref(), Some("2022-01-01T00:00:00.000Z"));
+        assert_eq!(info.updated_at.as_deref(), Some("2023-06-15T00:00:00.000Z"));
+        assert_eq!(info.author.as_deref(), Some("some-org"));
+        assert_eq!(info.license.as_deref(), Some("apache-2.0"));
+        assert_eq!(info.language, vec!["en".to_string(), "fr".to_string()]);
+        assert_eq!(info.dataset, vec!["squad".to_string()]);
+        assert_eq!(info.model_type.as_deref(), Some("bert"));
+        assert_eq!(info.architecture.as_deref(), Some("BertForMaskedLM"));
+        assert!(info.config.contains_key("model_type"));
+    }
+
+    #[cfg(feature = "hub")]
+    #[test]
+    fn test_model_info_from_hub_json_handles_missing_optional_fields() {
+        let json = serde_json::json!({});
+        let info = model_info_from_hub_json("bare-model", &json);
+
+        assert_eq!(info.model_id, "bare-model");
+        assert_eq!(info.downloads, None);
+        assert_eq!(info.likes, None);
+        assert_eq!(info.pipeline_tag, None);
+        assert_eq!(info.library_name, None);
+        assert!(info.tags.is_empty());
+        assert!(info.config.is_empty());
+        assert!(info.language.is_empty());
+        assert!(info.dataset.is_empty());
+        assert_eq!(info.license, None);
+        assert_eq!(info.model_type, None);
+        assert_eq!(info.architecture, None);
+    }
+
+    #[cfg(feature = "hub")]
+    #[test]
+    fn test_model_info_from_hub_json_handles_single_string_language() {
+        // Some HF cardData responses provide `language` as a single string
+        // rather than an array of strings.
+        let json = serde_json::json!({
+            "cardData": {
+                "language": "en"
+            }
+        });
+        let info = model_info_from_hub_json("single-lang-model", &json);
+        assert_eq!(info.language, vec!["en".to_string()]);
     }
 }

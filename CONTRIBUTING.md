@@ -326,8 +326,13 @@ When working with tensor operations:
 
 1. **Use SciRS2 SIMD ops**: Replace basic operations with `simd_add`, `simd_mul`, etc.
 2. **Parallel operations**: Use `scirs2_core::parallel_ops` instead of direct rayon
-3. **BLAS operations**: Integrate through SciRS2's BLAS abstractions
-4. **GPU support**: Use SciRS2's GPU context management when available
+3. **BLAS operations**: Integrate through SciRS2's BLAS abstractions (CPU path)
+4. **GPU support**: GPU compute is **not** provided by scirs2-core — use
+   `trustformers_core::gpu_ops`, which is backed by the Pure Rust **OxiCUDA** crate family
+   (`oxicuda-blas`/`oxicuda-dnn`/`oxicuda-memory`/`oxicuda-driver` for the `cuda` feature,
+   `oxicuda-metal`/`oxicuda-backend` for the `metal` feature). Never call `scirs2_core::gpu_ops`
+   or import raw GPU crates (`cudarc`, `metal`, `wgpu`, `opencl3`) directly — scirs2-core
+   remains mandatory for CPU array/random/SIMD/parallel abstractions only.
 
 Example:
 ```rust

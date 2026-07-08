@@ -707,12 +707,47 @@ impl AutoTokenizer {
             let tokenizer = crate::tokenizers::TokenizerImpl::from_file(&tokenizer_path)?;
             Ok(AutoTokenizer::HuggingFace(tokenizer))
         } else {
-            // Try to download from hub with revision support
-            let tokenizer = crate::tokenizers::TokenizerImpl::from_pretrained_with_revision(
+            // Try to download tokenizer.json from the Hub with revision support,
+            // mirroring AutoConfig::from_pretrained_with_revision's pattern above:
+            // download_file_from_hub already early-returns without any network
+            // access when the file is already present in the local Hub cache.
+            let hub_options = crate::hub::HubOptions {
+                revision: revision.map(|r| r.to_string()),
+                cache_dir: None,
+                force_download: false,
+                token: None,
+                parallel_downloads: true,
+                max_concurrent_downloads: 4,
+                enable_resumable_downloads: true,
+                enable_delta_compression: true,
+                chunk_size: 8192,
+                timeout_seconds: 30,
+                retry_attempts: 3,
+                use_cdn: true,
+                cdn_urls: vec![],
+                smart_caching: true,
+            };
+            match crate::hub::download_file_from_hub(
                 model_name_or_path,
-                revision,
-            )?;
-            Ok(AutoTokenizer::HuggingFace(tokenizer))
+                "tokenizer.json",
+                Some(hub_options),
+            ) {
+                Ok(downloaded_path) => {
+                    let tokenizer = crate::tokenizers::TokenizerImpl::from_file(&downloaded_path)?;
+                    Ok(AutoTokenizer::HuggingFace(tokenizer))
+                },
+                Err(_) => {
+                    // Fall back to the local-cache-path-only lookup (kept for
+                    // compatibility with pre-populated HF_HOME/TRANSFORMERS_CACHE
+                    // caches that TokenizerImpl checks directly).
+                    let tokenizer =
+                        crate::tokenizers::TokenizerImpl::from_pretrained_with_revision(
+                            model_name_or_path,
+                            revision,
+                        )?;
+                    Ok(AutoTokenizer::HuggingFace(tokenizer))
+                },
+            }
         }
     }
 }
@@ -1308,3 +1343,92 @@ impl AutoModel {
 #[cfg(test)]
 #[path = "automodel_tests.rs"]
 mod automodel_tests;
+
+#[cfg(test)]
+mod hub_download_tests {
+    use super::*;
+    use std::fs;
+
+    /// A minimal-but-valid `tokenizer.json` (HuggingFace `tokenizers` crate
+    /// format: a `WordLevel` model needs only `vocab` + `unk_token`; every
+    /// other top-level field is optional and defaults via `TokenizerBuilder`).
+    /// Proven to parse successfully via the same `serde_json`-based
+    /// `Tokenizer::from_file`/`from_str` path exercised by
+    /// `trustformers-tokenizers/src/tokenizer.rs`'s own
+    /// `test_tokenizer_from_json_string` test.
+    const TOKENIZER_JSON_FIXTURE: &str = r#"{
+    "version": "1.0",
+    "truncation": null,
+    "padding": null,
+    "added_tokens": [
+        { "id": 0, "content": "[PAD]", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true },
+        { "id": 1, "content": "[UNK]", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true }
+    ],
+    "normalizer": null,
+    "pre_tokenizer": { "type": "Whitespace" },
+    "post_processor": null,
+    "decoder": null,
+    "model": {
+        "type": "WordLevel",
+        "vocab": { "[PAD]": 0, "[UNK]": 1, "hello": 2, "world": 3 },
+        "unk_token": "[UNK]"
+    }
+}"#;
+
+    /// Cache-hit regression test for `AutoTokenizer::from_pretrained_with_revision`.
+    ///
+    /// Mirrors the early-return-on-cache-hit behavior already relied upon by
+    /// `AutoConfig::from_pretrained_with_revision` (130 lines above, via
+    /// `crate::hub::download_file_from_hub`): when `tokenizer.json` is already
+    /// present at the exact path the Hub cache resolves to, loading must
+    /// succeed purely from that cached file with **no network access** —
+    /// `download_file_from_hub`'s own `!opts.force_download && file_path.exists()`
+    /// check returns early, before the feature-gated `download_file` (the
+    /// only place that ever touches the network) is ever called. This holds
+    /// regardless of whether the `hub` feature is enabled, since neither
+    /// `get_cache_dir` nor `download_file_from_hub` are feature-gated.
+    ///
+    /// The cache directory is redirected to a fresh `std::env::temp_dir()`
+    /// subdirectory via `TRUSTFORMERS_CACHE` so this test never touches the
+    /// real/shared model cache on the machine running it.
+    #[test]
+    fn test_auto_tokenizer_from_pretrained_with_revision_cache_hit_no_network() {
+        let temp_cache = std::env::temp_dir().join(format!(
+            "trustformers_test_tokenizer_cache_{}",
+            std::process::id()
+        ));
+        let previous_cache_env = std::env::var("TRUSTFORMERS_CACHE").ok();
+        std::env::set_var("TRUSTFORMERS_CACHE", &temp_cache);
+
+        let model_id = "trustformers-test-org/cache-hit-tokenizer";
+        let revision_dir = temp_cache.join("models").join(model_id.replace('/', "--")).join("main");
+        fs::create_dir_all(&revision_dir).expect("should create fixture cache dir");
+        fs::write(revision_dir.join("tokenizer.json"), TOKENIZER_JSON_FIXTURE)
+            .expect("should write fixture tokenizer.json");
+
+        let result = AutoTokenizer::from_pretrained_with_revision(model_id, None);
+
+        // Restore the environment and clean up the temp cache before asserting,
+        // so a failed assertion never leaks the override or the fixture files.
+        match previous_cache_env {
+            Some(v) => std::env::set_var("TRUSTFORMERS_CACHE", v),
+            None => std::env::remove_var("TRUSTFORMERS_CACHE"),
+        }
+        fs::remove_dir_all(&temp_cache).ok();
+
+        let tokenizer = result.expect(
+            "from_pretrained_with_revision should succeed from the cache-hit path \
+             without any network access",
+        );
+        assert!(
+            matches!(tokenizer, AutoTokenizer::HuggingFace(_)),
+            "cache-hit tokenizer.json should load as the HuggingFace variant"
+        );
+        assert_eq!(
+            tokenizer.vocab_size(),
+            4,
+            "loaded tokenizer should reflect the 4-entry fixture vocab, proving it was \
+             read from the pre-populated Hub cache rather than a fallback/mock path"
+        );
+    }
+}

@@ -20,13 +20,11 @@ use crate::{
     ios::{IOSDeviceInfo, IOSThermalState},
     neural_engine_v3::NeuralEngineV3,
 };
-use scirs2_core::linalg::LinalgOps;
-use scirs2_core::tensor::Tensor as SciTensor;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
-use trustformers_core::error::{CoreError, Result};
+use trustformers_core::error::Result;
 use trustformers_core::Tensor;
 
 /// Configuration for Neural Engine v4 optimization

@@ -42,11 +42,13 @@ pub mod auto;
 pub mod auto_classes;
 pub mod automodel;
 pub mod automodel_tasks;
+pub mod cache;
 pub mod config_management;
 pub mod diagnostics;
 pub mod enhanced_profiler;
 pub mod error;
 pub mod evaluation;
+pub mod finetuning;
 pub mod hub;
 pub mod hub_differential;
 // hub_local_mirror is a networking module (reqwest-backed Hub mirror); gate it
@@ -59,6 +61,7 @@ pub mod hub_p2p;
 #[cfg(feature = "async")]
 pub mod hub_ui;
 pub mod hub_upload;
+pub mod loading;
 pub mod memory_pool;
 pub mod pipeline;
 pub mod processor;

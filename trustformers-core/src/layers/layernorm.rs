@@ -349,34 +349,42 @@ impl Layer for LayerNorm {
                     use crate::gpu_ops::cuda::get_cuda_backend;
 
                     if cuda_data.shape.len() == 2 && self.normalized_shape.len() == 1 {
-                        let device_id = if let Device::CUDA(id) = self.device { id } else { 0 };
+                        // Address the device the resident input actually lives on (the
+                        // buffer handle carries the ordinal) instead of the layer's
+                        // configured device.
+                        let device_id = cuda_data.device_id();
                         let backend = get_cuda_backend(device_id)?;
                         let shape = &cuda_data.shape;
                         let seq_len = shape[0];
                         let hidden_size = shape[1];
 
                         if hidden_size == self.normalized_shape[0] {
-                            // Get weight and bias buffer IDs
+                            // Get weight and bias buffer IDs; they must be resident on
+                            // the *same* device as the input for a GPU-to-GPU kernel.
                             match (&self.weight, &self.bias) {
-                                (Tensor::CUDA(w_data), Tensor::CUDA(b_data)) => {
-                                    // All on GPU - zero transfers!
+                                (Tensor::CUDA(w_data), Tensor::CUDA(b_data))
+                                    if w_data.device_id() == device_id
+                                        && b_data.device_id() == device_id =>
+                                {
+                                    // All on the same GPU - zero transfers!
                                     let output_buffer_id = backend.layernorm_gpu_to_gpu(
-                                        &cuda_data.buffer_id,
-                                        &w_data.buffer_id,
-                                        &b_data.buffer_id,
+                                        &cuda_data.buffer_id(),
+                                        &w_data.buffer_id(),
+                                        &b_data.buffer_id(),
                                         seq_len,
                                         hidden_size,
                                         self.eps,
                                     )?;
 
-                                    return Ok(Tensor::CUDA(CudaTensorData {
-                                        buffer_id: output_buffer_id,
-                                        shape: cuda_data.shape.clone(),
-                                        dtype: cuda_data.dtype,
-                                    }));
+                                    return Ok(Tensor::CUDA(CudaTensorData::new(
+                                        output_buffer_id,
+                                        device_id,
+                                        cuda_data.shape.clone(),
+                                        cuda_data.dtype,
+                                    )));
                                 },
                                 _ => {
-                                    // Weight/bias not on GPU - fallback to CPU
+                                    // Weight/bias not resident on this GPU - fallback to CPU
                                 },
                             }
                         }

@@ -87,7 +87,7 @@ impl Config for SwinConfig {
             ));
         }
 
-        if self.image_size % self.patch_size != 0 {
+        if !self.image_size.is_multiple_of(self.patch_size) {
             return Err(trustformers_core::errors::invalid_config(
                 "image_size",
                 "image_size must be divisible by patch_size",
@@ -123,11 +123,10 @@ impl Config for SwinConfig {
         }
 
         // Check head divisibility at each stage
-        for (stage, (&heads, &_depth)) in
-            self.num_heads.iter().zip(self.depths.iter()).enumerate()
+        for (stage, (&heads, &_depth)) in self.num_heads.iter().zip(self.depths.iter()).enumerate()
         {
             let dim = self.stage_dim(stage);
-            if dim % heads != 0 {
+            if !dim.is_multiple_of(heads) {
                 return Err(trustformers_core::errors::invalid_config(
                     "num_heads",
                     format!(
@@ -362,13 +361,19 @@ mod tests {
     #[test]
     fn test_initial_resolution_224() {
         // 224 / 4 = 56
-        assert_eq!(SwinConfig::swin_tiny_patch4_window7_224().initial_resolution(), 56);
+        assert_eq!(
+            SwinConfig::swin_tiny_patch4_window7_224().initial_resolution(),
+            56
+        );
     }
 
     #[test]
     fn test_initial_resolution_384() {
         // 384 / 4 = 96
-        assert_eq!(SwinConfig::swin_base_patch4_window12_384().initial_resolution(), 96);
+        assert_eq!(
+            SwinConfig::swin_base_patch4_window12_384().initial_resolution(),
+            96
+        );
     }
 
     #[test]
@@ -388,44 +393,56 @@ mod tests {
 
     #[test]
     fn test_validate_zero_patch_size() {
-        let mut cfg = SwinConfig::default();
-        cfg.patch_size = 0;
+        let cfg = SwinConfig {
+            patch_size: 0,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_validate_image_not_divisible_by_patch() {
-        let mut cfg = SwinConfig::default();
-        cfg.image_size = 225;
+        let cfg = SwinConfig {
+            image_size: 225,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_validate_depths_heads_length_mismatch() {
-        let mut cfg = SwinConfig::default();
-        cfg.depths = vec![2, 2, 6];
+        let cfg = SwinConfig {
+            depths: vec![2, 2, 6],
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_validate_empty_depths() {
-        let mut cfg = SwinConfig::default();
-        cfg.depths = vec![];
-        cfg.num_heads = vec![];
+        let cfg = SwinConfig {
+            depths: vec![],
+            num_heads: vec![],
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_validate_zero_window_size() {
-        let mut cfg = SwinConfig::default();
-        cfg.window_size = 0;
+        let cfg = SwinConfig {
+            window_size: 0,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_validate_zero_embed_dim() {
-        let mut cfg = SwinConfig::default();
-        cfg.embed_dim = 0;
+        let cfg = SwinConfig {
+            embed_dim: 0,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
@@ -444,9 +461,11 @@ mod tests {
             s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             let factor = ((s % 4) + 1) as usize;
             let embed_dim = 32 * factor;
-            let mut cfg = SwinConfig::default();
-            cfg.embed_dim = embed_dim;
-            cfg.num_heads = vec![factor, factor * 2, factor * 4, factor * 8];
+            let cfg = SwinConfig {
+                embed_dim,
+                num_heads: vec![factor, factor * 2, factor * 4, factor * 8],
+                ..Default::default()
+            };
             assert!(cfg.validate().is_ok(), "embed={embed_dim} failed");
         }
     }

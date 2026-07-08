@@ -96,7 +96,12 @@ impl BoundingBox {
             }
         }
         if found {
-            Some(Self { x_min, y_min, x_max, y_max })
+            Some(Self {
+                x_min,
+                y_min,
+                x_max,
+                y_max,
+            })
         } else {
             None
         }
@@ -188,11 +193,8 @@ impl SemanticSegmentationMap {
         let mut freq: Vec<(String, f32)> = counts
             .into_iter()
             .map(|(cls, count)| {
-                let name = self
-                    .label_names
-                    .get(cls)
-                    .cloned()
-                    .unwrap_or_else(|| format!("class_{cls}"));
+                let name =
+                    self.label_names.get(cls).cloned().unwrap_or_else(|| format!("class_{cls}"));
                 let frac = count as f32 / total as f32;
                 (name, frac)
             })
@@ -219,10 +221,8 @@ impl SemanticSegmentationMap {
         if pred_rows != gt_rows {
             return Err(SegmentationError::DimensionMismatch);
         }
-        for (p_row, g_row) in predictions
-            .labels_per_pixel
-            .iter()
-            .zip(ground_truth.labels_per_pixel.iter())
+        for (p_row, g_row) in
+            predictions.labels_per_pixel.iter().zip(ground_truth.labels_per_pixel.iter())
         {
             if p_row.len() != g_row.len() {
                 return Err(SegmentationError::DimensionMismatch);
@@ -245,10 +245,8 @@ impl SemanticSegmentationMap {
             let mut tp = 0_usize;
             let mut fp = 0_usize;
             let mut fn_ = 0_usize;
-            for (p_row, g_row) in predictions
-                .labels_per_pixel
-                .iter()
-                .zip(ground_truth.labels_per_pixel.iter())
+            for (p_row, g_row) in
+                predictions.labels_per_pixel.iter().zip(ground_truth.labels_per_pixel.iter())
             {
                 for (&p, &g) in p_row.iter().zip(g_row.iter()) {
                     let pred_is_cls = p == cls;
@@ -402,7 +400,11 @@ pub struct ImageInput {
 impl ImageInput {
     /// Construct an `ImageInput`.
     pub fn new(data: Vec<f32>, height: usize, width: usize) -> Self {
-        Self { data, height, width }
+        Self {
+            data,
+            height,
+            width,
+        }
     }
 }
 
@@ -426,7 +428,12 @@ pub struct SegmentationMask {
 impl SegmentationMask {
     /// Create a new `SegmentationMask`.
     pub fn new(class_ids: Vec<u32>, height: usize, width: usize, num_classes: usize) -> Self {
-        Self { class_ids, height, width, num_classes }
+        Self {
+            class_ids,
+            height,
+            width,
+            num_classes,
+        }
     }
 
     /// Return the class ID at `(row, col)`.
@@ -534,12 +541,14 @@ impl SegmentationResult {
                     .get(class_id as usize)
                     .cloned()
                     .unwrap_or_else(|| format!("class_{class_id}"));
-                let coverage_ratio = if total_pixels == 0 {
-                    0.0
-                } else {
-                    pixel_count as f32 / total_pixels as f32
-                };
-                SegmentStats { class_id, class_name, pixel_count, coverage_ratio }
+                let coverage_ratio =
+                    if total_pixels == 0 { 0.0 } else { pixel_count as f32 / total_pixels as f32 };
+                SegmentStats {
+                    class_id,
+                    class_name,
+                    pixel_count,
+                    coverage_ratio,
+                }
             })
             .collect();
         stats.sort_by_key(|s| Reverse(s.pixel_count));
@@ -571,10 +580,12 @@ impl ImageSegmentationPipeline {
             ));
         }
         // Generate synthetic class names for the first `num_classes` slots.
-        let class_names: Vec<String> = (0..config.num_classes)
-            .map(|i| format!("class_{i}"))
-            .collect();
-        Ok(Self { config, class_names })
+        let class_names: Vec<String> =
+            (0..config.num_classes).map(|i| format!("class_{i}")).collect();
+        Ok(Self {
+            config,
+            class_names,
+        })
     }
 
     /// Run semantic segmentation on a single image.
@@ -603,8 +614,11 @@ impl ImageSegmentationPipeline {
         // class_id = (pixel_value * num_classes) as u32, clamped to [0, num_classes - 1].
         let num_classes = self.config.num_classes as u32;
         let mut class_ids = Vec::with_capacity(out_h * out_w);
-        let mut confidence_map: Option<Vec<f32>> =
-            if self.config.return_confidence_map { Some(Vec::with_capacity(out_h * out_w)) } else { None };
+        let mut confidence_map: Option<Vec<f32>> = if self.config.return_confidence_map {
+            Some(Vec::with_capacity(out_h * out_w))
+        } else {
+            None
+        };
 
         let channels = image.len().checked_div(height * width).unwrap_or(1).max(1);
 
@@ -619,8 +633,7 @@ impl ImageSegmentationPipeline {
                 let class_id = if num_classes == 0 {
                     0u32
                 } else {
-                    ((pixel_val.clamp(0.0, 1.0) * num_classes as f32) as u32)
-                        .min(num_classes - 1)
+                    ((pixel_val.clamp(0.0, 1.0) * num_classes as f32) as u32).min(num_classes - 1)
                 };
                 class_ids.push(class_id);
 
@@ -653,10 +666,7 @@ impl ImageSegmentationPipeline {
         if images.is_empty() {
             return Err(SegmentationError::EmptyImage);
         }
-        images
-            .iter()
-            .map(|&(data, h, w)| self.segment(data, h, w))
-            .collect()
+        images.iter().map(|&(data, h, w)| self.segment(data, h, w)).collect()
     }
 
     /// Run semantic segmentation on an [`ImageInput`], returning a [`SemanticSegmentationMap`].
@@ -718,11 +728,7 @@ impl ImageSegmentationPipeline {
                     .get(class_id as usize)
                     .cloned()
                     .unwrap_or_else(|| format!("class_{class_id}"));
-                let score = if total > 0 {
-                    pixel_count as f32 / total as f32
-                } else {
-                    0.0
-                };
+                let score = if total > 0 { pixel_count as f32 / total as f32 } else { 0.0 };
                 SegmentationInstance {
                     mask,
                     label,
@@ -734,7 +740,7 @@ impl ImageSegmentationPipeline {
             .collect();
 
         // Sort by area descending for stable output.
-        instances.sort_by(|a, b| b.area.cmp(&a.area));
+        instances.sort_by_key(|instance| std::cmp::Reverse(instance.area));
         Ok(instances)
     }
 
@@ -947,10 +953,8 @@ mod tests {
         let pipeline = ImageSegmentationPipeline::new(config).unwrap();
         let img1 = make_image(8, 8);
         let img2 = make_image(12, 12);
-        let batch: Vec<(&[f32], usize, usize)> = vec![
-            (img1.as_slice(), 8, 8),
-            (img2.as_slice(), 12, 12),
-        ];
+        let batch: Vec<(&[f32], usize, usize)> =
+            vec![(img1.as_slice(), 8, 8), (img2.as_slice(), 12, 12)];
         let results = pipeline.segment_batch(&batch).unwrap();
         assert_eq!(results.len(), 2);
         for r in &results {
@@ -984,8 +988,7 @@ mod tests {
 
     #[test]
     fn test_segment_empty_input() {
-        let pipeline =
-            ImageSegmentationPipeline::new(ImageSegmentationConfig::default()).unwrap();
+        let pipeline = ImageSegmentationPipeline::new(ImageSegmentationConfig::default()).unwrap();
         let result = pipeline.segment(&[], 10, 10);
         assert!(matches!(result, Err(SegmentationError::EmptyImage)));
     }
@@ -994,10 +997,12 @@ mod tests {
 
     #[test]
     fn test_segment_invalid_dimensions() {
-        let pipeline =
-            ImageSegmentationPipeline::new(ImageSegmentationConfig::default()).unwrap();
+        let pipeline = ImageSegmentationPipeline::new(ImageSegmentationConfig::default()).unwrap();
         let result = pipeline.segment(&[0.5f32; 10], 0, 10);
-        assert!(matches!(result, Err(SegmentationError::InvalidDimensions(_))));
+        assert!(matches!(
+            result,
+            Err(SegmentationError::InvalidDimensions(_))
+        ));
     }
 
     // ---- 14. SemanticSegmentationMap::class_frequency ----
@@ -1142,10 +1147,7 @@ mod tests {
     #[test]
     fn test_masks_to_semantic_overlap_last_wins() {
         // Two masks covering the same pixel — later one should win.
-        let masks = vec![
-            vec![vec![true]],
-            vec![vec![true]],
-        ];
+        let masks = vec![vec![vec![true]], vec![vec![true]]];
         let class_ids = vec![1_usize, 2];
         let label_names = vec!["bg".into(), "a".into(), "b".into()];
         let map = masks_to_semantic(&masks, &class_ids, 1, 1, label_names);
@@ -1167,8 +1169,8 @@ mod tests {
     fn test_bounding_box_from_mask_basic() {
         let mask = vec![
             vec![false, false, false],
-            vec![false, true,  true ],
-            vec![false, false, true ],
+            vec![false, true, true],
+            vec![false, false, true],
         ];
         let bbox = BoundingBox::from_mask(&mask).expect("should find bbox");
         assert_eq!(bbox.x_min, 1);
@@ -1256,10 +1258,7 @@ mod tests {
     #[test]
     fn test_class_frequency_sorted_descending() {
         let map = SemanticSegmentationMap {
-            labels_per_pixel: vec![
-                vec![0, 0, 0, 1],
-                vec![0, 0, 2, 1],
-            ],
+            labels_per_pixel: vec![vec![0, 0, 0, 1], vec![0, 0, 2, 1]],
             label_names: vec!["a".into(), "b".into(), "c".into()],
         };
         let freq = map.class_frequency();
@@ -1283,6 +1282,9 @@ mod tests {
         };
         let miou = SemanticSegmentationMap::mean_iou(&pred, &gt).expect("ok");
         // Only class 0 in GT. IoU for class 0 = TP/(TP+FP+FN) = 2/(2+2+0) = 0.5.
-        assert!((miou - 0.5).abs() < 1e-5, "partial overlap mIoU expected 0.5, got {miou}");
+        assert!(
+            (miou - 0.5).abs() < 1e-5,
+            "partial overlap mIoU expected 0.5, got {miou}"
+        );
     }
 }

@@ -73,9 +73,6 @@ pub mod ios_icloud;
 pub mod android;
 
 #[cfg(target_os = "android")]
-pub mod android_renderscript;
-
-#[cfg(target_os = "android")]
 pub mod android_work_manager;
 
 #[cfg(target_os = "android")]
@@ -155,9 +152,6 @@ pub mod advanced_neural_engine_v4;
 // MLX framework integration for Apple Silicon
 #[cfg(any(target_os = "ios", target_os = "macos"))]
 pub mod mlx_integration;
-
-// Federated Learning v2.0 with advanced differential privacy (moved to federated module)
-// pub mod federated_learning_v2;
 
 #[cfg(feature = "react-native")]
 pub mod react_native;
@@ -405,13 +399,6 @@ pub use ios_app_extensions::{
 pub use ios_icloud::{
     iCloudModelSync, iCloudSyncConfig, ConflictResolution, DatabaseScope, ModelMetadata,
     ModelSyncResult, SyncOperation, SyncResult, SyncStatistics, SyncStatus,
-};
-
-// Re-export Android RenderScript types
-#[cfg(target_os = "android")]
-pub use android_renderscript::{
-    AndroidRenderScriptEngine, RSAllocationStrategy, RSKernelParams, RSKernelType,
-    RenderScriptConfig, RenderScriptStats,
 };
 
 // Re-export Android Work Manager types

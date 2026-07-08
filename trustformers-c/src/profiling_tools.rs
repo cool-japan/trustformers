@@ -307,7 +307,7 @@ impl ContinuousProfiler {
     fn get_cpu_usage() -> Option<f64> {
         // Simplified CPU usage calculation
         // In production, use proper system monitoring libraries
-        Some(thread_rng().gen::<f64>() * 100.0) // Mock data
+        Some(thread_rng().random::<f64>() * 100.0) // Mock data
     }
 
     fn get_memory_info() -> Option<u64> {
@@ -317,7 +317,7 @@ impl ContinuousProfiler {
 
     fn get_gpu_usage() -> Option<f64> {
         // Mock GPU usage
-        Some(thread_rng().gen::<f64>() * 100.0)
+        Some(thread_rng().random::<f64>() * 100.0)
     }
 }
 

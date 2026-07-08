@@ -168,7 +168,7 @@ impl DeviceSelector {
 // Private implementation methods
 impl DeviceSelector {
     /// Analyze device capabilities and performance characteristics
-    async fn analyze_device_capabilities() -> Result<DeviceCapabilities, JsValue> {
+    pub(crate) async fn analyze_device_capabilities() -> Result<DeviceCapabilities, JsValue> {
         // Check WebGPU availability
         let webgpu_available = Self::check_webgpu_available();
 

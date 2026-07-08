@@ -225,14 +225,6 @@ impl SmoothQuantizer {
                     ));
                 },
                 #[allow(unreachable_patterns)] // Feature-gated patterns after catch-all
-                #[cfg(feature = "torch")]
-                Tensor::Torch(_) => {
-                    return Err(TrustformersError::tensor_op_error(
-                        "Torch tensors not yet supported for calibration",
-                        "collect_activation_stats",
-                    ));
-                },
-                #[allow(unreachable_patterns)] // Feature-gated patterns after catch-all
                 #[cfg(feature = "candle")]
                 Tensor::Candle(_) => {
                     return Err(TrustformersError::tensor_op_error(
@@ -391,13 +383,6 @@ impl SmoothQuantizer {
             Tensor::Sparse(_) => {
                 return Err(TrustformersError::tensor_op_error(
                     "Sparse tensors not yet supported for weight scaling",
-                    "calculate_weight_scales",
-                ));
-            },
-            #[cfg(feature = "torch")]
-            Tensor::Torch(_) => {
-                return Err(TrustformersError::tensor_op_error(
-                    "Torch tensors not yet supported for weight scaling",
                     "calculate_weight_scales",
                 ));
             },
@@ -621,12 +606,6 @@ impl SmoothQuantizer {
                 "calculate_range",
             )),
             #[allow(unreachable_patterns)] // Feature-gated patterns after catch-all
-            #[cfg(feature = "torch")]
-            Tensor::Torch(_) => Err(TrustformersError::tensor_op_error(
-                "Torch tensors not yet supported",
-                "calculate_range",
-            )),
-            #[allow(unreachable_patterns)] // Feature-gated patterns after catch-all
             #[cfg(feature = "candle")]
             Tensor::Candle(_) => Err(TrustformersError::tensor_op_error(
                 "Candle tensors not yet supported",
@@ -700,12 +679,6 @@ impl SmoothQuantizer {
             #[cfg(feature = "cuda")]
             _ => Err(TrustformersError::tensor_op_error(
                 "CUDA tensors not yet supported",
-                "tensor_to_u8",
-            )),
-            #[allow(unreachable_patterns)] // Feature-gated patterns after catch-all
-            #[cfg(feature = "torch")]
-            Tensor::Torch(_) => Err(TrustformersError::tensor_op_error(
-                "Torch tensors not yet supported",
                 "tensor_to_u8",
             )),
             #[allow(unreachable_patterns)] // Feature-gated patterns after catch-all
@@ -929,8 +902,6 @@ mod tests {
             Tensor::Metal(_) => panic!("Metal tensor type not expected in smoothing test"),
             #[cfg(feature = "cuda")]
             Tensor::CUDA(_) => panic!("CUDA tensor type not expected in smoothing test"),
-            #[cfg(feature = "torch")]
-            Tensor::Torch(_) => panic!("Unexpected Torch tensor type"),
             #[cfg(feature = "candle")]
             Tensor::Candle(_) => panic!("Unexpected Candle tensor type"),
         }

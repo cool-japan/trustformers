@@ -64,6 +64,33 @@ pub enum QuantizationPrecision {
     Adaptive,
 }
 
+impl QuantizationPrecision {
+    /// Number of bits used to represent one quantized element for this precision.
+    ///
+    /// `Mixed` (FP16 for a minority of outlier weights, INT8 for the rest) and `Adaptive`
+    /// (a runtime-selected, per-layer bit-width) do not have one single fixed bit-width by
+    /// design. Both nominally report 8 bits here as a documented approximation used for
+    /// size/statistics purposes: for `Mixed`, INT8 is the majority-path width (outliers are
+    /// expected to be a small minority of elements); for `Adaptive`, INT8 is the
+    /// default/starting width used before any runtime adaptation narrows individual layers
+    /// further. This is intentionally explicit (not a silently-defaulted wildcard arm).
+    pub fn bits(&self) -> u32 {
+        match self {
+            QuantizationPrecision::FP16 => 16,
+            QuantizationPrecision::FP8 | QuantizationPrecision::INT8 => 8,
+            QuantizationPrecision::INT4 => 4,
+            QuantizationPrecision::INT2 => 2,
+            QuantizationPrecision::INT1 => 1,
+            QuantizationPrecision::Mixed | QuantizationPrecision::Adaptive => 8,
+        }
+    }
+
+    /// Storage size in bytes per element (fractional for sub-byte widths like INT4/INT2/INT1).
+    pub fn bytes_per_element(&self) -> f32 {
+        self.bits() as f32 / 8.0
+    }
+}
+
 /// Quantization configuration
 #[wasm_bindgen]
 #[derive(Debug, Clone)]
@@ -374,4 +401,69 @@ pub enum ComputeCapability {
     Low,    // Basic CPU
     Medium, // High-end CPU or integrated GPU
     High,   // Dedicated GPU
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bits_fp16() {
+        assert_eq!(QuantizationPrecision::FP16.bits(), 16);
+    }
+
+    #[test]
+    fn test_bits_fp8() {
+        assert_eq!(QuantizationPrecision::FP8.bits(), 8);
+    }
+
+    #[test]
+    fn test_bits_int8() {
+        assert_eq!(QuantizationPrecision::INT8.bits(), 8);
+    }
+
+    #[test]
+    fn test_bits_int4() {
+        assert_eq!(QuantizationPrecision::INT4.bits(), 4);
+    }
+
+    #[test]
+    fn test_bits_int2() {
+        assert_eq!(QuantizationPrecision::INT2.bits(), 2);
+    }
+
+    #[test]
+    fn test_bits_int1() {
+        assert_eq!(QuantizationPrecision::INT1.bits(), 1);
+    }
+
+    #[test]
+    fn test_bits_mixed_is_nominally_eight() {
+        assert_eq!(QuantizationPrecision::Mixed.bits(), 8);
+    }
+
+    #[test]
+    fn test_bits_adaptive_is_nominally_eight() {
+        assert_eq!(QuantizationPrecision::Adaptive.bits(), 8);
+    }
+
+    #[test]
+    fn test_bytes_per_element_int8_is_one_byte() {
+        assert_eq!(QuantizationPrecision::INT8.bytes_per_element(), 1.0);
+    }
+
+    #[test]
+    fn test_bytes_per_element_int4_is_half_byte() {
+        assert_eq!(QuantizationPrecision::INT4.bytes_per_element(), 0.5);
+    }
+
+    #[test]
+    fn test_bytes_per_element_int1_is_eighth_byte() {
+        assert_eq!(QuantizationPrecision::INT1.bytes_per_element(), 0.125);
+    }
+
+    #[test]
+    fn test_bytes_per_element_fp16_is_two_bytes() {
+        assert_eq!(QuantizationPrecision::FP16.bytes_per_element(), 2.0);
+    }
 }

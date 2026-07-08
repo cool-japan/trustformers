@@ -149,7 +149,9 @@ impl LoraConfig {
                 parameter: Some("dropout".to_string()),
                 expected: Some("[0.0, 1.0)".to_string()),
                 received: Some(self.dropout.to_string()),
-                suggestion: Some("Use dropout = 0.0 to disable or 0.1 for regularization".to_string()),
+                suggestion: Some(
+                    "Use dropout = 0.0 to disable or 0.1 for regularization".to_string(),
+                ),
             });
         }
         Ok(())
@@ -320,22 +322,19 @@ impl LoraLinear {
         }
 
         // Base weight: zeros (will be loaded from pretrained checkpoint)
-        let base_weight = Tensor::zeros(&[out_features, in_features])
-            .map_err(TrustformersError::Core)?;
+        let base_weight =
+            Tensor::zeros(&[out_features, in_features]).map_err(TrustformersError::Core)?;
 
         // lora_a: small random noise ~ N(0, 0.02) for Kaiming-like initialisation
         let lora_a = {
-            let raw = Tensor::randn(&[rank, in_features])
-                .map_err(TrustformersError::Core)?;
+            let raw = Tensor::randn(&[rank, in_features]).map_err(TrustformersError::Core)?;
             // Scale by 1/sqrt(in_features) to approximate Kaiming uniform magnitude
             let scale_factor = (in_features as f32).sqrt().recip();
-            raw.mul_scalar(scale_factor)
-                .map_err(TrustformersError::Core)?
+            raw.mul_scalar(scale_factor).map_err(TrustformersError::Core)?
         };
 
         // lora_b: zeros so initial ΔW = B·A = 0
-        let lora_b = Tensor::zeros(&[out_features, rank])
-            .map_err(TrustformersError::Core)?;
+        let lora_b = Tensor::zeros(&[out_features, rank]).map_err(TrustformersError::Core)?;
 
         debug!(
             rank = rank,
@@ -366,15 +365,13 @@ impl LoraLinear {
     /// Returns an error if the input shape is incompatible or a matmul fails.
     pub fn forward(&self, input: &Tensor) -> Result<Tensor> {
         let input_shape = input.shape();
-        let last_dim = *input_shape
-            .last()
-            .ok_or_else(|| TrustformersError::InvalidInput {
-                message: "Input tensor has no dimensions".to_string(),
-                parameter: Some("input".to_string()),
-                expected: Some(format!("[*, {}]", self.in_features)),
-                received: Some("[]".to_string()),
-                suggestion: None,
-            })?;
+        let last_dim = *input_shape.last().ok_or_else(|| TrustformersError::InvalidInput {
+            message: "Input tensor has no dimensions".to_string(),
+            parameter: Some("input".to_string()),
+            expected: Some(format!("[*, {}]", self.in_features)),
+            received: Some("[]".to_string()),
+            suggestion: None,
+        })?;
 
         if last_dim != self.in_features && !self.merged {
             return Err(TrustformersError::InvalidInput {
@@ -391,13 +388,8 @@ impl LoraLinear {
 
         // Base linear: W·x  (W is [out, in], x is [in, *] via transpose convention)
         // Flatten to 2D for matmul: [batch, in] × [in, out] = [batch, out]
-        let w_t = self
-            .base_weight
-            .transpose(0, 1)
-            .map_err(TrustformersError::Core)?;
-        let base_out = input
-            .matmul(&w_t)
-            .map_err(TrustformersError::Core)?;
+        let w_t = self.base_weight.transpose(0, 1).map_err(TrustformersError::Core)?;
+        let base_out = input.matmul(&w_t).map_err(TrustformersError::Core)?;
 
         if self.merged {
             // When merged the base weight already contains ΔW
@@ -406,28 +398,16 @@ impl LoraLinear {
 
         // LoRA path: scale × B·(A·x)
         // A is [rank, in], so A^T is [in, rank]
-        let a_t = self
-            .lora_a
-            .transpose(0, 1)
-            .map_err(TrustformersError::Core)?;
-        let ax = input
-            .matmul(&a_t)
-            .map_err(TrustformersError::Core)?;
+        let a_t = self.lora_a.transpose(0, 1).map_err(TrustformersError::Core)?;
+        let ax = input.matmul(&a_t).map_err(TrustformersError::Core)?;
 
         // B is [out, rank], so B^T is [rank, out]
-        let b_t = self
-            .lora_b
-            .transpose(0, 1)
-            .map_err(TrustformersError::Core)?;
+        let b_t = self.lora_b.transpose(0, 1).map_err(TrustformersError::Core)?;
         let bax = ax.matmul(&b_t).map_err(TrustformersError::Core)?;
 
-        let scaled_bax = bax
-            .mul_scalar(self.scale)
-            .map_err(TrustformersError::Core)?;
+        let scaled_bax = bax.mul_scalar(self.scale).map_err(TrustformersError::Core)?;
 
-        base_out
-            .add(&scaled_bax)
-            .map_err(TrustformersError::Core)
+        base_out.add(&scaled_bax).map_err(TrustformersError::Core)
     }
 
     /// Merge LoRA weights into the base weight for inference speed-up.
@@ -449,18 +429,10 @@ impl LoraLinear {
         }
 
         // delta = scale × B · A  — shapes: [out, rank] × [rank, in] = [out, in]
-        let ba = self
-            .lora_b
-            .matmul(&self.lora_a)
-            .map_err(TrustformersError::Core)?;
-        let delta = ba
-            .mul_scalar(self.scale)
-            .map_err(TrustformersError::Core)?;
+        let ba = self.lora_b.matmul(&self.lora_a).map_err(TrustformersError::Core)?;
+        let delta = ba.mul_scalar(self.scale).map_err(TrustformersError::Core)?;
 
-        self.base_weight = self
-            .base_weight
-            .add(&delta)
-            .map_err(TrustformersError::Core)?;
+        self.base_weight = self.base_weight.add(&delta).map_err(TrustformersError::Core)?;
         self.merged = true;
 
         debug!(scale = self.scale, "LoRA weights merged into base weight");
@@ -484,18 +456,10 @@ impl LoraLinear {
             });
         }
 
-        let ba = self
-            .lora_b
-            .matmul(&self.lora_a)
-            .map_err(TrustformersError::Core)?;
-        let delta = ba
-            .mul_scalar(self.scale)
-            .map_err(TrustformersError::Core)?;
+        let ba = self.lora_b.matmul(&self.lora_a).map_err(TrustformersError::Core)?;
+        let delta = ba.mul_scalar(self.scale).map_err(TrustformersError::Core)?;
 
-        self.base_weight = self
-            .base_weight
-            .sub(&delta)
-            .map_err(TrustformersError::Core)?;
+        self.base_weight = self.base_weight.sub(&delta).map_err(TrustformersError::Core)?;
         self.merged = false;
 
         debug!("LoRA weights unmerged from base weight");

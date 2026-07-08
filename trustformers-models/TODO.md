@@ -34,7 +34,7 @@ and follow consistent patterns for configuration, weight loading, and forward pa
 - NO FILE EXCEEDS 2,000 LINES — refactor policy satisfied crate-wide
 - WEIGHT LOADING: complete for 46 of 53 feature-gated architectures; 7 return a handled "not yet implemented" error instead of loading real checkpoints (see Weight Loading section below) — **this is a correction from the previous "Complete (27/27)" claim, which was accurate for the original 27 but did not account for architectures added since**
 - **Correction**: removed a "BART" entry from this file — BART does not exist anywhere in this crate's source, Cargo.toml, or `lib.rs` (no `bart` feature, no `src/bart*`). It was documented here previously but was never actually implemented.
-- **New findings**: 3 fully-implemented-but-orphaned modules (`swin/`, `deit/`, legacy `qwen2/` — none reachable from the public API), 6 vestigial Cargo feature flags that don't gate compilation, and an `all` meta-feature that omits `llama3_2`/`mistral_v3`. See [Known Limitations](#known-limitations).
+- **New findings**: 2 fully-implemented-but-orphaned modules (`swin/`, `deit/` — neither reachable from the public API; a third, legacy `qwen2/`, was confirmed zero-referenced and has since been deleted), 6 vestigial Cargo feature flags that don't gate compilation, and an `all` meta-feature that omits `llama3_2`/`mistral_v3`. See [Known Limitations](#known-limitations).
 
 ### Model Categories (reality-checked counts)
 - **Encoder Models:** 6 (BERT, RoBERTa, ALBERT, DistilBERT, ELECTRA, DeBERTa)
@@ -118,7 +118,7 @@ and follow consistent patterns for configuration, weight loading, and forward pa
 
 #### Qwen family
 - **Qwen** (`qwen`): multilingual pretraining, multi-format weight loading (`src/qwen/model.rs`)
-- **Qwen2.5** (`qwen2_5`): current-generation Qwen (note: an older, unwired `qwen2` also exists in source — see Known Limitations)
+- **Qwen2.5** (`qwen2_5`): current-generation Qwen (an older, unwired legacy `qwen2` module was removed — see [Future Enhancements](#future-enhancements))
 
 #### Phi family
 - **Phi-3** (`phi3`): sliding-window attention (2048), LongRoPE scaling to 128K context, SwiGLU, GQA. `tasks.rs` includes `Phi3Error`, sliding-window masking, chat-prompt formatting, RoPE with LongRoPE scale factors, GQA+SWA+causal attention, greedy generation — 17 tests
@@ -250,7 +250,6 @@ Higher-level wrappers built on the architectures above:
 ### Per-Model Weight Loading Status (reality-checked 2026-07-01)
 - **Complete (46/53 feature-gated architectures)**: BERT, RoBERTa, ALBERT, DeBERTa, DistilBERT, ELECTRA, GPT-2, GPT-Neo, GPT-J, GPT-NeoX, LLaMA, LLaMA-2, CodeLlama, Mistral, Mixtral, Gemma, Gemma-2, Qwen, Qwen2.5, Phi-3, Phi-4, Falcon, Falcon2, StableLM, DeepSeek-V2, InternLM2, T5, Whisper, SD3, ViT, CLIP, BLIP-2, LLaVA, DALL-E, Flamingo, Linformer, Mamba, Mamba-2, RWKV, S4, Opt, Granite, Aya, Jamba, Jamba2, Nemotron (all 46 have a real, working Cargo feature flag — note Linformer's flag is one of the vestigial ones, see below, but its weight loading itself is complete) — plus, separately, the 8 always-on bonus architectures that have no Cargo feature at all (CogVLM, Command-R, Claude, Recursive Transformers, Hyena, RetNet, FNet, Performer) also load/construct correctly. (Note: Llama-3.2 is explicitly **not** in either list — see the gap entry directly below.)
 - **NOT yet implemented (7/53)** — verified via source scan for `"not yet implemented"` error strings, one file each: `llama3` (LLaMA-3), `llama3_2` (Llama-3.2), `mistral_v3` (Mistral v0.3), `phi2` (Phi-2), `deepseek` (DeepSeek v1), `yi` (Yi), `starcoder2` (StarCoder2)
-- **Orphaned, same gap**: the unwired legacy `qwen2/` module also has an incomplete weight loader (moot until/unless it's wired up or removed)
 
 ---
 
@@ -319,27 +318,81 @@ trustformers-models/src/
 ## Known Limitations
 
 - **6 vestigial Cargo feature flags** (`mamba`, `rwkv`, `s4`, `stablelm`, `falcon`, `linformer`): declared in `Cargo.toml` but their `pub mod` in `lib.rs` has no matching `#[cfg(feature = ...)]` — these always compile in regardless of flag state. Either add the missing `#[cfg(...)]` guards or remove the now-decorative Cargo.toml entries.
-- **3 orphaned, fully-written modules**: `src/swin/` (2,502 lines), `src/deit/` (1,692 lines), legacy `src/qwen2/` (2,090 lines) have no `pub mod` anywhere in `lib.rs` — unreachable from the public API today.
+- **2 orphaned, fully-written modules**: `src/swin/` (2,502 lines), `src/deit/` (1,692 lines) have no `pub mod` anywhere in `lib.rs` — unreachable from the public API today. (A third, legacy `src/qwen2/`, had the same problem and has been deleted — see [Future Enhancements](#future-enhancements).)
 - **`all` meta-feature gap**: does not include `llama3_2` or `mistral_v3` (in addition to the intentional `cuda`/`metal` exclusion).
 - **Weight-loading gaps**: 7 of 53 feature-gated architectures return a handled error instead of loading real checkpoints (`llama3`, `llama3_2`, `mistral_v3`, `phi2`, `deepseek`, `yi`, `starcoder2`).
 - **GPT-2 generation gap**: contrastive search not yet implemented.
-- **GPU coverage within this crate**: real `#[cfg(feature = "cuda"/"metal")]` code paths verified only in `gpt2` and `gpt_neox`; all other architectures run CPU/`f32` regardless of GPU features, matching the workspace-wide GPU maturity notes.
+- **GPU coverage within this crate**: real `#[cfg(feature = "cuda"/"metal")]` code paths verified only in `gpt2` and `gpt_neox`; all other architectures run CPU/`f32` regardless of GPU features, matching the workspace-wide GPU maturity notes. (Closing this gap is now tracked under [0.2.0 Release Scope](#020-release-scope-oxicuda-gpu-migration--tch-removal).)
 - **No `AutoModel`/`from_pretrained` dispatcher** — callers construct concrete model types directly.
 - Some multimodal models (Flamingo, CogVLM) have complex architectures; weight mapping covers all documented components, but coverage of undocumented/edge-case checkpoint layouts is unverified.
 - Alpha status: API surface may still evolve before a Stable designation.
 
 ---
 
+## 0.2.0 Release Scope (OxiCUDA GPU migration & tch removal)
+
+Two workspace-wide tracks land in 0.2.0: **(1) OxiCUDA GPU migration** — GPU execution moves from the `scirs2-core` gpu abstractions to OxiCUDA (~/work/oxicuda, 0.4.x); trustformers-core already integrates oxicuda behind the `cuda`/`metal` features, and this crate's job is routing model forwards through those resident paths. **(2) PyTorch (tch) dependency removal** — the `tch` dependency and the `torch` feature are deleted entirely in 0.2.0 (workspace Cargo.toml:82, trustformers-core torch feature + ~40 lines of cfg arms, and the forwarder features in trustformers, trustformers-training, trustformers-c); `Tensor::Torch` was never constructed anywhere in the workspace, so nothing in this crate is affected — all real PyTorch interop used here (SafeTensors/pickle checkpoint loading via `weight_loading/`) is pure Rust and is kept. ToRSh is **not** adopted as a replacement now (crates.io torsh 0.1.3 pins a type-incompatible scirs2 0.5.1; torsh 0.2.0 is unpublished); a P2 workspace task tracks evaluating an optional `torsh-interop` feature in 0.3.x once torsh 0.2.0 ships on crates.io. Candle sub-decision: the unused `candle-nn` workspace dep is dropped now, the `candle` feature/variant is kept through 0.2.0 (it is in every `full` set), and implement-vs-remove is decided in 0.3.x.
+
+### OxiCUDA GPU migration (scirs2-core gpu → OxiCUDA)
+- [x] **[P1]** Wire GPT-2 and GPT-NeoX forwards through the CUDA-resident attention path (done 2026-07-06)
+  - Depended on trustformers-core's CUDA-resident attention chain (CUDA-7), which landed this session (`gpu_ops/cuda/oxicuda/attention.rs`: gather/RoPE/softmax/attention prefill+decode/KV-cache concat, all resident `gpu_to_gpu` methods).
+  - GPT-2 (`gpt2/model/model_blocks.rs`): added `cuda_resident_attention`, mirroring the existing Metal fast path — bulk causal prefill on an empty cache, exact per-token decode against a resident `Tensor::CUDA` cache (key transposed `[1,H,d,kv]`, value `[1,H,kv,d]`); host-format caches and non-batch-1 inputs still take the existing host path.
+  - GPT-NeoX (`gpt_neox/model.rs`): added `cuda_resident_forward` (NeoX-packing QKV gather → device RoPE → K^T → per-head causal prefill → head merge → resident dense projection), replacing the previous per-sub-block CPU round-trip; prefill-only, since the NeoX `Layer` trait has no KV-cache plumbing (pre-existing, unaffected).
+  - Verified: `cargo check`/`clippy --all-targets` clean (zero warnings) on `trustformers-core` and `trustformers-models` with `cuda` and default features; `nextest` core cuda-tagged tests 163/163, wider matmul/gemm/buffer/cuda/gather/concat/pitched set 205/205, `trustformers-models` full suite with `cuda` feature 1089/1089 (hardware execution itself not verifiable — no CUDA device on the build host; correctness rests on source-verified kernel signatures + CPU-parity availability-gated tests that skip cleanly without a GPU).
+  - Deferred/out of scope, tracked separately: GPT-2 batch>1 and non-F32 resident dtypes still fall back to host; `attention_mask` is ignored on the resident path (matches the Metal precedent); multi-token continuation behind a cache runs a per-token decode loop rather than one fused rectangular-causal kernel (no such upstream kernel exists yet).
+  - Evidence: `trustformers-models/src/gpt2/model/model_blocks.rs`; `trustformers-models/src/gpt_neox/model.rs`; `trustformers-core/src/gpu_ops/cuda/oxicuda/attention.rs`
+
+#### Post-0.2.0 (0.3.x)
+- [ ] **[P2]** Extend device-aware GPU forward beyond GPT-2/RetNet (record-only follow-up for 0.3.x)
+  - GPU forward is wired end-to-end only for GPT-2 and RetNet today. Factor a device-aware attention/linear helper (already sketched as task 5 in the root TODO.md, lines 154-164) so llama, gpt_neox, and the other model families pick up the resident CUDA/Metal path without per-model duplication.
+  - Evidence: `trustformers-models/README.md:11,251`; root `TODO.md:154-164`
+
+### PyTorch (tch) dependency removal
+No tasks in this crate — the `torch` feature never reached trustformers-models (no `cfg(feature = "torch")` here), and the PyTorch checkpoint loaders in `src/weight_loading/` are pure Rust and unaffected. The deletion itself (workspace Cargo.toml, trustformers-core, trustformers, trustformers-training, trustformers-c) and the P2 `torsh-interop` evaluation for 0.3.x are tracked in the root TODO.md and trustformers-core/TODO.md.
+
+---
+
 ## Future Enhancements
 
 ### High Priority
-- [ ] Wire up Swin Transformer: add `#[cfg(feature = "swin")] pub mod swin;` to `lib.rs`, add a `swin` feature to `Cargo.toml`, re-export `SwinConfig`/`SwinModel`/`SwinForImageClassification` — **implementation already exists** (2,502 lines), this is integration work, not new development
-- [ ] Wire up DeiT similarly (`deit` feature) — **implementation already exists** (1,692 lines, includes distillation token)
-- [ ] Resolve legacy `qwen2/`: either remove it (superseded by `qwen2_5`) or finish its weight loader and wire it up as a distinct feature — currently dead code with an unresolved gap either way
-- [ ] Fix the 6 vestigial feature flags (add real `#[cfg]` gates or drop the unused Cargo.toml entries)
-- [ ] Add `llama3_2` and `mistral_v3` to the `all` meta-feature (or document why they're intentionally excluded)
+- [x] Wire up Swin Transformer (planned 2026-07-05)
+  - Goal: expose the already-complete (2502 lines, 75 tests) Swin implementation.
+  - Design: add `swin = []` to Cargo.toml features; #[cfg(feature = "swin")] pub mod swin; + gated pub use, mirroring vit's exact wiring. Add "swin" to `all`.
+  - Files: Cargo.toml, lib.rs.
+  - Tests: cargo nextest run --features swin (75 pre-written tests run for the first time); cargo build --no-default-features (gate must be inert when off).
+  - Risk: none — zero cross-feature coupling confirmed.
+- [x] Wire up DeiT (planned 2026-07-05)
+  - Goal: expose the already-complete (1692 lines, 54 tests) DeiT implementation.
+  - Design: identical shape to Swin — `deit = []`, gated pub mod/pub use (include layer-level types for parity with vit's re-export), add to `all`.
+  - Files: Cargo.toml, lib.rs.
+  - Tests: cargo nextest run --features deit; spot-check the distillation-token path is covered by the existing 54 tests.
+  - Risk: none.
+- [x] Delete legacy qwen2/ (planned 2026-07-05)
+  - Goal: remove the superseded, unreferenced legacy Qwen-2 implementation.
+  - Design: delete src/qwen2/ (5 files, 2090 lines, 112 tests) — confirmed zero references anywhere in the workspace outside itself. qwen2_5 is the architectural successor (note: its weight loading is also a no-op today, just silently rather than loudly — not a blocker to this deletion).
+  - Files: delete trustformers-models/src/qwen2/; edit TODO.md, README.md references.
+  - Tests: cargo build --all-features (no-op diff expected); grep for dangling qwen2:: references post-deletion.
+  - Risk: none.
+- [x] Fix 6 vestigial Cargo features (mamba, rwkv, s4, stablelm, falcon, linformer) (planned 2026-07-05)
+  - Goal: these 6 features actually gate their modules (currently zero #[cfg(feature=...)] occurrences for any of them).
+  - Design: add #[cfg(feature = "X")] to each of the 6 pub mod lines and their corresponding pub use lines in lib.rs.
+  - Files: trustformers-models/src/lib.rs (12 line edits).
+  - Tests: CRITICAL — cargo build -p trustformers-models --no-default-features must still succeed, then --no-default-features --features mamba etc, then full --all-features regression.
+  - Risk: the no-default-features build is the only way to catch a hidden cross-reference from always-on code; don't skip it.
+- [x] Add llama3_2/mistral_v3 to `all` meta-feature (planned 2026-07-05)
+  - Goal: --features all actually includes these two.
+  - Design: confirmed via git blame this was an accidental git-history omission, not intentional (5 of 7 "incomplete weight loading" architectures are already in `all`, so that was never the exclusion criterion). Add "llama3_2", "mistral_v3" to the all=[...] list in Cargo.toml.
+  - Files: trustformers-models/Cargo.toml.
+  - Tests: cargo build --features all + cargo nextest run --features all.
+  - Risk: none.
 - [ ] Complete weight loading for the 7 architectures listed under [Known Limitations](#known-limitations): `llama3`, `llama3_2`, `mistral_v3`, `phi2`, `deepseek`, `yi`, `starcoder2`
-- [ ] Implement contrastive search generation for GPT-2
+- [~] Implement contrastive search generation for GPT-2 (planned 2026-07-05)
+  - Goal: GenerationMode::ContrastiveSearch produces real SimCTG-style output (Su & Collier 2022) instead of an "not yet implemented" error. Config/validation plumbing already exists — only the generation body is missing.
+  - Prerequisites: hidden-state access does not currently exist at the point generation strategies run — Gpt2LMOutput only carries logits/past_key_values. Must add a hidden_states: Tensor field and update both construction sites (Model::forward and forward_with_cache in model_core.rs) to clone-before-consume.
+  - Design: add a hidden-state-aware sibling to get_next_token_logits in generation.rs; implement generate_contrastive_search_internal following the existing generate_greedy_internal/generate_beam_search_internal dispatch shape. Port the scoring formulas (cosine_similarity, contrastive_score) from the orphaned trustformers-training/src/contrastive_search/mod.rs (pure math — reimplement, do not add a dependency edge between the sibling crates). Scope explicitly to a correct-but-not-cache-optimized first version: real per-candidate lookahead forward pass (k+1 forward passes per step), not a shortcut reusing the context's hidden state for all k candidates.
+  - Files: trustformers-models/src/gpt2/model/model_core.rs, gpt2/generation.rs, generation_utils.rs.
+  - Tests: unit tests for scoring helpers in isolation; integration test with ContrastiveSearch{top_k:4, alpha:0.6} on a tiny model asserting no panics and fewer immediate token repeats than greedy on a repetitive tiny model; regression test locking in Gpt2LMOutput.hidden_states.shape().
+  - Risk: the additive struct change is low blast radius (only 2 construction sites); the real risk is the "reuse context hidden state" shortcut — must not be taken.
 - [ ] Add BEiT (BERT pre-training for image transformers)
 - [ ] Add DINOv2 (self-supervised ViT with DINO pretraining)
 - [ ] Add SAM (Segment Anything Model)
@@ -450,6 +503,6 @@ cargo check -p trustformers-models --all-features
 
 ---
 
-**Last Updated:** 2026-07-02 — 0.1.4 Alpha Release (53 feature-gated architectures + 8 always-on bonus architectures, ~4,479 tests passing, 0 stubs, ~5,165 public API items)
+**Last Updated:** 2026-07-06 — 0.2.0 OxiCUDA GPU migration task (GPT-2/GPT-NeoX CUDA-resident attention) completed and verified; tch/torch removal decision recorded previously; previous baseline: 0.1.4 Alpha Release (53 feature-gated architectures + 8 always-on bonus architectures, ~4,479 tests passing, 0 stubs, ~5,165 public API items)
 **Status:** Alpha
 **Model Count:** 53 feature-gated architectures + 8 always-on architectures, 46/53 with complete weight loading (7 pending), 3 additional architectures implemented but not yet wired into the public API (Swin, DeiT, legacy Qwen2)

@@ -143,10 +143,7 @@ impl AudioWaveform {
 
     /// Peak (maximum absolute) amplitude in the waveform.
     pub fn peak_amplitude(&self) -> f32 {
-        self.samples
-            .iter()
-            .map(|s| s.abs())
-            .fold(0.0_f32, f32::max)
+        self.samples.iter().map(|s| s.abs()).fold(0.0_f32, f32::max)
     }
 
     /// Return a mono copy of this waveform (this implementation is already mono).
@@ -216,11 +213,7 @@ impl AudioWaveform {
             .map(|p| p + 1)
             .unwrap_or(0);
 
-        let trimmed = if start < end {
-            self.samples[start..end].to_vec()
-        } else {
-            Vec::new()
-        };
+        let trimmed = if start < end { self.samples[start..end].to_vec() } else { Vec::new() };
         let duration_seconds = trimmed.len() as f32 / self.sample_rate.max(1) as f32;
         AudioWaveform {
             samples: trimmed,
@@ -419,9 +412,7 @@ mod tests {
 
     #[test]
     fn test_rms_energy_is_finite() {
-        let samples: Vec<f32> = (0..1000)
-            .map(|i| (i as f32 * 0.01).sin())
-            .collect();
+        let samples: Vec<f32> = (0..1000).map(|i| (i as f32 * 0.01).sin()).collect();
         let w = AudioWaveform::new(samples, 16_000).expect("valid");
         assert!(w.rms_energy().is_finite());
         assert!(w.rms_energy() > 0.0);
@@ -437,7 +428,10 @@ mod tests {
             "peak was {}",
             n.peak_amplitude()
         );
-        assert!((n.peak_amplitude() - 1.0).abs() < 1e-5, "peak should be ~1.0");
+        assert!(
+            (n.peak_amplitude() - 1.0).abs() < 1e-5,
+            "peak should be ~1.0"
+        );
     }
 
     // --- Resample ---
@@ -535,8 +529,7 @@ mod tests {
             sample_rate: 0,
             ..Default::default()
         };
-        let err =
-            AudioGenerationPipeline::new(config).expect_err("zero sample rate should fail");
+        let err = AudioGenerationPipeline::new(config).expect_err("zero sample rate should fail");
         assert!(matches!(err, AudioGenError::InvalidSampleRate(0)));
     }
 
@@ -546,8 +539,7 @@ mod tests {
             audio_length_seconds: -1.0,
             ..Default::default()
         };
-        let err =
-            AudioGenerationPipeline::new(config).expect_err("negative duration should fail");
+        let err = AudioGenerationPipeline::new(config).expect_err("negative duration should fail");
         assert!(matches!(err, AudioGenError::InvalidDuration(_)));
     }
 }

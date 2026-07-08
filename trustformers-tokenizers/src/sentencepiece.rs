@@ -508,7 +508,28 @@ impl SentencePieceTokenizer {
         self
     }
 
-    pub fn from_pretrained(_model_name_or_path: &str) -> Result<Self> {
+    // Real behavior: probe a few candidate filesystem paths derived from
+    // `model_name_or_path` for an actual SentencePiece model file (e.g.
+    // "<path>/spiece.model", "<path>.model", or `model_name_or_path` itself
+    // treated as a direct path) and load it via `from_model_file` if one of
+    // them exists. Only when none of the candidates resolve to a real file
+    // do we fall back to the fabricated T5-like vocabulary below, which
+    // preserves existing behavior for callers that pass a bare model name
+    // like "t5-small".
+    pub fn from_pretrained(model_name_or_path: &str) -> Result<Self> {
+        // Probe likely on-disk locations for a real SentencePiece model file.
+        let potential_paths = vec![
+            format!("{}/spiece.model", model_name_or_path),
+            format!("{}.model", model_name_or_path),
+            model_name_or_path.to_string(),
+        ];
+
+        for candidate in potential_paths {
+            if let Ok(tokenizer) = Self::from_model_file(&candidate) {
+                return Ok(tokenizer);
+            }
+        }
+
         // This would typically load from a SentencePiece model file
         // For now, we'll create a basic T5 tokenizer
         let mut tokenizer = Self::new();
@@ -1042,5 +1063,59 @@ mod tests {
         assert!(!tokenizer.normalization);
         assert!(!tokenizer.add_dummy_prefix);
         assert!(tokenizer.byte_fallback);
+    }
+
+    #[test]
+    fn test_from_pretrained_loads_real_fixture_not_hardcoded_fallback() {
+        // Control: an argument that cannot resolve to any real file still exercises
+        // the fabricated-vocab fallback arm, exactly like every call did before this fix.
+        let fallback = SentencePieceTokenizer::from_pretrained(
+            "definitely-nonexistent-sentencepiece-model-xyz-123",
+        )
+        .expect("fallback arm should still succeed via the built-in vocab");
+
+        // Fixture: write a real, distinct .model file (SentencePiece's plain-text
+        // vocabulary format: `token<TAB>score` per line) to a unique directory under
+        // std::env::temp_dir(), named `spiece.model` so it hits the first candidate
+        // path this function now probes (`{path}/spiece.model`).
+        //
+        // The leading "\u{1}" line is deliberate: it forces load_vocab_from_model_file's
+        // protobuf-parse attempt to fail fast and deterministically on the very first
+        // byte (0x01 decodes to protobuf wire_type=1, tag=0, which this file's minimal
+        // parser rejects immediately as "Unsupported wire type"), so parsing reliably
+        // falls through to the plain-text vocab loader instead of the binary
+        // protobuf-format parser. Verify this empirically by running the test; if it
+        // doesn't behave as expected, add a temporary `eprintln!("{:?}", loaded.get_vocab())`
+        // to diagnose and adjust, then remove the debug print before finishing.
+        let fixture_dir = std::env::temp_dir()
+            .join("trustformers_tokenizers_sentencepiece_from_pretrained_fixture_test");
+        std::fs::create_dir_all(&fixture_dir).expect("failed to create fixture dir");
+        let fixture_model_path = fixture_dir.join("spiece.model");
+        std::fs::write(
+            &fixture_model_path,
+            "\u{1}\nzzzfixturemarker_alpha\t1.0\nzzzfixturemarker_beta\t2.0\n",
+        )
+        .expect("failed to write fixture model file");
+
+        let fixture_dir_str = fixture_dir.to_str().expect("temp dir path must be valid UTF-8");
+        let loaded = SentencePieceTokenizer::from_pretrained(fixture_dir_str)
+            .expect("from_pretrained should load the real fixture file, not fall back");
+
+        // The fixture-only token must be present in the fixture-loaded vocab...
+        assert!(loaded.token_to_id("zzzfixturemarker_alpha").is_some());
+        // ...and absent from the generic hardcoded fallback vocab.
+        assert!(fallback.token_to_id("zzzfixturemarker_alpha").is_none());
+
+        // The fallback's distinctive T5 sentinel tokens must be absent from the
+        // fixture vocab, proving the fixture path did not silently fall through
+        // to the hardcoded T5 vocab.
+        assert!(loaded.token_to_id("<extra_id_0>").is_none());
+        assert!(fallback.token_to_id("<extra_id_0>").is_some());
+
+        assert_ne!(loaded.vocab_size(), fallback.vocab_size());
+
+        // Best-effort cleanup; do not fail the test if this doesn't succeed.
+        let _ = std::fs::remove_file(&fixture_model_path);
+        let _ = std::fs::remove_dir(&fixture_dir);
     }
 }

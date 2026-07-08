@@ -533,6 +533,10 @@ pub use federated::{
     ClientInfo, ClientSelectionStrategy, DifferentialPrivacy, DifferentialPrivacyConfig, FedAvg,
     FedAvgConfig, FedProx, FedProxConfig, NoiseMechanism, SecureAggregation,
 };
+pub use fsdp::{
+    FsdpConfig, FsdpError, FsdpMemoryAnalyzer, FsdpState, FsdpUnit, ShardingStrategy,
+    WrappingPolicy,
+};
 #[cfg(target_arch = "x86_64")]
 pub use fusion::simd;
 pub use fusion::{FusedOperation, FusedOptimizerState, FusionConfig, FusionStats};
@@ -587,7 +591,15 @@ pub use monitoring::{
     OptimizerSelector, PerformanceStats, PerformanceTier,
 };
 pub use muon::{Muon, MuonConfig};
+pub use optimizer_surgery::{
+    MigrationReport, OptimizerKind, OptimizerSurgeon, ParamStateSnapshot, SurgeryConfig,
+    SurgeryError,
+};
 pub use pde_aware::{PDEAwareConfig, PDEAwareOptimizer, PDEAwareStats};
+pub use per_layer_quant::{
+    BitWidth, BitWidthStrategy, LayerBitWidthAssignment, LayerSensitivity, PerLayerQuantSelector,
+    QuantSelectionError, QuantizationPolicy, QuantizationSummary,
+};
 pub use prodigy::{Prodigy, ProdigyConfig};
 // pub use optimizer::OptimizerState; // Already imported from common
 pub use performance_validation::{

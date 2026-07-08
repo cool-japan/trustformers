@@ -196,10 +196,8 @@ where
         };
 
         // First, try to remove an expired entry (always preferable)
-        let expired_key: Option<K> = entries_guard
-            .iter()
-            .find(|(_, e)| e.is_expired())
-            .map(|(k, _)| k.clone());
+        let expired_key: Option<K> =
+            entries_guard.iter().find(|(_, e)| e.is_expired()).map(|(k, _)| k.clone());
 
         if let Some(key) = expired_key {
             drop(entries_guard);
@@ -212,7 +210,7 @@ where
             CacheEvictionPolicy::Ttl => {
                 // Only evict expired entries; we already checked above
                 None
-            }
+            },
 
             CacheEvictionPolicy::Lru => {
                 let order = match self.access_order.read() {
@@ -220,17 +218,15 @@ where
                     Err(_) => return false,
                 };
                 order.first().cloned()
-            }
+            },
 
-            CacheEvictionPolicy::Lfu => entries_guard
-                .iter()
-                .min_by_key(|(_, e)| e.access_count)
-                .map(|(k, _)| k.clone()),
+            CacheEvictionPolicy::Lfu => {
+                entries_guard.iter().min_by_key(|(_, e)| e.access_count).map(|(k, _)| k.clone())
+            },
 
-            CacheEvictionPolicy::Size => entries_guard
-                .iter()
-                .max_by_key(|(_, e)| e.size_bytes)
-                .map(|(k, _)| k.clone()),
+            CacheEvictionPolicy::Size => {
+                entries_guard.iter().max_by_key(|(_, e)| e.size_bytes).map(|(k, _)| k.clone())
+            },
         };
 
         drop(entries_guard);
@@ -299,9 +295,10 @@ where
                 (s.entry_count, s.total_size_bytes)
             };
 
-            let over_entries = self.config.max_entries > 0 && entry_count >= self.config.max_entries;
-            let over_bytes =
-                self.config.max_size_bytes > 0 && total_bytes + size_bytes > self.config.max_size_bytes;
+            let over_entries =
+                self.config.max_entries > 0 && entry_count >= self.config.max_entries;
+            let over_bytes = self.config.max_size_bytes > 0
+                && total_bytes + size_bytes > self.config.max_size_bytes;
 
             if !over_entries && !over_bytes {
                 break;
@@ -329,8 +326,7 @@ where
             // If key already existed, remove its old size from stats
             if let Some(old) = entries.remove(&key) {
                 if let Ok(mut stats) = self.stats.write() {
-                    stats.total_size_bytes =
-                        stats.total_size_bytes.saturating_sub(old.size_bytes);
+                    stats.total_size_bytes = stats.total_size_bytes.saturating_sub(old.size_bytes);
                     stats.entry_count = stats.entry_count.saturating_sub(1);
                 }
                 self.remove_from_access_order(&key);
@@ -365,7 +361,7 @@ where
                     } else {
                         (Some(entry.value.clone()), true)
                     }
-                }
+                },
             }
         };
 
@@ -373,9 +369,9 @@ where
             // Determine why it was invalid for statistics
             let is_version_mismatch = {
                 let entries = self.entries.read().ok()?;
-                entries.get(key).is_some_and(|e| {
-                    !e.is_expired() && !e.is_valid_version(required_version)
-                })
+                entries
+                    .get(key)
+                    .is_some_and(|e| !e.is_expired() && !e.is_valid_version(required_version))
             };
 
             if let Ok(mut stats) = self.stats.write() {
@@ -387,12 +383,7 @@ where
 
             // Clean up expired entry eagerly
             {
-                let expired = self
-                    .entries
-                    .read()
-                    .ok()?
-                    .get(key)
-                    .is_some_and(|e| e.is_expired());
+                let expired = self.entries.read().ok()?.get(key).is_some_and(|e| e.is_expired());
                 if expired {
                     self.remove_entry_internal(key, true);
                 }
@@ -458,11 +449,7 @@ where
                 Ok(g) => g,
                 Err(_) => return 0,
             };
-            entries
-                .iter()
-                .filter(|(_, e)| e.is_expired())
-                .map(|(k, _)| k.clone())
-                .collect()
+            entries.iter().filter(|(_, e)| e.is_expired()).map(|(k, _)| k.clone()).collect()
         };
 
         let count = expired_keys.len();
@@ -487,10 +474,7 @@ where
 
     /// Snapshot of current cache statistics
     pub fn stats(&self) -> VersionedCacheStats {
-        self.stats
-            .read()
-            .map(|s| s.clone())
-            .unwrap_or_default()
+        self.stats.read().map(|s| s.clone()).unwrap_or_default()
     }
 
     /// Number of live (non-expired) entries
@@ -557,9 +541,7 @@ mod tests {
     #[test]
     fn test_insert_and_get() {
         let cache = default_cache();
-        cache
-            .insert("key1".to_string(), vec![1, 2, 3], "1.0", 3, None)
-            .unwrap();
+        cache.insert("key1".to_string(), vec![1, 2, 3], "1.0", 3, None).unwrap();
         let v = cache.get(&"key1".to_string(), None).unwrap();
         assert_eq!(v, vec![1, 2, 3]);
     }
@@ -573,18 +555,14 @@ mod tests {
     #[test]
     fn test_version_mismatch_returns_none() {
         let cache = default_cache();
-        cache
-            .insert("k".to_string(), vec![0], "1.0", 1, None)
-            .unwrap();
+        cache.insert("k".to_string(), vec![0], "1.0", 1, None).unwrap();
         assert!(cache.get(&"k".to_string(), Some("2.0")).is_none());
     }
 
     #[test]
     fn test_version_match_returns_value() {
         let cache = default_cache();
-        cache
-            .insert("k".to_string(), vec![42], "1.0", 1, None)
-            .unwrap();
+        cache.insert("k".to_string(), vec![42], "1.0", 1, None).unwrap();
         let v = cache.get(&"k".to_string(), Some("1.0")).unwrap();
         assert_eq!(v, vec![42]);
     }
@@ -626,9 +604,7 @@ mod tests {
     #[test]
     fn test_contains() {
         let cache = default_cache();
-        cache
-            .insert("k".to_string(), vec![], "v1", 0, None)
-            .unwrap();
+        cache.insert("k".to_string(), vec![], "v1", 0, None).unwrap();
         assert!(cache.contains(&"k".to_string()));
         assert!(!cache.contains(&"other".to_string()));
     }
@@ -636,9 +612,7 @@ mod tests {
     #[test]
     fn test_remove() {
         let cache = default_cache();
-        cache
-            .insert("k".to_string(), vec![1], "v1", 1, None)
-            .unwrap();
+        cache.insert("k".to_string(), vec![1], "v1", 1, None).unwrap();
         assert!(cache.remove(&"k".to_string()));
         assert!(!cache.contains(&"k".to_string()));
         assert!(!cache.remove(&"k".to_string())); // second remove returns false
@@ -654,13 +628,7 @@ mod tests {
         cache.insert("b".to_string(), 2, "v", 4, None).unwrap();
         // c has no TTL
         cache
-            .insert(
-                "c".to_string(),
-                3,
-                "v",
-                4,
-                Some(Duration::from_secs(3600)),
-            )
+            .insert("c".to_string(), 3, "v", 4, Some(Duration::from_secs(3600)))
             .unwrap();
 
         thread::sleep(Duration::from_millis(25));
@@ -672,12 +640,8 @@ mod tests {
     #[test]
     fn test_clear() {
         let cache = default_cache();
-        cache
-            .insert("a".to_string(), vec![1], "v1", 1, None)
-            .unwrap();
-        cache
-            .insert("b".to_string(), vec![2], "v1", 1, None)
-            .unwrap();
+        cache.insert("a".to_string(), vec![1], "v1", 1, None).unwrap();
+        cache.insert("b".to_string(), vec![2], "v1", 1, None).unwrap();
         cache.clear();
         assert!(cache.is_empty());
         assert_eq!(cache.stats().entry_count, 0);
@@ -686,9 +650,7 @@ mod tests {
     #[test]
     fn test_hit_rate() {
         let cache = default_cache();
-        cache
-            .insert("k".to_string(), vec![1], "v1", 1, None)
-            .unwrap();
+        cache.insert("k".to_string(), vec![1], "v1", 1, None).unwrap();
 
         cache.get(&"k".to_string(), None);
         cache.get(&"k".to_string(), None);
@@ -703,18 +665,12 @@ mod tests {
     #[test]
     fn test_lru_eviction() {
         let cache = small_cache(2);
-        cache
-            .insert("a".to_string(), vec![1], "v1", 1, None)
-            .unwrap();
-        cache
-            .insert("b".to_string(), vec![2], "v1", 1, None)
-            .unwrap();
+        cache.insert("a".to_string(), vec![1], "v1", 1, None).unwrap();
+        cache.insert("b".to_string(), vec![2], "v1", 1, None).unwrap();
         // Access "a" to make it most-recently-used
         cache.get(&"a".to_string(), None);
         // Insert "c" — should evict "b" (LRU)
-        cache
-            .insert("c".to_string(), vec![3], "v1", 1, None)
-            .unwrap();
+        cache.insert("c".to_string(), vec![3], "v1", 1, None).unwrap();
 
         assert!(cache.contains(&"a".to_string()));
         assert!(cache.contains(&"c".to_string()));
@@ -734,15 +690,9 @@ mod tests {
     #[test]
     fn test_invalidate_version() {
         let cache = default_cache();
-        cache
-            .insert("a".to_string(), vec![1], "1.0", 1, None)
-            .unwrap();
-        cache
-            .insert("b".to_string(), vec![2], "1.0", 1, None)
-            .unwrap();
-        cache
-            .insert("c".to_string(), vec![3], "2.0", 1, None)
-            .unwrap();
+        cache.insert("a".to_string(), vec![1], "1.0", 1, None).unwrap();
+        cache.insert("b".to_string(), vec![2], "1.0", 1, None).unwrap();
+        cache.insert("c".to_string(), vec![3], "2.0", 1, None).unwrap();
 
         let invalidated = cache.invalidate_version("1.0");
         assert_eq!(invalidated, 2);
@@ -757,9 +707,7 @@ mod tests {
         assert!(cache.is_empty());
         assert_eq!(cache.len(), 0);
 
-        cache
-            .insert("x".to_string(), vec![1], "v", 1, None)
-            .unwrap();
+        cache.insert("x".to_string(), vec![1], "v", 1, None).unwrap();
         assert!(!cache.is_empty());
         assert_eq!(cache.len(), 1);
     }
@@ -767,9 +715,7 @@ mod tests {
     #[test]
     fn test_stats_version_mismatch_counter() {
         let cache = default_cache();
-        cache
-            .insert("k".to_string(), vec![1], "1.0", 1, None)
-            .unwrap();
+        cache.insert("k".to_string(), vec![1], "1.0", 1, None).unwrap();
         cache.get(&"k".to_string(), Some("2.0")); // mismatch
         let stats = cache.stats();
         assert_eq!(stats.version_mismatches, 1);
@@ -778,12 +724,8 @@ mod tests {
     #[test]
     fn test_overwrite_same_key() {
         let cache = default_cache();
-        cache
-            .insert("k".to_string(), vec![1], "1.0", 1, None)
-            .unwrap();
-        cache
-            .insert("k".to_string(), vec![2], "2.0", 1, None)
-            .unwrap();
+        cache.insert("k".to_string(), vec![1], "1.0", 1, None).unwrap();
+        cache.insert("k".to_string(), vec![2], "2.0", 1, None).unwrap();
         let v = cache.get(&"k".to_string(), Some("2.0")).unwrap();
         assert_eq!(v, vec![2]);
         // Stats entry count should still be 1 after overwrite
@@ -818,19 +760,11 @@ mod tests {
             eviction_policy: CacheEvictionPolicy::Size,
             ..Default::default()
         });
-        cache
-            .insert("small".to_string(), vec![0; 10], "v", 10, None)
-            .unwrap();
-        cache
-            .insert("large".to_string(), vec![0; 500], "v", 500, None)
-            .unwrap();
-        cache
-            .insert("medium".to_string(), vec![0; 100], "v", 100, None)
-            .unwrap();
+        cache.insert("small".to_string(), vec![0; 10], "v", 10, None).unwrap();
+        cache.insert("large".to_string(), vec![0; 500], "v", 500, None).unwrap();
+        cache.insert("medium".to_string(), vec![0; 100], "v", 100, None).unwrap();
         // Insert something that forces eviction (total would exceed 1000)
-        cache
-            .insert("new".to_string(), vec![0; 400], "v", 400, None)
-            .unwrap();
+        cache.insert("new".to_string(), vec![0; 400], "v", 400, None).unwrap();
 
         // "large" (500 bytes) should have been evicted first
         assert!(!cache.contains(&"large".to_string()));

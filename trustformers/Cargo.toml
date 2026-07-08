@@ -78,8 +78,6 @@ gpt_neo = ["trustformers-models/gpt_neo"]
 gpt_j = ["trustformers-models/gpt_j"]
 t5 = ["trustformers-models/t5"]
 all-models = ["bert", "roberta", "albert", "gpt2", "gpt_neo", "gpt_j", "t5"]
-# torch feature disabled by default - requires matching libtorch version at runtime
-torch = ["trustformers-core/torch", "trustformers-training/torch"]
 candle = ["trustformers-core/candle", "trustformers-training/candle"]
 cuda = ["trustformers-models/cuda"]
 async = ["axum", "tower", "tower-http", "async-stream"]
@@ -89,7 +87,7 @@ audio = []
 # reqwest -> rustls -> aws-lc-sys is C/C++. With `hub` off, local/cached model
 # loading still works; remote downloads return a clean "enable `hub`" error.
 hub = ["dep:reqwest"]
-# Full feature set for testing (excludes torch due to libtorch version requirements)
+# Full feature set for testing
 full = ["all-models", "candle", "async", "vision", "hub", "trustformers-core/full"]
 
 # `custom_backend_examples` builds a RemoteBackend on top of `reqwest`, so it

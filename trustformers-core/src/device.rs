@@ -74,13 +74,18 @@ impl Device {
         Device::CPU
     }
 
-    /// Create a CUDA device, or CPU if CUDA is not available
+    /// Create a CUDA device, or CPU if CUDA is not available.
+    ///
+    /// Availability is determined by a genuine runtime probe
+    /// (`crate::gpu_ops::cuda::oxicuda_cuda_available()`), which `dlopen`s the CUDA
+    /// driver and queries the device count. This is deliberately *not* based on
+    /// `scirs2_core::simd_ops::PlatformCapabilities`: as of scirs2-core 0.6.0 its
+    /// `cuda_available` flag is hardcoded to `false` (CUDA support was retired
+    /// upstream), so relying on it here would make this constructor always return
+    /// `Device::CPU` even on machines with a working CUDA GPU.
     #[cfg(feature = "cuda")]
     pub fn cuda_if_available(device_id: usize) -> Device {
-        use scirs2_core::simd_ops::PlatformCapabilities;
-
-        let caps = PlatformCapabilities::detect();
-        if caps.cuda_available {
+        if crate::gpu_ops::cuda::oxicuda_cuda_available() {
             Device::CUDA(device_id)
         } else {
             Device::CPU
@@ -92,23 +97,25 @@ impl Device {
         Device::CPU
     }
 
-    /// Get the best available device (prefers GPU over CPU)
+    /// Get the best available device, preferring CUDA, then Metal, then CPU.
+    ///
+    /// Like [`Device::cuda_if_available`] and [`Device::metal_if_available`], this
+    /// probes trustformers' own GPU backends directly rather than going through
+    /// `scirs2_core::simd_ops::PlatformCapabilities`, whose `cuda_available` is
+    /// hardcoded `false` upstream and whose `metal_available` requires a scirs2
+    /// `metal` feature that trustformers never enables. Using it here would silently
+    /// always fall back to `Device::CPU`, even on CUDA/Metal-capable machines.
     pub fn best_available() -> Device {
-        #[cfg(all(target_os = "macos", feature = "metal"))]
-        {
-            use scirs2_core::simd_ops::PlatformCapabilities;
-            let caps = PlatformCapabilities::detect();
-            if caps.metal_available {
-                return Device::Metal(0);
-            }
+        #[cfg(feature = "cuda")]
+        if crate::gpu_ops::cuda::oxicuda_cuda_available() {
+            return Device::CUDA(0);
         }
 
-        #[cfg(feature = "cuda")]
+        #[cfg(all(target_os = "macos", feature = "metal"))]
         {
-            use scirs2_core::simd_ops::PlatformCapabilities;
-            let caps = PlatformCapabilities::detect();
-            if caps.cuda_available {
-                return Device::CUDA(0);
+            use metal::Device as MetalDevice;
+            if MetalDevice::system_default().is_some() {
+                return Device::Metal(0);
             }
         }
 
@@ -158,5 +165,35 @@ mod tests {
         assert_eq!(Device::CPU.to_string(), "CPU");
         assert_eq!(Device::Metal(0).to_string(), "Metal:0");
         assert_eq!(Device::CUDA(1).to_string(), "CUDA:1");
+    }
+
+    /// `cuda_if_available` must never panic, regardless of whether the host
+    /// actually has a CUDA-capable GPU. On a machine without CUDA it must fall
+    /// back to `Device::CPU`; this test intentionally does not assert which
+    /// branch is taken since that depends on the machine running the test.
+    #[test]
+    fn test_cuda_if_available_does_not_panic() {
+        let device = Device::cuda_if_available(0);
+        assert!(matches!(device, Device::CPU | Device::CUDA(0)));
+    }
+
+    /// `metal_if_available` must never panic, regardless of whether the host
+    /// actually has a Metal-capable GPU.
+    #[test]
+    fn test_metal_if_available_does_not_panic() {
+        let device = Device::metal_if_available(0);
+        assert!(matches!(device, Device::CPU | Device::Metal(0)));
+    }
+
+    /// `best_available` must never panic and must always return a valid
+    /// `Device`, without asserting a specific GPU is present (CI/dev machines
+    /// running this test are not guaranteed to have CUDA or Metal hardware).
+    #[test]
+    fn test_best_available_does_not_panic() {
+        let device = Device::best_available();
+        assert!(matches!(
+            device,
+            Device::CPU | Device::CUDA(0) | Device::Metal(0)
+        ));
     }
 }

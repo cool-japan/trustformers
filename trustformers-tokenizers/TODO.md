@@ -345,8 +345,13 @@ Reference docs live under `docs/migration/`:
 - ✅ `docs/ml-framework-integration.md`
 - ✅ `docs/migration/` (6 guides, see above)
 - ✅ Rustdoc for public APIs (0 rustdoc warnings workspace-wide, verified 2026-07-01)
-- [ ] Tokenizer selection guide (which tokenizer for which model family) — not yet written
-- [ ] Dedicated performance-tuning / troubleshooting guides — not yet written (performance tips currently live only in this README)
+- [~] Write tokenizer-selection, performance-tuning, and troubleshooting guides (planned 2026-07-05)
+  - Goal: one combined deliverable (confirmed not 3 separate asks — TODO.md names all 3 in one line at two locations).
+  - Design: 3 new files under docs/. Follow docs/migration/README.md's STRUCTURE (tables, checklists, troubleshooting section) but NOT its content practice — that file was found to contain fabricated benchmark numbers and references to APIs that don't exist anywhere in src/. Every code sample in the new docs must be grep-verified against a real `pub fn` signature before inclusion. Use README.md's honest style as the tone template instead.
+  - Files: new docs/tokenizer-selection-guide.md, docs/performance-tuning-guide.md, docs/troubleshooting-guide.md.
+  - Tests: grep every method name used in the new docs against `grep -rn "pub fn <name>" src/` before finalizing.
+  - Risk: repeating docs/migration/README.md's fabrication pattern — explicitly guard against it.
+- [~] Write tokenizer-selection/performance-tuning/troubleshooting guides (planned 2026-07-05) — see the combined plan block above; same deliverable, implemented once.
 
 ---
 
@@ -383,30 +388,68 @@ Reference docs live under `docs/migration/`:
 ## Future Enhancements
 
 ### High Priority
-- [ ] Unigram with sampling / BPE-dropout (stochastic tokenization for data augmentation)
-- [ ] Real Hugging Face Hub download support for `from_pretrained` methods (currently local-cache/built-in-vocab only)
-- [ ] `SentencePieceTokenizer::from_pretrained` should actually resolve/parse the requested model instead of ignoring its argument
+- [~] Implement Unigram sampling / BPE-dropout (planned 2026-07-05)
+  - Goal: real stochastic tokenization — the existing subword_regularization.rs module sounds like it already does this but implements a different technique (character-level noise, not merge-dropping).
+  - Design: inside bpe.rs's merge-selection loop, roll each candidate pair against a dropout_p probability and exclude dropped pairs from that iteration's min-rank search (Provilkov et al. 2020's actual BPE-dropout). Inside unigram.rs's existing Viterbi DP table, add forward-filter/backward-sample instead of always taking the single best segmentation. Reuse the RNG pattern already established in subword_regularization.rs (scirs2_core::random::*).
+  - Files: trustformers-tokenizers/src/bpe.rs, src/unigram.rs.
+  - Tests: dropout_p=0.0 must reproduce today's exact deterministic output; seeded-RNG determinism; >=2 distinct segmentations across N samples at dropout_p=0.5; decode still round-trips.
+  - Risk: BPETokenizer caches bpe() results in a RwLock<HashMap> — sampling must explicitly bypass this cache, or the "random" result freezes after the first call per unique input.
+- [x] Real HF Hub download for from_pretrained — NARROWED, fix lives in trustformers crate (planned 2026-07-05) — **DONE (2026-07-05):** `AutoTokenizer::from_pretrained_with_revision` in `trustformers/src/automodel.rs` now calls `crate::hub::download_file_from_hub` for `tokenizer.json` (mirroring `AutoConfig::from_pretrained_with_revision`'s already-working pattern) before falling back to the local-cache-only lookup; added a cache-hit test proving no network call is needed when the file is already present.
+  - Goal: narrowed to fixing AutoTokenizer::from_pretrained_with_revision in trustformers/src/automodel.rs (NOT this crate) to call the hub download code that AutoConfig, 130 lines above it in the same file, already calls.
+  - Design: trustformers-tokenizers cannot depend on trustformers (would be a Cargo dependency cycle — trustformers already depends on trustformers-tokenizers). This fix lives entirely in the trustformers crate, at the call site next to its already-working sibling. Deferring "give trustformers-tokenizers its own standalone hub feature" as a separate, deeper follow-up.
+  - Files: trustformers/src/automodel.rs (NOT a file in this crate).
+  - Tests: cache-hit test asserting no network call when file already exists; existing offline tests must keep passing.
+  - Risk: none new — copying an already-proven 130-line-away pattern in the same file.
+- [~] Fix SentencePieceTokenizer::from_pretrained ignoring its argument (planned 2026-07-05)
+  - Goal: the argument is no longer ignored (currently always returns the same hardcoded fake T5 vocab regardless of input).
+  - Design: probe candidate paths built from the argument, delegate to the existing, already-correct from_model_file() on a hit; keep today's fabricated-vocab body only as the final fallback arm, now actually gated on the argument.
+  - Files: trustformers-tokenizers/src/sentencepiece.rs only.
+  - Tests: the existing tests cannot detect this bug (both call from_pretrained with the same argument) — add a new test with a distinct fixture file via std::env::temp_dir().
+  - Risk: interacts with the Hub-download item above — out of scope to design against it now.
 - [ ] Enhanced multilingual support (better handling of non-Latin scripts)
 - [ ] ONNX export for tokenizers (export tokenizer to ONNX for cross-framework compatibility)
   - **Note:** Use the `oxionnx` crate per COOLJAPAN policy; current `onnx` feature only produces model/graph metadata types, no ONNX Runtime execution
 
 ### Performance
-- [ ] ARM/NEON SIMD path (current SIMD acceleration is AVX2/x86_64-only)
+- [~] Port 4 AVX2 SIMD functions to ARM/NEON (planned 2026-07-05)
+  - Goal: classify_ascii_chars, find_whitespace_boundaries, validate_utf8, to_lowercase_ascii get real NEON siblings — this dev machine is Apple Silicon (ARM64), natively testable.
+  - Design: extend the existing 2-way (x86_64/scalar) #[cfg] dispatch to 3-way with #[cfg(target_arch = "aarch64")] variants. Correctness trap: _mm256_movemask_epi8 has no 1-instruction NEON equivalent — needs the standard bit-position-multiply + pairwise-narrow emulation sequence. Bonus fix in the same pass: classify_ascii_chars_avx2 is dead code dressed as SIMD today (loads into a variable it never reads, does a plain scalar loop) — port the intended vectorized behavior, not the fake one.
+  - Files: trustformers-tokenizers/src/simd.rs only.
+  - Tests: add explicit NEON-vs-scalar byte-parity tests at chunk-boundary edge cases (16-byte NEON vs 32-byte AVX2 chunking).
+  - Risk: the movemask emulation is the main correctness risk — verify with parity tests, not by inspection alone.
 - [ ] Real GPU kernel dispatch for the `gpu` feature (currently device-detection + CPU-executed fallback only)
   - **Refinement needed:** which ops to GPU-accelerate (vocab lookup? regex? both)? Target throughput (tokens/sec)?
-- [ ] Streaming tokenization (tokenize a stream of bytes incrementally without buffering full input)
+- [~] Implement real incremental/streaming tokenization (planned 2026-07-05)
+  - Goal: tokenize arbitrary raw byte chunks incrementally — the existing streaming.rs doesn't solve this (buffers whole lines/whole text, not arbitrary byte boundaries).
+  - Design: add IncrementalTokenizer<T: Tokenizer> with a pending: Vec<u8> field and push_bytes() using std::str::from_utf8's error_len()/valid_up_to() to distinguish "genuinely invalid" from "incomplete multi-byte tail"; plus finish() for real stream end.
+  - Files: trustformers-tokenizers/src/streaming.rs.
+  - Tests: feed a multi-byte-character string one byte at a time through push_bytes, assert final tokenization equals whole-string tokenization.
+  - Risk: MUST document explicitly that tokenization is not generally composable across arbitrary split points for BPE/WordPiece (only UTF-8 byte-safety is guaranteed) — do not let this silently imply full tokenization equivalence.
 - [ ] Further optimization of vocabulary lookups
 
 ### Features
 - [ ] Custom normalizers / pre-tokenizers plugin API for user-supplied normalizers
-- [ ] NFKC/NFKD normalizer types (currently only NFC/NFD are implemented)
-- [ ] Tokenizer alignment visualization (show which input bytes map to which tokens, useful for debugging)
-- [ ] Audit the `hangul = "0.1.3"` dependency — wire it into `korean.rs` or remove it (currently unused)
+- [~] Add NFKC/NFKD normalizers (planned 2026-07-05)
+  - Goal/Design: add NFKCNormalizer/NFKDNormalizer via .nfkc()/.nfkd() — sibling methods on the exact trait already imported for NFC/NFD. Zero new dependency; sentencepiece.rs already calls .nfkc() internally, proving it works here.
+  - Files: trustformers-tokenizers/src/normalizer.rs only.
+  - Tests: assert on a real compatibility-decomposition case that changes under NFKC/NFKD but is a no-op under plain NFC/NFD.
+  - Risk: none — lowest-risk item in the whole batch.
+- [~] Build tokenizer alignment visualizer (planned 2026-07-05)
+  - Goal: visualize token<->source-text alignment using real byte offsets (existing TokenVisualizer hardcodes None because it's generic against a trait with no offset method, even though real offsets already exist elsewhere).
+  - Design: build a new visualizer consuming the concrete offset-bearing types directly (BPETokenizer::tokenize_with_offsets, TokenizerImpl::encode_with_offsets) rather than widening the generic Tokenizer trait (too high blast radius). Copy (do not depend on) trustformers-debug's ~40-line HTML/JSON/ASCII three-format pattern.
+  - Files: trustformers-tokenizers/src/visualization.rs, src/alignment.rs.
+  - Tests: invariant test that computed byte ranges exactly tile 0..text.len() with no gaps/overlaps.
+  - Risk: low — confirmed no dependency cycle risk; just don't add trustformers-debug as a dependency, copy the small pattern.
+- [~] Delete unused hangul dependency (planned 2026-07-05)
+  - Goal/Design: remove hangul = "0.1.3" from Cargo.toml — confirmed zero usage anywhere (korean.rs hand-rolls the real Unicode arithmetic); also confirmed the crate wouldn't even fully solve the problem if wired in (decomposition-only, no composition function).
+  - Files: trustformers-tokenizers/Cargo.toml; drop orphaned mentions in TODO.md/README.md.
+  - Tests: cargo tree -i hangul reports not-found after removal.
+  - Risk: none — highest-confidence item in the batch.
 - [ ] Automatic tokenizer repair/optimization
 
 ### Housekeeping
 - [ ] Add a `python/tests/` suite (referenced in older docs but never created)
-- [ ] Write a tokenizer-selection guide, performance-tuning guide, and troubleshooting guide under `docs/`
+- [~] Write tokenizer-selection/performance-tuning/troubleshooting guides (planned 2026-07-05) — see the combined plan block above; same deliverable, implemented once.
 
 ---
 

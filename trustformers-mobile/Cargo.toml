@@ -30,7 +30,6 @@ hex.workspace = true
 
 # SciRS2 Policy: Using SciRS2-Core instead of ndarray/rand
 scirs2-core = { workspace = true }
-scirs2-linalg.workspace = true
 fastrand.workspace = true
 
 # Mobile-specific optimizations
@@ -79,10 +78,7 @@ rstest.workspace = true
 approx.workspace = true
 
 [features]
-default = ["mobile-optimized"]
-mobile-optimized = []
-ios = []
-android = []
+default = []
 coreml = []
 nnapi = []
 tflite-nnapi = ["nnapi"]

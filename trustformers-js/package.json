@@ -1,6 +1,6 @@
 {
   "name": "trustformers-js-workspace",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "TrustformeRS JavaScript/WebAssembly bindings workspace",
   "private": true,
   "type": "module",

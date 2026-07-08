@@ -182,11 +182,7 @@ impl VideoClip {
     ///
     /// If `count` exceeds the clip length the clip is returned as-is (all frames).
     /// Returns owned frame data (cloned from the clip).
-    pub fn sample_frames(
-        &self,
-        count: usize,
-        strategy: &FrameSamplingStrategy,
-    ) -> Vec<Vec<f32>> {
+    pub fn sample_frames(&self, count: usize, strategy: &FrameSamplingStrategy) -> Vec<Vec<f32>> {
         let n = self.frames.len();
         if count == 0 || n == 0 {
             return Vec::new();
@@ -196,15 +192,12 @@ impl VideoClip {
         let indices = match strategy {
             FrameSamplingStrategy::Uniform | FrameSamplingStrategy::MotionBased => {
                 uniform_indices(n, count)
-            }
+            },
             FrameSamplingStrategy::Center => center_indices(n, count),
             FrameSamplingStrategy::Random { seed } => random_indices(n, count, *seed),
         };
 
-        indices
-            .into_iter()
-            .map(|i| self.frames[i].clone())
-            .collect()
+        indices.into_iter().map(|i| self.frames[i].clone()).collect()
     }
 
     /// Return a reference to the frame at `index`, or `None` if out of bounds.
@@ -288,10 +281,7 @@ impl VideoClassificationPipeline {
         if video.frames.is_empty() {
             return Err(VideoError::EmptyVideo);
         }
-        let sampled = video.sample_frames(
-            self.config.num_frames,
-            &self.config.sampling_strategy,
-        );
+        let sampled = video.sample_frames(self.config.num_frames, &self.config.sampling_strategy);
         self.classify_frames(&sampled)
     }
 
@@ -310,11 +300,7 @@ impl VideoClassificationPipeline {
         // Mock: derive label index from mean pixel value across all frames.
         let total_pixels: usize = frames.iter().map(|f| f.len()).sum();
         let pixel_sum: f32 = frames.iter().flat_map(|f| f.iter()).sum();
-        let mean_pixel = if total_pixels > 0 {
-            pixel_sum / total_pixels as f32
-        } else {
-            0.0
-        };
+        let mean_pixel = if total_pixels > 0 { pixel_sum / total_pixels as f32 } else { 0.0 };
 
         // Clamp to [0, 1] range for label indexing.
         let clamped = mean_pixel.clamp(0.0, 1.0 - f32::EPSILON);
@@ -377,7 +363,12 @@ pub struct VideoFrame {
 impl VideoFrame {
     /// Construct a new `VideoFrame`.
     pub fn new(pixels: Vec<u8>, width: usize, height: usize, timestamp_ms: f32) -> Self {
-        Self { pixels, width, height, timestamp_ms }
+        Self {
+            pixels,
+            width,
+            height,
+            timestamp_ms,
+        }
     }
 
     /// Total number of pixels (width × height).
@@ -400,7 +391,11 @@ pub struct VideoInput {
 impl VideoInput {
     /// Construct a `VideoInput` from frames, fps, and total duration.
     pub fn new(frames: Vec<VideoFrame>, fps: f32, duration_ms: f32) -> Self {
-        Self { frames, fps, duration_ms }
+        Self {
+            frames,
+            fps,
+            duration_ms,
+        }
     }
 
     /// Number of frames in the input.
@@ -473,7 +468,7 @@ impl VideoFeatureExtractor {
                 }
                 out.iter_mut().for_each(|v| *v /= n as f32);
                 out
-            }
+            },
             TemporalPoolType::Max => {
                 let mut out = vec![f32::NEG_INFINITY; dim];
                 for frame in frame_features {
@@ -484,29 +479,23 @@ impl VideoFeatureExtractor {
                     }
                 }
                 out
-            }
+            },
             TemporalPoolType::Last => frame_features.last().cloned().unwrap_or_default(),
             TemporalPoolType::WeightedMean(weights) => {
                 let mut out = vec![0.0_f32; dim];
                 let weight_sum: f32 = weights.iter().sum();
-                let effective_sum = if weight_sum.abs() < f32::EPSILON {
-                    1.0
-                } else {
-                    weight_sum
-                };
-                for (frame, weight) in frame_features.iter().zip(
-                    weights
-                        .iter()
-                        .chain(std::iter::repeat(&0.0_f32))
-                        .take(n),
-                ) {
+                let effective_sum = if weight_sum.abs() < f32::EPSILON { 1.0 } else { weight_sum };
+                for (frame, weight) in frame_features
+                    .iter()
+                    .zip(weights.iter().chain(std::iter::repeat(&0.0_f32)).take(n))
+                {
                     for (o, &v) in out.iter_mut().zip(frame.iter()) {
                         *o += v * weight;
                     }
                 }
                 out.iter_mut().for_each(|v| *v /= effective_sum);
                 out
-            }
+            },
         }
     }
 
@@ -560,8 +549,7 @@ impl VideoFeatureExtractor {
         }
         (0..n)
             .map(|i| {
-                let local =
-                    (i as f64 * (clip_len - 1) as f64 / (n - 1) as f64).round() as usize;
+                let local = (i as f64 * (clip_len - 1) as f64 / (n - 1) as f64).round() as usize;
                 (start + local).min(total_frames - 1)
             })
             .collect()
@@ -572,12 +560,7 @@ impl VideoFeatureExtractor {
     ///
     /// `frame1` and `frame2` are raw RGB byte buffers of length `w * h * 3`.
     /// Returns a `w * h` magnitude map (one value per pixel).
-    pub fn optical_flow_magnitude(
-        frame1: &[u8],
-        frame2: &[u8],
-        w: usize,
-        h: usize,
-    ) -> Vec<f32> {
+    pub fn optical_flow_magnitude(frame1: &[u8], frame2: &[u8], w: usize, h: usize) -> Vec<f32> {
         let num_px = w * h;
         let mut magnitudes = vec![0.0_f32; num_px];
         for px in 0..num_px {
@@ -643,7 +626,9 @@ fn random_indices(total: usize, count: usize, seed: u64) -> Vec<usize> {
     let mut state = seed ^ (total as u64);
     let mut indices = Vec::with_capacity(count);
     for _ in 0..count {
-        state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
         indices.push((state >> 33) as usize % total);
     }
     indices
@@ -682,7 +667,7 @@ mod tests {
     fn make_clip(num_frames: usize, h: usize, w: usize) -> VideoClip {
         let frame_size = h * w * 3;
         let frames: Vec<Vec<f32>> = (0..num_frames)
-            .map(|i| vec![(i as f32 / num_frames as f32); frame_size])
+            .map(|i| vec![i as f32 / num_frames as f32; frame_size])
             .collect();
         VideoClip::new(frames, h, w, 25.0).expect("valid clip")
     }
@@ -802,7 +787,10 @@ mod tests {
         let clip = make_clip(20, 4, 4);
         let result = pipeline.classify(&clip).expect("ok");
         assert!(!result.label.is_empty(), "label should not be empty");
-        assert!(!result.top_labels.is_empty(), "top_labels should not be empty");
+        assert!(
+            !result.top_labels.is_empty(),
+            "top_labels should not be empty"
+        );
     }
 
     // --- VideoClassificationPipeline::classify_frames ---
@@ -887,8 +875,14 @@ mod tests {
 
     #[test]
     fn test_frame_sampling_strategy_variants() {
-        assert_eq!(FrameSamplingStrategy::Uniform, FrameSamplingStrategy::Uniform);
-        assert_ne!(FrameSamplingStrategy::Uniform, FrameSamplingStrategy::Center);
+        assert_eq!(
+            FrameSamplingStrategy::Uniform,
+            FrameSamplingStrategy::Uniform
+        );
+        assert_ne!(
+            FrameSamplingStrategy::Uniform,
+            FrameSamplingStrategy::Center
+        );
         assert_ne!(
             FrameSamplingStrategy::Random { seed: 42 },
             FrameSamplingStrategy::Random { seed: 99 }
@@ -917,7 +911,10 @@ mod tests {
         // We can only check top_labels here; verify they're valid probabilities.
         let sum: f32 = result.top_labels.iter().map(|(_, s)| *s).sum();
         // Sum of top-k probabilities must be in (0, 1].
-        assert!(sum > 0.0 && sum <= 1.0 + 1e-4, "probability sum out of range: {sum}");
+        assert!(
+            sum > 0.0 && sum <= 1.0 + 1e-4,
+            "probability sum out of range: {sum}"
+        );
     }
 
     // ── VideoFrame ────────────────────────────────────────────────────────────
@@ -1013,7 +1010,10 @@ mod tests {
         // 100 frames, clip=20 centered at 50 → frames in [40, 60).
         let indices = VideoFeatureExtractor::sample_frames_center_crop(100, 4, 20);
         for &idx in &indices {
-            assert!(idx >= 30 && idx < 70, "center crop index {idx} outside expected range");
+            assert!(
+                (30..70).contains(&idx),
+                "center crop index {idx} outside expected range"
+            );
         }
     }
 
@@ -1027,10 +1027,7 @@ mod tests {
 
     #[test]
     fn test_temporal_pool_mean() {
-        let frames = vec![
-            vec![0.0_f32, 2.0],
-            vec![2.0_f32, 4.0],
-        ];
+        let frames = vec![vec![0.0_f32, 2.0], vec![2.0_f32, 4.0]];
         let out = VideoFeatureExtractor::temporal_pool(&frames, &TemporalPoolType::Mean);
         assert!((out[0] - 1.0).abs() < 1e-5, "mean pool [0]: {}", out[0]);
         assert!((out[1] - 3.0).abs() < 1e-5, "mean pool [1]: {}", out[1]);
@@ -1038,11 +1035,7 @@ mod tests {
 
     #[test]
     fn test_temporal_pool_max() {
-        let frames = vec![
-            vec![1.0_f32, 5.0],
-            vec![3.0_f32, 2.0],
-            vec![2.0_f32, 4.0],
-        ];
+        let frames = vec![vec![1.0_f32, 5.0], vec![3.0_f32, 2.0], vec![2.0_f32, 4.0]];
         let out = VideoFeatureExtractor::temporal_pool(&frames, &TemporalPoolType::Max);
         assert!((out[0] - 3.0).abs() < 1e-5);
         assert!((out[1] - 5.0).abs() < 1e-5);
@@ -1050,11 +1043,7 @@ mod tests {
 
     #[test]
     fn test_temporal_pool_last() {
-        let frames = vec![
-            vec![1.0_f32, 1.0],
-            vec![2.0_f32, 2.0],
-            vec![9.0_f32, 8.0],
-        ];
+        let frames = vec![vec![1.0_f32, 1.0], vec![2.0_f32, 2.0], vec![9.0_f32, 8.0]];
         let out = VideoFeatureExtractor::temporal_pool(&frames, &TemporalPoolType::Last);
         assert!((out[0] - 9.0).abs() < 1e-5);
         assert!((out[1] - 8.0).abs() < 1e-5);
@@ -1062,16 +1051,11 @@ mod tests {
 
     #[test]
     fn test_temporal_pool_weighted_mean() {
-        let frames = vec![
-            vec![0.0_f32, 0.0],
-            vec![10.0_f32, 10.0],
-        ];
+        let frames = vec![vec![0.0_f32, 0.0], vec![10.0_f32, 10.0]];
         // Weight 0 for frame 0, weight 1 for frame 1 → output = frame 1.
         let weights = vec![0.0_f32, 1.0];
-        let out = VideoFeatureExtractor::temporal_pool(
-            &frames,
-            &TemporalPoolType::WeightedMean(weights),
-        );
+        let out =
+            VideoFeatureExtractor::temporal_pool(&frames, &TemporalPoolType::WeightedMean(weights));
         assert!((out[0] - 10.0).abs() < 1e-5);
         assert!((out[1] - 10.0).abs() < 1e-5);
     }
@@ -1089,7 +1073,10 @@ mod tests {
         let frame = vec![128u8; 4 * 4 * 3];
         let mag = VideoFeatureExtractor::optical_flow_magnitude(&frame, &frame, 4, 4);
         assert_eq!(mag.len(), 16);
-        assert!(mag.iter().all(|&m| m < 1e-5), "identical frames should have zero flow");
+        assert!(
+            mag.iter().all(|&m| m < 1e-5),
+            "identical frames should have zero flow"
+        );
     }
 
     #[test]

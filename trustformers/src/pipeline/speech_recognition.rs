@@ -108,8 +108,8 @@ impl Default for SpeechRecognitionConfig {
             return_timestamps: ReturnTimestamps::None,
             device: Device::CPU,
             num_mel_bins: 80,
-            fft_window_size: 400,  // 25 ms at 16 kHz
-            hop_length: 160,        // 10 ms at 16 kHz
+            fft_window_size: 400, // 25 ms at 16 kHz
+            hop_length: 160,      // 10 ms at 16 kHz
         }
     }
 }
@@ -244,10 +244,7 @@ impl SpeechRecognitionPipeline {
     }
 
     /// Transcribe a batch of audio inputs.
-    pub fn transcribe_batch(
-        &self,
-        audios: &[AudioInput],
-    ) -> Result<Vec<TranscriptionResult>> {
+    pub fn transcribe_batch(&self, audios: &[AudioInput]) -> Result<Vec<TranscriptionResult>> {
         audios.iter().map(|a| self.transcribe(a)).collect()
     }
 
@@ -259,10 +256,7 @@ impl SpeechRecognitionPipeline {
     /// Compute an 80-bin log-mel spectrogram from raw PCM samples.
     ///
     /// Returns a 2-D vector of shape `[num_frames][num_mel_bins]`.
-    pub fn compute_mel_spectrogram(
-        samples: &[f32],
-        sample_rate: u32,
-    ) -> Result<Vec<Vec<f32>>> {
+    pub fn compute_mel_spectrogram(samples: &[f32], sample_rate: u32) -> Result<Vec<Vec<f32>>> {
         if samples.is_empty() {
             return Err(TrustformersError::invalid_input(
                 "Cannot compute mel spectrogram from empty audio",
@@ -286,7 +280,11 @@ impl SpeechRecognitionPipeline {
         const HOP: usize = 160;
 
         let frames = compute_mel_spectrogram_internal(samples, FFT_SIZE, HOP, N_MEL, sample_rate);
-        debug!(frames = frames.len(), mel_bins = N_MEL, "Mel spectrogram computed");
+        debug!(
+            frames = frames.len(),
+            mel_bins = N_MEL,
+            "Mel spectrogram computed"
+        );
         Ok(frames)
     }
 
@@ -307,15 +305,17 @@ impl SpeechRecognitionPipeline {
     /// Resolve `AudioInput` to raw PCM samples at the configured sample rate.
     fn prepare_audio(&self, audio: &AudioInput) -> Result<(Vec<f32>, f32)> {
         match audio {
-            AudioInput::RawAudio { samples, sample_rate } => {
+            AudioInput::RawAudio {
+                samples,
+                sample_rate,
+            } => {
                 let resampled = resample_linear(samples, *sample_rate, self.config.sample_rate);
                 let max_samples =
                     (self.config.max_duration_secs * self.config.sample_rate as f32) as usize;
                 let truncated = if resampled.len() > max_samples {
                     warn!(
                         input_len = resampled.len(),
-                        max_samples,
-                        "Audio truncated to max_duration_secs"
+                        max_samples, "Audio truncated to max_duration_secs"
                     );
                     resampled[..max_samples].to_vec()
                 } else {
@@ -323,14 +323,16 @@ impl SpeechRecognitionPipeline {
                 };
                 let duration = truncated.len() as f32 / self.config.sample_rate as f32;
                 Ok((truncated, duration))
-            }
+            },
 
             AudioInput::FilePath(path) => {
                 if !path.exists() {
                     return Err(TrustformersError::Io {
                         message: format!("Audio file not found: '{}'", path.display()),
                         path: Some(path.to_string_lossy().to_string()),
-                        suggestion: Some("Verify the file path and ensure the file exists".to_string()),
+                        suggestion: Some(
+                            "Verify the file path and ensure the file exists".to_string(),
+                        ),
                     });
                 }
                 // Without an audio decoding library we return a silent placeholder.
@@ -342,7 +344,7 @@ impl SpeechRecognitionPipeline {
                 let n = (self.config.max_duration_secs * self.config.sample_rate as f32) as usize;
                 let duration = n as f32 / self.config.sample_rate as f32;
                 Ok((vec![0.0_f32; n], duration))
-            }
+            },
 
             AudioInput::MelSpectrogram(mel) => {
                 if mel.is_empty() {
@@ -359,7 +361,7 @@ impl SpeechRecognitionPipeline {
                 // Flatten mel back to a dummy PCM signal for the stub forward pass
                 let fake_pcm: Vec<f32> = mel.iter().flat_map(|row| row.iter().cloned()).collect();
                 Ok((fake_pcm, duration_secs))
-            }
+            },
         }
     }
 
@@ -407,11 +409,7 @@ impl SpeechRecognitionPipeline {
         }
 
         // Compute overall energy
-        let energy: f32 = mel
-            .iter()
-            .flat_map(|row| row.iter())
-            .map(|&v| v.abs())
-            .sum::<f32>()
+        let energy: f32 = mel.iter().flat_map(|row| row.iter()).map(|&v| v.abs()).sum::<f32>()
             / (mel.len() * mel[0].len().max(1)) as f32;
 
         let task_tag = match self.config.task {
@@ -419,12 +417,7 @@ impl SpeechRecognitionPipeline {
             SpeechTask::Translate => "translation",
         };
 
-        let lang_tag = self
-            .config
-            .language
-            .as_deref()
-            .unwrap_or("auto")
-            .to_string();
+        let lang_tag = self.config.language.as_deref().unwrap_or("auto").to_string();
 
         format!(
             "[{task_tag}|{lang_tag}|{duration:.1}s|energy:{energy:.4}] (stub output — model not loaded)",
@@ -463,7 +456,7 @@ impl SpeechRecognitionPipeline {
                         }
                     })
                     .collect()
-            }
+            },
 
             ReturnTimestamps::Word => {
                 // Split the text into words and distribute them over the duration
@@ -487,7 +480,7 @@ impl SpeechRecognitionPipeline {
                         }
                     })
                     .collect()
-            }
+            },
         }
     }
 }
@@ -542,7 +535,7 @@ impl SpeechProcessor {
         pcm: &[f32],
         frame_size: usize,
         hop_size: usize,
-    ) -> Result<Vec<f32>, SpeechProcessorError> {
+    ) -> std::result::Result<Vec<f32>, SpeechProcessorError> {
         if frame_size == 0 {
             return Err(SpeechProcessorError::InvalidFrameSize);
         }
@@ -579,7 +572,7 @@ impl SpeechProcessor {
         sample_rate: u32,
         min_silence_ms: f32,
         threshold: f32,
-    ) -> Result<Vec<Vec<f32>>, SpeechProcessorError> {
+    ) -> std::result::Result<Vec<Vec<f32>>, SpeechProcessorError> {
         if sample_rate == 0 {
             return Err(SpeechProcessorError::InvalidSampleRate);
         }
@@ -664,9 +657,7 @@ impl SpeechProcessor {
         for i in 1..=n {
             for j in 1..=m {
                 let cost = if ref_words[i - 1] == hyp_words[j - 1] { 0 } else { 1 };
-                dp[i][j] = (dp[i - 1][j] + 1)
-                    .min(dp[i][j - 1] + 1)
-                    .min(dp[i - 1][j - 1] + cost);
+                dp[i][j] = (dp[i - 1][j] + 1).min(dp[i][j - 1] + 1).min(dp[i - 1][j - 1] + cost);
             }
         }
 
@@ -796,8 +787,13 @@ fn compute_mel_spectrogram_internal(
     }
 
     let num_fft_bins = fft_size / 2 + 1;
-    let filterbank =
-        build_mel_filterbank(num_mel, num_fft_bins, sample_rate, 0.0, sample_rate as f32 / 2.0);
+    let filterbank = build_mel_filterbank(
+        num_mel,
+        num_fft_bins,
+        sample_rate,
+        0.0,
+        sample_rate as f32 / 2.0,
+    );
 
     let mut frames = Vec::new();
     let mut offset = 0usize;
@@ -810,11 +806,7 @@ fn compute_mel_spectrogram_internal(
         // Apply filterbank
         let mut mel_frame = Vec::with_capacity(num_mel);
         for filter in &filterbank {
-            let energy: f32 = filter
-                .iter()
-                .zip(magnitudes.iter())
-                .map(|(f, m)| f * m)
-                .sum();
+            let energy: f32 = filter.iter().zip(magnitudes.iter()).map(|(f, m)| f * m).sum();
             // Log-compress: log(max(energy, 1e-10))
             mel_frame.push(energy.max(1e-10_f32).ln());
         }
@@ -934,9 +926,7 @@ mod tests {
     fn test_transcribe_mel_spectrogram_input() {
         let p = default_pipeline();
         let mel = vec![vec![0.0_f32; 80]; 100];
-        let result = p
-            .transcribe(&AudioInput::MelSpectrogram(mel))
-            .expect("mel input");
+        let result = p.transcribe(&AudioInput::MelSpectrogram(mel)).expect("mel input");
         assert!(!result.text.is_empty());
     }
 
@@ -1023,8 +1013,7 @@ mod tests {
     #[test]
     fn test_compute_frame_energy_constant() {
         let pcm = vec![0.5_f32; 1600]; // 100ms at 16kHz
-        let energies = SpeechProcessor::compute_frame_energy(&pcm, 160, 160)
-            .expect("energy ok");
+        let energies = SpeechProcessor::compute_frame_energy(&pcm, 160, 160).expect("energy ok");
         assert!(!energies.is_empty());
         for &e in &energies {
             assert!((e - 0.5).abs() < 1e-4, "energy should be ~0.5, got {e}");
@@ -1035,8 +1024,7 @@ mod tests {
     #[test]
     fn test_compute_frame_energy_silence() {
         let pcm = vec![0.0_f32; 800];
-        let energies = SpeechProcessor::compute_frame_energy(&pcm, 160, 160)
-            .expect("energy ok");
+        let energies = SpeechProcessor::compute_frame_energy(&pcm, 160, 160).expect("energy ok");
         for &e in &energies {
             assert!(e < 1e-6, "silence energy should be ~0, got {e}");
         }
@@ -1047,9 +1035,13 @@ mod tests {
     fn test_compute_frame_energy_frame_count() {
         let pcm = vec![1.0_f32; 800];
         // frame_size=100, hop=100 → floor((800-100)/100)+1 = 8 frames
-        let energies = SpeechProcessor::compute_frame_energy(&pcm, 100, 100)
-            .expect("energy ok");
-        assert_eq!(energies.len(), 8, "expected 8 frames, got {}", energies.len());
+        let energies = SpeechProcessor::compute_frame_energy(&pcm, 100, 100).expect("energy ok");
+        assert_eq!(
+            energies.len(),
+            8,
+            "expected 8 frames, got {}",
+            energies.len()
+        );
     }
 
     // 4. compute_frame_energy: zero frame_size returns error
@@ -1069,8 +1061,7 @@ mod tests {
     // 6. compute_frame_energy: empty pcm gives empty energies
     #[test]
     fn test_compute_frame_energy_empty_pcm() {
-        let energies = SpeechProcessor::compute_frame_energy(&[], 160, 160)
-            .expect("empty ok");
+        let energies = SpeechProcessor::compute_frame_energy(&[], 160, 160).expect("empty ok");
         assert!(energies.is_empty());
     }
 
@@ -1116,10 +1107,7 @@ mod tests {
     // 12. format_timestamp: 1 min 30.5 sec
     #[test]
     fn test_format_timestamp_min_sec() {
-        assert_eq!(
-            SpeechProcessor::format_timestamp(90_500.0),
-            "00:01:30.500"
-        );
+        assert_eq!(SpeechProcessor::format_timestamp(90_500.0), "00:01:30.500");
     }
 
     // 13. format_timestamp: negative clamped to 0
@@ -1139,7 +1127,10 @@ mod tests {
     #[test]
     fn test_wer_completely_different() {
         let wer = SpeechProcessor::word_error_rate("cat sat mat", "dog ran far");
-        assert!((wer - 1.0).abs() < 1e-5, "completely different WER should be 1.0, got {wer}");
+        assert!(
+            (wer - 1.0).abs() < 1e-5,
+            "completely different WER should be 1.0, got {wer}"
+        );
     }
 
     // 16. word_error_rate: single substitution
@@ -1147,7 +1138,10 @@ mod tests {
     fn test_wer_single_substitution() {
         // "hello world" → "hello earth": 1 substitution out of 2 words
         let wer = SpeechProcessor::word_error_rate("hello world", "hello earth");
-        assert!((wer - 0.5).abs() < 1e-5, "single sub WER should be 0.5, got {wer}");
+        assert!(
+            (wer - 0.5).abs() < 1e-5,
+            "single sub WER should be 0.5, got {wer}"
+        );
     }
 
     // 17. word_error_rate: empty reference
@@ -1169,9 +1163,11 @@ mod tests {
     fn test_split_on_silence_silence_only() {
         let silence = vec![0.0_f32; 16_000];
         let segs =
-            SpeechProcessor::split_on_silence(&silence, 16_000, 100.0, 0.01)
-                .expect("split ok");
-        assert!(segs.is_empty(), "silence-only audio should give no segments");
+            SpeechProcessor::split_on_silence(&silence, 16_000, 100.0, 0.01).expect("split ok");
+        assert!(
+            segs.is_empty(),
+            "silence-only audio should give no segments"
+        );
     }
 
     // 20. split_on_silence: zero sample_rate returns error
@@ -1213,6 +1209,9 @@ mod tests {
     fn test_wer_insertion() {
         // ref: 2 words, hyp: 3 words (1 insertion) → WER = 1/2
         let wer = SpeechProcessor::word_error_rate("hello world", "hello beautiful world");
-        assert!((wer - 0.5).abs() < 1e-5, "insertion WER should be 0.5, got {wer}");
+        assert!(
+            (wer - 0.5).abs() < 1e-5,
+            "insertion WER should be 0.5, got {wer}"
+        );
     }
 }

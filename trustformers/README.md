@@ -1,6 +1,6 @@
 # trustformers
 
-**Version:** 0.1.4 | **Status:** Alpha | **Updated:** 2026-07-02
+**Version:** 0.2.0 | **Status:** Alpha | **Updated:** 2026-07-02
 
 Main integration crate providing high-level APIs, pipelines, and Hugging Face Hub integration for the TrustformeRS ecosystem.
 
@@ -154,7 +154,7 @@ let result = chain.__call__("Very long document text...".to_string())?;
 
 ### Hub Integration
 
-Requires the `hub` feature (`trustformers = { version = "0.1.4", features = ["hub"] }`):
+Requires the `hub` feature (`trustformers = { version = "0.2.0", features = ["hub"] }`):
 
 ```rust
 use trustformers::hub::{download_model, HubOptions};

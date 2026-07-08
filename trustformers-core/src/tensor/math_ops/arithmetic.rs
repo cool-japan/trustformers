@@ -144,6 +144,33 @@ impl Tensor {
                 cpu_self.add(&cpu_other)
             },
             #[cfg(feature = "cuda")]
+            (Tensor::CUDA(a_data), Tensor::CUDA(b_data))
+                if a_data.device_id() == b_data.device_id()
+                    && a_data.shape == b_data.shape
+                    && a_data.dtype == crate::tensor::DType::F32
+                    && b_data.dtype == crate::tensor::DType::F32
+                    && a_data.shape.iter().product::<usize>() > 0 =>
+            {
+                // GPU-to-GPU residual add — stays resident on the CUDA device.
+                // Same-shape only (resident buffers carry no broadcasting);
+                // mismatched shapes/devices/dtypes fall through to the host
+                // arms below, which apply the full broadcasting rules.
+                use crate::gpu_ops::cuda::get_cuda_backend;
+                use crate::tensor::CudaTensorData;
+
+                let device_id = a_data.device_id();
+                let size: usize = a_data.shape.iter().product();
+                let backend = get_cuda_backend(device_id)?;
+                let output_id =
+                    backend.add_gpu_to_gpu(&a_data.buffer_id(), &b_data.buffer_id(), size)?;
+                Ok(Tensor::CUDA(CudaTensorData::new(
+                    output_id,
+                    device_id,
+                    a_data.shape.clone(),
+                    a_data.dtype,
+                )))
+            },
+            #[cfg(feature = "cuda")]
             (Tensor::CUDA(_), _) => {
                 // Convert CUDA tensor to CPU, then perform operation
                 let cpu_self = self.to_device_enum(&crate::device::Device::CPU)?;

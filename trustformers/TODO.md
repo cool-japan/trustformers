@@ -1,6 +1,6 @@
 # trustformers TODO List
 
-**Version:** 0.1.4 | **Status:** Alpha | **Updated:** 2026-07-02
+**Version:** 0.2.0 | **Status:** Alpha | **Updated:** 2026-07-06
 
 ## Overview
 
@@ -33,7 +33,12 @@ The `trustformers` crate is the main integration crate providing high-level APIs
 - [x] **HUB UPLOAD EXTENDED** - HubUploadConfig, HubUploader extensions, HubUploadProgress, HubError, upload_model, upload_tokenizer (confirmed present in `hub_upload.rs`)
 - [x] **MODEL CARDS EXTENDED** - ModelCardBuilder, ModelCardTemplate, ModelCardError, `to_yaml_frontmatter()`, `from_markdown()` (confirmed present in `hub_model_card.rs`)
 - [x] **MODEL DIAGNOSTICS** - ModelDiagnostics, DiagnosticResult, DiagStatus, DiagnosticSummary, `check_weight_norms`, `check_activation_stats`, `check_gradient_flow`, `check_attention_entropy`, `detect_dead_neurons`, `detect_weight_collapse`, `report_summary` (confirmed present in `src/diagnostics/mod.rs`)
-- [ ] **FINE-TUNING WIRED IN** - `src/finetuning/` (LoRA + bottleneck adapters), `src/cache/` (versioned cache), and `src/loading/` (parallel model loader) are fully implemented (~2,900 lines total) but are **not referenced by any `mod`/`pub mod` declaration** in `lib.rs`, so they are not compiled into the crate today. See "Remaining Work" below.
+- [x] Wire finetuning/ + cache/ + loading/ into lib.rs (planned 2026-07-05)
+  - Goal: expose ~2900 lines of complete, already-tested code (LoRA/adapter fine-tuning, versioned cache, parallel weight loader) currently invisible to the compiler.
+  - Design: add exactly 3 lines to lib.rs: `pub mod cache; pub mod finetuning; pub mod loading;`. Each submodule's own mod.rs already wires its internals correctly.
+  - Files: trustformers/src/lib.rs only.
+  - Tests: cargo build --all-features; the pre-written #[cfg(test)] modules in versioned_cache.rs/parallel_loader.rs/adapter.rs/lora.rs run for the first time.
+  - Risk: low — crate already blankets #![allow(dead_code, unused_variables, unused_imports, unused_assignments)].
 - [ ] **MODEL SEARCH** - No `search_models`/Hub-search implementation exists anywhere in `src/`. A prior version of this document listed Hub model search as complete; that was incorrect and has been corrected here.
 
 ### Metrics (re-verified 2026-07-01)
@@ -59,6 +64,28 @@ The `trustformers` crate is the main integration crate providing high-level APIs
 - **Safety:** SafetyFilter (ExtendedSafetyConfig), EnhancedSafetyFilter (toxicity, hate speech, personal info, violence, adult content, harassment, bias)
 - **Hub:** Model download/cache/auth (feature `hub`), mirror support (feature `hub`), Hub browser UI (feature `async`), model cards, offline packs, differential updates, P2P
 - **Infrastructure:** MemoryPool, ConfigurationManager, EnhancedProfiler, HubMirror, ValidationManager, BenchmarkSuite, ModelDiagnostics, evaluation bridge (BLEU/ROUGE/F1/perplexity)
+
+---
+
+## 0.2.0 Release Scope
+
+Two workspace-wide tracks touch this umbrella crate in 0.2.0: the **OxiCUDA GPU migration** (scirs2-core `gpu` → OxiCUDA backends, already integrated in trustformers-core behind `cuda`/`metal`) and the **PyTorch (tch) dependency removal**. Decision: delete the `tch` dependency and the `torch` feature entirely in 0.2.0 (workspace Cargo.toml:82, trustformers-core torch feature + ~40 lines of cfg arms, and the forwarder features in trustformers, trustformers-training, trustformers-c); do **not** adopt ToRSh as a replacement now — a P2 task (tracked in the root TODO.md) evaluates an optional `torsh-interop` feature in 0.3.x once torsh 0.2.0 ships on crates.io. Candle sub-decision: drop the unused candle-nn workspace dep now, keep the `candle` feature/variant through 0.2.0 (it is in every `full` set), and decide implement-vs-remove in 0.3.x.
+
+### PyTorch (tch) dependency removal
+
+- [ ] **[P0]** Remove the `torch` forwarder feature from the umbrella crate
+  - Delete `torch = ["trustformers-core/torch", "trustformers-training/torch"]` (Cargo.toml:81-82) and update the `full` comment about excluding torch (:92-93). Zero code in `trustformers/src` is gated on the feature (verified: no `cfg(feature = "torch")` hits), so this is manifest-only. Must land in the same change as the trustformers-core torch removal — a forwarder referencing a deleted core feature fails Cargo feature resolution. Verify: `cargo check -p trustformers --features full` green.
+  - Evidence: trustformers/Cargo.toml:81-82,92-93
+
+### OxiCUDA GPU migration (scirs2-core gpu → OxiCUDA)
+
+- [ ] **[P1]** Add a `metal` forwarding feature to the umbrella crate
+  - The umbrella crate forwards cuda (`cuda = ["trustformers-models/cuda"]`, Cargo.toml:84) but has no metal forwarder, so users of the top-level trustformers crate cannot enable the oxicuda-metal path without depending on sub-crates directly. Add `metal = ["trustformers-models/metal"]` (models already forwards to trustformers-core/metal at trustformers-models/Cargo.toml:101, which pulls oxicuda-metal + oxicuda-backend). Verify: `cargo check -p trustformers --features metal` on macOS resolves and compiles the Metal backend.
+  - Evidence: trustformers/Cargo.toml:84; trustformers-models/Cargo.toml:101; trustformers-core/Cargo.toml:121,149-161
+
+### Post-0.2.0 (0.3.x)
+
+- No P2 items are scoped to this crate. The `torsh-interop` evaluation (once torsh 0.2.0 ships on crates.io) and the candle implement-vs-remove decision are tracked in the root TODO.md; if either lands, revisit the umbrella crate's feature forwarders here.
 
 ---
 
@@ -400,7 +427,10 @@ let model_path = download_model("private-org/private-model", Some(options))?;
   - Disk-based Hub cache (`hub::get_cache_dir`, `hub::is_cached`)
   - Cache invalidation / TTL / tag-based eviction
   - Size limits
-- [ ] `src/cache/versioned_cache.rs` (838 lines, a separate versioned-cache implementation) exists but is **not wired into `lib.rs`** — see Remaining Work.
+- [x] Wire cache/versioned_cache.rs into lib.rs (planned 2026-07-05)
+  - Goal: same underlying fix as the "wire finetuning/+cache/+loading/" item above — cache/mod.rs already internally wires versioned_cache.rs; the only missing piece for both items is the identical single `pub mod cache;` line in lib.rs. Implemented once as part of that item, not twice.
+  - Files: trustformers/src/lib.rs (same edit as the finetuning/cache/loading item).
+  - Risk: none — this is a duplicate of the item above, not independent work.
 
 ---
 
@@ -424,11 +454,25 @@ A grep for `todo!()`/`unimplemented!()` across `src/` returns exactly 12 hits. A
 - [x] Enhanced Hub features (upload, model cards, diagnostics — see new modules)
 - [x] Better error messages and diagnostics (ModelDiagnostics, HubError, ModelCardError)
 - [x] More pipeline types (audio, vision-only) — `audio_classification`, `image_classification`, `object_detection`, `depth_estimation`, `speech_to_text` (audio), `text_to_speech` (audio), `image_to_text` (vision), `visual_question_answering` (vision) are now implemented and wired into `pipeline/mod.rs`
-- [ ] **Wire up orphaned pipeline drafts**: `audio_generation.rs`, `document_classification.rs`, `feature_extraction.rs`, `image_segmentation.rs`, `speech_recognition.rs`, `table_question_answering.rs`, `text_to_image.rs`, `video_classification.rs`, `visual_grounding.rs`, `zero_shot_audio_classification.rs` exist under `src/pipeline/` but are **not declared** in `pipeline/mod.rs`'s `pub mod` list, so they do not compile into the crate today
+- [x] Wire 10 orphaned pipeline drafts into pipeline/mod.rs (planned 2026-07-05)
+  - Goal: expose 10 never-compiled pipeline modules (~9900 lines total).
+  - Design: add 10 `pub mod X;` lines to pipeline/mod.rs (alphabetized). The generic pipeline() string-dispatch factory does NOT need new cases — this is pub-mod-only wiring, by direct analogy with object_detection/depth_estimation.
+  - Files: trustformers/src/pipeline/mod.rs only.
+  - Tests: cargo build/cargo test --all-features — this is the real test, since these files have never been compiled and may have drifted against sibling types.
+  - Risk: explicit escape hatch — if the build surfaces non-trivial API drift in any of the 10 files, fix what's cheap; for anything that would balloon into a real redesign, `git checkout -- <that one file>` to revert just that file's wiring and leave it un-mounted for a follow-up, rather than let this one item consume the whole batch's budget. Report which (if any) files were reverted.
 - [ ] **Hub model search** — no `search_models` implementation exists; needs designing and implementing from scratch (see corrected "Model Search" section above)
-- [ ] Re-enable the two `#[cfg(test_disabled)]` test modules (`pipeline/conversational/config/utils.rs`, `auto/feature_extractors/mod.rs`) after rewriting them against the current API (they reference removed types: `PersonaConfigBuilder`/`ConfigurationPresets`, and `TrustformersError::InvalidInput`)
+- [x] Re-enable 2 disabled test modules (planned 2026-07-05)
+  - Goal: flip both #[cfg(test_disabled)] blocks back on.
+  - Design: Module A (pipeline/conversational/config/utils.rs) — its "removed types" (PersonaConfigBuilder, ConfigurationPresets) already exist again with matching signatures; likely just flip the cfg and delete the stale comment, then fix whatever the compiler actually flags. Module B (auto/feature_extractors/mod.rs) — one-line wrong-import fix: change `use trustformers_core::errors::TrustformersError;` (a struct with no InvalidInput variant) to `use crate::error::TrustformersError;` (the local enum that has one).
+  - Files: pipeline/conversational/config/utils.rs, auto/feature_extractors/mod.rs.
+  - Tests: cargo test after flipping each cfg — this is the actual verification.
+  - Risk: low, but must be confirmed by a real test run, not just re-reading the code.
 - [ ] Re-enable `examples/conversational_ai.rs.disabled` once its API dependencies stabilize
-- [ ] Clean up stale `// TODO` doc comments in `auto/mod.rs` (lines referring to `AutoDataCollator` and "remaining auto submodules" as future work — both are already implemented and wired in)
+- [x] Clean up stale TODO comments in auto/mod.rs (planned 2026-07-05)
+  - Goal/Design: delete 3 comments claiming AutoDataCollator and "remaining auto submodules" are future work — both are already implemented, wired, and re-exported today.
+  - Files: trustformers/src/auto/mod.rs.
+  - Tests: none needed (comment-only).
+  - Risk: none.
 
 #### Performance
 - [ ] Faster model loading
@@ -450,8 +494,18 @@ A grep for `todo!()`/`unimplemented!()` across `src/` returns exactly 12 hits. A
 - [ ] Fine-tuning: training loop helpers
   - **Refinement needed:** Should helpers wrap trustformers-training or be standalone?
 - [x] Evaluation metrics integration (BLEU, ROUGE, F1/exact-match, perplexity — `src/evaluation/bridge.rs`)
-- [ ] AutoModelForObjectDetection
-- [ ] AutoModelForImageSegmentation
+- [x] Add AutoModelForObjectDetection (planned 2026-07-05)
+  - Goal: mirror the existing AutoModelForImageClassification/AutoModelForAudioClassification (Pattern B: plain struct wrapping ObjectDetectionPipeline, from_pretrained/from_local/detect()/accessors — no AutoConfig dispatch, no weight loading).
+  - MANDATORY documentation requirement: ObjectDetectionPipeline produces deterministic MOCK detections today (no real detection head exists anywhere in the ecosystem — consistent with the already-shipped ImageClassification/AudioClassification siblings, which are equally mock). The doc comment on the new struct MUST say so explicitly — do not let this read as real inference to a caller.
+  - Files: trustformers/src/automodel_tasks.rs only (no crate-root re-export, matching sibling precedent).
+  - Tests: mirror automodel_tasks.rs's existing test style for the closest siblings.
+  - Risk: the documentation requirement above is the one thing that must not be skipped.
+- [x] Add AutoModelForImageSegmentation (planned 2026-07-05)
+  - Goal: mirror the existing AutoModelForImageClassification/AutoModelForAudioClassification (Pattern B: plain struct wrapping ImageSegmentationPipeline, from_pretrained/from_local/segment()/accessors — no AutoConfig dispatch, no weight loading).
+  - MANDATORY documentation requirement: ImageSegmentationPipeline produces deterministic MOCK segmentations today (no real segmentation head exists anywhere in the ecosystem — consistent with the already-shipped ImageClassification/AudioClassification siblings, which are equally mock). The doc comment on the new struct MUST say so explicitly — do not let this read as real inference to a caller.
+  - Files: trustformers/src/automodel_tasks.rs only (no crate-root re-export, matching sibling precedent).
+  - Tests: mirror automodel_tasks.rs's existing test style for the closest siblings.
+  - Risk: the documentation requirement above is the one thing that must not be skipped.
 
 ---
 
@@ -547,8 +601,8 @@ let model = AutoModel::from_config(&config)?;
 
 ---
 
-**Last Updated:** 2026-07-02
-**Version:** 0.1.4
+**Last Updated:** 2026-07-06
+**Version:** 0.2.0
 **Status:** Alpha
 **API:** HuggingFace-compatible high-level API
 **Hub:** Core Hub utilities unconditional; remote downloads require the optional `hub` feature

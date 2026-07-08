@@ -2,11 +2,11 @@
 
 Mobile deployment infrastructure for running transformer models on iOS and Android devices with hardware acceleration and cross-platform framework support.
 
-**Version:** 0.1.4 | **Status:** Alpha | **Tests:** ~742 passing (crate) · 18,102 passing workspace-wide (0 failed, 119 skipped) | **SLoC:** ~103,900 (Rust, `src/`) | **Last Updated:** 2026-07-02
+**Version:** 0.2.0 | **Status:** Alpha | **Tests:** ~742 passing (crate) · 18,102 passing workspace-wide (0 failed, 119 skipped) | **SLoC:** ~103,900 (Rust, `src/`) | **Last Updated:** 2026-07-02
 
 ## Status
 
-**Alpha**: Core mobile infrastructure — device detection, battery/thermal/network-aware adaptation, OTA model management, quantization, and the mobile performance profiler — is implemented and covered by ~742 passing crate-level tests (0 clippy warnings, 26 doctests passing / 0 failed / 2 ignored). iOS (Core ML/Metal via `TrustformersKit`) and Android (JNI/NNAPI via the `trustformers-android` AAR) native bridges are implemented and exercised by real Swift/Java/Kotlin source. Cross-platform framework integration is uneven: Flutter (`trustformers_flutter`) and Unity (`com.trustformers.mobile`) ship real Dart/C# packages backed by this crate's FFI; React Native currently has Rust-side JSI/Turbo Module bridge code and a detailed usage example, but no packaged npm module lives in this repository yet. A small number of advanced/experimental modules (post-quantum and homomorphic-encryption primitives in `advanced_security.rs`, one of two on-disk federated-learning implementations) are simplified reference code rather than production-grade — see [Known Limitations](#known-limitations).
+**Alpha**: Core mobile infrastructure — device detection, battery/thermal/network-aware adaptation, OTA model management, quantization, and the mobile performance profiler — is implemented and covered by ~742 passing crate-level tests (0 clippy warnings, 26 doctests passing / 0 failed / 2 ignored). iOS (Core ML/Metal via `TrustformersKit`) and Android (JNI/NNAPI via the `trustformers-android` AAR) native bridges are implemented and exercised by real Swift/Java/Kotlin source. Cross-platform framework integration is uneven: Flutter (`trustformers_flutter`) and Unity (`com.trustformers.mobile`) ship real Dart/C# packages backed by this crate's FFI; React Native currently has Rust-side JSI/Turbo Module bridge code and a detailed usage example, but no packaged npm module lives in this repository yet. A small number of advanced/experimental modules (post-quantum and homomorphic-encryption primitives in `advanced_security.rs`) are simplified reference code rather than production-grade — see [Known Limitations](#known-limitations).
 
 Public API surface: **~3,860 public items** (functions, structs, enums, traits — including impl-block methods) across 187 files in `src/`. No `todo!()`/`unimplemented!()` macros remain in the crate; where simplified/placeholder logic does exist (see below), it returns a working value rather than panicking.
 
@@ -27,7 +27,7 @@ Public API surface: **~3,860 public items** (functions, structs, enums, traits �
 - **NNAPI Integration**: `nnapi.rs` / `nnapi_converter.rs` (feature `nnapi`, Android target only)
 - **TFLite NNAPI delegate**: `tflite_nnapi_delegate.rs` (feature `tflite-nnapi`)
 - **Edge TPU Support**: `edge_tpu_support.rs` (compiled for `target_os = "android"` only) — Google Coral acceleration
-- **Work Manager / Doze / Content Provider / Android Auto / RenderScript**: `android_work_manager.rs`, `android_doze_compatibility.rs`, `android_content_provider.rs`, `android_auto_support.rs`, `android_renderscript.rs` (RenderScript path targets the legacy API and contains placeholder bindings — see Known Limitations)
+- **Work Manager / Doze / Content Provider / Android Auto**: `android_work_manager.rs`, `android_doze_compatibility.rs`, `android_content_provider.rs`, `android_auto_support.rs`
 
 ### Cross-Platform Features
 
@@ -182,7 +182,7 @@ float[] output = engine.Inference(inputTensor);
 
 ## Installation
 
-Sub-packages currently version independently (`1.0.0`) and do not track the workspace's `0.1.4` release; verify against each package's own manifest before pinning.
+Sub-packages currently version independently (`1.0.0`) and do not track the workspace's `0.2.0` release; verify against each package's own manifest before pinning.
 
 ### iOS (CocoaPods)
 
@@ -221,7 +221,7 @@ Add `com.trustformers.mobile` via the Unity Package Manager (Git URL or local `u
 
 ```toml
 [dependencies]
-trustformers-mobile = { version = "0.1.4", features = ["ios", "on-device-training"] }
+trustformers-mobile = { version = "0.2.0", features = ["on-device-training"] }
 ```
 
 ## Architecture
@@ -239,7 +239,7 @@ trustformers-mobile/
 ├── tutorials/                # Integration guides and production tutorials
 ├── src/                     # Shared Rust core (187 files, ~103,900 SLoC)
 │   ├── ios.rs, ios/          # iOS FFI bindings (engine, metal, mps)
-│   ├── android/, android_*.rs # Android JNI/NNAPI/WorkManager/Doze/RenderScript bindings
+│   ├── android/, android_*.rs # Android JNI/NNAPI/WorkManager/Doze bindings
 │   ├── model_management.rs   # OTA model lifecycle management
 │   ├── battery.rs             # Battery-aware optimization
 │   ├── federated.rs            # Federated learning (feature `on-device-training`)
@@ -296,9 +296,6 @@ The per-model tables below are illustrative reference figures and are **not** ye
 
 Verified against `Cargo.toml` and `#[cfg(feature = ...)]` usage in `src/`:
 
-- `mobile-optimized` (**default**) — currently a marker feature; no `#[cfg(feature = "mobile-optimized")]` gate exists in `src/` yet
-- `ios` — currently a marker feature; iOS-only code is gated by `target_os = "ios"` directly, not this flag
-- `android` — currently a marker feature; Android-only code is gated by `target_os = "android"` directly, not this flag
 - `coreml` — gates `coreml.rs` / `coreml_converter.rs` (also requires `target_os = "ios"`)
 - `nnapi` — gates `nnapi.rs` / `nnapi_converter.rs` (also requires `target_os = "android"`)
 - `tflite-nnapi` — implies `nnapi`; gates `tflite_nnapi_delegate.rs`
@@ -352,10 +349,8 @@ cd android-lib && ./gradlew test
 
 - Alpha status: API surface may change before 0.2.0
 - `advanced_security.rs` implements post-quantum KEM (Kyber/McEliece stand-ins), homomorphic encryption, and secure multi-party computation as **simplified/mock reference code**, not audited cryptography — do not depend on it for real confidentiality guarantees yet
-- Two federated-learning implementations exist under `src/`: only `federated.rs`'s `FederatedLearningClient` (feature `on-device-training`) is declared in `lib.rs` and compiled; `federated_learning.rs` and `federated_learning_v2/` are currently orphaned (not mounted as modules) and are unreachable dead code
 - `react-native-plugin/` in this repository contains a usage example (`TrustformersCompleteExample.tsx`) only — there is no `package.json` or module source here, so React Native integration is not yet an installable package from this repo
-- `ios`, `android`, and `mobile-optimized` Cargo features currently have no `#[cfg(feature = ...)]` gates in `src/` (platform code is gated by `target_os` directly instead)
-- Flutter, Unity, iOS, and Android sub-packages version independently at `1.0.0` and do not track the workspace's `0.1.4` release
+- Flutter, Unity, iOS, and Android sub-packages version independently at `1.0.0` and do not track the workspace's `0.2.0` release
 - Core ML Neural Engine requires iOS 16+ for latest features
 - NNAPI performance varies significantly across Android devices
 - Large models require quantization for mobile deployment
@@ -369,7 +364,6 @@ cd android-lib && ./gradlew test
 - Real-time collaboration features
 - WebNN integration for future platforms
 - Replace the `advanced_security.rs` placeholder cryptography with audited implementations
-- Reconcile or remove the orphaned `federated_learning.rs` / `federated_learning_v2/` modules
 - Publish an actual npm package for the React Native bridge
 
 ## License
@@ -379,7 +373,7 @@ Licensed under Apache License, Version 2.0 ([LICENSE](../LICENSE)).
 ---
 
 **Last Updated:** 2026-07-02
-**Version:** 0.1.4
+**Version:** 0.2.0
 **Status:** Alpha
 **Test Suite:** ~742 crate tests passing · 26 doctests passing (0 failed, 2 ignored)
 **SLoC:** ~103,900 (Rust, `src/`) · ~124,000 (full repo incl. Swift/Kotlin/C#/Dart/TS bindings, via tokei)

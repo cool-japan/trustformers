@@ -236,9 +236,9 @@ impl CrossFrameworkValidator {
 
     /// Check if PyTorch is available
     fn check_pytorch_available() -> bool {
-        // In a real implementation, this would try to import torch
-        // For now, we'll assume it's available if the torch feature is enabled
-        cfg!(feature = "torch")
+        // No PyTorch backend is compiled into trustformers-core (the `tch` dependency was
+        // removed); PyTorch cross-framework validation is therefore never available.
+        false
     }
 
     /// Check if TensorFlow is available
@@ -306,22 +306,9 @@ impl CrossFrameworkValidator {
 
     /// Validate against PyTorch
     fn validate_pytorch(&self, result: &mut ValidationResult) -> Result<()> {
-        #[cfg(feature = "torch")]
-        {
-            // Implementation would use PyTorch bindings
-            // For now, we'll simulate validation
-            result.passed = true;
-            result.max_diff = 1e-6;
-            result.mean_diff = 1e-7;
-            result.total_elements = 1000;
-            result.mismatch_count = 0;
-            result.add_metric("torch_version".to_string(), 2.1);
-        }
-
-        #[cfg(not(feature = "torch"))]
-        {
-            result.add_error("PyTorch not available".to_string());
-        }
+        // No PyTorch backend is compiled into trustformers-core (the `tch` dependency was
+        // removed), so PyTorch cross-framework validation always reports unavailable.
+        result.add_error("PyTorch not available".to_string());
 
         Ok(())
     }

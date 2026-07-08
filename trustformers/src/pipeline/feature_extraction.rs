@@ -144,21 +144,13 @@ impl Embedding {
 
     /// Dot product of two embeddings.
     pub fn dot_product(&self, other: &Embedding) -> f32 {
-        self.values
-            .iter()
-            .zip(other.values.iter())
-            .map(|(a, b)| a * b)
-            .sum()
+        self.values.iter().zip(other.values.iter()).map(|(a, b)| a * b).sum()
     }
 
     /// Euclidean (L2) distance between two embeddings.
     pub fn euclidean_distance(&self, other: &Embedding) -> f32 {
-        let sq_sum: f32 = self
-            .values
-            .iter()
-            .zip(other.values.iter())
-            .map(|(a, b)| (a - b).powi(2))
-            .sum();
+        let sq_sum: f32 =
+            self.values.iter().zip(other.values.iter()).map(|(a, b)| (a - b).powi(2)).sum();
         sq_sum.sqrt()
     }
 
@@ -262,11 +254,7 @@ impl FeatureExtractionPipeline {
             })
             .collect();
 
-        scored.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(top_k);
         Ok(scored)
     }
@@ -286,9 +274,8 @@ impl FeatureExtractionPipeline {
         let dim = self.config.embedding_dim;
 
         // Initialise centroids from first `num_clusters` embeddings.
-        let mut centroids: Vec<Vec<f32>> = (0..num_clusters)
-            .map(|i| embeddings[i].values.clone())
-            .collect();
+        let mut centroids: Vec<Vec<f32>> =
+            (0..num_clusters).map(|i| embeddings[i].values.clone()).collect();
 
         let mut assignments = vec![0usize; texts.len()];
         let mut actual_iters = 0usize;
@@ -507,11 +494,7 @@ impl SimilarityMetrics {
 
     /// Euclidean (L2) distance.
     pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
-        a.iter()
-            .zip(b.iter())
-            .map(|(&x, &y)| (x - y).powi(2))
-            .sum::<f32>()
-            .sqrt()
+        a.iter().zip(b.iter()).map(|(&x, &y)| (x - y).powi(2)).sum::<f32>().sqrt()
     }
 
     /// Dot product of two vectors.
@@ -648,7 +631,12 @@ mod tests {
     #[test]
     fn semantic_search_ordering() {
         let pipe = default_pipeline();
-        let corpus = vec!["apple banana", "dog cat", "machine learning", "neural network"];
+        let corpus = vec![
+            "apple banana",
+            "dog cat",
+            "machine learning",
+            "neural network",
+        ];
         let results = pipe.semantic_search("apple", &corpus, 4).unwrap();
         assert_eq!(results.len(), 4);
         for i in 1..results.len() {
@@ -819,11 +807,7 @@ mod tests {
 
     #[test]
     fn cls_pooling_returns_first() {
-        let embeddings = vec![
-            vec![1.0f32, 2.0],
-            vec![3.0, 4.0],
-            vec![5.0, 6.0],
-        ];
+        let embeddings = vec![vec![1.0f32, 2.0], vec![3.0, 4.0], vec![5.0, 6.0]];
         let pooled = EmbeddingNormalizer::cls_pooling(&embeddings);
         assert_eq!(pooled, vec![1.0, 2.0]);
     }
@@ -927,35 +911,29 @@ mod tests {
 
     #[test]
     fn pairwise_cosine_matrix_diagonal_is_one() {
-        let embeddings = vec![
-            vec![1.0f32, 0.0],
-            vec![0.0f32, 1.0],
-            vec![1.0f32, 1.0],
-        ];
+        let embeddings = vec![vec![1.0f32, 0.0], vec![0.0f32, 1.0], vec![1.0f32, 1.0]];
         let matrix = SimilarityMetrics::pairwise_cosine_matrix(&embeddings);
         assert_eq!(matrix.len(), 3);
         assert_eq!(matrix[0].len(), 3);
         for i in 0..3 {
-            assert!((matrix[i][i] - 1.0).abs() < 1e-4, "diagonal[{i}]={}", matrix[i][i]);
+            assert!(
+                (matrix[i][i] - 1.0).abs() < 1e-4,
+                "diagonal[{i}]={}",
+                matrix[i][i]
+            );
         }
     }
 
     #[test]
     fn pairwise_cosine_matrix_symmetric() {
-        let embeddings = vec![
-            vec![1.0f32, 2.0],
-            vec![3.0f32, 4.0],
-        ];
+        let embeddings = vec![vec![1.0f32, 2.0], vec![3.0f32, 4.0]];
         let matrix = SimilarityMetrics::pairwise_cosine_matrix(&embeddings);
         assert!((matrix[0][1] - matrix[1][0]).abs() < 1e-5);
     }
 
     #[test]
     fn pairwise_cosine_matrix_orthogonal_vectors() {
-        let embeddings = vec![
-            vec![1.0f32, 0.0],
-            vec![0.0f32, 1.0],
-        ];
+        let embeddings = vec![vec![1.0f32, 0.0], vec![0.0f32, 1.0]];
         let matrix = SimilarityMetrics::pairwise_cosine_matrix(&embeddings);
         assert!(matrix[0][1].abs() < 1e-5);
         assert!(matrix[1][0].abs() < 1e-5);

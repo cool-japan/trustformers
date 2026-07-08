@@ -434,8 +434,6 @@ impl TensorMemoryPool {
             Tensor::C64(_) => elements * 16,  // 2 * 64-bit complex
             Tensor::CF16(_) => elements * 4,  // 2 * 16-bit complex
             Tensor::CBF16(_) => elements * 4, // 2 * 16-bit bfloat complex
-            #[cfg(feature = "torch")]
-            Tensor::Torch(_) => elements * 4, // Default to 32-bit
             #[cfg(feature = "candle")]
             Tensor::Candle(_) => elements * 4, // Default to 32-bit
             #[cfg(all(target_os = "macos", feature = "metal"))]

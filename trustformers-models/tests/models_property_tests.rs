@@ -41,7 +41,11 @@ fn tiny_bert_config() -> impl Strategy<Value = BertConfig> {
 // Property: BERT model output shapes with memory constraints
 proptest! {
     #![proptest_config(ProptestConfig {
-        timeout: 1000, // 1 second timeout per test case
+        // Generous per-case timeout: this only guards against runaway cases.
+        // Each case takes ~50ms unloaded, but a saturated machine (parallel
+        // test runs / concurrent builds) can starve a case well past a tight
+        // budget, turning the timeout into a flake.
+        timeout: 10_000,
         max_shrink_iters: 10,
         ..ProptestConfig::default()
     })]
@@ -245,7 +249,9 @@ proptest! {
 // Property: Position embeddings bounds with memory constraints
 proptest! {
     #![proptest_config(ProptestConfig {
-        timeout: 500, // Increase timeout to 0.5 seconds
+        // Generous per-case timeout: guards against runaway cases only.
+        // Cases run in ~45ms unloaded; a tight budget flakes under load.
+        timeout: 10_000,
         max_shrink_iters: 1, // Reduce shrink iterations
         cases: 8, // Reduce number of test cases from default 256
         ..ProptestConfig::default()

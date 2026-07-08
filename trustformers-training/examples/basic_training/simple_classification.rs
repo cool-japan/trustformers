@@ -1,131 +1,140 @@
 //! Simple Classification Training Example
-#![allow(unused_variables)]
 //!
-//! This example demonstrates basic supervised learning using the TrustformeRS training infrastructure.
-//! It shows how to:
-//! - Set up a simple classification model
-//! - Configure training parameters
-//! - Use callbacks for monitoring and early stopping
-//! - Save and load checkpoints
-//! - Evaluate model performance
+//! This example walks through the end-to-end shape of TrustformeRS's training
+//! infrastructure on a tiny synthetic classification task:
+//!
+//! - Implementing `trustformers_core::traits::{Config, Model}` for a small
+//!   two-layer feedforward classifier (`SimpleClassifier`).
+//! - Generating synthetic classification data and batching it into the
+//!   `Vec<(Tensor, Tensor)>` shape that `Trainer::train`/`Trainer::evaluate`
+//!   expect.
+//! - Reusing the crate's own tested `CrossEntropyLoss`
+//!   (`trustformers_training::losses`) instead of hand-rolling a loss.
+//! - Implementing `TrainerCallback` for lightweight progress reporting.
+//! - Building a `Trainer`, training it for a few epochs, and printing the
+//!   final evaluation metrics.
+//!
+//! # Note on parameter updates
+//!
+//! `Trainer::train` computes the loss gradient with respect to the model's
+//! output (logits) on every step, but it only *applies* that gradient to a
+//! model's parameters for models that implement the optimizer-facing
+//! `ParameterAccess` trait (see `trustformers_training::trainer`). This
+//! example's `SimpleClassifier` does not implement `ParameterAccess`, so its
+//! weights are not actually updated; the point of this example is to
+//! exercise the public `Model` / `Loss` / `TrainerCallback` / `Trainer` API
+//! surface end-to-end, not to demonstrate convergence. Because of this, the
+//! printed loss is not expected to decrease across epochs.
+//!
+//! Run it with:
+//! ```bash
+//! cargo run --example simple_classification -p trustformers-training
+//! ```
+//!
+//! Run its unit tests with:
+//! ```bash
+//! cargo test --example simple_classification -p trustformers-training
+//! ```
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use trustformers_core::tensor::Tensor;
+use trustformers_core::traits::{Config, Model};
+use trustformers_core::TrustformersError;
+use trustformers_optim::Adam;
+use trustformers_training::trainer::{TaskType, TrainerCallback, TrainingState};
 use trustformers_training::{
-    trainer::{Trainer, TrainerConfig, TrainerCallback},
-    training_args::TrainingArgs,
-    metrics::{Metric, MetricCollection, MetricResult},
-    losses::Loss,
-};
-use trustformers_core::{
-    tensor::Tensor,
-    Model, ModelOutput,
-    error::TrustformersError,
+    CrossEntropyLoss, EvaluationStrategy, SaveStrategy, Trainer, TrainingArguments,
 };
 
-/// Simple feedforward neural network for classification
-#[derive(Debug, Clone)]
+/// Configuration for [`SimpleClassifier`], following the `Config` pattern
+/// documented on `trustformers_core::traits::Config`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SimpleClassifierConfig {
+    input_size: usize,
+    hidden_size: usize,
+    num_classes: usize,
+}
+
+impl Config for SimpleClassifierConfig {
+    fn architecture(&self) -> &'static str {
+        "simple_classifier"
+    }
+}
+
+/// A minimal two-layer feedforward classifier: `Linear -> ReLU -> Linear`.
+#[derive(Debug)]
 struct SimpleClassifier {
     weights_1: Tensor,
     bias_1: Tensor,
     weights_2: Tensor,
     bias_2: Tensor,
-    num_classes: usize,
+    config: SimpleClassifierConfig,
 }
 
 impl SimpleClassifier {
-    pub fn new(input_size: usize, hidden_size: usize, num_classes: usize) -> Result<Self> {
-        // Xavier initialization
+    /// Creates a new classifier with Xavier/Glorot-initialized weights.
+    fn new(input_size: usize, hidden_size: usize, num_classes: usize) -> Result<Self> {
+        // Xavier/Glorot initialization scale for each linear layer.
         let scale_1 = (2.0 / (input_size + hidden_size) as f32).sqrt();
         let scale_2 = (2.0 / (hidden_size + num_classes) as f32).sqrt();
 
+        let weights_1 = Tensor::randn(&[input_size, hidden_size])?.scalar_mul(scale_1)?;
+        let bias_1 = Tensor::zeros(&[hidden_size])?;
+        let weights_2 = Tensor::randn(&[hidden_size, num_classes])?.scalar_mul(scale_2)?;
+        let bias_2 = Tensor::zeros(&[num_classes])?;
+
         Ok(Self {
-            weights_1: Tensor::randn(&[input_size, hidden_size])? * scale_1,
-            bias_1: Tensor::zeros(&[hidden_size])?,
-            weights_2: Tensor::randn(&[hidden_size, num_classes])? * scale_2,
-            bias_2: Tensor::zeros(&[num_classes])?,
-            num_classes,
+            weights_1,
+            bias_1,
+            weights_2,
+            bias_2,
+            config: SimpleClassifierConfig {
+                input_size,
+                hidden_size,
+                num_classes,
+            },
         })
-    }
-
-    fn forward_impl(&self, input: &Tensor) -> Result<Tensor> {
-        // First layer: input -> hidden
-        let hidden = input.matmul(&self.weights_1)? + &self.bias_1;
-        let hidden_activated = hidden.relu()?;
-
-        // Second layer: hidden -> output
-        let output = hidden_activated.matmul(&self.weights_2)? + &self.bias_2;
-
-        Ok(output)
     }
 }
 
 impl Model for SimpleClassifier {
+    type Config = SimpleClassifierConfig;
+    type Input = Tensor;
     type Output = Tensor;
 
-    fn forward(&self, input: &Tensor) -> Result<Self::Output, TrustformersError> {
-        self.forward_impl(input)
-            .map_err(|e| TrustformersError::model_error(format!("Forward pass failed: {}", e)))
+    fn forward(&self, input: Self::Input) -> Result<Self::Output, TrustformersError> {
+        let hidden = input.matmul(&self.weights_1)?.add(&self.bias_1)?.relu()?;
+        let logits = hidden.matmul(&self.weights_2)?.add(&self.bias_2)?;
+        Ok(logits)
+    }
+
+    fn load_pretrained(
+        &mut self,
+        _reader: &mut dyn std::io::Read,
+    ) -> Result<(), TrustformersError> {
+        // This example only ever trains from scratch; loading pretrained
+        // weights is out of scope, but `Model` still requires a real body.
+        Ok(())
+    }
+
+    fn get_config(&self) -> &Self::Config {
+        &self.config
     }
 
     fn num_parameters(&self) -> usize {
-        self.weights_1.numel() + self.bias_1.numel() +
-        self.weights_2.numel() + self.bias_2.numel()
+        self.weights_1.size() + self.bias_1.size() + self.weights_2.size() + self.bias_2.size()
     }
 }
 
-impl ModelOutput for Tensor {
-    fn extract_predictions(&self) -> Tensor {
-        // For classification, return raw logits
-        self.clone()
-    }
-}
-
-/// Accuracy metric for classification
-#[derive(Debug, Clone)]
-struct AccuracyMetric;
-
-impl Metric for AccuracyMetric {
-    fn compute(&self, predictions: &Tensor, targets: &Tensor) -> MetricResult {
-        // Convert logits to class predictions
-        let predicted_classes = predictions.argmax(-1)?;
-
-        // Count correct predictions
-        let correct = predicted_classes.eq(targets)?.sum()?;
-        let total = targets.numel() as f64;
-        let accuracy = correct.to_scalar::<f64>()? / total;
-
-        MetricResult::Single(accuracy)
-    }
-
-    fn name(&self) -> &str {
-        "accuracy"
-    }
-}
-
-/// Cross-entropy loss for classification
-#[derive(Debug, Clone)]
-struct CrossEntropyLoss;
-
-impl Loss for CrossEntropyLoss {
-    fn compute(&self, predictions: &Tensor, targets: &Tensor) -> Result<Tensor, TrustformersError> {
-        // Apply log softmax to predictions
-        let log_probs = predictions.log_softmax(-1)?;
-
-        // Compute negative log likelihood
-        let nll = log_probs.gather(-1, targets)?.neg()?;
-
-        // Return mean loss
-        Ok(nll.mean()?)
-    }
-
-    fn name(&self) -> &str {
-        "cross_entropy"
-    }
-}
-
-/// Simple progress callback that prints training progress
+/// Prints lightweight progress information as training proceeds.
+///
+/// `print_frequency` throttles the per-step heartbeat printed from
+/// `on_step_end`. It is intentionally independent of
+/// `TrainingArguments::logging_steps`, which separately controls how often
+/// the `Trainer` calls `on_log` with the current loss - this callback
+/// demonstrates both mechanisms.
 #[derive(Debug)]
 struct ProgressCallback {
     print_frequency: usize,
@@ -133,268 +142,215 @@ struct ProgressCallback {
 
 impl ProgressCallback {
     fn new(print_frequency: usize) -> Self {
-        Self { print_frequency }
+        Self {
+            print_frequency: print_frequency.max(1),
+        }
     }
 }
 
 impl TrainerCallback for ProgressCallback {
-    fn on_epoch_begin(&mut self, epoch: usize, _logs: &HashMap<String, f64>) {
-        println!("Starting epoch {}", epoch + 1);
+    fn on_train_begin(&mut self, _args: &TrainingArguments, _state: &TrainingState) {
+        println!("Training started.");
     }
 
-    fn on_batch_end(&mut self, batch: usize, logs: &HashMap<String, f64>) {
-        if batch % self.print_frequency == 0 {
-            let loss = logs.get("loss").unwrap_or(&0.0);
-            println!("  Batch {}: loss = {:.4}", batch, loss);
+    fn on_epoch_begin(&mut self, _args: &TrainingArguments, state: &TrainingState) {
+        let epoch_number = state.epoch as usize + 1;
+        println!("Epoch {epoch_number} starting...");
+    }
+
+    fn on_step_end(&mut self, _args: &TrainingArguments, state: &TrainingState) {
+        let step = state.global_step;
+        if step.is_multiple_of(self.print_frequency) {
+            println!("  ...step {step}");
         }
     }
 
-    fn on_epoch_end(&mut self, epoch: usize, logs: &HashMap<String, f64>) {
-        let train_loss = logs.get("loss").unwrap_or(&0.0);
-        let eval_loss = logs.get("eval_loss").unwrap_or(&0.0);
-        let accuracy = logs.get("eval_accuracy").unwrap_or(&0.0);
-
-        println!("Epoch {} completed:", epoch + 1);
-        println!("  Train loss: {:.4}", train_loss);
-        println!("  Eval loss: {:.4}", eval_loss);
-        println!("  Accuracy: {:.4}", accuracy);
-        println!();
-    }
-}
-
-/// Configuration for the training example
-#[derive(Debug, Serialize, Deserialize)]
-struct ExampleConfig {
-    /// Model architecture parameters
-    pub input_size: usize,
-    pub hidden_size: usize,
-    pub num_classes: usize,
-
-    /// Training parameters
-    pub learning_rate: f64,
-    pub batch_size: usize,
-    pub num_epochs: usize,
-
-    /// Data generation parameters
-    pub num_train_samples: usize,
-    pub num_eval_samples: usize,
-    pub noise_level: f32,
-
-    /// Training configuration
-    pub print_frequency: usize,
-    pub save_checkpoints: bool,
-    pub checkpoint_dir: String,
-}
-
-impl Default for ExampleConfig {
-    fn default() -> Self {
-        Self {
-            input_size: 10,
-            hidden_size: 64,
-            num_classes: 3,
-            learning_rate: 0.001,
-            batch_size: 32,
-            num_epochs: 10,
-            num_train_samples: 1000,
-            num_eval_samples: 200,
-            noise_level: 0.1,
-            print_frequency: 10,
-            save_checkpoints: true,
-            checkpoint_dir: "./checkpoints".to_string(),
+    fn on_log(
+        &mut self,
+        _args: &TrainingArguments,
+        state: &TrainingState,
+        logs: &HashMap<String, f32>,
+    ) {
+        let step = state.global_step;
+        if let Some(loss) = logs.get("loss") {
+            println!("  step {step}: loss = {loss:.4}");
         }
     }
+
+    fn on_epoch_end(&mut self, _args: &TrainingArguments, state: &TrainingState) {
+        let epoch_number = state.epoch as usize + 1;
+        let step = state.global_step;
+        println!("Epoch {epoch_number} finished (global step {step}).");
+    }
+
+    fn on_evaluate(
+        &mut self,
+        _args: &TrainingArguments,
+        _state: &TrainingState,
+        metrics: &HashMap<String, f32>,
+    ) {
+        if let Some(loss) = metrics.get("eval_loss") {
+            println!("  evaluation: eval_loss = {loss:.4}");
+        }
+    }
+
+    fn on_train_end(&mut self, _args: &TrainingArguments, _state: &TrainingState) {
+        println!("Training finished.");
+    }
 }
 
-/// Generate synthetic classification data
-fn generate_data(num_samples: usize, input_size: usize, num_classes: usize, noise_level: f32) -> Result<(Tensor, Tensor)> {
-    let mut features = Vec::new();
-    let mut labels = Vec::new();
+/// Generates a synthetic classification dataset.
+///
+/// Each sample's features are centered on a class-dependent pattern (`1.0`
+/// at positions congruent to the sample's class modulo `num_classes`,
+/// `-0.5` elsewhere) plus uniform noise, which keeps the task learnable
+/// while still giving `CrossEntropyLoss` something non-trivial to compute
+/// over.
+fn generate_data(
+    num_samples: usize,
+    input_size: usize,
+    num_classes: usize,
+    noise_level: f32,
+) -> Result<(Tensor, Tensor)> {
+    let mut features = Vec::with_capacity(num_samples * input_size);
+    let mut labels = Vec::with_capacity(num_samples);
 
     for _ in 0..num_samples {
-        // Generate random class
-        let class = rand::random::<usize>() % num_classes;
+        let class = fastrand::usize(0..num_classes);
 
-        // Generate features based on class (with some pattern)
-        let mut feature_vec = vec![0.0f32; input_size];
         for i in 0..input_size {
-            // Create class-dependent patterns
-            let base_value = if i % num_classes == class {
-                1.0
-            } else {
-                -0.5
-            };
-
-            // Add noise
-            let noise = (rand::random::<f32>() - 0.5) * noise_level * 2.0;
-            feature_vec[i] = base_value + noise;
+            let base_value = if i % num_classes == class { 1.0 } else { -0.5 };
+            let noise = (fastrand::f32() - 0.5) * noise_level * 2.0;
+            features.push(base_value + noise);
         }
-
-        features.extend(feature_vec);
         labels.push(class as i64);
     }
 
     let features_tensor = Tensor::from_vec(features, &[num_samples, input_size])?;
-    let labels_tensor = Tensor::from_vec(labels, &[num_samples])?;
+    let labels_tensor = Tensor::from_vec_i64(labels, &[num_samples])?;
 
     Ok((features_tensor, labels_tensor))
 }
 
-/// Create data loaders for training and evaluation
-fn create_data_loaders(
-    train_features: Tensor,
-    train_labels: Tensor,
-    eval_features: Tensor,
-    eval_labels: Tensor,
+/// Splits `features`/`labels` (both sized `num_samples` along axis 0) into
+/// `Vec<(Tensor, Tensor)>` batches of at most `batch_size` samples each -
+/// the shape `Trainer::train`/`Trainer::evaluate` expect.
+fn create_batches(
+    features: &Tensor,
+    labels: &Tensor,
     batch_size: usize,
-) -> Result<(Vec<(Tensor, Tensor)>, Vec<(Tensor, Tensor)>)> {
-    // Simple batching - in practice you'd use more sophisticated data loaders
-    let mut train_batches = Vec::new();
-    let mut eval_batches = Vec::new();
+) -> Result<Vec<(Tensor, Tensor)>> {
+    let num_samples = features.shape()[0];
+    let mut batches = Vec::new();
 
-    // Create training batches
-    let num_train_samples = train_features.shape()[0];
-    for start in (0..num_train_samples).step_by(batch_size) {
-        let end = (start + batch_size).min(num_train_samples);
-        let batch_features = train_features.slice(0, start, end)?;
-        let batch_labels = train_labels.slice(0, start, end)?;
-        train_batches.push((batch_features, batch_labels));
+    for start in (0..num_samples).step_by(batch_size) {
+        let end = (start + batch_size).min(num_samples);
+        let batch_features = features.slice(0, start, end)?;
+        let batch_labels = labels.slice(0, start, end)?;
+        batches.push((batch_features, batch_labels));
     }
 
-    // Create evaluation batches
-    let num_eval_samples = eval_features.shape()[0];
-    for start in (0..num_eval_samples).step_by(batch_size) {
-        let end = (start + batch_size).min(num_eval_samples);
-        let batch_features = eval_features.slice(0, start, end)?;
-        let batch_labels = eval_labels.slice(0, start, end)?;
-        eval_batches.push((batch_features, batch_labels));
-    }
-
-    Ok((train_batches, eval_batches))
+    Ok(batches)
 }
 
 fn main() -> Result<()> {
-    println!("🚀 TrustformeRS Simple Classification Training Example");
-    println!("=================================================");
+    println!("TrustformeRS Simple Classification Training Example");
+    println!("=====================================================");
+    println!();
 
-    // Load configuration
-    let config = ExampleConfig::default();
+    // ---- configuration ----
+    let input_size: usize = 10;
+    let hidden_size: usize = 64;
+    let num_classes: usize = 3;
+    let batch_size: usize = 32;
+    let num_train_samples: usize = 1_000;
+    let num_eval_samples: usize = 200;
+    let noise_level: f32 = 0.1;
+    let num_epochs: f32 = 5.0;
+    let logging_steps: usize = 10;
+    let print_frequency: usize = 20;
+
     println!("Configuration:");
-    println!("  Input size: {}", config.input_size);
-    println!("  Hidden size: {}", config.hidden_size);
-    println!("  Number of classes: {}", config.num_classes);
-    println!("  Learning rate: {}", config.learning_rate);
-    println!("  Batch size: {}", config.batch_size);
-    println!("  Number of epochs: {}", config.num_epochs);
+    println!("  input_size:        {input_size}");
+    println!("  hidden_size:       {hidden_size}");
+    println!("  num_classes:       {num_classes}");
+    println!("  batch_size:        {batch_size}");
+    println!("  num_epochs:        {num_epochs:.1}");
+    println!("  num_train_samples: {num_train_samples}");
+    println!("  num_eval_samples:  {num_eval_samples}");
     println!();
 
-    // Generate synthetic data
-    println!("📊 Generating synthetic data...");
-    let (train_features, train_labels) = generate_data(
-        config.num_train_samples,
-        config.input_size,
-        config.num_classes,
-        config.noise_level,
-    )?;
-    let (eval_features, eval_labels) = generate_data(
-        config.num_eval_samples,
-        config.input_size,
-        config.num_classes,
-        config.noise_level,
-    )?;
+    // ---- synthetic data ----
+    println!("Generating synthetic classification data...");
+    let (train_features, train_labels) =
+        generate_data(num_train_samples, input_size, num_classes, noise_level)?;
+    let (eval_features, eval_labels) =
+        generate_data(num_eval_samples, input_size, num_classes, noise_level)?;
 
-    println!("  Training samples: {}", config.num_train_samples);
-    println!("  Evaluation samples: {}", config.num_eval_samples);
+    let train_batches = create_batches(&train_features, &train_labels, batch_size)?;
+    let eval_batches = create_batches(&eval_features, &eval_labels, batch_size)?;
+
+    println!("  training batches:   {}", train_batches.len());
+    println!("  evaluation batches: {}", eval_batches.len());
     println!();
 
-    // Create data loaders
-    let (train_batches, eval_batches) = create_data_loaders(
-        train_features,
-        train_labels,
-        eval_features,
-        eval_labels,
-        config.batch_size,
-    )?;
-
-    println!("  Training batches: {}", train_batches.len());
-    println!("  Evaluation batches: {}", eval_batches.len());
+    // ---- model ----
+    println!("Creating model...");
+    let model = SimpleClassifier::new(input_size, hidden_size, num_classes)?;
+    let model_config = model.get_config();
+    println!(
+        "  architecture: {}, input_size: {}, hidden_size: {}, num_classes: {}",
+        model_config.architecture(),
+        model_config.input_size,
+        model_config.hidden_size,
+        model_config.num_classes
+    );
+    println!("  model parameters: {}", model.num_parameters());
     println!();
 
-    // Create model
-    println!("🧠 Creating model...");
-    let model = SimpleClassifier::new(
-        config.input_size,
-        config.hidden_size,
-        config.num_classes,
-    )?;
-    println!("  Model parameters: {}", model.num_parameters());
-    println!();
-
-    // Create loss function
-    let loss_fn = CrossEntropyLoss;
-
-    // Create metrics
-    let mut metrics = MetricCollection::new();
-    metrics.add_metric("accuracy", Box::new(AccuracyMetric));
-
-    // Create trainer configuration
-    let training_args = TrainingArgs {
-        learning_rate: config.learning_rate,
-        num_epochs: config.num_epochs,
-        batch_size: config.batch_size,
-        weight_decay: 0.0001,
-        warmup_steps: 100,
-        evaluation_strategy: "epoch".to_string(),
-        save_strategy: "epoch".to_string(),
-        logging_steps: config.print_frequency,
-        save_total_limit: Some(3),
-        load_best_model_at_end: true,
-        ..Default::default()
+    // ---- trainer ----
+    let output_dir = std::env::temp_dir().join("trustformers_simple_classification_example");
+    let training_args = TrainingArguments {
+        output_dir,
+        per_device_train_batch_size: batch_size,
+        per_device_eval_batch_size: batch_size,
+        num_train_epochs: num_epochs,
+        learning_rate: 1e-4,
+        logging_steps,
+        evaluation_strategy: EvaluationStrategy::Epoch,
+        save_strategy: SaveStrategy::Epoch,
+        ..TrainingArguments::default()
     };
 
-    let trainer_config = TrainerConfig {
-        output_dir: config.checkpoint_dir.clone(),
-        ..Default::default()
-    };
+    let optimizer = Box::new(Adam::new(1e-4, (0.9, 0.999), 1e-8, 0.0));
+    let loss_fn = Box::new(CrossEntropyLoss::new());
 
-    // Create trainer
-    println!("🎯 Initializing trainer...");
     let mut trainer = Trainer::new(
         model,
-        Box::new(loss_fn),
-        Some(Box::new(metrics)),
         training_args,
-        trainer_config,
-    )?;
+        optimizer,
+        loss_fn,
+        TaskType::Classification,
+    )?
+    .add_callback(Box::new(ProgressCallback::new(print_frequency)));
 
-    // Add progress callback
-    trainer.add_callback(Box::new(ProgressCallback::new(config.print_frequency)));
+    println!("Starting training for {num_epochs:.1} epochs...");
+    println!();
+    trainer.train(&train_batches, Some(&eval_batches))?;
+    println!();
+    println!("Training completed.");
+    println!();
 
-    // Create checkpoint directory if it doesn't exist
-    if config.save_checkpoints {
-        std::fs::create_dir_all(&config.checkpoint_dir)?;
-        println!("  Checkpoints will be saved to: {}", config.checkpoint_dir);
+    // ---- final evaluation ----
+    println!("Final evaluation:");
+    let final_metrics = trainer.evaluate(&eval_batches)?;
+    let mut entries: Vec<(&String, &f32)> = final_metrics.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    for (name, value) in entries {
+        println!("  {name}: {value:.4}");
     }
     println!();
-
-    // Start training
-    println!("🔥 Starting training...");
-    println!("Training for {} epochs", config.num_epochs);
-    println!();
-
-    trainer.train(train_batches, Some(eval_batches))?;
-
-    println!("✅ Training completed successfully!");
-    println!();
-
-    // Final evaluation
-    println!("📈 Final model evaluation:");
-    let final_metrics = trainer.evaluate(eval_batches)?;
-    for (name, value) in final_metrics {
-        println!("  {}: {:.4}", name, value);
-    }
-
-    println!();
-    println!("🎉 Example completed successfully!");
+    println!("Example completed successfully.");
 
     Ok(())
 }
@@ -402,59 +358,58 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use trustformers_training::Loss;
 
     #[test]
     fn test_model_creation() {
-        let model = SimpleClassifier::new(10, 64, 3)
-            .expect("Failed to create test model");
-        assert_eq!(model.num_classes, 3);
+        let model = SimpleClassifier::new(10, 64, 3).expect("failed to create test model");
+        assert_eq!(model.get_config().num_classes, 3);
         assert!(model.num_parameters() > 0);
     }
 
     #[test]
-    fn test_model_forward() {
-        let model = SimpleClassifier::new(10, 64, 3)
-            .expect("Failed to create test model");
-        let input = Tensor::randn(&[2, 10])
-            .expect("Failed to create test input tensor");
-        let output = model.forward(&input)
-            .expect("Failed to perform forward pass");
+    fn test_model_forward_shape() {
+        let model = SimpleClassifier::new(10, 64, 3).expect("failed to create test model");
+        let input = Tensor::randn(&[2, 10]).expect("failed to create test input tensor");
+        let output = model.forward(input).expect("forward pass failed");
         assert_eq!(output.shape(), &[2, 3]);
     }
 
     #[test]
     fn test_data_generation() {
-        let (features, labels) = generate_data(100, 10, 3, 0.1)
-            .expect("Failed to generate test data");
+        let (features, labels) =
+            generate_data(100, 10, 3, 0.1).expect("failed to generate test data");
         assert_eq!(features.shape(), &[100, 10]);
         assert_eq!(labels.shape(), &[100]);
     }
 
     #[test]
-    fn test_accuracy_metric() {
-        let metric = AccuracyMetric;
-        let predictions = Tensor::from_vec(vec![2.0, 1.0, 0.0, 0.0, 2.0, 1.0], &[2, 3])
-            .expect("Failed to create predictions tensor");
-        let targets = Tensor::from_vec(vec![0i64, 2i64], &[2])
-            .expect("Failed to create targets tensor");
+    fn test_create_batches() {
+        let (features, labels) =
+            generate_data(100, 10, 3, 0.1).expect("failed to generate test data");
+        let batches = create_batches(&features, &labels, 32).expect("failed to create batches");
 
-        let result = metric.compute(&predictions, &targets)
-            .expect("Failed to compute accuracy metric");
-        if let MetricResult::Single(accuracy) = result {
-            assert!(accuracy >= 0.0 && accuracy <= 1.0);
-        }
+        assert_eq!(batches.len(), 4);
+        assert_eq!(batches[0].0.shape(), &[32, 10]);
+        assert_eq!(
+            batches.last().expect("batches should be non-empty").0.shape(),
+            &[4, 10]
+        );
     }
 
     #[test]
-    fn test_cross_entropy_loss() {
-        let loss_fn = CrossEntropyLoss;
-        let predictions = Tensor::randn(&[2, 3])
-            .expect("Failed to create predictions tensor");
-        let targets = Tensor::from_vec(vec![0i64, 2i64], &[2])
-            .expect("Failed to create targets tensor");
+    fn test_cross_entropy_loss_computation() {
+        let loss_fn = CrossEntropyLoss::new();
+        let predictions = Tensor::from_vec(vec![2.0, 1.0, 0.0, 0.0, 0.5, 2.0], &[2, 3])
+            .expect("failed to create predictions tensor");
+        let targets =
+            Tensor::from_vec_i64(vec![0, 2], &[2]).expect("failed to create targets tensor");
 
-        let loss = loss_fn.compute(&predictions, &targets)
-            .expect("Failed to compute cross entropy loss");
-        assert_eq!(loss.shape(), &[]);  // Scalar loss
+        let loss = loss_fn
+            .compute(&predictions, &targets)
+            .expect("failed to compute cross entropy loss");
+
+        assert!(loss.is_finite());
+        assert!(loss >= 0.0);
     }
 }

@@ -15,7 +15,7 @@ exclude = ["examples/server", "examples/grpc-server", "trustformers-py", "trustf
 resolver = "2"
 
 [workspace.package]
-version = "0.1.4"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.89"
 authors = ["COOLJAPAN OU (Team KitaSan) <contact@cooljapan.tech>"]
@@ -25,16 +25,16 @@ homepage = "https://github.com/cool-japan/trustformers"
 
 [workspace.dependencies]
 # Internal crate dependencies
-trustformers = { version = "0.1.4", path = "trustformers", default-features = false }
-trustformers-core = { version = "0.1.4", path = "trustformers-core", default-features = false }
-trustformers-tokenizers = { version = "0.1.4", path = "trustformers-tokenizers", default-features = false }
-trustformers-models = { version = "0.1.4", path = "trustformers-models", default-features = false }
-trustformers-optim = { version = "0.1.4", path = "trustformers-optim", default-features = false }
-trustformers-training = { version = "0.1.4", path = "trustformers-training", default-features = false }
-trustformers-wasm = { version = "0.1.4", path = "trustformers-wasm", default-features = false }
-trustformers-mobile = { version = "0.1.4", path = "trustformers-mobile", default-features = false }
-trustformers-debug = { version = "0.1.4", path = "trustformers-debug", default-features = false }
-trustformers-serve = { version = "0.1.4", path = "trustformers-serve", default-features = false }
+trustformers = { version = "0.2.0", path = "trustformers", default-features = false }
+trustformers-core = { version = "0.2.0", path = "trustformers-core", default-features = false }
+trustformers-tokenizers = { version = "0.2.0", path = "trustformers-tokenizers", default-features = false }
+trustformers-models = { version = "0.2.0", path = "trustformers-models", default-features = false }
+trustformers-optim = { version = "0.2.0", path = "trustformers-optim", default-features = false }
+trustformers-training = { version = "0.2.0", path = "trustformers-training", default-features = false }
+trustformers-wasm = { version = "0.2.0", path = "trustformers-wasm", default-features = false }
+trustformers-mobile = { version = "0.2.0", path = "trustformers-mobile", default-features = false }
+trustformers-debug = { version = "0.2.0", path = "trustformers-debug", default-features = false }
+trustformers-serve = { version = "0.2.0", path = "trustformers-serve", default-features = false }
 
 # Core dependencies
 anyhow = "1.0.103"
@@ -78,8 +78,6 @@ regex = "1.12.4"
 
 # Optional dependencies for different backends
 candle-core = "0.11.0"
-candle-nn = "0.11.0"
-tch = { version = "0.24", features = ["download-libtorch"] }
 safetensors = "0.8"
 
 # Web/Server dependencies  
@@ -209,10 +207,10 @@ numpy = "0.29"
 oxicode = { version = "0.2.4", features = ["serde"] }
 byteorder = "1.5"
 dashmap = "6.2"
-oxiarc-zstd = { version = "0.3.3" }
-oxiarc-deflate = { version = "0.3.3" }
-oxiarc-lz4 = { version = "0.3.3" }
-oxiarc-archive = { version = "0.3.3" }
+oxiarc-zstd = { version = "0.3.5" }
+oxiarc-deflate = { version = "0.3.5" }
+oxiarc-lz4 = { version = "0.3.5" }
+oxiarc-archive = { version = "0.3.5" }
 # Pure-Rust SQLite-compatible backend (COOLJAPAN OxiSQL ecosystem, C-free fork of Limbo).
 # Used for real SQLite-format export in trustformers-debug. NEVER use rusqlite/libsqlite3.
 oxisql-sqlite-compat = { version = "0.3", features = ["blocking"] }
@@ -282,10 +280,8 @@ scirs2-core = { version = "0.6.0", default-features = false, features = [
     "array_protocol",
     "random",  # Required for SciRS2 Integration Policy
     "serialization",  # Required for config and model loading
-    "gpu",     # GPU acceleration abstractions
     # Metal removed - enable via platform-specific dependencies in individual crates
 ]}
-scirs2-linalg = { version = "0.6.0" }
 
 [profile.release]
 lto = true

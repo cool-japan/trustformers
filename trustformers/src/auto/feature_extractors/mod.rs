@@ -552,15 +552,13 @@ pub trait FeatureExtractorConfig: Send + Sync {
 // Tests
 // =============================================================================
 
-// TODO: Tests use TrustformersError::InvalidInput variant that doesn't exist in current API
-// #[cfg(test)]
-#[cfg(test_disabled)]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::auto::types::{
         AudioMetadata, DocumentFormat, DocumentMetadata, FeatureInput, ImageFormat, ImageMetadata,
     };
-    use trustformers_core::errors::TrustformersError;
+    use crate::error::TrustformersError;
 
     #[test]
     fn test_auto_feature_extractor_supported_types() {
@@ -655,13 +653,11 @@ mod tests {
                 .expect("expected u64 value"),
             80
         );
-        assert_eq!(
-            caps.get("supports_batching")
-                .expect("missing supports_batching capability")
-                .as_bool()
-                .expect("expected bool value"),
-            true
-        );
+        assert!(caps
+            .get("supports_batching")
+            .expect("missing supports_batching capability")
+            .as_bool()
+            .expect("expected bool value"));
         assert_eq!(
             caps.get("max_batch_size")
                 .expect("missing max_batch_size capability")
