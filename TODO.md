@@ -7,19 +7,19 @@ The project provides a comprehensive ecosystem for transformer model development
 with support for 49+ architectures and multiple deployment targets.
 
 ### Version Information
-- **Current Version:** 0.2.0 (Unreleased)
-- **Previous Release:** 0.1.4 (Released 2026-07-02)
-- **Status:** Active Development (v0.2.0)
+- **Current Version:** 0.2.1 (Unreleased)
+- **Previous Release:** 0.2.0 (Released 2026-07-09)
+- **Status:** Active Development (v0.2.1)
 - **License:** Apache-2.0
 - **Repository:** https://github.com/cool-japan/trustformers
 
 ### Project Health (updated 2026-07-01 — full local workspace verification)
 - ✅ **Compiles cleanly** across all crates — `cargo clippy --workspace --all-features --all-targets -- -D warnings` = 0 warnings/errors
-- ✅ **Full test suite passes, machine-verified locally** — `cargo nextest run --workspace --all-features` = **18,102 passed, 0 failed** (119 skipped), ~565s, verified 2026-07-01. (No GitHub Actions Rust CI — intentionally not added, billable, per user policy — but the "100% pass" claim is now freshly and completely locally verified end-to-end, superseding Task 9's "not yet machine-verified" caveat below.)
+- ✅ **Full test suite passes, machine-verified locally** — `cargo nextest run --workspace --all-features` = **18,102 passed, 0 failed** (119 skipped), ~565s, verified 2026-07-01. (No GitHub Actions Rust CI — intentionally not added, billable, per user policy — but the "100% pass" claim is now freshly and completely locally verified end-to-end, superseding Task 9's "not yet machine-verified" caveat below.) A lighter `cargo check --all-features` was re-verified clean (zero warnings) on 2026-07-09 for the 0.2.1 version bump; the full nextest/clippy/rustdoc sweep above was not re-run this pass.
 - ✅ **0 rustdoc warnings** — `cargo doc --workspace --all-features --no-deps` with `RUSTDOCFLAGS="-D warnings"` = clean; `cargo fmt --all -- --check` = clean
 - 🟡 **49+ architectures for CPU inference** — maturity varies; a batch of "fake implementation" defects was fixed 2026-06-19 (see audit), others may remain
-- 🟡 **Compute is CPU / `f32`** — F16/BF16 are storage-only (upcast for math); GPU is wired only for GPT-2/RetNet, now via the Pure-Rust `oxicuda`/`oxicuda-metal` backends (the `cudarc` backend was fully removed in 0.1.4 — see audit Tasks 4 & 5, now historical)
-- ✅ **100% Pure Rust** default-feature source for every crate except `trustformers-serve` (accepted exception: rustls/aws-lc-rs TLS); 2,983 Rust files, ~1.42M lines / ~1.18M lines of code (via `tokei`, 2026-07-01); optional GPU/hardware backends remain feature-gated FFI
+- 🟡 **Compute is CPU / `f32`** — F16/BF16 are storage-only (upcast for math); GPU is wired for GPT-2 (incl. KV-cached decode) and RetNet, plus GPT-NeoX prefill-only (added in 0.2.0 — its `Layer` trait carries no KV cache), via the Pure-Rust `oxicuda`/`oxicuda-metal` backends (the `cudarc` backend was fully removed in 0.1.4 — see audit Tasks 4 & 5, now historical)
+- ✅ **100% Pure Rust** default-feature source for every crate except `trustformers-serve` (accepted exception: rustls/aws-lc-rs TLS); 2,970 Rust files, ~1.41M lines / ~1.17M lines of code (via `tokei`, 2026-07-09); optional GPU/hardware backends remain feature-gated FFI
 
 ---
 
@@ -38,6 +38,8 @@ substantively correct** in several areas. Evidence-backed verdicts:
 | README false advertising ("看板倒れ") | **Several FALSE claims** | Fabricated LLaMA-7B GPU benchmark numbers, a non-compiling GPU code example, overstated test count, TPU listed as supported (empty feature flag). |
 
 > **Update (2026-07-01):** the GPU row above is historical (as of 2026-06-19) and now stale on backend naming — the `cudarc` CUDA backend referenced there was **fully removed** in 0.1.4, replaced by the Pure-Rust `oxicuda` (`oxicuda-blas`/`-dnn`/`-memory`/`-driver`); Metal similarly moved from scirs2 MPS to `oxicuda-metal`, dropping the `scirs2-core` GPU dependency. Both backends now carry 12 CPU↔CUDA golden-parity tests, runtime-verified on a real NVIDIA RTX A4000 (CUDA 12.0). GPU is still wired into per-model `forward` for GPT-2/RetNet only (2 of ~58+ models) — that part of the criticism still stands; see the 0.1.4 CHANGELOG and README's GPU Acceleration section for the current picture.
+>
+> **Update (2026-07-09, 0.2.0):** GPU model coverage widened slightly but the criticism still substantively stands. 0.2.0 added a `gpu_ops::cuda::oxicuda::attention` GPU-resident pipeline and wired it into GPT-NeoX (`GPTNeoXAttention::cuda_resident_forward`) in addition to GPT-2/RetNet — but GPT-NeoX's wiring is **prefill-only** (no KV-cached decode; its `Layer` trait carries no cache), so it does not reach full parity with GPT-2's decode-capable path. Call it "2.5 of ~58+ models" rather than 3 — see the `[0.2.0]` CHANGELOG entry and README's GPU Acceleration section.
 
 ### ✅ Resolved 2026-06-19
 - **README & this file**: removed fabricated GPU benchmarks, fixed the non-compiling GPU example, corrected GPU/precision/test/TPU claims, added honest maturity notes.
@@ -957,7 +959,7 @@ cargo run -p trustformers --example clip_multimodal_example --features "clip,vit
 
 ---
 
-**Last Updated:** 2026-07-06 - v0.2.0 Development
+**Last Updated:** 2026-07-09 - v0.2.1 Development (0.2.0 released 2026-07-09; see CHANGELOG.md)
 **Next Milestone:** Beta 1.0 Release — no longer pending scirs2-core/MPSGraph (superseded by the 0.1.4 `oxicuda`/`oxicuda-metal` migration, see the SciRS2 Policy Compliance section above); remaining work is broadening GPU-resident `forward` coverage beyond GPT-2/RetNet and re-benchmarking end-to-end tok/sec on the new backend
 **Target Audience:** ML engineers, researchers, and production deployment teams
 
@@ -1095,7 +1097,8 @@ cargo run -p trustformers --example clip_multimodal_example --features "clip,vit
   - Priority: P2 | Scope: large | Hint: none
   - Locations: :117,:122,:196,:201,:271,:280,:396,:401,:417,:881 (10 stub methods)
 
-- [~] Implement proper DockerImageConfig conversion in deployment.rs (planned 2026-07-05)
+- [x] Implement proper DockerImageConfig conversion in deployment.rs (planned 2026-07-05)
+  - **DONE (shipped in 0.2.0, confirmed via source 2026-07-09):** `to_docker_builder_config` implemented in `deployment.rs`, routing through `docker::DockerImageBuilder` with the new `BaseImage::Custom` variant; `generate_deployment_artifacts()` now uses it instead of hand-rolled `format!()` templates. CHANGELOG `[0.2.0]` Fixed: "`ContainerDeploymentManager::generate_deployment_artifacts` now routes through the crate's own `DockerImageBuilder`... instead of hand-rolled `format!()` templates that silently dropped `build_args`/`env_vars`/`exposed_ports`/`volumes`."
   - Goal: generate_deployment_artifacts() produces real Dockerfile/compose/dockerignore/build-script content (build_args, env_vars, ports, volumes) instead of ignoring them.
   - Design: add `to_docker_builder_config(&containers::types::DockerImageConfig) -> containers::docker::DockerImageConfig` in deployment.rs; add a `BaseImage::Custom(String)` variant to `docker::BaseImage` (+ one match arm in `get_base_image_name`) since the target enum has no arbitrary-image-reference variant today; route through the existing `DockerImageBuilder::{generate_dockerfile, generate_docker_compose, generate_dockerignore, generate_build_script}` instead of hand-rolled `format!`.
   - Files: trustformers-c/src/containers/deployment.rs, trustformers-c/src/containers/docker.rs.
@@ -1232,7 +1235,8 @@ Real but non-actionable-now stubs found in workspace member crates during nagare
   - Files: trustformers-serve/src/test_performance_monitoring/types/reporting.rs, reporting.rs.
   - Tests: round-trip tests using std::env::temp_dir() for each export format; a dedicated test for the ExportFormat->ReportFormat mapping covering all 6 source variants.
   - Risk: depends on the store_report/get_report fix landing first (export_report calls get_report).
-- [~] Fix TestPerformanceMonitoringConfig field drift (planned 2026-07-05)
+- [x] Fix TestPerformanceMonitoringConfig field drift (planned 2026-07-05)
+  - **DONE (shipped in 0.2.0, confirmed via source 2026-07-09):** all 6 fields (`analytics_config`, `event_config`, `historical_data_config`, `alert_config`, `dashboard_config`, `subscription_config`) present on `TestPerformanceMonitoringConfig` with defaults in `types/config.rs`; `create_compliance_focused_service`/`create_resource_efficient_service` in `mod.rs` now set real `compliance_reporting`/`audit_trail_enabled`/`compliance_logging`/`rate_limiting_enabled` flags, verified by assertions in `mod.rs`'s own tests. CHANGELOG `[0.2.0]` Fixed: "...the config gained `analytics_config`/`event_config`/`historical_data_config`/`alert_config`/`dashboard_config`/`subscription_config` sub-manager fields... so these constructors now actually apply the settings they advertise."
   - Goal: add the 6 missing config struct fields (AnalyticsConfig, EventConfig, HistoricalDataConfig, AlertConfig, DashboardConfig, SubscriptionConfig) to TestPerformanceMonitoringConfig, wire real configs into service.rs instead of Default::default() everywhere, uncomment the specialized-service field assignments in mod.rs.
   - Design: add the 6 fields + update Default impls in types/config.rs; add the 2 missing leaf fields (audit_trail_enabled, compliance_logging, rate_limiting_enabled) referenced in the commented-out lines; update TestPerformanceMonitoringService::new() in service.rs to pass the real configs.
   - Files: trustformers-serve/src/test_performance_monitoring/types/config.rs, service.rs, mod.rs.

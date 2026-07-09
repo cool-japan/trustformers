@@ -1,8 +1,8 @@
 # trustformers-tokenizers
 
-Tokenization library for transformer models, providing Byte-Pair Encoding (BPE), WordPiece, SentencePiece (Unigram), TikToken, and Fairseq-dictionary tokenizers, plus language-specific (Arabic, Chinese, Japanese, Korean, Thai) and domain-specific (Chemical, Music, Math, Code, BIO, Multimodal) tokenizers for the TrustformeRS ecosystem. Version 0.2.0 — Development.
+Tokenization library for transformer models, providing Byte-Pair Encoding (BPE), WordPiece, SentencePiece (Unigram), TikToken, and Fairseq-dictionary tokenizers, plus language-specific (Arabic, Chinese, Japanese, Korean, Thai) and domain-specific (Chemical, Music, Math, Code, BIO, Multimodal) tokenizers for the TrustformeRS ecosystem. Version 0.2.1 — Development.
 
-**Version:** 0.2.0 | **Status:** Stable | **Tests:** ~500 | **SLoC:** 51,372 | **Last Updated:** 2026-07-02
+**Version:** 0.2.1 | **Status:** Stable | **Tests:** ~500 | **SLoC:** 51,372 | **Last Updated:** 2026-07-09
 
 ## Current State
 
@@ -55,7 +55,7 @@ This crate provides **24 concrete tokenizer implementations** of the shared `tru
 - **Thread-safe** — the `Tokenizer` trait requires `Send + Sync`
 
 ### Pre/Post Processing
-- **Normalization** — composable `Normalizer` trait with `NFCNormalizer`/`NFDNormalizer` (via the `unicode-normalization` crate), plus whitespace, accent-removal, punctuation-removal, digit, and case normalizers, combinable via `ChainedNormalizer` (NFKC/NFKD are not yet exposed as dedicated normalizer types)
+- **Normalization** — composable `Normalizer` trait with `NFCNormalizer`/`NFDNormalizer`/`NFKCNormalizer`/`NFKDNormalizer` (via the `unicode-normalization` crate), plus whitespace, accent-removal, punctuation-removal, digit, and case normalizers, combinable via `ChainedNormalizer`
 - **Alignment** — `AlignmentEngine` for token ↔ word span alignment
 - **Decoding** — token-to-text reconstruction, including byte-level BPE decoding
 - **Debugging/visualization** — `TokenizationDebugger` and `TokenVisualizer` for inspecting tokenization output
@@ -242,7 +242,7 @@ for rec in &result.actionable_recommendations {
 
 ### Supported Formats
 - **Hugging Face**: `TokenizerImpl` embeds the real upstream `tokenizers` crate (re-exported via `trustformers-core`) — `.json` tokenizer files load with full fidelity
-- **SentencePiece**: `SentencePieceTokenizer::from_model_file` loads real `.model` files (note: `from_pretrained` does not parse the requested model — see Known Limitations)
+- **SentencePiece**: `SentencePieceTokenizer::from_model_file` loads real `.model` files directly; `from_pretrained(model_name_or_path)` now also probes `{path}/spiece.model`, `{path}.model`, and the bare path for a real model file (delegating to `from_model_file` on a hit) before falling back to a simplified built-in vocabulary — see Known Limitations
 - **TikToken**: `cl100k_base`/`r50k_base` presets built in; other `.tiktoken` files loadable via `from_tiktoken_file`
 - **Fairseq**: `dict.txt` token/frequency dictionary format
 - **Custom**: JSON-based tokenizer configuration (`CustomFormatTokenizer`)
@@ -255,11 +255,10 @@ for rec in &result.actionable_recommendations {
 ## Known Limitations
 
 - `TokenizerImpl::from_pretrained` and `WordPieceTokenizer::from_pretrained` resolve a **local** cache/vocab path (or a small set of built-in vocabularies); neither downloads from the Hugging Face Hub
-- `SentencePieceTokenizer::from_pretrained` ignores its `model_name_or_path` argument and always constructs a simplified built-in vocabulary — use `from_model_file` to load a real SentencePiece `.model`
+- `SentencePieceTokenizer::from_pretrained` probes `{path}/spiece.model`, `{path}.model`, and the bare path for a real SentencePiece model file and loads it via `from_model_file` on a hit; it falls back to a simplified built-in vocabulary only when none of those candidates resolve
 - TikToken ships two named presets (`cl100k_base`, `r50k_base`); `p50k_base`/`o200k_base` are not built-in convenience constructors (load them manually via `from_tiktoken_file`)
 - SIMD acceleration is AVX2/x86_64-only; no ARM/NEON path yet
 - The `gpu`, `jax`, `tensorflow`, `pytorch`, and `onnx` features provide detection/data-structure/metadata layers, not real CUDA/ROCm/OpenCL/JAX/TensorFlow/PyTorch/ONNX-Runtime execution
-- NFKC/NFKD normalizers are not yet exposed as dedicated `Normalizer` types (only NFC/NFD)
 - `AutoTokenizer` exists only in the Python package (`python/trustformers_tokenizers`) — there is no Rust-level `AutoTokenizer` type; use `TokenizerWrapper` for enum-based dispatch across the built-in Rust tokenizer families
 - This crate's own `pyproject.toml` is configured for a `maturin` extension-module build, but `Cargo.toml`'s `[lib]` only declares `crate-type = ["rlib"]` (no `cdylib`) — that responsibility was moved to `trustformers-py`. Building the Python package straight from this crate directory will not currently produce a loadable native module; `python/trustformers_tokenizers/tokenizers.py` falls back to `unittest.mock.MagicMock` when the native import fails
 

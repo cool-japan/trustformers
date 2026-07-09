@@ -1,6 +1,6 @@
 # trustformers-debug TODO List
 
-**Version:** 0.1.4 | **Status:** Alpha | **Tests:** ~899 | **SLoC:** ~101,000 | **Updated:** 2026-07-02
+**Version:** 0.2.1 | **Status:** Alpha | **Tests:** ~899 | **SLoC:** ~101,000 | **Updated:** 2026-07-09
 
 ## Overview
 
@@ -640,9 +640,8 @@ let job_id = manager.start_export(
 ## Future Enhancements
 
 ### High Priority
-- [ ] Enhanced profiling for distributed training across multiple ranks
-- [ ] Better visualization for very large models (>100B params)
-  - **Refinement needed:** What sampling strategy? Hierarchical view? LOD approach?
+- [x] **DONE** Enhanced profiling for distributed training across multiple ranks: `distributed_profiling::DistributedProfiler` (re-exported at crate root) tracks per-rank node registration, communication/synchronization events, load-balance analysis, and bottleneck detection with recommendations. Present in the tree since 0.1.0 but never previously reflected here.
+- [x] **DONE** Better visualization for very large models (>100B params): `large_model_viz::LargeModelVisualizer` (re-exported at crate root) resolves the previous open questions on sampling strategy (Uniform/Adaptive/Representative/Importance-based), hierarchical view (layer grouping with per-group summaries), and LOD approach (configurable memory budget with sampled vs. full-detail layers). Present in the tree since 0.1.0 but never previously reflected here.
 - [x] **DONE** Real-time debugging dashboard with WebSocket/SSE streaming (`dashboard_ws` module)
 - [x] **DONE** More export formats: Perfetto (`export::perfetto`) and Tracy (`export::tracy`)
 
@@ -690,7 +689,7 @@ cargo run --example interactive_debug
 
 ---
 
-**Last Updated:** 2026-07-02 - v0.1.4 Development
+**Last Updated:** 2026-07-09 - v0.2.1 Development
 **Status:** Alpha - core features implemented, API may change
 **Tests:** ~899 (100% pass rate)
 **Tools:** Profiling, flame graphs, visualization (Plotters/Ratatui/TensorBoard), analysis, interpretability (SHAP/LIME/attribution/counterfactual/attention), simulation & robustness testing, guided debugger, tutorial mode, AI code analysis, VS Code integration, Excel/.xlsx (real OOXML), Perfetto/Tracy export, lock-free ring buffer, SSE streaming dashboard

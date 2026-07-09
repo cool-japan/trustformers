@@ -1,6 +1,6 @@
 # trustformers
 
-**Version:** 0.2.0 | **Status:** Alpha | **Updated:** 2026-07-02
+**Version:** 0.2.1 | **Status:** Alpha | **Updated:** 2026-07-09
 
 Main integration crate providing high-level APIs, pipelines, and Hugging Face Hub integration for the TrustformeRS ecosystem.
 
@@ -12,7 +12,7 @@ This crate serves as the **primary entry point** for users, offering HuggingFace
 - **Tests:** ~2,261 passing (part of a workspace-wide 18,102 passed / 0 failed / 119 skipped, 0 clippy warnings, 0 rustdoc warnings — verified 2026-07-01)
 - **Doctests:** 5 passed, 164 ignored by design (see [Testing](#testing))
 - **Public API (prelude):** 76 exports under default features (`bert` + `async`); 83 with `hub` also enabled
-- **Pipeline modules:** 28 task-specific pipelines, plus 6 execution-backend integrations and 10 execution-optimization/composition modules (44 `pub mod` declarations total under `src/pipeline/`)
+- **Pipeline modules:** 38 task-specific pipelines, plus 6 execution-backend integrations and 10 execution-optimization/composition modules (54 `pub mod` declarations total under `src/pipeline/`) — 10 of the 38 were mounted in 0.2.0 and are mock pipelines pending real backends (see [Pipeline API](#pipeline-api))
 - **Public API surface:** ~3,177 `pub` items (fn/struct/enum/trait, including impl-block methods) across `src/`
 - **Stubs remaining:** 0 reachable — a static grep finds 12 occurrences of `todo!()`/`unimplemented!()` in `src/`, but every one is either a string literal emitted by the code-generation pipeline (sample "generated code" text) or a hidden setup line inside an `ignore`d doctest example; none are on a reachable production code path
 
@@ -24,13 +24,19 @@ Pipelines are organized into task-specific implementations, backend integrations
 
 **Text / NLP pipelines**
 - **Text Generation**, **Text Classification**, **Token Classification** (NER/POS), **Question Answering**, **Fill-Mask**, **Summarization** (+ **Multi-Doc Summarization**), **Translation** (+ **Enhanced Translation** with language/script detection), **Code Generation**
+- *Mounted in 0.2.0 (mock — see note below):* **Document Classification** (long documents via overlapping-chunk aggregation), **Feature Extraction** (dense embeddings; CLS/mean/max/weighted-mean pooling), **Table Question Answering** (TAPAS/TaPEx-style, answers questions over CSV-like tables)
 
 **Retrieval & long-context**
 - **RAG** (TF-IDF and BM25 retrievers) and **Advanced RAG**
 - **Mamba-2** state-space pipeline for very long sequences
 
-**Vision / multimodal / audio** (feature-gated: `vision`, `audio`)
+**Vision / multimodal / audio** (feature-gated: `vision`, `audio` — tagged individually)
 - Image Classification, Object Detection, Depth Estimation, Optical Flow, Pose Estimation, Mask Generation (SAM-style point/box prompts), Image-to-Text (`vision`), Visual Question Answering (`vision`), MultiModal (CLIP-style), Document Understanding, Audio Classification, Speech-to-Text (`audio`), Text-to-Speech (`audio`)
+- *Mounted in 0.2.0 (mock — see note below; not gated behind `vision`/`audio`, compiled unconditionally):* Image Segmentation (SegFormer/Mask2Former-style), Video Classification (VideoMAE/TimeSformer-style), Visual Grounding (GroundingDINO-style free-text phrase grounding), Speech Recognition (Whisper-compatible; adds translation-to-English and word/sentence timestamps — distinct from the existing Speech-to-Text pipeline above), Zero-Shot Audio Classification (CLAP-style; classifies audio against arbitrary natural-language candidate labels)
+
+**Generative audio / image** (mounted in 0.2.0, mock — see note below; not gated behind `vision`/`audio`, compiled unconditionally)
+- **Audio Generation**: AudioLDM/MusicGen-style text-to-audio
+- **Text-to-Image**: Stable Diffusion XL / DALL-E-style text-to-image
 
 **Conversational** (feature `async`)
 - **ConversationalPipeline** with dedicated streaming, memory, safety, and reasoning submodules
@@ -48,7 +54,9 @@ Pipelines are organized into task-specific implementations, backend integrations
 **Execution optimization**
 - Adaptive/dynamic batching, JIT compilation, early-exit, mixture-of-depths, speculative decoding, and real-time/backpressure-aware streaming
 
-All pipelines implement a common `Pipeline` trait (`__call__`, `batch`, `adaptive_batch`) plus an `AsyncPipeline` trait under the `async` feature. Batched and async execution, and CPU/GPU device placement are supported throughout.
+> **Mock pipelines pending real backends (mounted in 0.2.0):** `audio_generation`, `document_classification`, `feature_extraction`, `image_segmentation`, `speech_recognition`, `table_question_answering`, `text_to_image`, `video_classification`, `visual_grounding`, and `zero_shot_audio_classification` existed as unwired source files before 0.2.0. They now compile into the crate, but — confirmed by reading each implementation — every one currently returns **deterministic, hash- or heuristic-derived mock output** (e.g. `generate_mock_waveform`, `mock_embed`, `mock_score`, djb2-hash-seeded pixel/embedding synthesis) rather than running real model inference, the same pattern already used by the mock `AutoModelForImageClassification`/`AutoModelForAudioClassification` wrappers. These ten are plain structs with their own methods (`generate`, `classify`, `segment`, `ground`, `answer`, `transcribe`, `extract`, ...) — they do **not** implement the common `Pipeline` trait and are **not** reachable through the string-based `pipeline(task, ...)` factory below; construct them directly via their module path, e.g. `trustformers::pipeline::text_to_image::TextToImagePipeline::new(TextToImageConfig::default())`.
+
+All other pipelines implement a common `Pipeline` trait (`__call__`, `batch`, `adaptive_batch`) plus an `AsyncPipeline` trait under the `async` feature. Batched and async execution, and CPU/GPU device placement are supported throughout.
 
 ### Safety Filtering
 
@@ -71,6 +79,28 @@ Automatic model/tokenizer/config selection, mirroring HuggingFace `transformers`
 - **AutoTokenizer** (type alias for `TokenizerWrapper`): Automatic tokenizer selection
 - **AutoProcessor**: Modality-aware input processing
 - **AutoFeatureExtractor** / **AutoDataCollator** / **AutoMetric** / **AutoOptimizer**: Automatic feature extraction, batching/collation, evaluation metrics, and optimizer selection (`src/auto/`)
+- **AutoModelForImageClassification** / **AutoModelForAudioClassification** / **AutoModelForObjectDetection** / **AutoModelForImageSegmentation** (the latter two added in 0.2.0): thin wrappers around the corresponding pipeline (`from_pretrained`, `from_local`, plus a task method — `detect()`/`segment()`/etc.). Not re-exported at the crate root like the six wrappers above — reach them via `trustformers::automodel_tasks::{AutoModelForObjectDetection, AutoModelForImageSegmentation, ...}`. **Mock notice:** all four wrap deterministic placeholder pipelines pending real detection/segmentation/classification heads; their doc comments say so explicitly — do not treat their output as real inference.
+
+### Fine-tuning
+
+`trustformers::finetuning` — mounted in 0.2.0 (previously an unwired source file); a real, tested implementation, **not** a mock:
+
+- **LoRA** (`LoraConfig`, `LoraConfigBuilder`, `LoraLinear`, `LoraBias`): low-rank adaptation with a fluent builder (`rank`, `alpha`, `dropout`, `target_modules`, `merge_weights`, `bias`), plus `LoraLinear::merge_weights`/`unmerge_weights` to fold the adapter into the base weights and `trainable_parameters()` for optimizer wiring.
+- **Bottleneck adapters** (`AdapterConfig`, `AdapterActivation`, `BottleneckAdapter`): Houlsby et al. (2019)-style down-project → activation → up-project + residual adapters.
+
+```rust
+use trustformers::finetuning::{AdapterConfig, BottleneckAdapter, LoraConfig, LoraLinear};
+
+// LoRA: 8-rank adapter for a 768 → 768 attention projection
+let lora_cfg = LoraConfig::builder().rank(8).alpha(16.0).build()?;
+let lora_layer = LoraLinear::new(768, 768, 8, &lora_cfg)?;
+
+// Bottleneck adapter for a BERT-base hidden layer
+let adapter_cfg = AdapterConfig { hidden_size: 768, bottleneck_size: 64, ..Default::default() };
+let adapter = BottleneckAdapter::new(adapter_cfg)?;
+```
+
+Prefix-tuning, prompt-tuning, and p-tuning v2 are not implemented (see `TODO.md`).
 
 ### Infrastructure
 
@@ -81,6 +111,8 @@ Automatic model/tokenizer/config selection, mirroring HuggingFace `transformers`
 - **BenchmarkSuite**: Built-in benchmarking utilities (re-exported from `trustformers-core`)
 - **ModelDiagnostics**: Rich diagnostics — weight-norm checks, activation stats, gradient-flow checks, attention-entropy checks, dead-neuron/weight-collapse detection, and summary reporting (`src/diagnostics/`)
 - **Evaluation bridge**: BLEU, ROUGE-N/L, token-F1, exact-match, and perplexity metrics adapted to the `Metric` trait (`src/evaluation/`)
+- **VersionedCache** (`trustformers::cache`, mounted in 0.2.0): a generic `VersionedCache<K, V>` with TTL expiry, version-tagged entries (`is_valid_version`), configurable eviction (`CacheEvictionPolicy::{Lru, Lfu, Ttl, Size}`), and hit/miss statistics (`VersionedCacheStats`) — a real, tested implementation, not a mock.
+- **ParallelWeightLoader** (`trustformers::loading`, mounted in 0.2.0): sharded/parallel model-weight loading (`load_sharded_directory`) with a progress-callback hook (`with_progress`, `LoadingProgress::pct_complete`) and throughput statistics (`LoadingStats`), plus a `load_model_parallel(path, config)` convenience function — a real, tested implementation, not a mock.
 
 ### Hugging Face Hub Integration
 
@@ -154,7 +186,7 @@ let result = chain.__call__("Very long document text...".to_string())?;
 
 ### Hub Integration
 
-Requires the `hub` feature (`trustformers = { version = "0.2.0", features = ["hub"] }`):
+Requires the `hub` feature (`trustformers = { version = "0.2.1", features = ["hub"] }`):
 
 ```rust
 use trustformers::hub::{download_model, HubOptions};
@@ -184,11 +216,15 @@ trustformers/
 │   │   ├── feature_extractors/
 │   │   ├── metrics/
 │   │   └── optimizers/
-│   ├── pipeline/                # 44 pub modules: task pipelines, composition, backends, optimization
+│   ├── pipeline/                # 54 pub modules: task pipelines, composition, backends, optimization
 │   │   ├── conversational/      # ConversationalPipeline (feature = "async")
 │   │   ├── ensemble/            # EnsemblePipeline
 │   │   ├── onnx_backend.rs, tensorrt_backend.rs, openvino_backend.rs,
 │   │   │   coreml_backend.rs, metal_backend.rs, custom_backend.rs
+│   │   ├── audio_generation.rs, document_classification.rs, feature_extraction.rs,
+│   │   │   image_segmentation.rs, speech_recognition.rs, table_question_answering.rs,
+│   │   │   text_to_image.rs, video_classification.rs, visual_grounding.rs,
+│   │   │   zero_shot_audio_classification.rs   # mounted in 0.2.0; mock pending real backends
 │   │   └── ... (text/vision/audio/RAG pipelines, adaptive/dynamic batching,
 │   │            jit_compilation, early_exit, mixture_of_depths,
 │   │            speculative_decoding, streaming)
@@ -202,7 +238,9 @@ trustformers/
 │   ├── enhanced_profiler.rs     # EnhancedProfiler
 │   ├── memory_pool.rs           # MemoryPool
 │   ├── processor.rs, profiler.rs, training_utils.rs, validation.rs, zero_copy.rs
-│   ├── cache/, finetuning/, loading/   # implemented but NOT wired into lib.rs yet — see TODO.md
+│   ├── cache/                   # VersionedCache (TTL/LRU/LFU/size eviction) — mounted in 0.2.0
+│   ├── finetuning/              # LoraConfig/LoraLinear, AdapterConfig/BottleneckAdapter — mounted in 0.2.0
+│   ├── loading/                 # ParallelWeightLoader, load_model_parallel — mounted in 0.2.0
 ```
 
 ## Pipeline Features
@@ -257,10 +295,10 @@ The underlying `trustformers-models` crate (re-exported as `trustformers::models
 
 ## Known Limitations (Alpha)
 
-- `src/finetuning/` (LoRA + bottleneck adapters, ~1,180 lines) and `src/cache/`, `src/loading/` (versioned cache, parallel model loader, ~1,650 lines) are fully implemented but **not yet wired into `lib.rs`** — they are not part of the compiled crate or public API today (see `TODO.md`).
-- A handful of pipeline source files under `src/pipeline/` (e.g. `audio_generation.rs`, `image_segmentation.rs`, `video_classification.rs`, `text_to_image.rs`) exist as drafts but are not yet declared in `pipeline/mod.rs`, so they are not compiled in.
-- Two test modules are disabled (`#[cfg(test_disabled)]`) pending a rewrite after an internal API rename (conversational config presets; feature-extractor error variants).
-- `examples/conversational_ai.rs.disabled` is currently disabled pending the same API rework.
+- `src/finetuning/` (LoRA + bottleneck adapters), `src/cache/` (versioned cache), and `src/loading/` (parallel model loader) were mounted into `lib.rs` in 0.2.0 and are now part of the compiled crate and public API (`trustformers::{finetuning, cache, loading}`) — real, tested implementations, not mocks. Remaining refinement: default LoRA rank/target-layer choices, and benchmarking the parallel loader/cache against concrete performance targets (see `TODO.md`).
+- Ten pipeline source files under `src/pipeline/` (`audio_generation.rs`, `document_classification.rs`, `feature_extraction.rs`, `image_segmentation.rs`, `speech_recognition.rs`, `table_question_answering.rs`, `text_to_image.rs`, `video_classification.rs`, `visual_grounding.rs`, `zero_shot_audio_classification.rs`) were also mounted in 0.2.0 and now compile in, but every one is a **mock**: it returns deterministic, hash- or heuristic-derived output rather than running real model inference, pending real model backends (see the [Pipeline API](#pipeline-api) note above).
+- `AutoModelForObjectDetection` and `AutoModelForImageSegmentation` (added in 0.2.0), like the existing `AutoModelForImageClassification`/`AutoModelForAudioClassification`, wrap mock pipelines for the same reason.
+- `examples/conversational_ai.rs.disabled` is currently disabled pending an API rework (the two previously-disabled `#[cfg(test_disabled)]` test modules referenced in earlier revisions of this document have since been re-enabled as ordinary `#[cfg(test)]` modules).
 - Hub **downloads** require the optional `hub` feature (not enabled by default) plus an internet connection; without it, only local/cached model loading works.
 - Large models require significant disk space; caching may use substantial disk space.
 

@@ -1,6 +1,6 @@
 # trustformers-optim
 
-**Version:** 0.2.0 | **Status:** Stable | **Tests:** ~960 | **SLoC:** 52,189 | **Public API:** ~1,925 items | **Updated:** 2026-07-02
+**Version:** 0.2.1 | **Status:** Stable | **Tests:** ~995 | **SLoC:** 50,431 | **Public API:** ~1,925 items | **Updated:** 2026-07-09
 
 Comprehensive optimization algorithms, learning rate schedulers, and distributed/advanced training
 infrastructure for training transformer models in the TrustformeRS ecosystem.
@@ -77,8 +77,9 @@ defined — everything described below is always compiled in).
 ### Distributed & Scaled Training
 - **ZeRO stages 1/2/3** (`ZeROOptimizer`, `ZeROConfig`, `ZeROStage`): optimizer-state, gradient, and full
   parameter partitioning with configurable bucket size, prefetch depth, and optional gradient compression
-- **FSDP-style sharding** (`fsdp` module: `FsdpConfig`, `ShardingStrategy`, `FsdpUnit`, `FsdpState`) —
-  present in the source tree, not yet re-exported at the crate root (use `trustformers_optim::fsdp::*`)
+- **FSDP-style sharding** (`fsdp` module: `FsdpConfig`, `FsdpError`, `FsdpMemoryAnalyzer`, `FsdpState`,
+  `FsdpUnit`, `ShardingStrategy`, `WrappingPolicy`) — re-exported directly at the crate root (also
+  accessible via `trustformers_optim::fsdp::*`)
 - **Multi-node training** (`MultiNodeTrainer`, `MultiNodeConfig`)
 - **Enhanced distributed trainer** (`EnhancedDistributedTrainer`, `DistributedConfig`): NCCL-style
   communication, gradient compression (`CompressionType`, e.g. PowerSGD), dynamic batching, fault
@@ -114,7 +115,7 @@ defined — everything described below is always compiled in).
 ### Tooling
 - **Hyperparameter tuning** (`BayesianOptimizer`, `MultiObjectiveOptimizer`, `HyperparameterTuner`)
 - **Monitoring & recommendation** (`OptimizerMonitor`, `OptimizerSelector`, `ConvergenceIndicators`)
-- **Performance validation & benchmarking harness** (`PerformanceValidator`, `advanced_benchmarking`*)
+- **Performance validation & benchmarking harness** (`PerformanceValidator`)
 - **ONNX export** (`ONNXOptimizerExporter`)
 - **Optimizer surgery** (`optimizer_surgery`): migrate momentum/variance state between Adam, AdamW, SGD,
   and Lion mid-training
@@ -129,9 +130,6 @@ defined — everything described below is always compiled in).
 - **Sparse optimizers** (`SparseAdam`, `SparseSGD`) and **LoRA-aware optimizers**
   (`LoRAOptimizer`, `LoRAAdapter`, `create_lora_adam`/`create_lora_adamw`/`create_lora_sgd`)
 - **Task-specific presets** (`BERTOptimizer`, `GANOptimizer`, `RLOptimizer`)
-
-\* `advanced_benchmarking` is present in `src/` but is not currently wired into `lib.rs` (see
-[Known Limitations](#known-limitations)).
 
 ## Usage Example
 
@@ -375,7 +373,7 @@ The `examples/` directory contains 24 runnable programs, including:
 
 ## Testing
 
-- **~960 tests** for this crate (workspace-wide `cargo nextest run --workspace --all-features`:
+- **~995 tests** for this crate (workspace-wide `cargo nextest run --workspace --all-features`:
   18,102 passed / 0 failed / 119 skipped)
 - **49 doctests passed, 0 failed, 1 ignored**
 - **0 clippy warnings, 0 rustdoc warnings**
@@ -384,6 +382,8 @@ The `examples/` directory contains 24 runnable programs, including:
 - Distributed operation tests for ZeRO stages
 - Memory usage profiling and quantization accuracy tests
 - Schedule-Free convergence equivalence tests
+- `tests/crate_root_reexports.rs` locks in the 21 `fsdp`/`optimizer_surgery`/`per_layer_quant` types
+  re-exported at the crate root
 - State save/load round-trip verification
 
 ## Known Limitations
@@ -398,12 +398,6 @@ The `examples/` directory contains 24 runnable programs, including:
   should be treated as less battle-hardened than the core SGD/Adam/AdamW/LAMB path.
 - ZeRO stage 3 with CPU offload adds host-device transfer overhead.
 - 4-bit quantized optimizers may diverge on tasks with very noisy gradients.
-- `fsdp`, `optimizer_surgery`, and `per_layer_quant` are implemented but not yet re-exported at the
-  crate root (accessible via their full module paths).
-- Four source files (`adafactor.rs`, `adafisher.rs`, `advanced_benchmarking.rs`, `second_order_new.rs`)
-  are not declared as modules anywhere in the crate and are therefore dead code excluded from the build
-  (superseded by `adafactor_new.rs`, `adafisher_simple.rs`, and the `second_order/` directory,
-  respectively).
 
 ## License
 

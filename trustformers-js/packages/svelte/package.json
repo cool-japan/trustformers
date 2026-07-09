@@ -1,6 +1,6 @@
 {
   "name": "@trustformers/svelte",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Svelte stores and utilities for TrustformeRS",
   "main": "dist/index.cjs.js",
   "module": "dist/index.esm.js",
@@ -55,7 +55,7 @@
   "sideEffects": false,
   "peerDependencies": {
     "svelte": ">=3.0.0",
-    "@trustformers/core": "^0.2.0"
+    "@trustformers/core": "^0.2.1"
   },
   "dependencies": {},
   "devDependencies": {

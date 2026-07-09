@@ -1,6 +1,6 @@
 # trustformers-training TODO List
 
-**Version:** 0.1.4 | **Last reviewed:** 2026-07-02
+**Version:** 0.2.1 | **Last reviewed:** 2026-07-09
 
 ## Overview
 
@@ -14,8 +14,8 @@ plus elastic and multi-cloud orchestration).
 
 ## Current Status (verified 2026-07-01)
 
-- **~930 tests passing** (workspace-wide: 18,102 passed / 0 failed, 0 clippy warnings, 0 rustdoc warnings)
-- **1,673 public API items** reachable from `lib.rs` (69 compiled `.rs` files, 59,720 SLoC; the full `src/` tree on disk is 89,914 lines across 102 files, ~30,194 of which are orphaned/unwired)
+- **~1,010 tests passing** (workspace-wide: 18,102 passed / 0 failed, 0 clippy warnings, 0 rustdoc warnings; this crate's own count updated 2026-07-09 to include the 83 tests in the newly-mounted `hpo` module)
+- **1,673 public API items** reachable from `lib.rs` (72 compiled `.rs` files, 58,207 SLoC; the full `src/` tree on disk is 83,317 lines across 101 files, ~25,110 of which are orphaned/unwired — file/SLoC counts refreshed via `tokei`, 2026-07-09)
 - **0 stub/placeholder implementations** (`todo!()`/`unimplemented!()`/TODO/FIXME/HACK/XXX/"placeholder") in compiled code
 - **0 `.unwrap()` calls** in compiled production code
 - No file in the compiled tree exceeds the workspace's 2000-line refactor threshold (largest: `auto_parallelism.rs` at 1,610 lines)
@@ -31,16 +31,19 @@ This file replaces the previous TODO.md's checklist with one re-verified against
 These are genuine findings from auditing `src/` against `lib.rs`'s module tree — not present in earlier
 drafts of this document.
 
-- [ ] **~30,000 lines of orphaned/unwired code.** 21 top-level directories (`dpo/`, `ppo/`, `kto/`, `lora/`,
-  `ewc/`, `curriculum/`, `hpo/`, `orpo/`, `simpo/`, `ipo/`, `spin/`, `grpo/`, `raft/`, `reinforce/`,
+- [ ] **~25,110 lines of orphaned/unwired code** (down from ~30,000 as of 2026-07-09; see the `hpo`/`mod.rs`
+  note below). 20 top-level directories (`dpo/`, `ppo/`, `kto/`, `lora/`,
+  `ewc/`, `curriculum/`, `orpo/`, `simpo/`, `ipo/`, `spin/`, `grpo/`, `raft/`, `reinforce/`,
   `distillation/`, `model_merging/`, `constitutional_ai/`, `contrastive_search/`, `token_dpo/`, `online_dpo/`,
-  `reward_modeling/`) plus 6 top-level files (`async_checkpoint.rs`, `distributed_overlap.rs`,
-  `losses_tests.rs`, `metrics_tests.rs`, `training_args_tests.rs`, `mod.rs`) are not referenced by any `mod`
+  `reward_modeling/`) plus 5 top-level files (`async_checkpoint.rs`, `distributed_overlap.rs`,
+  `losses_tests.rs`, `metrics_tests.rs`, `training_args_tests.rs`) are not referenced by any `mod`
   declaration in `lib.rs` and are therefore not compiled into the crate at all. Their functionality generally
   looks superseded by wired-in equivalents (`rlhf::ppo`/`rlhf::dpo` vs. the orphaned `ppo/`/`dpo/`;
   `data_pipeline`'s curriculum types vs. the orphaned `curriculum/`). Action needed: either wire the useful
   ones in (e.g. `grpo/`, which looks like it might add real GRPO support not otherwise present) or delete the
-  rest so the tree reflects what's actually shipped.
+  rest so the tree reflects what's actually shipped. (`hpo/` was mounted via `pub mod hpo;` in 0.2.0 and is
+  no longer on this orphaned list — see the Hyperparameter Tuning section below; the orphaned root-level
+  `mod.rs` was deleted in 0.2.0 rather than wired in — see Housekeeping below.)
 - [ ] **No ZeRO optimizer.** Earlier documentation for this crate advertised "ZeRO stages 1/2/3" as a
   flagship feature; there is no `ZeroStage`/sharded-optimizer implementation anywhere in the source. If ZeRO
   is wanted, it needs to be implemented from scratch.
@@ -205,7 +208,13 @@ trustformers-optim `pytorch_compat.rs`).
 - [x] Hyperband / successive halving (`Hyperband`, `SuccessiveHalving`)
 - [x] Population-Based Training (`PopulationBasedTraining`, `PBTConfig`)
 - [x] Bandit-based optimization (`BanditOptimizer`)
-- [~] Wire in hpo::multi_objective (planned 2026-07-05)
+- [x] Wire in hpo::multi_objective (planned 2026-07-05) — **DONE (2026-07-09):** `pub mod hpo;` added to
+  `lib.rs` (line 151), re-exporting `MultiObjectiveHpo`/`ParetoFront`/`compute_pareto_front`/
+  `hypervolume_indicator`/`non_domination_sort` (from `hpo::multi_objective`) and `AutoLrSelector`/
+  `LrRangeTest` (from `hpo::auto_lr`). The module's 83 pre-written tests (`auto_lr.rs`: 21, `mod.rs`: 32,
+  `multi_objective.rs`: 30) now compile and run for the first time. The module's one doctest (in
+  `multi_objective.rs`'s doc comment) already used `?`/`Ok::<(), Box<dyn std::error::Error>>(())` rather
+  than `.unwrap()`, so no additional no-unwrap fix was needed.
   - Goal: expose the already-complete (1332 lines) NSGA-II Pareto-front hyperparameter-search engine.
   - Design: add `pub mod hpo;` to lib.rs next to the existing `pub mod hyperopt;` — zero missing dependencies, zero name collisions confirmed against the ~90 names hyperopt already exports.
   - Files: trustformers-training/src/lib.rs only.
@@ -241,7 +250,7 @@ trustformers-optim `pytorch_compat.rs`).
 ## Future Enhancements
 
 ### High Priority
-- [ ] Decide the fate of the ~30,000 lines of orphaned modules: wire in (`grpo/` in particular looks like
+- [ ] Decide the fate of the ~25,110 lines of orphaned modules: wire in (`grpo/` in particular looks like
   it could add real GRPO support) or delete
 - [ ] Implement a real ZeRO optimizer (stage 1 at minimum) if distributed memory sharding is still a goal
 - [ ] Give `NCCLProcessGroup`/`GlooProcessGroup`/`MPIProcessGroup` real backend bindings, or rename/document
@@ -273,7 +282,8 @@ trustformers-optim `pytorch_compat.rs`).
 ### Housekeeping
 - [~] Delete the 5 stray `*.rs.prelude_fix` backup files — planned 2026-07-05 (see "Known Issues" above for
   the full plan)
-- [~] Delete dead src/mod.rs (planned 2026-07-05)
+- [x] Delete dead src/mod.rs (planned 2026-07-05) — **DONE (2026-07-09):** `trustformers-training/src/mod.rs`
+  is deleted (confirmed absent from the tree); `lib.rs` remains the sole crate root.
   - Goal/Design: delete the legacy src/mod.rs — crate root is lib.rs; everything mod.rs declares already exists, more completely, in lib.rs.
   - Files: trustformers-training/src/mod.rs.
   - Tests: cargo check --all-features (no-op diff).
@@ -303,7 +313,9 @@ cargo check -p trustformers-training --all-features
 
 ---
 
-**Last Updated:** 2026-07-06 — 0.2.0 release-scope section added (tch/torch removal, OxiCUDA note); torch forwarder feature removal task marked done
-**Version:** 0.1.4
-**Status:** Alpha — ~930 tests passing, 1,673 reachable public API items, 0 stubs, but see "Known Issues"
+**Last Updated:** 2026-07-09 — version bumped to 0.2.1; `hpo` module wiring and `src/mod.rs` deletion
+confirmed done and checked off; orphaned-code inventory and file/SLoC/test counts refreshed via `tokei`
+and source inspection
+**Version:** 0.2.1
+**Status:** Alpha — ~1,010 tests passing, 1,673 reachable public API items, 0 stubs, but see "Known Issues"
 for the distributed-training and orphaned-module caveats that keep this crate from being labeled Stable.

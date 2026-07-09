@@ -1,14 +1,14 @@
 # TrustformeRS 🦀
 
 [![Rust](https://img.shields.io/badge/rust-%23000000.svg?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](https://github.com/cool-japan/trustformers)
+[![Version](https://img.shields.io/badge/version-0.2.1-blue.svg)](https://github.com/cool-japan/trustformers)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
 A high-performance, memory-safe Rust implementation of Hugging Face Transformers. TrustformeRS brings the power of transformer models to the Rust ecosystem with zero-cost abstractions, fearless concurrency, and deployment flexibility from edge to cloud.
 
-> **Project Status (alpha)**: TrustformeRS 0.2.0 (in development, last verified 2026-07-02) is a large Pure-Rust transformer stack — 2,983 Rust files, ~1.4M lines (~1.18M lines of code, via `tokei`) across 10 crates and 49+ transformer architectures — together with multi-platform packaging (WebAssembly, server REST/gRPC/GraphQL, mobile iOS/Android, and RLHF/DPO training scaffolding).
+> **Project Status (alpha)**: TrustformeRS 0.2.1 (in development, last verified 2026-07-09) is a large Pure-Rust transformer stack — 2,970 Rust files, ~1.41M lines (~1.17M lines of code, via `tokei`) across 10 crates and 49+ transformer architectures — together with multi-platform packaging (WebAssembly, server REST/gRPC/GraphQL, mobile iOS/Android, and RLHF/DPO training scaffolding).
 >
-> **Honest maturity note**: today's compute path is primarily **CPU and `f32`**. F16/BF16 are supported as a storage/serialization format but are upcast to `f32` for arithmetic (native low-precision kernels are on the roadmap). GPU acceleration is **real** (CUDA via the Pure-Rust `oxicuda` backend, Metal via `objc2`/`oxicuda-metal`, WebGPU via `wgpu`) but is currently wired end-to-end **only for GPT-2 and RetNet**; the remaining backends (ROCm, Vulkan, OpenCL) are feature-gated and experimental, and **TPU is a placeholder, not implemented**. Several newer architectures are still being completed. See [Development Status](#-development-status) for the precise maturity of each area.
+> **Honest maturity note**: today's compute path is primarily **CPU and `f32`**. F16/BF16 are supported as a storage/serialization format but are upcast to `f32` for arithmetic (native low-precision kernels are on the roadmap). GPU acceleration is **real** (CUDA via the Pure-Rust `oxicuda` backend, Metal via `objc2`/`oxicuda-metal`, WebGPU via `wgpu`) but is currently wired end-to-end **only for GPT-2 and RetNet** (0.2.0 added a GPU-resident CUDA attention path for GPT-NeoX too, but it is **prefill-only** — no KV-cached decode, since its `Layer` trait carries no cache); the remaining backends (ROCm, Vulkan, OpenCL) are feature-gated and experimental, and **TPU is a placeholder, not implemented**. Several newer architectures are still being completed. See [Development Status](#-development-status) for the precise maturity of each area.
 
 ## 🚀 Why TrustformeRS?
 
@@ -38,19 +38,19 @@ TrustformeRS follows a modular workspace structure inspired by Hugging Face Tran
 
 ```
 trustformers/
-├── trustformers-core/      # Core traits and tensor abstractions  (189,922 SLoC, Stable)
-├── trustformers-models/    # 49+ model implementations           (185,954 SLoC, Alpha)
-├── trustformers-tokenizers/# BPE, WordPiece, SentencePiece       ( 48,701 SLoC, Stable)
-├── trustformers-optim/     # 20+ optimizers and LR schedulers    ( 76,662 SLoC, Stable)
-├── trustformers-training/  # Distributed training, RLHF/DPO      ( 87,017 SLoC, Stable)
-├── trustformers-serve/     # REST/gRPC/GraphQL serving           (331,151 SLoC, Stable)
-├── trustformers-wasm/      # WebAssembly + WebGPU deployment     ( 53,361 SLoC, Stable)
-├── trustformers-mobile/    # iOS/Android deployment              (125,131 SLoC, Alpha)
+├── trustformers-core/      # Core traits and tensor abstractions  (192,853 SLoC, Stable)
+├── trustformers-models/    # 49+ model implementations           (184,613 SLoC, Alpha)
+├── trustformers-tokenizers/# BPE, WordPiece, SentencePiece       ( 48,834 SLoC, Stable)
+├── trustformers-optim/     # 20+ optimizers and LR schedulers    ( 74,579 SLoC, Stable)
+├── trustformers-training/  # Distributed training, RLHF/DPO      ( 87,064 SLoC, Stable)
+├── trustformers-serve/     # REST/gRPC/GraphQL serving           (331,210 SLoC, Stable)
+├── trustformers-wasm/      # WebAssembly + WebGPU deployment     ( 53,687 SLoC, Stable)
+├── trustformers-mobile/    # iOS/Android deployment              (121,376 SLoC, Alpha)
 ├── trustformers-debug/     # Profilers, visualizers, TensorBoard (100,417 SLoC, Alpha)
-└── trustformers/           # High-level integration crate        (131,961 SLoC, Alpha)
+└── trustformers/           # High-level integration crate        (132,507 SLoC, Alpha)
 ```
 
-**Total**: ~1.33M SLoC across these 10 crates; **2,983 Rust files, ~1.4M lines total (~1.18M lines of code)** across the full repository including bindings/examples/tooling (via `tokei`, 2026-07-01). 100% Pure Rust source (COOLJAPAN Policy) — default-feature builds are C/C++-free for every crate except `trustformers-serve` (accepted exception: rustls/aws-lc-rs TLS for the HTTP server).
+**Total**: ~1.33M SLoC across these 10 crates; **2,970 Rust files, ~1.41M lines total (~1.17M lines of code)** across the full repository including bindings/examples/tooling (via `tokei`, 2026-07-09). 100% Pure Rust source (COOLJAPAN Policy) — default-feature builds are C/C++-free for every crate except `trustformers-serve` (accepted exception: rustls/aws-lc-rs TLS for the HTTP server).
 
 ### Design Principles
 
@@ -65,7 +65,7 @@ trustformers/
 
 ```toml
 [dependencies]
-trustformers = "0.2.0"
+trustformers = "0.2.1"
 ```
 
 ### Basic Usage
@@ -157,6 +157,8 @@ let result = classifier.__call__("I love writing Rust code!".to_string())?;
 | Model | Variants | Tasks |
 |-------|----------|-------|
 | ViT | tiny, small, base, large | Image Classification |
+| Swin Transformer | tiny, small, base, large | Hierarchical Image Classification (shifted windows) |
+| DeiT | tiny, small, base, large | Image Classification (w/ distillation token) |
 | CLIP | base, large | Text-Image Matching |
 | BLIP-2 | various | Vision-Language |
 | LLaVA | various | Visual Instruction Tuning |
@@ -248,7 +250,7 @@ impl Model for MyTransformer {
 
 ### GPU Acceleration
 
-GPU backends are real (CUDA via the Pure-Rust `oxicuda` backend, Metal via `objc2`/`oxicuda-metal`, WebGPU via `wgpu`) but are **currently wired end-to-end only for GPT-2 and RetNet**. Enable the matching feature flag (`metal` on macOS, `cuda` on Linux/Windows) and build a supported model on a GPU `Device`; its `forward` then runs the linear/attention path on-device with a persistent KV cache.
+GPU backends are real (CUDA via the Pure-Rust `oxicuda` backend, Metal via `objc2`/`oxicuda-metal`, WebGPU via `wgpu`) but are **currently wired end-to-end only for GPT-2 and RetNet** (with persistent KV-cached decode). Enable the matching feature flag (`metal` on macOS, `cuda` on Linux/Windows) and build a supported model on a GPU `Device`; its `forward` then runs the linear/attention path on-device with a persistent KV cache. GPT-NeoX also gained a GPU-resident CUDA attention path in 0.2.0, but it is **prefill-only** (no KV-cached decode yet — its `Layer` trait carries no cache), so it falls back to the CPU-download path for incremental decoding.
 
 > **CUDA runtime-verified (2026-07-01):** the CUDA backend was migrated from `cudarc` to the Pure-Rust `oxicuda` (`oxicuda-blas`/`-dnn`/`-memory`/`-driver`) — the `cuda` feature now pulls in `oxicuda` instead of `cudarc` (`cuda-oxicuda` is kept only as a deprecated alias for `cuda`). 12 CPU↔CUDA golden-parity tests (GEMM, GELU, LayerNorm, causal softmax, RoPE — both host and GPU-resident paths, plus cached-weight GEMM) prove the backend is numerically correct against the CPU reference, runtime-verified **12/12 passing on a real NVIDIA RTX A4000 (CUDA 12.0)**. The GPU-resident CUDA transformer layer (LayerNorm→QKV→bias→RoPE→causal-softmax attention→proj→residual, chained via cached device buffers with no host round-trips) replaces the previous CPU-fallback placeholder. Metal compute (matmul + resident attention) similarly migrated to `oxicuda-metal`, dropping the earlier `scirs2-core` MPS dependency.
 
@@ -350,6 +352,20 @@ let outputs = model.forward(inputs)?;
 
 ## 🎯 Development Status
 
+### Completed Features (v0.2.0 - 2026-07-09)
+- [x] **CUDA gains a GPU-resident attention pipeline**: a new `gpu_ops::cuda::oxicuda::attention` module (QKV head-gather, RoPE, causal softmax, prefill/decode attention, KV-cache concat, residual add) gives CUDA the same fully device-resident chain the Metal backend already had. GPT-2 (`Gpt2Attention::cuda_resident_attention`) uses it for zero-host-round-trip prefill **and** incremental KV-cached decode; GPT-NeoX (`GPTNeoXAttention::cuda_resident_forward`) uses it for prefill only, since its `Layer` trait carries no KV cache.
+- [x] **Batched/broadcasting CUDA matmul**: a new `gpu_ops::cuda::oxicuda::batched` module (`BatchedMatmulPlan`, a NumPy-style broadcasting-batch shape planner) replaces the previous 2D-only host-round-trip dispatcher; `Tensor::matmul` now routes N-D batched/broadcast F32 matmuls, and any operand pair involving a resident `Tensor::CUDA`, through the CUDA backend.
+- [x] **Reference-counted GPU buffer lifecycle**: `gpu_ops::cuda::BufferHandle` (`OxiCudaBufferHandle`) frees a device allocation automatically when the last clone drops, replacing the previous leak-until-`clear_buffer_cache()` behavior.
+- [x] **Swin Transformer and DeiT are buildable for the first time**: `trustformers-models` gained `swin`/`deit` Cargo features mounting `SwinModel`/`SwinForImageClassification` and `DeiTModel`/`DeiTForImageClassification` (with distillation-token support) — the implementations already existed in the tree but were never wired into `lib.rs`.
+- [x] **`trustformers` mounts three previously-dormant subsystems and ten task pipelines** that already existed in the tree but were never `pub mod`-declared: `cache` (`VersionedCache`, TTL/LRU/LFU/size eviction), `finetuning` (`LoraConfig`/`LoraLinear`, `AdapterConfig`/`BottleneckAdapter`), `loading` (`ParallelWeightLoader`/`load_model_parallel`), and the `audio_generation`, `document_classification`, `feature_extraction`, `image_segmentation`, `speech_recognition`, `table_question_answering`, `text_to_image`, `video_classification`, `visual_grounding`, and `zero_shot_audio_classification` pipelines under `trustformers::pipeline`.
+- [x] **Multi-objective hyperparameter optimization mounted**: `trustformers-training::hpo` exposes `MultiObjectiveHpo`/`ParetoFront`/`compute_pareto_front`/`hypervolume_indicator`/`non_domination_sort` plus `AutoLrSelector`/`LrRangeTest` for automatic learning-rate range tests.
+- [x] **Fixed a silent CUDA correctness bug**: GPU-to-host reads (`download_buffer`, matmul/GELU/LayerNorm/softmax/RoPE) now synchronize the CUDA stream before their device→host copy — oxicuda kernels launch asynchronously on a non-blocking stream, and without this fix a fast host thread could read back a buffer before the kernel filling it had finished, risking silent zero/garbage data.
+- [x] **Fixed `Device::cuda_if_available()` / `Device::best_available()`**: both always returned `Device::CPU` even on CUDA/Metal-capable hardware, because they read `scirs2_core`'s `PlatformCapabilities` (whose `cuda_available` is hardcoded `false` upstream and whose `metal_available` needs a scirs2 `metal` feature trustformers never enables); both now probe trustformers' own `oxicuda`/Metal backends directly.
+- [x] **Multi-GPU device-addressing fix**: `CudaTensorData` now carries its own `device_id` instead of callers inferring it from a `Layer`'s configured `Device` or hardcoding `0`; `LayerNorm`, `Linear`, `gelu`, and `Tensor::add`/`matmul` now operate on the buffer's actual device.
+- [x] **The `torch` (`tch`/libtorch) backend is removed workspace-wide** (the `torch` feature, `tch` dependency, and `Tensor::Torch` variant are gone from every crate) — advances the Pure-Rust default feature tree; `candle` remains the optional non-CPU tensor-framework integration.
+- [x] Several real-vs-mock bug fixes: `SentencePieceTokenizer::from_pretrained` now loads a real SentencePiece model file instead of always returning a fabricated T5-like vocabulary; `trustformers-wasm` quantization now performs real affine (min/max, scale/zero-point) quantize-dequantize instead of a constant-multiply placeholder; `trustformers-wasm` device-capability probes (`detect_webgl_support`, `get_screen_orientation`, WebGPU capabilities) now query the real browser/device instead of returning hardcoded results; `OfflineModelPackManager::get_model_info` now queries the real HuggingFace Hub API instead of hardcoded mock metadata.
+- [x] **`trustformers-models`' `all` feature aggregate fixed**: it was missing the already-implemented `llama3_2` (LLaMA 3.2) and `mistral_v3` (Mistral v0.3) model features; `--features all` now builds every supported architecture.
+
 ### Completed Features (v0.1.4 - 2026-07-01)
 - [x] **CUDA backend migrated to the Pure-Rust `oxicuda`** (COOLJAPAN Pure-Rust policy), entirely replacing `cudarc` (`cuda` now pulls `oxicuda-blas`/`-dnn`/`-memory`/`-driver`; `cuda-oxicuda` kept as a deprecated alias). GPU-resident `matmul_gpu_to_gpu` confirmed genuinely zero-copy (cached `DeviceBuffer`, no host round-trip); the `cuda` feature now propagates through `trustformers-models` and the `trustformers` umbrella crate.
 - [x] **12 CPU↔CUDA golden-parity tests** (GEMM, GELU, LayerNorm, causal softmax, RoPE — host and GPU-resident paths, plus cached-weight GEMM), runtime-verified 12/12 passing on a real NVIDIA RTX A4000 (CUDA 12.0).
@@ -390,9 +406,9 @@ let outputs = model.forward(inputs)?;
 ### Future Enhancements
 
 #### High Priority
-- [ ] **Broader GPU model coverage**: extend the `oxicuda`/`oxicuda-metal` device-resident forward path beyond GPT-2/RetNet to more architectures (superseded the earlier scirs2-core MPSGraph plan — Metal now runs on `oxicuda-metal` directly, no longer blocked on scirs2-core)
+- [ ] **Broader GPU model coverage**: extend the `oxicuda`/`oxicuda-metal` device-resident forward path beyond GPT-2/RetNet/GPT-NeoX to more architectures, and extend GPT-NeoX's CUDA path from prefill-only to full KV-cached decode (superseded the earlier scirs2-core MPSGraph plan — Metal now runs on `oxicuda-metal` directly, no longer blocked on scirs2-core)
 - [ ] **More quantization methods**: Enhanced GGUF format, AutoGPTQ improvements
-- [ ] **Additional vision transformer variants**: ViT-Huge, DeiT, Swin
+- [ ] **Additional vision transformer variants**: ViT-Huge (DeiT and Swin shipped in 0.2.0 — see the Model Zoo table)
 
 #### Performance
 - [ ] **Fused CUDA megakernel**: LayerNorm+QKV+RoPE+Attention+Proj+Residual as a single `oxicuda-dnn` kernel (today's oxicuda path executes ops individually — correct, but not fused)

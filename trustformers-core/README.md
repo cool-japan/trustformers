@@ -1,16 +1,16 @@
 # trustformers-core
 
-![Version](https://img.shields.io/badge/version-0.2.0-blue)
+![Version](https://img.shields.io/badge/version-0.2.1-blue)
 ![Status](https://img.shields.io/badge/status-Stable-brightgreen)
 ![Tests](https://img.shields.io/badge/tests-2%2C353%2B%20passing-brightgreen)
-![SLoC](https://img.shields.io/badge/SLoC-155%2C280-informational)
-![Date](https://img.shields.io/badge/updated-2026--07--02-lightgrey)
+![SLoC](https://img.shields.io/badge/SLoC-153%2C689-informational)
+![Date](https://img.shields.io/badge/updated-2026--07--09-lightgrey)
 
 Core infrastructure crate providing fundamental abstractions and utilities for the TrustformeRS ecosystem.
 
 ## Current State
 
-**Version 0.2.0 — Stable (2026-07-02)**
+**Version 0.2.1 — Stable (2026-07-09)**
 
 This crate is **stable and production-ready**, serving as the foundation for all other TrustformeRS components. It provides high-performance tensor operations, layer implementations, and advanced optimization techniques. ~2,353 tests pass for this crate specifically, with zero stubs or unimplemented items, and zero clippy/rustdoc warnings workspace-wide.
 
@@ -19,7 +19,7 @@ This crate is **stable and production-ready**, serving as the foundation for all
 ### Tensor Operations
 - **Comprehensive tensor abstraction** supporting multiple backends
 - **SciRS2 integration** for SIMD-optimized operations
-- **GPU support** through multiple backends (CUDA, Metal, Vulkan, WebGPU, OpenCL, ROCm, OneAPI, XLA, RISC-V)
+- **GPU support** through multiple backends (CUDA, Metal, Vulkan, WebGPU, OpenCL, ROCm, OneAPI, XLA, RISC-V), each opt-in behind its own Cargo feature (`cuda`, `metal`, `vulkan`, `wgpu_backend`, `opencl`, `rocm`, `oneapi`, `xla`, `riscv`) — no GPU backend is enabled by default (`default = ["linalg"]`)
 - **Automatic differentiation** with reverse-mode and forward-mode autodiff
 - **Memory-efficient operations** with zero-copy views
 
@@ -40,7 +40,7 @@ This crate is **stable and production-ready**, serving as the foundation for all
 - **Kernel Tuning**: Automatic hardware-aware kernel parameter optimization
 - **Memory Management**: Adaptive pooling with LRU, LFU, ARC, and Hybrid eviction policies
 - **Conv2D**: Full im2col+matmul implementation with groups and dilation
-- **GPU Attention**: Scaled dot-product and flash attention (tiled online-softmax)
+- **GPU Attention**: Scaled dot-product and flash attention (tiled online-softmax); the CUDA backend (`cuda` feature) additionally runs a fully GPU-resident attention pipeline — QKV split, RoPE, causal softmax, KV-cache append — and batched/broadcasting matmul, avoiding host round-trips during prefill and decode
 
 ### Export and Interoperability
 - **ONNX Export**: Complete graph construction and runtime support
@@ -134,6 +134,7 @@ The crate includes comprehensive test coverage:
 - `scirs2-core`: SIMD operations and parallelism
 - `half`: FP16/BF16 support
 - `rayon`: Parallel iteration (via SciRS2)
+- `oxicuda-{blas,dnn,memory,driver}` (optional, `cuda` feature): CUDA GEMM, resident attention, and refcounted GPU buffer management
 - Various serialization and utility crates
 
 ## Public API

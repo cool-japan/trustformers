@@ -93,8 +93,8 @@ impl Drop for BufferHandleInner {
 ///
 /// This is the lifecycle layer the raw [`OxiCudaBufferId`] lacks: the backend's
 /// `buffer_cache` owns the [`DeviceBuffer<f32>`] allocations, and without a handle every
-/// resident op output would stay parked on the device until [`clear_buffer_cache`]
-/// (`OxicudaCudaBackend::clear_buffer_cache`) — a leak in any long-running forward loop.
+/// resident op output would stay parked on the device until
+/// [`OxicudaCudaBackend::clear_buffer_cache`] — a leak in any long-running forward loop.
 /// Cloning a handle is a pure refcount increment ([`Arc::clone`]); when the last clone
 /// drops, the release callback removes the buffer from the owning backend's cache,
 /// freeing the device memory.
@@ -115,7 +115,7 @@ pub struct OxiCudaBufferHandle {
 impl OxiCudaBufferHandle {
     /// Wrap a freshly minted resident buffer id in a lifecycle-managed handle.
     ///
-    /// The id must identify a buffer owned by the [`oxicuda_backend`] registry entry for
+    /// The id must identify a buffer owned by the [`oxicuda_backend()`] registry entry for
     /// `device_id` (i.e. it came from `create_persistent_buffer` / a `*_gpu_to_gpu` op on
     /// that backend). Each raw id must be wrapped **at most once**; the wrap point is the
     /// single owner and all sharing goes through clones of the returned handle.

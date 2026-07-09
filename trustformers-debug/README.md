@@ -1,6 +1,6 @@
 # TrustformeRS Debug
 
-**Version:** 0.2.0 | **Status:** Alpha | **Tests:** ~899 | **SLoC:** ~101,000 | **Updated:** 2026-07-02
+**Version:** 0.2.1 | **Status:** Alpha | **Tests:** ~899 | **SLoC:** ~101,000 | **Updated:** 2026-07-09
 
 Advanced debugging and analysis tools for TrustformeRS machine learning models.
 
@@ -62,6 +62,15 @@ Multiple backends depending on enabled features:
 - **GIF export** (`gif` feature): Animated training progress visualizations
 - **Video export** (`video` feature): MP4-compatible frame sequences for training recordings
 
+### Large-Model Visualization
+
+Memory-bounded visualization for models too large to render layer-by-layer (`LargeModelVisualizer`, `large_model_viz` module, re-exported at the crate root):
+
+- **Smart Layer Sampling**: Uniform, Adaptive, Representative, and Importance-based (parameter-count/compute-cost weighted) sampling strategies pick a representative subset of layers instead of rendering every layer
+- **Hierarchical Rendering**: Layers are grouped into clusters with per-group summary statistics for very deep architectures
+- **Memory-Bounded Caching**: Configurable memory budget (`max_memory_mb`) that warns when accumulated layer metadata exceeds it
+- **Output Formats**: Text summary, JSON metadata, static PNG/SVG, and interactive SVG/HTML
+
 ### Memory Profiling
 
 Deadlock-safe memory profiling using scoped mutex guards:
@@ -77,6 +86,16 @@ Deadlock-safe memory profiling using scoped mutex guards:
 - **Bottleneck Detection**: Identify performance bottlenecks automatically
 - **Optimization Suggestions**: Get recommendations for performance improvements
 - **Flame Graphs**: Generate Inferno-compatible flamegraph data for call stack visualization
+
+### Distributed Profiling
+
+Multi-node, multi-rank profiling for distributed training (`DistributedProfiler`, `distributed_profiling` module, re-exported at the crate root):
+
+- **Per-Rank Node Registration**: Track each node by rank and role, recording communication and synchronization events as training progresses
+- **Communication & Synchronization Analysis**: Aggregated summaries of cross-node communication patterns and synchronization overhead
+- **Load Balance Analysis**: Detect work imbalance across ranks
+- **Bottleneck Detection**: Automatic identification of distributed-training bottlenecks with actionable recommendations
+- **Real-time Stats & Export**: Live statistics snapshots (`get_realtime_stats`) plus full JSON report export (`export_json`)
 
 ### AI Code Analysis
 

@@ -22,7 +22,7 @@ building blocks required by model implementations in trustformers-models and oth
 ## Current Status
 
 ### Implementation Status
-✅ **STABLE** - Version 0.1.4 (initial stable release 0.1.0 on 2026-03-21)
+✅ **STABLE** - Version 0.2.1 (initial stable release 0.1.0 on 2026-03-21)
 ✅ **ZERO COMPILATION ERRORS** - Clean compilation across all backends
 ✅ **COMPREHENSIVE TEST COVERAGE** - ~2,353 tests with 100% pass rate
 ✅ **ALL TODOS COMPLETED** - Zero stubs (todo!/unimplemented!) remaining (verified 2026-07-01)
@@ -33,10 +33,10 @@ building blocks required by model implementations in trustformers-models and oth
 - **Test Count:** ~2,353 unit tests, all passing (0 failing)
 - **Stubs:** 0 (no todo! or unimplemented! macros; verified 2026-07-01)
 - **Public API Items:** ~4,533
-- **SLoC:** 155,280
+- **SLoC:** 153,689 (tokei, verified 2026-07-09)
 - **Code Coverage:** Extensive coverage across modules
 - **Clippy Warnings:** 3855+ warnings resolved historically; 0 clippy and 0 rustdoc warnings workspace-wide as of 2026-07-01
-- **File Size Compliance:** All files <2000 lines (verified 2026-07-01)
+- **File Size Compliance:** 1 file exceeds 2000 lines as of 2026-07-09 — `gpu_ops/cuda/oxicuda/mod.rs` grew to 2,187 lines during the 0.2.0 CUDA resident-buffer/attention/batched-matmul work; all other files remain <2000 lines (last full sweep 2026-07-01). Refactor candidate for a future `splitrs` pass.
 - **Documentation:** Comprehensive rustdoc for all public APIs
 
 ---
@@ -859,7 +859,9 @@ if debugger.is_breakpoint_hit() {
 - **Small Tensors:** Overhead may dominate for very small tensors on GPU
 
 ### Housekeeping
-- **Stray Backup Files:** 6 `.bak2` files remain under `src/` from prior refactors and are not compiled/live code — `layers/sdpa.rs.bak2`, `layers/flash_attention.rs.bak2`, `layers/linear.rs.bak2`, `kernels/simd/matrix_ops.rs.bak2`, `gpu_ops/metal/metalbackend_matmul_f32_group.rs.bak2`, `tensor/math_ops/linear_algebra.rs.bak2` (found 2026-07-01) — safe to delete
+- **Stray Backup Files:** 6 `.bak2` files remain under `src/` from prior refactors and are not compiled/live code — `layers/sdpa.rs.bak2`, `layers/flash_attention.rs.bak2`, `layers/linear.rs.bak2`, `kernels/simd/matrix_ops.rs.bak2`, `gpu_ops/metal/metalbackend_matmul_f32_group.rs.bak2`, `tensor/math_ops/linear_algebra.rs.bak2` (found 2026-07-01, still present 2026-07-09) — safe to delete
+- **Orphaned Module:** `src/quantization/int2.rs` (INT2 sub-byte quantization, ~1,200 lines: `Int2QuantConfig`, `Int2Mode`, `quantize_to_int2`, `dequantize_from_int2`) is fully implemented but never declared in `quantization/mod.rs` (no `mod int2;`/`pub mod int2;`), so it is unreachable from the crate root and not actually part of the compiled public API — despite its own doc comment referencing `trustformers_core::quantization::int2::{...}` as if it were public (found 2026-07-09). This is why "INT2 and sub-byte quantization" below is still unchecked. Either wire it in (`pub mod int2;` + re-export from `quantization::mod`) or remove it.
+- **File Size Policy:** `gpu_ops/cuda/oxicuda/mod.rs` grew to 2,187 lines during the 0.2.0 CUDA resident-buffer/attention/batched-matmul work, exceeding the workspace's 2000-line-per-file policy (found 2026-07-09) — refactor candidate for a future `splitrs` pass (e.g. split out the buffer-handle lifecycle, resident dispatch, and test modules).
 
 ---
 
@@ -1025,9 +1027,9 @@ cargo doc -p trustformers-core --all-features --no-deps
 
 ---
 
-**Last Updated:** 2026-07-06 - v0.2.0 Development
-**Version:** 0.2.0
+**Last Updated:** 2026-07-09 - v0.2.1 Development
+**Version:** 0.2.1
 **Status:** Stable — production-ready core infrastructure
 **Test Coverage:** ~2,353 tests, 100% pass rate, 0 stubs
 **Public API:** ~4,533 items
-**SLoC:** 155,280
+**SLoC:** 153,689

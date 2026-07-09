@@ -1,10 +1,10 @@
 # trustformers-models TODO List
 
-**Version:** 0.1.4 (Alpha) | **Date:** 2026-07-02 | **Tests:** ~4,479 passing | **SLoC:** 151,766 | **Stubs:** 0 | **Public API items:** ~5,165
+**Version:** 0.2.1 (Alpha) | **Date:** 2026-07-09 | **Tests:** ~4,479 passing | **SLoC:** 151,766 | **Stubs:** 0 | **Public API items:** ~5,165
 
 ## Overview
 
-The `trustformers-models` crate provides implementations of **53 feature-gated transformer architectures**
+The `trustformers-models` crate provides implementations of **55 feature-gated transformer architectures**
 plus a handful of always-on bonus architectures (CogVLM, Command-R, Claude-inspired, Recursive Transformers,
 Hyena, RetNet, FNet, Performer), covering encoder-only, decoder-only, encoder-decoder, vision, speech,
 multimodal, and state-space models. It also ships a large surrounding toolkit — quantization, distillation,
@@ -26,21 +26,21 @@ and follow consistent patterns for configuration, weight loading, and forward pa
 
 ## Current Status
 
-### Implementation Status (reality-checked against source 2026-07-01)
-- ALPHA RELEASE — all 53 feature-gated architectures implemented, 0 genuine stubs (`todo!()`/`unimplemented!()`/`FIXME` scan returned only false positives in regex-pattern comments)
-- COMPREHENSIVE MODEL ZOO — 53 feature-gated architectures + 8 always-on bonus modules (cogvlm, recursive, command_r, claude, hyena, retnet, fnet, performer)
+### Implementation Status (reality-checked against source 2026-07-09)
+- ALPHA RELEASE — all 55 feature-gated architectures implemented, 0 genuine stubs (`todo!()`/`unimplemented!()`/`FIXME` scan returned only false positives in regex-pattern comments)
+- COMPREHENSIVE MODEL ZOO — 55 feature-gated architectures + 8 always-on bonus modules (cogvlm, recursive, command_r, claude, hyena, retnet, fnet, performer)
 - ZERO COMPILATION ERRORS, 0 clippy warnings, 0 rustdoc warnings — clean across the workspace as of today's full `cargo nextest run --workspace --all-features`
 - ~4,479 TESTS PASSING in this crate (0 failing); workspace-wide 18,102 passed / 0 failed / 119 skipped
 - NO FILE EXCEEDS 2,000 LINES — refactor policy satisfied crate-wide
-- WEIGHT LOADING: complete for 46 of 53 feature-gated architectures; 7 return a handled "not yet implemented" error instead of loading real checkpoints (see Weight Loading section below) — **this is a correction from the previous "Complete (27/27)" claim, which was accurate for the original 27 but did not account for architectures added since**
+- WEIGHT LOADING: complete for 46 of 55 feature-gated architectures; 7 return a handled "not yet implemented" error instead of loading real checkpoints, and 2 more (`swin`, `deit`) have no loading path at all yet (see Weight Loading section below)
 - **Correction**: removed a "BART" entry from this file — BART does not exist anywhere in this crate's source, Cargo.toml, or `lib.rs` (no `bart` feature, no `src/bart*`). It was documented here previously but was never actually implemented.
-- **New findings**: 2 fully-implemented-but-orphaned modules (`swin/`, `deit/` — neither reachable from the public API; a third, legacy `qwen2/`, was confirmed zero-referenced and has since been deleted), 6 vestigial Cargo feature flags that don't gate compilation, and an `all` meta-feature that omits `llama3_2`/`mistral_v3`. See [Known Limitations](#known-limitations).
+- **Resolved this release** (verified against source 2026-07-09): `swin`/`deit` are now wired into `lib.rs`/`Cargo.toml` behind their own Cargo features (previously fully-implemented-but-orphaned, unreachable from the public API); the legacy, zero-referenced `qwen2/` has been deleted; the 6 previously-vestigial Cargo feature flags (`mamba`, `rwkv`, `s4`, `stablelm`, `falcon`, `linformer`) now properly gate compilation; the `all` meta-feature now includes `llama3_2`/`mistral_v3`. Remaining gap: `swin`/`deit` still have no weight-loading path (see [Known Limitations](#known-limitations)).
 
 ### Model Categories (reality-checked counts)
 - **Encoder Models:** 6 (BERT, RoBERTa, ALBERT, DistilBERT, ELECTRA, DeBERTa)
 - **Decoder Models / Modern LLMs:** 33 feature flags across GPT-2/GPT-Neo/GPT-J/GPT-NeoX, LLaMA family (llama/llama2/llama3/llama3_2/codellama), Mistral family (mistral/mistral_v3/mixtral), Gemma family (gemma/gemma2), Qwen family (qwen/qwen2_5), Phi family (phi3/phi2/phi4), Falcon family (falcon/falcon2), StableLM, DeepSeek family (deepseek/deepseek_v2), InternLM2, OPT, Granite, Aya, Jamba family (jamba/jamba2), Nemotron, Yi, StarCoder2 — plus always-on Command-R and Claude-inspired
 - **Encoder-Decoder / Speech / Diffusion-adjacent:** T5, Whisper, SD3 (text-encoder pipeline only)
-- **Vision Models:** 2 shipped (ViT, CLIP) + 2 fully implemented but orphaned (Swin, DeiT — not wired into `lib.rs`)
+- **Vision Models:** 4 shipped (ViT, CLIP, Swin, DeiT — Swin/DeiT newly wired into `lib.rs` this release; neither has a weight-loading path yet)
 - **Multimodal Models:** 6 (BLIP-2, LLaVA, DALL-E, Flamingo, CogVLM, Llama-3.2)
 - **State-Space / Linear / Efficient-Attention:** 9 (Mamba, Mamba-2, RWKV, S4, RetNet, Hyena, FNet, Linformer, Performer) + xLSTM + Recursive Transformers
 - **Domain-Specialized wrappers:** 5 (scientific, legal & medical, creative writing, code, math)
@@ -189,10 +189,10 @@ and follow consistent patterns for configuration, weight loading, and forward pa
 #### Flamingo
 - Perceiver Resampler + gated cross-attention for few-shot, interleaved image-text inputs
 
-#### Swin Transformer and DeiT — implemented but not wired up
-- `src/swin/` (2,502 lines): `SwinConfig` (tiny/small/base/base-384 presets), `SwinModel`, `SwinForImageClassification`
-- `src/deit/` (1,692 lines): `DeiTConfig`, `DeiTModel`, `DeiTForImageClassification` (with distillation token)
-- Neither has a `pub mod` declaration in `lib.rs` nor a Cargo feature — currently unreachable dead code despite being fully written. See [Future Enhancements](#future-enhancements).
+#### Swin Transformer and DeiT — newly wired this release
+- `src/swin/` (2,502 lines, feature `swin`): `SwinConfig` (tiny/small/base/base-384 presets), `SwinModel`, `SwinForImageClassification`
+- `src/deit/` (1,692 lines, feature `deit`): `DeiTConfig`, `DeiTModel`, `DeiTForImageClassification` (with distillation token)
+- Both now have a `pub mod` declaration and a Cargo feature in `lib.rs`/`Cargo.toml` (previously unreachable dead code despite being fully written). Neither implements `trustformers_core::traits::Model` yet, so there's no `load_pretrained`/checkpoint-loading path — random-initialized construction and forward passes work normally. See [Weight Loading Infrastructure](#weight-loading-infrastructure).
 
 ---
 
@@ -247,9 +247,10 @@ Higher-level wrappers built on the architectures above:
 ### Weight Loading Modules (`src/weight_loading/`, 8 files, 3,932 lines total, largest file 981 lines)
 - `config.rs` (198), `utils.rs` (77), `memory_mapped.rs` (138, zero-copy), `streaming.rs` (366, chunk-based), `distributed.rs` (843, multi-node), `huggingface.rs` (948), `gguf.rs` (981), `tests.rs` (309)
 
-### Per-Model Weight Loading Status (reality-checked 2026-07-01)
-- **Complete (46/53 feature-gated architectures)**: BERT, RoBERTa, ALBERT, DeBERTa, DistilBERT, ELECTRA, GPT-2, GPT-Neo, GPT-J, GPT-NeoX, LLaMA, LLaMA-2, CodeLlama, Mistral, Mixtral, Gemma, Gemma-2, Qwen, Qwen2.5, Phi-3, Phi-4, Falcon, Falcon2, StableLM, DeepSeek-V2, InternLM2, T5, Whisper, SD3, ViT, CLIP, BLIP-2, LLaVA, DALL-E, Flamingo, Linformer, Mamba, Mamba-2, RWKV, S4, Opt, Granite, Aya, Jamba, Jamba2, Nemotron (all 46 have a real, working Cargo feature flag — note Linformer's flag is one of the vestigial ones, see below, but its weight loading itself is complete) — plus, separately, the 8 always-on bonus architectures that have no Cargo feature at all (CogVLM, Command-R, Claude, Recursive Transformers, Hyena, RetNet, FNet, Performer) also load/construct correctly. (Note: Llama-3.2 is explicitly **not** in either list — see the gap entry directly below.)
-- **NOT yet implemented (7/53)** — verified via source scan for `"not yet implemented"` error strings, one file each: `llama3` (LLaMA-3), `llama3_2` (Llama-3.2), `mistral_v3` (Mistral v0.3), `phi2` (Phi-2), `deepseek` (DeepSeek v1), `yi` (Yi), `starcoder2` (StarCoder2)
+### Per-Model Weight Loading Status (reality-checked 2026-07-09)
+- **Complete (46/55 feature-gated architectures)**: BERT, RoBERTa, ALBERT, DeBERTa, DistilBERT, ELECTRA, GPT-2, GPT-Neo, GPT-J, GPT-NeoX, LLaMA, LLaMA-2, CodeLlama, Mistral, Mixtral, Gemma, Gemma-2, Qwen, Qwen2.5, Phi-3, Phi-4, Falcon, Falcon2, StableLM, DeepSeek-V2, InternLM2, T5, Whisper, SD3, ViT, CLIP, BLIP-2, LLaVA, DALL-E, Flamingo, Linformer, Mamba, Mamba-2, RWKV, S4, Opt, Granite, Aya, Jamba, Jamba2, Nemotron (all 46 have a real, working Cargo feature flag — note Linformer's flag was one of the previously-vestigial ones, now fixed, and its weight loading itself is complete) — plus, separately, the 8 always-on bonus architectures that have no Cargo feature at all (CogVLM, Command-R, Claude, Recursive Transformers, Hyena, RetNet, FNet, Performer) also load/construct correctly. (Note: Llama-3.2, Swin, and DeiT are explicitly **not** in either list below — see the gap entries directly below.)
+- **NOT yet implemented (7/55)** — verified via source scan for `"not yet implemented"` error strings, one file each: `llama3` (LLaMA-3), `llama3_2` (Llama-3.2), `mistral_v3` (Mistral v0.3), `phi2` (Phi-2), `deepseek` (DeepSeek v1), `yi` (Yi), `starcoder2` (StarCoder2)
+- **No weight-loading path at all (2/55)**: `swin`, `deit` — newly wired into `lib.rs` this release. Unlike the 7 above, neither implements `trustformers_core::traits::Model`/`load_pretrained` at all, so there isn't even a handled-error stub — only random-initialized construction and forward passes are available.
 
 ---
 
@@ -317,15 +318,14 @@ trustformers-models/src/
 
 ## Known Limitations
 
-- **6 vestigial Cargo feature flags** (`mamba`, `rwkv`, `s4`, `stablelm`, `falcon`, `linformer`): declared in `Cargo.toml` but their `pub mod` in `lib.rs` has no matching `#[cfg(feature = ...)]` — these always compile in regardless of flag state. Either add the missing `#[cfg(...)]` guards or remove the now-decorative Cargo.toml entries.
-- **2 orphaned, fully-written modules**: `src/swin/` (2,502 lines), `src/deit/` (1,692 lines) have no `pub mod` anywhere in `lib.rs` — unreachable from the public API today. (A third, legacy `src/qwen2/`, had the same problem and has been deleted — see [Future Enhancements](#future-enhancements).)
-- **`all` meta-feature gap**: does not include `llama3_2` or `mistral_v3` (in addition to the intentional `cuda`/`metal` exclusion).
-- **Weight-loading gaps**: 7 of 53 feature-gated architectures return a handled error instead of loading real checkpoints (`llama3`, `llama3_2`, `mistral_v3`, `phi2`, `deepseek`, `yi`, `starcoder2`).
+- **Weight-loading gaps**: 7 of 55 feature-gated architectures return a handled error instead of loading real checkpoints (`llama3`, `llama3_2`, `mistral_v3`, `phi2`, `deepseek`, `yi`, `starcoder2`); 2 more (`swin`, `deit`, newly wired this release) have no loading path at all — not even a handled-error stub.
 - **GPT-2 generation gap**: contrastive search not yet implemented.
 - **GPU coverage within this crate**: real `#[cfg(feature = "cuda"/"metal")]` code paths verified only in `gpt2` and `gpt_neox`; all other architectures run CPU/`f32` regardless of GPU features, matching the workspace-wide GPU maturity notes. (Closing this gap is now tracked under [0.2.0 Release Scope](#020-release-scope-oxicuda-gpu-migration--tch-removal).)
 - **No `AutoModel`/`from_pretrained` dispatcher** — callers construct concrete model types directly.
 - Some multimodal models (Flamingo, CogVLM) have complex architectures; weight mapping covers all documented components, but coverage of undocumented/edge-case checkpoint layouts is unverified.
 - Alpha status: API surface may still evolve before a Stable designation.
+
+Resolved this release (previously listed here, verified against source 2026-07-09): the 6 previously-vestigial Cargo feature flags (`mamba`, `rwkv`, `s4`, `stablelm`, `falcon`, `linformer`) now properly gate their modules; `src/swin/` and `src/deit/` are wired into `lib.rs`/`Cargo.toml` behind their own features (no longer orphaned — though see the weight-loading gap above); the legacy, zero-referenced `src/qwen2/` has been deleted; the `all` meta-feature now includes `llama3_2` and `mistral_v3`.
 
 ---
 
@@ -386,6 +386,7 @@ No tasks in this crate — the `torch` feature never reached trustformers-models
   - Tests: cargo build --features all + cargo nextest run --features all.
   - Risk: none.
 - [ ] Complete weight loading for the 7 architectures listed under [Known Limitations](#known-limitations): `llama3`, `llama3_2`, `mistral_v3`, `phi2`, `deepseek`, `yi`, `starcoder2`
+- [ ] Add weight loading for `swin`/`deit` (newly wired this release): currently neither implements `trustformers_core::traits::Model`, so there's no `load_pretrained` path at all yet — not even a handled-error stub like the 7 above. Needs a `Model` impl plus real HuggingFace checkpoint mapping (or, at minimum, the same handled-error stub pattern as a first step).
 - [~] Implement contrastive search generation for GPT-2 (planned 2026-07-05)
   - Goal: GenerationMode::ContrastiveSearch produces real SimCTG-style output (Su & Collier 2022) instead of an "not yet implemented" error. Config/validation plumbing already exists — only the generation body is missing.
   - Prerequisites: hidden-state access does not currently exist at the point generation strategies run — Gpt2LMOutput only carries logits/past_key_values. Must add a hidden_states: Tensor field and update both construction sites (Model::forward and forward_with_cache in model_core.rs) to clone-before-consume.
@@ -503,6 +504,6 @@ cargo check -p trustformers-models --all-features
 
 ---
 
-**Last Updated:** 2026-07-06 — 0.2.0 OxiCUDA GPU migration task (GPT-2/GPT-NeoX CUDA-resident attention) completed and verified; tch/torch removal decision recorded previously; previous baseline: 0.1.4 Alpha Release (53 feature-gated architectures + 8 always-on bonus architectures, ~4,479 tests passing, 0 stubs, ~5,165 public API items)
+**Last Updated:** 2026-07-09 — version bumped to 0.2.1; documentation corrected for internal consistency (Swin/DeiT wiring, the 6-feature vestigial-flag fix, legacy-qwen2 deletion, and the `all`-meta-feature fix were already implemented in source but several sections here still described them as open issues — now corrected against source). Previous: 2026-07-06 0.2.0 OxiCUDA GPU migration task (GPT-2/GPT-NeoX CUDA-resident attention) completed and verified; tch/torch removal decision recorded previously; previous baseline: 0.1.4 Alpha Release (53 feature-gated architectures + 8 always-on bonus architectures, ~4,479 tests passing, 0 stubs, ~5,165 public API items)
 **Status:** Alpha
-**Model Count:** 53 feature-gated architectures + 8 always-on architectures, 46/53 with complete weight loading (7 pending), 3 additional architectures implemented but not yet wired into the public API (Swin, DeiT, legacy Qwen2)
+**Model Count:** 55 feature-gated architectures + 8 always-on architectures, 46/55 with complete weight loading (7 return a handled error, 2 — Swin/DeiT — have no loading path at all); legacy Qwen2 deleted

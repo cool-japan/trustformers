@@ -2,11 +2,11 @@
 
 Comprehensive transformer model implementations for NLP, vision, speech, and multimodal tasks — plus a large surrounding toolkit (quantization, distillation, NAS, continual/meta learning, serving, dev tools).
 
-**Version:** 0.2.0 (Alpha) | **Date:** 2026-07-02 | **Tests:** ~4,479 passing | **SLoC:** 151,766 | **Public API items:** ~5,165
+**Version:** 0.2.1 (Alpha) | **Date:** 2026-07-09 | **Tests:** ~4,479 passing | **SLoC:** 151,766 | **Public API items:** ~5,165
 
 ## Current State
 
-This is the **largest model-coverage crate in the TrustformeRS workspace**: 53 architecture-specific Cargo feature flags plus a handful of always-on bonus architectures, all built on `trustformers-core` abstractions. There are **0 genuine stub/placeholder implementations** (verified by source scan — no `todo!()`/`unimplemented!()`/`FIXME` in production code paths) and no file exceeds the workspace's 2,000-line refactor threshold.
+This is the **largest model-coverage crate in the TrustformeRS workspace**: 55 architecture-specific Cargo feature flags plus a handful of always-on bonus architectures, all built on `trustformers-core` abstractions. There are **0 genuine stub/placeholder implementations** (verified by source scan — no `todo!()`/`unimplemented!()`/`FIXME` in production code paths) and no file exceeds the workspace's 2,000-line refactor threshold.
 
 The crate is comprehensive but not yet 100% uniform in maturity: weight loading from real HuggingFace checkpoints is complete for the large majority of architectures, but 7 of the newer ones currently return a clean "not yet implemented" error instead of loading real weights (see [Weight Loading](#weight-loading) and [Known Limitations](#known-limitations) below). Default feature is just `bert`, which is fully complete (config, model, all four task heads, weight loading, doctested examples).
 
@@ -42,7 +42,7 @@ The crate is comprehensive but not yet 100% uniform in maturity: weight loading 
 
 ### Vision Models
 - **ViT** (`vit`), **CLIP** (`clip`, with a `CLIPEncoderConfig` trait)
-- **Swin Transformer** and **DeiT** are fully implemented in source (`src/swin/`, `src/deit/` — config + model + classification head, distillation token for DeiT) but are **not yet wired into `lib.rs`/`Cargo.toml`** — see [Known Limitations](#known-limitations)
+- **Swin Transformer** (`swin`) and **DeiT** (`deit`) — hierarchical shifted-window attention and data-efficient distillation-token training respectively (`src/swin/`, `src/deit/` — config + model + classification head, distillation token for DeiT). Newly wired into `lib.rs`/`Cargo.toml` this release (previously present in source but unreachable). Random-initialized construction and forward passes work; neither has a HuggingFace checkpoint-loading path yet — see [Weight Loading](#weight-loading)
 
 ### Multimodal Models
 - **BLIP-2** (Q-Former), **LLaVA** (CLIP ViT + LLM), **DALL-E** (VQ-VAE + autoregressive image tokens), **Flamingo** (Perceiver Resampler + gated cross-attention), **CogVLM** (visual expert + CogVideo variant, always-on), **Llama-3.2** (`llama3_2`, vision-language)
@@ -59,14 +59,14 @@ The crate is comprehensive but not yet 100% uniform in maturity: weight loading 
 - **xLSTM** — extended LSTM with matrix memory
 - **Recursive Transformers** — hierarchical/recursive processing for long sequences
 
-All of the above in this section ship unconditionally (no Cargo feature required) except `mamba`, `rwkv`, `s4`, and `linformer`, which have Cargo feature flags declared in `Cargo.toml` but — see the note in [Feature Flags](#feature-flags) — those flags currently don't gate compilation either, so the practical effect is the same: always compiled in. (`mamba2` is the one exception in this section that *is* properly feature-gated — it requires the `mamba2` feature.)
+`mamba`, `mamba2`, `rwkv`, `s4`, and `linformer` each require their matching Cargo feature to compile (fixed this release — previously declared in `Cargo.toml` but not actually gating anything, see [Feature Flags](#feature-flags)); `retnet`, `hyena`, `fnet`, and `performer` ship unconditionally (no Cargo feature required).
 
 ### Domain-Specialized Model Families
 Built on top of the above as higher-level, prompt/generation-oriented wrappers: **scientific** (`scientific_specialized`), **legal & medical** (`legal_medical_specialized`), **creative writing** (`creative_writing_specialized`), **code** and **math** (`code_specialized`, `math_specialized`, both gated behind `llama`).
 
 ## Beyond the Model Zoo: Supporting Toolkit
 
-Roughly half of this crate's ~5,165 public API items are not model architectures at all — they're a substantial always-on toolkit that explains why the API surface is so much larger than "53 models" would suggest:
+Roughly half of this crate's ~5,165 public API items are not model architectures at all — they're a substantial always-on toolkit that explains why the API surface is so much larger than "55 models" would suggest:
 
 - **Quantization**: `advanced_quantization` (NF4/FP4, block-wise, outlier handling), `mixed_bit_quantization`
 - **Compression & distillation**: `model_compression`, `knowledge_distillation`, `dynamic_pruning`
@@ -78,18 +78,18 @@ Roughly half of this crate's ~5,165 public API items are not model architectures
 
 ## Feature Flags
 
-Default feature is `bert`. 53 architecture-specific flags plus `all`, `metal`, `cuda`:
+Default feature is `bert`. 55 architecture-specific flags plus `all`, `metal`, `cuda`:
 
 ```toml
 [dependencies]
-trustformers-models = { version = "0.2.0", features = ["bert", "llama", "mistral", "clip"] }
+trustformers-models = { version = "0.2.1", features = ["bert", "llama", "mistral", "clip"] }
 ```
 
-`bert`, `roberta`, `distilbert`, `gpt2`, `gpt_neo`, `gpt_j`, `t5`, `albert`, `electra`, `deberta`, `vit`, `llama`, `llama2`, `llama3`, `codellama`, `deepseek`, `gpt_neox`, `mistral`, `clip`, `gemma`, `qwen`, `phi3`, `gemma2`, `mamba`, `rwkv`, `s4`, `stablelm`, `falcon`, `blip2`, `llava`, `dalle`, `flamingo`, `linformer`, `internlm2`, `falcon2`, `deepseek_v2`, `qwen2_5`, `opt`, `granite`, `aya`, `jamba`, `jamba2`, `sd3`, `llama3_2`, `mistral_v3`, `mixtral`, `phi2`, `mamba2`, `phi4`, `nemotron`, `whisper`, `yi`, `starcoder2`
+`bert`, `roberta`, `distilbert`, `gpt2`, `gpt_neo`, `gpt_j`, `t5`, `albert`, `electra`, `deberta`, `vit`, `swin`, `deit`, `llama`, `llama2`, `llama3`, `codellama`, `deepseek`, `gpt_neox`, `mistral`, `clip`, `gemma`, `qwen`, `phi3`, `gemma2`, `mamba`, `rwkv`, `s4`, `stablelm`, `falcon`, `blip2`, `llava`, `dalle`, `flamingo`, `linformer`, `internlm2`, `falcon2`, `deepseek_v2`, `qwen2_5`, `opt`, `granite`, `aya`, `jamba`, `jamba2`, `sd3`, `llama3_2`, `mistral_v3`, `mixtral`, `phi2`, `mamba2`, `phi4`, `nemotron`, `whisper`, `yi`, `starcoder2`
 
-Plus `metal` / `cuda` (forward to `trustformers-core`'s GPU backends) and `all` (enables every architecture flag **except** `cuda`, `metal`, `llama3_2`, and `mistral_v3` — the last two are a currently-unintentional-looking gap in `Cargo.toml`, not a documented design choice; enable them explicitly if you need them alongside `all`).
+Plus `metal` / `cuda` (forward to `trustformers-core`'s GPU backends) and `all` (enables every one of the 55 architecture flags above, including `swin`/`deit`/`llama3_2`/`mistral_v3` — the `llama3_2`/`mistral_v3` gap is fixed this release; `all` still intentionally excludes only `cuda`/`metal`).
 
-**Feature-gating note (verified against `src/lib.rs`)**: `mamba`, `rwkv`, `s4`, `stablelm`, `falcon`, and `linformer` are declared as Cargo features, but their `pub mod` declarations in `lib.rs` have no matching `#[cfg(feature = ...)]` guard — these five architectures compile unconditionally regardless of which features you enable. Toggling those specific flags currently has no effect on the build. Everything else in the flag list above is a real, working `#[cfg(feature = "...")]` gate.
+**Feature-gating note (verified against `src/lib.rs`)**: every flag in the list above is a real, working `#[cfg(feature = "...")]` gate on both its `pub mod` declaration and its `pub use` re-export. `mamba`, `rwkv`, `s4`, `stablelm`, `falcon`, and `linformer` are fixed this release — previously declared as Cargo features but with no matching `#[cfg(feature = ...)]` guard, so they compiled unconditionally regardless of which features were enabled.
 
 ## Quick Start
 
@@ -118,7 +118,7 @@ This mirrors the crate's own doctested example (`src/bert/mod.rs`). Task heads f
 
 HuggingFace-format loading (SafeTensors, PyTorch, JSON configs) plus GGUF, memory-mapped, streaming, and distributed loaders live in `weight_loading/` (8 focused modules, largest 981 lines, well under the 2,000-line policy limit).
 
-**Status**: complete for the large majority of the 53 feature-gated architectures. Verified exceptions that currently return a descriptive `Err(...)` ("weight loading not yet implemented for ...") instead of loading real weights:
+**Status**: complete for the large majority of the 55 feature-gated architectures. Verified exceptions that currently return a descriptive `Err(...)` ("weight loading not yet implemented for ...") instead of loading real weights:
 
 - `llama3` (LLaMA-3)
 - `llama3_2` (Llama-3.2)
@@ -129,6 +129,8 @@ HuggingFace-format loading (SafeTensors, PyTorch, JSON configs) plus GGUF, memor
 - `starcoder2` (StarCoder2)
 
 These are handled errors, not panics or `todo!()`/`unimplemented!()` — hence they don't count against the "0 stubs" figure — but functionally, pretrained-checkpoint loading isn't yet available for these seven. Random-initialization / from-scratch construction and forward passes work normally for all of them.
+
+`swin` and `deit` (newly wired this release) go a step further: neither implements `trustformers_core::traits::Model`, so there is no `load_pretrained` method at all yet — not even a handled-error stub. Only random-initialized construction (`SwinModel::new`/`DeiTModel::new`) and forward passes are available today.
 
 GPT-2 has one narrower, unrelated gap: contrastive-search generation returns "not yet implemented" (greedy, sampling, top-k/top-p, and beam search all work).
 
@@ -146,7 +148,7 @@ trustformers-models/
 │   ├── internlm2/, opt/, granite/, aya/, jamba/, jamba2/           # Modern LLMs (cont.)
 │   ├── nemotron/, yi/, starcoder2/, command_r/, claude/            # Modern LLMs (cont.)
 │   ├── t5/, whisper/, sd3/                                         # Encoder-decoder / speech
-│   ├── vit/, clip/, swin/, deit/                                   # Vision (swin/deit orphaned, see Known Limitations)
+│   ├── vit/, clip/, swin/, deit/                                   # Vision (swin/deit each require their own Cargo feature)
 │   ├── blip2/, llava/, dalle/, flamingo/, cogvlm/                  # Multimodal
 │   ├── mamba/, mamba2/, rwkv/, s4/, retnet/, hyena/                # State-space / linear attention
 │   ├── fnet/, linformer/, performer/, xlstm/, recursive/           # Efficient attention
@@ -171,12 +173,11 @@ trustformers-models/
 
 ## Known Limitations
 
-- **Vestigial feature flags**: `mamba`, `rwkv`, `s4`, `stablelm`, `falcon`, `linformer` are declared in `Cargo.toml` but don't gate their module's compilation (see [Feature Flags](#feature-flags)).
-- **Orphaned implementations**: `src/swin/` (2,502 lines) and `src/deit/` (1,692 lines) exist with real, documented APIs but have no `pub mod` declaration anywhere in `lib.rs` — they're unreachable dead code today. Both look ready to wire up behind new feature flags. (A third, legacy `src/qwen2/`, had the same problem — superseded by `qwen2_5` — and has been deleted after confirming it had zero references anywhere in the workspace.)
-- **`all` meta-feature gap**: excludes `llama3_2` and `mistral_v3` in addition to the intentional `cuda`/`metal` exclusion.
-- **Weight-loading gaps**: 7 of 53 feature-gated architectures (see [Weight Loading](#weight-loading)).
+- **Weight-loading gaps**: 7 of 55 feature-gated architectures return a handled error instead of loading real checkpoints, and 2 more (`swin`, `deit`) have no loading path at all yet (see [Weight Loading](#weight-loading)).
 - **GPU coverage**: `cuda`/`metal` features exist and forward to `trustformers-core`, but within this crate real GPU-resident `#[cfg(feature = "cuda"/"metal")]` code paths currently exist only for `gpt2` and `gpt_neox`; the rest run on CPU (`f32`) regardless of GPU features being enabled, consistent with the workspace-wide GPU maturity notes in the top-level README.
 - **No `AutoModel`/`from_pretrained` dispatcher** in this crate (see [Quick Start](#quick-start)).
+
+Resolved this release (previously listed here): `swin`/`deit` are now wired into `lib.rs`/`Cargo.toml` behind their own Cargo features (previously orphaned dead code); the legacy, unreferenced `src/qwen2/` has been deleted (`qwen2_5` is the supported successor); `mamba`, `rwkv`, `s4`, `stablelm`, `falcon`, and `linformer` now properly gate their module's compilation (previously declared in `Cargo.toml` but vestigial); the `all` meta-feature now includes `llama3_2` and `mistral_v3`.
 
 ## License
 

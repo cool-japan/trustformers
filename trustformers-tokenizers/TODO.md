@@ -21,7 +21,7 @@ Python bindings.
 
 ## Current Status
 
-**Version:** 0.1.4 | **Date:** 2026-07-02 | **Status:** Stable
+**Version:** 0.2.1 | **Date:** 2026-07-09 | **Status:** Stable
 
 ### Implementation Status
 ✅ **STABLE** — 24 tokenizer types implemented and tested, 0 genuine stub/placeholder implementations
@@ -39,7 +39,7 @@ Python bindings.
 ### Test Metrics
 - **Test Count:** ~500 tests in this crate (workspace-wide: 18,102 passed / 0 failed / 119 skipped — verified 2026-07-01)
 - **Pass Rate:** 100%
-- **Public API Surface:** ~1,339 `pub fn`/`struct`/`enum`/`trait` items
+- **Public API Surface:** ~1,341 `pub fn`/`struct`/`enum`/`trait` items (+2 for `NFKCNormalizer`/`NFKDNormalizer`, added 2026-07-09)
 - **SLoC:** 51,372 (`tokei src/`, 68 files, 2026-07-01)
 - **Coverage:** Encoding/decoding, special tokens, edge cases, language-specific, domain-specific
 
@@ -139,7 +139,7 @@ let encoding = tokenizer.encode_pair("First sentence.", "Second sentence.")?;
 
 - ✅ Unigram language-model segmentation via Viterbi decoding
 - ✅ `from_model_file(path)` loads a real SentencePiece `.model` file
-- ⚠️ `from_pretrained(model_name_or_path)` **ignores its argument** and always builds a simplified built-in vocabulary — it does not fetch or parse the named model. Use `from_model_file` for real usage.
+- ✅ `from_pretrained(model_name_or_path)` probes `{path}/spiece.model`, `{path}.model`, and the bare path for a real model file and loads it via `from_model_file` on a hit; only falls back to a simplified built-in vocabulary when none of those candidates resolve
 
 **Example:**
 ```rust
@@ -373,11 +373,10 @@ Reference docs live under `docs/migration/`:
 ## Known Limitations
 
 - `TokenizerImpl::from_pretrained` and `WordPieceTokenizer::from_pretrained` only resolve local cache paths / a small built-in vocabulary set — neither downloads from the Hugging Face Hub
-- `SentencePieceTokenizer::from_pretrained` ignores its argument and always returns a simplified built-in vocabulary — use `from_model_file` for real `.model` files
+- `SentencePieceTokenizer::from_pretrained` probes `{path}/spiece.model`, `{path}.model`, and the bare path for a real model file before falling back to a simplified built-in vocabulary — see the SentencePiece section above
 - TikToken ships only `cl100k_base`/`r50k_base` as named presets; other encodings need `from_tiktoken_file`
 - SIMD acceleration is AVX2/x86_64-only (no ARM/NEON path)
 - `gpu`, `jax`, `tensorflow`, `pytorch`, `onnx` features are pure-Rust detection/data-structure/metadata layers — not real CUDA/ROCm/OpenCL/JAX/TensorFlow/PyTorch/ONNX-Runtime execution (each adds zero extra crate dependencies)
-- NFKC/NFKD normalizers are not yet exposed as dedicated `Normalizer` types (only NFC/NFD, plus whitespace/accent/punctuation/digit/case normalizers)
 - The `hangul = "0.1.3"` dependency has no references in `src/`; Korean Hangul decomposition uses inline Unicode arithmetic instead
 - `AutoTokenizer` is Python-only; Rust callers use `TokenizerWrapper` (enum dispatch) or a concrete tokenizer type directly
 - This crate's `pyproject.toml` still targets a `maturin` extension-module build, but `Cargo.toml` no longer declares a `cdylib` target (moved to `trustformers-py`) — `maturin build` here will not currently produce a working native module
@@ -400,7 +399,7 @@ Reference docs live under `docs/migration/`:
   - Files: trustformers/src/automodel.rs (NOT a file in this crate).
   - Tests: cache-hit test asserting no network call when file already exists; existing offline tests must keep passing.
   - Risk: none new — copying an already-proven 130-line-away pattern in the same file.
-- [~] Fix SentencePieceTokenizer::from_pretrained ignoring its argument (planned 2026-07-05)
+- [x] Fix SentencePieceTokenizer::from_pretrained ignoring its argument (planned 2026-07-05) — **DONE (2026-07-09):** `from_pretrained` now probes `{path}/spiece.model`, `{path}.model`, and the bare path (delegating to `from_model_file` on a hit) before falling back to the fabricated built-in vocabulary; verified via `test_from_pretrained_loads_real_fixture_not_hardcoded_fallback`, which writes a real fixture `.model` file under `std::env::temp_dir()` and asserts the fixture's tokens load correctly while the fallback's T5 sentinel tokens do not appear.
   - Goal: the argument is no longer ignored (currently always returns the same hardcoded fake T5 vocab regardless of input).
   - Design: probe candidate paths built from the argument, delegate to the existing, already-correct from_model_file() on a hit; keep today's fabricated-vocab body only as the final fallback arm, now actually gated on the argument.
   - Files: trustformers-tokenizers/src/sentencepiece.rs only.
@@ -429,7 +428,7 @@ Reference docs live under `docs/migration/`:
 
 ### Features
 - [ ] Custom normalizers / pre-tokenizers plugin API for user-supplied normalizers
-- [~] Add NFKC/NFKD normalizers (planned 2026-07-05)
+- [x] Add NFKC/NFKD normalizers (planned 2026-07-05) — **DONE (2026-07-09):** `NFKCNormalizer`/`NFKDNormalizer` added to `src/normalizer.rs` via `.nfkc()`/`.nfkd()` on the already-imported `unicode_normalization::UnicodeNormalization` trait; tests cover U+00B2 (SUPERSCRIPT TWO) and U+FB01 (LATIN SMALL LIGATURE FI), both of which fold under NFKC/NFKD but are left untouched by NFC/NFD, proving the K-variants do genuinely different work rather than aliasing the plain variants.
   - Goal/Design: add NFKCNormalizer/NFKDNormalizer via .nfkc()/.nfkd() — sibling methods on the exact trait already imported for NFC/NFD. Zero new dependency; sentencepiece.rs already calls .nfkc() internally, proving it works here.
   - Files: trustformers-tokenizers/src/normalizer.rs only.
   - Tests: assert on a real compatibility-decomposition case that changes under NFKC/NFKD but is a no-op under plain NFC/NFD.
@@ -481,9 +480,9 @@ cargo clippy -p trustformers-tokenizers --all-features -- -D warnings
 
 ---
 
-**Last Updated:** 2026-07-02
-**Version:** 0.1.4
+**Last Updated:** 2026-07-09
+**Version:** 0.2.1
 **Status:** Stable
 **Test Coverage:** ~500 tests in this crate, 100% pass rate (workspace: 18,102 passed / 0 failed / 119 skipped)
-**Public API:** ~1,339 items
+**Public API:** ~1,341 items
 **SLoC:** 51,372

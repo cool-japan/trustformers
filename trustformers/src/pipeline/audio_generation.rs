@@ -329,7 +329,7 @@ impl AudioGenerationPipeline {
 
     /// Generate one or more waveforms from the given text prompt.
     ///
-    /// Returns [`config.num_waveforms_per_prompt`] waveforms as a `Vec`.
+    /// Returns [`AudioGenerationConfig::num_waveforms_per_prompt`] waveforms as a `Vec`.
     ///
     /// # Errors
     ///

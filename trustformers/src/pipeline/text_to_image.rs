@@ -324,7 +324,7 @@ impl TextToImagePipeline {
     /// Generate images conditioned on both `prompt` and `negative_prompt`.
     ///
     /// The negative prompt modifies the hash so that different images are
-    /// produced compared to calling [`generate`] without a negative prompt.
+    /// produced compared to calling [`Self::generate`] without a negative prompt.
     pub fn generate_with_negative(
         &self,
         prompt: &str,

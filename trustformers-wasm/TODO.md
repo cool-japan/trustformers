@@ -18,7 +18,7 @@ The `trustformers-wasm` crate enables browser and edge deployment of transformer
 
 ## Current Status
 
-**Version:** 0.1.4 | **Date:** 2026-07-02 | **Status:** Stable
+**Version:** 0.2.1 | **Date:** 2026-07-09 | **Status:** Stable
 
 ### Implementation Status
 ✅ **STABLE** - Complete WASM infrastructure
@@ -546,7 +546,7 @@ This crate has **no dependency on the native `wgpu` crate**. WebGPU support is i
 - Some WebGPU features limited by web-sys 0.3.95 API availability
 - Large models may require quantization for browser deployment
 - `WebGPUBackend`/`SimpleGpuOps` (the dispatch path behind `GpuTensor`) currently execute the CPU fallback for matmul/add/relu/softmax/layer_norm/attention by documented design — use `WebGPUOps` directly for guaranteed end-to-end GPU dispatch today (see "WebGPU Notes")
-- 0 `todo!()`/`unimplemented!()` macros in source, but several documented simplifications remain (none block compilation or panic): a no-op cache-clear recovery action (`src/error.rs`), fixed-bytes-per-element quantization stats (`src/optimization/quantization/quantizer.rs`), hardcoded device-capability probes (`src/device_capability/detector.rs`), fixed-constant (non-bit-width-aware) basic quantization math (`src/optimization/quantization/algorithms/basic.rs`), synthesized `blob:`/`data:` URLs in place of `URL.createObjectURL()` (`src/storage/model_splitting.rs`, `src/compute/threads.rs`), and default (non-queried) device capabilities (`src/compute/webgpu/mod.rs`)
+- 0 `todo!()`/`unimplemented!()` macros in source. Several previously-documented simplifications were fixed this release: `RecoveryAction::ClearCache` now really clears the browser's Cache Storage instead of being a no-op (`src/error.rs`); quantization stats and the `apply_dynamic/static/post_training_quantization` math are now real, bit-width-aware affine quantize/dequantize instead of a fixed-constant multiplier (`src/optimization/quantization/quantizer.rs`, `algorithms/basic.rs`); and device-capability probes now query the real browser APIs instead of returning hardcoded/default values (`detect_webgl_support`/`get_screen_orientation` in `src/device_capability/detector.rs`, `compute::webgpu::get_device_capabilities()` in `src/compute/webgpu/mod.rs`). One simplification remains: synthesized `blob:`/`data:` URLs in place of `URL.createObjectURL()` (`src/storage/model_splitting.rs`, `src/compute/threads.rs`)
 
 ---
 
@@ -735,8 +735,8 @@ full = ["web-workers", "shared-memory", "kernel-fusion", "async-executor", "inde
 
 ---
 
-**Last Updated:** 2026-07-06
-**Version:** 0.1.4
+**Last Updated:** 2026-07-09
+**Version:** 0.2.1
 **Status:** Stable
 **Test Suite:** ~130 tests, 100% pass rate (workspace-wide `cargo nextest run --workspace --all-features` on 2026-07-01: 18,102 passed / 0 failed / 119 skipped; 0 clippy warnings; 0 rustdoc warnings)
 **SLoC:** 55,721

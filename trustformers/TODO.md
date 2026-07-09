@@ -1,6 +1,6 @@
 # trustformers TODO List
 
-**Version:** 0.2.0 | **Status:** Alpha | **Updated:** 2026-07-06
+**Version:** 0.2.1 | **Status:** Alpha | **Updated:** 2026-07-09
 
 ## Overview
 
@@ -22,7 +22,7 @@ The `trustformers` crate is the main integration crate providing high-level APIs
 
 - [x] **HIGH-LEVEL API** - Complete (AutoModel, AutoTokenizer, AutoConfig, AutoModelFor*)
 - [x] **HUB INTEGRATED** - Hub utilities (offline packs, model cards, differential updates, P2P) compile unconditionally; actual remote *downloads* require the optional `hub` feature (not a default feature)
-- [x] **PIPELINE COMPLETE** - 28 task-specific pipeline modules implemented (incl. RAG + Advanced RAG + Enhanced Translation), plus 6 execution-backend integrations and 10 composition/execution-optimization modules — see `src/pipeline/mod.rs`
+- [x] **PIPELINE COMPLETE** - 38 task-specific pipeline modules implemented (incl. RAG + Advanced RAG + Enhanced Translation), plus 6 execution-backend integrations and 10 composition/execution-optimization modules — see `src/pipeline/mod.rs`. 10 of the 38 (`audio_generation`, `document_classification`, `feature_extraction`, `image_segmentation`, `speech_recognition`, `table_question_answering`, `text_to_image`, `video_classification`, `visual_grounding`, `zero_shot_audio_classification`) were mounted in 0.2.0 and are mock pipelines pending real model backends — see "Mock Pipelines" note under Known Limitations
 - [x] **AUTO CLASSES** - Auto* classes for model/tokenizer/config loading, plus `AutoProcessor`, `AutoFeatureExtractor`, `AutoDataCollator`, `AutoMetric`, `AutoOptimizer`
 - [x] **PIPELINE COMPOSITION** - ComposedPipeline, EnsemblePipeline, PipelineChain, PipelineComposer
 - [x] **SAFETY FILTERING** - SafetyFilter, ExtendedSafetyConfig, EnhancedSafetyFilter (multi-risk)
@@ -39,6 +39,7 @@ The `trustformers` crate is the main integration crate providing high-level APIs
   - Files: trustformers/src/lib.rs only.
   - Tests: cargo build --all-features; the pre-written #[cfg(test)] modules in versioned_cache.rs/parallel_loader.rs/adapter.rs/lora.rs run for the first time.
   - Risk: low — crate already blankets #![allow(dead_code, unused_variables, unused_imports, unused_assignments)].
+  - **Result (re-verified 2026-07-09):** `pub mod cache;`, `pub mod finetuning;`, `pub mod loading;` all present in `trustformers/src/lib.rs`; `cargo check -p trustformers --all-features` compiles clean (0 warnings). 61 embedded `#[test]` functions across the 4 source files (versioned_cache.rs, adapter.rs, lora.rs, parallel_loader.rs) now compile and run.
 - [ ] **MODEL SEARCH** - No `search_models`/Hub-search implementation exists anywhere in `src/`. A prior version of this document listed Hub model search as complete; that was incorrect and has been corrected here.
 
 ### Metrics (re-verified 2026-07-01)
@@ -46,7 +47,7 @@ The `trustformers` crate is the main integration crate providing high-level APIs
 - **SLoC:** ~109,369 (Rust code lines, via `tokei`; up from the previously recorded ~62,500 — reflects substantial growth in `src/pipeline/` and `src/auto/`)
 - **Tests:** ~2,261 (part of a workspace-wide 18,102 passed / 0 failed / 119 skipped run; 0 clippy warnings, 0 rustdoc warnings)
 - **Doctests:** 5 passed, 164 ignored (intentionally `rust,ignore` — see README.md Testing section)
-- **Pipeline modules:** 44 `pub mod` declarations under `src/pipeline/` (28 task pipelines, 6 backends, 10 composition/optimization modules)
+- **Pipeline modules:** 54 `pub mod` declarations under `src/pipeline/` (38 task pipelines, 6 backends, 10 composition/optimization modules) — re-verified 2026-07-09 against `grep -c "^pub mod " src/pipeline/mod.rs`
 - **Public API exports (prelude):** 76 under default features (`bert` + `async`); 83 with `hub` also enabled
 - **Total public API surface:** ~3,177 `pub` fn/struct/enum/trait items across `src/` (including impl-block methods; a narrower module-level-only count is 1,317)
 - **Stubs remaining:** 0 reachable in production code. Static grep for `todo!()`/`unimplemented!()` finds exactly 12 hits in `src/`, all confirmed benign:
@@ -57,13 +58,15 @@ The `trustformers` crate is the main integration crate providing high-level APIs
 ### Feature Coverage
 
 - **API:** AutoModel, AutoTokenizer, AutoConfig, AutoModelForCausalLM, AutoModelForMaskedLM, AutoModelForSequenceClassification, AutoModelForTokenClassification, AutoModelForQuestionAnswering, AutoModelForSeq2SeqLM, AutoProcessor
-- **Pipelines:** TextGeneration, TextClassification, QuestionAnswering, TokenClassification, Summarization, MultiDocSummarization, Translation, EnhancedTranslation, FillMask, ConversationalPipeline (async), MultiModal, DocumentUnderstanding, RAG (TF-IDF + BM25), AdvancedRAG, CodeGeneration, Mamba2, MaskGeneration, OpticalFlow, PoseEstimation, AudioClassification, ImageClassification, ObjectDetection, DepthEstimation, ImageToText (vision), VisualQuestionAnswering (vision), SpeechToText (audio), TextToSpeech (audio) — 28 task pipelines total
+- **Pipelines:** TextGeneration, TextClassification, QuestionAnswering, TokenClassification, Summarization, MultiDocSummarization, Translation, EnhancedTranslation, FillMask, ConversationalPipeline (async), MultiModal, DocumentUnderstanding, RAG (TF-IDF + BM25), AdvancedRAG, CodeGeneration, Mamba2, MaskGeneration, OpticalFlow, PoseEstimation, AudioClassification, ImageClassification, ObjectDetection, DepthEstimation, ImageToText (vision), VisualQuestionAnswering (vision), SpeechToText (audio), TextToSpeech (audio), plus 10 pipelines mounted in 0.2.0 — AudioGeneration, DocumentClassification, FeatureExtraction, ImageSegmentation, SpeechRecognition, TableQuestionAnswering, TextToImage, VideoClassification, VisualGrounding, ZeroShotAudioClassification (**all 10 are mock**: deterministic hash/heuristic output pending real model backends, not gated behind `vision`/`audio`, not reachable via the `pipeline()` factory) — 38 task pipelines total
 - **Pipeline Composition:** ComposedPipeline, EnsemblePipeline, PipelineChain, PipelineComposer, AdaptiveInferenceEngine
 - **Execution backends:** ONNX Runtime, TensorRT, OpenVINO, CoreML, Metal, custom backend registry
 - **Execution optimization:** Adaptive/dynamic batching, JIT compilation, early-exit, mixture-of-depths, speculative decoding, streaming
 - **Safety:** SafetyFilter (ExtendedSafetyConfig), EnhancedSafetyFilter (toxicity, hate speech, personal info, violence, adult content, harassment, bias)
 - **Hub:** Model download/cache/auth (feature `hub`), mirror support (feature `hub`), Hub browser UI (feature `async`), model cards, offline packs, differential updates, P2P
-- **Infrastructure:** MemoryPool, ConfigurationManager, EnhancedProfiler, HubMirror, ValidationManager, BenchmarkSuite, ModelDiagnostics, evaluation bridge (BLEU/ROUGE/F1/perplexity)
+- **Infrastructure:** MemoryPool, ConfigurationManager, EnhancedProfiler, HubMirror, ValidationManager, BenchmarkSuite, ModelDiagnostics, evaluation bridge (BLEU/ROUGE/F1/perplexity), VersionedCache (`trustformers::cache`, mounted 0.2.0), ParallelWeightLoader/`load_model_parallel` (`trustformers::loading`, mounted 0.2.0)
+- **Fine-tuning:** LoRA (`LoraConfig`/`LoraConfigBuilder`/`LoraLinear`/`LoraBias`) and bottleneck adapters (`AdapterConfig`/`AdapterActivation`/`BottleneckAdapter`) — `trustformers::finetuning`, mounted 0.2.0; real, tested implementations (not mocks). Prefix-tuning/prompt-tuning/p-tuning v2 remain unimplemented.
+- **AutoModel wrappers (non-crate-root):** AutoModelForImageClassification, AutoModelForAudioClassification, AutoModelForObjectDetection, AutoModelForImageSegmentation (latter two added 0.2.0) — `trustformers::automodel_tasks`; all four wrap mock pipelines pending real model backends
 
 ---
 
@@ -431,6 +434,7 @@ let model_path = download_model("private-org/private-model", Some(options))?;
   - Goal: same underlying fix as the "wire finetuning/+cache/+loading/" item above — cache/mod.rs already internally wires versioned_cache.rs; the only missing piece for both items is the identical single `pub mod cache;` line in lib.rs. Implemented once as part of that item, not twice.
   - Files: trustformers/src/lib.rs (same edit as the finetuning/cache/loading item).
   - Risk: none — this is a duplicate of the item above, not independent work.
+  - **Result (re-verified 2026-07-09):** confirmed via the same `pub mod cache;` check as the item above — `VersionedCache`/`VersionedCacheConfig`/`VersionedCacheStats`/`CacheEvictionPolicy` are reachable at `trustformers::cache::*`.
 
 ---
 
@@ -460,6 +464,7 @@ A grep for `todo!()`/`unimplemented!()` across `src/` returns exactly 12 hits. A
   - Files: trustformers/src/pipeline/mod.rs only.
   - Tests: cargo build/cargo test --all-features — this is the real test, since these files have never been compiled and may have drifted against sibling types.
   - Risk: explicit escape hatch — if the build surfaces non-trivial API drift in any of the 10 files, fix what's cheap; for anything that would balloon into a real redesign, `git checkout -- <that one file>` to revert just that file's wiring and leave it un-mounted for a follow-up, rather than let this one item consume the whole batch's budget. Report which (if any) files were reverted.
+  - **Result (re-verified 2026-07-09):** all 10 landed — none reverted. `grep -n "^pub mod " src/pipeline/mod.rs` shows all of `audio_generation`, `document_classification`, `feature_extraction`, `image_segmentation`, `speech_recognition`, `table_question_answering`, `text_to_image`, `video_classification`, `visual_grounding`, `zero_shot_audio_classification` present, and `cargo check -p trustformers --all-features` compiles clean. However, every one of the 10 is confirmed-by-source-reading a **mock**: each returns deterministic, hash- or heuristic-derived output (e.g. `generate_mock_waveform`, `mock_embed`, `mock_score`, djb2-hash pixel/embedding synthesis) rather than running real inference. None implement the `Pipeline` trait or are reachable via the `pipeline()` factory — see README.md's Pipeline API section.
 - [ ] **Hub model search** — no `search_models` implementation exists; needs designing and implementing from scratch (see corrected "Model Search" section above)
 - [x] Re-enable 2 disabled test modules (planned 2026-07-05)
   - Goal: flip both #[cfg(test_disabled)] blocks back on.
@@ -476,20 +481,20 @@ A grep for `todo!()`/`unimplemented!()` across `src/` returns exactly 12 hits. A
 
 #### Performance
 - [ ] Faster model loading
-  - **Update:** `src/loading/parallel_loader.rs` (815 lines) implements a parallel model loader but is **not wired into `lib.rs`** — wiring it in and benchmarking it is the concrete next step, rather than starting from scratch
+  - **Update (2026-07-09):** `src/loading/parallel_loader.rs` (798 lines) implements a parallel model loader and **is now wired into `lib.rs`** (`pub mod loading;`, mounted in 0.2.0) — `cargo check -p trustformers --all-features` compiles clean. The remaining step is benchmarking against a concrete target, not wiring.
   - **Refinement still needed:** target metric (e.g., 20% throughput improvement, <100ms load latency for 7B models?)
 - [ ] Better caching strategies
-  - **Update:** `src/cache/versioned_cache.rs` (838 lines) implements a versioned cache but is **not wired into `lib.rs`**
+  - **Update (2026-07-09):** `src/cache/versioned_cache.rs` (772 lines) implements a versioned cache and **is now wired into `lib.rs`** (`pub mod cache;`, mounted in 0.2.0)
   - **Refinement still needed:** which caching layer is targeted — weights, KV cache, tokenizer outputs?
 - [ ] Reduced memory usage for large models
   - **Refinement needed:** What is the target metric? (e.g., peak RSS reduction %? 70B model fits in 40GB?)
 
 #### Features
 - [ ] Fine-tuning: LoRA adapter implementation
-  - **Update:** `src/finetuning/lora.rs` (680 lines: `LoraConfig`, `LoraConfigBuilder`, `LoraLinear`, `LoraBias`) is fully implemented but **not wired into `lib.rs`** (no `pub mod finetuning;` in `lib.rs`) — the remaining work is integration + public-API tests, not a from-scratch implementation
-  - **Refinement needed:** default adapter ranks and which layers should be adapted by default once wired in
+  - **Update (2026-07-09):** `src/finetuning/lora.rs` (644 lines: `LoraConfig`, `LoraConfigBuilder`, `LoraLinear`, `LoraBias`) is fully implemented and **is now wired into `lib.rs`** (`pub mod finetuning;`, mounted in 0.2.0) plus reachable at `trustformers::finetuning::{LoraConfig, LoraLinear, ...}`; its 15 embedded `#[test]` unit tests now run. No separate crate-level integration test file exists yet in `tests/` — that plus the item below are the remaining work, not a from-scratch implementation.
+  - **Refinement needed:** default adapter ranks and which layers should be adapted by default
 - [ ] Fine-tuning: PEFT/prefix-tuning
-  - **Update:** `src/finetuning/adapter.rs` (503 lines: `BottleneckAdapter`, `AdapterConfig`, `AdapterActivation` — Houlsby-style bottleneck adapters) is implemented but likewise not wired in. Prefix-tuning, prompt-tuning, and p-tuning v2 remain fully unimplemented.
+  - **Update (2026-07-09):** `src/finetuning/adapter.rs` (489 lines: `BottleneckAdapter`, `AdapterConfig`, `AdapterActivation` — Houlsby-style bottleneck adapters) is implemented and likewise **now wired in** (14 embedded `#[test]` unit tests now run). Prefix-tuning, prompt-tuning, and p-tuning v2 remain fully unimplemented.
   - **Refinement needed:** which PEFT variants beyond LoRA/adapters to prioritize
 - [ ] Fine-tuning: training loop helpers
   - **Refinement needed:** Should helpers wrap trustformers-training or be standalone?
@@ -500,22 +505,23 @@ A grep for `todo!()`/`unimplemented!()` across `src/` returns exactly 12 hits. A
   - Files: trustformers/src/automodel_tasks.rs only (no crate-root re-export, matching sibling precedent).
   - Tests: mirror automodel_tasks.rs's existing test style for the closest siblings.
   - Risk: the documentation requirement above is the one thing that must not be skipped.
+  - **Result (re-verified 2026-07-09):** `AutoModelForObjectDetection` present at `automodel_tasks.rs:753`; the mandatory mock-notice doc comment is present verbatim ("**Mock notice:** this wrapper uses a deterministic placeholder pipeline pending a real object-detection model..."); 11 tests covering it exist in the file's test module; not re-exported at crate root (confirmed absent from `lib.rs`'s `pub use automodel_tasks::{...}` list), matching the plan.
 - [x] Add AutoModelForImageSegmentation (planned 2026-07-05)
   - Goal: mirror the existing AutoModelForImageClassification/AutoModelForAudioClassification (Pattern B: plain struct wrapping ImageSegmentationPipeline, from_pretrained/from_local/segment()/accessors — no AutoConfig dispatch, no weight loading).
   - MANDATORY documentation requirement: ImageSegmentationPipeline produces deterministic MOCK segmentations today (no real segmentation head exists anywhere in the ecosystem — consistent with the already-shipped ImageClassification/AudioClassification siblings, which are equally mock). The doc comment on the new struct MUST say so explicitly — do not let this read as real inference to a caller.
   - Files: trustformers/src/automodel_tasks.rs only (no crate-root re-export, matching sibling precedent).
   - Tests: mirror automodel_tasks.rs's existing test style for the closest siblings.
   - Risk: the documentation requirement above is the one thing that must not be skipped.
+  - **Result (re-verified 2026-07-09):** `AutoModelForImageSegmentation` present at `automodel_tasks.rs:853`; the mandatory mock-notice doc comment is present verbatim ("**Mock notice:** this wrapper uses a deterministic placeholder pipeline pending a real image-segmentation model..."); 11 tests covering it exist in the file's test module; not re-exported at crate root, matching the plan.
 
 ---
 
 ## Known Limitations (Alpha)
 
-- `src/finetuning/`, `src/cache/`, and `src/loading/` contain real, substantial implementations (~2,900 lines) that are not yet part of the compiled crate (see Remaining Work).
-- Ten pipeline source files exist as unwired drafts (see "Wire up orphaned pipeline drafts" above).
+- `src/finetuning/`, `src/cache/`, and `src/loading/` (~2,754 lines) were mounted into `lib.rs` in 0.2.0 and are now part of the compiled crate and public API (see "Wire finetuning/ + cache/ + loading/ into lib.rs" above) — real, tested implementations. Remaining refinement: default LoRA rank/target-layer choices, PEFT-variant prioritization beyond LoRA/adapters, and benchmarking the parallel loader/cache against a concrete performance target (see Remaining Work).
+- **Mock pipelines:** the ten pipeline source files mounted in 0.2.0 (`audio_generation`, `document_classification`, `feature_extraction`, `image_segmentation`, `speech_recognition`, `table_question_answering`, `text_to_image`, `video_classification`, `visual_grounding`, `zero_shot_audio_classification` — see "Wire 10 orphaned pipeline drafts" above) all compile in now, but every one is a deterministic mock pending a real model backend, and none implement the `Pipeline` trait or are reachable via the `pipeline()` factory. `AutoModelForObjectDetection`/`AutoModelForImageSegmentation` (also added 0.2.0) wrap mock pipelines for the same reason, matching the pre-existing `AutoModelForImageClassification`/`AutoModelForAudioClassification`.
 - Hub model search is unimplemented (previously mis-documented as complete).
-- Two test modules are disabled pending a rewrite after internal API changes.
-- One example (`conversational_ai.rs.disabled`) is disabled pending the same rework.
+- One example (`conversational_ai.rs.disabled`) is disabled pending an API rework (the two previously-disabled `#[cfg(test_disabled)]` test modules noted in earlier revisions of this document have since been re-enabled as ordinary `#[cfg(test)]` modules — confirmed via source, 2026-07-09).
 - Some pipelines require specific model types.
 - Hub download requires the optional `hub` feature plus an internet connection.
 - Large models require significant disk space.
@@ -601,8 +607,8 @@ let model = AutoModel::from_config(&config)?;
 
 ---
 
-**Last Updated:** 2026-07-06
-**Version:** 0.2.0
+**Last Updated:** 2026-07-09
+**Version:** 0.2.1
 **Status:** Alpha
 **API:** HuggingFace-compatible high-level API
 **Hub:** Core Hub utilities unconditional; remote downloads require the optional `hub` feature

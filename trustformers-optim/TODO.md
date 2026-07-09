@@ -1,6 +1,6 @@
 # trustformers-optim TODO List
 
-**Version:** 0.1.4 | **Status:** Stable | **Tests:** ~960 | **SLoC:** 52,189 | **Updated:** 2026-07-02
+**Version:** 0.2.1 | **Status:** Stable | **Tests:** ~995 | **SLoC:** 50,431 | **Updated:** 2026-07-09
 
 ## Overview
 
@@ -41,13 +41,13 @@ hardware-targeted variants, and PyTorch/JAX/TensorFlow compatibility layers.
 - [x] **SCHEDULE-FREE** — `ScheduleFreeAdam` / `ScheduleFreeSGD` implemented
 - [x] **ZERO STAGES 1/2/3** — including an async-communication-overlap variant of stage 3
       (`zero::zero_stage3_overlap`)
-- [x] **FSDP-STYLE SHARDING** — `fsdp` module (not yet re-exported at crate root)
+- [x] **FSDP-STYLE SHARDING** — `fsdp` module (re-exported at crate root)
 - [x] **NO UNWRAP POLICY SATISFIED** — 0 occurrences of `.unwrap()` in any real `.rs` source file
 - [ ] **SECOND-ORDER: NO SHAMPOO** — Shampoo/Kronecker-factored preconditioning is not implemented
       (real second-order coverage: Sophia, L-BFGS, Newton-CG, SSBFGS, SSBroyden)
 
 ### Test Metrics
-- **Test Count:** ~960 tests for this crate (workspace-wide `cargo nextest run --workspace --all-features`:
+- **Test Count:** ~995 tests for this crate (workspace-wide `cargo nextest run --workspace --all-features`:
   18,102 passed / 0 failed / 119 skipped)
 - **Doctests:** 49 passed, 0 failed, 1 ignored
 - **Pass Rate:** 100%
@@ -278,7 +278,7 @@ let optimizer = Adam4bit::new(1e-4, 0.9, 0.999, 1e-8, 0.01);
 
 #### Per-layer bit-width selection
 - [x] `per_layer_quant.rs` (807 lines) — `BitWidth::{Int2,Int4,Int8,Fp16,Fp32}`, sensitivity analysis,
-      memory-budget-constrained assignment (module exists, not yet re-exported at crate root)
+      memory-budget-constrained assignment (re-exported at crate root)
 
 ---
 
@@ -384,7 +384,7 @@ optimizer.register_parameters(parameters)?;
 
 ### FSDP-style sharding
 - [x] `fsdp` module: `FsdpConfig`, `ShardingStrategy`, `WrappingPolicy`, `FsdpUnit`, `FsdpState`,
-      `FsdpMemoryAnalyzer` (not yet re-exported at crate root)
+      `FsdpMemoryAnalyzer` (re-exported at crate root)
 
 ### Multi-node training
 - [x] `MultiNodeTrainer` / `MultiNodeConfig` / `MultiNodeStats`
@@ -442,15 +442,14 @@ optimizer.register_parameters(parameters)?;
       regression, and distributed-training validation)
 - [x] **ONNX export** — `ONNXOptimizerExporter`
 - [x] **Optimizer surgery** — `optimizer_surgery` module (875 lines): migrates momentum/variance/EMA
-      state between Adam, AdamW, SGD, and Lion mid-training (module exists, not yet re-exported at
-      crate root)
+      state between Adam, AdamW, SGD, and Lion mid-training (re-exported at crate root)
 
 ---
 
 ## Testing
 
 ### Test Coverage
-- [x] **~960 tests** for this crate — 100% pass rate (workspace-wide: 18,102 passed / 0 failed / 119 skipped)
+- [x] **~995 tests** for this crate — 100% pass rate (workspace-wide: 18,102 passed / 0 failed / 119 skipped)
 - [x] **49 doctests passed, 0 failed, 1 ignored**
 - [x] **0 clippy warnings, 0 rustdoc warnings**
 - [x] **Optimizer Convergence** — verify convergence on toy problems
@@ -513,9 +512,9 @@ optimizer.register_parameters(parameters)?;
 - [x] **Automatic LR Finder** — `LrFinder` + `LrFinderConfig` + `LrFinderResult` + `find_optimal_lr`
       (`lr_finder.rs`)
 - [x] **Optimizer surgery** (change optimizer type mid-training) — `optimizer_surgery.rs` (875 lines);
-      not yet re-exported at crate root
-- [x] **Per-layer quantization bit-width selection** — `per_layer_quant.rs` (807 lines); not yet
       re-exported at crate root
+- [x] **Per-layer quantization bit-width selection** — `per_layer_quant.rs` (807 lines); re-exported
+      at crate root
 
 ### Housekeeping (new)
 - [x] Delete 3 stray *.prelude_fix backup files (planned 2026-07-05)
@@ -601,9 +600,9 @@ cargo check -p trustformers-optim --all-features
 
 ---
 
-**Last Updated:** 2026-07-02 — v0.1.4
+**Last Updated:** 2026-07-09 — v0.2.1
 **Status:** Stable
-**Tests:** ~960 tests for this crate (workspace: 18,102 passed / 0 failed / 119 skipped); 49 doctests
+**Tests:** ~995 tests for this crate (workspace: 18,102 passed / 0 failed / 119 skipped); 49 doctests
 passed, 0 failed, 1 ignored
 **Optimizers:** SGD, Adam, AdamW, RAdam, NAdam, AdaBelief, LAMB, AdaFactor, AdaFisher, AdaMaxPlus, Adan,
 Lion, Muon, CAME, MicroAdam, BGE-Adam, HN-Adam, AdEMAMix, Prodigy, NovoGrad, LancBiO, AMacP, EVA,

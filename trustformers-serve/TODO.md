@@ -1,6 +1,6 @@
 # trustformers-serve TODO List
 
-**Version:** 0.1.4 | **Status:** Stable | **Tests:** ~4,321 | **Public API Items:** 7,319 | **SLoC:** 283,692 | **Updated:** 2026-07-02
+**Version:** 0.2.1 | **Status:** Stable | **Tests:** ~4,321 | **Public API Items:** 7,319 | **SLoC:** 283,692 | **Updated:** 2026-07-09
 
 ## Overview
 
@@ -770,7 +770,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ---
 
-**Last Updated:** 2026-07-02 - v0.1.4
+**Last Updated:** 2026-07-09 - v0.2.1
 **Status:** Production-ready serving infrastructure (see Known Limitations / Security Notes for the mock/placeholder subsystems and the deferred audit finding)
 **Tests:** ~4,321 passing, 0 failing (workspace-wide `cargo nextest run --workspace --all-features`)
 **Public API:** 7,319 items (largest crate in the `trustformers` workspace by this measure)

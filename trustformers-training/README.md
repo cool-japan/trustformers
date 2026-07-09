@@ -4,13 +4,13 @@ Training infrastructure for TrustformeRS.
 
 ## Current State
 
-**Version:** 0.2.0 | **Status:** Alpha | **Updated:** 2026-07-02
+**Version:** 0.2.1 | **Status:** Alpha | **Updated:** 2026-07-09
 
 This crate provides HuggingFace-`Trainer`-inspired training infrastructure: a core `Trainer`/`TrainingArguments` loop (plus a simpler `SimpleTrainer` builder API), mixed-precision/AMP, quantization-aware training, RLHF (PPO/DPO), few-shot and meta-learning, continual learning, hyperparameter optimization, a large data-pipeline/augmentation/curriculum system, and a family of distributed/parallel-training abstractions (tensor, sequence, 3D, expert and ring-attention parallelism, plus elastic and multi-cloud orchestration).
 
-- **~930 tests passing** (workspace-wide: 18,102 passed / 0 failed, 0 clippy warnings, 0 rustdoc warnings — verified 2026-07-01)
+- **~1,010 tests passing** (workspace-wide: 18,102 passed / 0 failed, 0 clippy warnings, 0 rustdoc warnings — verified 2026-07-01)
 - **1,673 public API items** (`pub fn`/`struct`/`enum`/`trait`, incl. impl-block methods) reachable from `lib.rs`
-- **59,720 SLoC** actually compiled into the crate (69 `.rs` files wired into the module tree; the full `src/` tree on disk is 89,914 lines across 102 files — see [Verification Notes](#verification-notes))
+- **58,207 SLoC** actually compiled into the crate (72 `.rs` files wired into the module tree; the full `src/` tree on disk is 83,317 lines across 101 files — see [Verification Notes](#verification-notes))
 - **0 stub/placeholder implementations** (`todo!()`/`unimplemented!()`/TODO/FIXME/HACK/XXX/"placeholder", searched case-insensitively) in the compiled source
 - **0 `.unwrap()` calls** in the compiled production source
 
@@ -75,9 +75,10 @@ This crate provides HuggingFace-`Trainer`-inspired training infrastructure: a co
 - **Augmentation**: image/text/audio/token augmentation strategies with adaptive scheduling
 - **Multi-modal handling & validation**: `MultiModalHandler`, `DataValidator`, `StreamingDataset`
 
-### Hyperparameter Optimization (`hyperopt` module)
-- **Search strategies**: `GridSearch`, `RandomSearch`, `BayesianOptimization` (with `GPSampler`/`TPESampler`), `Hyperband`/`SuccessiveHalving`, `PopulationBasedTraining` (PBT), `BanditOptimizer`
-- **Multi-objective criteria** are supported as an early-stopping/reward composition inside `hyperopt::efficiency` (`EarlyStoppingStrategy::MultiObjective`) rather than as a standalone Pareto-front optimizer
+### Hyperparameter Optimization (`hyperopt` and `hpo` modules)
+- **Search strategies**: `GridSearch`, `RandomSearch`, `BayesianOptimization` (with `GPSampler`/`TPESampler`), `Hyperband`/`SuccessiveHalving`, `PopulationBasedTraining` (PBT), `BanditOptimizer` (`hyperopt`)
+- **Multi-objective Pareto-front search** (`hpo::multi_objective`, newly mounted): `MultiObjectiveHpo`, `ParetoFront`, `compute_pareto_front`, `hypervolume_indicator`, `non_domination_sort` (NSGA-II-style); `hyperopt::efficiency`'s `EarlyStoppingStrategy::MultiObjective` remains available as a separate early-stopping/reward-composition mechanism
+- **Automatic learning-rate range tests** (`hpo::auto_lr`, newly mounted): `AutoLrSelector`, `LrRangeTest`
 - **Experiment management**: `ExperimentManager`, A/B testing (`ABTestConfig`/`ABTestResults`), data/model lineage and provenance (`experiment_management.rs`)
 - **External tracker integrations**: TensorBoard, W&B, Neptune, ClearML, MLflow trackers/configs (`framework_integration.rs`)
 
@@ -91,7 +92,7 @@ This crate provides HuggingFace-`Trainer`-inspired training infrastructure: a co
 
 ```toml
 [dependencies]
-trustformers-training = "0.2.0"
+trustformers-training = "0.2.1"
 ```
 
 - `default = []` — no backend feature is enabled by default.
@@ -113,7 +114,7 @@ Everything below is re-exported from the crate root (`trustformers_training::*`)
 | RLHF | `PPOTrainer`, `DPOTrainer`, `RewardModel` | `rlhf` |
 | Few-shot / meta-learning | `MAMLTrainer`, `ReptileTrainer`, `InContextLearner`, `PromptTuner` | `few_shot` |
 | Continual learning | `EWCTrainer`, `ProgressiveNetwork`, `MemoryReplay` | `continual` |
-| Hyperparameter search | `GridSearch`, `BayesianOptimization`, `Hyperband`, `PopulationBasedTraining` | `hyperopt` |
+| Hyperparameter search | `GridSearch`, `BayesianOptimization`, `Hyperband`, `PopulationBasedTraining`, `MultiObjectiveHpo`, `AutoLrSelector` | `hyperopt`, `hpo` |
 | Data pipeline | `DataPipeline`, `CurriculumLearningManager`, `ActiveLearningManager` | `data_pipeline` |
 | Stability / monitoring | `AdvancedStabilityMonitor`, `GradientRecoveryManager`, `TrainingMonitor` | `advanced_stability_monitor`, `gradient_anomaly_recovery`, `training_monitor` |
 
@@ -196,6 +197,7 @@ trustformers-training/
 │   ├── few_shot/                # meta_learning.rs (MAML/Reptile), in_context.rs, prompt_tuning.rs, ...
 │   ├── continual/                # ewc.rs, progressive_networks.rs, memory_replay.rs, task_boundary.rs
 │   ├── hyperopt/                 # tuner.rs, sampler.rs, strategies.rs, surrogate_models.rs, ...
+│   ├── hpo/                      # multi_objective.rs (NSGA-II Pareto front), auto_lr.rs (AutoLrSelector/LrRangeTest)
 │   ├── data_pipeline.rs          # Curriculum, active learning, augmentation, multi-modal, validation
 │   ├── experiment_management.rs, framework_integration.rs   # A/B testing, W&B/MLflow/ClearML/Neptune/TensorBoard
 │   ├── advanced_stability_monitor.rs, gradient_anomaly_recovery.rs
@@ -208,13 +210,13 @@ trustformers-training/
 
 ## Testing
 
-- **~930 tests passing** (workspace-wide: 18,102 passed / 0 failed, 0 clippy warnings, 0 rustdoc warnings — verified 2026-07-01)
-- Covers the training loop, distributed abstractions, mixed precision/QAT, RLHF (PPO/DPO), few-shot/continual learning, hyperparameter search, data pipeline, and the stability/monitoring stack
+- **~1,010 tests passing** (workspace-wide: 18,102 passed / 0 failed, 0 clippy warnings, 0 rustdoc warnings — verified 2026-07-01)
+- Covers the training loop, distributed abstractions, mixed precision/QAT, RLHF (PPO/DPO), few-shot/continual learning, hyperparameter search (incl. `hpo`'s multi-objective Pareto-front search and auto-LR range tests), data pipeline, and the stability/monitoring stack
 - `examples/` contains illustrative programs, but at least one (`examples/basic_training/simple_classification.rs`) references types (`TrainerConfig`, `TrainingArgs`, `MetricResult`) that no longer match the current public API — see `TODO.md`
 
 ## Verification Notes
 
-While documenting this crate we found a meaningful amount of code under `src/` that exists on disk but is **not** referenced by any `mod` declaration in `lib.rs`, and is therefore not compiled into the crate: 21 top-level directories (`dpo/`, `ppo/`, `kto/`, `lora/`, `ewc/`, `curriculum/`, `hpo/`, `orpo/`, `simpo/`, `ipo/`, `spin/`, `grpo/`, `raft/`, `reinforce/`, `distillation/`, `model_merging/`, `constitutional_ai/`, `contrastive_search/`, `token_dpo/`, `online_dpo/`, `reward_modeling/`) plus 6 top-level files (`async_checkpoint.rs`, `distributed_overlap.rs`, `losses_tests.rs`, `metrics_tests.rs`, `training_args_tests.rs`, `mod.rs`) — roughly 30,000 lines across 33 files. Their functionality generally overlaps with (and appears superseded by) modules that *are* wired in, e.g. `rlhf::ppo`/`rlhf::dpo` vs. the orphaned top-level `ppo/`/`dpo/`, or `data_pipeline`'s curriculum types vs. the orphaned top-level `curriculum/`. All statistics in this README (SLoC, public API count, test coverage) describe only the reachable, compiled 69-file tree. See `TODO.md` for details.
+While documenting this crate we found a meaningful amount of code under `src/` that exists on disk but is **not** referenced by any `mod` declaration in `lib.rs`, and is therefore not compiled into the crate: 20 top-level directories (`dpo/`, `ppo/`, `kto/`, `lora/`, `ewc/`, `curriculum/`, `orpo/`, `simpo/`, `ipo/`, `spin/`, `grpo/`, `raft/`, `reinforce/`, `distillation/`, `model_merging/`, `constitutional_ai/`, `contrastive_search/`, `token_dpo/`, `online_dpo/`, `reward_modeling/`) plus 5 top-level files (`async_checkpoint.rs`, `distributed_overlap.rs`, `losses_tests.rs`, `metrics_tests.rs`, `training_args_tests.rs`) — roughly 25,110 lines across 29 files (verified via `tokei`, 2026-07-09). Their functionality generally overlaps with (and appears superseded by) modules that *are* wired in, e.g. `rlhf::ppo`/`rlhf::dpo` vs. the orphaned top-level `ppo/`/`dpo/`, or `data_pipeline`'s curriculum types vs. the orphaned top-level `curriculum/`. (The `hpo/` directory, previously in this orphaned list, was mounted via `pub mod hpo;` in the 0.2.0 release and is no longer orphaned; the orphaned root-level `mod.rs` was deleted the same release rather than wired in, since everything it declared already existed, more completely, in `lib.rs`.) All statistics in this README (SLoC, public API count, test coverage) describe only the reachable, compiled 72-file tree. See `TODO.md` for details.
 
 ## License
 

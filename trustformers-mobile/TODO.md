@@ -17,7 +17,7 @@ The `trustformers-mobile` crate provides mobile deployment infrastructure for iO
 
 ## Current Status
 
-**Version:** 0.1.4 | **Date:** 2026-07-02 | **Status:** Alpha
+**Version:** 0.2.1 | **Date:** 2026-07-09 | **Status:** Alpha
 
 ### Implementation Status
 🔵 **ALPHA** - Core infrastructure implemented; API may change
@@ -157,8 +157,8 @@ val output = engine.inference(model, inputTensor)
 
 - ✅ **Hardware Acceleration** (`nnapi.rs`, feature `nnapi`)
   - Backend detection (NPU, GPU, DSP)
-  - TensorFlow Lite delegate (`tflite_nnapi_delegate.rs`, feature `tflite-nnapi`)
   - Fallback strategies
+- ⚠️ **TensorFlow Lite delegate** (`tflite_nnapi_delegate.rs`, feature `tflite-nnapi`): source-complete with real `#[cfg(feature = "tflite-nnapi")]` gates throughout, but the file has no `pub mod` declaration anywhere in `lib.rs` — orphaned, unreachable from the crate today; the `tflite-nnapi` feature currently gates nothing. Found during the 2026-07-09 documentation pass (see [Known Limitations](#known-limitations)).
 
 - ✅ **Optimization**
   - Model compilation for NNAPI
@@ -464,7 +464,8 @@ let recommendations = battery_mgr.get_optimization_recommendations();
 - Some features iOS 16+/Android 12+ only
 - ⚠️ `advanced_security.rs` implements post-quantum KEM (Kyber/McEliece stand-ins), homomorphic encryption, and secure multi-party computation as simplified/mock reference code, not audited cryptography
 - ⚠️ `react-native-plugin/` ships an example only — no installable npm package source is present in this repository
-- ⚠️ Flutter/Unity/iOS/Android sub-packages version independently at `1.0.0` and do not track the workspace `0.1.4` release
+- ⚠️ Flutter/Unity/iOS/Android sub-packages version independently at `1.0.0` and do not track the workspace `0.2.1` release
+- ⚠️ **Newly found 2026-07-09**: `tflite_nnapi_delegate.rs` is fully written (real `#[cfg(feature = "tflite-nnapi")]` gates internally) but has no `pub mod` declaration in `lib.rs` — the `tflite-nnapi` Cargo feature currently gates nothing. Not yet triaged; see [Future Enhancements](#future-enhancements).
 
 ---
 
@@ -495,6 +496,12 @@ Two workspace-wide tracks land in 0.2.0: **OxiCUDA GPU migration** (scirs2-core 
 - ✅ **INT4/GGUF quantization** — nibble-packed INT4 per-group quantization + pure-Rust GGUF reader (`quantization/int4.rs`, `quantization/gguf_mobile.rs`)
 - ✅ **Predictive thermal management** — linear regression thermal predictor with proactive throttle prevention (`thermal/predictive.rs`)
 - ✅ **WebNN integration (IR + export)** — W3C WebNN IR, graph builder, JSON/compact-JSON export, structural validation (`webnn/mod.rs`)
+- [ ] Triage orphaned `tflite_nnapi_delegate.rs` (found 2026-07-09)
+  - Goal: the `tflite-nnapi` Cargo feature should either gate something real or be removed — right now it does neither.
+  - Design: the file itself is source-complete (real `#[cfg(feature = "tflite-nnapi")]` guards throughout, mirroring `nnapi.rs`'s structure), it's simply missing a `pub mod tflite_nnapi_delegate;` (+ matching feature-gated `pub use`) in `lib.rs`. Two options: (a) wire it up the same way `swin`/`deit` were wired into `trustformers-models` in 0.2.0 (add the `pub mod`/`pub use`, verify `cargo build --features tflite-nnapi` on an Android target), or (b) delete it as dead code the same way `android_renderscript.rs` was deleted, if on closer inspection it's superseded/unwanted.
+  - Files: trustformers-mobile/src/lib.rs (+ delete trustformers-mobile/src/tflite_nnapi_delegate.rs if option (b)); README.md, TODO.md.
+  - Tests: cargo check -p trustformers-mobile --features tflite-nnapi (Android target) before/after; cargo build --all-features must be unaffected by whichever path is chosen.
+  - Risk: low either way — confirmed zero references to this module anywhere else in the crate today, so neither path has blast radius beyond this one file.
 - [ ] Improved model compression techniques
   - **Refinement needed:** target compression ratio? Which techniques: GPTQ, AWQ, SqueezeLLM?
 - [ ] Replace the `advanced_security.rs` placeholder cryptography (post-quantum KEM, homomorphic encryption, MPC) with audited implementations before advertising real confidentiality guarantees
@@ -669,8 +676,8 @@ fun TrustformersDemo() {
 
 ---
 
-**Last Updated:** 2026-07-06
-**Version:** 0.1.4
+**Last Updated:** 2026-07-09
+**Version:** 0.2.1
 **Status:** Alpha
 **Test Suite:** ~742 crate tests passing · 26 doctests passing (0 failed, 2 ignored)
 **SLoC:** ~103,900 (Rust, `src/`) · ~124,000 (full repo incl. Swift/Kotlin/C#/Dart/TS bindings, via tokei)

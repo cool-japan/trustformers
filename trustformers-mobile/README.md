@@ -2,7 +2,7 @@
 
 Mobile deployment infrastructure for running transformer models on iOS and Android devices with hardware acceleration and cross-platform framework support.
 
-**Version:** 0.2.0 | **Status:** Alpha | **Tests:** ~742 passing (crate) · 18,102 passing workspace-wide (0 failed, 119 skipped) | **SLoC:** ~103,900 (Rust, `src/`) | **Last Updated:** 2026-07-02
+**Version:** 0.2.1 | **Status:** Alpha | **Tests:** ~742 passing (crate) · 18,102 passing workspace-wide (0 failed, 119 skipped) | **SLoC:** ~103,900 (Rust, `src/`) | **Last Updated:** 2026-07-09
 
 ## Status
 
@@ -25,7 +25,7 @@ Public API surface: **~3,860 public items** (functions, structs, enums, traits �
 
 - **Native Android Library**: `trustformers-android` AAR (`android-lib/`) — Java `TrustformersEngine` + Kotlin `TrustformersKt` coroutine wrapper and DSL builder
 - **NNAPI Integration**: `nnapi.rs` / `nnapi_converter.rs` (feature `nnapi`, Android target only)
-- **TFLite NNAPI delegate**: `tflite_nnapi_delegate.rs` (feature `tflite-nnapi`)
+- **TFLite NNAPI delegate**: `tflite_nnapi_delegate.rs` (feature `tflite-nnapi`) — source is fully written (real `#[cfg(feature = "tflite-nnapi")]` guards throughout) but the file has no `pub mod` declaration anywhere in `lib.rs`, so it does not currently compile in and the feature gates nothing yet (orphaned; see [Known Limitations](#known-limitations))
 - **Edge TPU Support**: `edge_tpu_support.rs` (compiled for `target_os = "android"` only) — Google Coral acceleration
 - **Work Manager / Doze / Content Provider / Android Auto**: `android_work_manager.rs`, `android_doze_compatibility.rs`, `android_content_provider.rs`, `android_auto_support.rs`
 
@@ -182,7 +182,7 @@ float[] output = engine.Inference(inputTensor);
 
 ## Installation
 
-Sub-packages currently version independently (`1.0.0`) and do not track the workspace's `0.2.0` release; verify against each package's own manifest before pinning.
+Sub-packages currently version independently (`1.0.0`) and do not track the workspace's `0.2.1` release; verify against each package's own manifest before pinning.
 
 ### iOS (CocoaPods)
 
@@ -221,7 +221,7 @@ Add `com.trustformers.mobile` via the Unity Package Manager (Git URL or local `u
 
 ```toml
 [dependencies]
-trustformers-mobile = { version = "0.2.0", features = ["on-device-training"] }
+trustformers-mobile = { version = "0.2.1", features = ["on-device-training"] }
 ```
 
 ## Architecture
@@ -298,7 +298,7 @@ Verified against `Cargo.toml` and `#[cfg(feature = ...)]` usage in `src/`:
 
 - `coreml` — gates `coreml.rs` / `coreml_converter.rs` (also requires `target_os = "ios"`)
 - `nnapi` — gates `nnapi.rs` / `nnapi_converter.rs` (also requires `target_os = "android"`)
-- `tflite-nnapi` — implies `nnapi`; gates `tflite_nnapi_delegate.rs`
+- `tflite-nnapi` — implies `nnapi`; declared for `tflite_nnapi_delegate.rs`, but that file currently has no `pub mod` declaration in `lib.rs`, so this flag does not yet gate anything (see [Known Limitations](#known-limitations))
 - `on-device-training` — gates `training.rs`, `federated.rs`, `differential_privacy.rs`, `advanced_training.rs`, `advanced_privacy_mechanisms.rs`
 - `web` — gates `wasm.rs` (also requires `target_arch = "wasm32"`)
 - `react-native` — gates `react_native.rs` / `react_native_turbo.rs` / `react_native_fabric.rs` re-exports
@@ -347,10 +347,11 @@ cd android-lib && ./gradlew test
 
 ## Known Limitations
 
-- Alpha status: API surface may change before 0.2.0
+- Alpha status: API surface may still change before a Stable designation
 - `advanced_security.rs` implements post-quantum KEM (Kyber/McEliece stand-ins), homomorphic encryption, and secure multi-party computation as **simplified/mock reference code**, not audited cryptography — do not depend on it for real confidentiality guarantees yet
 - `react-native-plugin/` in this repository contains a usage example (`TrustformersCompleteExample.tsx`) only — there is no `package.json` or module source here, so React Native integration is not yet an installable package from this repo
-- Flutter, Unity, iOS, and Android sub-packages version independently at `1.0.0` and do not track the workspace's `0.2.0` release
+- Flutter, Unity, iOS, and Android sub-packages version independently at `1.0.0` and do not track the workspace's `0.2.1` release
+- `tflite_nnapi_delegate.rs` is fully written but has no `pub mod` declaration anywhere in `lib.rs` — the `tflite-nnapi` Cargo feature currently gates nothing (orphaned, same pattern as the now-fixed `swin`/`deit` in `trustformers-models` before this release, or the now-deleted `android_renderscript.rs` here). Not yet triaged: wire it up or delete it.
 - Core ML Neural Engine requires iOS 16+ for latest features
 - NNAPI performance varies significantly across Android devices
 - Large models require quantization for mobile deployment
@@ -372,8 +373,8 @@ Licensed under Apache License, Version 2.0 ([LICENSE](../LICENSE)).
 
 ---
 
-**Last Updated:** 2026-07-02
-**Version:** 0.2.0
+**Last Updated:** 2026-07-09
+**Version:** 0.2.1
 **Status:** Alpha
 **Test Suite:** ~742 crate tests passing · 26 doctests passing (0 failed, 2 ignored)
 **SLoC:** ~103,900 (Rust, `src/`) · ~124,000 (full repo incl. Swift/Kotlin/C#/Dart/TS bindings, via tokei)
