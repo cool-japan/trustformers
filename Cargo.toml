@@ -271,7 +271,7 @@ wgpu = "30.0"
 # SciRS2 dependencies - using crates.io 0.1.x
 # Note: "metal" feature removed from default features as it's Apple-specific
 # Individual crates should enable it conditionally using target-specific dependencies
-scirs2-core = { version = "0.6.2", default-features = false, features = [
+scirs2-core = { version = "0.6.3", default-features = false, features = [
     "array",
     "simd",
     "parallel",

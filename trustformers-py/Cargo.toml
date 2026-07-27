@@ -25,7 +25,7 @@ crate-type = ["cdylib", "rlib"]
 # Upgrading to pyo3 0.29 is blocked until scirs2-core publishes with pyo3 0.29 support.
 # See RUSTSEC-2026-0176 / RUSTSEC-2026-0177 notes in TODO.md Security Advisories.
 pyo3 = { version = "0.28", features = ["extension-module", "abi3-py39"] }
-scirs2-numpy = { version = "0.6.2" }
+scirs2-numpy = { version = "0.6.3" }
 
 # Error handling
 anyhow = "1.0.100"
@@ -38,7 +38,7 @@ approx = "0.5"
 libc = "0.2"
 
 # SciRS2 Integration Policy: Use scirs2-core abstractions instead of direct dependencies
-scirs2-core = { version = "0.6.2", default-features = false, features = ["python", "random", "parallel", "array", "serialization"] }
+scirs2-core = { version = "0.6.3", default-features = false, features = ["python", "random", "parallel", "array", "serialization"] }
 
 # TrustformeRS dependencies (path-based for standalone build)
 trustformers-core = { path = "../trustformers-core", default-features = false }

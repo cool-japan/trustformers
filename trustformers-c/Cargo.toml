@@ -105,7 +105,7 @@ toml = { version = "0.9", optional = true }
 chrono = { version = "0.4", features = ["serde"] }
 
 # SciRS2 Integration
-scirs2-core = "0.6.2"
+scirs2-core = "0.6.3"
 
 # Standards framework dependencies
 regex = "1.12"
