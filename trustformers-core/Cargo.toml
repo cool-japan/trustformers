@@ -85,10 +85,10 @@ opencl3 = { version = "0.12", optional = true }
 libloading = { workspace = true, optional = true }
 
 # Campaign C0 spike: oxicuda Pure-Rust CUDA replacement (compile-validation; runtime-loads libcuda)
-oxicuda-blas = { version = "0.5.1", optional = true }
-oxicuda-dnn = { version = "0.5.1", optional = true }
-oxicuda-memory = { version = "0.5.1", optional = true }
-oxicuda-driver = { version = "0.5.1", optional = true }
+oxicuda-blas = { version = "0.5.2", optional = true }
+oxicuda-dnn = { version = "0.5.2", optional = true }
+oxicuda-memory = { version = "0.5.2", optional = true }
+oxicuda-driver = { version = "0.5.2", optional = true }
 
 [dev-dependencies]
 rstest.workspace = true
@@ -153,5 +153,5 @@ oxiblas = { workspace = true }
 oxiblas-blas = { workspace = true }
 oxiblas-matrix = { workspace = true }
 # Campaign C0 spike: oxicuda Metal backend + compute-backend trait (macOS only)
-oxicuda-metal = { version = "0.5.1", optional = true }
-oxicuda-backend = { version = "0.5.1", optional = true }
+oxicuda-metal = { version = "0.5.2", optional = true }
+oxicuda-backend = { version = "0.5.2", optional = true }
