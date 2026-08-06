@@ -204,7 +204,7 @@ pyo3 = "0.29"
 numpy = "0.29"
 
 # Additional core dependencies
-oxicode = { version = "0.2.5", features = ["serde"] }
+oxicode = { version = "0.2.6", features = ["serde"] }
 byteorder = "1.5"
 dashmap = "6.2"
 oxiarc-zstd = { version = "0.4.1" }
