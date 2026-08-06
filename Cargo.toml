@@ -218,9 +218,9 @@ libc = "0.2.186"
 libloading = "0.9"
 
 # BLAS dependencies - OxiBLAS (Pure Rust BLAS/LAPACK from SciRS2 ecosystem)
-oxiblas = { version = "0.2.1", features = ["parallel"] }
-oxiblas-blas = { version = "0.2.1" }
-oxiblas-matrix = { version = "0.2.1" }
+oxiblas = { version = "0.2.2", features = ["parallel"] }
+oxiblas-blas = { version = "0.2.2" }
+oxiblas-matrix = { version = "0.2.2" }
 
 # Server and networking dependencies
 tokio-util = "0.7"
