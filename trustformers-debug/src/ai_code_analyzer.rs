@@ -1,8 +1,20 @@
-//! AI-Powered Code Analysis for Model Debugging
+//! Rule-Based Static Code Analysis for Model Debugging
 //!
-//! This module provides intelligent code analysis capabilities using AI to identify
-//! potential issues in neural network models, suggest optimizations, and provide
-//! automated debugging insights.
+//! This module identifies potential issues in neural-network training/inference
+//! source code, suggests optimizations, and flags common security anti-patterns.
+//!
+//! Despite the type name [`AICodeAnalyzer`] (kept for API stability), this is a
+//! **deterministic, rule-based static analyzer**: every finding comes from a
+//! fixed substring/pattern check against the literal source text (see
+//! [`AICodeAnalyzer::perform_deep_analysis`] and its sibling
+//! `detect_*`/`generate_*` methods), not from any trained model or live
+//! inference call. There is no network access, no model weights, and no
+//! non-deterministic behavior -- calling it twice on the same input always
+//! produces the same result. Each rule carries a fixed `confidence: f64`
+//! assigned when the rule was written, reflecting that rule's own
+//! specificity (how often that particular substring pattern is a true
+//! positive in practice) -- it is **not** a live-computed statistical
+//! probability from any model, and must not be read as one.
 // reason: debug/profiling scaffolding — structs are constructed and their fields/methods
 // are retained for the data model, serialization completeness, and future consumers that
 // do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
@@ -14,7 +26,10 @@ use std::collections::HashMap;
 use tokio::time::{Duration, Instant};
 use tracing::{debug, info};
 
-/// AI-powered code analysis engine for model debugging
+/// Rule-based static code analysis engine for model debugging.
+///
+/// See the module-level docs: this is a deterministic pattern matcher, not
+/// an AI model.
 #[derive(Debug)]
 pub struct AICodeAnalyzer {
     config: AIAnalysisConfig,
@@ -322,17 +337,17 @@ impl AICodeAnalyzer {
         Ok(patterns)
     }
 
+    /// Rule-based issue detection over the literal source text. See the
+    /// module docs: this is real pattern matching, not a live model call,
+    /// so there is no analysis latency to simulate here.
     async fn perform_deep_analysis(
         &self,
         code: &str,
         _context: &ModelContext,
     ) -> Result<Vec<IdentifiedIssue>> {
-        debug!("Performing deep AI analysis");
+        debug!("Performing rule-based deep code analysis");
 
         let mut issues = Vec::new();
-
-        // Simulate AI analysis (in a real implementation, this would use an actual AI model)
-        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Check for numerical stability issues
         if code.contains("log") && !code.contains("log1p") && code.contains("softmax") {
@@ -343,7 +358,7 @@ impl AICodeAnalyzer {
                 severity: Severity::High,
                 confidence: 0.88,
                 suggested_fix: "Replace log(softmax(x)) with log_softmax(x)".to_string(),
-                code_location: None, // Would be populated with actual line numbers
+                code_location: locate_in_code(code, "softmax"),
             });
         }
 
@@ -360,7 +375,7 @@ impl AICodeAnalyzer {
                 suggested_fix:
                     "Consider using Flash Attention or other optimized attention mechanisms"
                         .to_string(),
-                code_location: None,
+                code_location: locate_in_code(code, "attention"),
             });
         }
 
@@ -374,7 +389,7 @@ impl AICodeAnalyzer {
                 severity: Severity::High,
                 confidence: 0.82,
                 suggested_fix: "Ensure optimizer.zero_grad() is called appropriately".to_string(),
-                code_location: None,
+                code_location: locate_in_code(code, "accumulate"),
             });
         }
 
@@ -495,15 +510,15 @@ impl AICodeAnalyzer {
         Ok(vulnerabilities)
     }
 
+    /// Rule-based performance prediction. Like [`Self::perform_deep_analysis`],
+    /// this is real (if heuristic) computation over `code`/`context`, not a
+    /// model call, so there is no latency to simulate.
     async fn predict_performance_characteristics(
         &self,
         code: &str,
         context: &ModelContext,
     ) -> Result<PerformancePredictions> {
         debug!("Predicting performance characteristics");
-
-        // Simulate AI-based performance prediction
-        tokio::time::sleep(Duration::from_millis(50)).await;
 
         let mut predictions = PerformancePredictions::new();
 
@@ -513,13 +528,37 @@ impl AICodeAnalyzer {
         predictions.estimated_inference_latency = self.estimate_inference_latency(code, context);
         predictions.scaling_characteristics = self.predict_scaling_behavior(code, context);
 
-        // Predict bottlenecks
-        predictions.predicted_bottlenecks = vec![
-            "Attention computation may become bottleneck for long sequences".to_string(),
-            "Memory bandwidth may limit performance for large batch sizes".to_string(),
-        ];
+        // Real, code/context-dependent bottleneck signals: each entry only
+        // appears when the pattern it describes was actually detected. The
+        // old implementation emitted both strings unconditionally,
+        // regardless of what `code`/`context` actually contained.
+        let mut signal_count: u32 = 0;
+        if code.contains("attention") && !code.contains("flash") {
+            predictions.predicted_bottlenecks.push(
+                "Attention computation may become a bottleneck for long sequences (no Flash \
+                 Attention detected in this code)"
+                    .to_string(),
+            );
+            signal_count += 1;
+        }
+        if context.model_size > 1_000_000_000 {
+            predictions.predicted_bottlenecks.push(
+                "Memory bandwidth may limit performance for large batch sizes (model exceeds \
+                 1B parameters)"
+                    .to_string(),
+            );
+            signal_count += 1;
+        }
 
-        predictions.confidence_score = 0.75;
+        // Confidence reflects how many independent real signals were
+        // found: an honest `0.0` ("no basis for a bottleneck prediction")
+        // when none matched, scaling up with corroborating signals. Never
+        // the old fixed `0.75` regardless of input.
+        predictions.confidence_score = match signal_count {
+            0 => 0.0,
+            1 => 0.6,
+            _ => 0.75,
+        };
 
         Ok(predictions)
     }
@@ -1145,6 +1184,36 @@ pub struct CodeLocation {
     pub column: u32,
 }
 
+/// Real 1-indexed `(line, column)` of the first occurrence of `needle` in
+/// `code`, or `None` if `needle` does not occur. `file` is a fixed sentinel
+/// (`analyze_model_code` receives only a code string, not a path) --
+/// callers that need a real path should overwrite `CodeLocation::file` with
+/// the source file they read `code` from.
+///
+/// Used so [`IdentifiedIssue::code_location`] points at the text that
+/// actually triggered the rule, instead of always being `None`.
+fn locate_in_code(code: &str, needle: &str) -> Option<CodeLocation> {
+    let byte_offset = code.find(needle)?;
+    let mut line: u32 = 1;
+    let mut last_newline_offset: Option<usize> = None;
+    for (idx, ch) in code[..byte_offset].char_indices() {
+        if ch == '\n' {
+            line += 1;
+            last_newline_offset = Some(idx);
+        }
+    }
+    let column = match last_newline_offset {
+        Some(nl_idx) => (byte_offset - nl_idx) as u32,
+        None => byte_offset as u32 + 1,
+    };
+
+    Some(CodeLocation {
+        file: "<analyzed source>".to_string(),
+        line,
+        column,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OptimizationSuggestion {
     pub optimization_type: OptimizationType,
@@ -1659,5 +1728,130 @@ mod tests {
         assert!(!assistance.probable_causes.is_empty());
         assert!(!assistance.suggested_fixes.is_empty());
         assert!(assistance.confidence_score > 0.0);
+    }
+
+    fn make_context(model_size: u64) -> ModelContext {
+        ModelContext {
+            model_type: ModelType::Training,
+            model_size,
+            framework: "PyTorch".to_string(),
+            target_hardware: "CUDA".to_string(),
+            training_stage: TrainingStage::Training,
+        }
+    }
+
+    /// Regression test: `perform_deep_analysis` used to always set
+    /// `code_location: None` ("Would be populated with actual line
+    /// numbers"). It must now report the real line/column of the text that
+    /// triggered the rule.
+    #[tokio::test]
+    async fn test_identified_issue_code_location_is_real_not_none() {
+        let analyzer = AICodeAnalyzer::new(AIAnalysisConfig::default());
+        let code = "def f(x):\n    return log(softmax(x))\n";
+        let context = make_context(1_000);
+
+        let issues = analyzer
+            .perform_deep_analysis(code, &context)
+            .await
+            .expect("deep analysis should succeed");
+        let issue = issues
+            .iter()
+            .find(|i| matches!(i.issue_type, IssueType::NumericalStability))
+            .expect("the log-softmax rule should have fired");
+
+        let location = issue
+            .code_location
+            .as_ref()
+            .expect("code_location must be Some (a real position), not the old hardcoded None");
+        // "softmax" occurs on line 2 (1-indexed), starting right after
+        // "    return log(".
+        assert_eq!(location.line, 2);
+        assert_eq!(location.column, "    return log(".len() as u32 + 1);
+    }
+
+    /// Regression test: `predict_performance_characteristics` used to
+    /// unconditionally return the same two `predicted_bottlenecks` strings
+    /// and a fixed `confidence_score: 0.75` for any input whatsoever. Code
+    /// with none of the underlying signals must now honestly report no
+    /// bottlenecks and zero confidence.
+    #[tokio::test]
+    async fn test_performance_predictions_are_honest_with_no_signals() {
+        let analyzer = AICodeAnalyzer::new(AIAnalysisConfig::default());
+        let code = "def f(x):\n    return x + 1\n";
+        let context = make_context(1_000); // well under the 1B-parameter threshold
+
+        let predictions = analyzer
+            .predict_performance_characteristics(code, &context)
+            .await
+            .expect("prediction should succeed");
+
+        assert!(
+            predictions.predicted_bottlenecks.is_empty(),
+            "must not report bottlenecks when no real signal was detected: {:?}",
+            predictions.predicted_bottlenecks
+        );
+        assert_eq!(
+            predictions.confidence_score, 0.0,
+            "must not be the old fixed 0.75 when nothing was actually detected"
+        );
+    }
+
+    /// Companion to the above: with a real attention-without-flash signal
+    /// present, the corresponding bottleneck must appear and confidence
+    /// must be nonzero -- and the result must differ between inputs,
+    /// proving these are no longer fixed constants.
+    #[tokio::test]
+    async fn test_performance_predictions_reflect_real_code_signals() {
+        let analyzer = AICodeAnalyzer::new(AIAnalysisConfig::default());
+        let attention_code = "out = attention(q, k, v, matmul_impl=True)";
+        let plain_context = make_context(1_000);
+
+        let with_attention = analyzer
+            .predict_performance_characteristics(attention_code, &plain_context)
+            .await
+            .expect("prediction should succeed");
+        assert_eq!(with_attention.predicted_bottlenecks.len(), 1);
+        assert!(with_attention.predicted_bottlenecks[0].contains("Attention"));
+        assert_eq!(with_attention.confidence_score, 0.6);
+
+        let large_model_context = make_context(2_000_000_000);
+        let with_both = analyzer
+            .predict_performance_characteristics(attention_code, &large_model_context)
+            .await
+            .expect("prediction should succeed");
+        assert_eq!(
+            with_both.predicted_bottlenecks.len(),
+            2,
+            "a large model plus an attention signal must report both real bottlenecks"
+        );
+        assert_eq!(with_both.confidence_score, 0.75);
+    }
+
+    /// Regression test: `perform_deep_analysis` and
+    /// `predict_performance_characteristics` used to sleep for 100ms/50ms
+    /// each ("Simulate AI analysis") regardless of input. A full
+    /// `analyze_model_code` call (which invokes both, plus every other
+    /// rule pass) must now complete essentially immediately.
+    #[tokio::test]
+    async fn test_analyze_model_code_has_no_artificial_latency() {
+        let mut analyzer = AICodeAnalyzer::new(AIAnalysisConfig::default());
+        let code = "out = attention(q, k, v, matmul_impl=True)\nlog(softmax(x))";
+        let context = make_context(2_000_000_000);
+
+        let start = std::time::Instant::now();
+        analyzer
+            .analyze_model_code(code, context)
+            .await
+            .expect("analysis should succeed");
+        let elapsed = start.elapsed();
+
+        // The old sleeps alone totalled 150ms; a real rule-based pass over
+        // a two-line string should take microseconds. 50ms leaves generous
+        // headroom for slow CI machines while still catching a reintroduced
+        // sleep.
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "analysis took {elapsed:?}; the old implementation's artificial sleeps must be gone"
+        );
     }
 }

@@ -1,26 +1,30 @@
-#![allow(unused_variables)] // Metal backend
-
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
 
-#[cfg(all(target_os = "macos", feature = "metal"))]
-use mpsgraph as mps;
-
-/// Metal Performance Shaders implementation for Apple Silicon hardware acceleration
+/// Standalone Metal compute kernels for a handful of tensor primitives.
 ///
-/// This module provides production-ready Metal compute shaders for transformer operations,
-/// optimized specifically for Apple Silicon (M1, M2, M3+) hardware with unified memory architecture.
+/// # Scope, honestly stated
 ///
-/// Features:
-/// - Matrix multiplication with Apple's optimized Metal Performance Shaders
-/// - Fused attention operations using Metal's neural network graph API
-/// - Element-wise operations optimized for Apple GPU architecture
-/// - Memory-efficient tensor operations leveraging unified memory
-/// - Native integration with Core ML and Apple's ML frameworks
+/// This is a small, self-contained set of hand-written MSL kernels compiled at
+/// runtime. It is **not** the crate's main GPU path: `gpu_ops::metal::MetalBackend`
+/// is, and it is what `Device::Metal` dispatches to. Keep that in mind before
+/// reaching for this type.
 ///
-/// Requirements:
-/// - macOS 10.15+ or iOS 13+ for Metal Performance Shaders
-/// - Apple Silicon hardware for optimal performance
+/// What it actually provides:
+/// * `matrix_multiply` - a single 2-D `f32` GEMM (batched inputs are rejected, not
+///   silently flattened).
+/// * `add_tensors` - elementwise addition.
+/// * `gelu` - elementwise tanh-approximation GELU.
+/// * `flash_attention` - a fused single-pass attention kernel (see its own docs for
+///   what it does and does not do).
+///
+/// What it does **not** provide, despite what these docs used to claim:
+/// * Metal Performance Shaders. Nothing here uses MPS or MPSGraph. An `MPSGraph` was
+///   constructed in the constructor and immediately dropped; it is gone.
+/// * "Native integration with Core ML and Apple's ML frameworks". There is none.
+///
+/// # Requirements
+/// * macOS with the `metal` cargo feature (the whole module is gated on both).
 pub struct MetalImpl {
     #[cfg(all(target_os = "macos", feature = "metal"))]
     device: metal::Device,
@@ -28,23 +32,12 @@ pub struct MetalImpl {
     command_queue: metal::CommandQueue,
     #[cfg(all(target_os = "macos", feature = "metal"))]
     library: metal::Library,
-
-    #[cfg(not(feature = "metal"))]
-    _placeholder: (),
 }
 
 impl MetalImpl {
     /// Create new Metal implementation
     pub fn new() -> Result<Self> {
-        #[cfg(all(target_os = "macos", feature = "metal"))]
-        {
-            Self::new_with_metal()
-        }
-
-        #[cfg(not(feature = "metal"))]
-        {
-            Ok(Self { _placeholder: () })
-        }
+        Self::new_with_metal()
     }
 
     #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -64,9 +57,6 @@ impl MetalImpl {
 
         // Create command queue for submitting GPU work
         let command_queue = device.new_command_queue();
-
-        // Initialize Metal Performance Shaders graph for neural network operations
-        let mps_graph = mps::Graph::new();
 
         // Create compute library with custom kernels
         let library = Self::create_kernel_library(&device)?;
@@ -302,19 +292,30 @@ impl MetalImpl {
     #[cfg(all(target_os = "macos", feature = "metal"))]
     pub fn matrix_multiply(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
         // Validate input tensors
-        if a.shape().len() < 2 || b.shape().len() < 2 {
+        let a_shape = a.shape();
+        let b_shape = b.shape();
+
+        // The `matrix_multiply_f32` kernel indexes `a[row * K + i]` over a flat buffer
+        // and the result is declared `[a_rows, b_cols]`, so it implements a *single*
+        // 2-D GEMM. The previous check accepted `len() >= 2`, took the trailing two
+        // dimensions and silently dropped every batch dimension - a 3-D input produced
+        // numerically wrong output with a 2-D shape and no error at all. Reject
+        // anything the kernel cannot actually compute.
+        if a_shape.len() != 2 || b_shape.len() != 2 {
             return Err(TrustformersError::tensor_op_error(
-                "Matrix multiplication requires at least 2D tensors",
+                &format!(
+                    "MetalImpl::matrix_multiply implements a single 2-D GEMM; got shapes \
+                     {a_shape:?} @ {b_shape:?}. Use `gpu_ops::metal::MetalBackend::\
+                     batched_matmul_gpu_to_gpu` for batched inputs."
+                ),
                 "MetalImpl::matrix_multiply",
             ));
         }
 
-        let a_shape = a.shape();
-        let b_shape = b.shape();
-        let a_rows = a_shape[a_shape.len() - 2];
-        let a_cols = a_shape[a_shape.len() - 1];
-        let b_rows = b_shape[b_shape.len() - 2];
-        let b_cols = b_shape[b_shape.len() - 1];
+        let a_rows = a_shape[0];
+        let a_cols = a_shape[1];
+        let b_rows = b_shape[0];
+        let b_cols = b_shape[1];
 
         if a_cols != b_rows {
             return Err(
@@ -534,11 +535,21 @@ impl MetalImpl {
     ///
     /// Algorithm: output = softmax(Q @ K^T / sqrt(d_k)) @ V
     ///
-    /// # Performance Features
-    /// - Fused kernel eliminates intermediate attention matrix materialization
-    /// - Tiled computation for better cache utilization
-    /// - Numerically stable softmax with max subtraction
-    /// - Optimized for Apple unified memory architecture
+    /// # What this kernel is
+    ///
+    /// A *fused, non-tiled* attention kernel: one GPU thread per `(query, dim_v)`
+    /// pair recomputes the full score row for its query and applies a numerically
+    /// stable (max-subtracted) softmax. It avoids materialising the attention matrix
+    /// in global memory, which is where the memory saving comes from.
+    ///
+    /// It is **not** FlashAttention in the tiled, IO-aware sense despite the name:
+    /// there is no KV blocking and the score row is recomputed once per `dim_v`
+    /// thread, so compute scales with `seq_k * dim_v` rather than `seq_k`. The
+    /// tiled implementation lives in
+    /// `gpu_ops::metal::MetalBackend::flash_attention_with_cache`.
+    ///
+    /// The kernel keeps a `float scores[1024]` thread-private array and refuses any
+    /// `seq_k > 1024` rather than overrunning it.
     ///
     /// # Arguments
     /// - `query`: Query tensor [batch, seq_q, dim]
@@ -691,197 +702,14 @@ impl MetalImpl {
         Ok(())
     }
 
-    /// Get device information
+    /// Human-readable summary of the live Metal device.
     pub fn device_info(&self) -> Result<String> {
-        #[cfg(all(target_os = "macos", feature = "metal"))]
-        {
-            Ok(format!(
-                "Metal Device: {}\nUnified Memory: {} GB\nMax Threads Per Group: {}",
-                self.device.name(),
-                self.device.recommended_max_working_set_size() / (1024 * 1024 * 1024),
-                self.device.max_threads_per_threadgroup().width
-            ))
-        }
-
-        #[cfg(not(feature = "metal"))]
-        {
-            Ok("Metal backend not compiled".to_string())
-        }
-    }
-}
-
-// Placeholder implementations for when Metal feature is not enabled
-#[cfg(not(feature = "metal"))]
-impl MetalImpl {
-    pub fn matrix_multiply(&self, _a: &Tensor, _b: &Tensor) -> Result<Tensor> {
-        Err(TrustformersError::hardware_error(
-            "Metal backend not compiled in this build",
-            "MetalImpl::matrix_multiply",
+        Ok(format!(
+            "Metal Device: {}\nRecommended working set: {} GB\nMax threads per threadgroup: {}",
+            self.device.name(),
+            self.device.recommended_max_working_set_size() / (1024 * 1024 * 1024),
+            self.device.max_threads_per_threadgroup().width
         ))
-    }
-
-    pub fn add_tensors(&self, _a: &Tensor, _b: &Tensor) -> Result<Tensor> {
-        Err(TrustformersError::hardware_error(
-            "Metal backend not compiled in this build",
-            "MetalImpl::add_tensors",
-        ))
-    }
-
-    pub fn flash_attention(
-        &self,
-        _query: &Tensor,
-        _key: &Tensor,
-        _value: &Tensor,
-        _output: &mut Tensor,
-    ) -> Result<()> {
-        Err(TrustformersError::hardware_error(
-            "Metal backend not compiled in this build",
-            "MetalImpl::flash_attention",
-        ))
-    }
-
-    pub fn device_info(&self) -> Result<String> {
-        Ok("Metal backend not compiled".to_string())
-    }
-}
-
-// Mock MPS and Metal modules for when feature is not enabled
-#[cfg(not(feature = "metal"))]
-mod metal {
-    pub struct Device;
-    pub struct CommandQueue;
-    pub struct Library;
-    pub struct MTLResourceOptions;
-    pub struct MTLSize;
-
-    impl Device {
-        pub fn system_default() -> Option<Self> {
-            None
-        }
-        pub fn name(&self) -> &str {
-            "Mock"
-        }
-        pub fn recommended_max_working_set_size(&self) -> u64 {
-            0
-        }
-        pub fn supports_feature_set(&self, _: MTLFeatureSet) -> bool {
-            false
-        }
-        pub fn new_command_queue(&self) -> CommandQueue {
-            CommandQueue
-        }
-        pub fn new_library_with_source(
-            &self,
-            _: &str,
-            _: &CompileOptions,
-        ) -> Result<Library, String> {
-            Err("Not supported".to_string())
-        }
-        pub fn new_buffer(&self, _: u64, _: MTLResourceOptions) -> metal::Buffer {
-            metal::Buffer
-        }
-        pub fn new_compute_pipeline_state_with_function(
-            &self,
-            _: &Function,
-        ) -> Result<ComputePipelineState, String> {
-            Err("Not supported".to_string())
-        }
-        pub fn max_threads_per_threadgroup(&self) -> MTLSize {
-            MTLSize::new(0, 0, 0)
-        }
-    }
-
-    impl CommandQueue {
-        pub fn new_command_buffer(&self) -> CommandBuffer {
-            CommandBuffer
-        }
-    }
-
-    pub struct CommandBuffer;
-    impl CommandBuffer {
-        pub fn new_compute_command_encoder(&self) -> ComputeCommandEncoder {
-            ComputeCommandEncoder
-        }
-        pub fn commit(&self) {}
-        pub fn wait_until_completed(&self) {}
-    }
-
-    pub struct ComputeCommandEncoder;
-    impl ComputeCommandEncoder {
-        pub fn set_compute_pipeline_state(&self, _: &ComputePipelineState) {}
-        pub fn set_buffer(&self, _: u32, _: Option<&Buffer>, _: u64) {}
-        pub fn set_bytes(&self, _: u32, _: u64, _: &u32) {}
-        pub fn dispatch_thread_groups(&self, _: MTLSize, _: MTLSize) {}
-        pub fn end_encoding(&self) {}
-    }
-
-    pub struct Buffer;
-    pub struct Function;
-    pub struct ComputePipelineState;
-    pub struct CompileOptions;
-    pub enum MTLFeatureSet {
-        macOS_GPUFamily2_v1,
-        iOS_GPUFamily4_v1,
-    }
-
-    impl CompileOptions {
-        pub fn new() -> Self {
-            CompileOptions
-        }
-    }
-
-    impl MTLSize {
-        pub fn new(_: usize, _: usize, _: usize) -> Self {
-            MTLSize
-        }
-        pub fn width(&self) -> usize {
-            0
-        }
-    }
-}
-
-#[cfg(not(feature = "metal"))]
-mod mps {
-    use std::collections::HashMap;
-
-    pub struct MPSGraph;
-    pub struct MPSGraphTensorData;
-    pub enum MPSDataType {
-        Float32,
-    }
-
-    impl MPSGraph {
-        pub fn new() -> Self {
-            MPSGraph
-        }
-        pub fn placeholder(&self, _: &[u64], _: MPSDataType, _: &str) -> MPSGraphTensorData {
-            MPSGraphTensorData
-        }
-        pub fn matrix_multiplication(
-            &self,
-            _: &MPSGraphTensorData,
-            _: &MPSGraphTensorData,
-            _: &str,
-        ) -> MPSGraphTensorData {
-            MPSGraphTensorData
-        }
-        pub fn run_async(
-            &self,
-            _: &metal::CommandBuffer,
-            _: &HashMap<String, metal::Buffer>,
-            _: &[(String, MPSGraphTensorData)],
-        ) -> Result<HashMap<String, metal::Buffer>, crate::errors::TrustformersError> {
-            Err(crate::errors::TrustformersError::hardware_error(
-                "Not supported",
-                "mock",
-            ))
-        }
-    }
-
-    impl MPSGraphTensorData {
-        pub fn new(_: &metal::Device, _: &[u64], _: MPSDataType) -> Self {
-            MPSGraphTensorData
-        }
     }
 }
 
@@ -892,7 +720,6 @@ trait TensorMetalExt {
 }
 
 impl TensorMetalExt for Tensor {
-    #[cfg(all(target_os = "macos", feature = "metal"))]
     fn to_metal_buffer(&self, device: &metal::Device) -> Result<metal::Buffer> {
         let data = self.data()?;
         let buffer = device.new_buffer_with_data(
@@ -903,28 +730,11 @@ impl TensorMetalExt for Tensor {
         Ok(buffer)
     }
 
-    #[cfg(not(feature = "metal"))]
-    fn to_metal_buffer(&self, _device: &metal::Device) -> Result<metal::Buffer> {
-        Err(TrustformersError::hardware_error(
-            "Metal backend not compiled",
-            "TensorMetalExt::to_metal_buffer",
-        ))
-    }
-
-    #[cfg(all(target_os = "macos", feature = "metal"))]
     fn from_metal_buffer(buffer: &metal::Buffer, shape: &[usize]) -> Result<Tensor> {
         let data_ptr = buffer.contents() as *const f32;
         let len = shape.iter().product::<usize>();
         let data = unsafe { std::slice::from_raw_parts(data_ptr, len) };
         Tensor::from_slice(data, shape)
-    }
-
-    #[cfg(not(feature = "metal"))]
-    fn from_metal_buffer(_buffer: &metal::Buffer, _shape: &[usize]) -> Result<Tensor> {
-        Err(TrustformersError::hardware_error(
-            "Metal backend not compiled",
-            "TensorMetalExt::from_metal_buffer",
-        ))
     }
 }
 
@@ -947,21 +757,171 @@ mod tests {
         assert!(!info.is_empty());
     }
 
+    /// Regression: this asserted only the output *shape*, so a kernel returning
+    /// arbitrary numbers passed. Check the values against the closed-form product.
     #[cfg(all(target_os = "macos", feature = "metal"))]
     #[test]
     fn test_matrix_multiply() {
         let metal_impl = MetalImpl::new().expect("operation failed in test");
 
+        // A = [[1,2],[3,4]], B = [[5,6],[7,8]] -> A@B = [[19,22],[43,50]]
         let a =
             Tensor::from_slice(&[1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("tensor operation failed");
         let b =
             Tensor::from_slice(&[5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("tensor operation failed");
 
-        let result = metal_impl.matrix_multiply(&a, &b);
-        assert!(result.is_ok());
-
-        let result_tensor = result.expect("tensor operation failed");
+        let result_tensor = metal_impl.matrix_multiply(&a, &b).expect("matmul failed");
         assert_eq!(result_tensor.shape(), &[2, 2]);
+        let actual = result_tensor.data_f32().expect("tensor operation failed");
+        for (got, want) in actual.iter().zip([19.0f32, 22.0, 43.0, 50.0].iter()) {
+            assert!(
+                (got - want).abs() < 1e-4,
+                "GPU matmul {actual:?} != [19, 22, 43, 50]"
+            );
+        }
+    }
+
+    /// Regression: `matrix_multiply` accepted any tensor with `shape().len() >= 2`,
+    /// took the trailing two dims and dropped the batch dimensions - a 3-D input got
+    /// a numerically wrong 2-D answer and no error. It must refuse instead.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[test]
+    fn matrix_multiply_rejects_batched_inputs_instead_of_flattening() {
+        let metal_impl = MetalImpl::new().expect("operation failed in test");
+        let a = Tensor::from_slice(&[1.0; 8], &[2, 2, 2]).expect("tensor operation failed");
+        let b = Tensor::from_slice(&[1.0; 4], &[2, 2]).expect("tensor operation failed");
+        let error = metal_impl
+            .matrix_multiply(&a, &b)
+            .expect_err("a 3-D operand must be rejected, not silently flattened");
+        let rendered = format!("{error}");
+        assert!(
+            rendered.contains("single 2-D GEMM"),
+            "error must explain the kernel's real limitation, got: {rendered}"
+        );
+    }
+
+    /// GELU had no correctness test at all; assert against the same tanh
+    /// approximation the kernel implements.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[test]
+    fn gelu_matches_the_tanh_approximation() {
+        fn reference(x: f32) -> f32 {
+            let inner = 0.7978845608_f32 * (x + 0.044715 * x * x * x);
+            0.5 * x * (1.0 + inner.tanh())
+        }
+
+        let metal_impl = MetalImpl::new().expect("operation failed in test");
+        let inputs: Vec<f32> = vec![-3.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 4.0];
+        let tensor = Tensor::from_slice(&inputs, &[inputs.len()]).expect("tensor operation failed");
+        let out = metal_impl.gelu(&tensor).expect("gelu failed");
+        assert_eq!(out.shape(), &[inputs.len()]);
+        let actual = out.data_f32().expect("tensor operation failed");
+        for (index, (got, x)) in actual.iter().zip(inputs.iter()).enumerate() {
+            let want = reference(*x);
+            assert!(
+                (got - want).abs() < 1e-5,
+                "gelu[{index}] (x={x}): GPU {got} vs reference {want}"
+            );
+        }
+        // Shape properties a constant or pass-through kernel would violate:
+        // GELU(0) == 0 exactly, GELU is strictly increasing for x >= 0, and it dips
+        // negative on (-inf, 0) with a minimum near x = -0.75 (it is NOT monotone).
+        assert!(
+            actual[3].abs() < 1e-6,
+            "GELU(0) must be 0, got {}",
+            actual[3]
+        );
+        assert!(
+            actual[4..].windows(2).all(|pair| pair[1] > pair[0]),
+            "GELU must be strictly increasing for x >= 0, got {:?}",
+            &actual[3..]
+        );
+        assert!(
+            actual[1] < 0.0 && actual[2] < 0.0,
+            "GELU(-1) and GELU(-0.5) must be negative, got {} and {}",
+            actual[1],
+            actual[2]
+        );
+        assert!(
+            actual[1] < actual[2],
+            "GELU's minimum lies near x = -0.75, so GELU(-1) < GELU(-0.5); got {} vs {}",
+            actual[1],
+            actual[2]
+        );
+    }
+
+    /// `flash_attention` had no correctness test. Compare it against a CPU
+    /// reference implementation of softmax(QK^T/sqrt(d)) @ V.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[test]
+    fn flash_attention_matches_cpu_reference() {
+        let metal_impl = MetalImpl::new().expect("operation failed in test");
+        let (batch, seq, dim) = (1usize, 3usize, 2usize);
+        let q: Vec<f32> = vec![0.1, -0.2, 0.3, 0.4, -0.5, 0.6];
+        let k: Vec<f32> = vec![0.7, 0.1, -0.3, 0.2, 0.5, -0.4];
+        let v: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+
+        let q_t = Tensor::from_slice(&q, &[batch, seq, dim]).expect("tensor");
+        let k_t = Tensor::from_slice(&k, &[batch, seq, dim]).expect("tensor");
+        let v_t = Tensor::from_slice(&v, &[batch, seq, dim]).expect("tensor");
+        let mut out = Tensor::zeros(&[batch, seq, dim]).expect("tensor");
+        metal_impl
+            .flash_attention(&q_t, &k_t, &v_t, &mut out)
+            .expect("flash attention failed");
+        let actual = out.data_f32().expect("tensor operation failed");
+
+        // CPU reference.
+        let scale = 1.0f32 / (dim as f32).sqrt();
+        let mut expected = vec![0.0f32; seq * dim];
+        for row in 0..seq {
+            let mut scores = vec![0.0f32; seq];
+            let mut max_score = f32::NEG_INFINITY;
+            for (col, score) in scores.iter_mut().enumerate() {
+                let mut dot = 0.0f32;
+                for d in 0..dim {
+                    dot += q[row * dim + d] * k[col * dim + d];
+                }
+                *score = dot * scale;
+                max_score = max_score.max(*score);
+            }
+            let mut sum = 0.0f32;
+            for score in scores.iter_mut() {
+                *score = (*score - max_score).exp();
+                sum += *score;
+            }
+            for d in 0..dim {
+                let mut acc = 0.0f32;
+                for (col, score) in scores.iter().enumerate() {
+                    acc += (score / sum) * v[col * dim + d];
+                }
+                expected[row * dim + d] = acc;
+            }
+        }
+
+        for (index, (got, want)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-4,
+                "flash_attention[{index}]: GPU {got} vs CPU reference {want} \
+                 (full GPU {actual:?} vs reference {expected:?})"
+            );
+        }
+    }
+
+    /// The kernel's `float scores[1024]` array bounds the sequence length; anything
+    /// longer must error rather than overrun it.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[test]
+    fn flash_attention_rejects_sequences_past_the_kernel_limit() {
+        let metal_impl = MetalImpl::new().expect("operation failed in test");
+        let (batch, seq, dim) = (1usize, 1025usize, 2usize);
+        let q = Tensor::zeros(&[batch, 1, dim]).expect("tensor");
+        let k = Tensor::zeros(&[batch, seq, dim]).expect("tensor");
+        let v = Tensor::zeros(&[batch, seq, dim]).expect("tensor");
+        let mut out = Tensor::zeros(&[batch, 1, dim]).expect("tensor");
+        let error = metal_impl
+            .flash_attention(&q, &k, &v, &mut out)
+            .expect_err("seq_k = 1025 exceeds the kernel's scores[1024] array");
+        assert!(format!("{error}").contains("1024"));
     }
 
     #[cfg(all(target_os = "macos", feature = "metal"))]

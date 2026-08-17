@@ -69,7 +69,7 @@ impl Plugin for TextProcessorPlugin {
             });
         }
 
-        let start_time = std::time::Instant::now();
+        let start_time = js_sys::Date::now();
         let mut result_data = HashMap::new();
 
         // Get input text from context
@@ -94,7 +94,7 @@ impl Plugin for TextProcessorPlugin {
         );
         result_data.insert("processing_mode".to_string(), processing_mode.clone());
 
-        let execution_time = start_time.elapsed().as_millis() as f64;
+        let execution_time = js_sys::Date::now() - start_time;
 
         Ok(PluginResult {
             success: true,
@@ -186,7 +186,7 @@ impl Plugin for ModelOptimizerPlugin {
             });
         }
 
-        let start_time = std::time::Instant::now();
+        let start_time = js_sys::Date::now();
         let mut result_data = HashMap::new();
 
         // Simulate model optimization based on level
@@ -241,7 +241,7 @@ impl Plugin for ModelOptimizerPlugin {
             result_data.insert("model_type".to_string(), metadata.model_type.clone());
         }
 
-        let execution_time = start_time.elapsed().as_millis() as f64;
+        let execution_time = js_sys::Date::now() - start_time;
 
         Ok(PluginResult {
             success: true,
@@ -329,7 +329,7 @@ impl Plugin for VisualizationPlugin {
             });
         }
 
-        let start_time = std::time::Instant::now();
+        let start_time = js_sys::Date::now();
         let mut result_data = HashMap::new();
 
         // Generate mock chart data based on chart type
@@ -348,7 +348,7 @@ impl Plugin for VisualizationPlugin {
         result_data.insert("width".to_string(), "800".to_string());
         result_data.insert("height".to_string(), "600".to_string());
 
-        let execution_time = start_time.elapsed().as_millis() as f64;
+        let execution_time = js_sys::Date::now() - start_time;
 
         Ok(PluginResult {
             success: true,

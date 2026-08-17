@@ -70,8 +70,13 @@ pub struct MemoryAnalysis {
     pub allocation_patterns: Vec<AllocationPattern>,
     /// Memory reuse opportunities
     pub reuse_opportunities: Vec<ReuseOpportunity>,
-    /// Memory fragmentation analysis
-    pub fragmentation_analysis: FragmentationAnalysis,
+    /// Memory fragmentation analysis, when it can be produced.
+    ///
+    /// Always `None` from static graph analysis: fragmentation is a property of
+    /// a running allocator. It is `None` rather than a plausible-looking
+    /// default so a caller cannot mistake "not analysed" for "no
+    /// fragmentation".
+    pub fragmentation_analysis: Option<FragmentationAnalysis>,
 }
 
 /// Memory snapshot at a point in execution
@@ -146,8 +151,11 @@ pub struct DependencyAnalysis {
     pub connected_components: Vec<Vec<usize>>,
     /// Data flow dependencies
     pub data_dependencies: Vec<Dependency>,
-    /// Loop analysis
-    pub loop_analysis: LoopAnalysis,
+    /// Loop analysis, when the IR has loops to analyse.
+    ///
+    /// Always `None` for this compiler's IR, which is a DAG of tensor
+    /// operations with no loop constructs.
+    pub loop_analysis: Option<LoopAnalysis>,
     /// Parallelization analysis
     pub parallelization: ParallelizationAnalysis,
 }
@@ -348,7 +356,8 @@ impl GraphAnalyzer {
 
         let allocation_patterns = self.analyze_allocation_patterns(graph)?;
         let reuse_opportunities = self.find_reuse_opportunities(graph)?;
-        let fragmentation_analysis = self.analyze_fragmentation(graph)?;
+        // Fragmentation needs a live allocator; `None` records that honestly.
+        let fragmentation_analysis = self.analyze_fragmentation(graph).ok();
 
         Ok(MemoryAnalysis {
             peak_memory_usage: peak_memory,
@@ -367,7 +376,8 @@ impl GraphAnalyzer {
         let topological_order = self.topological_sort(graph)?;
         let connected_components = self.find_connected_components(graph)?;
         let data_dependencies = self.analyze_data_dependencies(graph)?;
-        let loop_analysis = self.analyze_loops(graph)?;
+        // The IR has no loops; `None` records that rather than an empty result.
+        let loop_analysis = self.analyze_loops(graph).ok();
         let parallelization = self.analyze_parallelization(graph)?;
 
         Ok(DependencyAnalysis {
@@ -791,81 +801,493 @@ impl GraphAnalyzer {
         Ok(result)
     }
 
-    /// Placeholder implementations for other analysis methods
+    /// Weakly connected components of the graph.
+    ///
+    /// Nodes are grouped by reachability treating edges as undirected, via
+    /// union-find. Components that share no data can be scheduled or placed
+    /// independently.
     fn find_connected_components(
         &self,
-        _graph: &ComputationGraph,
+        graph: &ComputationGraph,
     ) -> Result<Vec<Vec<usize>>, TrustformersError> {
-        Ok(Vec::new()) // Simplified implementation
+        let node_count = graph.nodes.len();
+        if node_count == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Map node ids to dense indices; ids need not be 0..n.
+        let index_of: HashMap<usize, usize> =
+            graph.nodes.iter().enumerate().map(|(index, node)| (node.id, index)).collect();
+
+        let mut parent: Vec<usize> = (0..node_count).collect();
+
+        fn find(parent: &mut [usize], mut node: usize) -> usize {
+            while parent[node] != node {
+                // Path halving keeps the tree shallow.
+                parent[node] = parent[parent[node]];
+                node = parent[node];
+            }
+            node
+        }
+
+        for edge in &graph.edges {
+            let (Some(&from), Some(&to)) = (index_of.get(&edge.from), index_of.get(&edge.to))
+            else {
+                continue;
+            };
+            let root_from = find(&mut parent, from);
+            let root_to = find(&mut parent, to);
+            if root_from != root_to {
+                parent[root_to] = root_from;
+            }
+        }
+
+        let mut components: HashMap<usize, Vec<usize>> = HashMap::new();
+        for index in 0..node_count {
+            let root = find(&mut parent, index);
+            components.entry(root).or_default().push(graph.nodes[index].id);
+        }
+
+        let mut result: Vec<Vec<usize>> = components.into_values().collect();
+        for component in &mut result {
+            component.sort_unstable();
+        }
+        // Stable order so repeated analyses of the same graph agree.
+        result.sort_by(|a, b| a.first().cmp(&b.first()));
+        Ok(result)
     }
 
+    /// Data-flow dependencies, one per graph edge.
+    ///
+    /// `data_size` is the size of the tensor the edge carries, computed from
+    /// the producer's declared output shape (4 bytes per element, f32).
+    /// `latency_impact` is the producer's declared compute cost: the consumer
+    /// cannot start until that work finishes.
     fn analyze_data_dependencies(
         &self,
-        _graph: &ComputationGraph,
+        graph: &ComputationGraph,
     ) -> Result<Vec<Dependency>, TrustformersError> {
-        Ok(Vec::new()) // Simplified implementation
+        let node_by_id: HashMap<usize, &GraphNode> =
+            graph.nodes.iter().map(|node| (node.id, node)).collect();
+
+        let mut dependencies = Vec::with_capacity(graph.edges.len());
+        for edge in &graph.edges {
+            let Some(producer) = node_by_id.get(&edge.from) else {
+                continue;
+            };
+
+            let data_size = producer
+                .output_shapes
+                .get(edge.output_idx)
+                .map(|shape| shape.iter().product::<usize>() as u64 * 4)
+                .unwrap_or(0);
+
+            dependencies.push(Dependency {
+                from: edge.from,
+                to: edge.to,
+                dependency_type: DependencyType::DataFlow,
+                data_size,
+                latency_impact: producer.compute_cost,
+            });
+        }
+
+        Ok(dependencies)
     }
 
+    /// Loop analysis.
+    ///
+    /// Not implemented: the compiler IR is a DAG of tensor operations with no
+    /// loop constructs, so there is nothing to detect. Returning an all-empty
+    /// `LoopAnalysis` would be indistinguishable from "analysed and found
+    /// none".
     fn analyze_loops(&self, _graph: &ComputationGraph) -> Result<LoopAnalysis, TrustformersError> {
-        Ok(LoopAnalysis {
-            detected_loops: Vec::new(),
-            loop_carried_dependencies: Vec::new(),
-            vectorization_opportunities: Vec::new(),
-        })
+        Err(TrustformersError::not_implemented(
+            "loop analysis: the compiler IR has no loop constructs to analyse".to_string(),
+        ))
     }
 
+    /// Parallelization analysis derived from the graph's real structure.
+    ///
+    /// Independent components can run in parallel; the load balance is measured
+    /// from their declared compute costs. Communication figures are left at
+    /// zero with an explicit recommendation, because this analyser has no
+    /// placement or network model to derive them from.
     fn analyze_parallelization(
         &self,
-        _graph: &ComputationGraph,
+        graph: &ComputationGraph,
     ) -> Result<ParallelizationAnalysis, TrustformersError> {
+        let components = self.find_connected_components(graph)?;
+        let cost_of: HashMap<usize, f64> =
+            graph.nodes.iter().map(|node| (node.id, node.compute_cost)).collect();
+
+        let mut parallel_regions = Vec::with_capacity(components.len());
+        let mut work_distribution = Vec::with_capacity(components.len());
+
+        for component in &components {
+            let work: f64 = component.iter().filter_map(|id| cost_of.get(id)).copied().sum();
+            work_distribution.push(work);
+
+            parallel_regions.push(ParallelRegion {
+                operations: component.clone(),
+                parallelism_type: ParallelismType::TaskParallel,
+                // Independent components run concurrently; the speedup a region
+                // contributes is bounded by its share of the total work.
+                estimated_speedup: 1.0,
+                resource_requirements: ResourceRequirements {
+                    // One thread per region is the only requirement the graph
+                    // itself implies; thread counts and bandwidth need a
+                    // hardware model this analyser does not have.
+                    min_threads: 1,
+                    optimal_threads: 1,
+                    memory_per_thread: component
+                        .iter()
+                        .filter_map(|id| graph.nodes.iter().find(|node| node.id == *id))
+                        .map(|node| node.memory_cost as u64)
+                        .sum(),
+                    communication_bandwidth: 0.0,
+                },
+            });
+        }
+
+        // Balance score: 1.0 when every region carries equal work, falling to
+        // 0 as one region dominates. Undefined for a single region.
+        let total_work: f64 = work_distribution.iter().sum();
+        let balance_score = if work_distribution.len() < 2 || total_work <= 0.0 {
+            1.0
+        } else {
+            let mean = total_work / work_distribution.len() as f64;
+            let max_deviation =
+                work_distribution.iter().map(|work| (work - mean).abs()).fold(0.0f64, f64::max);
+            (1.0 - max_deviation / total_work).clamp(0.0, 1.0)
+        };
+
+        let mut recommendations = Vec::new();
+        if work_distribution.len() > 1 && balance_score < 0.8 {
+            recommendations.push(format!(
+                "work is unevenly distributed across {} independent regions (balance {:.2})",
+                work_distribution.len(),
+                balance_score
+            ));
+        }
+        recommendations.push(
+            "communication volume and network utilization are not modelled by this analyser"
+                .to_string(),
+        );
+
         Ok(ParallelizationAnalysis {
-            parallel_regions: Vec::new(),
+            parallel_regions,
             synchronization_points: Vec::new(),
             load_balance_analysis: LoadBalanceAnalysis {
-                balance_score: 0.8,
-                work_distribution: Vec::new(),
-                synchronization_overhead: 0.1,
-                recommendations: Vec::new(),
+                balance_score,
+                work_distribution,
+                // No synchronization model exists, so no overhead is claimed.
+                synchronization_overhead: 0.0,
+                recommendations,
             },
             communication_analysis: CommunicationAnalysis {
-                communication_volume: 0,
+                communication_volume: graph
+                    .edges
+                    .iter()
+                    .filter_map(|edge| {
+                        let producer = graph.nodes.iter().find(|node| node.id == edge.from)?;
+                        producer
+                            .output_shapes
+                            .get(edge.output_idx)
+                            .map(|shape| shape.iter().product::<usize>() as u64 * 4)
+                    })
+                    .sum(),
                 communication_patterns: Vec::new(),
-                network_utilization: 0.5,
-                latency_sensitivity: 0.3,
+                // No placement or network model: these are not estimated.
+                network_utilization: 0.0,
+                latency_sensitivity: 0.0,
             },
         })
     }
 
+    /// Allocation patterns, one per distinct tensor the graph produces.
+    ///
+    /// A tensor consumed exactly once is `Temporary` (it can be freed straight
+    /// after its consumer); one consumed several times is `LongLived`; one with
+    /// no consumer is a graph output and therefore `LongLived` too.
     fn analyze_allocation_patterns(
         &self,
-        _graph: &ComputationGraph,
+        graph: &ComputationGraph,
     ) -> Result<Vec<AllocationPattern>, TrustformersError> {
-        Ok(Vec::new()) // Simplified implementation
+        let mut consumers: HashMap<(usize, usize), usize> = HashMap::new();
+        for edge in &graph.edges {
+            *consumers.entry((edge.from, edge.output_idx)).or_insert(0) += 1;
+        }
+
+        let mut temporary_total = 0u64;
+        let mut temporary_count = 0usize;
+        let mut long_lived_total = 0u64;
+        let mut long_lived_count = 0usize;
+
+        for node in &graph.nodes {
+            for (output_idx, shape) in node.output_shapes.iter().enumerate() {
+                let size = shape.iter().product::<usize>() as u64 * 4;
+                match consumers.get(&(node.id, output_idx)).copied().unwrap_or(0) {
+                    1 => {
+                        temporary_total += size;
+                        temporary_count += 1;
+                    },
+                    _ => {
+                        long_lived_total += size;
+                        long_lived_count += 1;
+                    },
+                }
+            }
+        }
+
+        let mut patterns = Vec::new();
+        if temporary_count > 0 {
+            patterns.push(AllocationPattern {
+                pattern_type: AllocationType::Temporary,
+                frequency: temporary_count,
+                total_size: temporary_total,
+                // Single-use tensors are exactly the ones a reuse pass can
+                // fold into their consumer's buffer.
+                optimization_potential: 1.0,
+            });
+        }
+        if long_lived_count > 0 {
+            patterns.push(AllocationPattern {
+                pattern_type: AllocationType::LongLived,
+                frequency: long_lived_count,
+                total_size: long_lived_total,
+                optimization_potential: 0.0,
+            });
+        }
+
+        Ok(patterns)
     }
 
+    /// Buffer-reuse opportunities.
+    ///
+    /// A tensor with exactly one consumer can share that consumer's output
+    /// buffer when the shapes match, saving its allocation.
     fn find_reuse_opportunities(
         &self,
-        _graph: &ComputationGraph,
+        graph: &ComputationGraph,
     ) -> Result<Vec<ReuseOpportunity>, TrustformersError> {
-        Ok(Vec::new()) // Simplified implementation
+        let node_by_id: HashMap<usize, &GraphNode> =
+            graph.nodes.iter().map(|node| (node.id, node)).collect();
+
+        let mut consumers: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+        for edge in &graph.edges {
+            consumers.entry((edge.from, edge.output_idx)).or_default().push(edge.to);
+        }
+
+        let mut opportunities = Vec::new();
+        for ((producer_id, output_idx), consumer_ids) in &consumers {
+            if consumer_ids.len() != 1 {
+                continue;
+            }
+            let Some(producer) = node_by_id.get(producer_id) else {
+                continue;
+            };
+            let Some(shape) = producer.output_shapes.get(*output_idx) else {
+                continue;
+            };
+            let Some(consumer) = node_by_id.get(&consumer_ids[0]) else {
+                continue;
+            };
+
+            // In-place reuse requires the consumer to produce the same shape.
+            if !consumer.output_shapes.iter().any(|candidate| candidate == shape) {
+                continue;
+            }
+
+            opportunities.push(ReuseOpportunity {
+                tensor_id: *producer_id,
+                reusable_with: consumer_ids.clone(),
+                memory_savings: shape.iter().product::<usize>() as u64 * 4,
+                implementation_complexity: ComplexityLevel::Low,
+            });
+        }
+
+        opportunities.sort_by_key(|opportunity| opportunity.tensor_id);
+        Ok(opportunities)
     }
 
+    /// Memory fragmentation analysis.
+    ///
+    /// Not implemented: fragmentation is a property of a running allocator, and
+    /// this analyser sees only a static graph. Reporting a 0.1 fragmentation
+    /// ratio and 90% allocation efficiency for every graph — as this used to —
+    /// gave optimisation decisions a number that described nothing.
     fn analyze_fragmentation(
         &self,
         _graph: &ComputationGraph,
     ) -> Result<FragmentationAnalysis, TrustformersError> {
-        Ok(FragmentationAnalysis {
-            fragmentation_ratio: 0.1,
-            largest_free_block: 1024 * 1024 * 1024, // 1GB
-            allocation_efficiency: 0.9,
-            defragmentation_potential: 0.05,
-        })
+        Err(TrustformersError::not_implemented(
+            "memory fragmentation analysis: fragmentation is a runtime allocator property and \
+             cannot be derived from a static graph"
+                .to_string(),
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a graph with two independent chains, so the analysis has real
+    /// structure to find: 0 -> 1, and a disconnected 2.
+    fn two_component_graph() -> ComputationGraph {
+        let node = |id: usize, cost: f64, out: Vec<usize>| GraphNode {
+            id,
+            op_type: "matmul".to_string(),
+            attributes: HashMap::new(),
+            input_shapes: vec![],
+            output_shapes: vec![out],
+            compute_cost: cost,
+            memory_cost: 16.0,
+        };
+
+        ComputationGraph {
+            nodes: vec![
+                node(0, 10.0, vec![2, 2]),
+                node(1, 5.0, vec![2, 2]),
+                node(2, 1.0, vec![4]),
+            ],
+            edges: vec![crate::compiler::GraphEdge {
+                from: 0,
+                to: 1,
+                output_idx: 0,
+                input_idx: 0,
+                shape: vec![2, 2],
+                dtype: "f32".to_string(),
+            }],
+            metadata: HashMap::new(),
+        }
+    }
+
+    /// Regression test: `find_connected_components` returned `Vec::new()` for
+    /// every graph, and `analyze_data_dependencies` likewise.
+    #[test]
+    fn test_dependency_analysis_reflects_the_real_graph() {
+        let mut analyzer = GraphAnalyzer::new(HardwareTarget::default());
+        let graph = two_component_graph();
+
+        let analysis = analyzer.analyze_dependencies(&graph).expect("analysis failed");
+
+        // Two components: {0, 1} and {2}.
+        assert_eq!(analysis.connected_components.len(), 2);
+        assert!(analysis.connected_components.contains(&vec![0, 1]));
+        assert!(analysis.connected_components.contains(&vec![2]));
+
+        // One edge, one data dependency, sized from the producer's shape.
+        assert_eq!(analysis.data_dependencies.len(), 1);
+        let dependency = &analysis.data_dependencies[0];
+        assert_eq!(dependency.from, 0);
+        assert_eq!(dependency.to, 1);
+        assert_eq!(
+            dependency.data_size,
+            2 * 2 * 4,
+            "a 2x2 f32 tensor is 16 bytes"
+        );
+        assert!((dependency.latency_impact - 10.0).abs() < 1e-9);
+
+        // The IR has no loops, and that is recorded as "not analysed".
+        assert!(
+            analysis.loop_analysis.is_none(),
+            "an all-empty LoopAnalysis would look like a completed analysis"
+        );
+    }
+
+    /// Regression test: `analyze_parallelization` returned a fixed
+    /// `balance_score: 0.8`, `synchronization_overhead: 0.1`,
+    /// `network_utilization: 0.5` and `latency_sensitivity: 0.3`.
+    #[test]
+    fn test_parallelization_metrics_are_measured_from_the_graph() {
+        let mut analyzer = GraphAnalyzer::new(HardwareTarget::default());
+        let graph = two_component_graph();
+
+        let analysis = analyzer.analyze_dependencies(&graph).expect("analysis failed");
+        let parallelization = &analysis.parallelization;
+
+        assert_eq!(parallelization.parallel_regions.len(), 2);
+        // Component {0,1} carries 15 units of work, {2} carries 1.
+        let mut work = parallelization.load_balance_analysis.work_distribution.clone();
+        work.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+        assert!((work[0] - 1.0).abs() < 1e-9, "got {work:?}");
+        assert!((work[1] - 15.0).abs() < 1e-9, "got {work:?}");
+
+        let balance = parallelization.load_balance_analysis.balance_score;
+        assert_ne!(balance, 0.8, "the hardcoded balance score must be gone");
+        assert!(
+            balance < 0.6,
+            "a 15:1 split is badly balanced, got {balance}"
+        );
+
+        // Nothing models synchronization or the network, so nothing is claimed.
+        assert_eq!(
+            parallelization.load_balance_analysis.synchronization_overhead,
+            0.0
+        );
+        assert_eq!(
+            parallelization.communication_analysis.network_utilization,
+            0.0
+        );
+        assert_eq!(
+            parallelization.communication_analysis.latency_sensitivity,
+            0.0
+        );
+        // Communication volume *is* derivable: the single 16-byte edge.
+        assert_eq!(
+            parallelization.communication_analysis.communication_volume,
+            16
+        );
+    }
+
+    /// Regression test: `analyze_allocation_patterns` and
+    /// `find_reuse_opportunities` returned empty vectors, and
+    /// `analyze_fragmentation` returned a fixed 0.1/1GB/0.9 result.
+    #[test]
+    fn test_memory_analysis_reflects_the_real_graph() {
+        let mut analyzer = GraphAnalyzer::new(HardwareTarget::default());
+        let graph = two_component_graph();
+
+        let analysis = analyzer.analyze_memory(&graph).expect("analysis failed");
+
+        // Node 0's output is consumed once (temporary); nodes 1 and 2 produce
+        // graph outputs (long-lived).
+        assert!(!analysis.allocation_patterns.is_empty());
+        let temporary = analysis
+            .allocation_patterns
+            .iter()
+            .find(|pattern| matches!(pattern.pattern_type, AllocationType::Temporary))
+            .expect("the single-use tensor must be classified temporary");
+        assert_eq!(temporary.frequency, 1);
+        assert_eq!(temporary.total_size, 16);
+
+        // Node 0's 2x2 output can reuse node 1's 2x2 output buffer.
+        assert_eq!(analysis.reuse_opportunities.len(), 1);
+        assert_eq!(analysis.reuse_opportunities[0].tensor_id, 0);
+        assert_eq!(analysis.reuse_opportunities[0].memory_savings, 16);
+
+        assert!(
+            analysis.fragmentation_analysis.is_none(),
+            "fragmentation cannot be derived from a static graph and must not be invented"
+        );
+    }
+
+    /// An empty graph yields empty analyses, not invented ones.
+    #[test]
+    fn test_empty_graph_analyses_are_empty() {
+        let mut analyzer = GraphAnalyzer::new(HardwareTarget::default());
+        let graph = ComputationGraph {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            metadata: HashMap::new(),
+        };
+
+        let dependencies = analyzer.analyze_dependencies(&graph).expect("analysis failed");
+        assert!(dependencies.connected_components.is_empty());
+        assert!(dependencies.data_dependencies.is_empty());
+        assert!(dependencies.parallelization.parallel_regions.is_empty());
+    }
     use crate::compiler::{ComputationGraph, GraphNode, HardwareTarget};
 
     fn create_test_graph() -> ComputationGraph {

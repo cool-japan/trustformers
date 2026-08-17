@@ -55,7 +55,7 @@ impl HealthChecker {
             SimplifiedDebugResult::Standard { health, .. } => health.score,
             SimplifiedDebugResult::Deep(report) => {
                 let summary = report.summary();
-                100.0 - (summary.critical_issues as f64 * 20.0 + summary.total_issues as f64 * 5.0)
+                Self::health_score_from_counts(summary.critical_issues, summary.total_issues)
             },
             SimplifiedDebugResult::Production(anomaly) => {
                 100.0 - (anomaly.anomaly_count as f64 * 10.0)
@@ -225,15 +225,30 @@ impl HealthChecker {
         format!("{:x}", hasher.finish())
     }
 
-    /// Convert report to CSV format
-    fn report_to_csv(_report: &crate::DebugReport) -> Result<String> {
-        // Simple CSV conversion - in a real implementation this would be more sophisticated
+    /// Convert report to CSV format.
+    ///
+    /// `score` and `issues` are extracted from `report.summary()` (real
+    /// tensor/gradient analysis results), using the same
+    /// issues-to-score formula as [`Self::quick_health_check`]'s `Deep`
+    /// branch -- never the fabricated `0, 0` this used to emit
+    /// unconditionally.
+    fn report_to_csv(report: &crate::DebugReport) -> Result<String> {
+        let summary = report.summary();
+        let score = Self::health_score_from_counts(summary.critical_issues, summary.total_issues);
         Ok(format!(
-            "timestamp,score,issues\n{},{},{}",
+            "timestamp,score,issues\n{},{:.1},{}",
             chrono::Utc::now().to_rfc3339(),
-            0, // Placeholder - would extract from report.summary()
-            0  // Placeholder - would extract from report.summary()
+            score,
+            summary.total_issues
         ))
+    }
+
+    /// Shared health-score formula: start at 100 and dock points per issue
+    /// found (20 per critical issue, 5 per issue overall). Used by both
+    /// [`Self::quick_health_check`] and [`Self::report_to_csv`] so the two
+    /// never drift apart.
+    fn health_score_from_counts(critical_issues: usize, total_issues: usize) -> f64 {
+        100.0 - (critical_issues as f64 * 20.0 + total_issues as f64 * 5.0)
     }
 
     /// Convert report to HTML format
@@ -260,5 +275,79 @@ impl HealthChecker {
         "#,
             serde_json::to_string_pretty(report)?
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tensor_inspector::{
+        AlertSeverity as TensorAlertSeverity, TensorAlert, TensorAlertType, TensorInspectionReport,
+    };
+    use std::collections::HashMap;
+    use uuid::Uuid;
+
+    /// Regression test for the `report_to_csv` placeholder: the old code
+    /// emitted the literal string `"0,0"` for score/issues unconditionally,
+    /// ignoring `report.summary()` entirely. A report with one real critical
+    /// (NaN) alert must now produce a real, docked score and a real issues
+    /// count -- not the old hardcoded zeros.
+    #[tokio::test]
+    async fn test_report_to_csv_reflects_real_summary_not_hardcoded_zeros() {
+        let mut session = DebugSession::new(DebugConfig::default());
+        session.start().await.expect("session should start");
+        let mut report = session.stop().await.expect("session should stop");
+
+        report.tensor_report = Some(TensorInspectionReport {
+            total_tensors: 1,
+            tensors_with_issues: 1,
+            total_memory_usage: 0,
+            alerts: vec![TensorAlert {
+                id: Uuid::new_v4(),
+                tensor_id: Uuid::new_v4(),
+                tensor_name: "test_tensor".to_string(),
+                alert_type: TensorAlertType::NaNValues,
+                severity: TensorAlertSeverity::Critical,
+                message: "NaN detected".to_string(),
+                timestamp: chrono::Utc::now(),
+            }],
+            comparisons: Vec::new(),
+            summary_stats: HashMap::new(),
+        });
+
+        let csv = HealthChecker::report_to_csv(&report).expect("csv conversion should succeed");
+        let data_row = csv.lines().nth(1).expect("csv must have a data row after the header");
+        let fields: Vec<&str> = data_row.split(',').collect();
+        assert_eq!(fields.len(), 3, "expected timestamp,score,issues columns");
+
+        let score: f64 = fields[1].parse().expect("score column must be numeric");
+        let issues: usize = fields[2].parse().expect("issues column must be numeric");
+
+        // report.summary() sees one NaN alert -> total_issues=1,
+        // critical_issues=1 -> score = 100 - (1*20 + 1*5) = 75.0.
+        assert_eq!(
+            issues, 1,
+            "issues must reflect the real NaN alert, not the old hardcoded 0"
+        );
+        assert_eq!(
+            score, 75.0,
+            "score must be computed from report.summary(), not the old hardcoded 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_report_to_csv_clean_report_has_zero_issues_and_full_score() {
+        let mut session = DebugSession::new(DebugConfig::default());
+        session.start().await.expect("session should start");
+        let report = session.stop().await.expect("session should stop");
+
+        let csv = HealthChecker::report_to_csv(&report).expect("csv conversion should succeed");
+        let data_row = csv.lines().nth(1).expect("csv must have a data row after the header");
+        let fields: Vec<&str> = data_row.split(',').collect();
+
+        let score: f64 = fields[1].parse().expect("score column must be numeric");
+        let issues: usize = fields[2].parse().expect("issues column must be numeric");
+        assert_eq!(issues, 0);
+        assert_eq!(score, 100.0);
     }
 }

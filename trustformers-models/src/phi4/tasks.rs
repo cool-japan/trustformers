@@ -45,8 +45,9 @@ impl std::error::Error for Phi4Error {}
 
 use crate::phi4::config::Phi4Config;
 use crate::phi4::model::Phi4Model;
+use crate::weight_loading::checkpoint::Checkpoint;
 use trustformers_core::{
-    errors::Result,
+    errors::{Result, TrustformersError},
     layers::Linear,
     tensor::Tensor,
     traits::{Layer, Model},
@@ -152,8 +153,52 @@ impl Model for Phi4ForCausalLM {
         self.lm_head.forward(hidden_states)
     }
 
-    fn load_pretrained(&mut self, _reader: &mut dyn std::io::Read) -> Result<()> {
-        // Stub: weight loading not implemented in this scaffold.
+    /// Load a HuggingFace `Phi4ForCausalLM` checkpoint.
+    ///
+    /// The backbone is bound through [`Phi4Model::load_checkpoint`], then the LM
+    /// head. Phi-4 ties its word embeddings by default, so a checkpoint
+    /// typically carries no `lm_head.weight` and the input embedding matrix is
+    /// reused — that is what the tied configuration means, not a fallback.
+    ///
+    /// A previous revision returned `Ok(())` under the comment "Stub: weight
+    /// loading not implemented in this scaffold", leaving the model randomly
+    /// initialised while reporting a successful load.
+    ///
+    /// # Errors
+    ///
+    /// See [`Phi4Model::load_checkpoint`]; additionally fails when the
+    /// checkpoint holds neither an LM head nor an embedding matrix to tie it to,
+    /// or when the head has the wrong shape.
+    fn load_pretrained(&mut self, reader: &mut dyn std::io::Read) -> Result<()> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        self.model.load_checkpoint(&checkpoint, &["lm_head."])?;
+
+        let config = self.model.config();
+        let expected = [config.vocab_size, config.hidden_size];
+        let head = match checkpoint.get("lm_head.weight") {
+            Some(weight) => weight,
+            None => {
+                let embed_name = if checkpoint.contains("model.embed_tokens.weight") {
+                    "model.embed_tokens.weight"
+                } else {
+                    "embed_tokens.weight"
+                };
+                checkpoint.get(embed_name).ok_or_else(|| {
+                    TrustformersError::weight_load_error(
+                        "checkpoint holds neither lm_head.weight nor an embedding matrix to tie \
+                         it to"
+                            .to_string(),
+                    )
+                })?
+            },
+        };
+        if head.shape() != expected {
+            return Err(TrustformersError::shape_error(format!(
+                "language-model head has shape {:?} but this model expects {expected:?}",
+                head.shape()
+            )));
+        }
+        self.lm_head.set_weight(head.clone())?;
         Ok(())
     }
 

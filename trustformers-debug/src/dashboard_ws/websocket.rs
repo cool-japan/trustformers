@@ -293,11 +293,11 @@ impl DashboardServer {
                         tracing::debug!("dashboard: accepted connection from {}", peer);
                         let rx = sender.subscribe();
                         tokio::spawn(handle_client(stream, rx));
-                    }
+                    },
                     Err(e) => {
                         tracing::warn!("dashboard: accept error: {}", e);
                         break;
-                    }
+                    },
                 }
             }
         });
@@ -328,15 +328,12 @@ impl DashboardServer {
 ///
 /// Reads the HTTP request line, sends back SSE headers, then streams events
 /// received on `rx` until the connection is closed.
-async fn handle_client(
-    mut stream: TcpStream,
-    mut rx: broadcast::Receiver<String>,
-) {
+async fn handle_client(mut stream: TcpStream, mut rx: broadcast::Receiver<String>) {
     // Read enough of the request to identify the path, then ignore the rest.
     let mut buf = [0u8; 512];
     match stream.read(&mut buf).await {
         Ok(0) | Err(_) => return,
-        Ok(_) => {}
+        Ok(_) => {},
     }
 
     let request = std::str::from_utf8(&buf).unwrap_or("");
@@ -370,10 +367,10 @@ async fn handle_client(
                 if stream.write_all(frame.as_bytes()).await.is_err() {
                     break;
                 }
-            }
+            },
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 tracing::warn!("dashboard client lagged by {} events", n);
-            }
+            },
             Err(broadcast::error::RecvError::Closed) => break,
         }
     }
@@ -601,7 +598,8 @@ mod tests {
             value: serde_json::json!({"key": "value"}),
         };
         let json = serde_json::to_string(&ev).expect("serialize should succeed");
-        let decoded: DashboardEvent = serde_json::from_str(&json).expect("deserialize should succeed");
+        let decoded: DashboardEvent =
+            serde_json::from_str(&json).expect("deserialize should succeed");
         if let DashboardEvent::Custom { name, .. } = decoded {
             assert_eq!(name, "my_event");
         } else {
@@ -640,12 +638,14 @@ mod tests {
         };
         let server = DashboardServer::new(cfg).expect("create server");
         for i in 0..5_u64 {
-            server.push_event(DashboardEvent::TrainingStep {
-                step: i,
-                loss: 0.5,
-                learning_rate: 1e-4,
-                throughput_tokens_per_sec: 1000.0,
-            }).expect("push should succeed");
+            server
+                .push_event(DashboardEvent::TrainingStep {
+                    step: i,
+                    loss: 0.5,
+                    learning_rate: 1e-4,
+                    throughput_tokens_per_sec: 1000.0,
+                })
+                .expect("push should succeed");
         }
         assert!(!server.event_buffer.is_empty());
     }

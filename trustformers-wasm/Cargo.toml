@@ -29,6 +29,11 @@ getrandom = { version = "0.4.3", features = ["wasm_js"] }
 console_error_panic_hook = { version = "0.1.7", optional = true }
 dlmalloc = { version = "0.2.14", features = ["global"], optional = true }
 bytemuck = { workspace = true }
+# Pure-Rust F16/BF16 <-> F32 conversion for SafeTensors weight loading.
+half = { workspace = true }
+# Pure-Rust DEFLATE (RFC 1951) for real cache/chunk compression (COOLJAPAN
+# policy forbids flate2/zstd/lz4/etc. directly; oxiarc-* is the substitute).
+oxiarc-deflate = { workspace = true }
 
 # Core web-sys features for essential functionality (full union defined in workspace root Cargo.toml)
 web-sys = { workspace = true }

@@ -27,6 +27,44 @@ use anyhow::Result;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
+/// Errors specific to [`EnvironmentalMonitor`]'s forecast-driven scheduling.
+#[derive(Debug, thiserror::Error)]
+pub enum EnvironmentalMonitorError {
+    /// [`EnvironmentalMonitor::optimize_scheduling`] needs real carbon-
+    /// intensity and energy-price forecasts, but this crate ships no
+    /// built-in grid-carbon-intensity or spot-price API client. Without a
+    /// [`ForecastSource`] attached via
+    /// [`EnvironmentalMonitor::set_forecast_source`], it honestly refuses
+    /// to schedule rather than inventing sine-wave forecast data.
+    #[error(
+        "no ForecastSource configured on this EnvironmentalMonitor (see \
+         EnvironmentalMonitor::set_forecast_source); cannot forecast carbon \
+         intensity or energy prices without one"
+    )]
+    NotConfigured,
+}
+
+/// Supplies real carbon-intensity and energy-price forecasts for
+/// [`EnvironmentalMonitor::optimize_scheduling`].
+///
+/// Implementations are expected to already hold (or synchronously look up)
+/// this data -- e.g. from a cache a caller-owned background task keeps
+/// refreshed from a real grid-carbon-intensity API (WattTime,
+/// Electricity Maps, ...) or a utility's spot-price feed -- since
+/// `EnvironmentalMonitor` performs no network I/O of its own. Without one
+/// attached, [`EnvironmentalMonitor::optimize_scheduling`] fails with
+/// [`EnvironmentalMonitorError::NotConfigured`] instead of fabricating a
+/// forecast.
+pub trait ForecastSource: std::fmt::Debug + Send + Sync {
+    /// Real carbon-intensity forecast for `region`, one entry per hour for
+    /// the next `hours` hours.
+    fn carbon_intensity_forecast(&self, region: &str, hours: usize) -> Result<Vec<CarbonForecast>>;
+    /// Real energy-price forecast for `region`, one entry per hour for the
+    /// next `hours` hours.
+    fn energy_price_forecast(&self, region: &str, hours: usize)
+        -> Result<Vec<EnergyPriceForecast>>;
+}
+
 /// Environmental impact monitor for tracking carbon footprint and energy usage
 #[derive(Debug)]
 pub struct EnvironmentalMonitor {
@@ -36,6 +74,10 @@ pub struct EnvironmentalMonitor {
     efficiency_analyzer: EfficiencyAnalyzer,
     sustainability_advisor: SustainabilityAdvisor,
     reporting_engine: EnvironmentalReportingEngine,
+    /// Real forecast data source for [`Self::optimize_scheduling`]. `None`
+    /// (the default) means scheduling optimization is unavailable -- see
+    /// [`EnvironmentalMonitorError::NotConfigured`].
+    forecast_source: Option<Box<dyn ForecastSource>>,
 }
 
 impl EnvironmentalMonitor {
@@ -48,7 +90,24 @@ impl EnvironmentalMonitor {
             efficiency_analyzer: EfficiencyAnalyzer::new(),
             sustainability_advisor: SustainabilityAdvisor::new(),
             reporting_engine: EnvironmentalReportingEngine::new(),
+            forecast_source: None,
         }
+    }
+
+    /// Attach a real [`ForecastSource`] so [`Self::optimize_scheduling`] can
+    /// produce real carbon-aware schedules.
+    pub fn set_forecast_source(&mut self, source: Box<dyn ForecastSource>) {
+        self.forecast_source = Some(source);
+    }
+
+    /// Detach the [`ForecastSource`], if any.
+    pub fn clear_forecast_source(&mut self) {
+        self.forecast_source = None;
+    }
+
+    /// Whether a [`ForecastSource`] is currently attached.
+    pub fn has_forecast_source(&self) -> bool {
+        self.forecast_source.is_some()
     }
 
     /// Start environmental monitoring
@@ -168,23 +227,40 @@ impl EnvironmentalMonitor {
         Ok(impact_report)
     }
 
-    /// Get real-time environmental metrics
+    /// Get real-time environmental metrics.
+    ///
+    /// `efficiency_ratio` and `temperature_celsius` come from the most
+    /// recently recorded device measurement (see
+    /// [`energy_monitoring::EnergyConsumptionMonitor::record_measurement`]):
+    /// a real, per-measurement efficiency ratio and (when the caller
+    /// supplied one) a real device temperature. Before any measurement has
+    /// been recorded, `efficiency_ratio` is honestly `0.0` and
+    /// `temperature_celsius` is `None` -- never the old hardcoded `0.87` /
+    /// `Some(75.0)`.
     pub async fn get_real_time_metrics(&self) -> Result<RealTimeEnvironmentalMetrics> {
         let current_power = self.energy_monitor.get_current_consumption();
         let carbon_intensity = self.carbon_tracker.get_carbon_intensity(&self.config.region);
-        let _energy_price = self.config.energy_price_per_kwh;
+
+        let latest_measurement = self.energy_monitor.get_consumption_history().last();
+        let efficiency_ratio = latest_measurement.map(|m| m.efficiency_ratio).unwrap_or(0.0);
+        let temperature_celsius = latest_measurement.and_then(|m| m.temperature);
 
         Ok(RealTimeEnvironmentalMetrics {
             timestamp: std::time::SystemTime::now(),
             current_power_watts: current_power,
             energy_consumed_kwh: current_power / 1000.0, // Convert to kWh for 1 hour
             co2_emissions_kg: (current_power / 1000.0) * carbon_intensity / 1000.0,
-            efficiency_ratio: self.calculate_real_time_efficiency().await?,
-            temperature_celsius: Some(75.0), // Mock temperature
+            efficiency_ratio,
+            temperature_celsius,
         })
     }
 
-    /// Optimize scheduling for minimum environmental impact
+    /// Optimize scheduling for minimum environmental impact.
+    ///
+    /// Requires a real [`ForecastSource`] to be attached via
+    /// [`Self::set_forecast_source`] -- fails with
+    /// [`EnvironmentalMonitorError::NotConfigured`] otherwise, rather than
+    /// scheduling against a fabricated forecast.
     pub async fn optimize_scheduling(
         &self,
         workload: WorkloadDescription,
@@ -205,6 +281,16 @@ impl EnvironmentalMonitor {
         // Estimate savings
         let savings = self.calculate_projected_savings(&workload, &optimal_time).await?;
 
+        // Real average of the underlying forecasts' own confidence values
+        // (as reported by the attached `ForecastSource`), not a fabricated
+        // constant. `0.0` when there are no forecasts to average.
+        let confidence = if carbon_forecasts.is_empty() {
+            0.0
+        } else {
+            carbon_forecasts.iter().map(|f| f.confidence).sum::<f64>()
+                / carbon_forecasts.len() as f64
+        };
+
         Ok(OptimalSchedule {
             schedule_type: ScheduleType::LowCarbon,
             start_time: optimal_time,
@@ -214,7 +300,7 @@ impl EnvironmentalMonitor {
                 .iter()
                 .map(|f| f.predicted_carbon_intensity)
                 .collect(),
-            confidence: 0.85,
+            confidence,
         })
     }
 
@@ -250,13 +336,24 @@ impl EnvironmentalMonitor {
 
     // Private implementation methods
 
+    /// Report the configured monitoring interval.
+    ///
+    /// This does **not** spawn any autonomous background sampling task --
+    /// `EnvironmentalMonitor` holds no `Arc`/`Mutex`-wrapped state and
+    /// `&self` here cannot safely drive a `'static` background task against
+    /// `self.energy_monitor` / `self.carbon_tracker`. Callers must poll by
+    /// calling [`Self::record_session`] / [`Self::get_real_time_metrics`]
+    /// themselves on their own schedule (e.g. from their training loop).
+    /// The old log message ("Environmental monitoring loops started")
+    /// claimed background loops had started when none ever ran; this is
+    /// corrected to describe only what is actually true.
     async fn start_monitoring_loops(&self) -> Result<()> {
         let interval = Duration::from_secs(self.config.monitoring_interval_secs);
 
-        // In a full implementation, these would be actual background tasks
-        // For now, we'll just log that monitoring has started
         info!(
-            "Environmental monitoring loops started with interval: {:?}",
+            "Environmental monitoring configured with interval {:?}; call record_session() / \
+             get_real_time_metrics() to sample -- no autonomous background polling runs \
+             automatically",
             interval
         );
 
@@ -270,11 +367,6 @@ impl EnvironmentalMonitor {
     ) -> Result<()> {
         // Cumulative metrics are updated within the carbon tracker
         Ok(())
-    }
-
-    async fn calculate_real_time_efficiency(&self) -> Result<f64> {
-        // Simplified efficiency calculation
-        Ok(0.87) // 87% efficiency
     }
 
     async fn calculate_cost_impact(&self, energy: &EnergyMeasurement) -> Result<CostAnalysis> {
@@ -340,38 +432,26 @@ impl EnvironmentalMonitor {
         Ok(())
     }
 
+    /// Real carbon-intensity forecast from the attached [`ForecastSource`].
+    /// Errors with [`EnvironmentalMonitorError::NotConfigured`] when none is
+    /// attached -- this used to synthesize 24 sine-wave points labeled with
+    /// a fixed `confidence: 0.8` regardless of any real grid data.
     async fn get_carbon_intensity_forecasts(&self) -> Result<Vec<CarbonForecast>> {
-        // Mock carbon intensity forecasts - in reality would fetch from API
-        let mut forecasts = Vec::new();
-        let current_time = std::time::SystemTime::now();
-
-        for hour in 0..24 {
-            forecasts.push(CarbonForecast {
-                timestamp: current_time + Duration::from_secs(hour * 3600),
-                predicted_carbon_intensity: 350.0 + (hour as f64 * 10.0).sin() * 100.0,
-                renewable_percentage: 40.0 + (hour as f64 * 8.0).cos() * 20.0,
-                confidence: 0.8,
-            });
-        }
-
-        Ok(forecasts)
+        let source = self
+            .forecast_source
+            .as_deref()
+            .ok_or(EnvironmentalMonitorError::NotConfigured)?;
+        source.carbon_intensity_forecast(&self.config.region, 24)
     }
 
+    /// Real energy-price forecast from the attached [`ForecastSource`]. See
+    /// [`Self::get_carbon_intensity_forecasts`].
     async fn get_energy_price_forecasts(&self) -> Result<Vec<EnergyPriceForecast>> {
-        // Mock energy price forecasts
-        let mut forecasts = Vec::new();
-        let current_time = std::time::SystemTime::now();
-
-        for hour in 0..24 {
-            forecasts.push(EnergyPriceForecast {
-                timestamp: current_time + Duration::from_secs(hour * 3600),
-                predicted_price_per_kwh: self.config.energy_price_per_kwh
-                    * (1.0 + (hour as f64 * 6.0).sin() * 0.3),
-                confidence: 0.85,
-            });
-        }
-
-        Ok(forecasts)
+        let source = self
+            .forecast_source
+            .as_deref()
+            .ok_or(EnvironmentalMonitorError::NotConfigured)?;
+        source.energy_price_forecast(&self.config.region, 24)
     }
 
     async fn find_optimal_execution_time(
@@ -417,20 +497,24 @@ impl EnvironmentalMonitor {
     }
 }
 
-// Supporting data structures
+// Supporting data structures for [`ForecastSource`]. `pub` because
+// `ForecastSource` is a public trait that external callers implement.
 #[derive(Debug, Clone)]
-struct CarbonForecast {
-    timestamp: std::time::SystemTime,
-    predicted_carbon_intensity: f64,
-    renewable_percentage: f64,
-    confidence: f64,
+pub struct CarbonForecast {
+    pub timestamp: std::time::SystemTime,
+    pub predicted_carbon_intensity: f64,
+    pub renewable_percentage: f64,
+    /// The forecast source's own confidence in this prediction. Only ever
+    /// set by a real [`ForecastSource`] implementation now -- never
+    /// attached to synthetic data.
+    pub confidence: f64,
 }
 
 #[derive(Debug, Clone)]
-struct EnergyPriceForecast {
-    timestamp: std::time::SystemTime,
-    predicted_price_per_kwh: f64,
-    confidence: f64,
+pub struct EnergyPriceForecast {
+    pub timestamp: std::time::SystemTime,
+    pub predicted_price_per_kwh: f64,
+    pub confidence: f64,
 }
 
 /// Convenience functions
@@ -517,11 +601,100 @@ mod tests {
         let metrics = monitor.get_real_time_metrics().await.expect("async operation failed");
         assert!(metrics.current_power_watts >= 0.0); // Changed to >= to allow 0.0 on fresh monitor
         assert!(metrics.efficiency_ratio > 0.0);
+
+        // Regression: the old implementation always returned
+        // `Some(75.0)` regardless of what was actually recorded. The real
+        // device measurement above reported `Some(70.0)`.
+        assert_eq!(
+            metrics.temperature_celsius,
+            Some(70.0),
+            "must reflect the real recorded temperature, not the old hardcoded Some(75.0)"
+        );
     }
 
+    /// Regression test: before any measurement has ever been recorded,
+    /// `efficiency_ratio` and `temperature_celsius` must be honest zero /
+    /// absence -- never the old hardcoded `0.87` / `Some(75.0)`.
     #[tokio::test]
-    async fn test_scheduling_optimization() {
+    async fn test_real_time_metrics_honest_before_any_measurement() {
         let monitor = EnvironmentalMonitor::new(EnvironmentalConfig::default());
+        let metrics = monitor.get_real_time_metrics().await.expect("async operation failed");
+        assert_eq!(metrics.efficiency_ratio, 0.0);
+        assert_eq!(metrics.temperature_celsius, None);
+    }
+
+    /// A [`ForecastSource`] mock that returns fixed, clearly-labeled
+    /// synthetic data so tests can assert `optimize_scheduling` actually
+    /// consumes it (rather than generating its own).
+    #[derive(Debug)]
+    struct FixedForecastSource;
+
+    impl ForecastSource for FixedForecastSource {
+        fn carbon_intensity_forecast(
+            &self,
+            _region: &str,
+            hours: usize,
+        ) -> Result<Vec<CarbonForecast>> {
+            let now = std::time::SystemTime::now();
+            Ok((0..hours)
+                .map(|h| CarbonForecast {
+                    timestamp: now + Duration::from_secs(h as u64 * 3600),
+                    predicted_carbon_intensity: 100.0,
+                    renewable_percentage: 60.0,
+                    confidence: 0.42,
+                })
+                .collect())
+        }
+
+        fn energy_price_forecast(
+            &self,
+            _region: &str,
+            hours: usize,
+        ) -> Result<Vec<EnergyPriceForecast>> {
+            let now = std::time::SystemTime::now();
+            Ok((0..hours)
+                .map(|h| EnergyPriceForecast {
+                    timestamp: now + Duration::from_secs(h as u64 * 3600),
+                    predicted_price_per_kwh: 0.1,
+                    confidence: 0.42,
+                })
+                .collect())
+        }
+    }
+
+    /// Regression test: without a [`ForecastSource`] attached,
+    /// `optimize_scheduling` must honestly fail instead of scheduling
+    /// against a fabricated sine-wave forecast.
+    #[tokio::test]
+    async fn test_scheduling_optimization_without_forecast_source_errors() {
+        let monitor = EnvironmentalMonitor::new(EnvironmentalConfig::default());
+        assert!(!monitor.has_forecast_source());
+
+        let workload = WorkloadDescription {
+            workload_name: "test workload".to_string(),
+            workload_type: "training".to_string(),
+            priority: WorkloadPriority::Medium,
+            estimated_duration_hours: 2.0,
+            resource_requirements: std::collections::HashMap::new(),
+            estimated_energy_kwh: 5.0,
+        };
+
+        let error = monitor
+            .optimize_scheduling(workload)
+            .await
+            .expect_err("must fail honestly without a ForecastSource");
+        assert!(error.to_string().contains("ForecastSource"));
+    }
+
+    /// Regression test: with a real [`ForecastSource`] attached,
+    /// `optimize_scheduling` must reflect its real data -- including a real
+    /// (non-fabricated) `confidence` derived from the source, not the old
+    /// hardcoded `0.85`.
+    #[tokio::test]
+    async fn test_scheduling_optimization_uses_real_forecast_source() {
+        let mut monitor = EnvironmentalMonitor::new(EnvironmentalConfig::default());
+        monitor.set_forecast_source(Box::new(FixedForecastSource));
+        assert!(monitor.has_forecast_source());
 
         let workload = WorkloadDescription {
             workload_name: "test workload".to_string(),
@@ -534,6 +707,14 @@ mod tests {
 
         let schedule = monitor.optimize_scheduling(workload).await.expect("async operation failed");
         assert!(schedule.projected_savings.carbon_reduction_kg >= 0.0);
+        assert!(
+            schedule.carbon_intensity_forecast.iter().all(|&v| v == 100.0),
+            "must reflect the real ForecastSource data, not a sine wave"
+        );
+        assert_eq!(
+            schedule.confidence, 0.42,
+            "must be derived from the real ForecastSource confidence, not the old hardcoded 0.85"
+        );
     }
 
     #[tokio::test]

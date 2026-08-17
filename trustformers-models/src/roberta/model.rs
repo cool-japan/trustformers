@@ -1,9 +1,11 @@
-use crate::bert::layers::{BertEncoder, BertPooler};
+use crate::bert::layers::{BertEncoder, BertLayerNames, BertPooler};
+use crate::bert::model::BertModel;
 use crate::roberta::config::RobertaConfig;
+use crate::weight_loading::checkpoint::{Checkpoint, LoadReport, WeightBinder};
 use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
 use trustformers_core::device::Device;
-use trustformers_core::errors::Result;
+use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::{Layer, Model, TokenizedInput};
 
@@ -213,8 +215,13 @@ impl Model for RobertaModel {
         )
     }
 
-    fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
-        Ok(())
+    /// Load a HuggingFace RoBERTa checkpoint (safetensors or `torch.save`).
+    ///
+    /// A previous revision was `Ok(())` — the reader was never touched, so every
+    /// "load" left the model randomly initialised while reporting success. See
+    /// [`RobertaModel::load_from_checkpoint`] for the name map.
+    fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -240,5 +247,131 @@ impl Model for RobertaModel {
         let layer_params = attention_params + mlp_params + norm_params;
 
         embedding_params + (num_layers * layer_params)
+    }
+}
+
+impl RobertaModel {
+    /// Build the BERT-shaped config the shared encoder layers were created with.
+    fn bert_config(&self) -> crate::bert::config::BertConfig {
+        crate::bert::config::BertConfig {
+            vocab_size: self.config.vocab_size,
+            hidden_size: self.config.hidden_size,
+            num_hidden_layers: self.config.num_hidden_layers,
+            num_attention_heads: self.config.num_attention_heads,
+            intermediate_size: self.config.intermediate_size,
+            hidden_act: self.config.hidden_act.clone(),
+            hidden_dropout_prob: self.config.hidden_dropout_prob,
+            attention_probs_dropout_prob: self.config.attention_probs_dropout_prob,
+            max_position_embeddings: self.config.max_position_embeddings,
+            type_vocab_size: self.config.type_vocab_size,
+            initializer_range: self.config.initializer_range,
+            layer_norm_eps: self.config.layer_norm_eps,
+            pad_token_id: self.config.pad_token_id,
+            position_embedding_type: self.config.position_embedding_type.clone(),
+            use_cache: self.config.use_cache,
+            classifier_dropout: self.config.classifier_dropout,
+        }
+    }
+
+    /// Load pretrained weights and report exactly what was bound.
+    ///
+    /// # Errors
+    ///
+    /// See [`RobertaModel::load_from_checkpoint`].
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        self.load_from_checkpoint(&checkpoint)
+    }
+
+    /// Bind an already-parsed checkpoint into this model.
+    ///
+    /// RoBERTa uses BERT's encoder tensor layout verbatim
+    /// (`encoder.layer.{i}.attention.self.query.…`), differing only in the
+    /// wrapper prefix (`roberta.` rather than `bert.`) and in having no
+    /// meaningful segment embeddings. Both encoder and pooler are therefore
+    /// bound through the shared BERT layer loaders rather than a second copy of
+    /// the same name map.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint does not look like a RoBERTa checkpoint, when a
+    /// tensor has the wrong shape, when a parameter is missing, or when the
+    /// checkpoint carries weights this architecture does not recognise.
+    pub fn load_from_checkpoint(&mut self, checkpoint: &Checkpoint) -> Result<LoadReport> {
+        let prefix =
+            checkpoint.detect_prefix(&["", "roberta."], "embeddings.word_embeddings.weight")?;
+        let mut binder = checkpoint.binder(&prefix);
+        let bert_config = self.bert_config();
+        let names = BertLayerNames::bert();
+
+        self.embeddings.load_weights(&mut binder, &self.config)?;
+        self.encoder.load_weights(&mut binder, &names, &bert_config)?;
+
+        // The pooler is optional in HuggingFace exports
+        // (`add_pooling_layer=False`). When the checkpoint has none, drop ours
+        // rather than leaving a randomly-initialised projection in place
+        // pretending to be trained.
+        if checkpoint.contains(&format!("{prefix}pooler.dense.weight")) {
+            let pooler = match self.pooler.as_mut() {
+                Some(pooler) => pooler,
+                None => {
+                    self.pooler = Some(BertPooler::new_with_device(&bert_config, self.device)?);
+                    self.pooler.as_mut().ok_or_else(|| {
+                        TrustformersError::model_error(
+                            "RoBERTa pooler could not be created for the checkpoint".to_string(),
+                        )
+                    })?
+                },
+            };
+            pooler.load_weights(&mut binder, &bert_config)?;
+        } else {
+            self.pooler = None;
+        }
+
+        binder.finish(BertModel::unused_tensor_policy())
+    }
+}
+
+impl RobertaEmbeddings {
+    /// Copy the embedding tables and their layer norm out of a checkpoint.
+    ///
+    /// RoBERTa always ships `token_type_embeddings` even though its
+    /// `type_vocab_size` is 1, so the table is bound like any other parameter.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a shape mismatch; absent tensors are recorded on the binder.
+    pub fn load_weights(
+        &mut self,
+        binder: &mut WeightBinder<'_>,
+        config: &RobertaConfig,
+    ) -> Result<()> {
+        let hidden = config.hidden_size;
+
+        if let Some(weight) = binder.take_shaped(
+            "embeddings.word_embeddings.weight",
+            &[config.vocab_size, hidden],
+        )? {
+            self.word_embeddings.set_weight(weight)?;
+        }
+        if let Some(weight) = binder.take_shaped(
+            "embeddings.position_embeddings.weight",
+            &[config.max_position_embeddings, hidden],
+        )? {
+            self.position_embeddings.set_weight(weight)?;
+        }
+        if let Some(weight) = binder.take_shaped(
+            "embeddings.token_type_embeddings.weight",
+            &[config.type_vocab_size, hidden],
+        )? {
+            self.token_type_embeddings.set_weight(weight)?;
+        }
+        if let Some(weight) = binder.take_shaped("embeddings.LayerNorm.weight", &[hidden])? {
+            self.layer_norm.set_weight(weight)?;
+        }
+        if let Some(bias) = binder.take_shaped("embeddings.LayerNorm.bias", &[hidden])? {
+            self.layer_norm.set_bias(bias)?;
+        }
+        Ok(())
     }
 }

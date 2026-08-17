@@ -143,7 +143,7 @@ fn test_transcribe_greedy_empty_input() {
 
     // Zero time frames → EmptyInput error.
     let empty_mel = Tensor::from_vec(vec![], &[1, 80, 0]).expect("empty mel");
-    let result = task.transcribe_greedy(&empty_mel, 1, 10);
+    let result = task.transcribe_greedy_tokens(&empty_mel, 1, 10);
     assert!(
         matches!(result, Err(WhisperError::EmptyInput)),
         "expected EmptyInput, got {:?}",
@@ -159,7 +159,7 @@ fn test_transcribe_greedy_valid_input() {
     let task = SpeechRecognitionTask::new(config).expect("task creation");
     let mel = make_mel(1, 80, 20);
     // start_token=1, max 5 new tokens
-    match task.transcribe_greedy(&mel, 1, 5) {
+    match task.transcribe_greedy_tokens(&mel, 1, 5) {
         Ok(_) => {
             // Greedy transcription succeeded
         },
@@ -343,7 +343,7 @@ fn test_transcribe_beam_invalid_beam_size() {
     let config = tiny_test_config();
     let task = SpeechRecognitionTask::new(config).expect("task creation");
     let mel = make_mel(1, 80, 20);
-    let result = task.transcribe_beam(&mel, 1, 0, 5);
+    let result = task.transcribe_beam_tokens(&mel, 1, 0, 5);
     assert!(
         matches!(result, Err(WhisperError::InvalidBeamSize)),
         "beam_size=0 should return InvalidBeamSize"
@@ -357,7 +357,7 @@ fn test_transcribe_beam_valid() {
     let config = tiny_test_config();
     let task = SpeechRecognitionTask::new(config).expect("task creation");
     let mel = make_mel(1, 80, 20);
-    match task.transcribe_beam(&mel, 1, 3, 5) {
+    match task.transcribe_beam_tokens(&mel, 1, 3, 5) {
         Ok(hypotheses) => {
             assert!(
                 !hypotheses.is_empty(),
@@ -415,7 +415,7 @@ fn test_transcribe_with_timestamps() {
     let task = SpeechRecognitionTask::new(config).expect("task creation");
     // 60 time frames → 2 chunks of 30.
     let mel = make_mel(1, 80, 60);
-    match task.transcribe_with_timestamps(&mel, 1, 30, 3) {
+    match task.transcribe_with_timestamps(&mel, 1, 30, 3, &TestTokenizer) {
         Ok(segments) => {
             assert_eq!(segments.len(), 2, "60 frames / 30 per chunk = 2 segments");
 
@@ -586,5 +586,118 @@ fn test_whisper_speech_recognition_task() {
         Err(_) => {
             // Forward pass has known shape limitations in test configs
         },
+    }
+}
+
+/// A decode-only tokenizer that renders each id as `t<id>`, so the tests can
+/// tell decoded text apart from the space-joined numeric ids the old
+/// implementation returned.
+struct TestTokenizer;
+
+impl trustformers_core::traits::Tokenizer for TestTokenizer {
+    fn encode(
+        &self,
+        _text: &str,
+    ) -> trustformers_core::Result<trustformers_core::traits::TokenizedInput> {
+        Err(
+            trustformers_core::errors::TrustformersError::not_implemented(
+                "TestTokenizer is decode-only".to_string(),
+            ),
+        )
+    }
+
+    fn encode_pair(
+        &self,
+        _a: &str,
+        _b: &str,
+    ) -> trustformers_core::Result<trustformers_core::traits::TokenizedInput> {
+        Err(
+            trustformers_core::errors::TrustformersError::not_implemented(
+                "TestTokenizer is decode-only".to_string(),
+            ),
+        )
+    }
+
+    fn decode(&self, ids: &[u32]) -> trustformers_core::Result<String> {
+        Ok(ids.iter().map(|id| format!("t{id}")).collect::<Vec<_>>().join(" "))
+    }
+
+    fn vocab_size(&self) -> usize {
+        128
+    }
+
+    fn get_vocab(&self) -> std::collections::HashMap<String, u32> {
+        (0..128u32).map(|id| (format!("t{id}"), id)).collect()
+    }
+
+    fn token_to_id(&self, token: &str) -> Option<u32> {
+        token.strip_prefix('t').and_then(|rest| rest.parse::<u32>().ok())
+    }
+
+    fn id_to_token(&self, id: u32) -> Option<String> {
+        (id < 128).then(|| format!("t{id}"))
+    }
+}
+
+/// Regression: `transcribe_greedy` returned space-joined numeric token ids
+/// (`"418 92 1130"`) as the "transcription" — never touching a tokenizer.
+#[test]
+fn transcribe_greedy_decodes_through_a_real_tokenizer() {
+    let config = tiny_test_config();
+    let task = SpeechRecognitionTask::new(config).expect("task creation");
+    let mel = make_mel(1, 80, 20);
+
+    let Ok(tokens) = task.transcribe_greedy_tokens(&mel, 1, 5) else {
+        // Forward pass has known shape limitations in some test configs.
+        return;
+    };
+    let text = task
+        .transcribe_greedy(&mel, 1, 5, &TestTokenizer)
+        .expect("decoding must succeed when generation does");
+
+    for id in &tokens {
+        assert!(
+            text.contains(&format!("t{id}")),
+            "the decoded text must carry generated token {id}: {text}"
+        );
+    }
+    if !tokens.is_empty() {
+        assert!(
+            text.starts_with('t'),
+            "decoded text must come from the tokenizer, not from `id.to_string()`: {text}"
+        );
+    }
+}
+
+/// Beam scores must be accumulated log-probabilities, so they are negative and
+/// monotonically ordered best-first. Summing raw logits (the previous
+/// behaviour) gives an arbitrary, non-comparable quantity.
+#[test]
+fn beam_hypotheses_are_ranked_by_log_probability() {
+    let config = tiny_test_config();
+    let task = SpeechRecognitionTask::new(config).expect("task creation");
+    let mel = make_mel(1, 80, 20);
+
+    let Ok(hypotheses) = task.transcribe_beam_tokens(&mel, 1, 3, 4) else {
+        return;
+    };
+    assert!(
+        !hypotheses.is_empty(),
+        "beam search must produce a hypothesis"
+    );
+    for window in hypotheses.windows(2) {
+        assert!(
+            window[0].1 >= window[1].1,
+            "hypotheses must be sorted best-first: {} then {}",
+            window[0].1,
+            window[1].1
+        );
+    }
+    for (_, score) in &hypotheses {
+        assert!(
+            *score <= 1e-4,
+            "an accumulated log-probability cannot be positive, got {score}"
+        );
+        assert!(score.is_finite(), "beam scores must be finite, got {score}");
     }
 }

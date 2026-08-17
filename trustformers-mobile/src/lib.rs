@@ -149,7 +149,8 @@ pub mod neural_engine_v3;
 #[cfg(target_os = "ios")]
 pub mod advanced_neural_engine_v4;
 
-// MLX framework integration for Apple Silicon
+// MLX-*style* graph engine for Apple Silicon, implemented on Metal + CPU.
+// NOTE: this does NOT link Apple's MLX framework - see the module docs.
 #[cfg(any(target_os = "ios", target_os = "macos"))]
 pub mod mlx_integration;
 
@@ -341,13 +342,14 @@ pub use neural_engine_v3::{
     PowerEfficiencyMode, QuantizationProfile,
 };
 
-// Re-export MLX framework integration types
+// Re-export the MLX-style engine's types. The `Mlx` prefix denotes an MLX-shaped
+// API implemented on Metal/CPU; Apple's MLX framework is not linked.
 #[cfg(any(target_os = "ios", target_os = "macos"))]
 pub use mlx_integration::{
-    AppleSiliconDevice, CompilationStrategy, CompiledMlxModel, ComputeUnitConfig,
+    probe_hardware, AppleSiliconDevice, CompilationStrategy, CompiledMlxModel, ComputeUnitConfig,
     DeviceCapabilities, GraphOptimizationConfig, MemoryRequirements, MlxConfig, MlxEngine,
     MlxOperation, MlxPerformanceMetrics, MlxPrecision, ModelPerformanceProfile, OptimizedGraph,
-    PrecisionConfig, ProfilingConfig, UnifiedMemoryConfig,
+    PrecisionConfig, ProbedHardware, ProfilingConfig, PublishedChipSpecs, UnifiedMemoryConfig,
 };
 
 // Re-export Federated Learning types

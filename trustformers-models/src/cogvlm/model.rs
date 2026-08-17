@@ -385,9 +385,10 @@ impl CogVlmModel {
         batch_size: usize,
         seq_len: usize,
     ) -> Result<Tensor> {
-        println!(
+        tracing::info!(
             "Processing multi-batch embeddings: batch_size={}, seq_len={}",
-            batch_size, seq_len
+            batch_size,
+            seq_len
         );
 
         // Collect embeddings for each batch
@@ -542,22 +543,46 @@ impl Model for CogVlmModel {
         })
     }
 
+    /// Loading a CogVLM checkpoint is not implemented.
+    ///
+    /// # Errors
+    ///
+    /// Always fails.
+    ///
+    /// # Why an error rather than a load
+    ///
+    /// CogVLM's defining feature is its *visual expert*: every language layer
+    /// carries a second, parallel QKV and MLP that is applied only to the image
+    /// positions, and the two experts are stored fused in the released
+    /// checkpoints (`…language_expert_query_key_value` next to
+    /// `…vision_expert_query_key_value`). This implementation models the experts
+    /// as separate [`VisualExpert`] modules with no fused-tensor split, so there
+    /// is no name mapping that would place a checkpoint's weights correctly —
+    /// any binding this method attempted would put the wrong half of a fused
+    /// tensor into the wrong expert.
+    ///
+    /// A previous revision read the entire checkpoint into a `Vec<u8>`, checked
+    /// only that it was non-empty, **discarded it** and returned `Ok(())`. The
+    /// caller was told the load succeeded while the model kept its random
+    /// initialisation, which is the single most expensive way for this API to
+    /// lie: the failure surfaces only as nonsense output much later.
+    ///
+    /// Install weights explicitly through the layer setters until the fused
+    /// expert layout is modelled.
     fn load_pretrained(&mut self, reader: &mut dyn std::io::Read) -> Result<()> {
-        use trustformers_core::errors::invalid_input;
-
-        // Read weight data
+        // Drain the stream so the caller's reader is left in a defined state.
         let mut buffer = Vec::new();
-        reader
-            .read_to_end(&mut buffer)
-            .map_err(|e| invalid_input(format!("Failed to read CogVLM weights: {}", e)))?;
+        reader.read_to_end(&mut buffer).map_err(|e| {
+            TrustformersError::io_error(format!("failed to read CogVLM weights: {e}"))
+        })?;
 
-        if buffer.is_empty() {
-            return Err(invalid_input("CogVLM weight file is empty"));
-        }
-
-        // Weight loading would involve loading model-specific weights
-        // For now, return success as placeholder
-        Ok(())
+        Err(TrustformersError::not_implemented(
+            "CogVLM checkpoint loading is not implemented: the released checkpoints fuse the \
+             language and vision experts into shared `query_key_value` tensors, and this \
+             implementation models the two experts separately, so no faithful name mapping \
+             exists. Install weights explicitly through the layer setters instead."
+                .to_string(),
+        ))
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -1016,22 +1041,46 @@ impl Model for CogVideoModel {
         })
     }
 
+    /// Loading a CogVLM checkpoint is not implemented.
+    ///
+    /// # Errors
+    ///
+    /// Always fails.
+    ///
+    /// # Why an error rather than a load
+    ///
+    /// CogVLM's defining feature is its *visual expert*: every language layer
+    /// carries a second, parallel QKV and MLP that is applied only to the image
+    /// positions, and the two experts are stored fused in the released
+    /// checkpoints (`…language_expert_query_key_value` next to
+    /// `…vision_expert_query_key_value`). This implementation models the experts
+    /// as separate [`VisualExpert`] modules with no fused-tensor split, so there
+    /// is no name mapping that would place a checkpoint's weights correctly —
+    /// any binding this method attempted would put the wrong half of a fused
+    /// tensor into the wrong expert.
+    ///
+    /// A previous revision read the entire checkpoint into a `Vec<u8>`, checked
+    /// only that it was non-empty, **discarded it** and returned `Ok(())`. The
+    /// caller was told the load succeeded while the model kept its random
+    /// initialisation, which is the single most expensive way for this API to
+    /// lie: the failure surfaces only as nonsense output much later.
+    ///
+    /// Install weights explicitly through the layer setters until the fused
+    /// expert layout is modelled.
     fn load_pretrained(&mut self, reader: &mut dyn std::io::Read) -> Result<()> {
-        use trustformers_core::errors::invalid_input;
-
-        // Read weight data
+        // Drain the stream so the caller's reader is left in a defined state.
         let mut buffer = Vec::new();
-        reader
-            .read_to_end(&mut buffer)
-            .map_err(|e| invalid_input(format!("Failed to read CogVLM weights: {}", e)))?;
+        reader.read_to_end(&mut buffer).map_err(|e| {
+            TrustformersError::io_error(format!("failed to read CogVLM weights: {e}"))
+        })?;
 
-        if buffer.is_empty() {
-            return Err(invalid_input("CogVLM weight file is empty"));
-        }
-
-        // Weight loading would involve loading model-specific weights
-        // For now, return success as placeholder
-        Ok(())
+        Err(TrustformersError::not_implemented(
+            "CogVLM checkpoint loading is not implemented: the released checkpoints fuse the \
+             language and vision experts into shared `query_key_value` tensors, and this \
+             implementation models the two experts separately, so no faithful name mapping \
+             exists. Install weights explicitly through the layer setters instead."
+                .to_string(),
+        ))
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -1224,20 +1273,79 @@ pub struct CogVideoInput {
 }
 
 // Utility functions
+
+/// Cut an image batch into a flat grid of non-overlapping square patches.
+///
+/// `[batch, channels, height, width]` becomes
+/// `[batch, num_patches, channels * patch_size * patch_size]`, patches in
+/// row-major grid order and each patch laid out channel-major (`c, py, px`) to
+/// match the flattened `Conv2d` kernel a ViT patch embedding uses.
+///
+/// # What this replaces
+///
+/// The previous body computed the right output *shape* and then produced it with
+/// a bare `reshape` — no permutation at all. A reshape reinterprets the buffer
+/// in its existing `(b, c, y, x)` order, so "patch 0" was the first
+/// `channels * patch_size²` values of the image read row by row across its
+/// **full width**: for a 224×224 image with 14-pixel patches, patch 0 spanned
+/// the first 2.6 rows of channel 0 rather than the top-left 14×14 square. Every
+/// patch the vision tower saw was a horizontal stripe of the wrong region, and
+/// no error was raised because the element count happens to match.
+///
+/// # Errors
+///
+/// Fails when the input is not a 4-D tensor, when `patch_size` is 0, or when the
+/// spatial dimensions are not divisible by `patch_size`.
 fn extract_patches(pixel_values: &Tensor, patch_size: usize) -> Result<Tensor> {
-    // Extract patches from images
-    // This is a simplified implementation - would need proper patch extraction
-    let batch_size = pixel_values.shape()[0];
-    let channels = pixel_values.shape()[1];
-    let height = pixel_values.shape()[2];
-    let width = pixel_values.shape()[3];
+    if patch_size == 0 {
+        return Err(TrustformersError::invalid_input_simple(
+            "patch_size must be greater than 0".to_string(),
+        ));
+    }
+    let shape = pixel_values.shape();
+    let [batch, channels, height, width] = shape[..] else {
+        return Err(TrustformersError::shape_error(format!(
+            "patch extraction expects [batch, channels, height, width], got {shape:?}"
+        )));
+    };
+    if !height.is_multiple_of(patch_size) || !width.is_multiple_of(patch_size) {
+        return Err(TrustformersError::shape_error(format!(
+            "image {height}x{width} is not divisible into {patch_size}x{patch_size} patches"
+        )));
+    }
 
-    let num_patches_h = height / patch_size;
-    let num_patches_w = width / patch_size;
-    let num_patches = num_patches_h * num_patches_w;
+    let grid_h = height / patch_size;
+    let grid_w = width / patch_size;
+    let num_patches = grid_h * grid_w;
+    let patch_dim = channels * patch_size * patch_size;
 
-    // Reshape and permute to extract patches
-    pixel_values.reshape(&[batch_size, num_patches, channels * patch_size * patch_size])
+    let values = pixel_values.data().map_err(|e| {
+        TrustformersError::tensor_op_error(
+            "extract_patches",
+            &format!("failed to read the pixel tensor: {e}"),
+        )
+    })?;
+
+    let mut out = vec![0.0f32; batch * num_patches * patch_dim];
+    for b in 0..batch {
+        let image_offset = b * channels * height * width;
+        for gy in 0..grid_h {
+            for gx in 0..grid_w {
+                let out_offset = (b * num_patches + gy * grid_w + gx) * patch_dim;
+                for c in 0..channels {
+                    let channel_offset = image_offset + c * height * width;
+                    for py in 0..patch_size {
+                        let row = gy * patch_size + py;
+                        let src = channel_offset + row * width + gx * patch_size;
+                        let dst = out_offset + (c * patch_size + py) * patch_size;
+                        out[dst..dst + patch_size].copy_from_slice(&values[src..src + patch_size]);
+                    }
+                }
+            }
+        }
+    }
+
+    Tensor::from_vec(out, &[batch, num_patches, patch_dim])
 }
 
 fn inject_vision_features(
@@ -1364,4 +1472,89 @@ fn compute_blend_factor(vision_val: f32, hidden_val: f32) -> f32 {
     let blend_factor = vision_ratio.tanh() * 0.5 + 0.3; // Range: [0.3, 0.8]
 
     blend_factor.clamp(0.1, 0.9) // Ensure reasonable blending range
+}
+
+#[cfg(test)]
+mod patch_tests {
+    use super::*;
+
+    /// Regression: `extract_patches` produced the right shape with a bare
+    /// `reshape`, so "patch 0" was the first `channels * patch_size²` values in
+    /// `(c, y, x)` order — a horizontal stripe across the image's full width,
+    /// not the top-left square.
+    #[test]
+    fn extract_patches_returns_spatial_squares_not_reshaped_stripes() {
+        // 1-channel 4x4 image whose pixels are their own flat index.
+        let pixels: Vec<f32> = (0..16).map(|i| i as f32).collect();
+        let image = Tensor::from_vec(pixels, &[1, 1, 4, 4]).expect("image must build");
+
+        let patches = extract_patches(&image, 2).expect("patch extraction must succeed");
+        assert_eq!(patches.shape(), vec![1, 4, 4]);
+
+        let values = patches.data().expect("readable");
+        // A bare reshape would give [0,1,2,3] here — the first row and a half of
+        // the image. The real top-left 2x2 patch is [0,1,4,5].
+        assert_eq!(
+            &values[0..4],
+            &[0.0, 1.0, 4.0, 5.0],
+            "patch 0 must be the top-left 2x2 square"
+        );
+        assert_eq!(&values[4..8], &[2.0, 3.0, 6.0, 7.0], "top-right patch");
+        assert_eq!(&values[8..12], &[8.0, 9.0, 12.0, 13.0], "bottom-left patch");
+        assert_eq!(
+            &values[12..16],
+            &[10.0, 11.0, 14.0, 15.0],
+            "bottom-right patch"
+        );
+    }
+
+    #[test]
+    fn extract_patches_rejects_an_indivisible_image() {
+        let image = Tensor::zeros(&[1, 3, 5, 5]).expect("image must build");
+        assert!(extract_patches(&image, 2).is_err());
+    }
+
+    /// Regression: `load_pretrained` read the whole checkpoint, discarded it and
+    /// returned `Ok(())`, leaving the model randomly initialised while reporting
+    /// a successful load.
+    #[test]
+    fn load_pretrained_reports_the_missing_expert_mapping_instead_of_faking_success() {
+        use crate::weight_loading::test_support::{build_safetensors, F32Tensor};
+
+        // The default vision tower is EVA-CLIP-G scale; shrink both halves so
+        // the test builds in milliseconds instead of a minute.
+        let config = CogVlmConfig {
+            vocab_size: 16,
+            hidden_size: 8,
+            intermediate_size: 16,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            vision_config: CogVlmVisionConfig {
+                hidden_size: 8,
+                intermediate_size: 16,
+                num_hidden_layers: 1,
+                num_attention_heads: 2,
+                num_channels: 3,
+                patch_size: 2,
+                image_size: 4,
+                ..CogVlmConfig::default().vision_config
+            },
+            ..CogVlmConfig::default()
+        };
+        let mut model = CogVlmModel::new(config).expect("model must build");
+        let bytes =
+            build_safetensors(&[F32Tensor::ramp("model.embed_tokens.weight", &[16, 8], 1.0)]);
+
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a load that binds nothing must not report success");
+        assert!(
+            err.to_string().contains("not implemented"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains("expert"),
+            "the error must explain why: {err}"
+        );
+    }
 }

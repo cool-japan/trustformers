@@ -427,3 +427,43 @@ fn test_search_strategy_has_no_darts_variant() {
         assert!(!format!("{strategy:?}").contains("DARTS"));
     }
 }
+
+/// An evaluator that always fails, to prove failures are not swallowed.
+struct FailingEvaluator;
+
+impl ArchitectureEvaluator for FailingEvaluator {
+    fn evaluate(&mut self, _architecture: &Architecture) -> Result<MeasuredPerformance> {
+        Err(
+            trustformers_core::errors::TrustformersError::invalid_operation(
+                "the training run diverged".to_string(),
+            ),
+        )
+    }
+}
+
+#[test]
+fn test_evaluation_failures_are_propagated_by_every_strategy() {
+    for strategy in [
+        SearchStrategy::Random,
+        SearchStrategy::ReinforcementLearning,
+        SearchStrategy::BayesianOptimization,
+        SearchStrategy::Progressive,
+        SearchStrategy::Evolutionary,
+    ] {
+        let mut config = small_config(strategy.clone(), 5);
+        config.generations = 1;
+        let mut searcher =
+            NeuralArchitectureSearcher::with_evaluator(config, Box::new(FailingEvaluator))
+                .expect("searcher");
+
+        let error = match searcher.search() {
+            Ok(_) => panic!("{strategy:?} reported success despite every evaluation failing"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("diverged")
+                || error.to_string().contains("No architecture found"),
+            "{strategy:?}: unexpected error {error}"
+        );
+    }
+}

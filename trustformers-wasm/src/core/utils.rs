@@ -231,6 +231,6 @@ mod tests {
     #[test]
     fn test_features() {
         let f = features();
-        assert!(f.len() > 0);
+        assert!(!f.is_empty());
     }
 }

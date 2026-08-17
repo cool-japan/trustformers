@@ -235,13 +235,107 @@ fn test_phi2_code_generation_construction() {
     );
 }
 
+/// A tokenizer that decodes ids to a reproducible textual form, so the test can
+/// assert that the *generated ids* reach the string rather than a debug label.
+struct IdEchoTokenizer;
+
+impl trustformers_core::traits::Tokenizer for IdEchoTokenizer {
+    fn encode(
+        &self,
+        _text: &str,
+    ) -> trustformers_core::Result<trustformers_core::traits::TokenizedInput> {
+        Err(
+            trustformers_core::errors::TrustformersError::not_implemented(
+                "IdEchoTokenizer is decode-only".to_string(),
+            ),
+        )
+    }
+
+    fn encode_pair(
+        &self,
+        _text_a: &str,
+        _text_b: &str,
+    ) -> trustformers_core::Result<trustformers_core::traits::TokenizedInput> {
+        Err(
+            trustformers_core::errors::TrustformersError::not_implemented(
+                "IdEchoTokenizer is decode-only".to_string(),
+            ),
+        )
+    }
+
+    fn decode(&self, ids: &[u32]) -> trustformers_core::Result<String> {
+        Ok(ids.iter().map(|id| format!("t{id}")).collect::<Vec<_>>().join(" "))
+    }
+
+    fn vocab_size(&self) -> usize {
+        Phi2Config::small_test().vocab_size
+    }
+
+    fn get_vocab(&self) -> std::collections::HashMap<String, u32> {
+        (0..self.vocab_size() as u32).map(|id| (format!("t{id}"), id)).collect()
+    }
+
+    fn token_to_id(&self, token: &str) -> Option<u32> {
+        token.strip_prefix('t').and_then(|rest| rest.parse::<u32>().ok())
+    }
+
+    fn id_to_token(&self, id: u32) -> Option<String> {
+        (id < self.vocab_size() as u32).then(|| format!("t{id}"))
+    }
+}
+
+/// Regression: `generate_code` ran a single forward pass and returned the
+/// formatted string `"# generated code (next_token=<id>)"` — a debug rendering
+/// of one token id, presented as generated source. It never looped and never
+/// decoded anything.
 #[test]
-fn test_phi2_generate_code_returns_string() {
+fn test_phi2_generate_code_decodes_real_generated_tokens() {
     let model = Phi2ForCodeGeneration::new(Phi2Config::small_test()).expect("construction failed");
-    let result = model.generate_code(vec![1u32, 2, 3]);
-    assert!(result.is_ok(), "generate_code must not return an error");
-    let code = result.expect("checked");
+    let tokens = model
+        .generate_tokens(vec![1u32, 2, 3], 4, None)
+        .expect("generation must succeed");
+    assert_eq!(
+        tokens.len(),
+        4,
+        "the loop must run for every requested token"
+    );
+
+    let code = model
+        .generate_code(vec![1u32, 2, 3], 4, None, &IdEchoTokenizer)
+        .expect("generate_code must succeed");
     assert!(!code.is_empty(), "generated code string must not be empty");
+    assert!(
+        !code.contains("# generated code"),
+        "the placeholder debug label must not survive: {code}"
+    );
+    // Every generated id must appear in the decoded text.
+    for id in &tokens {
+        assert!(
+            code.contains(&format!("t{id}")),
+            "decoded text must carry generated token {id}: {code}"
+        );
+    }
+}
+
+#[test]
+fn test_phi2_generate_tokens_stops_at_eos() {
+    let model = Phi2ForCodeGeneration::new(Phi2Config::small_test()).expect("construction failed");
+    let first = model
+        .generate_tokens(vec![1u32, 2, 3], 1, None)
+        .expect("generation must succeed");
+    let eos = first[0];
+    // Asking for the same first token as EOS must stop after exactly one token.
+    let stopped = model
+        .generate_tokens(vec![1u32, 2, 3], 8, Some(eos))
+        .expect("generation must succeed");
+    assert_eq!(stopped, vec![eos], "generation must stop at the EOS token");
+}
+
+#[test]
+fn test_phi2_generate_tokens_rejects_degenerate_requests() {
+    let model = Phi2ForCodeGeneration::new(Phi2Config::small_test()).expect("construction failed");
+    assert!(model.generate_tokens(vec![], 4, None).is_err());
+    assert!(model.generate_tokens(vec![1, 2], 0, None).is_err());
 }
 
 // ─────────────────────────────────────────────────────────────────────────

@@ -582,7 +582,7 @@ fn test_pruning_preserves_parameter_dtypes_and_skips_integer_buffers() {
         "an integer buffer is not a weight and must not be pruned"
     );
     assert!(
-        compressed.model.weight.data().expect("weights").iter().any(|v| *v == 0.0),
+        compressed.model.weight.data().expect("weights").contains(&0.0),
         "the float weights must still have been pruned"
     );
 }

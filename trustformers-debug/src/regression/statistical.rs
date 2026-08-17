@@ -229,7 +229,13 @@ impl StatRegressionDetector {
         }
 
         let severity = StatRegressionSeverity::from_relative_change(rel);
-        let event = StatRegressionEvent { step, value, z_score: z, relative_change: rel, severity };
+        let event = StatRegressionEvent {
+            step,
+            value,
+            z_score: z,
+            relative_change: rel,
+            severity,
+        };
         self.detection_history.push(event.clone());
         Some(event)
     }
@@ -281,7 +287,13 @@ impl StatRegressionDetector {
         let variance = if count > 1 { m2 / (count - 1) as f64 } else { 0.0 };
         let std = variance.sqrt();
 
-        StatBaselineStats { mean, std, min, max, sample_count: count }
+        StatBaselineStats {
+            mean,
+            std,
+            min,
+            max,
+            sample_count: count,
+        }
     }
 }
 
@@ -395,12 +407,18 @@ impl CusumDetector {
         if self.s_hi > self.h {
             let s_value = self.s_hi;
             self.s_hi = 0.0; // reset after alarm
-            return Some(CusumAlert { direction: ChangeDirection::Up, s_value });
+            return Some(CusumAlert {
+                direction: ChangeDirection::Up,
+                s_value,
+            });
         }
         if self.s_lo > self.h {
             let s_value = self.s_lo;
             self.s_lo = 0.0;
-            return Some(CusumAlert { direction: ChangeDirection::Down, s_value });
+            return Some(CusumAlert {
+                direction: ChangeDirection::Down,
+                s_value,
+            });
         }
         None
     }
@@ -472,7 +490,13 @@ mod tests {
 
     #[test]
     fn test_z_score_zero_std() {
-        let baseline = StatBaselineStats { mean: 5.0, std: 0.0, min: 5.0, max: 5.0, sample_count: 5 };
+        let baseline = StatBaselineStats {
+            mean: 5.0,
+            std: 0.0,
+            min: 5.0,
+            max: 5.0,
+            sample_count: 5,
+        };
         let detector = StatRegressionDetector::new("m", baseline, Default::default());
         assert_eq!(detector.z_score(5.0), 0.0);
         assert_eq!(detector.z_score(10.0), 0.0);
@@ -480,7 +504,13 @@ mod tests {
 
     #[test]
     fn test_relative_change_positive() {
-        let baseline = StatBaselineStats { mean: 2.0, std: 0.1, min: 1.9, max: 2.1, sample_count: 10 };
+        let baseline = StatBaselineStats {
+            mean: 2.0,
+            std: 0.1,
+            min: 1.9,
+            max: 2.1,
+            sample_count: 10,
+        };
         let detector = StatRegressionDetector::new("x", baseline, Default::default());
         let rel = detector.relative_change(3.0); // 50% increase
         assert!((rel - 0.5).abs() < 1e-9, "rel={rel}");
@@ -490,24 +520,26 @@ mod tests {
 
     #[test]
     fn test_check_point_detects_regression() {
-        let samples: Vec<f64> = (0..20).map(|_| 1.0).collect();
-        let baseline = StatRegressionDetector::build_baseline(&samples);
         let config = StatRegressionConfig {
             z_score_threshold: 2.0,
             relative_threshold: 0.10,
             min_samples_for_detection: 5,
             direction: StatRegressionDirection::Either,
         };
-        // std is 0 for constant samples, so z_score will be 0 — test with realistic data
-        let samples2: Vec<f64> = (0..20).map(|i| 1.0 + (i as f64) * 0.01).collect();
-        let baseline2 = StatRegressionDetector::build_baseline(&samples2);
-        let mut detector = StatRegressionDetector::new("loss", baseline2, config);
+        // Constant samples would give std == 0 (z_score always 0, nothing
+        // could ever look like a regression), so use realistic varying data.
+        let samples: Vec<f64> = (0..20).map(|i| 1.0 + (i as f64) * 0.01).collect();
+        let baseline = StatRegressionDetector::build_baseline(&samples);
+        let mut detector = StatRegressionDetector::new("loss", baseline, config);
         // Inject a value 5 std-devs away from the mean
         let mean = detector.baseline.mean;
         let std = detector.baseline.std;
         let far_value = mean + 6.0 * std;
         let event = detector.check_point(100, far_value);
-        assert!(event.is_some(), "should detect regression for extreme value");
+        assert!(
+            event.is_some(),
+            "should detect regression for extreme value"
+        );
     }
 
     #[test]
@@ -550,7 +582,13 @@ mod tests {
 
     #[test]
     fn test_check_point_insufficient_samples() {
-        let baseline = StatBaselineStats { mean: 5.0, std: 1.0, min: 4.0, max: 6.0, sample_count: 2 };
+        let baseline = StatBaselineStats {
+            mean: 5.0,
+            std: 1.0,
+            min: 4.0,
+            max: 6.0,
+            sample_count: 2,
+        };
         let config = StatRegressionConfig {
             min_samples_for_detection: 10,
             ..Default::default()
@@ -583,12 +621,27 @@ mod tests {
 
     #[test]
     fn test_severity_thresholds() {
-        assert_eq!(StatRegressionSeverity::from_relative_change(0.05), StatRegressionSeverity::Mild);
-        assert_eq!(StatRegressionSeverity::from_relative_change(0.15), StatRegressionSeverity::Moderate);
-        assert_eq!(StatRegressionSeverity::from_relative_change(0.30), StatRegressionSeverity::Severe);
-        assert_eq!(StatRegressionSeverity::from_relative_change(0.60), StatRegressionSeverity::Critical);
+        assert_eq!(
+            StatRegressionSeverity::from_relative_change(0.05),
+            StatRegressionSeverity::Mild
+        );
+        assert_eq!(
+            StatRegressionSeverity::from_relative_change(0.15),
+            StatRegressionSeverity::Moderate
+        );
+        assert_eq!(
+            StatRegressionSeverity::from_relative_change(0.30),
+            StatRegressionSeverity::Severe
+        );
+        assert_eq!(
+            StatRegressionSeverity::from_relative_change(0.60),
+            StatRegressionSeverity::Critical
+        );
         // negative (improvement) uses abs
-        assert_eq!(StatRegressionSeverity::from_relative_change(-0.60), StatRegressionSeverity::Critical);
+        assert_eq!(
+            StatRegressionSeverity::from_relative_change(-0.60),
+            StatRegressionSeverity::Critical
+        );
     }
 
     // ── CusumDetector ─────────────────────────────────────────────────────────
@@ -599,7 +652,10 @@ mod tests {
         // Feed values close to target mean — should not alert
         for i in 0..50 {
             let v = if i % 2 == 0 { 0.1 } else { -0.1 };
-            assert!(cusum.update(v).is_none(), "should not alert for in-control data");
+            assert!(
+                cusum.update(v).is_none(),
+                "should not alert for in-control data"
+            );
         }
     }
 
@@ -663,6 +719,9 @@ mod tests {
                 break;
             }
         }
-        assert!(alerted, "CUSUM with zero std should still detect large deviation");
+        assert!(
+            alerted,
+            "CUSUM with zero std should still detect large deviation"
+        );
     }
 }

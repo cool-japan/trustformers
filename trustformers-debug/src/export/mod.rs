@@ -14,12 +14,6 @@ pub mod unified;
 pub use perfetto::{PerfettoEvent, PerfettoExporter, PerfettoPhase, PerfettoTrace};
 pub use tracy::{TracyExporter, TracyTrace, TracyZone};
 pub use unified::{
-    CsvExporter,
-    ExportConfig,
-    ExportError,
-    ExportFormat,
-    JsonExporter,
-    ProfilingTrace,
-    TimingEvent,
-    TraceExporter,
+    CsvExporter, ExportConfig, ExportError, ExportFormat, JsonExporter, ProfilingTrace,
+    TimingEvent, TraceExporter,
 };

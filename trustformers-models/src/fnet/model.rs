@@ -1,5 +1,9 @@
 use crate::common::ActivationType;
 use crate::fnet::config::FNetConfig;
+use crate::weight_loading::binding::{
+    bind_embedding, bind_linear, take_norm_bias, take_norm_weight,
+};
+use crate::weight_loading::checkpoint::{Checkpoint, LoadReport, UnusedTensors};
 use std::io::Read;
 use trustformers_core::{
     device::Device,
@@ -348,8 +352,8 @@ impl Layer for FourierTransform {
 
 /// FNet feed-forward network (same as BERT)
 pub struct FNetFeedForward {
-    dense1: Linear,
-    dense2: Linear,
+    pub(crate) dense1: Linear,
+    pub(crate) dense2: Linear,
     activation: ActivationType,
     #[allow(dead_code)]
     dropout: f32,
@@ -406,9 +410,9 @@ impl Layer for FNetFeedForward {
 /// FNet encoder layer (Fourier + FFN)
 pub struct FNetLayer {
     fourier_transform: FourierTransform,
-    feed_forward: FNetFeedForward,
-    fourier_norm: LayerNorm,
-    output_norm: LayerNorm,
+    pub(crate) feed_forward: FNetFeedForward,
+    pub(crate) fourier_norm: LayerNorm,
+    pub(crate) output_norm: LayerNorm,
     device: Device,
 }
 
@@ -465,10 +469,10 @@ impl Layer for FNetLayer {
 
 /// FNet embeddings (same as BERT)
 pub struct FNetEmbeddings {
-    word_embeddings: Embedding,
-    position_embeddings: Embedding,
-    token_type_embeddings: Embedding,
-    layer_norm: LayerNorm,
+    pub(crate) word_embeddings: Embedding,
+    pub(crate) position_embeddings: Embedding,
+    pub(crate) token_type_embeddings: Embedding,
+    pub(crate) layer_norm: LayerNorm,
     #[allow(dead_code)]
     dropout: f32,
     device: Device,
@@ -544,7 +548,7 @@ impl Layer for FNetEmbeddings {
 
 /// FNet encoder
 pub struct FNetEncoder {
-    layers: Vec<FNetLayer>,
+    pub(crate) layers: Vec<FNetLayer>,
     device: Device,
 }
 
@@ -629,8 +633,13 @@ impl Model for FNetModel {
         Ok(sequence_output)
     }
 
-    fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
-        Ok(())
+    /// Load a HuggingFace FNet checkpoint (safetensors or `torch.save`).
+    ///
+    /// A previous revision was `Ok(())` — the reader was never touched, so every
+    /// "load" left the model randomly initialised while reporting success. See
+    /// [`FNetModel::load_from_checkpoint`] for the name map.
+    fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -754,6 +763,122 @@ impl Model for FNetForMaskedLM {
 
     fn num_parameters(&self) -> usize {
         self.fnet.num_parameters() + self.mlm_head.parameter_count()
+    }
+}
+
+impl FNetModel {
+    /// Checkpoint namespaces an FNet encoder legitimately does not consume.
+    pub(crate) const ALLOWED_UNUSED_PREFIXES: &'static [&'static str] =
+        &["cls.", "classifier.", "qa_outputs.", "pooler."];
+
+    /// Non-parameter buffers HuggingFace stores alongside FNet's weights.
+    pub(crate) const ALLOWED_UNUSED_SUFFIXES: &'static [&'static str] =
+        &["embeddings.position_ids", "embeddings.token_type_ids"];
+
+    /// Load pretrained weights and report exactly what was bound.
+    ///
+    /// # Errors
+    ///
+    /// See [`FNetModel::load_from_checkpoint`].
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        self.load_from_checkpoint(&checkpoint)
+    }
+
+    /// Bind an already-parsed checkpoint into this model.
+    ///
+    /// FNet is BERT with self-attention replaced by a parameter-free 2-D Fourier
+    /// transform, so its checkpoints carry BERT's embedding and feed-forward
+    /// tensors and simply *omit* every `attention.self.*` / `attention.output.*`
+    /// projection — the mixing layer has no weights to store. The two per-layer
+    /// norms keep their HuggingFace spellings (`fourier.output.LayerNorm` and
+    /// `output.LayerNorm`).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint does not look like an FNet checkpoint, when a
+    /// tensor has the wrong shape, when a parameter is missing, or when the
+    /// checkpoint carries weights this architecture does not recognise.
+    pub fn load_from_checkpoint(&mut self, checkpoint: &Checkpoint) -> Result<LoadReport> {
+        let prefix =
+            checkpoint.detect_prefix(&["", "fnet."], "embeddings.word_embeddings.weight")?;
+        let mut binder = checkpoint.binder(&prefix);
+
+        let config = self.config.clone();
+        let hidden = config.hidden_size;
+        let intermediate = config.intermediate_size;
+
+        bind_embedding(
+            &mut binder,
+            "embeddings.word_embeddings",
+            config.vocab_size,
+            hidden,
+            &mut self.embeddings.word_embeddings,
+        )?;
+        bind_embedding(
+            &mut binder,
+            "embeddings.position_embeddings",
+            config.max_position_embeddings,
+            hidden,
+            &mut self.embeddings.position_embeddings,
+        )?;
+        bind_embedding(
+            &mut binder,
+            "embeddings.token_type_embeddings",
+            config.type_vocab_size,
+            hidden,
+            &mut self.embeddings.token_type_embeddings,
+        )?;
+        if let Some(w) = take_norm_weight(&mut binder, "embeddings.LayerNorm", hidden)? {
+            self.embeddings.layer_norm.set_weight(w)?;
+        }
+        if let Some(b) = take_norm_bias(&mut binder, "embeddings.LayerNorm", hidden)? {
+            self.embeddings.layer_norm.set_bias(b)?;
+        }
+
+        for (index, layer) in self.encoder.layers.iter_mut().enumerate() {
+            let base = format!("encoder.layer.{index}");
+
+            // The Fourier mixing layer itself has no parameters; only the
+            // residual norm that follows it does.
+            let fourier_norm = format!("{base}.fourier.output.LayerNorm");
+            if let Some(w) = take_norm_weight(&mut binder, &fourier_norm, hidden)? {
+                layer.fourier_norm.set_weight(w)?;
+            }
+            if let Some(b) = take_norm_bias(&mut binder, &fourier_norm, hidden)? {
+                layer.fourier_norm.set_bias(b)?;
+            }
+
+            bind_linear(
+                &mut binder,
+                &format!("{base}.intermediate.dense"),
+                intermediate,
+                hidden,
+                true,
+                &mut layer.feed_forward.dense1,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{base}.output.dense"),
+                hidden,
+                intermediate,
+                true,
+                &mut layer.feed_forward.dense2,
+            )?;
+
+            let output_norm = format!("{base}.output.LayerNorm");
+            if let Some(w) = take_norm_weight(&mut binder, &output_norm, hidden)? {
+                layer.output_norm.set_weight(w)?;
+            }
+            if let Some(b) = take_norm_bias(&mut binder, &output_norm, hidden)? {
+                layer.output_norm.set_bias(b)?;
+            }
+        }
+
+        binder.finish(UnusedTensors::new(
+            Self::ALLOWED_UNUSED_PREFIXES,
+            Self::ALLOWED_UNUSED_SUFFIXES,
+        ))
     }
 }
 
@@ -1137,6 +1262,186 @@ mod tests {
             shape[shape.len() - 1],
             cfg.hidden_size,
             "embedding dim must match hidden_size"
+        );
+    }
+
+    // ── Real checkpoint loading (regression for the silent `Ok(())`) ────────
+
+    use crate::weight_loading::test_support::{build_safetensors, F32Tensor};
+
+    fn loading_config() -> FNetConfig {
+        FNetConfig {
+            vocab_size: 16,
+            hidden_size: 8,
+            num_hidden_layers: 2,
+            intermediate_size: 16,
+            max_position_embeddings: 8,
+            type_vocab_size: 2,
+            ..tiny_config()
+        }
+    }
+
+    /// Every tensor an FNet checkpoint of this shape carries.
+    ///
+    /// Note the absence of any `attention.*` projection: FNet's mixing layer is
+    /// a parameter-free Fourier transform, so those tensors simply do not exist.
+    fn fnet_tensors(config: &FNetConfig, prefix: &str) -> Vec<F32Tensor> {
+        let hidden = config.hidden_size;
+        let intermediate = config.intermediate_size;
+        let mut seed = 0.0f32;
+        let mut next = || {
+            seed += 1.0;
+            seed
+        };
+
+        let mut tensors = vec![
+            F32Tensor::ramp(
+                &format!("{prefix}embeddings.word_embeddings.weight"),
+                &[config.vocab_size, hidden],
+                next(),
+            ),
+            F32Tensor::ramp(
+                &format!("{prefix}embeddings.position_embeddings.weight"),
+                &[config.max_position_embeddings, hidden],
+                next(),
+            ),
+            F32Tensor::ramp(
+                &format!("{prefix}embeddings.token_type_embeddings.weight"),
+                &[config.type_vocab_size, hidden],
+                next(),
+            ),
+            F32Tensor::ramp(
+                &format!("{prefix}embeddings.LayerNorm.weight"),
+                &[hidden],
+                next(),
+            ),
+            F32Tensor::ramp(
+                &format!("{prefix}embeddings.LayerNorm.bias"),
+                &[hidden],
+                next(),
+            ),
+        ];
+
+        for layer in 0..config.num_hidden_layers {
+            let base = format!("{prefix}encoder.layer.{layer}");
+            tensors.push(F32Tensor::ramp(
+                &format!("{base}.fourier.output.LayerNorm.weight"),
+                &[hidden],
+                next(),
+            ));
+            tensors.push(F32Tensor::ramp(
+                &format!("{base}.fourier.output.LayerNorm.bias"),
+                &[hidden],
+                next(),
+            ));
+            tensors.push(F32Tensor::ramp(
+                &format!("{base}.intermediate.dense.weight"),
+                &[intermediate, hidden],
+                next(),
+            ));
+            tensors.push(F32Tensor::ramp(
+                &format!("{base}.intermediate.dense.bias"),
+                &[intermediate],
+                next(),
+            ));
+            tensors.push(F32Tensor::ramp(
+                &format!("{base}.output.dense.weight"),
+                &[hidden, intermediate],
+                next(),
+            ));
+            tensors.push(F32Tensor::ramp(
+                &format!("{base}.output.dense.bias"),
+                &[hidden],
+                next(),
+            ));
+            tensors.push(F32Tensor::ramp(
+                &format!("{base}.output.LayerNorm.weight"),
+                &[hidden],
+                next(),
+            ));
+            tensors.push(F32Tensor::ramp(
+                &format!("{base}.output.LayerNorm.bias"),
+                &[hidden],
+                next(),
+            ));
+        }
+
+        tensors
+    }
+
+    /// Regression: `load_pretrained` was `Ok(())`, so the reader was never read
+    /// and the model kept its random initialisation while reporting success.
+    #[test]
+    fn load_pretrained_binds_the_checkpoint_instead_of_returning_ok() {
+        let config = loading_config();
+        let tensors = fnet_tensors(&config, "fnet.");
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = FNetModel::new(config).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a matching checkpoint must load");
+        assert!(
+            report.is_complete(),
+            "every parameter must be bound, missing: {:?}",
+            report.missing
+        );
+        assert_eq!(
+            report.loaded.len(),
+            tensors.len(),
+            "every fixture tensor must reach the model"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_reports_a_missing_parameter_instead_of_inventing_it() {
+        let config = loading_config();
+        let mut tensors = fnet_tensors(&config, "fnet.");
+        tensors.retain(|t| t.name != "fnet.encoder.layer.1.output.dense.weight");
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = FNetModel::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("an incomplete checkpoint must not load silently");
+        assert!(
+            err.to_string().contains("encoder.layer.1.output.dense.weight"),
+            "the error must name the gap: {err}"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_rejects_a_foreign_tensor() {
+        let config = loading_config();
+        let mut tensors = fnet_tensors(&config, "fnet.");
+        // An attention projection has no place in an FNet checkpoint.
+        tensors.push(F32Tensor::ramp(
+            "fnet.encoder.layer.0.attention.self.query.weight",
+            &[8, 8],
+            42.0,
+        ));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = FNetModel::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("an unrecognised weight must fail the load");
+        assert!(
+            err.to_string().contains("attention.self.query"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_rejects_bytes_that_are_not_a_checkpoint() {
+        let mut model = FNetModel::new(loading_config()).expect("model must build");
+        let garbage = vec![0xABu8; 4096];
+        let err = model
+            .load_pretrained(&mut garbage.as_slice())
+            .expect_err("garbage must not be accepted as weights");
+        assert!(
+            err.to_string().contains("unrecognised checkpoint container"),
+            "unexpected: {err}"
         );
     }
 }

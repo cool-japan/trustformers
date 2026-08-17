@@ -1429,6 +1429,10 @@ impl DashboardBuilder {
 }
 
 #[cfg(test)]
+#[path = "realtime_dashboard_tests.rs"]
+mod realtime_dashboard_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use futures::StreamExt;

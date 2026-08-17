@@ -60,7 +60,7 @@ Key modules (see `cargo doc -p trustformers-mobile --all-features --open` for th
 | `federated`, `training`, `differential_privacy` | On-device / federated learning (feature `on-device-training`) |
 | `mobile_performance_profiler` | Profiling, bottleneck detection, real-time monitoring, export |
 | `react_native`, `flutter`, `unity_interop`, `expo_plugin` | Cross-platform framework bridges |
-| `webnn`, `mlx_integration`, `hardware` | WebNN IR/export, Apple-Silicon MLX integration, next-gen accelerator abstractions |
+| `webnn`, `mlx_integration`, `hardware` | WebNN IR/export, an MLX-*style* graph engine for Apple Silicon (Metal + CPU; **does not link Apple's MLX framework**), next-gen accelerator abstractions |
 | `advanced_security`, `advanced_privacy_mechanisms` | Experimental PQ-crypto / HE / MPC / DP research code (see Known Limitations) |
 
 ## Quick Start

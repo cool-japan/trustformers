@@ -16,8 +16,6 @@ pub mod metalbackend_attention_with_cache_gpu_to_gpu_group;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub mod metalbackend_buffer_cache_size_group;
 #[cfg(all(target_os = "macos", feature = "metal"))]
-pub mod metalbackend_buffer_to_objc2_group;
-#[cfg(all(target_os = "macos", feature = "metal"))]
 pub mod metalbackend_clear_buffer_cache_group;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub mod metalbackend_flash_attention_group;
@@ -27,6 +25,8 @@ pub mod metalbackend_gelu_f32_group;
 pub mod metalbackend_initialize_mps_group;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub mod metalbackend_layernorm_f32_group;
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub mod metalbackend_lifecycle_group;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub mod metalbackend_matmul_f32_group;
 #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -41,6 +41,9 @@ pub mod metalbackend_rope_f32_group;
 pub mod metalbackend_softmax_causal_f32_group;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub mod metalbackend_type;
+/// GPU-vs-CPU parity and buffer-lifetime regression tests (macOS + `metal` only).
+#[cfg(all(test, target_os = "macos", feature = "metal"))]
+mod parity_tests;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub mod types;
 
@@ -62,9 +65,6 @@ pub use metalbackend_attention_with_cache_gpu_to_gpu_group::*;
 pub use metalbackend_buffer_cache_size_group::*;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 #[allow(unused_imports)]
-pub use metalbackend_buffer_to_objc2_group::*;
-#[cfg(all(target_os = "macos", feature = "metal"))]
-#[allow(unused_imports)]
 pub use metalbackend_clear_buffer_cache_group::*;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 #[allow(unused_imports)]
@@ -78,6 +78,9 @@ pub use metalbackend_initialize_mps_group::*;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 #[allow(unused_imports)]
 pub use metalbackend_layernorm_f32_group::*;
+#[cfg(all(target_os = "macos", feature = "metal"))]
+#[allow(unused_imports)]
+pub use metalbackend_lifecycle_group::*;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 #[allow(unused_imports)]
 pub use metalbackend_matmul_f32_group::*;
@@ -108,4 +111,4 @@ pub use functions::*;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub use metalbackend_type::MetalBackend;
 #[cfg(all(target_os = "macos", feature = "metal"))]
-pub use types::BufferId;
+pub use types::{BufferCacheStats, BufferId, BufferTier, MetalBufferHandle};

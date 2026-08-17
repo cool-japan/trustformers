@@ -598,25 +598,39 @@ impl GenerationUtils {
             .unwrap_or(0)
     }
 
-    /// Check if generation should stop based on criteria
-    pub fn should_stop(
-        generated_tokens: &[u32],
-        config: &GenerationConfig,
-        current_length: usize,
-    ) -> bool {
-        // Check max_length
-        if current_length >= config.max_length {
+    /// Check if generation should stop based on criteria.
+    ///
+    /// `sequence` is the **whole** sequence the model has seen — prompt tokens
+    /// followed by generated ones — and `prompt_length` says where the prompt
+    /// ends. `max_length` bounds the total; `max_new_tokens` bounds only the
+    /// completion, which is why the split has to be given rather than guessed.
+    ///
+    /// # The bug this signature prevents
+    ///
+    /// The previous signature took `generated_tokens: &[u32]` and compared
+    /// `generated_tokens.len() >= max_new`. Callers that passed the full
+    /// sequence — the natural reading of "the tokens generated so far", and what
+    /// every generation loop has on hand — were charged for their prompt: a
+    /// 100-token prompt with `max_new_tokens = 20` stopped *immediately*,
+    /// emitting nothing, because `100 >= 20`. Requiring `prompt_length` makes
+    /// the distinction impossible to get wrong silently.
+    pub fn should_stop(sequence: &[u32], config: &GenerationConfig, prompt_length: usize) -> bool {
+        // Check max_length against the total sequence.
+        if sequence.len() >= config.max_length {
             return true;
         }
 
-        // Check max_new_tokens
+        // Check max_new_tokens against the *completion* only.
         if let Some(max_new) = config.max_new_tokens {
-            if generated_tokens.len() >= max_new {
+            let completion_length = sequence.len().saturating_sub(prompt_length);
+            if completion_length >= max_new {
                 return true;
             }
         }
 
-        // Check for EOS token
+        // Check for EOS token. An EOS that happens to sit inside the prompt is
+        // not a reason to stop before generating anything.
+        let generated_tokens = &sequence[prompt_length.min(sequence.len())..];
         if let Some(eos_id) = config.eos_token_id {
             if generated_tokens.last() == Some(&eos_id) {
                 return true;
@@ -626,7 +640,7 @@ impl GenerationUtils {
         // Check stopping criteria
         for criterion in &config.stopping_criteria {
             match criterion {
-                StoppingCriteria::MaxLength if current_length >= config.max_length => {
+                StoppingCriteria::MaxLength if sequence.len() >= config.max_length => {
                     return true;
                 },
                 StoppingCriteria::EosToken { eos_token_id }
@@ -816,17 +830,88 @@ mod tests {
             ..Default::default()
         };
 
-        // Should stop at max length
-        let tokens = vec![1, 2, 3];
-        assert!(GenerationUtils::should_stop(&tokens, &config, 10));
+        // Should stop once the whole sequence reaches max_length (10 here).
+        let at_limit: Vec<u32> = (0..10).collect();
+        assert!(GenerationUtils::should_stop(&at_limit, &config, 0));
 
         // Should stop at EOS
         let tokens_with_eos = vec![1, 2, 50256];
-        assert!(GenerationUtils::should_stop(&tokens_with_eos, &config, 5));
+        assert!(GenerationUtils::should_stop(&tokens_with_eos, &config, 0));
 
         // Should not stop
         let tokens = vec![1, 2, 3];
-        assert!(!GenerationUtils::should_stop(&tokens, &config, 5));
+        assert!(!GenerationUtils::should_stop(&tokens, &config, 0));
+    }
+
+    /// Regression: `max_new_tokens` counted the prompt.
+    ///
+    /// `should_stop` compared `generated_tokens.len() >= max_new` against
+    /// whatever slice the caller passed, so a loop holding the full sequence
+    /// (prompt + completion, which is what a decoder actually has) stopped
+    /// before emitting a single token whenever the prompt was longer than
+    /// `max_new_tokens`.
+    #[test]
+    fn max_new_tokens_counts_the_completion_not_the_prompt() {
+        let config = GenerationConfig {
+            max_length: 10_000,
+            max_new_tokens: Some(5),
+            eos_token_id: None,
+            ..Default::default()
+        };
+
+        // A 100-token prompt with nothing generated yet: generation has not even
+        // started, so it must not stop.
+        let prompt: Vec<u32> = (0..100).collect();
+        assert!(
+            !GenerationUtils::should_stop(&prompt, &config, prompt.len()),
+            "a long prompt must not exhaust max_new_tokens before any token is generated"
+        );
+
+        // Four generated tokens: still under the budget of five.
+        let mut sequence = prompt.clone();
+        sequence.extend([1000, 1001, 1002, 1003]);
+        assert!(
+            !GenerationUtils::should_stop(&sequence, &config, prompt.len()),
+            "four of five new tokens must not stop generation"
+        );
+
+        // The fifth new token reaches the budget.
+        sequence.push(1004);
+        assert!(
+            GenerationUtils::should_stop(&sequence, &config, prompt.len()),
+            "the fifth new token must reach max_new_tokens"
+        );
+    }
+
+    /// An EOS inside the prompt is not a reason to stop before generating.
+    #[test]
+    fn an_eos_token_inside_the_prompt_does_not_stop_generation() {
+        let config = GenerationConfig {
+            max_length: 1_000,
+            max_new_tokens: Some(10),
+            eos_token_id: Some(50256),
+            ..Default::default()
+        };
+        let prompt = vec![1, 2, 50256];
+        assert!(
+            !GenerationUtils::should_stop(&prompt, &config, prompt.len()),
+            "an EOS that is part of the prompt must not end generation immediately"
+        );
+    }
+
+    /// `max_length` still bounds the total sequence, prompt included.
+    #[test]
+    fn max_length_bounds_the_whole_sequence() {
+        let config = GenerationConfig {
+            max_length: 8,
+            max_new_tokens: Some(1_000),
+            eos_token_id: None,
+            ..Default::default()
+        };
+        let sequence: Vec<u32> = (0..8).collect();
+        assert!(GenerationUtils::should_stop(&sequence, &config, 4));
+        let shorter: Vec<u32> = (0..7).collect();
+        assert!(!GenerationUtils::should_stop(&shorter, &config, 4));
     }
 
     #[test]

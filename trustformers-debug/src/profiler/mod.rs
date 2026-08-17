@@ -1113,6 +1113,10 @@ macro_rules! profile_scope {
 }
 
 #[cfg(test)]
+#[path = "../profiler_tests.rs"]
+mod profiler_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

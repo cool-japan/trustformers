@@ -39,6 +39,62 @@ pub fn initialize() -> Result<(), StorageError> {
     Ok(())
 }
 
+/// Real DEFLATE compression (pure Rust, via `oxiarc_deflate`). Pure
+/// (`String`-erroring, no `JsValue`) so it is unit tested directly; see
+/// [`ModelSplitter::compress_data`] for the `JsValue`-wrapping boundary
+/// used from `#[wasm_bindgen]` methods.
+fn compress_bytes(data: &[u8]) -> Result<Vec<u8>, String> {
+    oxiarc_deflate::deflate(data, 6).map_err(|e| format!("chunk compression failed: {e}"))
+}
+
+/// Inverse of [`compress_bytes`].
+fn decompress_bytes(data: &[u8]) -> Result<Vec<u8>, String> {
+    oxiarc_deflate::inflate(data).map_err(|e| format!("chunk decompression failed: {e}"))
+}
+
+/// Calculate a checksum for chunk data integrity. Not cryptographic, but
+/// order- and content-sensitive (unlike a byte sum or XOR), which is
+/// enough to catch the truncation/corruption this module's compression
+/// pipeline used to introduce.
+fn calculate_checksum(data: &[u8]) -> u32 {
+    let mut checksum = 0u32;
+    for &byte in data {
+        checksum = checksum.wrapping_mul(31).wrapping_add(byte as u32);
+    }
+    checksum
+}
+
+/// Resolve a chunk by id and return its real, decompressed bytes with the
+/// checksum verified against them — never the raw, possibly-compressed
+/// bytes handed back as-is. `Ok(None)` for an unknown id (matches the
+/// public API's optional-return shape); `Err` for a decompression failure
+/// or a checksum mismatch — never silently-corrupt bytes.
+///
+/// This used to not exist at all: `get_chunk_data` returned `chunk.data`
+/// directly with no decompression step anywhere in this module, so any
+/// chunk marked `compressed: true` was unusable to every caller (and, with
+/// the old fake `compress_data`, permanently missing 30% of its content
+/// regardless).
+fn resolve_chunk_data(chunks: &[ModelChunk], chunk_id: &str) -> Result<Option<Vec<u8>>, String> {
+    let Some(chunk) = chunks.iter().find(|c| c.id == chunk_id) else {
+        return Ok(None);
+    };
+    let raw = if chunk.compressed {
+        decompress_bytes(&chunk.data)?
+    } else {
+        chunk.data.clone()
+    };
+
+    let actual_checksum = calculate_checksum(&raw);
+    if actual_checksum != chunk.checksum {
+        return Err(format!(
+            "chunk '{chunk_id}' failed integrity check: expected checksum {}, got {actual_checksum}",
+            chunk.checksum
+        ));
+    }
+    Ok(Some(raw))
+}
+
 /// Model chunk configuration
 #[wasm_bindgen]
 #[derive(Debug, Clone)]
@@ -256,6 +312,7 @@ impl ModelSplitter {
         model_name: &str,
         model_version: &str,
     ) -> Result<js_sys::Array, JsValue> {
+        #[cfg(target_arch = "wasm32")]
         web_sys::console::log_1(
             &format!(
                 "Splitting model '{}' ({} bytes) into chunks",
@@ -265,22 +322,9 @@ impl ModelSplitter {
             .into(),
         );
 
-        self.chunk_metadata.model_name = model_name.to_string();
-        self.chunk_metadata.model_version = model_version.to_string();
-        self.chunk_metadata.total_size_bytes = model_data.len();
+        self.split_model_inner(model_data, model_name, model_version)?;
 
-        // Analyze model structure to identify components
-        let components = self.analyze_model_structure(model_data)?;
-
-        // Split into chunks based on components and size limits
-        self.chunks = self.create_chunks_from_components(model_data, components)?;
-
-        // Generate metadata
-        self.generate_chunk_metadata()?;
-
-        // Determine optimal loading order
-        self.loading_order = self.calculate_loading_order();
-
+        #[cfg(target_arch = "wasm32")]
         web_sys::console::log_1(
             &format!(
                 "Model split into {} chunks, total size: {} bytes",
@@ -292,6 +336,34 @@ impl ModelSplitter {
 
         // Return chunk information as JavaScript array
         self.get_chunk_manifest()
+    }
+
+    /// Pure core of [`Self::split_model`]: analyze + chunk + generate
+    /// metadata + compute loading order, populating `self.chunks`. Its
+    /// `Result` error type is inherited from the `?`-chained calls below
+    /// (kept as `JsValue` rather than plumbing a separate `String` error
+    /// type through this whole call chain), but none of them construct a
+    /// `JsValue` on their success path, so — unlike `split_model` itself,
+    /// which also builds real `js_sys::Object`/`Array` values via
+    /// `get_chunk_manifest()` (real JS-heap operations only meaningful with
+    /// an actual JS engine) — this is safe to call directly from native
+    /// tests and is what they use to exercise real chunking + compression +
+    /// checksum + reassembly end to end.
+    fn split_model_inner(
+        &mut self,
+        model_data: &[u8],
+        model_name: &str,
+        model_version: &str,
+    ) -> Result<(), JsValue> {
+        self.chunk_metadata.model_name = model_name.to_string();
+        self.chunk_metadata.model_version = model_version.to_string();
+        self.chunk_metadata.total_size_bytes = model_data.len();
+
+        let components = self.analyze_model_structure(model_data)?;
+        self.chunks = self.create_chunks_from_components(model_data, components)?;
+        self.generate_chunk_metadata()?;
+        self.loading_order = self.calculate_loading_order();
+        Ok(())
     }
 
     /// Analyze model structure to identify components
@@ -396,7 +468,7 @@ impl ModelSplitter {
                 priority: component.priority,
                 data: final_data,
                 compressed,
-                checksum: self.calculate_checksum(chunk_data),
+                checksum: calculate_checksum(chunk_data),
             };
 
             chunks.push(chunk);
@@ -405,18 +477,22 @@ impl ModelSplitter {
         Ok(chunks)
     }
 
-    /// Simple data compression simulation
+    /// Real chunk compression via `oxiarc_deflate` (pure-Rust DEFLATE;
+    /// COOLJAPAN policy forbids `flate2`/`zstd`/`lz4` directly). Every byte
+    /// of `data` is encoded; see [`decompress_bytes`] for the inverse.
+    ///
+    /// This used to be `let compressed_size = (data.len() as f64 * 0.7) as
+    /// usize; compressed[..copy_size].copy_from_slice(&data[..copy_size])`
+    /// — an unconditional 30%-of-every-chunk truncation with no inverse
+    /// operation anywhere in this module, so any chunk marked `compressed:
+    /// true` was silently missing its last 30% forever.
     fn compress_data(&self, data: &[u8]) -> Result<Vec<u8>, JsValue> {
-        // In a real implementation, you'd use actual compression like gzip, lz4, etc.
-        // For now, we'll simulate compression by reducing size by ~30%
-        let compressed_size = (data.len() as f64 * 0.7) as usize;
-        let mut compressed = vec![0u8; compressed_size];
+        compress_bytes(data).map_err(|e| JsValue::from_str(&e))
+    }
 
-        // Copy first part of data as a simulation
-        let copy_size = compressed_size.min(data.len());
-        compressed[..copy_size].copy_from_slice(&data[..copy_size]);
-
-        Ok(compressed)
+    /// Inverse of [`Self::compress_data`].
+    fn decompress_data(&self, data: &[u8]) -> Result<Vec<u8>, JsValue> {
+        decompress_bytes(data).map_err(|e| JsValue::from_str(&e))
     }
 
     /// Calculate dependencies between chunks
@@ -454,16 +530,6 @@ impl ModelSplitter {
         }
 
         dependencies
-    }
-
-    /// Calculate checksum for data integrity
-    fn calculate_checksum(&self, data: &[u8]) -> u32 {
-        // Simple CRC32-like checksum
-        let mut checksum = 0u32;
-        for &byte in data {
-            checksum = checksum.wrapping_mul(31).wrapping_add(byte as u32);
-        }
-        checksum
     }
 
     /// Generate chunk metadata
@@ -557,14 +623,14 @@ impl ModelSplitter {
 
     /// Get chunk data by ID
     pub fn get_chunk_data(&self, chunk_id: &str) -> Result<Option<js_sys::Uint8Array>, JsValue> {
-        if let Some(chunk) = self.chunks.iter().find(|c| c.id == chunk_id) {
-            let array_buffer = ArrayBuffer::new(chunk.data.len() as u32);
-            let uint8_view = Uint8Array::new(&array_buffer);
-            uint8_view.copy_from(&chunk.data);
-            Ok(Some(uint8_view))
-        } else {
-            Ok(None)
-        }
+        let raw = resolve_chunk_data(&self.chunks, chunk_id).map_err(|e| JsValue::from_str(&e))?;
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+        let array_buffer = ArrayBuffer::new(raw.len() as u32);
+        let uint8_view = Uint8Array::new(&array_buffer);
+        uint8_view.copy_from(&raw);
+        Ok(Some(uint8_view))
     }
 
     /// Get loading order
@@ -606,11 +672,17 @@ impl ModelSplitter {
             let blob_parts = js_sys::Array::new();
             blob_parts.push(&uint8_array);
 
-            // BlobPropertyBag not available in web-sys 0.3.81 - using default
-            let _blob = web_sys::Blob::new_with_u8_array_sequence(&blob_parts)?;
-
-            // Url not available in web-sys 0.3.81 - using placeholder
-            let url = format!("blob:data-chunk-{}", chunk.id);
+            // A real `Blob`, kept alive by the object URL created below —
+            // `web_sys::Url::create_object_url_with_blob` (used here) is
+            // available in the web-sys version this crate depends on (the
+            // "Url not available" comment this replaced was stale). The old
+            // code discarded the blob (`let _blob = ...`) entirely and
+            // fabricated `format!("blob:data-chunk-{}", chunk.id)` — a
+            // string that merely looks like a blob URL but was never
+            // registered with the browser, so it could never actually be
+            // fetched/opened.
+            let blob = web_sys::Blob::new_with_u8_array_sequence(&blob_parts)?;
+            let url = web_sys::Url::create_object_url_with_blob(&blob)?;
 
             let file_info = Object::new();
             js_sys::Reflect::set(&file_info, &"chunk_id".into(), &chunk.id.clone().into())?;
@@ -792,5 +864,189 @@ mod tests {
     fn test_recommended_chunk_size() {
         let chunk_size = get_recommended_chunk_size_mb(500.0, 1000.0);
         assert!((10.0..=300.0).contains(&chunk_size)); // Within reasonable bounds
+    }
+
+    // -----------------------------------------------------------------
+    // Real DEFLATE compression (replacing the fake 30%-truncation stub).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_compress_decompress_bytes_round_trip() {
+        let mut state = 4242u32;
+        let original: Vec<u8> = (0..3000)
+            .map(|_| {
+                state = state.wrapping_mul(1103515245).wrapping_add(12345);
+                (state >> 16) as u8
+            })
+            .collect();
+
+        let compressed = compress_bytes(&original).expect("compression should succeed");
+        // Regression guard: the old fake `compress_data` produced exactly
+        // `(len as f64 * 0.7) as usize` bytes by construction, silently
+        // dropping the rest. Real DEFLATE output length is data-dependent
+        // and effectively never lands on that exact naive formula.
+        let naive_old_len = (original.len() as f64 * 0.7) as usize;
+        assert_ne!(compressed.len(), naive_old_len);
+
+        let decompressed = decompress_bytes(&compressed).expect("decompression should succeed");
+        assert_eq!(
+            decompressed, original,
+            "compress/decompress must round-trip exactly"
+        );
+    }
+
+    #[test]
+    fn test_compress_bytes_shrinks_repetitive_data_for_real() {
+        let original = std::vec![0xABu8; 16384];
+        let compressed = compress_bytes(&original).expect("compression should succeed");
+        assert!(
+            compressed.len() < original.len() / 4,
+            "highly repetitive data must compress substantially: {} of {} bytes",
+            compressed.len(),
+            original.len()
+        );
+        let decompressed = decompress_bytes(&compressed).expect("decompression should succeed");
+        assert_eq!(decompressed, original);
+    }
+
+    #[test]
+    fn test_decompress_bytes_rejects_garbage() {
+        let garbage = std::vec![0xFFu8; 32];
+        assert!(
+            decompress_bytes(&garbage).is_err(),
+            "non-DEFLATE data must not silently decode"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Chunk checksum verification.
+    // -----------------------------------------------------------------
+
+    fn make_chunk(id: &str, raw: &[u8], compress: bool) -> ModelChunk {
+        let checksum = calculate_checksum(raw);
+        let data = if compress {
+            compress_bytes(raw).expect("compression should succeed")
+        } else {
+            raw.to_vec()
+        };
+        ModelChunk {
+            id: id.to_string(),
+            chunk_type: ChunkType::Custom,
+            size_bytes: data.len(),
+            dependencies: Vec::new(),
+            priority: ChunkPriority::Medium,
+            data,
+            compressed: compress,
+            checksum,
+        }
+    }
+
+    #[test]
+    fn test_resolve_chunk_data_round_trips_compressed_chunk() {
+        let raw = std::vec![7u8, 8, 9, 10, 11, 12, 13, 14];
+        let chunk = make_chunk("c1", &raw, true);
+        let resolved = resolve_chunk_data(std::slice::from_ref(&chunk), "c1")
+            .expect("checksum must match")
+            .expect("chunk must be found");
+        assert_eq!(resolved, raw);
+    }
+
+    #[test]
+    fn test_resolve_chunk_data_missing_id_returns_none() {
+        let chunk = make_chunk("c1", &[1, 2, 3], false);
+        let resolved = resolve_chunk_data(std::slice::from_ref(&chunk), "does-not-exist").unwrap();
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn test_resolve_chunk_data_detects_checksum_mismatch() {
+        // Regression guard: with the old fake compressor, a compressed
+        // chunk's stored `data` never matched what its checksum (computed
+        // over the real pre-compression bytes) expected — but nothing ever
+        // checked that. Corrupt a chunk's stored bytes directly here and
+        // confirm the mismatch is now caught rather than silently returned.
+        let raw = std::vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let mut chunk = make_chunk("c1", &raw, false);
+        chunk.data[0] ^= 0xFF; // corrupt one byte after checksumming
+
+        let err = resolve_chunk_data(std::slice::from_ref(&chunk), "c1")
+            .expect_err("corrupted chunk data must fail its checksum check");
+        assert!(err.contains("integrity check"));
+    }
+
+    // -----------------------------------------------------------------
+    // End-to-end: split -> resolve every chunk -> exact reassembly.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_split_model_reassembles_byte_exact() {
+        // The headline regression test for this module: the old
+        // `compress_data` silently discarded the last 30% of every chunk
+        // over 1KB, so concatenating resolved chunk data could never equal
+        // the original model bytes. Build a real (non-trivial, partially
+        // compressible) byte buffer, split it, resolve every chunk through
+        // the real decompress+checksum path, and verify the concatenation
+        // is byte-for-byte identical to the input.
+        let mut state = 7u32;
+        let model_data: Vec<u8> = (0..200_000)
+            .map(|i| {
+                if i % 5 == 0 {
+                    // Some genuinely repetitive stretches so compression
+                    // actually engages for at least some chunks.
+                    0x11
+                } else {
+                    state = state.wrapping_mul(1103515245).wrapping_add(12345);
+                    (state >> 16) as u8
+                }
+            })
+            .collect();
+
+        let mut config = ChunkConfig::new();
+        config.set_max_chunk_size_mb(0.05); // force multiple chunks for a 200KB buffer
+        let mut splitter = ModelSplitter::new(config);
+        splitter
+            .split_model_inner(&model_data, "test-model", "1.0.0")
+            .expect("splitting real data must succeed");
+
+        assert!(
+            splitter.chunks.len() > 1,
+            "expected more than one chunk for this input size"
+        );
+        assert!(
+            splitter.chunks.iter().any(|c| c.compressed),
+            "at least one chunk should have engaged real compression"
+        );
+
+        let mut reassembled = Vec::with_capacity(model_data.len());
+        for chunk in &splitter.chunks {
+            let resolved = resolve_chunk_data(&splitter.chunks, &chunk.id)
+                .expect("every chunk must pass its checksum check")
+                .expect("chunk must be found by its own id");
+            reassembled.extend_from_slice(&resolved);
+        }
+
+        assert_eq!(
+            reassembled.len(),
+            model_data.len(),
+            "reassembled length must match the original exactly"
+        );
+        assert_eq!(
+            reassembled, model_data,
+            "reassembled bytes must be identical to the original"
+        );
+    }
+
+    #[test]
+    fn test_resolved_chunk_length_matches_its_own_component_not_a_70_percent_truncation() {
+        // The old bug: `compress_data` unconditionally truncated to 70% of
+        // whatever it was given, and nothing ever decompressed it back.
+        // Take a single component-sized buffer through compress+decompress
+        // directly and confirm the recovered length is the *real* original
+        // length, not `(len as f64 * 0.7) as usize`.
+        let raw = std::vec![0x5Au8; 4096];
+        let compressed = compress_bytes(&raw).expect("compression should succeed");
+        let decompressed = decompress_bytes(&compressed).expect("decompression should succeed");
+        assert_eq!(decompressed.len(), raw.len());
+        assert_ne!(decompressed.len(), (raw.len() as f64 * 0.7) as usize);
     }
 }

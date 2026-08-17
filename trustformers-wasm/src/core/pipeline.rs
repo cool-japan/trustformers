@@ -74,24 +74,56 @@ impl TextGenerationPipeline {
 
     /// Generate text from a prompt
     pub async fn generate(&self, prompt: &str) -> Result<String, JsValue> {
-        // Tokenize input
         let input_ids = self.tokenizer.encode(prompt, true);
-        let input_tensor = WasmTensor::new(
-            input_ids.iter().map(|&id| id as f32).collect(),
-            vec![1, input_ids.len()],
-        )?;
+        let generated_ids = self.generate_ids(&input_ids)?;
 
-        // Generate tokens
-        let mut generated_ids = input_ids.clone();
-        let _past_key_values: Option<Vec<WasmTensor>> = None;
+        // Decode generated tokens
+        let generated_text = self.tokenizer.decode(generated_ids, true);
+        Ok(generated_text)
+    }
+
+    /// Autoregressively generate up to `self.config.max_length` new token
+    /// ids on top of `prompt_ids`, feeding every previously generated token
+    /// back into the model as context for the next step.
+    ///
+    /// This used to build `input_tensor` once from the prompt and then call
+    /// `self.model.forward(&input_tensor)` in a loop *without ever
+    /// rebuilding it* — every "generated" token was really just the
+    /// argmax/sample of the same first next-token prediction, repeated
+    /// `max_length` times. There is intentionally no KV cache here: each
+    /// step reruns the full transformer over the whole growing sequence
+    /// (`O(generated_len^2)` total), which is correct but not the fastest
+    /// possible implementation — a real incremental cache is future work,
+    /// not something to fake in the meantime.
+    ///
+    /// Stops (without erroring) once the sequence would exceed the model's
+    /// `max_position_embeddings`, since `WasmModel::forward` rejects
+    /// sequences longer than that.
+    fn generate_ids(&self, prompt_ids: &[u32]) -> Result<Vec<u32>, JsValue> {
+        let mut generated_ids = prompt_ids.to_vec();
+        let max_position = self.model.config().max_position_embeddings;
+        let vocab_size = self.model.config().vocab_size;
 
         for _ in 0..self.config.max_length {
-            // Forward pass
-            let outputs = self.model.forward(&input_tensor)?;
+            if generated_ids.len() >= max_position {
+                break;
+            }
 
-            // Get next token (simplified - just take argmax of last position)
+            // Rebuild the input tensor from the full context so far (prompt
+            // + every token generated up to this point) — this is the fix:
+            // the old code reused the prompt-only tensor for every step.
+            let current_tensor = WasmTensor::new(
+                generated_ids.iter().map(|&id| id as f32).collect(),
+                vec![1, generated_ids.len()],
+            )?;
+            let outputs = self.model.forward(&current_tensor)?;
+
             let logits = outputs.data();
-            let vocab_size = self.model.config().vocab_size;
+            if logits.len() < vocab_size {
+                return Err(JsValue::from_str(
+                    "TextGenerationPipeline: model output is shorter than one vocabulary row",
+                ));
+            }
             let last_logits = &logits[logits.len() - vocab_size..];
 
             let next_token_id = if self.config.do_sample {
@@ -102,15 +134,12 @@ impl TextGenerationPipeline {
 
             generated_ids.push(next_token_id);
 
-            // Check stopping conditions
             if self.should_stop(&generated_ids) {
                 break;
             }
         }
 
-        // Decode generated tokens
-        let generated_text = self.tokenizer.decode(generated_ids, true);
-        Ok(generated_text)
+        Ok(generated_ids)
     }
 
     /// Generate text with streaming support - yields tokens incrementally
@@ -121,23 +150,35 @@ impl TextGenerationPipeline {
     ) -> Result<String, JsValue> {
         // Tokenize input
         let input_ids = self.tokenizer.encode(prompt, true);
-        let input_tensor = WasmTensor::new(
-            input_ids.iter().map(|&id| id as f32).collect(),
-            vec![1, input_ids.len()],
-        )?;
 
-        // Generate tokens
+        // Generate tokens. As in `generate_ids`, the input tensor is
+        // rebuilt from the full running context on every step — the old
+        // code built it once from the prompt and reused it for every
+        // iteration, so every streamed token was a copy of the same first
+        // prediction.
         let mut generated_ids = input_ids.clone();
-        let _past_key_values: Option<Vec<WasmTensor>> = None;
         let mut generated_text = String::new();
+        let max_position = self.model.config().max_position_embeddings;
+        let vocab_size = self.model.config().vocab_size;
 
         for step in 0..self.config.max_length {
-            // Forward pass
-            let outputs = self.model.forward(&input_tensor)?;
+            if generated_ids.len() >= max_position {
+                break;
+            }
+
+            let current_tensor = WasmTensor::new(
+                generated_ids.iter().map(|&id| id as f32).collect(),
+                vec![1, generated_ids.len()],
+            )?;
+            let outputs = self.model.forward(&current_tensor)?;
 
             // Get next token
             let logits = outputs.data();
-            let vocab_size = self.model.config().vocab_size;
+            if logits.len() < vocab_size {
+                return Err(JsValue::from_str(
+                    "TextGenerationPipeline: model output is shorter than one vocabulary row",
+                ));
+            }
             let last_logits = &logits[logits.len() - vocab_size..];
 
             let next_token_id = if self.config.do_sample {
@@ -717,11 +758,168 @@ pub struct StreamProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::model::weights::{layer_prefix, NamedWeights};
 
     #[test]
     fn test_generation_config() {
         let config = GenerationConfig::default();
         assert_eq!(config.max_length, 50);
         assert_eq!(config.temperature, 1.0);
+    }
+
+    /// Deterministic pseudo-random f32 generator (no external RNG dependency
+    /// needed — just enough spread to make matmuls non-degenerate).
+    fn fill(n: usize, seed: u32) -> Vec<f32> {
+        let mut s = seed.wrapping_add(1);
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_mul(1103515245).wrapping_add(12345);
+                ((s >> 8) as f32 / u32::MAX as f32) * 2.0 - 1.0
+            })
+            .collect()
+    }
+
+    fn tensor(data: Vec<f32>, shape: Vec<usize>) -> WasmTensor {
+        WasmTensor::new(data, shape).expect("valid tensor")
+    }
+
+    /// Build a tiny, fully-populated GPT-2-shaped `TextGenerationPipeline`
+    /// (real weights, real tokenizer, no network/wasm-bindgen boundary) for
+    /// exercising the autoregressive loop directly.
+    fn build_test_pipeline() -> TextGenerationPipeline {
+        build_test_pipeline_seeded(3)
+    }
+
+    fn build_test_pipeline_seeded(seed_base: u32) -> TextGenerationPipeline {
+        let config = ModelConfig {
+            architecture: ModelArchitecture::GPT2,
+            vocab_size: 12,
+            hidden_size: 8,
+            num_layers: 2,
+            num_heads: 2,
+            max_position_embeddings: 16,
+            intermediate_size: 10,
+            hidden_dropout_prob: 0.0,
+            attention_dropout_prob: 0.0,
+        };
+        let h = config.hidden_size;
+        let inter = config.intermediate_size;
+        let mut w = NamedWeights::new();
+        let mut seed = seed_base;
+        let mut next = |n: usize| {
+            seed = seed.wrapping_add(211);
+            fill(n, seed)
+        };
+
+        w.insert(
+            "token_embeddings.weight",
+            tensor(next(config.vocab_size * h), vec![config.vocab_size, h]),
+        );
+        w.insert(
+            "position_embeddings.weight",
+            tensor(
+                next(config.max_position_embeddings * h),
+                vec![config.max_position_embeddings, h],
+            ),
+        );
+        for i in 0..config.num_layers {
+            let p = layer_prefix(i);
+            for name in ["attn.q_proj", "attn.k_proj", "attn.v_proj", "attn.o_proj"] {
+                w.insert(format!("{p}{name}.weight"), tensor(next(h * h), vec![h, h]));
+            }
+            w.insert(format!("{p}norm1.weight"), tensor(vec![1.0; h], vec![h]));
+            w.insert(format!("{p}norm2.weight"), tensor(vec![1.0; h], vec![h]));
+            w.insert(
+                format!("{p}ffn.fc1.weight"),
+                tensor(next(h * inter), vec![h, inter]),
+            );
+            w.insert(
+                format!("{p}ffn.fc2.weight"),
+                tensor(next(inter * h), vec![inter, h]),
+            );
+        }
+        w.insert("final_norm.weight", tensor(vec![1.0; h], vec![h]));
+
+        let model = WasmModel::with_weights_for_test(config, w);
+        let tokenizer = WasmTokenizer::new(TokenizerType::BPE);
+        TextGenerationPipeline::new(model, tokenizer)
+    }
+
+    #[test]
+    fn test_generate_ids_feeds_generated_tokens_back_into_context() {
+        // Regression test for the former bug: `input_tensor` was built once
+        // from the prompt and never rebuilt from `generated_ids`, so every
+        // step's forward pass saw the identical frozen prompt tensor and
+        // every generated token was a copy of the very first prediction.
+        //
+        // `do_sample: false` (argmax) keeps this deterministic and avoids
+        // `js_sys::Math::random()`, which is unavailable on native targets.
+        let mut pipeline = build_test_pipeline();
+        pipeline.set_config(GenerationConfig {
+            max_length: 6,
+            do_sample: false,
+            early_stopping: false,
+            ..GenerationConfig::default()
+        });
+
+        let prompt_ids = vec![1u32, 2, 3];
+        let generated = pipeline
+            .generate_ids(&prompt_ids)
+            .expect("generation over real weights should succeed");
+
+        assert!(
+            generated.len() > prompt_ids.len(),
+            "must generate at least one new token"
+        );
+        let new_tokens = &generated[prompt_ids.len()..];
+
+        assert!(
+            new_tokens.iter().any(|&t| t != new_tokens[0]),
+            "generated tokens must not all be identical — the old bug re-predicted the same \
+             token every step because the input tensor was never rebuilt: {new_tokens:?}"
+        );
+    }
+
+    #[test]
+    fn test_generate_ids_stops_at_model_context_limit() {
+        // max_position_embeddings is 16; start near that limit and ask for
+        // far more new tokens than could possibly fit. The old code had no
+        // notion of a context limit at all (it never grew the sequence), so
+        // this guards the new stopping condition added alongside the fix.
+        let mut pipeline = build_test_pipeline();
+        pipeline.set_config(GenerationConfig {
+            max_length: 100,
+            do_sample: false,
+            early_stopping: false,
+            ..GenerationConfig::default()
+        });
+
+        let prompt_ids: Vec<u32> = (0..14).map(|i| i % 5).collect();
+        let generated = pipeline
+            .generate_ids(&prompt_ids)
+            .expect("must stop cleanly at the context limit, not error");
+        assert!(
+            generated.len() <= 16,
+            "must not exceed max_position_embeddings: {}",
+            generated.len()
+        );
+    }
+
+    #[test]
+    fn test_generate_produces_nonempty_text_from_real_model() {
+        let mut pipeline = build_test_pipeline();
+        pipeline.set_config(GenerationConfig {
+            max_length: 4,
+            do_sample: false,
+            early_stopping: false,
+            ..GenerationConfig::default()
+        });
+        // `generate_ids` (not the async `generate`/wasm-bindgen boundary) —
+        // native tests have no JS microtask queue to drive
+        // `wasm_bindgen_futures`/`JsFuture`, but `generate`'s only `.await`
+        // point lives in `generate_stream`, not here; `generate_ids` is the
+        // synchronous core shared by both.
+        let generated = pipeline.generate_ids(&[1, 2]).expect("generation should succeed");
+        assert!(generated.len() >= 2);
     }
 }

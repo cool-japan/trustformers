@@ -45,48 +45,68 @@ impl MetalBackend {
         num_heads: usize,
         head_dim: usize,
     ) -> Result<BufferId> {
-        // eprintln!(
-        //     "🚀 GPU Multi-Head Attention (with cache): batch={}, q_seq={}, kv_seq={}, heads={}, head_dim={}",
-        //     batch_size, q_seq_len, kv_seq_len, num_heads, head_dim
-        // );
+        tracing::trace!(
+            batch_size,
+            q_seq_len,
+            kv_seq_len,
+            num_heads,
+            head_dim,
+            "metal: cached multi-head attention (gpu-to-gpu)"
+        );
         if batch_size != 1 {
             return Err(TrustformersError::tensor_op_error(
                 "GPU cached attention currently only supports batch_size=1",
                 "attention_with_cache_gpu_to_gpu",
             ));
         }
+        if q_seq_len == 0 || kv_seq_len == 0 || num_heads == 0 || head_dim == 0 {
+            return Err(TrustformersError::tensor_op_error(
+                "GPU cached attention requires non-zero q_seq_len, kv_seq_len, \
+                 num_heads and head_dim",
+                "attention_with_cache_gpu_to_gpu",
+            ));
+        }
+        if q_seq_len > kv_seq_len {
+            return Err(TrustformersError::tensor_op_error(
+                "GPU cached attention requires q_seq_len <= kv_seq_len (the KV cache \
+                 always contains at least the current query positions)",
+                "attention_with_cache_gpu_to_gpu",
+            ));
+        }
         let scale = 1.0 / (head_dim as f32).sqrt();
-        // eprintln!(
-        //     "   Step 1: Batched transpose K ({} heads, kv_seq={})",
-        //     num_heads, kv_seq_len
-        // );
-        let k_heads_t =
-            self.batched_transpose_gpu_to_gpu(k_heads_id, num_heads, kv_seq_len, head_dim)?;
-        // eprintln!(
-        //     "   Step 2: 🔥 Batched scaled matmul + softmax (q_seq={}, kv_seq={})",
-        //     q_seq_len, kv_seq_len
-        // );
-        let attn_weights = if q_seq_len == kv_seq_len {
-            // Same sequence length: use causal-masked fused kernel
-            self.batched_scaled_matmul_softmax_causal_gpu_to_gpu(
-                q_heads_id, &k_heads_t, num_heads, q_seq_len, head_dim, scale,
-            )?
-        } else {
-            // Different sequence lengths (generation): use gen-optimized fused kernel
-            self.batched_scaled_matmul_softmax_gen_gpu_to_gpu(
-                q_heads_id, &k_heads_t, num_heads, q_seq_len, kv_seq_len, head_dim, scale,
-            )?
-        };
-        // eprintln!("   Step 3: Batched matmul @ V ({} heads)", num_heads);
-        let output_heads_id = self.batched_matmul_gpu_to_gpu(
-            &attn_weights,
-            v_heads_id,
-            num_heads,
-            q_seq_len,
-            kv_seq_len,
-            head_dim,
-        )?;
-        // eprintln!("✅ GPU cached attention complete!");
-        Ok(output_heads_id)
+
+        // Both intermediates are dead once the output exists; release them on every
+        // exit path so a decode loop does not accumulate two GPU buffers per token.
+        let mut scratch: Vec<BufferId> = Vec::with_capacity(2);
+        let result = (|| -> Result<BufferId> {
+            let k_heads_t =
+                self.batched_transpose_gpu_to_gpu(k_heads_id, num_heads, kv_seq_len, head_dim)?;
+            scratch.push(k_heads_t);
+
+            let attn_weights = if q_seq_len == kv_seq_len {
+                // Same sequence length: use causal-masked fused kernel
+                self.batched_scaled_matmul_softmax_causal_gpu_to_gpu(
+                    q_heads_id, &k_heads_t, num_heads, q_seq_len, head_dim, scale,
+                )?
+            } else {
+                // Different sequence lengths (generation): use gen-optimized fused kernel
+                self.batched_scaled_matmul_softmax_gen_gpu_to_gpu(
+                    q_heads_id, &k_heads_t, num_heads, q_seq_len, kv_seq_len, head_dim, scale,
+                )?
+            };
+            scratch.push(attn_weights);
+
+            self.batched_matmul_gpu_to_gpu(
+                &attn_weights,
+                v_heads_id,
+                num_heads,
+                q_seq_len,
+                kv_seq_len,
+                head_dim,
+            )
+        })();
+
+        self.release_buffers(&scratch)?;
+        result
     }
 }

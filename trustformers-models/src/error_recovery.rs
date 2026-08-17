@@ -1600,6 +1600,49 @@ mod tests {
     }
 
     #[test]
+    fn test_retry_alone_is_not_reported_as_a_recovery() {
+        let mut manager = ErrorRecoveryManager::new(RecoveryConfig::default());
+        let recovered = manager
+            .execute_recovery_strategy(
+                &RecoveryStrategy::Retry {
+                    max_attempts: 3,
+                    base_delay_ms: 1,
+                },
+                &anyhow::anyhow!("transient failure"),
+                &ErrorCategory::Network,
+            )
+            .expect("strategy execution");
+        assert!(
+            !recovered,
+            "waiting before a retry is not a recovery; only the retry itself can be"
+        );
+    }
+
+    #[test]
+    fn test_restore_preserves_the_target_dtype() {
+        use trustformers_core::tensor::DType;
+
+        let source = TinyModel::new(&[1.0, 2.0, 3.0, 4.0], &[0.5, -0.5]);
+        let checkpoint = ModelCheckpoint::from_model(&source, HashMap::new()).expect("capture");
+
+        let mut target = TinyModel::new(&[0.0, 0.0, 0.0, 0.0], &[0.0, 0.0]);
+        target.weight =
+            Tensor::from_vec_with_dtype(vec![0.0; 4], &[2, 2], DType::F64).expect("f64 weights");
+
+        checkpoint.restore_into(&mut target).expect("restore");
+
+        assert_eq!(
+            target.weight.dtype(),
+            DType::F64,
+            "restoring must not silently change an F64 parameter to F32"
+        );
+        assert_eq!(
+            target.weight.data().expect("weights"),
+            vec![1.0, 2.0, 3.0, 4.0]
+        );
+    }
+
+    #[test]
     fn test_checkpoint_eviction_is_oldest_first() {
         let mut manager = ErrorRecoveryManager::new(RecoveryConfig::default());
 

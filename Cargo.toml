@@ -213,6 +213,8 @@ web-sys = { version = "0.3.103", features = [
     "GpuAdapter",
     "GpuQueue",
     "Geolocation",
+    "Position",
+    "Coordinates",
     "RequestMode",
     "ResponseInit",
     "Screen",
@@ -221,6 +223,8 @@ web-sys = { version = "0.3.103", features = [
     "StorageManager",
     "NodeList",
     "HtmlCollection",
+    "Url",
+    "BlobPropertyBag",
 ]}
 
 # Serialization dependencies

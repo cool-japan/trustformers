@@ -1,12 +1,32 @@
 //! Batch processing support for efficient inference
 
 use crate::core::tensor::WasmTensor;
-use js_sys::{Date, Promise};
 use serde::{Deserialize, Serialize};
 use std::string::String;
 use std::vec::Vec;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::JsFuture;
+
+/// Wall-clock milliseconds. `js_sys::Date::now()` on wasm32 (the real
+/// target); a portable equivalent (`SystemTime`, also wall-clock
+/// milliseconds since the Unix epoch) elsewhere, so the batching/statistics
+/// logic here — which only ever computes *differences* between two
+/// `now_ms()` readings — can be exercised by native tests. `js_sys::Date`
+/// unconditionally panics when called on non-wasm32 targets (there is no
+/// JS engine to call into), which is why this indirection exists rather
+/// than calling `Date::now()` directly at each site.
+#[cfg(target_arch = "wasm32")]
+fn now_ms() -> f64 {
+    js_sys::Date::now()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn now_ms() -> f64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .unwrap_or(0.0)
+}
 
 /// Batching strategies for different use cases
 #[wasm_bindgen]
@@ -192,6 +212,30 @@ impl BatchResponse {
     }
 }
 
+#[cfg(test)]
+impl BatchResponse {
+    /// Build a `BatchResponse` directly for tests that only need to
+    /// exercise response-handling logic without running a full batch.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_for_test(
+        request_id: String,
+        result: Option<WasmTensor>,
+        error: Option<String>,
+        processing_time_ms: f64,
+        queue_time_ms: f64,
+        batch_size: usize,
+    ) -> Self {
+        Self {
+            request_id,
+            result,
+            error,
+            processing_time_ms,
+            queue_time_ms,
+            batch_size,
+        }
+    }
+}
+
 /// Batch statistics for monitoring
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchStats {
@@ -239,7 +283,7 @@ impl BatchProcessor {
                 throughput_requests_per_second: 0.0,
                 memory_usage_mb: 0.0,
             },
-            last_batch_time: Date::now(),
+            last_batch_time: now_ms(),
             adaptive_batch_size,
             request_counter: 0,
         }
@@ -259,7 +303,7 @@ impl BatchProcessor {
             id: request_id.clone(),
             input,
             priority,
-            timestamp: Date::now(),
+            timestamp: now_ms(),
             timeout_ms,
             callback: None,
         };
@@ -278,6 +322,7 @@ impl BatchProcessor {
 
         self.stats.total_requests += 1;
 
+        #[cfg(target_arch = "wasm32")]
         web_sys::console::log_1(
             &format!(
                 "Added request {} to batch queue (priority: {:?})",
@@ -289,8 +334,13 @@ impl BatchProcessor {
         request_id
     }
 
-    /// Process pending requests based on batching strategy
-    pub async fn process_batch(&mut self) -> Result<Vec<BatchResponse>, JsValue> {
+    /// Process pending requests based on batching strategy, running each
+    /// request through `model`'s real forward pass (see
+    /// [`Self::process_batch_inference`]).
+    pub async fn process_batch(
+        &mut self,
+        model: &crate::model::WasmModel,
+    ) -> Result<Vec<BatchResponse>, JsValue> {
         if self.pending_requests.is_empty() {
             return Ok(Vec::new());
         }
@@ -302,8 +352,9 @@ impl BatchProcessor {
             return Ok(Vec::new());
         }
 
-        let batch_start_time = Date::now();
+        let batch_start_time = now_ms();
 
+        #[cfg(target_arch = "wasm32")]
         web_sys::console::log_1(
             &format!(
                 "Processing batch of {len} requests",
@@ -315,10 +366,10 @@ impl BatchProcessor {
         // Combine inputs into a single batch tensor
         let batch_inputs = self.combine_inputs(&batch_requests)?;
 
-        // Process the batch (this would call the actual inference engine)
-        let batch_results = self.process_batch_inference(&batch_inputs).await?;
+        // Process the batch through the real model.
+        let batch_results = self.process_batch_inference(&batch_inputs, model)?;
 
-        let processing_time = Date::now() - batch_start_time;
+        let processing_time = now_ms() - batch_start_time;
 
         // Split results back to individual responses
         let responses = self.create_responses(
@@ -336,7 +387,7 @@ impl BatchProcessor {
             self.update_adaptive_batch_size(processing_time, responses.len());
         }
 
-        self.last_batch_time = Date::now();
+        self.last_batch_time = now_ms();
 
         Ok(responses)
     }
@@ -353,12 +404,12 @@ impl BatchProcessor {
                 self.pending_requests.len() >= self.config.max_batch_size
             },
             BatchingStrategy::Dynamic => {
-                let elapsed = Date::now() - self.last_batch_time;
+                let elapsed = now_ms() - self.last_batch_time;
                 elapsed >= self.config.timeout_ms as f64
                     || self.pending_requests.len() >= self.config.max_batch_size
             },
             BatchingStrategy::Adaptive => {
-                let elapsed = Date::now() - self.last_batch_time;
+                let elapsed = now_ms() - self.last_batch_time;
                 elapsed >= self.config.timeout_ms as f64
                     || self.pending_requests.len() >= self.adaptive_batch_size
             },
@@ -387,6 +438,7 @@ impl BatchProcessor {
     /// Clear all pending requests
     pub fn clear_queue(&mut self) {
         self.pending_requests.clear();
+        #[cfg(target_arch = "wasm32")]
         web_sys::console::log_1(&"Batch queue cleared".into());
     }
 
@@ -394,6 +446,7 @@ impl BatchProcessor {
     pub fn update_config(&mut self, config: BatchConfig) {
         self.config = config;
         self.adaptive_batch_size = self.config.max_batch_size.min(4);
+        #[cfg(target_arch = "wasm32")]
         web_sys::console::log_1(&"Batch configuration updated".into());
     }
 
@@ -406,7 +459,7 @@ impl BatchProcessor {
                 self.config.max_batch_size.min(self.pending_requests.len())
             },
             BatchingStrategy::Dynamic => {
-                let elapsed = Date::now() - self.last_batch_time;
+                let elapsed = now_ms() - self.last_batch_time;
                 if elapsed >= self.config.timeout_ms as f64 {
                     self.pending_requests.len().min(self.config.max_batch_size)
                 } else {
@@ -491,74 +544,53 @@ impl BatchProcessor {
         WasmTensor::new(batched_data, batched_shape)
     }
 
-    async fn process_batch_inference(
+    /// Run each item of `batch_input` through `model`'s real forward pass.
+    ///
+    /// This used to await a fabricated `setTimeout` "processing delay"
+    /// (`10.0 + pending_requests.len() * 2.0` ms, reported back to callers
+    /// as real inference latency) and then, instead of running any model,
+    /// applied a hardcoded placeholder transformation — `matmul` against a
+    /// freshly-`randn`-initialized weight matrix for 2D input, or a bare
+    /// `relu()` for everything else. Every batched prediction was
+    /// noise-through-a-random-matrix or an activation function with no
+    /// weights at all, never the requested model.
+    ///
+    /// `WasmModel::forward` only accepts a `[1, seq_len]` input (see its
+    /// docs), so the combined `[batch_size, ...]` tensor is split back into
+    /// per-item `[1, ...]` tensors, each run through the model
+    /// individually, and the real outputs collected — real computation
+    /// rather than a synthetic delay standing in for it.
+    fn process_batch_inference(
         &self,
         batch_input: &WasmTensor,
+        model: &crate::model::WasmModel,
     ) -> Result<Vec<WasmTensor>, JsValue> {
-        // Simulate inference processing time
-        let processing_delay = 10.0 + (self.pending_requests.len() as f64 * 2.0);
-
-        // Simulate inference delay (in a real implementation, this would be actual model inference)
-        let delay_promise = Promise::new(&mut |resolve, _| {
-            if let Some(window) = web_sys::window() {
-                let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
-                    &resolve,
-                    processing_delay as i32,
-                );
-                // Note: In a real app, you'd want to track timeout_id for cleanup
-            }
-        });
-
-        JsFuture::from(delay_promise).await?;
-
-        // Perform actual inference on the batched input
         let batch_shape = batch_input.shape();
-        let batch_size = batch_shape[0];
-
-        // For demonstration, perform a simple transformation
-        // In a real implementation, this would use the model's forward pass
-        let batch_output = match batch_shape.len() {
-            2 => {
-                // For 2D tensors (batch_size, features), return logits
-                let output_features = 10; // Assuming classification with 10 classes
-                batch_input.matmul(&WasmTensor::randn(vec![batch_shape[1], output_features])?)?
-            },
-            3 => {
-                // For 3D tensors (batch_size, seq_len, features), return sequence output
-                let _output_features = batch_shape[2]; // Same feature size
-                batch_input.relu() // Simple activation for demonstration
-            },
-            _ => {
-                // For other shapes, apply element-wise transformation
-                batch_input.relu()
-            },
-        };
-
-        // Split the batched output back into individual results
-        let output_shape = batch_output.shape();
-        let elements_per_batch = output_shape[1..].iter().product::<usize>();
-        let output_data = batch_output.data();
-
-        let mut results = Vec::new();
-        for batch_idx in 0..batch_size {
-            let start_idx = batch_idx * elements_per_batch;
-            let end_idx = start_idx + elements_per_batch;
-
-            if end_idx <= output_data.len() {
-                let batch_data = output_data[start_idx..end_idx].to_vec();
-                let mut individual_shape = output_shape[1..].to_vec();
-                individual_shape.insert(0, 1); // Add batch dimension of 1
-
-                results.push(WasmTensor::new(batch_data, individual_shape)?);
-            }
+        if batch_shape.is_empty() {
+            return Err(JsValue::from_str(
+                "process_batch_inference: batch tensor has no dimensions",
+            ));
         }
+        let batch_size = batch_shape[0];
+        let item_shape: Vec<usize> =
+            std::iter::once(1).chain(batch_shape[1..].iter().copied()).collect();
+        let elements_per_item: usize = batch_shape[1..].iter().product();
+        let batch_data = batch_input.data();
 
-        if results.len() != batch_size {
-            return Err(format!(
-                "Expected {batch_size} results but got {len}",
-                len = results.len()
-            )
-            .into());
+        let mut results = Vec::with_capacity(batch_size);
+        for batch_idx in 0..batch_size {
+            let start_idx = batch_idx * elements_per_item;
+            let end_idx = start_idx + elements_per_item;
+            let item_data = batch_data
+                .get(start_idx..end_idx)
+                .ok_or_else(|| {
+                    JsValue::from_str(
+                        "process_batch_inference: batch tensor shorter than its declared shape",
+                    )
+                })?
+                .to_vec();
+            let item_tensor = WasmTensor::new(item_data, item_shape.clone())?;
+            results.push(model.forward(&item_tensor)?);
         }
 
         Ok(results)
@@ -637,6 +669,7 @@ impl BatchProcessor {
                 (self.adaptive_batch_size + 1).min(self.config.max_batch_size);
         }
 
+        #[cfg(target_arch = "wasm32")]
         web_sys::console::log_1(
             &format!(
                 "Adaptive batch size updated to {}",
@@ -650,6 +683,8 @@ impl BatchProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::model::weights::{layer_prefix, NamedWeights};
+    use crate::core::model::{ModelArchitecture, ModelConfig, WasmModel};
 
     #[test]
     fn test_batch_config() {
@@ -666,5 +701,148 @@ mod tests {
         assert!(Priority::Critical > Priority::High);
         assert!(Priority::High > Priority::Normal);
         assert!(Priority::Normal > Priority::Low);
+    }
+
+    /// Drive a `Future` to completion without a real async runtime. Every
+    /// `.await` `process_batch`/`process_batch_inference` used to perform
+    /// was a real browser API (a `setTimeout` `Promise`) that has since
+    /// been removed entirely (see `process_batch_inference`'s doc
+    /// comment) — the function no longer actually suspends, so a no-op
+    /// waker resolves it on the very first poll.
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        let mut future = std::boxed::Box::pin(future);
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        loop {
+            if let std::task::Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+                return output;
+            }
+        }
+    }
+
+    fn tiny_model() -> WasmModel {
+        let config = ModelConfig {
+            architecture: ModelArchitecture::Bert,
+            vocab_size: 10,
+            hidden_size: 4,
+            num_layers: 1,
+            num_heads: 2,
+            max_position_embeddings: 8,
+            intermediate_size: 6,
+            hidden_dropout_prob: 0.0,
+            attention_dropout_prob: 0.0,
+        };
+        let h = config.hidden_size;
+        let inter = config.intermediate_size;
+        let mut w = NamedWeights::new();
+        let mut seed = 5u32;
+        let mut next = |n: usize| {
+            seed = seed.wrapping_add(131);
+            let mut s = seed;
+            (0..n)
+                .map(|_| {
+                    s = s.wrapping_mul(1103515245).wrapping_add(12345);
+                    ((s >> 8) as f32 / u32::MAX as f32) * 2.0 - 1.0
+                })
+                .collect::<std::vec::Vec<f32>>()
+        };
+
+        w.insert(
+            "token_embeddings.weight",
+            WasmTensor::new(next(config.vocab_size * h), std::vec![config.vocab_size, h]).unwrap(),
+        );
+        w.insert(
+            "position_embeddings.weight",
+            WasmTensor::new(
+                next(config.max_position_embeddings * h),
+                std::vec![config.max_position_embeddings, h],
+            )
+            .unwrap(),
+        );
+        let p = layer_prefix(0);
+        for name in ["attn.q_proj", "attn.k_proj", "attn.v_proj", "attn.o_proj"] {
+            w.insert(
+                format!("{p}{name}.weight"),
+                WasmTensor::new(next(h * h), std::vec![h, h]).unwrap(),
+            );
+        }
+        w.insert(
+            format!("{p}norm1.weight"),
+            WasmTensor::new(std::vec![1.0; h], std::vec![h]).unwrap(),
+        );
+        w.insert(
+            format!("{p}norm2.weight"),
+            WasmTensor::new(std::vec![1.0; h], std::vec![h]).unwrap(),
+        );
+        w.insert(
+            format!("{p}ffn.fc1.weight"),
+            WasmTensor::new(next(h * inter), std::vec![h, inter]).unwrap(),
+        );
+        w.insert(
+            format!("{p}ffn.fc2.weight"),
+            WasmTensor::new(next(inter * h), std::vec![inter, h]).unwrap(),
+        );
+        w.insert(
+            "final_norm.weight",
+            WasmTensor::new(std::vec![1.0; h], std::vec![h]).unwrap(),
+        );
+
+        WasmModel::with_weights_for_test(config, w)
+    }
+
+    #[test]
+    fn test_process_batch_inference_runs_real_model_deterministically() {
+        // Regression test for the old `process_batch_inference`: it
+        // awaited a fabricated `setTimeout` delay and then transformed the
+        // batch via `matmul` against a freshly `WasmTensor::randn`-
+        // initialized weight matrix — different random weights on every
+        // call — instead of running any real model. Running the same
+        // request through the same model twice must now give byte-
+        // identical results (real deterministic computation), which the
+        // old randn-based stand-in could not.
+        let model = tiny_model();
+        let mut processor = BatchProcessor::new(BatchConfig::real_time());
+        let input =
+            WasmTensor::new(std::vec![1.0, 2.0, 3.0], std::vec![1, 3]).expect("valid tensor");
+        processor.add_request(input.clone(), Priority::Critical, None);
+
+        let responses_a = block_on(processor.process_batch(&model)).expect("batch must process");
+        assert_eq!(responses_a.len(), 1);
+        let result_a = responses_a[0].result().expect("must carry a real result tensor");
+
+        processor.add_request(input, Priority::Critical, None);
+        let responses_b = block_on(processor.process_batch(&model)).expect("batch must process");
+        let result_b = responses_b[0].result().expect("must carry a real result tensor");
+
+        assert_eq!(
+            result_a.data(),
+            result_b.data(),
+            "identical input through the same model must be deterministic"
+        );
+        assert!(result_a.data().iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn test_process_batch_inference_output_depends_on_input() {
+        let model = tiny_model();
+        let mut processor = BatchProcessor::new(BatchConfig::real_time());
+
+        let input_a =
+            WasmTensor::new(std::vec![1.0, 2.0, 3.0], std::vec![1, 3]).expect("valid tensor");
+        processor.add_request(input_a, Priority::Critical, None);
+        let responses_a = block_on(processor.process_batch(&model)).expect("batch must process");
+        let result_a = responses_a[0].result().expect("must carry a real result tensor");
+
+        let input_b =
+            WasmTensor::new(std::vec![4.0, 5.0, 6.0], std::vec![1, 3]).expect("valid tensor");
+        processor.add_request(input_b, Priority::Critical, None);
+        let responses_b = block_on(processor.process_batch(&model)).expect("batch must process");
+        let result_b = responses_b[0].result().expect("must carry a real result tensor");
+
+        assert_ne!(
+            result_a.data(),
+            result_b.data(),
+            "different inputs must produce different real output"
+        );
     }
 }

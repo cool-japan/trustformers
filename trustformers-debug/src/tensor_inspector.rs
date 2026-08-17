@@ -64,7 +64,12 @@ pub struct TensorComparison {
     pub mae: f64,
     pub max_diff: f64,
     pub cosine_similarity: f64,
-    pub correlation: f64,
+    /// Pearson correlation between the two tensors' real element-wise
+    /// values. `None` when it cannot be honestly computed -- see
+    /// [`TensorInspector::compute_correlation`] for why that is currently
+    /// always the case (this crate only retains [`TensorStats`] summaries,
+    /// not raw tensor data, once a tensor has been inspected).
+    pub correlation: Option<f64>,
     pub shape_match: bool,
     pub dtype_match: bool,
 }
@@ -136,7 +141,12 @@ pub struct InformationContent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StabilityMetrics {
     pub numerical_stability: f64,
-    pub gradient_stability: f64,
+    /// Coefficient-of-variation-based stability of the real gradient
+    /// values, computed the same way as `numerical_stability` but over the
+    /// gradient tensor. `None` (never a fabricated constant) when
+    /// [`TensorInspector::perform_advanced_analysis`] was called without a
+    /// gradient tensor.
+    pub gradient_stability: Option<f64>,
     pub perturbation_sensitivity: f64,
     pub robustness_score: f64,
 }
@@ -427,17 +437,30 @@ impl TensorInspector {
         }
     }
 
-    /// Perform advanced tensor analysis
-    pub fn perform_advanced_analysis<T>(&self, tensor: &ArrayD<T>) -> Result<AdvancedTensorAnalysis>
+    /// Perform advanced tensor analysis.
+    ///
+    /// `gradients`, when supplied, must be the real gradient tensor for
+    /// `tensor` (same element count) and is used to compute a real
+    /// `stability_metrics.gradient_stability` (see
+    /// [`Self::compute_stability_metrics`]). Without it, `gradient_stability`
+    /// is honestly `None` rather than a fabricated constant.
+    pub fn perform_advanced_analysis<T>(
+        &self,
+        tensor: &ArrayD<T>,
+        gradients: Option<&ArrayD<T>>,
+    ) -> Result<AdvancedTensorAnalysis>
     where
         T: Clone + Into<f64> + fmt::Debug + 'static,
     {
         let values: Vec<f64> = tensor.iter().map(|x| x.clone().into()).collect();
+        let gradient_values: Option<Vec<f64>> =
+            gradients.map(|g| g.iter().map(|x| x.clone().into()).collect());
 
         Ok(AdvancedTensorAnalysis {
             spectral_analysis: self.compute_spectral_analysis(&values, tensor.shape())?,
             information_content: self.compute_information_content(&values)?,
-            stability_metrics: self.compute_stability_metrics(&values)?,
+            stability_metrics: self
+                .compute_stability_metrics(&values, gradient_values.as_deref())?,
             relationship_analysis: self.compute_relationship_analysis(&values)?,
         })
     }
@@ -773,13 +796,18 @@ impl TensorInspector {
         }
     }
 
-    fn compute_correlation(&self, stats1: &TensorStats, stats2: &TensorStats) -> f64 {
-        // Simplified correlation (would need actual tensor data for real correlation)
-        if stats1.std == 0.0 || stats2.std == 0.0 {
-            0.0
-        } else {
-            0.5 // Placeholder
-        }
+    /// Pearson correlation requires paired per-element values (`sum((x_i -
+    /// mean_x)(y_i - mean_y))`), but `TensorInspector` only retains
+    /// [`TensorStats`] summaries once a tensor has been inspected -- see
+    /// [`TensorInspector::tracked_tensors`] -- never the raw values, so it
+    /// can be tracked across many tensors without unbounded memory growth.
+    /// With only `(mean, std, ...)` for each side there is no honest way to
+    /// recover the cross term, so this returns `None` rather than a
+    /// fabricated constant. (`compute_simple_correlation`, used by
+    /// [`Self::compute_relationship_analysis`], computes a real Pearson
+    /// correlation when real paired values are available.)
+    fn compute_correlation(&self, _stats1: &TensorStats, _stats2: &TensorStats) -> Option<f64> {
+        None
     }
 
     // Advanced analysis helper methods
@@ -908,7 +936,11 @@ impl TensorInspector {
         })
     }
 
-    fn compute_stability_metrics(&self, values: &[f64]) -> Result<StabilityMetrics> {
+    fn compute_stability_metrics(
+        &self,
+        values: &[f64],
+        gradients: Option<&[f64]>,
+    ) -> Result<StabilityMetrics> {
         // Numerical stability based on condition of values
         let mean = values.iter().sum::<f64>() / values.len() as f64;
         let variance = values.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / values.len() as f64;
@@ -927,9 +959,24 @@ impl TensorInspector {
         // Overall robustness score
         let robustness_score = numerical_stability * (1.0 - perturbation_sensitivity.min(1.0));
 
+        // Real gradient stability: the same coefficient-of-variation-based
+        // formula as `numerical_stability`, computed over the real gradient
+        // values when they were provided. `None` (never the old hardcoded
+        // `0.8`) when no gradient tensor is available to this call.
+        let gradient_stability = gradients.filter(|g| !g.is_empty()).map(|g| {
+            let g_mean = g.iter().sum::<f64>() / g.len() as f64;
+            let g_variance = g.iter().map(|x| (x - g_mean).powi(2)).sum::<f64>() / g.len() as f64;
+            let g_std = g_variance.sqrt();
+            if g_std > 1e-12 {
+                1.0 / (1.0 + g_std / g_mean.abs().max(1e-12))
+            } else {
+                1.0
+            }
+        });
+
         Ok(StabilityMetrics {
             numerical_stability,
-            gradient_stability: 0.8, // Placeholder - would need gradient info
+            gradient_stability,
             perturbation_sensitivity,
             robustness_score,
         })
@@ -1375,10 +1422,61 @@ mod tests {
         let config = make_config();
         let inspector = TensorInspector::new(&config);
         let tensor = make_tensor(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
-        let result = inspector.perform_advanced_analysis(&tensor);
+        let result = inspector.perform_advanced_analysis(&tensor, None);
         assert!(result.is_ok());
         let analysis = result.expect("analysis should succeed");
         assert!(analysis.information_content.entropy >= 0.0);
+    }
+
+    /// Regression test: without a gradient tensor, `gradient_stability` must
+    /// be honestly `None`, never the old hardcoded `0.8`.
+    #[test]
+    fn test_gradient_stability_is_none_without_gradients() {
+        let config = make_config();
+        let inspector = TensorInspector::new(&config);
+        let tensor = make_tensor(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        let analysis = inspector
+            .perform_advanced_analysis(&tensor, None)
+            .expect("analysis should succeed");
+        assert_eq!(
+            analysis.stability_metrics.gradient_stability, None,
+            "must be None (not the old hardcoded 0.8) when no gradients were provided"
+        );
+    }
+
+    /// Regression test: with a real gradient tensor, `gradient_stability`
+    /// must be a real, data-dependent value computed from those gradients
+    /// -- never the old hardcoded `0.8` -- and must actually change when the
+    /// gradients change.
+    #[test]
+    fn test_gradient_stability_is_computed_from_real_gradients() {
+        let config = make_config();
+        let inspector = TensorInspector::new(&config);
+        let tensor = make_tensor(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+
+        let stable_gradients = make_tensor(&[0.01, 0.01, 0.01, 0.01, 0.01, 0.01], &[2, 3]);
+        let volatile_gradients = make_tensor(&[10.0, -8.0, 6.0, -12.0, 9.0, -7.0], &[2, 3]);
+
+        let stable = inspector
+            .perform_advanced_analysis(&tensor, Some(&stable_gradients))
+            .expect("analysis should succeed")
+            .stability_metrics
+            .gradient_stability
+            .expect("gradient_stability must be Some when gradients are provided");
+        let volatile = inspector
+            .perform_advanced_analysis(&tensor, Some(&volatile_gradients))
+            .expect("analysis should succeed")
+            .stability_metrics
+            .gradient_stability
+            .expect("gradient_stability must be Some when gradients are provided");
+
+        assert_ne!(stable, 0.8, "must not be the old fabricated constant");
+        assert_ne!(volatile, 0.8, "must not be the old fabricated constant");
+        assert!(
+            stable > volatile,
+            "low-variance gradients ({stable}) must score more stable than \
+             high-variance gradients ({volatile})"
+        );
     }
 
     #[tokio::test]
@@ -1432,6 +1530,12 @@ mod tests {
         let c = comparison.expect("comparison should succeed");
         assert!(c.shape_match);
         assert!(c.dtype_match);
+        // Regression: the old implementation returned a hardcoded `0.5`
+        // (or `0.0`) `correlation` regardless of the tensors involved. Since
+        // only summary stats are retained (see `compute_correlation`'s
+        // docs), a real correlation cannot be computed here, and must be
+        // honestly `None` rather than any fabricated float.
+        assert_eq!(c.correlation, None);
     }
 
     #[test]

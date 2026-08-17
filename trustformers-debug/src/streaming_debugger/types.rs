@@ -1094,15 +1094,23 @@ impl StreamingDebugger {
     }
     /// Start the streaming debugger
     pub async fn start(&self) -> Result<()> {
-        let mut is_running = self.is_running.write().await;
-        if *is_running {
-            return Ok(());
+        {
+            let mut is_running = self.is_running.write().await;
+            if *is_running {
+                return Ok(());
+            }
+            info!(
+                "Starting streaming debugger with {} buffer size",
+                self.config.stream_buffer_size
+            );
+            *is_running = true;
+            // Guard must be dropped (end of this block) before
+            // `send_event` below, which itself takes a *read* lock on
+            // `is_running` -- `tokio::sync::RwLock` is not reentrant, so
+            // holding the write guard across that `.await` deadlocks the
+            // task against itself forever (this was the "timeout" that
+            // used to be worked around with `#[ignore]`).
         }
-        info!(
-            "Starting streaming debugger with {} buffer size",
-            self.config.stream_buffer_size
-        );
-        *is_running = true;
         self.start_background_tasks().await?;
         let control_event = StreamEvent::StreamControl {
             event_type: StreamControlType::StreamStarted,
@@ -1115,12 +1123,17 @@ impl StreamingDebugger {
     }
     /// Stop the streaming debugger
     pub async fn stop(&self) -> Result<()> {
-        let mut is_running = self.is_running.write().await;
-        if !*is_running {
-            return Ok(());
+        {
+            let mut is_running = self.is_running.write().await;
+            if !*is_running {
+                return Ok(());
+            }
+            info!("Stopping streaming debugger");
+            *is_running = false;
+            // See the comment in `start()`: the write guard must be
+            // dropped before `send_event` takes its own read lock on the
+            // same `is_running` RwLock.
         }
-        info!("Stopping streaming debugger");
-        *is_running = false;
         let control_event = StreamEvent::StreamControl {
             event_type: StreamControlType::StreamStopped,
             stream_id: Uuid::new_v4(),
@@ -1146,12 +1159,15 @@ impl StreamingDebugger {
             created_at: SystemTime::now(),
             last_activity: SystemTime::now(),
         };
-        let mut subscribers = self.subscribers.write().await;
-        subscribers.insert(subscriber_id, subscriber);
-        info!("New stream subscriber: {} ({})", name, subscriber_id);
         {
+            let mut subscribers = self.subscribers.write().await;
+            subscribers.insert(subscriber_id, subscriber);
+            info!("New stream subscriber: {} ({})", name, subscriber_id);
             let mut metrics = self.stream_metrics.write().await;
             metrics.active_subscribers = subscribers.len();
+            // Both guards drop here, before `send_event` below takes its
+            // own locks (including `stream_metrics`) -- see the
+            // `tokio::sync::RwLock` reentrancy note in `start()`.
         }
         let receiver = self.event_sender.subscribe();
         let subscription = StreamSubscription::new(subscriber_id, receiver, filter, format);
@@ -1166,23 +1182,34 @@ impl StreamingDebugger {
     }
     /// Unsubscribe from stream events
     pub async fn unsubscribe(&self, subscriber_id: Uuid) -> Result<()> {
-        let mut subscribers = self.subscribers.write().await;
-        if let Some(subscriber) = subscribers.remove(&subscriber_id) {
+        let removed_name = {
+            let mut subscribers = self.subscribers.write().await;
+            let Some(subscriber) = subscribers.remove(&subscriber_id) else {
+                return Ok(());
+            };
             info!(
                 "Removed stream subscriber: {} ({})",
                 subscriber.name, subscriber_id
             );
             let mut metrics = self.stream_metrics.write().await;
             metrics.active_subscribers = subscribers.len();
-            let control_event = StreamEvent::StreamControl {
-                event_type: StreamControlType::ConnectionLost,
-                stream_id: subscriber_id,
-                message: format!("Subscriber {} disconnected", subscriber.name),
-                timestamp: SystemTime::now(),
-            };
-            drop(subscribers);
-            self.send_event(control_event).await?;
-        }
+            // `subscribers` and `metrics` both drop at the end of this
+            // block -- neither may be held into `send_event` below, which
+            // reacquires `stream_metrics` (and, if the request happens to
+            // rate-limit, does so *twice*). This was the actual cause of
+            // `test_subscription`'s timeout: the old code kept `metrics`
+            // alive across the `.await`, so `send_event`'s own
+            // `self.stream_metrics.write().await` deadlocked against
+            // itself forever.
+            subscriber.name
+        };
+        let control_event = StreamEvent::StreamControl {
+            event_type: StreamControlType::ConnectionLost,
+            stream_id: subscriber_id,
+            message: format!("Subscriber {} disconnected", removed_name),
+            timestamp: SystemTime::now(),
+        };
+        self.send_event(control_event).await?;
         Ok(())
     }
     /// Send a stream event

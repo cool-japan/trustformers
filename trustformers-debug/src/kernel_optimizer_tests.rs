@@ -5,11 +5,11 @@ mod tests {
     use std::time::Duration;
 
     use crate::kernel_optimizer::{
-        AccessPatternType, BalancingStrategyType, BlockSizeConstraint, ConflictResolutionType,
-        ConflictSeverity, ComputeIntensityCategory, ConfigurationRecommendationType,
-        DependencyType, FusionType, KernelOptimizationAnalyzer, KernelOptimizationConfig,
-        KernelProfileData, MemoryOptimizationRecommendationType, OccupancyLimitingFactor,
-        OptimizationDirection, OptimizationPotential, PerformanceTrend, ResourceOptimizationRecommendationType,
+        AccessPatternType, BalancingStrategyType, BlockSizeConstraint, ComputeIntensityCategory,
+        ConfigurationRecommendationType, ConflictResolutionType, ConflictSeverity, DependencyType,
+        FusionType, KernelOptimizationAnalyzer, KernelOptimizationConfig, KernelProfileData,
+        MemoryOptimizationRecommendationType, OccupancyLimitingFactor, OptimizationDirection,
+        OptimizationPotential, PerformanceTrend, ResourceOptimizationRecommendationType,
         ResourcePressure, StrideImpact, StrideOptimizationType, SynchronizationComplexity,
         TestType,
     };
@@ -69,7 +69,10 @@ mod tests {
     #[test]
     fn test_analyzer_new() {
         let analyzer = KernelOptimizationAnalyzer::new();
-        assert!(analyzer.is_ok(), "KernelOptimizationAnalyzer::new() should succeed");
+        assert!(
+            analyzer.is_ok(),
+            "KernelOptimizationAnalyzer::new() should succeed"
+        );
     }
 
     #[test]
@@ -110,7 +113,10 @@ mod tests {
         // Second call same kernel
         let profile2 = make_profile_data(0.55, 0.65);
         let result = analyzer.analyze_kernel("kernel_a", profile2);
-        assert!(result.is_ok(), "repeated analysis of same kernel should succeed");
+        assert!(
+            result.is_ok(),
+            "repeated analysis of same kernel should succeed"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -143,7 +149,10 @@ mod tests {
     fn test_analyze_fusion_opportunities_empty() {
         let mut analyzer = KernelOptimizationAnalyzer::new().expect("ok");
         let result = analyzer.analyze_fusion_opportunities(&[]);
-        assert!(result.is_ok(), "Fusion analysis with empty sequence should succeed");
+        assert!(
+            result.is_ok(),
+            "Fusion analysis with empty sequence should succeed"
+        );
     }
 
     #[test]
@@ -156,8 +165,11 @@ mod tests {
     #[test]
     fn test_analyze_fusion_opportunities_multiple_kernels() {
         let mut analyzer = KernelOptimizationAnalyzer::new().expect("ok");
-        let kernels =
-            vec!["kernel_a".to_string(), "kernel_b".to_string(), "kernel_c".to_string()];
+        let kernels = vec![
+            "kernel_a".to_string(),
+            "kernel_b".to_string(),
+            "kernel_c".to_string(),
+        ];
         let result = analyzer.analyze_fusion_opportunities(&kernels);
         assert!(result.is_ok());
     }

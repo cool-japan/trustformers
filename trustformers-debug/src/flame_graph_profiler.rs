@@ -990,6 +990,10 @@ impl Profiler {
 }
 
 #[cfg(test)]
+#[path = "flame_graph_profiler_tests.rs"]
+mod flame_graph_profiler_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

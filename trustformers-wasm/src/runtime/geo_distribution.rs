@@ -173,6 +173,17 @@ impl EdgeLocation {
     }
 }
 
+/// Not `#[wasm_bindgen]`: an internal, natively-testable value type used by
+/// [`GeoDistributionManager::location_health_report`] to carry the
+/// last-known metrics for one edge location, before they are packed into a
+/// `JsValue` object for JS callers.
+#[derive(Debug, Clone, PartialEq)]
+struct LocationHealthReport {
+    datacenter_id: String,
+    health_score: f32,
+    load: f32,
+}
+
 /// User location information
 #[wasm_bindgen]
 #[derive(Debug, Clone)]
@@ -905,28 +916,53 @@ impl GeoDistributionManager {
             .map_err(|_| "Geolocation not available")?;
 
         let position = JsFuture::from(js_sys::Promise::new(&mut |resolve, reject| {
-            // PositionOptions not available in web-sys 0.3.81 - use default options
-            // let options = web_sys::PositionOptions::new();
-            // options.set_enable_high_accuracy(true);
-            // options.set_timeout(10000);
-            // options.set_maximum_age(300000);
-
+            // PositionOptions is available (web-sys >= 0.3.103, feature
+            // enabled at the workspace root) but omitted deliberately: the
+            // browser default options (no forced high accuracy, default
+            // timeout/maximum age) are what most callers want, and callers
+            // that need tighter control can call the browser API directly.
             let _ = geolocation.get_current_position_with_error_callback(&resolve, Some(&reject));
         }))
         .await?;
 
-        // Position type not available in web-sys 0.3.81 - using JsValue
-        let _position_obj = position;
-        // Geolocation API types not fully available in web-sys 0.3.81
-        // Using default location until proper types are available
-        let latitude = 40.7128; // Default to NYC
-        let longitude = -74.0060;
-        let accuracy = 100.0;
+        // The resolved value is a real `Position` (per the Geolocation spec)
+        // carrying the browser's actual measured location - read it out
+        // instead of discarding it. This previously ignored the real,
+        // awaited result and returned a hardcoded "NYC" location for every
+        // caller regardless of where they actually were.
+        //
+        // Deliberately `unchecked_into`, not `dyn_into`: web-sys generates
+        // `Position`/`Coordinates` with `is_type_of = |_| false` (they are
+        // plain-object "dictionary-ish" API shapes with no reliable
+        // `instanceof`/duck-typing check available), so `dyn_into` would
+        // *always* return `Err` here regardless of the real runtime value -
+        // silently turning every successful geolocation call into an error
+        // and falling through to the IP/timezone/hardcoded-default chain.
+        // The value is safe to trust because it is exactly what
+        // `get_current_position_with_error_callback`'s success callback
+        // resolves the promise with, per the Geolocation API spec.
+        let position: web_sys::Position = position.unchecked_into();
+        let coords = position.coords();
+        let latitude = coords.latitude();
+        let longitude = coords.longitude();
+        let accuracy = coords.accuracy();
 
-        // Determine region from coordinates
+        Ok(self.user_location_from_coords(latitude, longitude, accuracy))
+    }
+
+    /// Build a [`UserLocation`] from real coordinates (region is derived,
+    /// never fabricated). Split out from [`Self::detect_location_geolocation`]
+    /// so the coordinate -> region -> `UserLocation` logic is testable
+    /// without a real browser `Geolocation` API.
+    fn user_location_from_coords(
+        &self,
+        latitude: f64,
+        longitude: f64,
+        accuracy: f64,
+    ) -> UserLocation {
         let region = self.determine_region_from_coords(latitude, longitude);
 
-        Ok(UserLocation::new(
+        UserLocation::new(
             latitude,
             longitude,
             "unknown".to_string(), // Would need reverse geocoding
@@ -935,7 +971,7 @@ impl GeoDistributionManager {
             accuracy,
             "unknown".to_string(),
             "unknown".to_string(),
-        ))
+        )
     }
 
     /// Detect location using IP geolocation
@@ -1059,35 +1095,66 @@ impl GeoDistributionManager {
         }
     }
 
-    /// Check health of a location by index
-    async fn check_location_health_by_index(&mut self, index: usize) -> Result<JsValue, JsValue> {
-        // This would typically perform actual health checks
-        // For now, simulate health check results
+    /// Pure (non-`JsValue`, natively testable) computation behind
+    /// [`Self::check_location_health_by_index`]. Reports the location's
+    /// last-known metrics rather than inventing a measurement.
+    fn location_health_report(&self, index: usize) -> LocationHealthReport {
+        let location = &self.edge_locations[index];
+        LocationHealthReport {
+            datacenter_id: location.datacenter_id.clone(),
+            health_score: location.health_score,
+            load: location.current_load,
+        }
+    }
 
-        let health_score = 0.9 + (js_sys::Math::random() - 0.5) * 0.2;
-        let load = js_sys::Math::random() * 0.8; // 0-80% load
-
-        let location = &mut self.edge_locations[index];
-        location.update_metrics(load as f32, health_score as f32);
-
-        let datacenter_id = location.datacenter_id.clone();
+    /// Report the (last-known) health of a location by index.
+    ///
+    /// This previously fabricated a plausible-looking `health_score`/`load`
+    /// via `js_sys::Math::random()` on every call and fed it into
+    /// `update_metrics`, so location selection was effectively driven by
+    /// random numbers dressed up as a "health check". `EdgeLocation` has no
+    /// URL/host field to reach a real remote health endpoint over the
+    /// network, so there is no live signal this function can honestly
+    /// measure. Rather than inventing one, it reports the location's last
+    /// known (real, previously-set) metrics without ever overwriting them,
+    /// and marks the result `checked: false` / `status: "unknown"` so
+    /// callers cannot mistake a stale value for a fresh measurement.
+    async fn check_location_health_by_index(&self, index: usize) -> Result<JsValue, JsValue> {
+        let report = self.location_health_report(index);
 
         let result = js_sys::Object::new();
         let _ = js_sys::Reflect::set(
             &result,
             &JsValue::from_str("datacenter_id"),
-            &JsValue::from_str(&datacenter_id),
+            &JsValue::from_str(&report.datacenter_id),
         );
         let _ = js_sys::Reflect::set(
             &result,
             &JsValue::from_str("health_score"),
-            &JsValue::from(health_score),
+            &JsValue::from(report.health_score),
         );
-        let _ = js_sys::Reflect::set(&result, &JsValue::from_str("load"), &JsValue::from(load));
+        let _ = js_sys::Reflect::set(
+            &result,
+            &JsValue::from_str("load"),
+            &JsValue::from(report.load),
+        );
         let _ = js_sys::Reflect::set(
             &result,
             &JsValue::from_str("status"),
-            &JsValue::from_str("healthy"),
+            &JsValue::from_str("unknown"),
+        );
+        let _ = js_sys::Reflect::set(
+            &result,
+            &JsValue::from_str("checked"),
+            &JsValue::from_bool(false),
+        );
+        let _ = js_sys::Reflect::set(
+            &result,
+            &JsValue::from_str("reason"),
+            &JsValue::from_str(
+                "no health-check transport is configured for this edge location; \
+                 reporting last-known metrics instead of a fabricated measurement",
+            ),
         );
 
         Ok(result.into())
@@ -1128,4 +1195,153 @@ pub fn estimate_network_latency(distance_km: f64) -> u32 {
     let jitter = 10.0;
 
     (base_latency + distance_factor + jitter) as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn edge_location_for_test(
+        datacenter_id: &str,
+        health_score: f32,
+        current_load: f32,
+    ) -> EdgeLocation {
+        EdgeLocation {
+            region: GeoRegion::NorthAmerica,
+            country_code: "US".to_string(),
+            city: "Test City".to_string(),
+            datacenter_id: datacenter_id.to_string(),
+            latitude: 0.0,
+            longitude: 0.0,
+            runtime_type: EdgeRuntime::Generic,
+            capabilities: EdgeCapabilities::for_test(),
+            current_load,
+            health_score,
+            last_health_check: 0,
+        }
+    }
+
+    fn manager_with_locations(locations: Vec<EdgeLocation>) -> GeoDistributionManager {
+        // Deliberately bypasses `GeoDistributionManager::new()`, which calls
+        // `initialize_default_locations` -> `js_sys::Date::now()`, a
+        // wasm-bindgen import that panics on non-wasm32 native targets.
+        GeoDistributionManager {
+            edge_locations: locations,
+            routing_weights: RoutingWeights::new(),
+            health_check_interval: 30_000,
+            last_health_check: 0,
+            region_preferences: BTreeMap::new(),
+            failover_enabled: true,
+            load_balancing_enabled: true,
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // `location_health_report`: was `js_sys::Math::random()`-based fake
+    // health scores fed into `update_metrics` on every "check" (so routing
+    // was effectively driven by random numbers). Now reports the real
+    // last-known metrics and never mutates them.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_location_health_report_returns_real_last_known_metrics() {
+        let manager =
+            manager_with_locations(vec![edge_location_for_test("dc-real-metrics", 0.42, 0.77)]);
+
+        let report = manager.location_health_report(0);
+
+        assert_eq!(report.datacenter_id, "dc-real-metrics");
+        assert_eq!(report.health_score, 0.42);
+        assert_eq!(report.load, 0.77);
+    }
+
+    #[test]
+    fn test_location_health_report_is_deterministic_not_random() {
+        // Old code called `js_sys::Math::random()` twice per check, so
+        // repeated calls for the same location would differ. The real
+        // (last-known-metrics) implementation must be perfectly
+        // deterministic for an unchanged location.
+        let manager = manager_with_locations(vec![edge_location_for_test("dc-stable", 0.6, 0.3)]);
+
+        let first = manager.location_health_report(0);
+        let second = manager.location_health_report(0);
+        let third = manager.location_health_report(0);
+
+        assert_eq!(first, second);
+        assert_eq!(second, third);
+    }
+
+    #[test]
+    fn test_location_health_report_never_invents_a_value_outside_stored_range() {
+        // Regression guard: with the old `0.9 + (random() - 0.5) * 0.2`
+        // formula, health_score was always confined to [0.8, 1.0]
+        // regardless of the location's real state. Store a health score far
+        // outside that fabricated band and confirm it passes through
+        // untouched.
+        let manager =
+            manager_with_locations(vec![edge_location_for_test("dc-unhealthy", 0.05, 0.99)]);
+
+        let report = manager.location_health_report(0);
+        assert_eq!(report.health_score, 0.05);
+        assert_eq!(report.load, 0.99);
+    }
+
+    #[test]
+    fn test_location_health_report_multiple_locations_are_independent() {
+        let manager = manager_with_locations(vec![
+            edge_location_for_test("dc-a", 0.9, 0.1),
+            edge_location_for_test("dc-b", 0.2, 0.8),
+        ]);
+
+        let a = manager.location_health_report(0);
+        let b = manager.location_health_report(1);
+
+        assert_eq!(a.datacenter_id, "dc-a");
+        assert_eq!(b.datacenter_id, "dc-b");
+        assert_ne!(a, b);
+    }
+
+    // -----------------------------------------------------------------
+    // `user_location_from_coords`: was fabricating a hardcoded NYC location
+    // from a discarded real `Position` result. Verify the region/coordinate
+    // plumbing (the part that is testable without a real browser
+    // `Geolocation` API) is honest and correctly derived from input.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_user_location_from_coords_preserves_real_coordinates() {
+        let manager = manager_with_locations(vec![]);
+
+        // Tokyo, not the old hardcoded NYC (40.7128, -74.0060).
+        let location = manager.user_location_from_coords(35.6762, 139.6503, 12.5);
+
+        assert_eq!(location.latitude(), 35.6762);
+        assert_eq!(location.longitude(), 139.6503);
+        assert_eq!(location.accuracy(), 12.5);
+        assert_eq!(location.region(), GeoRegion::AsiaPacific);
+    }
+
+    #[test]
+    fn test_user_location_from_coords_differs_for_different_inputs() {
+        // Old code returned identical (40.7128, -74.0060) output regardless
+        // of the real, awaited geolocation result.
+        let manager = manager_with_locations(vec![]);
+
+        let tokyo = manager.user_location_from_coords(35.6762, 139.6503, 10.0);
+        let london = manager.user_location_from_coords(51.5074, -0.1278, 10.0);
+
+        assert_ne!(tokyo.latitude(), london.latitude());
+        assert_ne!(tokyo.longitude(), london.longitude());
+        assert_eq!(tokyo.region(), GeoRegion::AsiaPacific);
+        assert_eq!(london.region(), GeoRegion::Europe);
+    }
+
+    #[test]
+    fn test_determine_region_from_coords_north_america() {
+        let manager = manager_with_locations(vec![]);
+        assert_eq!(
+            manager.determine_region_from_coords(40.7128, -74.0060),
+            GeoRegion::NorthAmerica
+        );
+    }
 }

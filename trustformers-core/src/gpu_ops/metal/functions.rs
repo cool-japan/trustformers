@@ -30,6 +30,7 @@ pub fn get_metal_backend() -> Result<MetalBackend> {
             device: backend.device.clone(),
             command_queue: backend.command_queue.clone(),
             buffer_cache: Arc::clone(&backend.buffer_cache),
+            pending_command_buffers: Arc::clone(&backend.pending_command_buffers),
             matmul_pipeline: Arc::clone(&backend.matmul_pipeline),
             gelu_pipeline: Arc::clone(&backend.gelu_pipeline),
             matmul_gelu_pipeline: Arc::clone(&backend.matmul_gelu_pipeline),

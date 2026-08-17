@@ -2,9 +2,11 @@
 
 use crate::albert::config::AlbertConfig;
 use crate::common::ActivationType;
+use crate::weight_loading::binding::{bind_linear, take_norm_bias, take_norm_weight};
+use crate::weight_loading::checkpoint::{Checkpoint, LoadReport, UnusedTensors};
 use std::io::Read;
 use trustformers_core::device::Device;
-use trustformers_core::errors::Result;
+use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::layers::{Embedding, LayerNorm, Linear};
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::{Config, Layer, Model, TokenizedInput};
@@ -12,41 +14,41 @@ use trustformers_core::traits::{Config, Layer, Model, TokenizedInput};
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct AlbertEmbeddings {
-    word_embeddings: Embedding,
-    position_embeddings: Embedding,
-    token_type_embeddings: Embedding,
-    layer_norm: LayerNorm,
+    pub(crate) word_embeddings: Embedding,
+    pub(crate) position_embeddings: Embedding,
+    pub(crate) token_type_embeddings: Embedding,
+    pub(crate) layer_norm: LayerNorm,
     #[allow(dead_code)]
     dropout: f32,
-    embedding_hidden_mapping_in: Linear,
+    pub(crate) embedding_hidden_mapping_in: Linear,
     device: Device,
 }
 
 #[derive(Debug, Clone)]
 pub struct AlbertTransformerGroup {
-    albert_layers: Vec<AlbertLayer>,
+    pub(crate) albert_layers: Vec<AlbertLayer>,
     device: Device,
 }
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct AlbertLayer {
-    attention: AlbertAttention,
-    ffn: AlbertFeedForward,
-    attention_output: AlbertAttentionOutput,
-    ffn_output: AlbertFFNOutput,
+    pub(crate) attention: AlbertAttention,
+    pub(crate) ffn: AlbertFeedForward,
+    pub(crate) attention_output: AlbertAttentionOutput,
+    pub(crate) ffn_output: AlbertFFNOutput,
     device: Device,
 }
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct AlbertAttention {
-    query: Linear,
-    key: Linear,
-    value: Linear,
-    dense: Linear,
+    pub(crate) query: Linear,
+    pub(crate) key: Linear,
+    pub(crate) value: Linear,
+    pub(crate) dense: Linear,
     #[allow(dead_code)]
-    layer_norm: LayerNorm,
+    pub(crate) layer_norm: LayerNorm,
     dropout: f32,
     num_attention_heads: usize,
     attention_head_size: usize,
@@ -55,8 +57,8 @@ pub struct AlbertAttention {
 
 #[derive(Debug, Clone)]
 pub struct AlbertAttentionOutput {
-    dense: Linear,
-    layer_norm: LayerNorm,
+    pub(crate) dense: Linear,
+    pub(crate) layer_norm: LayerNorm,
     #[allow(dead_code)]
     dropout: f32,
     device: Device,
@@ -64,15 +66,15 @@ pub struct AlbertAttentionOutput {
 
 #[derive(Debug, Clone)]
 pub struct AlbertFeedForward {
-    dense: Linear,
+    pub(crate) dense: Linear,
     intermediate_act_fn: ActivationType,
     device: Device,
 }
 
 #[derive(Debug, Clone)]
 pub struct AlbertFFNOutput {
-    dense: Linear,
-    layer_norm: LayerNorm,
+    pub(crate) dense: Linear,
+    pub(crate) layer_norm: LayerNorm,
     #[allow(dead_code)]
     dropout: f32,
     device: Device,
@@ -93,13 +95,13 @@ pub struct AlbertModel {
 pub struct AlbertTransformer {
     #[allow(dead_code)]
     embedding_hidden_mapping_in: Linear,
-    albert_layer_groups: Vec<AlbertTransformerGroup>,
+    pub(crate) albert_layer_groups: Vec<AlbertTransformerGroup>,
     device: Device,
 }
 
 #[derive(Debug, Clone)]
 pub struct AlbertPooler {
-    dense: Linear,
+    pub(crate) dense: Linear,
     activation: ActivationType,
     device: Device,
 }
@@ -509,8 +511,13 @@ impl Model for AlbertModel {
         })
     }
 
-    fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
-        Ok(())
+    /// Load a HuggingFace ALBERT checkpoint (safetensors or `torch.save`).
+    ///
+    /// A previous revision was `Ok(())` — the reader was never touched, so every
+    /// "load" left the model randomly initialised while reporting success. See
+    /// [`AlbertModel::load_from_checkpoint`] for the name map.
+    fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -559,5 +566,202 @@ impl Model for AlbertModel {
         }
 
         total
+    }
+}
+
+impl AlbertModel {
+    /// Checkpoint namespaces an ALBERT encoder legitimately does not consume.
+    pub(crate) const ALLOWED_UNUSED_PREFIXES: &'static [&'static str] = &[
+        "predictions.",
+        "cls.",
+        "classifier.",
+        "qa_outputs.",
+        "sop_classifier.",
+    ];
+
+    /// Non-parameter buffers HuggingFace stores alongside ALBERT's weights.
+    pub(crate) const ALLOWED_UNUSED_SUFFIXES: &'static [&'static str] =
+        &["embeddings.position_ids", "embeddings.token_type_ids"];
+
+    /// Load pretrained weights and report exactly what was bound.
+    ///
+    /// # Errors
+    ///
+    /// See [`AlbertModel::load_from_checkpoint`].
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        self.load_from_checkpoint(&checkpoint)
+    }
+
+    /// Bind an already-parsed checkpoint into this model.
+    ///
+    /// ALBERT's distinguishing feature is **cross-layer parameter sharing**: the
+    /// checkpoint stores `num_hidden_groups` groups of `inner_group_num` layers,
+    /// and the `num_hidden_layers` runtime layers reuse them. The tensor names
+    /// therefore carry a *group* index, not a layer index
+    /// (`encoder.albert_layer_groups.0.albert_layers.0.…`), and this loader
+    /// binds exactly the groups the checkpoint holds. Its factorised embedding
+    /// (`embedding_size` ≠ `hidden_size`) also means the up-projection
+    /// `encoder.embedding_hidden_mapping_in` is a real parameter rather than an
+    /// identity.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint does not look like an ALBERT checkpoint, when a
+    /// tensor has the wrong shape, when a parameter is missing, or when the
+    /// checkpoint carries weights this architecture does not recognise.
+    pub fn load_from_checkpoint(&mut self, checkpoint: &Checkpoint) -> Result<LoadReport> {
+        let prefix =
+            checkpoint.detect_prefix(&["", "albert."], "embeddings.word_embeddings.weight")?;
+        let mut binder = checkpoint.binder(&prefix);
+
+        let config = self.config.clone();
+        let embedding_size = config.embedding_size;
+        let hidden = config.hidden_size;
+        let intermediate = config.intermediate_size;
+
+        // ── Embeddings (at `embedding_size`, not `hidden_size`) ──────────────
+        if let Some(w) = binder.take_shaped(
+            "embeddings.word_embeddings.weight",
+            &[config.vocab_size, embedding_size],
+        )? {
+            self.embeddings.word_embeddings.set_weight(w)?;
+        }
+        if let Some(w) = binder.take_shaped(
+            "embeddings.position_embeddings.weight",
+            &[config.max_position_embeddings, embedding_size],
+        )? {
+            self.embeddings.position_embeddings.set_weight(w)?;
+        }
+        if let Some(w) = binder.take_shaped(
+            "embeddings.token_type_embeddings.weight",
+            &[config.type_vocab_size, embedding_size],
+        )? {
+            self.embeddings.token_type_embeddings.set_weight(w)?;
+        }
+        if let Some(w) = binder.take_shaped("embeddings.LayerNorm.weight", &[embedding_size])? {
+            self.embeddings.layer_norm.set_weight(w)?;
+        }
+        if let Some(b) = binder.take_shaped("embeddings.LayerNorm.bias", &[embedding_size])? {
+            self.embeddings.layer_norm.set_bias(b)?;
+        }
+
+        // ── Factorised embedding up-projection ───────────────────────────────
+        bind_linear(
+            &mut binder,
+            "encoder.embedding_hidden_mapping_in",
+            hidden,
+            embedding_size,
+            true,
+            &mut self.encoder.embedding_hidden_mapping_in,
+        )?;
+
+        // ── Shared layer groups ──────────────────────────────────────────────
+        for (group_index, group) in self.encoder.albert_layer_groups.iter_mut().enumerate() {
+            for (layer_index, layer) in group.albert_layers.iter_mut().enumerate() {
+                let base = format!(
+                    "encoder.albert_layer_groups.{group_index}.albert_layers.{layer_index}"
+                );
+                bind_linear(
+                    &mut binder,
+                    &format!("{base}.attention.query"),
+                    hidden,
+                    hidden,
+                    true,
+                    &mut layer.attention.query,
+                )?;
+                bind_linear(
+                    &mut binder,
+                    &format!("{base}.attention.key"),
+                    hidden,
+                    hidden,
+                    true,
+                    &mut layer.attention.key,
+                )?;
+                bind_linear(
+                    &mut binder,
+                    &format!("{base}.attention.value"),
+                    hidden,
+                    hidden,
+                    true,
+                    &mut layer.attention.value,
+                )?;
+                bind_linear(
+                    &mut binder,
+                    &format!("{base}.attention.dense"),
+                    hidden,
+                    hidden,
+                    true,
+                    &mut layer.attention_output.dense,
+                )?;
+                if let Some(w) =
+                    take_norm_weight(&mut binder, &format!("{base}.attention.LayerNorm"), hidden)?
+                {
+                    layer.attention_output.layer_norm.set_weight(w)?;
+                }
+                if let Some(b) =
+                    take_norm_bias(&mut binder, &format!("{base}.attention.LayerNorm"), hidden)?
+                {
+                    layer.attention_output.layer_norm.set_bias(b)?;
+                }
+
+                bind_linear(
+                    &mut binder,
+                    &format!("{base}.ffn"),
+                    intermediate,
+                    hidden,
+                    true,
+                    &mut layer.ffn.dense,
+                )?;
+                bind_linear(
+                    &mut binder,
+                    &format!("{base}.ffn_output"),
+                    hidden,
+                    intermediate,
+                    true,
+                    &mut layer.ffn_output.dense,
+                )?;
+                if let Some(w) = take_norm_weight(
+                    &mut binder,
+                    &format!("{base}.full_layer_layer_norm"),
+                    hidden,
+                )? {
+                    layer.ffn_output.layer_norm.set_weight(w)?;
+                }
+                if let Some(b) = take_norm_bias(
+                    &mut binder,
+                    &format!("{base}.full_layer_layer_norm"),
+                    hidden,
+                )? {
+                    layer.ffn_output.layer_norm.set_bias(b)?;
+                }
+            }
+        }
+
+        // ── Pooler (optional in HuggingFace exports) ─────────────────────────
+        if checkpoint.contains(&format!("{prefix}pooler.weight")) {
+            let pooler = self.pooler.as_mut().ok_or_else(|| {
+                TrustformersError::model_error(
+                    "the checkpoint carries a pooler but this model has none".to_string(),
+                )
+            })?;
+            bind_linear(
+                &mut binder,
+                "pooler",
+                hidden,
+                hidden,
+                true,
+                &mut pooler.dense,
+            )?;
+        } else {
+            // Do not leave a randomly-initialised projection pretending to be
+            // trained when the checkpoint has none.
+            self.pooler = None;
+        }
+
+        binder.finish(UnusedTensors::new(
+            Self::ALLOWED_UNUSED_PREFIXES,
+            Self::ALLOWED_UNUSED_SUFFIXES,
+        ))
     }
 }

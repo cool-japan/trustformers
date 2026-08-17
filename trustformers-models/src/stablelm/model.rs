@@ -1081,9 +1081,10 @@ impl StableLMForCausalLM {
     ) -> Result<()> {
         use std::process::Command;
 
-        println!(
+        tracing::info!(
             "Downloading model {} from HuggingFace Hub to {:?}",
-            model_name, model_path
+            model_name,
+            model_path
         );
 
         // Create the model directory
@@ -1110,7 +1111,7 @@ impl StableLMForCausalLM {
             let file_url = format!("{}/{}", base_url, file_name);
             let file_path = model_path.join(file_name);
 
-            println!("Attempting to download {}", file_url);
+            tracing::info!("Attempting to download {}", file_url);
 
             // Convert path to string once for both commands
             let file_path_str = file_path.to_str().ok_or_else(|| {
@@ -1130,18 +1131,18 @@ impl StableLMForCausalLM {
 
             match curl_result {
                 Ok(output) if output.status.success() => {
-                    println!("Successfully downloaded {}", file_name);
+                    tracing::info!("Successfully downloaded {}", file_name);
                     continue;
                 },
                 Ok(output) => {
-                    eprintln!(
+                    tracing::warn!(
                         "Failed to download {} with curl: {}",
                         file_name,
                         String::from_utf8_lossy(&output.stderr)
                     );
                 },
                 Err(e) => {
-                    println!("curl not available: {}", e);
+                    tracing::info!("curl not available: {}", e);
                 },
             }
 
@@ -1150,18 +1151,18 @@ impl StableLMForCausalLM {
 
             match wget_result {
                 Ok(output) if output.status.success() => {
-                    println!("Successfully downloaded {} with wget", file_name);
+                    tracing::info!("Successfully downloaded {} with wget", file_name);
                     continue;
                 },
                 Ok(output) => {
-                    eprintln!(
+                    tracing::warn!(
                         "Failed to download {} with wget: {}",
                         file_name,
                         String::from_utf8_lossy(&output.stderr)
                     );
                 },
                 Err(e) => {
-                    println!("wget not available: {}", e);
+                    tracing::info!("wget not available: {}", e);
                 },
             }
 
@@ -1174,7 +1175,7 @@ impl StableLMForCausalLM {
             }
         }
 
-        println!(
+        tracing::info!(
             "Successfully downloaded model {} from HuggingFace Hub",
             model_name
         );

@@ -50,18 +50,23 @@ impl JitCompiler {
     }
 
     /// Create appropriate backend based on configuration
+    /// Create the backend the configuration asks for.
+    ///
+    /// Only the interpreter backend exists. Asking for a native JIT is an
+    /// error rather than a silent downgrade: a caller who requested `llvm` and
+    /// received an interpreter would attribute the interpreter's timings to a
+    /// JIT.
     fn create_backend(config: &CompilerConfig) -> Result<Box<dyn JitBackend>, TrustformersError> {
-        #[cfg(feature = "llvm")]
-        if config.compiler_flags.contains(&"llvm".to_string()) {
-            return Ok(Box::new(LLVMBackend::new(config)?));
+        for requested in ["llvm", "cranelift"] {
+            if config.compiler_flags.iter().any(|flag| flag == requested) {
+                return Err(TrustformersError::not_implemented(format!(
+                    "compiler flag '{}' requests a native JIT backend, which is not implemented; \
+                     only the interpreter backend is available",
+                    requested
+                )));
+            }
         }
 
-        #[cfg(feature = "cranelift")]
-        if config.compiler_flags.contains(&"cranelift".to_string()) {
-            return Ok(Box::new(CraneliftBackend::new(config)?));
-        }
-
-        // Default to interpreter backend
         Ok(Box::new(InterpreterBackend::new(config)?))
     }
 
@@ -889,79 +894,12 @@ pub trait JitBackend: Send + Sync {
     }
 }
 
-/// LLVM-based JIT backend
-#[cfg(feature = "llvm")]
-pub struct LLVMBackend {
-    #[allow(dead_code)]
-    config: CompilerConfig,
-}
-
-#[cfg(feature = "llvm")]
-impl LLVMBackend {
-    pub fn new(config: &CompilerConfig) -> Result<Self, TrustformersError> {
-        Ok(Self {
-            config: config.clone(),
-        })
-    }
-}
-
-#[cfg(feature = "llvm")]
-impl JitBackend for LLVMBackend {
-    fn compile_ir(
-        &mut self,
-        _ir: IntermediateRepresentation,
-    ) -> Result<Vec<u8>, TrustformersError> {
-        // Placeholder: would use LLVM to compile IR to machine code
-        Ok(vec![0x90, 0xc3]) // NOP + RET for x86_64
-    }
-
-    fn name(&self) -> &str {
-        "LLVM"
-    }
-
-    fn supported_targets(&self) -> Vec<String> {
-        vec![
-            "x86_64".to_string(),
-            "aarch64".to_string(),
-            "arm".to_string(),
-        ]
-    }
-}
-
-/// Cranelift-based JIT backend
-#[cfg(feature = "cranelift")]
-pub struct CraneliftBackend {
-    #[allow(dead_code)]
-    config: CompilerConfig,
-}
-
-#[cfg(feature = "cranelift")]
-impl CraneliftBackend {
-    pub fn new(config: &CompilerConfig) -> Result<Self, TrustformersError> {
-        Ok(Self {
-            config: config.clone(),
-        })
-    }
-}
-
-#[cfg(feature = "cranelift")]
-impl JitBackend for CraneliftBackend {
-    fn compile_ir(
-        &mut self,
-        _ir: IntermediateRepresentation,
-    ) -> Result<Vec<u8>, TrustformersError> {
-        // Placeholder: would use Cranelift to compile IR to machine code
-        Ok(vec![0x90, 0xc3]) // NOP + RET for x86_64
-    }
-
-    fn name(&self) -> &str {
-        "Cranelift"
-    }
-
-    fn supported_targets(&self) -> Vec<String> {
-        vec!["x86_64".to_string(), "aarch64".to_string()]
-    }
-}
+// The `llvm` and `cranelift` JIT backends were removed: their features pulled
+// in no compiler dependency, and `compile_ir` returned the two bytes
+// `0x90 0xC3` (NOP; RET) for every graph while `supported_targets()` advertised
+// x86_64/aarch64/arm. Executing that as "compiled code" would run nothing at
+// all. Wire `inkwell` / `cranelift-*` in and implement `JitBackend` against
+// them to bring a real JIT back.
 
 /// Interpreter backend (fallback)
 pub struct InterpreterBackend {
@@ -1040,6 +978,35 @@ impl From<IntermediateRepresentation> for SerializableIR {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test: the `llvm` and `cranelift` backends "compiled" every IR
+    /// to `[0x90, 0xC3]` (NOP; RET) while advertising x86_64/aarch64/arm
+    /// support. Requesting one must now fail rather than silently produce a
+    /// two-byte stub — or silently fall back to the interpreter.
+    #[test]
+    fn test_native_jit_backends_are_refused() {
+        for flag in ["llvm", "cranelift"] {
+            let config = CompilerConfig {
+                compiler_flags: vec![flag.to_string()],
+                ..CompilerConfig::default()
+            };
+            let error = JitCompiler::new(&config)
+                .err()
+                .expect("a native JIT backend must not be silently substituted");
+            assert!(
+                error.to_string().contains(flag),
+                "the error must name the requested backend: {error}"
+            );
+        }
+    }
+
+    /// Without a JIT flag the interpreter backend is selected, and it says so.
+    #[test]
+    fn test_interpreter_backend_is_the_default() {
+        let compiler =
+            JitCompiler::new(&CompilerConfig::default()).expect("interpreter is always available");
+        assert_eq!(compiler.backend.name(), "Interpreter");
+    }
     use crate::compiler::{CompilerConfig, ComputationGraph};
 
     #[test]

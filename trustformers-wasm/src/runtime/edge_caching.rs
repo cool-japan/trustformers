@@ -95,6 +95,11 @@ pub struct CacheEntry {
     priority: f32,
     checksum: String,
     compression_ratio: f32,
+    /// Whether `data` currently holds compressed (DEFLATE) bytes rather
+    /// than the original raw payload. `checksum` is always computed over
+    /// the *original* (uncompressed) bytes, so `verify_integrity` needs to
+    /// know whether to decompress first.
+    is_compressed: bool,
 }
 
 #[wasm_bindgen]
@@ -126,6 +131,7 @@ impl CacheEntry {
             priority,
             checksum,
             compression_ratio: 1.0,
+            is_compressed: false,
         }
     }
 
@@ -237,42 +243,71 @@ impl CacheEntry {
         (age_factor + access_factor + size_factor + compression_factor) * self.priority
     }
 
-    /// Verify data integrity
-    pub fn verify_integrity(&self) -> bool {
-        Self::calculate_checksum(&self.data) == self.checksum
+    /// Whether the cached payload is currently stored compressed.
+    #[wasm_bindgen(getter)]
+    pub fn is_compressed(&self) -> bool {
+        self.is_compressed
     }
 
-    /// Compress entry data
+    /// Verify data integrity. `checksum` is always computed over the
+    /// original (uncompressed) bytes at construction time, so a compressed
+    /// entry is decompressed first — real decompression, not a stale
+    /// comparison against already-mutated bytes.
+    pub fn verify_integrity(&self) -> bool {
+        if self.is_compressed {
+            match oxiarc_deflate::inflate(&self.data) {
+                Ok(raw) => Self::calculate_checksum(&raw) == self.checksum,
+                Err(_) => false,
+            }
+        } else {
+            Self::calculate_checksum(&self.data) == self.checksum
+        }
+    }
+
+    /// Compress entry data via real DEFLATE (`oxiarc_deflate`; COOLJAPAN
+    /// policy forbids `flate2`/`zstd`/`lz4` directly). Idempotent — a
+    /// second call on an already-compressed entry is a no-op rather than
+    /// double-compressing.
+    ///
+    /// This used to be `self.data.resize(compressed_size, 0)` with
+    /// `compressed_size` computed from a hardcoded per-`CacheEntryType`
+    /// ratio table, unconditionally overwriting every truncated byte with
+    /// zero and destroying the payload — [`Self::decompress`] then had no
+    /// real bytes to recover it from.
     pub fn compress(&mut self) -> Result<(), JsValue> {
-        // Simple compression simulation (in real implementation, use actual compression)
+        if self.is_compressed {
+            return Ok(());
+        }
         let original_size = self.data.len();
+        let compressed = oxiarc_deflate::deflate(&self.data, 6)
+            .map_err(|e| JsValue::from_str(&format!("cache entry compression failed: {e}")))?;
 
-        // Simulate compression effect
-        let compression_factor = match self.entry_type {
-            CacheEntryType::Model => 0.6,              // Models compress well
-            CacheEntryType::InferenceResult => 0.8,    // Results compress moderately
-            CacheEntryType::TokenizationResult => 0.9, // Tokens don't compress much
-            CacheEntryType::PreprocessedInput => 0.7,
-            CacheEntryType::AttentionPatterns => 0.5, // Patterns compress very well
-            CacheEntryType::Embeddings => 0.8,
-            CacheEntryType::RawData => 0.9,
+        self.compression_ratio = if !compressed.is_empty() {
+            original_size as f32 / compressed.len() as f32
+        } else {
+            1.0
         };
-
-        let compressed_size = (original_size as f32 * compression_factor) as usize;
-        self.data.resize(compressed_size, 0);
-        self.size_bytes = compressed_size;
-        self.compression_ratio = original_size as f32 / compressed_size as f32;
+        self.data = compressed;
+        self.size_bytes = self.data.len();
+        self.is_compressed = true;
 
         Ok(())
     }
 
-    /// Decompress entry data
+    /// Decompress entry data — the real inverse of [`Self::compress`], not
+    /// a zero-padded resize. Idempotent — a no-op on an already-
+    /// decompressed entry.
     pub fn decompress(&mut self) -> Result<(), JsValue> {
-        // In real implementation, actually decompress the data
-        let original_size = (self.size_bytes as f32 * self.compression_ratio) as usize;
-        self.data.resize(original_size, 0);
-        self.size_bytes = original_size;
+        if !self.is_compressed {
+            return Ok(());
+        }
+        let raw = oxiarc_deflate::inflate(&self.data)
+            .map_err(|e| JsValue::from_str(&format!("cache entry decompression failed: {e}")))?;
+
+        self.data = raw;
+        self.size_bytes = self.data.len();
         self.compression_ratio = 1.0;
+        self.is_compressed = false;
 
         Ok(())
     }
@@ -1158,7 +1193,7 @@ impl EdgeCacheManager {
         let mut compressed_count = 0;
 
         for (_, entry) in self.entries.iter_mut() {
-            if entry.compression_ratio <= 1.0 && entry.compress().is_ok() {
+            if !entry.is_compressed && entry.compress().is_ok() {
                 compressed_count += 1;
             }
         }
@@ -1243,4 +1278,126 @@ pub fn estimate_cache_overhead(entry_count: usize, average_size_bytes: usize) ->
     let compression_overhead = (entry_count * average_size_bytes) / 10; // ~10% compression overhead
 
     metadata_overhead + indexing_overhead + compression_overhead
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a `CacheEntry` directly (bypassing `CacheEntry::new`, which
+    /// unconditionally calls `js_sys::Date::now()` and so — like every
+    /// other `js_sys`/`web_sys` call in this crate — panics on non-wasm32
+    /// targets) so `compress`/`decompress`/`verify_integrity` can be
+    /// exercised by native tests.
+    fn entry_for_test(data: Vec<u8>) -> CacheEntry {
+        let checksum = CacheEntry::calculate_checksum(&data);
+        let size_bytes = data.len();
+        CacheEntry {
+            key: "test-key".to_string(),
+            entry_type: CacheEntryType::Model,
+            data,
+            size_bytes,
+            created_at: 0,
+            last_accessed: 0,
+            access_count: 0,
+            ttl_ms: None,
+            region: GeoRegion::NorthAmerica,
+            priority: 1.0,
+            checksum,
+            compression_ratio: 1.0,
+            is_compressed: false,
+        }
+    }
+
+    #[test]
+    fn test_compress_decompress_round_trip_exact() {
+        // Regression test for the old `compress`/`decompress`: `compress`
+        // called `self.data.resize(compressed_size, 0)` (zero-padding or
+        // truncating in place, destroying the payload) and `decompress`
+        // did the same in reverse from a guessed size — never recovering
+        // real bytes. Use pseudo-random (poorly compressible) data so this
+        // cannot pass by coincidence.
+        let mut state = 555u32;
+        let original: Vec<u8> = (0..4096)
+            .map(|_| {
+                state = state.wrapping_mul(1103515245).wrapping_add(12345);
+                (state >> 16) as u8
+            })
+            .collect();
+
+        let mut entry = entry_for_test(original.clone());
+        assert!(
+            entry.verify_integrity(),
+            "a freshly constructed entry must verify"
+        );
+
+        entry.compress().expect("compression should succeed");
+        assert!(entry.is_compressed());
+        assert!(
+            entry.verify_integrity(),
+            "compressed entry must still verify (decompress-then-check)"
+        );
+
+        entry.decompress().expect("decompression should succeed");
+        assert!(!entry.is_compressed());
+        assert_eq!(
+            entry.data(),
+            original,
+            "decompressed data must be byte-identical to the original"
+        );
+        assert!(entry.verify_integrity());
+    }
+
+    #[test]
+    fn test_compress_shrinks_repetitive_data_for_real() {
+        let original = std::vec![0x33u8; 16384];
+        let mut entry = entry_for_test(original.clone());
+
+        entry.compress().expect("compression should succeed");
+        assert!(
+            entry.size_bytes() < original.len() / 4,
+            "highly repetitive data must compress substantially, got {} of {} bytes",
+            entry.size_bytes(),
+            original.len()
+        );
+        assert!(entry.compression_ratio() > 4.0);
+
+        entry.decompress().expect("decompression should succeed");
+        assert_eq!(entry.data(), original);
+    }
+
+    #[test]
+    fn test_compress_is_idempotent() {
+        let original = std::vec![1u8, 2, 3, 4, 5, 6, 7, 8];
+        let mut entry = entry_for_test(original.clone());
+        entry.compress().expect("first compress should succeed");
+        let compressed_once = entry.data();
+        entry
+            .compress()
+            .expect("second compress must be a safe no-op, not double-compression");
+        assert_eq!(entry.data(), compressed_once);
+    }
+
+    #[test]
+    fn test_decompress_on_uncompressed_entry_is_noop() {
+        let original = std::vec![9u8, 8, 7, 6];
+        let mut entry = entry_for_test(original.clone());
+        entry.decompress().expect("decompress on already-raw data must be a safe no-op");
+        assert_eq!(entry.data(), original);
+    }
+
+    #[test]
+    fn test_verify_integrity_detects_corruption_after_compression() {
+        let original: Vec<u8> = (0..500).map(|i| (i % 251) as u8).collect();
+        let mut entry = entry_for_test(original);
+        entry.compress().expect("compression should succeed");
+        assert!(entry.verify_integrity());
+
+        // Corrupt the stored (compressed) bytes directly.
+        entry.data[0] ^= 0xFF;
+        assert!(
+            !entry.verify_integrity(),
+            "corrupting compressed bytes must be detected, not silently accepted"
+        );
+    }
 }

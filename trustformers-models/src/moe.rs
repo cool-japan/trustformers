@@ -4,7 +4,12 @@
 /// various transformer architectures like Mixtral, GLaM, Switch Transformer, etc.
 use crate::common::ActivationType;
 use std::collections::HashMap;
-use trustformers_core::{errors::Result, layers::Linear, tensor::Tensor, traits::Layer};
+use trustformers_core::{
+    errors::{tensor_op_error, Result},
+    layers::Linear,
+    tensor::Tensor,
+    traits::Layer,
+};
 
 /// Configuration for MoE layers
 #[derive(Debug, Clone)]
@@ -308,8 +313,17 @@ impl<E: Expert> Layer for SparseMoE<E> {
         let flattened_input = input.reshape(&[batch_size * seq_len, hidden_size])?;
         let num_tokens = flattened_input.shape()[0];
 
-        // Initialize output
-        let mut output = Tensor::zeros(&[num_tokens, hidden_size])?;
+        // Accumulate directly into a flat buffer.
+        //
+        // A previous revision rebuilt the *whole* output tensor on every token:
+        // it sliced the rows before the current one, the row itself and the rows
+        // after it, then `concat`-ed the three back together. That copies
+        // `O(num_tokens)` rows per token and therefore `O(num_tokens²)` in
+        // total, so a 2048-token sequence performed about four million row
+        // copies to write two thousand rows — with three temporary tensor
+        // allocations per token on top. Writing into a `Vec<f32>` at a known
+        // offset is the same computation in `O(num_tokens)`.
+        let mut output = vec![0.0f32; num_tokens * hidden_size];
 
         // Process each token
         for token_idx in 0..num_tokens {
@@ -318,49 +332,46 @@ impl<E: Expert> Layer for SparseMoE<E> {
                 flattened_input.slice_multi(&[(token_idx, token_idx + 1), (0, hidden_size)])?;
 
             // Combine outputs from selected experts
-            let mut token_output = Tensor::zeros(&[1, hidden_size])?;
+            let row = &mut output[token_idx * hidden_size..(token_idx + 1) * hidden_size];
             for k in 0..self.config.num_experts_per_token {
                 let expert_idx = router_output.top_k_indices.get_scalar(&[token_idx, k])? as usize;
+                if expert_idx >= self.experts.len() {
+                    return Err(tensor_op_error(
+                        "SparseMoE::forward",
+                        format!(
+                            "router selected expert {expert_idx} but only {} exist",
+                            self.experts.len()
+                        ),
+                    ));
+                }
                 let weight = router_output.top_k_weights.get_scalar(&[token_idx, k])?;
 
-                // Get expert output
+                // Get expert output and accumulate it, weighted by the router.
                 let expert_output = self.experts[expert_idx].forward(token_input.clone())?;
-                let weighted_output = expert_output.mul_scalar(weight)?;
-
-                // Accumulate expert outputs for this token
-                token_output = token_output.add(&weighted_output)?;
-            }
-
-            // Set the token output in the final output tensor
-            // Use slice and add for proper accumulation per token
-            let token_output_slice =
-                output.slice_multi(&[(token_idx, token_idx + 1), (0, hidden_size)])?;
-            let updated_slice = token_output_slice.add(&token_output)?;
-
-            // For now, we'll use a workaround since set_slice is not available
-            // This approach maintains per-token processing but requires reconstruction
-            if token_idx == 0 {
-                output = updated_slice.clone();
-            } else {
-                // Concatenate along the first dimension
-                let current_tokens = output.slice_multi(&[(0, token_idx), (0, hidden_size)])?;
-                let remaining_shape = if token_idx + 1 < num_tokens {
-                    Some(output.slice_multi(&[(token_idx + 1, num_tokens), (0, hidden_size)])?)
-                } else {
-                    None
-                };
-
-                // Reconstruct output tensor with updated token
-                output = if let Some(remaining) = remaining_shape {
-                    Tensor::concat(&[current_tokens, updated_slice, remaining], 0)?
-                } else {
-                    Tensor::concat(&[current_tokens, updated_slice], 0)?
-                };
+                let values = expert_output.data().map_err(|e| {
+                    tensor_op_error(
+                        "SparseMoE::forward",
+                        format!("failed to read expert {expert_idx} output: {e}"),
+                    )
+                })?;
+                if values.len() != hidden_size {
+                    return Err(tensor_op_error(
+                        "SparseMoE::forward",
+                        format!(
+                            "expert {expert_idx} produced {} value(s) for a hidden size of \
+                             {hidden_size}",
+                            values.len()
+                        ),
+                    ));
+                }
+                for (slot, value) in row.iter_mut().zip(values.iter()) {
+                    *slot += weight * value;
+                }
             }
         }
 
         // Reshape back to original dimensions
-        output.reshape(&[batch_size, seq_len, hidden_size])
+        Tensor::from_vec(output, &[batch_size, seq_len, hidden_size])
     }
 }
 

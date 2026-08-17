@@ -1,7 +1,11 @@
-//! MLX engine implementation
+//! MLX-style engine implementation (Metal + CPU, **not** Apple's MLX framework).
 //!
-//! Contains MlxEngine implementation methods and UnifiedMemoryPool.
+//! See [`super::mlx_types`] for the full statement of what this module is and is not.
+//! In short: an MLX-shaped graph API whose ops execute on the real Metal kernels in
+//! `trustformers_core::gpu_ops::metal` (with the `metal` feature on macOS) or on CPU
+//! tensor kernels otherwise. No MLX linkage, no Neural Engine dispatch.
 
+use super::device_probe::probe_hardware;
 use super::mlx_types::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -12,7 +16,7 @@ use trustformers_core::TrustformersError;
 impl MlxEngine {
     /// Create a new MLX engine with the specified configuration
     pub fn new(config: MlxConfig) -> Result<Self> {
-        let device_capabilities = Self::detect_device_capabilities(&config.device)?;
+        let device_capabilities = Self::detect_device_capabilities()?;
         Self::validate_config(&config, &device_capabilities)?;
         let memory_config = config.memory_config.clone();
 
@@ -25,8 +29,64 @@ impl MlxEngine {
         })
     }
 
-    /// Detect device capabilities for the target Apple Silicon device
-    pub fn detect_device_capabilities(device: &AppleSiliconDevice) -> Result<DeviceCapabilities> {
+    /// Probe the running machine for its real capabilities.
+    ///
+    /// Reads `sysctlbyname` for CPU/memory facts and, with the `metal` feature on
+    /// macOS, the live `MTLDevice` for GPU facts. Quantities Apple exposes no API for
+    /// stay `None`.
+    ///
+    /// This replaces the old `detect_device_capabilities(device: &AppleSiliconDevice)`,
+    /// which detected nothing: it matched the chip enum the *caller* passed in against
+    /// a hardcoded table and tacked on `mlx_version: "0.15.0"` for an unlinked
+    /// framework. Use [`Self::published_specs_for`] when you explicitly want the
+    /// spec-sheet numbers for a named chip.
+    pub fn detect_device_capabilities() -> Result<DeviceCapabilities> {
+        let hw = probe_hardware()?;
+
+        #[allow(unused_mut)]
+        let mut capabilities = DeviceCapabilities {
+            cpu_brand: hw.cpu_brand.clone(),
+            performance_cores: hw.performance_cores,
+            efficiency_cores: hw.efficiency_cores,
+            logical_cores: hw.logical_cores,
+            unified_memory_gb: hw.memory_gib(),
+            amx_version: hw.amx_version,
+            metal_device_name: None,
+            apple_gpu_family: None,
+            metal_max_buffer_bytes: None,
+            metal_recommended_working_set_bytes: None,
+            metal_unified_memory: None,
+            // Not queryable through any Apple API - see the struct docs.
+            gpu_cores: None,
+            neural_engine_tops: None,
+            memory_bandwidth_gbps: None,
+        };
+
+        #[cfg(all(target_os = "macos", feature = "metal"))]
+        {
+            // Best-effort: a machine without a usable Metal device still has valid CPU
+            // capabilities, so a Metal failure narrows the report rather than failing it.
+            if let Ok(backend) = trustformers_core::gpu_ops::metal::get_metal_backend() {
+                let info = backend.device_info();
+                capabilities.metal_device_name = Some(info.name);
+                capabilities.apple_gpu_family = info.apple_gpu_family;
+                capabilities.metal_max_buffer_bytes = Some(info.max_buffer_length);
+                capabilities.metal_recommended_working_set_bytes =
+                    Some(info.recommended_max_working_set_size);
+                capabilities.metal_unified_memory = Some(info.has_unified_memory);
+            }
+        }
+
+        Ok(capabilities)
+    }
+
+    /// Apple's **published marketing specifications** for a named chip.
+    ///
+    /// This is a static table transcribed from Apple's product pages, not a
+    /// measurement, and it says nothing about the machine this code is running on.
+    /// It is kept because callers legitimately want to reason about a target device
+    /// they are not currently executing on; the name makes the provenance explicit.
+    pub fn published_specs_for(device: &AppleSiliconDevice) -> PublishedChipSpecs {
         let (perf_cores, eff_cores, gpu_cores, ne_tops, memory_gb, bandwidth_gbps, amx) =
             match device {
                 AppleSiliconDevice::M1 => (4, 4, 7, 15.8, 8.0, 68.0, true),
@@ -48,43 +108,86 @@ impl MlxEngine {
                 AppleSiliconDevice::A18Pro => (2, 4, 6, 35.0, 8.0, 68.0, false),
             };
 
-        Ok(DeviceCapabilities {
+        PublishedChipSpecs {
+            device: *device,
             performance_cores: perf_cores,
             efficiency_cores: eff_cores,
             gpu_cores,
             neural_engine_tops: ne_tops,
-            unified_memory_gb: memory_gb,
+            base_configuration_memory_gb: memory_gb,
             memory_bandwidth_gbps: bandwidth_gbps,
             amx_support: amx,
-            metal_version: "3.2".to_string(),
-            mlx_version: "0.15.0".to_string(),
-        })
+        }
     }
 
-    /// Validate configuration against device capabilities
+    /// Validate a configuration against the *probed* machine.
+    ///
+    /// A request of `0` means "auto - use whatever the device has" and is never an
+    /// error. A capability the OS does not report (`None`) cannot be validated
+    /// against, so the corresponding request is accepted with a warning rather than
+    /// rejected on the basis of a number nobody measured.
     fn validate_config(config: &MlxConfig, capabilities: &DeviceCapabilities) -> Result<()> {
-        if config.memory_config.max_memory_gb > capabilities.unified_memory_gb {
+        let requested_memory = config.memory_config.max_memory_gb;
+        if requested_memory > 0.0 && requested_memory > capabilities.unified_memory_gb {
             return Err(TrustformersError::config_error(
-                "Requested memory exceeds device capability",
+                &format!(
+                    "requested {requested_memory:.1} GB exceeds the {:.1} GB installed \
+                     on this machine ({})",
+                    capabilities.unified_memory_gb, capabilities.cpu_brand
+                ),
                 "validate_config",
             )
             .into());
         }
 
-        if config.compute_units.cpu_config.performance_cores > capabilities.performance_cores {
-            return Err(TrustformersError::config_error(
-                "Requested performance cores exceed device capability",
-                "validate_config",
-            )
-            .into());
+        let requested_perf = config.compute_units.cpu_config.performance_cores;
+        if requested_perf > 0 {
+            match capabilities.performance_cores {
+                Some(available) if u32::from(requested_perf) > available => {
+                    return Err(TrustformersError::config_error(
+                        &format!(
+                            "requested {requested_perf} performance cores but \
+                             hw.perflevel0.logicalcpu reports {available}"
+                        ),
+                        "validate_config",
+                    )
+                    .into());
+                },
+                Some(_) => {},
+                None => tracing::warn!(
+                    requested_perf,
+                    "this machine does not report performance-core counts; \
+                     the request cannot be validated"
+                ),
+            }
         }
 
-        if config.compute_units.gpu_config.gpu_cores > capabilities.gpu_cores {
-            return Err(TrustformersError::config_error(
-                "Requested GPU cores exceed device capability",
-                "validate_config",
-            )
-            .into());
+        let requested_eff = config.compute_units.cpu_config.efficiency_cores;
+        if requested_eff > 0 {
+            match capabilities.efficiency_cores {
+                Some(available) if u32::from(requested_eff) > available => {
+                    return Err(TrustformersError::config_error(
+                        &format!(
+                            "requested {requested_eff} efficiency cores but \
+                             hw.perflevel1.logicalcpu reports {available}"
+                        ),
+                        "validate_config",
+                    )
+                    .into());
+                },
+                _ => {},
+            }
+        }
+
+        // GPU core counts are not exposed by any Apple API, so a non-zero request is
+        // unverifiable. Say so instead of validating against an invented number.
+        let requested_gpu = config.compute_units.gpu_config.gpu_cores;
+        if requested_gpu > 0 {
+            tracing::warn!(
+                requested_gpu,
+                "GPU core counts are not queryable on Apple platforms; \
+                 the request is recorded but not enforced"
+            );
         }
 
         Ok(())
@@ -111,7 +214,7 @@ impl MlxEngine {
         // Create compilation metadata
         let compilation_metadata = CompilationMetadata {
             compilation_time: std::time::SystemTime::now(),
-            mlx_version: self.device_capabilities.mlx_version.clone(),
+            engine_backend: Self::backend_label().to_string(),
             optimization_level,
             target_device: self.config.device,
             compilation_options: HashMap::new(),
@@ -127,8 +230,10 @@ impl MlxEngine {
 
         self.compiled_models.insert(model_id.clone(), compiled_model);
 
+        // Sub-millisecond resolution: `as_millis()` truncated every fast compile to 0,
+        // which read as "not measured" rather than "measured and small".
         let compilation_time = compilation_start.elapsed();
-        self.performance_metrics.compilation_time_ms = compilation_time.as_millis() as f64;
+        self.performance_metrics.compilation_time_ms = compilation_time.as_secs_f64() * 1000.0;
 
         Ok(model_id)
     }
@@ -142,7 +247,6 @@ impl MlxEngine {
 
         // Clone the data we need to avoid borrow conflicts
         let optimized_graph = compiled_model.optimized_graph.clone();
-        let performance_profile = compiled_model.performance_profile.clone();
 
         let execution_start = std::time::Instant::now();
 
@@ -152,60 +256,85 @@ impl MlxEngine {
         // Execute graph nodes in order
         let outputs = self.execute_optimized_graph(&optimized_graph, inputs)?;
 
-        // Update performance metrics
+        // Record the real cost of the run just performed.
         let execution_time = execution_start.elapsed();
-        self.update_performance_metrics(execution_time, &performance_profile);
+        let executed_nodes = optimized_graph.execution_order.len();
+        self.update_performance_metrics(execution_time, executed_nodes);
 
         Ok(outputs)
     }
 
-    /// Optimize computation graph for MLX execution
+    /// Build an executable dataflow graph from a caller-declared op list.
+    ///
+    /// # Contract
+    ///
+    /// `model_graph[i] = (operation, producers, parameters)`, where `producers[j]` is
+    /// the **index of the node that produces** input `j` of node `i`. A producer index
+    /// that is not strictly less than `i` cannot refer to an already-computed value, so
+    /// it denotes a **runtime graph input**: those are numbered in order of appearance
+    /// and filled from the `inputs` slice handed to `execute_model`.
+    ///
+    /// # What was wrong before
+    ///
+    /// Input tensor ids were minted fresh per node (`inputs.iter().map(|_| counter++)`)
+    /// and therefore never equalled any producer's output id - the dataflow was never
+    /// connected. Meanwhile the *edge* list used `inputs[j]` directly as a node index,
+    /// so the canonical single-node example `vec![(MatMul, vec![0, 0], ...)]` produced
+    /// a self-edge, i.e. a cycle. That only went unnoticed because dead-code
+    /// elimination (whose root rule was "the op is Softmax or LayerNorm") deleted the
+    /// entire graph first, after which execution fell through to
+    /// `tensor_values.values().last()` and returned an arbitrary `HashMap` entry -
+    /// frequently one of the *inputs* rather than the computed result.
     fn optimize_graph(
         &self,
         model_graph: Vec<(MlxOperation, Vec<usize>, HashMap<String, f32>)>,
     ) -> Result<OptimizedGraph> {
-        let mut nodes = Vec::new();
-        let mut edges = Vec::new();
-        let mut tensor_id_counter = 0u64;
-
-        // Create nodes from input graph
-        for (i, (operation, inputs, parameters)) in model_graph.iter().enumerate() {
-            let input_tensors: Vec<TensorId> = inputs
-                .iter()
-                .map(|_| {
-                    tensor_id_counter += 1;
-                    tensor_id_counter - 1
-                })
-                .collect();
-
-            let output_tensors = vec![{
-                tensor_id_counter += 1;
-                tensor_id_counter - 1
-            }];
-
-            // Assign compute unit based on operation type and device capabilities
-            let compute_unit = self.assign_compute_unit(operation);
-
-            nodes.push(GraphNode {
-                id: i,
-                operation: *operation,
-                inputs: input_tensors.clone(),
-                outputs: output_tensors.clone(),
-                parameters: parameters.clone(),
-                compute_unit,
-            });
-
-            // Create edges
-            for (j, &input_tensor) in input_tensors.iter().enumerate() {
-                if let Some(source_node) = inputs.get(j) {
-                    edges.push(GraphEdge {
-                        source: *source_node,
-                        destination: i,
-                        tensor_id: input_tensor,
-                        data_type: self.config.precision_config.default_precision,
-                    });
+        // Pass 1: count runtime inputs so node outputs can be numbered after them.
+        let mut runtime_input_count = 0usize;
+        for (node_index, (_, producers, _)) in model_graph.iter().enumerate() {
+            for producer in producers {
+                if *producer >= node_index {
+                    runtime_input_count += 1;
                 }
             }
+        }
+
+        let mut nodes = Vec::with_capacity(model_graph.len());
+        let mut edges = Vec::new();
+        let mut next_runtime_slot = 0u64;
+
+        // Node `i` writes tensor id `runtime_input_count + i`.
+        let output_tensor_of =
+            |node_index: usize| -> TensorId { (runtime_input_count + node_index) as TensorId };
+
+        for (node_index, (operation, producers, parameters)) in model_graph.iter().enumerate() {
+            let mut input_tensors = Vec::with_capacity(producers.len());
+            for producer in producers {
+                if *producer < node_index {
+                    // Consume the producing node's output; record the dependency edge.
+                    input_tensors.push(output_tensor_of(*producer));
+                    edges.push(GraphEdge {
+                        source: *producer,
+                        destination: node_index,
+                        tensor_id: output_tensor_of(*producer),
+                        data_type: self.config.precision_config.default_precision,
+                    });
+                } else {
+                    // Runtime graph input: no edge, filled by `execute_model`.
+                    input_tensors.push(next_runtime_slot);
+                    next_runtime_slot += 1;
+                }
+            }
+
+            nodes.push(GraphNode {
+                id: node_index,
+                operation: *operation,
+                inputs: input_tensors,
+                outputs: vec![output_tensor_of(node_index)],
+                parameters: parameters.clone(),
+                // Assign compute unit based on operation type and build capabilities.
+                compute_unit: self.assign_compute_unit(operation),
+            });
         }
 
         // Apply graph optimizations
@@ -231,26 +360,34 @@ impl MlxEngine {
         })
     }
 
-    /// Assign compute unit based on operation characteristics
+    /// Assign a compute unit that this build can actually dispatch to.
+    ///
+    /// The previous version returned `NeuralEngine` / `Hybrid` labels that no code
+    /// path acted on - every op ran on the CPU regardless. Now the label is a fact:
+    /// `Gpu` is only ever returned when the crate is built with the `metal` feature
+    /// on macOS and the op has a Metal kernel, and `execute_node_operation` really
+    /// does dispatch those to the GPU.
     fn assign_compute_unit(&self, operation: &MlxOperation) -> AssignedComputeUnit {
-        match (operation, &self.config.compute_units.distribution_strategy) {
-            (MlxOperation::MatMul, WorkloadDistributionStrategy::NeuralEngineFirst) => {
-                AssignedComputeUnit::NeuralEngine
+        if !Self::metal_available() {
+            return AssignedComputeUnit::CPU;
+        }
+        let prefers_gpu = !matches!(
+            self.config.compute_units.distribution_strategy,
+            WorkloadDistributionStrategy::CpuFirst
+        );
+        match operation {
+            MlxOperation::MatMul | MlxOperation::Attention | MlxOperation::LayerNorm
+                if prefers_gpu =>
+            {
+                AssignedComputeUnit::Gpu
             },
-            (MlxOperation::Convolution, WorkloadDistributionStrategy::NeuralEngineFirst) => {
-                AssignedComputeUnit::NeuralEngine
-            },
-            (MlxOperation::Attention, WorkloadDistributionStrategy::GpuFirst) => {
-                AssignedComputeUnit::GPU
-            },
-            (MlxOperation::MatMul, WorkloadDistributionStrategy::GpuFirst) => {
-                AssignedComputeUnit::GPU
-            },
-            (MlxOperation::ElementWise, _) => AssignedComputeUnit::CPU,
-            (MlxOperation::Reduction, _) => AssignedComputeUnit::CPU,
-            (_, WorkloadDistributionStrategy::Heterogeneous) => AssignedComputeUnit::Hybrid,
             _ => AssignedComputeUnit::CPU,
         }
+    }
+
+    /// Whether this build can dispatch to Metal at all.
+    pub fn metal_available() -> bool {
+        cfg!(all(target_os = "macos", feature = "metal"))
     }
 
     /// Apply operator fusion optimization
@@ -314,9 +451,19 @@ impl MlxEngine {
         // Mark nodes that are reachable from outputs
         let mut reachable = vec![false; nodes.len()];
 
-        // Mark output nodes as reachable
+        // Mark graph outputs as reachable: a node whose products nothing else consumes.
+        // (Same dataflow rule as `is_output_node`, expressed over the pre-optimisation
+        // node list. The old rule marked only Softmax/LayerNorm nodes, so a graph
+        // ending in a MatMul had no reachable root and every node was eliminated.)
+        let node_snapshot = nodes.clone();
         for node in &*nodes {
-            if node.outputs.is_empty() || self.is_output_node(node) {
+            let is_sink = node.outputs.is_empty()
+                || node.outputs.iter().any(|produced| {
+                    !node_snapshot
+                        .iter()
+                        .any(|other| other.id != node.id && other.inputs.contains(produced))
+                });
+            if is_sink {
                 reachable[node.id] = true;
             }
         }
@@ -381,12 +528,21 @@ impl MlxEngine {
     }
 
     /// Check if a node is an output node
-    fn is_output_node(&self, node: &GraphNode) -> bool {
-        // Simplified: consider nodes with specific operations as outputs
-        matches!(
-            node.operation,
-            MlxOperation::Softmax | MlxOperation::LayerNorm
-        )
+    /// A node is a graph output when nothing else consumes what it produces.
+    ///
+    /// The previous rule was "the operation is Softmax or LayerNorm", which made the
+    /// output set depend on op *type* rather than on the dataflow - a graph ending in
+    /// a MatMul had no outputs at all and fell through to the
+    /// "return the last computed tensor" branch below, which read an arbitrary entry
+    /// out of a `HashMap`. That returned a *nondeterministically chosen* tensor: on a
+    /// two-input MatMul graph it handed back one of the inputs instead of the product.
+    fn is_output_node(&self, node: &GraphNode, graph: &OptimizedGraph) -> bool {
+        node.outputs.iter().any(|produced| {
+            !graph
+                .nodes
+                .iter()
+                .any(|other| other.id != node.id && other.inputs.contains(produced))
+        })
     }
 
     /// Create execution order using topological sort
@@ -542,14 +698,17 @@ impl MlxEngine {
             total_ops += 1;
 
             // Estimate latency based on operation type and compute unit
+            // Rough per-op cost model used only to order/ size the graph; it is
+            // reported as an *estimate* and never as a measurement. The Neural Engine
+            // rows are gone with the enum variant - nothing dispatches there.
             let op_latency = match (node.operation, node.compute_unit) {
-                (MlxOperation::MatMul, AssignedComputeUnit::NeuralEngine) => 0.5,
-                (MlxOperation::MatMul, AssignedComputeUnit::GPU) => 1.2,
+                (MlxOperation::MatMul, AssignedComputeUnit::Gpu) => 1.2,
                 (MlxOperation::MatMul, AssignedComputeUnit::CPU) => 5.0,
-                (MlxOperation::Convolution, AssignedComputeUnit::NeuralEngine) => 0.8,
-                (MlxOperation::Convolution, AssignedComputeUnit::GPU) => 2.0,
-                (MlxOperation::Attention, AssignedComputeUnit::GPU) => 3.0,
+                (MlxOperation::Convolution, AssignedComputeUnit::Gpu) => 2.0,
+                (MlxOperation::Convolution, AssignedComputeUnit::CPU) => 8.0,
+                (MlxOperation::Attention, AssignedComputeUnit::Gpu) => 3.0,
                 (MlxOperation::Attention, AssignedComputeUnit::CPU) => 10.0,
+                (MlxOperation::LayerNorm, AssignedComputeUnit::Gpu) => 0.4,
                 _ => 1.0,
             };
 
@@ -624,23 +783,41 @@ impl MlxEngine {
             }
         }
 
-        // Collect final outputs
+        // Collect final outputs in execution order, so the result is deterministic.
         let mut outputs = Vec::new();
-        for node in &graph.nodes {
-            if self.is_output_node(node) {
-                for &output_tensor_id in &node.outputs {
-                    if let Some(tensor) = tensor_values.get(&output_tensor_id) {
-                        outputs.push(tensor.clone());
-                    }
+        for &node_id in &graph.execution_order {
+            let Some(node) = graph.nodes.get(node_id) else {
+                continue;
+            };
+            if !self.is_output_node(node, graph) {
+                continue;
+            }
+            for output_tensor_id in &node.outputs {
+                if let Some(tensor) = tensor_values.get(output_tensor_id) {
+                    outputs.push(tensor.clone());
                 }
             }
         }
 
-        if outputs.is_empty() && !tensor_values.is_empty() {
-            // If no explicit output nodes, return the last computed tensor
-            if let Some(last_tensor) = tensor_values.values().last() {
-                outputs.push(last_tensor.clone());
+        if outputs.is_empty() {
+            // Fall back to the last *executed* node's output - still deterministic.
+            // Never `tensor_values.values().last()`: HashMap order is arbitrary.
+            if let Some(tensor) = graph
+                .execution_order
+                .last()
+                .and_then(|node_id| graph.nodes.get(*node_id))
+                .and_then(|node| node.outputs.first())
+                .and_then(|tensor_id| tensor_values.get(tensor_id))
+            {
+                outputs.push(tensor.clone());
             }
+        }
+
+        if outputs.is_empty() {
+            return Err(TrustformersError::runtime_error(
+                "graph execution produced no output tensors".to_string(),
+            )
+            .into());
         }
 
         Ok(outputs)
@@ -662,7 +839,12 @@ impl MlxEngine {
         }
     }
 
-    /// Execute matrix multiplication (simplified MLX implementation)
+    /// Real matrix multiplication: `A[m, k] @ B[k, n]`.
+    ///
+    /// Dispatches to the Metal GEMM in `trustformers_core::gpu_ops::metal` when this
+    /// build has the `metal` feature on macOS, otherwise to the crate's CPU tensor
+    /// kernels (`oxiblas`-backed). The previous body was a hand-rolled scalar triple
+    /// loop labelled "Optimized matrix multiplication for Apple Silicon".
     fn execute_matmul(
         &self,
         inputs: &[Tensor],
@@ -677,8 +859,6 @@ impl MlxEngine {
 
         let a = &inputs[0];
         let b = &inputs[1];
-        let a_data = a.data()?;
-        let b_data = b.data()?;
         let a_shape = a.shape();
         let b_shape = b.shape();
 
@@ -687,82 +867,281 @@ impl MlxEngine {
                 TrustformersError::runtime_error("MatMul requires 2D tensors".to_string()).into(),
             );
         }
-
         let (m, k) = (a_shape[0], a_shape[1]);
         let (k2, n) = (b_shape[0], b_shape[1]);
-
         if k != k2 {
-            return Err(TrustformersError::runtime_error(
-                "Matrix dimensions incompatible".to_string(),
-            )
+            return Err(TrustformersError::runtime_error(format!(
+                "MatMul dimensions incompatible: [{m}, {k}] @ [{k2}, {n}]"
+            ))
             .into());
         }
 
-        let mut result = vec![0.0f32; m * n];
-
-        // Optimized matrix multiplication for Apple Silicon
-        for i in 0..m {
-            for j in 0..n {
-                let mut sum = 0.0f32;
-                for k_idx in 0..k {
-                    sum += a_data[i * k + k_idx] * b_data[k_idx * n + j];
-                }
-                result[i * n + j] = sum;
-            }
+        #[cfg(all(target_os = "macos", feature = "metal"))]
+        {
+            let backend = trustformers_core::gpu_ops::metal::get_metal_backend()?;
+            let out = backend.matmul_f32(&a.data()?, &b.data()?, m, k, n)?;
+            Ok(vec![Tensor::from_vec(out, &[m, n])?])
         }
-
-        let result_tensor = Tensor::from_vec(result, &[m, n])?;
-        Ok(vec![result_tensor])
+        #[cfg(not(all(target_os = "macos", feature = "metal")))]
+        {
+            // Real CPU GEMM through the core tensor kernels, not a scalar loop.
+            Ok(vec![a.matmul(b)?])
+        }
     }
 
-    /// Execute convolution (simplified implementation)
+    /// Real direct 2-D convolution (cross-correlation), NCHW / OIHW layout.
+    ///
+    /// The previous body was `Ok(vec![input.clone()])` behind the comment
+    /// "For simplicity, return input (real implementation would do actual
+    /// convolution)" - a convolution that returned its argument unchanged.
+    ///
+    /// # Parameters
+    ///
+    /// The tensor shapes carry the geometry, so only the sampling parameters are read
+    /// from `parameters`, each with an explicit default:
+    ///
+    /// * `stride` (default 1), `padding` (default 0, zero padding), `dilation`
+    ///   (default 1).
+    ///
+    /// `inputs[0]` must be `[batch, in_channels, height, width]` and `inputs[1]`
+    /// `[out_channels, in_channels, kernel_h, kernel_w]`; an optional `inputs[2]` is a
+    /// per-output-channel bias. Anything else is a structured error, never a silent
+    /// pass-through.
     fn execute_convolution(
         &self,
         inputs: &[Tensor],
-        _parameters: &HashMap<String, f32>,
+        parameters: &HashMap<String, f32>,
     ) -> Result<Vec<Tensor>> {
-        if inputs.len() != 2 {
+        if inputs.len() < 2 {
             return Err(TrustformersError::runtime_error(
-                "Convolution requires input and kernel tensors".to_string(),
+                "Convolution requires an input tensor and a kernel tensor".to_string(),
             )
             .into());
         }
-
-        // Simplified 2D convolution implementation
         let input = &inputs[0];
         let kernel = &inputs[1];
+        let input_shape = input.shape();
+        let kernel_shape = kernel.shape();
 
-        // For simplicity, return input (real implementation would do actual convolution)
-        Ok(vec![input.clone()])
+        if input_shape.len() != 4 {
+            return Err(TrustformersError::runtime_error(format!(
+                "Convolution input must be 4-D [batch, in_channels, height, width], got {input_shape:?}"
+            ))
+            .into());
+        }
+        if kernel_shape.len() != 4 {
+            return Err(TrustformersError::runtime_error(format!(
+                "Convolution kernel must be 4-D [out_channels, in_channels, kh, kw], got {kernel_shape:?}"
+            ))
+            .into());
+        }
+        let (batch, in_channels, height, width) = (
+            input_shape[0],
+            input_shape[1],
+            input_shape[2],
+            input_shape[3],
+        );
+        let (out_channels, kernel_in_channels, kernel_h, kernel_w) = (
+            kernel_shape[0],
+            kernel_shape[1],
+            kernel_shape[2],
+            kernel_shape[3],
+        );
+        if kernel_in_channels != in_channels {
+            return Err(TrustformersError::runtime_error(format!(
+                "Convolution channel mismatch: input has {in_channels} channels, kernel expects \
+                 {kernel_in_channels}"
+            ))
+            .into());
+        }
+
+        let stride = read_positive_usize(parameters, "stride", 1)?;
+        let dilation = read_positive_usize(parameters, "dilation", 1)?;
+        let padding = read_non_negative_usize(parameters, "padding", 0)?;
+
+        let effective_h = dilation * (kernel_h - 1) + 1;
+        let effective_w = dilation * (kernel_w - 1) + 1;
+        if height + 2 * padding < effective_h || width + 2 * padding < effective_w {
+            return Err(TrustformersError::runtime_error(format!(
+                "Convolution kernel {effective_h}x{effective_w} (after dilation) does not fit a \
+                 {height}x{width} input padded by {padding}"
+            ))
+            .into());
+        }
+        let out_h = (height + 2 * padding - effective_h) / stride + 1;
+        let out_w = (width + 2 * padding - effective_w) / stride + 1;
+
+        let bias = match inputs.get(2) {
+            Some(bias_tensor) => {
+                let data = bias_tensor.data()?;
+                if data.len() != out_channels {
+                    return Err(TrustformersError::runtime_error(format!(
+                        "Convolution bias has {} elements but there are {out_channels} output channels",
+                        data.len()
+                    ))
+                    .into());
+                }
+                Some(data)
+            },
+            None => None,
+        };
+
+        let input_data = input.data()?;
+        let kernel_data = kernel.data()?;
+        let mut output = vec![0.0f32; batch * out_channels * out_h * out_w];
+
+        for b in 0..batch {
+            for oc in 0..out_channels {
+                for oy in 0..out_h {
+                    for ox in 0..out_w {
+                        let mut acc = bias.as_ref().map(|values| values[oc]).unwrap_or(0.0);
+                        for ic in 0..in_channels {
+                            for ky in 0..kernel_h {
+                                // Signed arithmetic so padding on the top/left edge is
+                                // recognised rather than wrapping around.
+                                let iy = (oy * stride + ky * dilation) as isize - padding as isize;
+                                if iy < 0 || iy >= height as isize {
+                                    continue;
+                                }
+                                for kx in 0..kernel_w {
+                                    let ix =
+                                        (ox * stride + kx * dilation) as isize - padding as isize;
+                                    if ix < 0 || ix >= width as isize {
+                                        continue;
+                                    }
+                                    let input_index =
+                                        ((b * in_channels + ic) * height + iy as usize) * width
+                                            + ix as usize;
+                                    let kernel_index =
+                                        ((oc * in_channels + ic) * kernel_h + ky) * kernel_w + kx;
+                                    acc += input_data[input_index] * kernel_data[kernel_index];
+                                }
+                            }
+                        }
+                        let out_index = ((b * out_channels + oc) * out_h + oy) * out_w + ox;
+                        output[out_index] = acc;
+                    }
+                }
+            }
+        }
+
+        Ok(vec![Tensor::from_vec(
+            output,
+            &[batch, out_channels, out_h, out_w],
+        )?])
     }
 
-    /// Execute attention mechanism (simplified implementation)
+    /// Real multi-head scaled dot-product attention.
+    ///
+    /// The previous body multiplied the input by a scalar (`result[i] = input_data[i]
+    /// * scale`) and called it attention.
+    ///
+    /// Takes `[q, k, v]`, each `[seq_len, num_heads * head_dim]`. `parameters` may set
+    /// `num_heads` (default 1) and `causal` (non-zero enables the causal mask, which
+    /// is the default). With the `metal` feature on macOS the computation runs on the
+    /// GPU through `attention_gpu_to_gpu`; otherwise it is an exact CPU
+    /// implementation of the same function.
     fn execute_attention(
         &self,
         inputs: &[Tensor],
         parameters: &HashMap<String, f32>,
     ) -> Result<Vec<Tensor>> {
-        if inputs.is_empty() {
-            return Err(TrustformersError::runtime_error(
-                "Attention requires at least one input tensor".to_string(),
-            )
+        if inputs.len() < 3 {
+            return Err(TrustformersError::runtime_error(format!(
+                "Attention requires three input tensors (query, key, value), got {}",
+                inputs.len()
+            ))
             .into());
         }
+        let (q, k, v) = (&inputs[0], &inputs[1], &inputs[2]);
+        let shape = q.shape();
+        if shape.len() != 2 {
+            return Err(TrustformersError::runtime_error(format!(
+                "Attention expects 2-D [seq_len, num_heads * head_dim] tensors, got {shape:?}"
+            ))
+            .into());
+        }
+        if k.shape() != shape || v.shape() != shape {
+            return Err(TrustformersError::runtime_error(format!(
+                "Attention requires q/k/v of equal shape, got {:?} / {:?} / {:?}",
+                shape,
+                k.shape(),
+                v.shape()
+            ))
+            .into());
+        }
+        let (seq_len, hidden) = (shape[0], shape[1]);
+        let num_heads = read_positive_usize(parameters, "num_heads", 1)?;
+        if hidden % num_heads != 0 {
+            return Err(TrustformersError::runtime_error(format!(
+                "Attention hidden size {hidden} is not divisible by num_heads {num_heads}"
+            ))
+            .into());
+        }
+        let head_dim = hidden / num_heads;
+        let causal = parameters.get("causal").copied().unwrap_or(1.0) != 0.0;
 
-        let input = &inputs[0];
-        let scale = parameters.get("scale").copied().unwrap_or(1.0);
-
-        // Simplified self-attention (real implementation would be more complex)
-        let input_data = input.data()?;
-        let shape = input.shape();
-        let mut result = vec![0.0f32; input_data.len()];
-
-        for i in 0..input_data.len() {
-            result[i] = input_data[i] * scale;
+        #[cfg(all(target_os = "macos", feature = "metal"))]
+        {
+            // The Metal kernel always applies the causal mask, so only take the GPU
+            // path when that is what was asked for.
+            if causal {
+                let backend = trustformers_core::gpu_ops::metal::get_metal_backend()?;
+                let q_id = backend.create_transient_buffer(&q.data()?)?;
+                let k_id = backend.create_transient_buffer(&k.data()?)?;
+                let v_id = backend.create_transient_buffer(&v.data()?)?;
+                let outcome = backend
+                    .attention_gpu_to_gpu(&q_id, &k_id, &v_id, 1, seq_len, num_heads, head_dim)
+                    .and_then(|out_id| {
+                        let data = backend.download_buffer_to_vec(&out_id);
+                        backend.release_buffers(&[out_id])?;
+                        data
+                    });
+                backend.release_buffers(&[q_id, k_id, v_id])?;
+                return Ok(vec![Tensor::from_vec(outcome?, &[seq_len, hidden])?]);
+            }
         }
 
-        let result_tensor = Tensor::from_vec(result, &shape)?;
-        Ok(vec![result_tensor])
+        let q_data = q.data()?;
+        let k_data = k.data()?;
+        let v_data = v.data()?;
+        let scale = 1.0f32 / (head_dim as f32).sqrt();
+        let mut output = vec![0.0f32; seq_len * hidden];
+
+        for head in 0..num_heads {
+            let head_offset = head * head_dim;
+            for row in 0..seq_len {
+                let limit = if causal { row + 1 } else { seq_len };
+                // Online softmax: one pass over the keys, numerically stable, no
+                // seq_len-sized scratch buffer.
+                let mut running_max = f32::NEG_INFINITY;
+                let mut running_sum = 0.0f32;
+                let mut accumulator = vec![0.0f32; head_dim];
+                for col in 0..limit {
+                    let mut dot = 0.0f32;
+                    for d in 0..head_dim {
+                        dot += q_data[row * hidden + head_offset + d]
+                            * k_data[col * hidden + head_offset + d];
+                    }
+                    let score = dot * scale;
+                    let new_max = running_max.max(score);
+                    let correction = (running_max - new_max).exp();
+                    let weight = (score - new_max).exp();
+                    running_sum = running_sum * correction + weight;
+                    for d in 0..head_dim {
+                        accumulator[d] = accumulator[d] * correction
+                            + weight * v_data[col * hidden + head_offset + d];
+                    }
+                    running_max = new_max;
+                }
+                let inv_sum = if running_sum > 0.0 { 1.0 / running_sum } else { 0.0 };
+                for d in 0..head_dim {
+                    output[row * hidden + head_offset + d] = accumulator[d] * inv_sum;
+                }
+            }
+        }
+
+        Ok(vec![Tensor::from_vec(output, &[seq_len, hidden])?])
     }
 
     /// Execute layer normalization (simplified implementation)
@@ -1121,23 +1500,66 @@ impl MlxEngine {
         Ok(vec![result_tensor])
     }
 
-    /// Update performance metrics after execution
-    fn update_performance_metrics(
-        &mut self,
-        execution_time: std::time::Duration,
-        profile: &ModelPerformanceProfile,
-    ) {
-        self.performance_metrics.ops_per_second = 1.0 / execution_time.as_secs_f64();
+    /// Record what the last execution actually cost.
+    ///
+    /// Every field is measured here: wall-clock time from `Instant`, node count from
+    /// the executed graph, process CPU and RSS from `sysinfo`, pool occupancy from the
+    /// allocator. The previous body was introduced by the comment
+    /// `// Simulate MLX performance characteristics` and assigned the constants
+    /// `cpu_utilization = 75.0`, `gpu_utilization = 85.0`,
+    /// `neural_engine_utilization = 90.0` plus a fixed 15 W and a fixed thermal state.
+    fn update_performance_metrics(&mut self, execution_time: std::time::Duration, nodes: usize) {
+        let seconds = execution_time.as_secs_f64();
+        self.performance_metrics.last_execution_ms = seconds * 1000.0;
+        self.performance_metrics.last_execution_nodes = nodes;
+        self.performance_metrics.ops_per_second =
+            if seconds > 0.0 { nodes as f64 / seconds } else { 0.0 };
 
-        // Simulate MLX performance characteristics
-        self.performance_metrics.memory_bandwidth_gbps =
-            self.device_capabilities.memory_bandwidth_gbps * 0.8;
-        self.performance_metrics.cpu_utilization = 75.0;
-        self.performance_metrics.gpu_utilization = 85.0;
-        self.performance_metrics.neural_engine_utilization = 90.0;
-        self.performance_metrics.power_consumption_watts = profile.power_consumption_watts;
-        self.performance_metrics.memory_usage_gb = self.memory_pool.get_total_allocated_gb();
-        self.performance_metrics.thermal_state = profile.thermal_impact;
+        let (cpu, rss) = Self::sample_process_usage();
+        self.performance_metrics.cpu_utilization = cpu;
+        self.performance_metrics.process_memory_gb = rss;
+        self.performance_metrics.pool_memory_gb = self.memory_pool.get_total_allocated_gb();
+    }
+
+    /// Sample this process's CPU usage and resident memory.
+    ///
+    /// Returns `(cpu_percent, rss_gib)`; either component is `None` when the platform
+    /// does not report it. CPU percentage needs two samples separated by at least
+    /// `MINIMUM_CPU_UPDATE_INTERVAL`, so the first call in a process may legitimately
+    /// return `None` for CPU rather than a made-up figure.
+    fn sample_process_usage() -> (Option<f32>, Option<f32>) {
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+        let pid = Pid::from_u32(std::process::id());
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing().with_cpu().with_memory(),
+        );
+        std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing().with_cpu().with_memory(),
+        );
+
+        match system.process(pid) {
+            Some(process) => {
+                let rss_gib = process.memory() as f32 / (1024.0 * 1024.0 * 1024.0);
+                (Some(process.cpu_usage()), Some(rss_gib))
+            },
+            None => (None, None),
+        }
+    }
+
+    /// `"metal"` when this build dispatches to the GPU, `"cpu"` otherwise.
+    pub fn backend_label() -> &'static str {
+        if Self::metal_available() {
+            "metal"
+        } else {
+            "cpu"
+        }
     }
 
     /// Get current performance metrics
@@ -1150,65 +1572,137 @@ impl MlxEngine {
         &self.device_capabilities
     }
 
-    /// Export comprehensive performance report
+    /// Export a performance report containing only measured or probed values.
+    ///
+    /// Anything this process cannot observe is printed as
+    /// `not available (<why>)` rather than as a number. In particular GPU and
+    /// Neural-Engine utilisation, power draw and thermal state need IOReport or
+    /// `powermetrics` (root); this crate uses neither, so it does not report them.
     pub fn export_performance_report(&self) -> String {
+        fn opt_u32(value: Option<u32>) -> String {
+            value
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "not reported by sysctl".to_string())
+        }
+        fn opt_str(value: &Option<String>) -> String {
+            value.clone().unwrap_or_else(|| "not available (metal feature off)".to_string())
+        }
+        fn opt_f32(value: Option<f32>, unit: &str) -> String {
+            value
+                .map(|v| format!("{v:.2} {unit}"))
+                .unwrap_or_else(|| "not available".to_string())
+        }
+
+        let caps = &self.device_capabilities;
+        let metrics = &self.performance_metrics;
         format!(
-            "MLX Framework Performance Report\n\
-             =================================\n\
-             Device: {:?}\n\
-             MLX Version: {}\n\
-             Metal Version: {}\n\n\
-             Hardware Capabilities:\n\
-             - Performance cores: {}\n\
-             - Efficiency cores: {}\n\
-             - GPU cores: {}\n\
-             - Neural Engine TOPS: {:.1}\n\
-             - Unified memory: {:.1} GB\n\
-             - Memory bandwidth: {:.1} GB/s\n\
-             - AMX support: {}\n\n\
-             Performance Metrics:\n\
-             - Operations per second: {:.0}\n\
-             - Memory bandwidth utilization: {:.1} GB/s\n\
-             - CPU utilization: {:.1}%\n\
-             - GPU utilization: {:.1}%\n\
-             - Neural Engine utilization: {:.1}%\n\
-             - Power consumption: {:.1} W\n\
-             - Compilation time: {:.1} ms\n\
-             - Memory usage: {:.2} GB\n\
-             - Thermal state: {:.1}%\n\n\
+            "MLX-style Engine Report ({backend} backend)\n\
+             =========================================\n\
+             NOTE: this engine implements an MLX-shaped API on Metal/CPU. It does NOT\n\
+             link Apple's MLX framework and never dispatches to the Neural Engine.\n\n\
+             Probed hardware (sysctlbyname):\n\
+             - CPU: {cpu_brand}\n\
+             - Performance cores: {perf}\n\
+             - Efficiency cores: {eff}\n\
+             - Logical cores: {logical}\n\
+             - Installed memory: {memory:.1} GiB\n\
+             - AMX version: {amx}\n\n\
+             Metal device:\n\
+             - Name: {metal_name}\n\
+             - Apple GPU family: {gpu_family}\n\
+             - Max buffer length: {max_buffer}\n\
+             - Unified memory: {unified}\n\n\
+             Measured execution:\n\
+             - Last run: {last_ms:.3} ms over {last_nodes} graph nodes\n\
+             - Nodes per second: {ops:.0}\n\
+             - Compilation time: {compile_ms:.3} ms\n\
+             - Process CPU: {cpu}\n\
+             - Process RSS: {rss}\n\
+             - Memory pool allocated: {pool:.4} GiB\n\n\
+             Not measured (no public API available to this process):\n\
+             - GPU utilization, Neural Engine utilization, power draw, thermal state\n\
+             - GPU core count, Neural Engine TOPS, memory bandwidth\n\n\
              Configuration:\n\
-             - Compilation strategy: {:?}\n\
-             - Default precision: {:?}\n\
-             - Memory pool strategy: {:?}\n\
-             - Workload distribution: {:?}\n\
-             - Graph optimization enabled: {}\n\
-             - Zero-copy operations: {}",
-            self.config.device,
-            self.device_capabilities.mlx_version,
-            self.device_capabilities.metal_version,
-            self.device_capabilities.performance_cores,
-            self.device_capabilities.efficiency_cores,
-            self.device_capabilities.gpu_cores,
-            self.device_capabilities.neural_engine_tops,
-            self.device_capabilities.unified_memory_gb,
-            self.device_capabilities.memory_bandwidth_gbps,
-            self.device_capabilities.amx_support,
-            self.performance_metrics.ops_per_second,
-            self.performance_metrics.memory_bandwidth_gbps,
-            self.performance_metrics.cpu_utilization,
-            self.performance_metrics.gpu_utilization,
-            self.performance_metrics.neural_engine_utilization,
-            self.performance_metrics.power_consumption_watts,
-            self.performance_metrics.compilation_time_ms,
-            self.performance_metrics.memory_usage_gb,
-            self.performance_metrics.thermal_state * 100.0,
-            self.config.compilation_strategy,
-            self.config.precision_config.default_precision,
-            self.config.memory_config.pool_strategy,
-            self.config.compute_units.distribution_strategy,
-            self.config.graph_optimization.operator_fusion,
-            self.config.memory_config.zero_copy_enabled
+             - Compilation strategy: {strategy:?}\n\
+             - Default precision: {precision:?}\n\
+             - Memory pool strategy: {pool_strategy:?}\n\
+             - Workload distribution: {distribution:?}\n\
+             - Operator fusion: {fusion}\n\
+             - Zero-copy operations: {zero_copy}",
+            backend = Self::backend_label(),
+            cpu_brand = caps.cpu_brand,
+            perf = opt_u32(caps.performance_cores),
+            eff = opt_u32(caps.efficiency_cores),
+            logical = caps.logical_cores,
+            memory = caps.unified_memory_gb,
+            amx = opt_u32(caps.amx_version),
+            metal_name = opt_str(&caps.metal_device_name),
+            gpu_family = caps
+                .apple_gpu_family
+                .map(|v| format!("Apple{v}"))
+                .unwrap_or_else(|| "not available".to_string()),
+            max_buffer = caps
+                .metal_max_buffer_bytes
+                .map(|v| format!("{} MiB", v / (1024 * 1024)))
+                .unwrap_or_else(|| "not available".to_string()),
+            unified = caps
+                .metal_unified_memory
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "not available".to_string()),
+            last_ms = metrics.last_execution_ms,
+            last_nodes = metrics.last_execution_nodes,
+            ops = metrics.ops_per_second,
+            compile_ms = metrics.compilation_time_ms,
+            cpu = opt_f32(metrics.cpu_utilization, "%"),
+            rss = opt_f32(metrics.process_memory_gb, "GiB"),
+            pool = metrics.pool_memory_gb,
+            strategy = self.config.compilation_strategy,
+            precision = self.config.precision_config.default_precision,
+            pool_strategy = self.config.memory_config.pool_strategy,
+            distribution = self.config.compute_units.distribution_strategy,
+            fusion = self.config.graph_optimization.operator_fusion,
+            zero_copy = self.config.memory_config.zero_copy_enabled,
         )
+    }
+}
+
+/// Read a strictly positive `usize` graph parameter, defaulting when absent.
+fn read_positive_usize(
+    parameters: &HashMap<String, f32>,
+    key: &str,
+    default: usize,
+) -> Result<usize> {
+    match parameters.get(key) {
+        None => Ok(default),
+        Some(value) => {
+            if !value.is_finite() || *value < 1.0 || value.fract() != 0.0 {
+                return Err(TrustformersError::runtime_error(format!(
+                    "graph parameter '{key}' must be a positive whole number, got {value}"
+                ))
+                .into());
+            }
+            Ok(*value as usize)
+        },
+    }
+}
+
+/// Read a non-negative `usize` graph parameter, defaulting when absent.
+fn read_non_negative_usize(
+    parameters: &HashMap<String, f32>,
+    key: &str,
+    default: usize,
+) -> Result<usize> {
+    match parameters.get(key) {
+        None => Ok(default),
+        Some(value) => {
+            if !value.is_finite() || *value < 0.0 || value.fract() != 0.0 {
+                return Err(TrustformersError::runtime_error(format!(
+                    "graph parameter '{key}' must be a non-negative whole number, got {value}"
+                ))
+                .into());
+            }
+            Ok(*value as usize)
+        },
     }
 }
 
@@ -1238,215 +1732,20 @@ impl UnifiedMemoryPool {
 }
 
 impl Default for MlxPerformanceMetrics {
+    /// "Nothing measured yet": counters at zero, unmeasurable quantities at `None`.
     fn default() -> Self {
         Self {
             ops_per_second: 0.0,
-            memory_bandwidth_gbps: 0.0,
-            cpu_utilization: 0.0,
-            gpu_utilization: 0.0,
-            neural_engine_utilization: 0.0,
-            power_consumption_watts: 0.0,
+            last_execution_ms: 0.0,
+            last_execution_nodes: 0,
+            cpu_utilization: None,
+            process_memory_gb: None,
+            pool_memory_gb: 0.0,
             compilation_time_ms: 0.0,
-            memory_usage_gb: 0.0,
-            thermal_state: 0.0,
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_mlx_engine_creation() {
-        let mut config = MlxConfig::default();
-
-        // Use conservative settings that should work on most systems
-        config.compute_units.cpu_config.performance_cores = 4;
-        config.compute_units.cpu_config.efficiency_cores = 2;
-        config.compute_units.gpu_config.gpu_cores = 8;
-        config.memory_config.max_memory_gb = 8.0;
-
-        let engine = MlxEngine::new(config);
-
-        // Print error for debugging on non-Apple Silicon platforms
-        if let Err(ref e) = engine {
-            println!("MLX Engine creation failed: {:?}", e);
-        }
-
-        // Only assert success on Apple Silicon
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        assert!(engine.is_ok());
-
-        // Allow failure on non-Apple Silicon platforms
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-        {
-            // Just ensure the function returns some result (Ok or Err)
-            let _ = engine;
-        }
-    }
-
-    #[test]
-    fn test_device_capabilities_detection() {
-        let capabilities = MlxEngine::detect_device_capabilities(&AppleSiliconDevice::M4);
-        assert!(capabilities.is_ok());
-
-        let caps = capabilities.expect("Operation failed");
-        assert_eq!(caps.performance_cores, 4);
-        assert_eq!(caps.efficiency_cores, 6);
-        assert!(caps.amx_support);
-    }
-
-    #[test]
-    fn test_model_compilation() {
-        let mut config = MlxConfig::default();
-
-        // Use conservative settings
-        config.compute_units.cpu_config.performance_cores = 4;
-        config.compute_units.cpu_config.efficiency_cores = 2;
-        config.compute_units.gpu_config.gpu_cores = 8;
-        config.memory_config.max_memory_gb = 8.0;
-
-        let engine_result = MlxEngine::new(config);
-
-        // Skip test if engine creation fails (non-Apple Silicon)
-        if engine_result.is_err() {
-            println!("Skipping model compilation test - MLX not available");
-            return;
-        }
-
-        let mut engine = engine_result.expect("Operation failed");
-
-        let model_graph = vec![
-            (MlxOperation::MatMul, vec![0, 1], HashMap::new()),
-            (MlxOperation::Activation, vec![1], {
-                let mut params = HashMap::new();
-                params.insert("type".to_string(), 0.0); // ReLU
-                params
-            }),
-        ];
-
-        let result =
-            engine.compile_model("test_model".to_string(), model_graph, OptimizationLevel::O2);
-
-        assert!(result.is_ok());
-        assert_eq!(result.expect("Operation failed"), "test_model");
-        assert!(engine.compiled_models.contains_key("test_model"));
-    }
-
-    #[test]
-    fn test_model_execution() {
-        let mut config = MlxConfig::default();
-
-        // Use conservative settings
-        config.compute_units.cpu_config.performance_cores = 4;
-        config.compute_units.cpu_config.efficiency_cores = 2;
-        config.compute_units.gpu_config.gpu_cores = 8;
-        config.memory_config.max_memory_gb = 8.0;
-
-        let engine_result = MlxEngine::new(config);
-
-        // Skip test if engine creation fails (non-Apple Silicon)
-        if engine_result.is_err() {
-            println!("Skipping model execution test - MLX not available");
-            return;
-        }
-
-        let mut engine = engine_result.expect("Operation failed");
-
-        // Compile a simple model
-        let model_graph = vec![(MlxOperation::MatMul, vec![0, 0], HashMap::new())];
-
-        engine
-            .compile_model("test_model".to_string(), model_graph, OptimizationLevel::O1)
-            .expect("Operation failed");
-
-        // Execute the model
-        let input1 = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("Operation failed");
-        let input2 = Tensor::from_vec(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("Operation failed");
-
-        let result = engine.execute_model("test_model", &[input1, input2]);
-        assert!(result.is_ok());
-
-        let outputs = result.expect("Operation failed");
-        assert!(!outputs.is_empty());
-    }
-
-    #[test]
-    fn test_config_validation() {
-        let mut config = MlxConfig::default();
-        config.memory_config.max_memory_gb = 1000.0; // Too much memory
-
-        let engine = MlxEngine::new(config);
-        assert!(engine.is_err());
-    }
-
-    #[test]
-    fn test_performance_metrics() {
-        let mut config = MlxConfig::default();
-
-        // Use conservative settings
-        config.compute_units.cpu_config.performance_cores = 4;
-        config.compute_units.cpu_config.efficiency_cores = 2;
-        config.compute_units.gpu_config.gpu_cores = 8;
-        config.memory_config.max_memory_gb = 8.0;
-
-        let engine_result = MlxEngine::new(config);
-
-        // Skip test if engine creation fails (non-Apple Silicon)
-        if engine_result.is_err() {
-            println!("Skipping performance metrics test - MLX not available");
-            return;
-        }
-
-        let engine = engine_result.expect("Operation failed");
-
-        let metrics = engine.get_performance_metrics();
-        assert_eq!(metrics.ops_per_second, 0.0);
-        assert_eq!(metrics.memory_usage_gb, 0.0);
-    }
-
-    #[test]
-    fn test_apple_silicon_variants() {
-        let m1_caps = MlxEngine::detect_device_capabilities(&AppleSiliconDevice::M1)
-            .expect("Operation failed");
-        let m4_caps = MlxEngine::detect_device_capabilities(&AppleSiliconDevice::M4)
-            .expect("Operation failed");
-        let a18_caps = MlxEngine::detect_device_capabilities(&AppleSiliconDevice::A18Pro)
-            .expect("Operation failed");
-
-        // M4 should have better capabilities than M1
-        assert!(m4_caps.neural_engine_tops > m1_caps.neural_engine_tops);
-        assert!(m4_caps.memory_bandwidth_gbps > m1_caps.memory_bandwidth_gbps);
-
-        // A18 Pro should not have AMX
-        assert!(!a18_caps.amx_support);
-        assert!(m4_caps.amx_support);
-    }
-
-    #[test]
-    fn test_performance_report() {
-        let mut config = MlxConfig::default();
-
-        // Use conservative settings
-        config.compute_units.cpu_config.performance_cores = 4;
-        config.compute_units.cpu_config.efficiency_cores = 2;
-        config.compute_units.gpu_config.gpu_cores = 8;
-        config.memory_config.max_memory_gb = 8.0;
-
-        let engine_result = MlxEngine::new(config);
-
-        // Skip test if engine creation fails (non-Apple Silicon)
-        if engine_result.is_err() {
-            println!("Skipping performance report test - MLX not available");
-            return;
-        }
-
-        let engine = engine_result.expect("Operation failed");
-
-        let report = engine.export_performance_report();
-        assert!(report.contains("MLX Framework Performance Report"));
-        assert!(report.contains("Hardware Capabilities"));
-        assert!(report.contains("Performance Metrics"));
-    }
-}
+#[path = "mlx_engine_tests.rs"]
+mod tests;

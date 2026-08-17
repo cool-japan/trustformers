@@ -41,6 +41,7 @@ chrono.workspace = true
 
 # System-level APIs
 libc.workspace = true
+sysinfo.workspace = true
 
 # CLI tools
 clap.workspace = true
@@ -79,6 +80,10 @@ approx.workspace = true
 
 [features]
 default = []
+# Route MLX-style MatMul / Attention / LayerNorm through the real Metal kernels in
+# trustformers-core. Off by default (macOS-only dependency stack); with the feature
+# off the same ops run on real CPU tensor kernels, never on fabricated output.
+metal = ["trustformers-core/metal"]
 coreml = []
 nnapi = []
 tflite-nnapi = ["nnapi"]

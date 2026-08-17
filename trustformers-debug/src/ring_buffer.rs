@@ -122,7 +122,10 @@ impl<T: Copy + Send + 'static> LockFreeRingBuffer<T> {
     /// assert_eq!(buf.capacity(), 16); // rounded up to next power of 2
     /// ```
     pub fn new(capacity: usize) -> Self {
-        assert!(capacity > 0, "LockFreeRingBuffer capacity must be at least 1");
+        assert!(
+            capacity > 0,
+            "LockFreeRingBuffer capacity must be at least 1"
+        );
         let actual = capacity.next_power_of_two();
         // Build the backing store as a boxed slice of uninitialised cells.
         let buffer: Box<[UnsafeCell<MaybeUninit<T>>]> =
@@ -156,7 +159,9 @@ impl<T: Copy + Send + 'static> LockFreeRingBuffer<T> {
         let tail = self.tail.load(Ordering::Acquire);
 
         if head.wrapping_sub(tail) >= self.capacity {
-            return Err(RingBufferError::Full { capacity: self.capacity });
+            return Err(RingBufferError::Full {
+                capacity: self.capacity,
+            });
         }
 
         let slot = head & self.mask;
@@ -331,7 +336,8 @@ impl<T: Copy + Into<f64>> StatisticsWindow<T> {
         }
         let mean = self.mean()?;
         let vals = self.as_f64_vec();
-        let variance = vals.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / (vals.len() - 1) as f64;
+        let variance =
+            vals.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / (vals.len() - 1) as f64;
         Some(variance.sqrt())
     }
 
@@ -446,7 +452,10 @@ impl<T: Copy> TimestampedRingBuffer<T> {
     ///
     /// If the buffer is full the oldest entry is evicted.
     pub fn push_now(&mut self, value: T, time_ns: u64) {
-        let entry = TimestampedValue { value, timestamp_ns: time_ns };
+        let entry = TimestampedValue {
+            value,
+            timestamp_ns: time_ns,
+        };
         if self.len < self.capacity {
             self.buf.push(entry);
             self.len += 1;

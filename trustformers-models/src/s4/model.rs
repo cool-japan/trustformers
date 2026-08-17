@@ -739,7 +739,7 @@ impl S4Model {
 
         // Verify all data was consumed
         if offset != buffer.len() {
-            eprintln!(
+            tracing::warn!(
                 "Warning: S4 weight file contains unused data ({} bytes remaining)",
                 buffer.len() - offset
             );

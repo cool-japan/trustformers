@@ -3,13 +3,12 @@
 #[cfg(test)]
 mod tests {
     use crate::training_dynamics::{
-        BatchSizeAnalysis, BatchSizePoint, BatchSizeRecommendation, ConvergenceAnalysis,
-        ConvergenceCriterion, ConvergenceCriterionType, ConvergenceStatus, EarlyStoppingRecommendation,
-        LRAction, LRRecommendation, LRScheduleType, LearningRateAnalysis, LearningRatePoint,
-        LossCurveAnalysis, LossStatistics, LossTrend, MovingAverages, PlateauAction, PlateauAnalysis,
-        PlateauCharacteristics, PlateauRecommendation, PlateauType, Priority, TrainingCategory,
-        TrainingDynamicsAnalyzer, TrainingDynamicsConfig, TrainingDynamicsReport, TrainingMetrics,
-        TrainingRecommendation, TrainingSummary, TrainingStateSummary,
+        BatchSizePoint, BatchSizeRecommendation, ConvergenceCriterion, ConvergenceCriterionType,
+        ConvergenceStatus, EarlyStoppingRecommendation, LRAction, LRScheduleType,
+        LearningRatePoint, LossStatistics, LossTrend, MovingAverages, PlateauAction,
+        PlateauCharacteristics, PlateauType, Priority, TrainingCategory, TrainingDynamicsAnalyzer,
+        TrainingDynamicsConfig, TrainingMetrics, TrainingRecommendation, TrainingStateSummary,
+        TrainingSummary,
     };
 
     // -------------------------------------------------------------------------
@@ -25,7 +24,8 @@ mod tests {
         }
 
         fn next(&mut self) -> u64 {
-            self.state = self.state
+            self.state = self
+                .state
                 .wrapping_mul(6364136223846793005u64)
                 .wrapping_add(1442695040888963407u64);
             self.state
@@ -190,19 +190,14 @@ mod tests {
         let config = TrainingDynamicsConfig::default();
         let mut analyzer = TrainingDynamicsAnalyzer::new(config);
 
-        match analyzer.analyze().await {
-            Ok(report) => {
-                // Empty history => unknown/empty analyses
-                if let Some(loss_analysis) = &report.loss_curve_analysis {
-                    match loss_analysis.trend {
-                        LossTrend::Unknown => {},
-                        _ => {},
-                    }
-                }
-                // Summary should show 0 epochs/steps
-                assert_eq!(report.training_summary.total_epochs, 0);
-            },
-            Err(_) => {},
+        if let Ok(report) = analyzer.analyze().await {
+            // Empty history => unknown/empty analyses; just confirm no
+            // panic reading the trend, whatever it resolves to.
+            if let Some(loss_analysis) = &report.loss_curve_analysis {
+                let _trend = &loss_analysis.trend;
+            }
+            // Summary should show 0 epochs/steps
+            assert_eq!(report.training_summary.total_epochs, 0);
         }
     }
 
@@ -217,20 +212,17 @@ mod tests {
             analyzer.record_metrics(make_metrics(i, i * 10, loss, 0.001));
         }
 
-        match analyzer.analyze().await {
-            Ok(report) => {
-                if let Some(loss_analysis) = &report.loss_curve_analysis {
-                    assert!(
-                        loss_analysis.best_loss < loss_analysis.current_loss + 0.5,
-                        "Best loss should be less than initial loss"
-                    );
-                    assert!(
-                        loss_analysis.loss_reduction_percentage > 0.0,
-                        "Loss should have reduced"
-                    );
-                }
-            },
-            Err(_) => {},
+        if let Ok(report) = analyzer.analyze().await {
+            if let Some(loss_analysis) = &report.loss_curve_analysis {
+                assert!(
+                    loss_analysis.best_loss < loss_analysis.current_loss + 0.5,
+                    "Best loss should be less than initial loss"
+                );
+                assert!(
+                    loss_analysis.loss_reduction_percentage > 0.0,
+                    "Loss should have reduced"
+                );
+            }
         }
     }
 
@@ -245,16 +237,13 @@ mod tests {
             analyzer.record_metrics(make_metrics(i, i * 5, loss.max(0.01), 0.001));
         }
 
-        match analyzer.analyze().await {
-            Ok(report) => {
-                if let Some(loss_analysis) = &report.loss_curve_analysis {
-                    let stats = &loss_analysis.loss_statistics;
-                    assert!(stats.min <= stats.mean);
-                    assert!(stats.mean <= stats.max);
-                    assert!(stats.std >= 0.0);
-                }
-            },
-            Err(_) => {},
+        if let Ok(report) = analyzer.analyze().await {
+            if let Some(loss_analysis) = &report.loss_curve_analysis {
+                let stats = &loss_analysis.loss_statistics;
+                assert!(stats.min <= stats.mean);
+                assert!(stats.mean <= stats.max);
+                assert!(stats.std >= 0.0);
+            }
         }
     }
 
@@ -267,17 +256,14 @@ mod tests {
             analyzer.record_metrics(make_metrics(i, i, 1.0 - i as f32 * 0.01, 0.001));
         }
 
-        match analyzer.analyze().await {
-            Ok(report) => {
-                if let Some(loss_analysis) = &report.loss_curve_analysis {
-                    let ma = &loss_analysis.moving_averages;
-                    // All MA values should be finite and positive
-                    assert!(ma.short_term.is_finite());
-                    assert!(ma.medium_term.is_finite());
-                    assert!(ma.long_term.is_finite());
-                }
-            },
-            Err(_) => {},
+        if let Ok(report) = analyzer.analyze().await {
+            if let Some(loss_analysis) = &report.loss_curve_analysis {
+                let ma = &loss_analysis.moving_averages;
+                // All MA values should be finite and positive
+                assert!(ma.short_term.is_finite());
+                assert!(ma.medium_term.is_finite());
+                assert!(ma.long_term.is_finite());
+            }
         }
     }
 
@@ -294,15 +280,11 @@ mod tests {
             analyzer.record_metrics(make_metrics(i, i * 10, 0.1, 0.0001));
         }
 
-        match analyzer.analyze().await {
-            Ok(report) => {
-                if let Some(conv) = &report.convergence_analysis {
-                    // Convergence probability should be 0-1
-                    assert!(conv.convergence_probability >= 0.0);
-                    assert!(conv.convergence_probability <= 1.0);
-                }
-            },
-            Err(_) => {},
+        if let Ok(report) = analyzer.analyze().await {
+            if let Some(conv) = &report.convergence_analysis {
+                // Convergence probability should be 0-1
+                assert!((0.0..=1.0).contains(&conv.convergence_probability));
+            }
         }
     }
 
@@ -316,14 +298,11 @@ mod tests {
             analyzer.record_metrics(make_metrics(i, i * 5, 0.5, 0.0001));
         }
 
-        match analyzer.analyze().await {
-            Ok(report) => {
-                if let Some(plateau) = &report.plateau_analysis {
-                    // Plateau should be detected for constant loss
-                    assert!(plateau.plateau_detected);
-                }
-            },
-            Err(_) => {},
+        if let Ok(report) = analyzer.analyze().await {
+            if let Some(plateau) = &report.plateau_analysis {
+                // Plateau should be detected for constant loss
+                assert!(plateau.plateau_detected);
+            }
         }
     }
 
@@ -336,12 +315,9 @@ mod tests {
             analyzer.record_metrics(make_metrics(i, i * 10, 1.5 - i as f32 * 0.05, 0.001));
         }
 
-        match analyzer.generate_report().await {
-            Ok(report) => {
-                // Report should have training summary
-                assert!(report.training_summary.total_epochs > 0);
-            },
-            Err(_) => {},
+        if let Ok(report) = analyzer.generate_report().await {
+            // Report should have training summary
+            assert!(report.training_summary.total_epochs > 0);
         }
     }
 
@@ -727,15 +703,12 @@ mod tests {
             analyzer.record_metrics(make_metrics(i, i, 1.0, 0.001));
         }
 
-        match analyzer.analyze().await {
-            Ok(report) => {
-                assert!(report.loss_curve_analysis.is_none());
-                assert!(report.learning_rate_analysis.is_none());
-                assert!(report.batch_size_analysis.is_none());
-                assert!(report.convergence_analysis.is_none());
-                assert!(report.plateau_analysis.is_none());
-            },
-            Err(_) => {},
+        if let Ok(report) = analyzer.analyze().await {
+            assert!(report.loss_curve_analysis.is_none());
+            assert!(report.learning_rate_analysis.is_none());
+            assert!(report.batch_size_analysis.is_none());
+            assert!(report.convergence_analysis.is_none());
+            assert!(report.plateau_analysis.is_none());
         }
     }
 

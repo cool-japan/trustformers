@@ -1,6 +1,10 @@
 use crate::whisper::{config::WhisperConfig, model::WhisperForConditionalGeneration};
 use std::fmt;
-use trustformers_core::{errors::Result, tensor::Tensor, traits::Layer};
+use trustformers_core::{
+    errors::Result,
+    tensor::Tensor,
+    traits::{Layer, Tokenizer},
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // WhisperError
@@ -122,24 +126,26 @@ impl SpeechRecognitionTask {
 
     // ── Greedy transcription ─────────────────────────────────────────────────
 
-    /// Greedy autoregressive transcription.
+    /// Greedy autoregressive transcription, returning the **token ids**.
     ///
     /// Runs the encoder once, then decodes token-by-token selecting the argmax
     /// at each step.  Stops when the end-of-text token (vocab_size − 1 as a
     /// stand-in) is produced or `max_new_tokens` is reached.
     ///
-    /// Returns a `String` with space-joined numeric token IDs (placeholder for
-    /// a proper tokenizer integration).
+    /// Text is produced by [`SpeechRecognitionTask::transcribe_greedy`],
+    /// which decodes these ids through a real tokenizer. Splitting the two makes
+    /// it impossible to accidentally hand a caller a string of numbers and call
+    /// it a transcription.
     ///
     /// # Errors
     ///
     /// Returns `WhisperError::EmptyInput` if `mel` has zero time frames.
-    pub fn transcribe_greedy(
+    pub fn transcribe_greedy_tokens(
         &self,
         mel: &Tensor,
         start_token: u32,
         max_new_tokens: usize,
-    ) -> std::result::Result<String, WhisperError> {
+    ) -> std::result::Result<Vec<u32>, WhisperError> {
         let shape = mel.shape().to_vec();
         if shape.len() < 3 || shape[2] == 0 {
             return Err(WhisperError::EmptyInput);
@@ -179,36 +185,61 @@ impl SpeechRecognitionTask {
             decoder_ids.push(next_token);
         }
 
-        // Convert token IDs to a placeholder string representation.
-        let text = if generated.is_empty() {
-            String::new()
-        } else {
-            generated.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(" ")
-        };
-        Ok(text)
+        Ok(generated)
+    }
+
+    /// Greedy transcription as **text**, decoded through a real tokenizer.
+    ///
+    /// # Errors
+    ///
+    /// Propagates decoding errors from [`Self::transcribe_greedy_tokens`], and
+    /// fails when the tokenizer cannot decode the produced ids.
+    ///
+    /// # What this replaces
+    ///
+    /// A previous revision ended with
+    /// `generated.iter().map(|t| t.to_string()).join(" ")` and returned that as
+    /// the transcription — a string such as `"418 92 1130 7"`. It is not text in
+    /// any language, it never touched a tokenizer, and a caller writing it to a
+    /// subtitle file would have produced a file full of integers. Text now
+    /// requires the tokenizer that can actually produce it.
+    pub fn transcribe_greedy<T: Tokenizer + ?Sized>(
+        &self,
+        mel: &Tensor,
+        start_token: u32,
+        max_new_tokens: usize,
+        tokenizer: &T,
+    ) -> std::result::Result<String, WhisperError> {
+        let tokens = self.transcribe_greedy_tokens(mel, start_token, max_new_tokens)?;
+        tokenizer
+            .decode(&tokens)
+            .map_err(|e| WhisperError::DecodingFailed(e.to_string()))
     }
 
     // ── Beam search transcription ────────────────────────────────────────────
 
-    /// Beam-search transcription.
+    /// Beam-search transcription, returning the **token ids** of each hypothesis.
     ///
-    /// Maintains `beam_size` partial hypotheses in parallel and expands each by
-    /// the top-1 token (full beam-width scoring is a heavier implementation; this
-    /// reference version demonstrates the hypothesis-management plumbing).
+    /// Every live beam is expanded by its top-`beam_size` continuations, the
+    /// pooled candidates are ranked by accumulated **log-probability** and the
+    /// best `beam_size` survive. Scores come from `log_softmax` over the
+    /// vocabulary, not from raw logits: raw logits are not comparable across
+    /// steps, so summing them ranks longer hypotheses by an arbitrary offset.
+    /// Hypotheses ending in the EOS token are retired to the completed set.
     ///
-    /// Returns up to `beam_size` distinct hypotheses sorted by accumulated
-    /// log-probability (best first).
+    /// Returns up to `beam_size` hypotheses sorted by accumulated
+    /// log-probability (best first), each paired with its score.
     ///
     /// # Errors
     ///
     /// Returns `WhisperError::InvalidBeamSize` if `beam_size == 0`.
-    pub fn transcribe_beam(
+    pub fn transcribe_beam_tokens(
         &self,
         mel: &Tensor,
         start_token: u32,
         beam_size: usize,
         max_new_tokens: usize,
-    ) -> std::result::Result<Vec<String>, WhisperError> {
+    ) -> std::result::Result<Vec<(Vec<u32>, f32)>, WhisperError> {
         if beam_size == 0 {
             return Err(WhisperError::InvalidBeamSize);
         }
@@ -251,9 +282,16 @@ impl SpeechRecognitionTask {
                 let top_tokens = extract_top_k_at_position(&logits, seq_pos, v, beam_size)
                     .map_err(|e| WhisperError::DecodingFailed(e.to_string()))?;
 
+                // Normalise the step's logits into log-probabilities. Summing
+                // raw logits (as a previous revision did) is not a valid beam
+                // score: logits carry an arbitrary per-step additive constant,
+                // so the ranking depended on that constant rather than on the
+                // model's actual preferences.
+                let log_norm = log_sum_exp_at_position(&logits, seq_pos, v)
+                    .map_err(|e| WhisperError::DecodingFailed(e.to_string()))?;
+
                 for (token, logit) in top_tokens {
-                    // Convert raw logit to log-prob (simplified: treat logit as log-prob).
-                    let new_log_prob = log_prob + logit;
+                    let new_log_prob = log_prob + (logit - log_norm);
                     let mut new_seq = seq.clone();
                     new_seq.push(token);
 
@@ -282,20 +320,45 @@ impl SpeechRecognitionTask {
             ));
         }
 
-        let results: Vec<String> = completed
+        // Drop the start token from every hypothesis: it is a prompt marker,
+        // not part of the transcription.
+        let results: Vec<(Vec<u32>, f32)> = completed
             .into_iter()
-            .map(|(seq, _)| {
-                // Skip the start token; convert the rest to strings.
-                let tokens = &seq[1..];
-                if tokens.is_empty() {
-                    String::new()
-                } else {
-                    tokens.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(" ")
-                }
-            })
+            .map(|(seq, score)| (seq.into_iter().skip(1).collect(), score))
             .collect();
 
         Ok(results)
+    }
+
+    /// Beam-search transcription as **text**, decoded through a real tokenizer.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`Self::transcribe_beam_tokens`], and fails when
+    /// the tokenizer cannot decode a hypothesis.
+    ///
+    /// # What this replaces
+    ///
+    /// The previous version returned each hypothesis as space-joined numeric
+    /// token ids, so "the best transcription" was a string of integers.
+    pub fn transcribe_beam<T: Tokenizer + ?Sized>(
+        &self,
+        mel: &Tensor,
+        start_token: u32,
+        beam_size: usize,
+        max_new_tokens: usize,
+        tokenizer: &T,
+    ) -> std::result::Result<Vec<String>, WhisperError> {
+        let hypotheses =
+            self.transcribe_beam_tokens(mel, start_token, beam_size, max_new_tokens)?;
+        hypotheses
+            .into_iter()
+            .map(|(tokens, _)| {
+                tokenizer
+                    .decode(&tokens)
+                    .map_err(|e| WhisperError::DecodingFailed(e.to_string()))
+            })
+            .collect()
     }
 
     // ── Language detection ───────────────────────────────────────────────────
@@ -366,18 +429,24 @@ impl SpeechRecognitionTask {
     /// `WhisperTimestamp` entry.
     ///
     /// Real timestamp-token support (tokens 50 364+ in the official Whisper vocab)
-    /// would require a proper tokenizer; this approximation demonstrates the data
-    /// structure and control flow.
+    /// would require the official Whisper vocabulary; this chunking approximates
+    /// segment boundaries from the mel time axis instead.
+    ///
+    /// Each chunk's text is decoded through `tokenizer`, so the returned
+    /// [`WhisperTimestamp::text`] is real text rather than the space-joined
+    /// numeric token ids a previous revision produced.
     ///
     /// # Errors
     ///
-    /// Returns `WhisperError::EmptyInput` for zero-length audio.
-    pub fn transcribe_with_timestamps(
+    /// Returns `WhisperError::EmptyInput` for zero-length audio, and propagates
+    /// decoding failures from the tokenizer.
+    pub fn transcribe_with_timestamps<T: Tokenizer + ?Sized>(
         &self,
         mel: &Tensor,
         start_token: u32,
         chunk_frames: usize,
         max_new_tokens_per_chunk: usize,
+        tokenizer: &T,
     ) -> std::result::Result<Vec<WhisperTimestamp>, WhisperError> {
         let shape = mel.shape().to_vec();
         if shape.len() < 3 || shape[2] == 0 {
@@ -402,7 +471,12 @@ impl SpeechRecognitionTask {
             let chunk_mel = slice_mel_time(mel, start_frame, end_frame)
                 .map_err(|e| WhisperError::ForwardError(e.to_string()))?;
 
-            let text = self.transcribe_greedy(&chunk_mel, start_token, max_new_tokens_per_chunk)?;
+            let text = self.transcribe_greedy(
+                &chunk_mel,
+                start_token,
+                max_new_tokens_per_chunk,
+                tokenizer,
+            )?;
 
             timestamps.push(WhisperTimestamp::new(start_ms, end_ms, text));
         }
@@ -621,6 +695,33 @@ fn extract_top_k_at_position(
     }
 }
 
+/// Log-normalising constant `log Σ_v exp(logit_v)` at decoder position `pos`.
+///
+/// Subtracting this from a logit yields a genuine log-probability, which is what
+/// beam scores have to be summed in. Computed with the max-shift trick so that a
+/// large logit cannot overflow `exp`.
+///
+/// # Errors
+///
+/// Fails when the tensor is not `F32` or the position is out of range.
+fn log_sum_exp_at_position(logits: &Tensor, pos: usize, vocab_size: usize) -> Result<f32> {
+    use trustformers_core::errors::TrustformersError;
+    let slice = extract_slice_at_position(logits, pos, vocab_size)?;
+    if slice.is_empty() {
+        return Err(TrustformersError::shape_error(
+            "cannot normalise an empty logit slice".to_string(),
+        ));
+    }
+    let max = slice.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    if !max.is_finite() {
+        return Err(TrustformersError::shape_error(
+            "logit slice holds no finite value".to_string(),
+        ));
+    }
+    let sum: f32 = slice.iter().map(|v| (v - max).exp()).sum();
+    Ok(max + sum.ln())
+}
+
 /// Extract a flat f32 slice at position `pos` from a `[batch, seq, vocab]` tensor (batch=1).
 fn extract_slice_at_position(logits: &Tensor, pos: usize, vocab_size: usize) -> Result<Vec<f32>> {
     use trustformers_core::errors::TrustformersError;
@@ -694,6 +795,52 @@ mod tests {
     use super::*;
     use crate::whisper::config::WhisperConfig;
     use trustformers_core::tensor::Tensor;
+    use trustformers_core::traits::TokenizedInput;
+
+    /// A decode-only tokenizer that renders each id as `t<id>`.
+    ///
+    /// Deliberately *not* the identity on numbers: a test that asserted the
+    /// output equals the space-joined ids would still pass against the old
+    /// numeric-join implementation.
+    struct NumericTokenizer;
+
+    impl Tokenizer for NumericTokenizer {
+        fn encode(&self, _text: &str) -> Result<TokenizedInput> {
+            Err(
+                trustformers_core::errors::TrustformersError::not_implemented(
+                    "NumericTokenizer is decode-only".to_string(),
+                ),
+            )
+        }
+
+        fn encode_pair(&self, _a: &str, _b: &str) -> Result<TokenizedInput> {
+            Err(
+                trustformers_core::errors::TrustformersError::not_implemented(
+                    "NumericTokenizer is decode-only".to_string(),
+                ),
+            )
+        }
+
+        fn decode(&self, ids: &[u32]) -> Result<String> {
+            Ok(ids.iter().map(|id| format!("t{id}")).collect::<Vec<_>>().join(" "))
+        }
+
+        fn vocab_size(&self) -> usize {
+            64
+        }
+
+        fn get_vocab(&self) -> std::collections::HashMap<String, u32> {
+            (0..64u32).map(|id| (format!("t{id}"), id)).collect()
+        }
+
+        fn token_to_id(&self, token: &str) -> Option<u32> {
+            token.strip_prefix('t').and_then(|rest| rest.parse::<u32>().ok())
+        }
+
+        fn id_to_token(&self, id: u32) -> Option<String> {
+            (id < 64).then(|| format!("t{id}"))
+        }
+    }
 
     /// Minimal config for fast test model construction.
     fn tiny_config() -> WhisperConfig {
@@ -787,7 +934,7 @@ mod tests {
         let task = SpeechRecognitionTask::new(cfg.clone()).expect("task creation should succeed");
         let empty_mel = Tensor::from_vec(vec![0.0_f32; 0], &[1, cfg.num_mel_bins, 0])
             .expect("tensor creation should succeed");
-        let result = task.transcribe_greedy(&empty_mel, 0, 10);
+        let result = task.transcribe_greedy_tokens(&empty_mel, 0, 10);
         assert!(
             matches!(result, Err(WhisperError::EmptyInput)),
             "empty mel should return EmptyInput error"
@@ -799,7 +946,7 @@ mod tests {
         let cfg = tiny_config();
         let task = SpeechRecognitionTask::new(cfg.clone()).expect("task creation should succeed");
         let mel = make_mel(&cfg, 4);
-        match task.transcribe_greedy(&mel, 0, 5) {
+        match task.transcribe_greedy_tokens(&mel, 0, 5) {
             Ok(_) => {
                 // Greedy transcription succeeded
             },
@@ -816,7 +963,7 @@ mod tests {
         let cfg = tiny_config();
         let task = SpeechRecognitionTask::new(cfg.clone()).expect("task creation should succeed");
         let mel = make_mel(&cfg, 4);
-        let result = task.transcribe_beam(&mel, 0, 0, 5);
+        let result = task.transcribe_beam_tokens(&mel, 0, 0, 5);
         assert!(
             matches!(result, Err(WhisperError::InvalidBeamSize)),
             "beam_size=0 should return InvalidBeamSize error"
@@ -828,7 +975,7 @@ mod tests {
         let cfg = tiny_config();
         let task = SpeechRecognitionTask::new(cfg.clone()).expect("task creation should succeed");
         let mel = make_mel(&cfg, 4);
-        match task.transcribe_beam(&mel, 0, 2, 5) {
+        match task.transcribe_beam_tokens(&mel, 0, 2, 5) {
             Ok(hypotheses) => {
                 assert!(
                     !hypotheses.is_empty(),
@@ -847,7 +994,7 @@ mod tests {
         let task = SpeechRecognitionTask::new(cfg.clone()).expect("task creation should succeed");
         let mel = make_mel(&cfg, 4);
         let beam_size = 3;
-        match task.transcribe_beam(&mel, 0, beam_size, 5) {
+        match task.transcribe_beam_tokens(&mel, 0, beam_size, 5) {
             Ok(hypotheses) => {
                 assert!(
                     hypotheses.len() <= beam_size,
@@ -922,7 +1069,7 @@ mod tests {
         let task = SpeechRecognitionTask::new(cfg.clone()).expect("task creation should succeed");
         let empty = Tensor::from_vec(vec![], &[1, cfg.num_mel_bins, 0])
             .expect("tensor creation should succeed");
-        let result = task.transcribe_with_timestamps(&empty, 0, 30, 5);
+        let result = task.transcribe_with_timestamps(&empty, 0, 30, 5, &NumericTokenizer);
         assert!(
             matches!(result, Err(WhisperError::EmptyInput)),
             "empty mel should return EmptyInput"
@@ -934,7 +1081,7 @@ mod tests {
         let cfg = tiny_config();
         let task = SpeechRecognitionTask::new(cfg.clone()).expect("task creation should succeed");
         let mel = make_mel(&cfg, 4);
-        match task.transcribe_with_timestamps(&mel, 0, 2, 5) {
+        match task.transcribe_with_timestamps(&mel, 0, 2, 5, &NumericTokenizer) {
             Ok(timestamps) => {
                 assert_eq!(timestamps.len(), 2, "4 frames / chunk_size 2 -> 2 segments");
             },

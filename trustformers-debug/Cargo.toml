@@ -11,6 +11,8 @@ description = "Advanced debugging tools for TrustformeRS models"
 keywords = ["debugging", "tensor", "gradient", "ml", "diagnostics"]
 categories = ["development-tools", "science"]
 readme = "README.md"
+# Leftover editor/agent artifacts must never ship in the published .crate.
+exclude = ["**/*.policy_fix"]
 
 [lints]
 workspace = true

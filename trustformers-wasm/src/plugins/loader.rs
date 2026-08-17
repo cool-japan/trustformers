@@ -255,8 +255,15 @@ format!("{hash:08x}")
             return Err(LoadingError::SecurityCheckFailed("Empty plugin code".to_string()));
         }
 
-        // Check for basic WASM magic number
-        if code.len() >= 4 && &code[0..4] == b"\\0asm" {
+        // Check for the real WASM magic number: bytes 0x00 'a' 's' 'm'.
+        // This used to compare against `b"\\0asm"` — a doubled backslash,
+        // which Rust parses as the 5-byte sequence `\`, `0`, `a`, `s`, `m`
+        // (an escaped backslash followed by the literal characters '0asm'),
+        // not the 4-byte NUL-prefixed magic number. Comparing a 4-byte
+        // slice to a 5-byte array is always `false` regardless of content,
+        // so every WASM module — valid or not — failed this check whenever
+        // `enable_security_checks` was on (the default).
+        if code.len() >= 4 && code[0..4] == *b"\0asm" {
             // Looks like a WASM module
             Ok(())
         } else {
@@ -287,13 +294,21 @@ pub trait LoadingStrategy: fmt::Debug + Send + Sync {
 /// URL-based loading strategy
 #[derive(Debug)]
 pub struct UrlLoadingStrategy {
-    client: web_sys::Window,
+    /// `None` when constructed outside a browser main-thread context (a Web
+    /// Worker or Service Worker global scope, where `web_sys::window()`
+    /// returns `None`). This used to be a bare `web_sys::Window` populated
+    /// via `web_sys::window().expect("should have a window in WASM")`,
+    /// which unconditionally panicked in exactly that situation; a missing
+    /// window is now a normal, non-panicking `Err` returned lazily from
+    /// [`LoadingStrategy::load_plugin_code`] only if a URL load is actually
+    /// attempted, rather than aborting the whole loader at construction.
+    client: Option<web_sys::Window>,
 }
 
 impl UrlLoadingStrategy {
     pub fn new() -> Self {
         Self {
-            client: web_sys::window().expect("should have a window in WASM"),
+            client: web_sys::window(),
         }
     }
 }
@@ -304,11 +319,18 @@ impl LoadingStrategy for UrlLoadingStrategy {
         let url = metadata.source_url.as_ref()
             .ok_or_else(|| LoadingError::MissingSource)?;
 
+        let client = self.client.as_ref().ok_or_else(|| {
+            LoadingError::BrowserApiUnavailable(
+                "no `window` object available in this context (running in a Worker/ServiceWorker?)"
+                    .to_string(),
+            )
+        })?;
+
         // Use fetch API to download the plugin
         let request = web_sys::Request::new_with_str(url)
             .map_err(|_| LoadingError::NetworkError("Failed to create request".to_string()))?;
 
-        let response_promise = self.client.fetch_with_request(&request);
+        let response_promise = client.fetch_with_request(&request);
         let response = JsFuture::from(response_promise).await
             .map_err(|_| LoadingError::NetworkError("Fetch failed".to_string()))?;
 
@@ -336,7 +358,7 @@ impl LoadingStrategy for UrlLoadingStrategy {
     }
 
     async fn is_source_available(&self, metadata: &PluginMetadata) -> bool {
-        metadata.source_url.is_some()
+        self.client.is_some() && metadata.source_url.is_some()
     }
 
     fn get_priority(&self) -> u8 {

@@ -613,7 +613,7 @@ impl LinformerModel {
         // Load embeddings
         if let Ok(embeddings_weight) = loader.load_tensor("embeddings.word_embeddings.weight") {
             // Assign to word embeddings
-            println!(
+            tracing::info!(
                 "Loaded embeddings.word_embeddings.weight: {:?}",
                 embeddings_weight.shape()
             );
@@ -621,7 +621,7 @@ impl LinformerModel {
 
         if let Ok(position_embeddings) = loader.load_tensor("embeddings.position_embeddings.weight")
         {
-            println!(
+            tracing::info!(
                 "Loaded embeddings.position_embeddings.weight: {:?}",
                 position_embeddings.shape()
             );
@@ -630,7 +630,7 @@ impl LinformerModel {
         if let Ok(token_type_embeddings) =
             loader.load_tensor("embeddings.token_type_embeddings.weight")
         {
-            println!(
+            tracing::info!(
                 "Loaded embeddings.token_type_embeddings.weight: {:?}",
                 token_type_embeddings.shape()
             );
@@ -638,14 +638,14 @@ impl LinformerModel {
 
         // Load layer normalization
         if let Ok(layernorm_weight) = loader.load_tensor("embeddings.LayerNorm.weight") {
-            println!(
+            tracing::info!(
                 "Loaded embeddings.LayerNorm.weight: {:?}",
                 layernorm_weight.shape()
             );
         }
 
         if let Ok(layernorm_bias) = loader.load_tensor("embeddings.LayerNorm.bias") {
-            println!(
+            tracing::info!(
                 "Loaded embeddings.LayerNorm.bias: {:?}",
                 layernorm_bias.shape()
             );
@@ -663,10 +663,10 @@ impl LinformerModel {
                 let bias_name = format!("{}.{}.bias", attention_prefix, weight_type);
 
                 if let Ok(weight) = loader.load_tensor(&weight_name) {
-                    println!("Loaded {}: {:?}", weight_name, weight.shape());
+                    tracing::debug!("Loaded {}: {:?}", weight_name, weight.shape());
                 }
                 if let Ok(bias) = loader.load_tensor(&bias_name) {
-                    println!("Loaded {}: {:?}", bias_name, bias.shape());
+                    tracing::debug!("Loaded {}: {:?}", bias_name, bias.shape());
                 }
             }
 
@@ -676,7 +676,7 @@ impl LinformerModel {
                 for proj_type in &["key_projection", "value_projection"] {
                     let weight_name = format!("{}.{}.weight", proj_prefix, proj_type);
                     if let Ok(weight) = loader.load_tensor(&weight_name) {
-                        println!("Loaded {}: {:?}", weight_name, weight.shape());
+                        tracing::debug!("Loaded {}: {:?}", weight_name, weight.shape());
                     }
                 }
             }
@@ -685,10 +685,10 @@ impl LinformerModel {
             let output_weight = format!("{}.attention.output.dense.weight", layer_prefix);
             let output_bias = format!("{}.attention.output.dense.bias", layer_prefix);
             if let Ok(weight) = loader.load_tensor(&output_weight) {
-                println!("Loaded {}: {:?}", output_weight, weight.shape());
+                tracing::debug!("Loaded {}: {:?}", output_weight, weight.shape());
             }
             if let Ok(bias) = loader.load_tensor(&output_bias) {
-                println!("Loaded {}: {:?}", output_bias, bias.shape());
+                tracing::debug!("Loaded {}: {:?}", output_bias, bias.shape());
             }
 
             // Attention LayerNorm
@@ -697,47 +697,47 @@ impl LinformerModel {
             let attention_layernorm_bias =
                 format!("{}.attention.output.LayerNorm.bias", layer_prefix);
             if let Ok(weight) = loader.load_tensor(&attention_layernorm_weight) {
-                println!(
+                tracing::info!(
                     "Loaded {}: {:?}",
                     attention_layernorm_weight,
                     weight.shape()
                 );
             }
             if let Ok(bias) = loader.load_tensor(&attention_layernorm_bias) {
-                println!("Loaded {}: {:?}", attention_layernorm_bias, bias.shape());
+                tracing::debug!("Loaded {}: {:?}", attention_layernorm_bias, bias.shape());
             }
 
             // Feed forward weights
             let intermediate_weight = format!("{}.intermediate.dense.weight", layer_prefix);
             let intermediate_bias = format!("{}.intermediate.dense.bias", layer_prefix);
             if let Ok(weight) = loader.load_tensor(&intermediate_weight) {
-                println!("Loaded {}: {:?}", intermediate_weight, weight.shape());
+                tracing::debug!("Loaded {}: {:?}", intermediate_weight, weight.shape());
             }
             if let Ok(bias) = loader.load_tensor(&intermediate_bias) {
-                println!("Loaded {}: {:?}", intermediate_bias, bias.shape());
+                tracing::debug!("Loaded {}: {:?}", intermediate_bias, bias.shape());
             }
 
             let output_dense_weight = format!("{}.output.dense.weight", layer_prefix);
             let output_dense_bias = format!("{}.output.dense.bias", layer_prefix);
             if let Ok(weight) = loader.load_tensor(&output_dense_weight) {
-                println!("Loaded {}: {:?}", output_dense_weight, weight.shape());
+                tracing::debug!("Loaded {}: {:?}", output_dense_weight, weight.shape());
             }
             if let Ok(bias) = loader.load_tensor(&output_dense_bias) {
-                println!("Loaded {}: {:?}", output_dense_bias, bias.shape());
+                tracing::debug!("Loaded {}: {:?}", output_dense_bias, bias.shape());
             }
 
             // Output LayerNorm
             let output_layernorm_weight = format!("{}.output.LayerNorm.weight", layer_prefix);
             let output_layernorm_bias = format!("{}.output.LayerNorm.bias", layer_prefix);
             if let Ok(weight) = loader.load_tensor(&output_layernorm_weight) {
-                println!("Loaded {}: {:?}", output_layernorm_weight, weight.shape());
+                tracing::debug!("Loaded {}: {:?}", output_layernorm_weight, weight.shape());
             }
             if let Ok(bias) = loader.load_tensor(&output_layernorm_bias) {
-                println!("Loaded {}: {:?}", output_layernorm_bias, bias.shape());
+                tracing::debug!("Loaded {}: {:?}", output_layernorm_bias, bias.shape());
             }
         }
 
-        println!("Successfully loaded Linformer model weights from path");
+        tracing::info!("Successfully loaded Linformer model weights from path");
         Ok(())
     }
 
@@ -763,9 +763,10 @@ impl LinformerModel {
     ) -> Result<()> {
         use std::process::Command;
 
-        println!(
+        tracing::info!(
             "Downloading Linformer model {} from HuggingFace Hub to {:?}",
-            model_name, model_path
+            model_name,
+            model_path
         );
 
         // Create the model directory
@@ -836,9 +837,9 @@ impl LinformerModel {
 
             if success {
                 successful_downloads += 1;
-                println!("Downloaded {}", file);
+                tracing::info!("Downloaded {}", file);
             } else {
-                eprintln!(
+                tracing::warn!(
                     "Failed to download {} (this may be normal if the file doesn't exist)",
                     file
                 );
@@ -851,7 +852,7 @@ impl LinformerModel {
             ));
         }
 
-        println!(
+        tracing::info!(
             "Successfully downloaded {}/{} files for Linformer model",
             successful_downloads,
             essential_files.len()

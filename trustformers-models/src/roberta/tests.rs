@@ -20,7 +20,8 @@ mod tests {
         }
 
         fn next(&mut self) -> u64 {
-            self.state = self.state
+            self.state = self
+                .state
                 .wrapping_mul(6_364_136_223_846_793_005_u64)
                 .wrapping_add(1_442_695_040_888_963_407_u64);
             self.state
@@ -293,7 +294,133 @@ mod tests {
         let mut rng = Lcg::new(99999);
         for _ in 0..100 {
             let v = rng.next_f32();
-            assert!(v >= 0.0 && v < 1.0);
+            assert!((0.0..1.0).contains(&v));
         }
+    }
+
+    // ── Real checkpoint loading (regression for the silent `Ok(())`) ────────
+
+    use crate::bert::layers::BertLayerNames;
+    use crate::weight_loading::test_support::{build_safetensors, BertFixtureSpec, F32Tensor};
+    use trustformers_core::traits::Model;
+
+    fn loading_config() -> RobertaConfig {
+        RobertaConfig {
+            vocab_size: 16,
+            hidden_size: 8,
+            num_hidden_layers: 2,
+            num_attention_heads: 2,
+            intermediate_size: 16,
+            max_position_embeddings: 8,
+            type_vocab_size: 1,
+            ..RobertaConfig::default()
+        }
+    }
+
+    fn fixture(config: &RobertaConfig, prefix: &str) -> BertFixtureSpec {
+        BertFixtureSpec {
+            prefix: prefix.to_string(),
+            vocab_size: config.vocab_size,
+            hidden_size: config.hidden_size,
+            num_layers: config.num_hidden_layers,
+            intermediate_size: config.intermediate_size,
+            max_position_embeddings: config.max_position_embeddings,
+            type_vocab_size: Some(config.type_vocab_size),
+            include_pooler: true,
+            names: BertLayerNames::bert(),
+        }
+    }
+
+    /// Regression: `load_pretrained` was `Ok(())`, so the reader was never read
+    /// and the model kept its random initialisation while reporting success.
+    #[test]
+    fn load_pretrained_binds_the_checkpoint_instead_of_returning_ok() {
+        let config = loading_config();
+        let tensors = fixture(&config, "roberta.").tensors();
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = RobertaModel::new(config).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a matching checkpoint must load");
+        assert!(
+            report.is_complete(),
+            "every parameter must be bound, missing: {:?}",
+            report.missing
+        );
+        assert!(
+            !report.loaded.is_empty(),
+            "a real load must report the tensors it consumed"
+        );
+        assert!(
+            report.loaded.contains(&"roberta.embeddings.word_embeddings.weight".to_string()),
+            "the embedding matrix must be among the loaded tensors: {:?}",
+            report.loaded
+        );
+    }
+
+    #[test]
+    fn load_pretrained_reports_a_missing_parameter_instead_of_inventing_it() {
+        let config = loading_config();
+        let mut tensors = fixture(&config, "roberta.").tensors();
+        tensors.retain(|t| !t.name.contains("encoder.layer.1.attention.self.key"));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = RobertaModel::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("an incomplete checkpoint must not load silently");
+        assert!(
+            err.to_string().contains("encoder.layer.1.attention.self.key.weight"),
+            "the error must name the gap: {err}"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_rejects_a_foreign_tensor() {
+        let config = loading_config();
+        let mut tensors = fixture(&config, "roberta.").tensors();
+        tensors.push(F32Tensor::ramp(
+            "roberta.encoder.layer.9.mystery.weight",
+            &[8, 8],
+            42.0,
+        ));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = RobertaModel::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("an unrecognised weight must fail the load");
+        assert!(
+            err.to_string().contains("mystery.weight"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_rejects_bytes_that_are_not_a_checkpoint() {
+        let mut model = RobertaModel::new(loading_config()).expect("model must build");
+        let garbage = vec![0xABu8; 4096];
+        let err = model
+            .load_pretrained(&mut garbage.as_slice())
+            .expect_err("garbage must not be accepted as weights");
+        assert!(
+            err.to_string().contains("unrecognised checkpoint container"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_drops_the_pooler_when_the_checkpoint_has_none() {
+        let config = loading_config();
+        let mut spec = fixture(&config, "roberta.");
+        spec.include_pooler = false;
+        let bytes = spec.safetensors();
+
+        let mut model = RobertaModel::new(config).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a pooler-less checkpoint must load");
+        assert!(report.is_complete());
     }
 }

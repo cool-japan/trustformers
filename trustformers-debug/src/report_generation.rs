@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 use crate::{
+    architecture_analysis::ArchitectureAnalysisReport,
     gradient_debugger::GradientDebugReport,
     profiler::ProfilerReport,
     visualization::{DebugVisualizer, PlotData, VisualizationConfig},
@@ -182,6 +183,11 @@ pub struct ReportGenerator {
     debug_data: Option<GradientDebugReport>,
     /// Profiling data
     profiling_data: Option<ProfilerReport>,
+    /// Model architecture data (parameter counts, layer shapes, ...), used by
+    /// [`Self::generate_architecture_section`] to fill in real per-layer
+    /// parameter counts instead of the honest-but-permanent "N/A" that is
+    /// used when this is absent.
+    architecture_data: Option<ArchitectureAnalysisReport>,
     /// Visualizer
     visualizer: DebugVisualizer,
 }
@@ -193,6 +199,7 @@ impl ReportGenerator {
             config,
             debug_data: None,
             profiling_data: None,
+            architecture_data: None,
             visualizer: DebugVisualizer::new(VisualizationConfig::default()),
         }
     }
@@ -206,6 +213,15 @@ impl ReportGenerator {
     /// Add profiling data
     pub fn with_profiling_data(mut self, data: ProfilerReport) -> Self {
         self.profiling_data = Some(data);
+        self
+    }
+
+    /// Add model architecture data (real per-layer parameter counts, shapes,
+    /// ...). Without this, [`Self::generate_architecture_section`] reports
+    /// each layer's parameter count as `N/A` -- an honest absence, not a
+    /// fabricated number -- rather than guessing.
+    pub fn with_architecture_data(mut self, data: ArchitectureAnalysisReport) -> Self {
+        self.architecture_data = Some(data);
         self
     }
 
@@ -444,6 +460,17 @@ impl ReportGenerator {
         content.push_str("## Model Architecture Analysis\n\n");
         content.push_str("This section provides detailed analysis of the model architecture.\n\n");
 
+        // Real per-layer parameter counts, keyed by layer name, from
+        // whatever architecture data was attached via
+        // `with_architecture_data`. Absent (rather than guessed) when no
+        // architecture data was provided, or when a given gradient-flow
+        // layer name has no matching entry there.
+        let parameter_counts: HashMap<&str, usize> = self
+            .architecture_data
+            .as_ref()
+            .map(|arch| arch.layers.iter().map(|l| (l.name.as_str(), l.parameters)).collect())
+            .unwrap_or_default();
+
         // Add architecture details if available
         content.push_str("### Layer Structure\n\n");
         if let Some(debug_data) = &self.debug_data {
@@ -460,12 +487,13 @@ impl ReportGenerator {
                 } else {
                     "Healthy"
                 };
+                let parameters = parameter_counts
+                    .get(layer_name.as_str())
+                    .map(|count| count.to_string())
+                    .unwrap_or_else(|| "N/A".to_string());
                 content.push_str(&format!(
                     "| {} | {} | {} | {} |\n",
-                    i,
-                    layer_name,
-                    "N/A", // In a real implementation, get parameter count
-                    health
+                    i, layer_name, parameters, health
                 ));
             }
         } else {
@@ -740,21 +768,39 @@ impl ReportGenerator {
         })
     }
 
-    /// Generate visualizations
+    /// Generate visualizations.
+    ///
+    /// The performance chart plots `profiling_data.slowest_layers` -- a real
+    /// ranked list of `(layer_name, Duration)` produced by the profiler --
+    /// rather than the fixed `[1,2,3]`/`[10,15,12]` points the old
+    /// implementation emitted regardless of what was actually profiled.
+    /// Omitted entirely (never fabricated) when there is no profiling data,
+    /// or it recorded no layer timings.
     fn generate_visualizations(&self) -> Result<HashMap<String, PlotData>, ReportError> {
         let mut visualizations = HashMap::new();
 
-        // Generate performance chart
-        if self.profiling_data.is_some() {
-            let plot_data = PlotData {
-                x_values: vec![1.0, 2.0, 3.0],    // Placeholder data
-                y_values: vec![10.0, 15.0, 12.0], // Placeholder performance data
-                labels: vec!["A".to_string(), "B".to_string(), "C".to_string()],
-                title: "Performance Chart".to_string(),
-                x_label: "Time".to_string(),
-                y_label: "Performance".to_string(),
-            };
-            visualizations.insert("performance_chart".to_string(), plot_data);
+        if let Some(profiling_data) = &self.profiling_data {
+            if !profiling_data.slowest_layers.is_empty() {
+                let x_values: Vec<f64> =
+                    (0..profiling_data.slowest_layers.len()).map(|i| i as f64).collect();
+                let y_values: Vec<f64> = profiling_data
+                    .slowest_layers
+                    .iter()
+                    .map(|(_, duration)| duration.as_secs_f64() * 1000.0)
+                    .collect();
+                let labels: Vec<String> =
+                    profiling_data.slowest_layers.iter().map(|(name, _)| name.clone()).collect();
+
+                let plot_data = PlotData {
+                    x_values,
+                    y_values,
+                    labels,
+                    title: "Performance Chart".to_string(),
+                    x_label: "Layer Rank (slowest first)".to_string(),
+                    y_label: "Duration (ms)".to_string(),
+                };
+                visualizations.insert("performance_chart".to_string(), plot_data);
+            }
         }
 
         Ok(visualizations)
@@ -990,6 +1036,7 @@ impl std::error::Error for ReportError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DebugConfig;
 
     #[test]
     fn test_report_config_default() {
@@ -1074,5 +1121,147 @@ mod tests {
 
         assert_eq!(report.metadata.title, deserialized.metadata.title);
         assert_eq!(report.sections.len(), deserialized.sections.len());
+    }
+
+    /// Regression test: the old `generate_architecture_section` printed the
+    /// literal string `"N/A"` for every layer's parameter count
+    /// unconditionally, regardless of whether any architecture data was
+    /// ever provided. With real architecture data attached via
+    /// `with_architecture_data`, a layer that has a matching entry there
+    /// must show its real parameter count.
+    #[tokio::test]
+    async fn test_architecture_section_uses_real_parameter_counts_not_na() {
+        use crate::architecture_analysis::{
+            ArchitectureAnalysisConfig, ArchitectureAnalyzer, LayerInfo, LayerType,
+        };
+        use crate::gradient_debugger::debugger::{FlowAnalysis, LayerFlowAnalysis};
+        use crate::gradient_debugger::GradientDebugger;
+
+        let debugger = GradientDebugger::new(DebugConfig::default());
+        let mut gradient_report =
+            debugger.generate_report().await.expect("gradient report should generate");
+        let mut layer_analyses = HashMap::new();
+        layer_analyses.insert(
+            "encoder.layer0".to_string(),
+            LayerFlowAnalysis {
+                layer_name: "encoder.layer0".to_string(),
+                is_vanishing: false,
+                is_exploding: false,
+                gradient_norm: 0.5,
+                flow_consistency: 0.9,
+            },
+        );
+        gradient_report.flow_analysis = FlowAnalysis { layer_analyses };
+
+        let mut analyzer = ArchitectureAnalyzer::new(ArchitectureAnalysisConfig::default());
+        analyzer.register_layer(LayerInfo {
+            id: "0".to_string(),
+            name: "encoder.layer0".to_string(),
+            layer_type: LayerType::Linear,
+            input_shape: vec![768],
+            output_shape: vec![768],
+            parameters: 590_592,
+            trainable_parameters: 590_592,
+            memory_usage: 0,
+            flops: 0,
+            receptive_field: None,
+        });
+        let architecture_report =
+            analyzer.analyze().await.expect("architecture analysis should succeed");
+
+        let generator = ReportGenerator::new(ReportConfig::default())
+            .with_debug_data(gradient_report)
+            .with_architecture_data(architecture_report);
+
+        let section = generator
+            .generate_architecture_section()
+            .expect("architecture section generation should succeed");
+
+        assert!(
+            section.content.contains("590592"),
+            "must show the real parameter count from architecture data, not N/A: {}",
+            section.content
+        );
+    }
+
+    /// Companion to the above: without `with_architecture_data`, the column
+    /// must still honestly say `N/A` -- this is the absence path, distinct
+    /// from the bug (a permanent, unconditional `N/A` even when real data
+    /// was available).
+    #[tokio::test]
+    async fn test_architecture_section_reports_na_without_architecture_data() {
+        use crate::gradient_debugger::debugger::{FlowAnalysis, LayerFlowAnalysis};
+        use crate::gradient_debugger::GradientDebugger;
+
+        let debugger = GradientDebugger::new(DebugConfig::default());
+        let mut gradient_report =
+            debugger.generate_report().await.expect("gradient report should generate");
+        let mut layer_analyses = HashMap::new();
+        layer_analyses.insert(
+            "encoder.layer0".to_string(),
+            LayerFlowAnalysis {
+                layer_name: "encoder.layer0".to_string(),
+                is_vanishing: false,
+                is_exploding: false,
+                gradient_norm: 0.5,
+                flow_consistency: 0.9,
+            },
+        );
+        gradient_report.flow_analysis = FlowAnalysis { layer_analyses };
+
+        let generator =
+            ReportGenerator::new(ReportConfig::default()).with_debug_data(gradient_report);
+        let section = generator
+            .generate_architecture_section()
+            .expect("architecture section generation should succeed");
+
+        assert!(section.content.contains("N/A"));
+    }
+
+    /// Regression test: the old `generate_visualizations` always emitted the
+    /// fixed points `[1,2,3]`/`[10,15,12]` for the performance chart
+    /// whenever any profiling data was attached, regardless of its content.
+    /// The chart must instead reflect the real `slowest_layers` list.
+    #[test]
+    fn test_visualizations_reflect_real_slowest_layers_not_fixed_points() {
+        use crate::profiler::{MemoryEfficiencyAnalysis, ProfilerReport};
+        use std::time::Duration;
+
+        let profiling_data = ProfilerReport {
+            total_events: 2,
+            total_runtime: Duration::from_millis(42),
+            statistics: HashMap::new(),
+            bottlenecks: Vec::new(),
+            slowest_layers: vec![
+                ("attention.0".to_string(), Duration::from_millis(30)),
+                ("mlp.0".to_string(), Duration::from_millis(12)),
+            ],
+            memory_efficiency: MemoryEfficiencyAnalysis::default(),
+            recommendations: Vec::new(),
+        };
+
+        let generator =
+            ReportGenerator::new(ReportConfig::default()).with_profiling_data(profiling_data);
+        let visualizations = generator
+            .generate_visualizations()
+            .expect("visualization generation should succeed");
+
+        let chart = visualizations
+            .get("performance_chart")
+            .expect("a performance chart should be produced from real slowest_layers data");
+        assert_eq!(
+            chart.y_values,
+            vec![30.0, 12.0],
+            "must reflect real layer durations in ms"
+        );
+        assert_ne!(
+            chart.y_values,
+            vec![10.0, 15.0, 12.0],
+            "must not be the old fabricated placeholder points"
+        );
+        assert_eq!(
+            chart.labels,
+            vec!["attention.0".to_string(), "mlp.0".to_string()]
+        );
     }
 }

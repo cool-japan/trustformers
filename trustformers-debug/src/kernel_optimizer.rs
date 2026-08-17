@@ -1363,6 +1363,10 @@ impl Default for KernelOptimizationConfig {
 }
 
 #[cfg(test)]
+#[path = "kernel_optimizer_tests.rs"]
+mod kernel_optimizer_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

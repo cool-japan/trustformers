@@ -20,11 +20,8 @@
 pub mod metrics;
 pub mod websocket;
 
-pub use websocket::{DashboardConfig, DashboardEvent, DashboardServer};
 pub use metrics::{
-    DashboardConfig as MetricsDashboardConfig,
-    DashboardError,
-    DashboardMessage,
-    DashboardServerExt,
-    MetricHistory,
+    DashboardConfig as MetricsDashboardConfig, DashboardError, DashboardMessage,
+    DashboardServerExt, MetricHistory,
 };
+pub use websocket::{DashboardConfig, DashboardEvent, DashboardServer};

@@ -365,7 +365,7 @@ fn escape_json_string_local(s: &str) -> String {
             '\t' => out.push_str("\\t"),
             c if (c as u32) < 0x20 => {
                 let _ = write!(out, "\\u{:04x}", c as u32);
-            }
+            },
             c => out.push(c),
         }
     }
@@ -418,19 +418,17 @@ impl TraceExporter {
             ExportFormat::Perfetto | ExportFormat::ChromeTrace => {
                 let perf = trace.to_perfetto();
                 perf.export_to_file(path).map_err(ExportError::from)?;
-            }
+            },
             ExportFormat::Tracy => {
                 let tracy = trace.to_tracy();
                 tracy.export_to_file(path).map_err(ExportError::from)?;
-            }
+            },
             ExportFormat::Csv => {
-                CsvExporter::export_to_file(trace.events(), path)
-                    .map_err(ExportError::from)?;
-            }
+                CsvExporter::export_to_file(trace.events(), path).map_err(ExportError::from)?;
+            },
             ExportFormat::Json => {
-                JsonExporter::export_to_file(trace.events(), path)
-                    .map_err(ExportError::from)?;
-            }
+                JsonExporter::export_to_file(trace.events(), path).map_err(ExportError::from)?;
+            },
         }
         Ok(())
     }
@@ -449,11 +447,10 @@ impl TraceExporter {
             ExportFormat::Perfetto | ExportFormat::ChromeTrace => {
                 PerfettoExporter::export_profiler_report(report, path)
                     .map_err(ExportError::from)?;
-            }
+            },
             ExportFormat::Tracy => {
-                TracyExporter::export_profiler_report(report, path)
-                    .map_err(ExportError::from)?;
-            }
+                TracyExporter::export_profiler_report(report, path).map_err(ExportError::from)?;
+            },
             ExportFormat::Csv | ExportFormat::Json => {
                 let events: Vec<TimingEvent> = report
                     .slowest_layers
@@ -470,12 +467,12 @@ impl TraceExporter {
                     return Err(ExportError::EmptyTrace);
                 }
                 match &config.format {
-                    ExportFormat::Csv => CsvExporter::export_to_file(&events, path)
-                        .map_err(ExportError::from)?,
-                    _ => JsonExporter::export_to_file(&events, path)
-                        .map_err(ExportError::from)?,
+                    ExportFormat::Csv => {
+                        CsvExporter::export_to_file(&events, path).map_err(ExportError::from)?
+                    },
+                    _ => JsonExporter::export_to_file(&events, path).map_err(ExportError::from)?,
                 }
-            }
+            },
         }
         Ok(())
     }
@@ -491,9 +488,24 @@ mod tests {
 
     fn sample_events() -> Vec<TimingEvent> {
         vec![
-            TimingEvent { timestamp_ns: 0, duration_ns: 1_000_000, thread_id: 0, name: "attention".to_string() },
-            TimingEvent { timestamp_ns: 1_000_000, duration_ns: 2_000_000, thread_id: 1, name: "ffn".to_string() },
-            TimingEvent { timestamp_ns: 3_000_000, duration_ns: 500_000, thread_id: 0, name: "layer_norm".to_string() },
+            TimingEvent {
+                timestamp_ns: 0,
+                duration_ns: 1_000_000,
+                thread_id: 0,
+                name: "attention".to_string(),
+            },
+            TimingEvent {
+                timestamp_ns: 1_000_000,
+                duration_ns: 2_000_000,
+                thread_id: 1,
+                name: "ffn".to_string(),
+            },
+            TimingEvent {
+                timestamp_ns: 3_000_000,
+                duration_ns: 500_000,
+                thread_id: 0,
+                name: "layer_norm".to_string(),
+            },
         ]
     }
 
@@ -672,6 +684,8 @@ mod tests {
     fn test_export_error_display() {
         assert!(ExportError::EmptyTrace.to_string().contains("empty"));
         assert!(ExportError::UnsupportedFormat("xyz".to_string()).to_string().contains("xyz"));
-        assert!(ExportError::IoError("perm denied".to_string()).to_string().contains("perm denied"));
+        assert!(ExportError::IoError("perm denied".to_string())
+            .to_string()
+            .contains("perm denied"));
     }
 }

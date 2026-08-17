@@ -443,7 +443,7 @@ impl Tensor {
                     Ok(Tensor::Metal(metal_data.clone()))
                 } else {
                     Err(TrustformersError::hardware_error(
-                        format!(
+                        &format!(
                             "Metal device-to-device transfer to ordinal {} is not supported: \
                              the Metal backend exposes only the system default device (ordinal {})",
                             target_device, METAL_DEFAULT_DEVICE

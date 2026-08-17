@@ -522,6 +522,10 @@ pub fn enable_simd() -> bool {
 #[wasm_bindgen]
 pub struct InferenceSession {
     model_type: String,
+    /// The real, loaded model — `None` until `load_model` successfully
+    /// parses weight data. `predict` refuses to run without one (see
+    /// `require_loaded_model`) rather than returning fabricated output.
+    model: Option<model::WasmModel>,
     #[cfg(feature = "webgpu")]
     device_selector: Option<webgpu::DeviceSelector>,
     #[cfg(feature = "webgpu")]
@@ -538,6 +542,48 @@ pub struct InferenceSession {
     event_emitter: Option<events::EventEmitter>,
 }
 
+/// Map an `InferenceSession`'s free-form `model_type` string to a concrete
+/// [`model::ModelArchitecture`], so `load_model` knows which transformer
+/// shape (attention masking, normalization, RoPE, tied embeddings — see
+/// `core::model::wasm_model::ArchSpec`) to run over the parsed weights.
+/// Deliberately conservative: an unrecognized `model_type` is a structured
+/// `Err`, never a silent default architecture (which would happily "load"
+/// weights against the wrong tensor-name convention and either error deep
+/// inside the forward pass or, worse, run with mismatched semantics).
+///
+/// Pure (no `wasm_bindgen`/`JsValue`/`web_sys`), so it is unit tested
+/// directly below rather than only via the `JsValue`-returning
+/// `InferenceSession::load_model`.
+fn resolve_model_architecture(model_type: &str) -> Result<model::ModelArchitecture, String> {
+    let normalized: String = model_type
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    match normalized.as_str() {
+        "bert" => Ok(model::ModelArchitecture::Bert),
+        "gpt2" | "gpt" => Ok(model::ModelArchitecture::GPT2),
+        "t5" => Ok(model::ModelArchitecture::T5),
+        "llama" | "llama2" | "llama3" => Ok(model::ModelArchitecture::Llama),
+        "mistral" => Ok(model::ModelArchitecture::Mistral),
+        _ => Err(format!(
+            "unsupported model_type '{model_type}' (expected one of: bert, gpt2, t5, llama, mistral)"
+        )),
+    }
+}
+
+/// Require that a model has actually been loaded before running inference.
+/// `predict` used to run unconditionally (`let result = input.clone();`,
+/// never touching any model), so there was nothing to check; now that it
+/// runs a real forward pass, calling it before `load_model` succeeds must
+/// be a structured error rather than a panic or fabricated output.
+///
+/// Pure (`String` error, no `JsValue`) for the same native-testability
+/// reason as [`resolve_model_architecture`].
+fn require_loaded_model(model: Option<&model::WasmModel>) -> Result<&model::WasmModel, String> {
+    model.ok_or_else(|| "predict: no model loaded (call load_model first)".to_string())
+}
+
 #[wasm_bindgen]
 impl InferenceSession {
     #[wasm_bindgen(constructor)]
@@ -550,6 +596,7 @@ impl InferenceSession {
 
         Ok(InferenceSession {
             model_type,
+            model: None,
             #[cfg(feature = "webgpu")]
             device_selector: None,
             #[cfg(feature = "webgpu")]
@@ -703,7 +750,6 @@ impl InferenceSession {
         #[cfg(not(feature = "webgpu"))]
         web_sys::console::log_1(&format!("Loading model on CPU (size: {model_size} bytes)").into());
 
-        // Simulate model loading validation
         if model_size < 1024 {
             if let Some(ref mut logger) = self.debug_logger {
                 logger.warn(
@@ -712,6 +758,53 @@ impl InferenceSession {
                 );
             }
         }
+
+        // Really parse and store the model weights. `self.model_type` picks
+        // which architecture's tensor layout/math to run (see
+        // `resolve_model_architecture`); the bytes are then handed to the
+        // real format-detecting SafeTensors parser in `core::model`. Either
+        // step failing returns a structured `Err` here — this method used
+        // to reach `Ok(())` unconditionally without ever parsing or storing
+        // `model_data`, so every prior "success" was fabricated.
+        let architecture = match resolve_model_architecture(&self.model_type) {
+            Ok(architecture) => architecture,
+            Err(e) => {
+                let error = ErrorBuilder::new(ErrorCode::E1003, &e)
+                    .operation("load_model")
+                    .component("inference_session")
+                    .build();
+                if let Some(ref mut logger) = self.debug_logger {
+                    logger.warn(&e, "model_loading");
+                    logger.end_timer("model_loading");
+                }
+                if let Some(ref mut emitter) = self.event_emitter {
+                    let event = events::EventData::error_occurred(&error.message, "load_model");
+                    emitter.emit(event);
+                }
+                return Err(error.into());
+            },
+        };
+
+        let mut model = model::WasmModel::new(model::ModelConfig::new(architecture));
+        if let Err(parse_err) = model.load_weights(model_data).await {
+            let message = parse_err
+                .as_string()
+                .unwrap_or_else(|| "model weight parsing failed".to_string());
+            let error = ErrorBuilder::new(ErrorCode::E1005, &message)
+                .operation("load_model")
+                .component("inference_session")
+                .build();
+            if let Some(ref mut logger) = self.debug_logger {
+                logger.warn(&message, "model_loading");
+                logger.end_timer("model_loading");
+            }
+            if let Some(ref mut emitter) = self.event_emitter {
+                let event = events::EventData::error_occurred(&error.message, "load_model");
+                emitter.emit(event);
+            }
+            return Err(error.into());
+        }
+        self.model = Some(model);
 
         // Complete debug logging
         if let Some(ref mut logger) = self.debug_logger {
@@ -737,6 +830,8 @@ impl InferenceSession {
     }
 
     pub fn predict(&mut self, input: &tensor::WasmTensor) -> Result<tensor::WasmTensor, JsValue> {
+        use crate::error::{ErrorBuilder, ErrorCode};
+
         let input_size = input.len();
         let start_time = js_sys::Date::now();
 
@@ -753,21 +848,16 @@ impl InferenceSession {
             logger.log_memory_usage("Before inference");
         }
 
+        // NOTE: this only logs which device *would* run inference — there is
+        // no separate GPU dispatch path. `WasmModel::forward` below always
+        // runs the same real CPU math regardless of `should_use_gpu`.
         #[cfg(feature = "webgpu")]
         if let Some(selector) = &self.device_selector {
             let should_use_gpu = selector.should_use_gpu(input_size, 0.6); // Medium complexity for inference
-
-            if should_use_gpu {
-                web_sys::console::log_1(
-                    &format!("Running inference on GPU (input size: {input_size})").into(),
-                );
-                // GPU-accelerated prediction would go here
-            } else {
-                web_sys::console::log_1(
-                    &format!("Running inference on CPU (input size: {input_size})").into(),
-                );
-                // CPU-optimized prediction would go here
-            }
+            let device = if should_use_gpu { "GPU" } else { "CPU" };
+            web_sys::console::log_1(
+                &format!("Running inference on {device} (input size: {input_size})").into(),
+            );
         } else {
             web_sys::console::log_1(
                 &format!("Running inference on CPU (input size: {input_size})").into(),
@@ -779,7 +869,30 @@ impl InferenceSession {
             &format!("Running inference on CPU (input size: {input_size})").into(),
         );
 
-        let result = input.clone();
+        // Route through the real per-architecture forward pass over the
+        // weights loaded by `load_model`. This used to unconditionally
+        // `let result = input.clone();` — the identity function — so every
+        // caller silently received their own input back as "output".
+        let model = match require_loaded_model(self.model.as_ref()) {
+            Ok(model) => model,
+            Err(e) => {
+                let error = ErrorBuilder::new(ErrorCode::E2002, &e)
+                    .operation("predict")
+                    .component("inference_session")
+                    .input_shape(input.shape())
+                    .build();
+                if let Some(ref mut logger) = self.debug_logger {
+                    logger.warn(&e, "inference");
+                    logger.end_timer("inference");
+                }
+                if let Some(ref mut emitter) = self.event_emitter {
+                    let event = events::EventData::error_occurred(&error.message, "predict");
+                    emitter.emit(event);
+                }
+                return Err(error.into());
+            },
+        };
+        let result = model.forward(input)?;
 
         // Complete debug logging for inference
         if let Some(ref mut logger) = self.debug_logger {
@@ -1168,8 +1281,10 @@ impl InferenceSession {
         }
     }
 
-    /// Process pending batch requests
+    /// Process pending batch requests, running each through the real,
+    /// currently-loaded model (see `load_model`).
     pub async fn process_batch(&mut self) -> Result<Vec<batch_processing::BatchResponse>, JsValue> {
+        let model = require_loaded_model(self.model.as_ref()).map_err(|e| JsValue::from_str(&e))?;
         if let Some(ref mut processor) = self.batch_processor {
             if let Some(ref mut logger) = self.debug_logger {
                 logger.start_timer("batch_processing");
@@ -1182,7 +1297,7 @@ impl InferenceSession {
                 );
             }
 
-            let responses = processor.process_batch().await?;
+            let responses = processor.process_batch(model).await?;
 
             if let Some(ref mut logger) = self.debug_logger {
                 logger.info(
@@ -1293,10 +1408,13 @@ impl InferenceSession {
 
             // Process if batch is ready or if it's a high-priority request
             if processor.is_batch_ready() || priority >= batch_processing::Priority::High {
-                let responses = processor.process_batch().await?;
+                let model =
+                    require_loaded_model(self.model.as_ref()).map_err(|e| JsValue::from_str(&e))?;
+                let responses = processor.process_batch(model).await?;
 
                 // Find our response
-                return self.find_batch_response(&responses, &request_id);
+                return Self::find_batch_response(&responses, &request_id)
+                    .map_err(|e| JsValue::from_str(&e));
             }
 
             // If not processed in batch, fall back to direct prediction
@@ -1307,13 +1425,16 @@ impl InferenceSession {
         self.predict(input)
     }
 
-    /// Process all pending batches
+    /// Process all pending batches, running each through the real,
+    /// currently-loaded model (see `load_model`).
     pub async fn flush_batches(&mut self) -> Result<Vec<batch_processing::BatchResponse>, JsValue> {
         if let Some(ref mut processor) = self.batch_processor {
             let mut all_responses = Vec::new();
 
             while processor.queue_length() > 0 {
-                let responses = processor.process_batch().await?;
+                let model =
+                    require_loaded_model(self.model.as_ref()).map_err(|e| JsValue::from_str(&e))?;
+                let responses = processor.process_batch(model).await?;
                 all_responses.extend(responses);
             }
 
@@ -1347,23 +1468,33 @@ impl InferenceSession {
         }
     }
 
+    /// Find the batch response matching `request_id` and return its real
+    /// result tensor. `BatchResponse::result()` already carries a real
+    /// `WasmTensor` (see `optimization::batch_processing`) — this used to
+    /// discard it and fabricate a hardcoded `[1.0]`-shaped tensor instead.
+    ///
+    /// Does not depend on `self`; kept as an associated function (rather
+    /// than requiring `&self`) so it can be unit tested without
+    /// constructing a full `InferenceSession`, whose feature-gated fields
+    /// (e.g. `EdgeRuntimeDetector`) touch browser APIs unavailable natively.
+    /// Returns a plain `String` error rather than `JsValue`: constructing a
+    /// `JsValue` (even a bare `JsValue::from_str`) unconditionally panics
+    /// on non-wasm32 targets, which would make the error path untestable;
+    /// `predict_with_batching` converts to `JsValue` at its call site.
     fn find_batch_response(
-        &self,
         responses: &[batch_processing::BatchResponse],
         request_id: &str,
-    ) -> Result<tensor::WasmTensor, JsValue> {
+    ) -> Result<tensor::WasmTensor, String> {
         for response in responses.iter() {
             if response.request_id() == request_id {
-                if let Some(_result) = response.result() {
-                    // Convert String result to WasmTensor - in a real implementation this would parse the result
-                    // For now, create a dummy tensor with the result as metadata
-                    return tensor::WasmTensor::new(vec![1.0], vec![1]);
+                if let Some(result) = response.result() {
+                    return Ok(result);
                 } else if let Some(error) = response.error() {
-                    return Err(error.into());
+                    return Err(error);
                 }
             }
         }
-        Err("Response not found for request ID".into())
+        Err(format!("Response not found for request ID '{request_id}'"))
     }
 }
 
@@ -1376,5 +1507,118 @@ mod tests {
         let tf = TrustformersWasm::new();
         assert!(tf.initialized());
         assert_eq!(tf.version(), "0.2.1");
+    }
+
+    #[test]
+    fn test_resolve_model_architecture_known_names() {
+        assert_eq!(
+            resolve_model_architecture("bert").unwrap(),
+            model::ModelArchitecture::Bert
+        );
+        assert_eq!(
+            resolve_model_architecture("BERT").unwrap(),
+            model::ModelArchitecture::Bert
+        );
+        assert_eq!(
+            resolve_model_architecture("gpt2").unwrap(),
+            model::ModelArchitecture::GPT2
+        );
+        assert_eq!(
+            resolve_model_architecture("gpt-2").unwrap(),
+            model::ModelArchitecture::GPT2
+        );
+        assert_eq!(
+            resolve_model_architecture("t5").unwrap(),
+            model::ModelArchitecture::T5
+        );
+        assert_eq!(
+            resolve_model_architecture("llama").unwrap(),
+            model::ModelArchitecture::Llama
+        );
+        assert_eq!(
+            resolve_model_architecture("Llama-2").unwrap(),
+            model::ModelArchitecture::Llama
+        );
+        assert_eq!(
+            resolve_model_architecture("mistral").unwrap(),
+            model::ModelArchitecture::Mistral
+        );
+    }
+
+    #[test]
+    fn test_resolve_model_architecture_unknown_name_errors() {
+        // Regression guard: an unrecognized model_type must never silently
+        // fall back to a default architecture.
+        let err = resolve_model_architecture("totally-not-a-model")
+            .expect_err("unknown model_type must be rejected");
+        assert!(err.contains("totally-not-a-model"));
+    }
+
+    #[test]
+    fn test_require_loaded_model_none_errors() {
+        // Regression guard for the old `predict`, which ran unconditionally
+        // (`let result = input.clone();`) with no notion of "no model
+        // loaded" at all.
+        match require_loaded_model(None) {
+            Err(e) => assert!(e.contains("no model loaded")),
+            Ok(_) => panic!("missing model must error"),
+        }
+    }
+
+    #[test]
+    fn test_require_loaded_model_some_returns_it() {
+        let config = model::ModelConfig::bert_base();
+        let m = model::WasmModel::new(config);
+        assert!(require_loaded_model(Some(&m)).is_ok());
+    }
+
+    #[test]
+    fn test_find_batch_response_returns_real_tensor_not_dummy() {
+        // Regression test for the former bug where a matched batch response's
+        // real tensor was discarded and a hardcoded `[1.0]`-shaped dummy
+        // tensor was returned instead (see find_batch_response).
+        let expected = tensor::WasmTensor::new(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2])
+            .expect("valid tensor construction");
+
+        let responses = vec![batch_processing::BatchResponse::new_for_test(
+            "req_1".to_string(),
+            Some(expected.clone()),
+            None,
+            5.0,
+            1.0,
+            1,
+        )];
+
+        let result = InferenceSession::find_batch_response(&responses, "req_1")
+            .expect("response should be found");
+
+        assert_eq!(result.shape(), expected.shape());
+        assert_eq!(result.data(), expected.data());
+        // The old code always returned a 1-element `[1.0]` tensor regardless
+        // of the real result, so a 4-element shape is proof the real branch
+        // is now taken.
+        assert_eq!(result.len(), 4);
+    }
+
+    #[test]
+    fn test_find_batch_response_propagates_error() {
+        let responses = vec![batch_processing::BatchResponse::new_for_test(
+            "req_1".to_string(),
+            None,
+            Some("boom".to_string()),
+            5.0,
+            1.0,
+            1,
+        )];
+        let err = InferenceSession::find_batch_response(&responses, "req_1")
+            .expect_err("errored response must propagate");
+        assert!(err.contains("boom"));
+    }
+
+    #[test]
+    fn test_find_batch_response_missing_id_errors() {
+        let err = InferenceSession::find_batch_response(&[], "missing")
+            .expect_err("missing id must error");
+        assert!(err.contains("not found"));
     }
 }

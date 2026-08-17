@@ -8,11 +8,11 @@ mod tests {
     use uuid::Uuid;
 
     use crate::differential_debugging::{
-        ABTestConfig, ABTestConclusion, ABTestMetrics, ABTestResult, ArchitectureChange,
-        ArchitectureInfo, ConfigChange, DifferentialDebugger, DifferentialDebuggingConfig,
-        Improvement, MetricComparison, ModelMetrics, ModelSnapshot, PerformanceDelta,
-        RegressionAssessment, RegressionDetectionResult, RegressionSeverity, StatisticalTestResult,
-        SummaryStats, TrainingConfig, VersionDiff, WeightChangesSummary, WeightsSummary,
+        welch_t_test, ABTestConclusion, ABTestConfig, ArchitectureChange, ArchitectureInfo,
+        ConfigChange, DifferentialDebugger, DifferentialDebuggingConfig, Improvement, ModelMetrics,
+        ModelSnapshot, PerformanceDelta, RegressionAssessment, RegressionDetectionResult,
+        RegressionSeverity, StatisticalTestResult, SummaryStats, TrainingConfig,
+        WeightChangesSummary, WeightsSummary,
     };
 
     // -------------------------------------------------------------------------
@@ -177,10 +177,7 @@ mod tests {
         debugger.add_model_snapshot(snapshot).expect("add snapshot");
 
         let result = debugger.compare_models(vec!["only_one".to_string()]).await;
-        assert!(
-            result.is_err(),
-            "Comparing less than 2 models should fail"
-        );
+        assert!(result.is_err(), "Comparing less than 2 models should fail");
     }
 
     #[tokio::test]
@@ -202,8 +199,12 @@ mod tests {
         let config = make_config();
         let mut debugger = DifferentialDebugger::new(config);
 
-        debugger.add_model_snapshot(make_snapshot("model_a", 0.85, 50.0)).expect("add a");
-        debugger.add_model_snapshot(make_snapshot("model_b", 0.90, 40.0)).expect("add b");
+        debugger
+            .add_model_snapshot(make_snapshot("model_a", 0.85, 50.0))
+            .expect("add a");
+        debugger
+            .add_model_snapshot(make_snapshot("model_b", 0.90, 40.0))
+            .expect("add b");
 
         let result = debugger
             .compare_models(vec!["model_a".to_string(), "model_b".to_string()])
@@ -233,9 +234,7 @@ mod tests {
         debugger.add_model_snapshot(make_snapshot("a", 0.8, 50.0)).expect("add a");
         debugger.add_model_snapshot(make_snapshot("b", 0.9, 40.0)).expect("add b");
 
-        let result = debugger
-            .compare_models(vec!["a".to_string(), "b".to_string()])
-            .await;
+        let result = debugger.compare_models(vec!["a".to_string(), "b".to_string()]).await;
         assert!(result.is_err(), "Disabled comparison should return error");
     }
 
@@ -252,14 +251,17 @@ mod tests {
             .compare_models(vec!["m1".to_string(), "m2".to_string(), "m3".to_string()])
             .await;
 
-        match result {
-            Ok(comparison) => {
-                assert_eq!(comparison.models.len(), 3);
-                // m3 is best on accuracy and latency
-                assert_eq!(comparison.performance_comparison.accuracy_comparison.best_model, "m3");
-                assert_eq!(comparison.performance_comparison.latency_comparison.best_model, "m3");
-            },
-            Err(_) => {},
+        if let Ok(comparison) = result {
+            assert_eq!(comparison.models.len(), 3);
+            // m3 is best on accuracy and latency
+            assert_eq!(
+                comparison.performance_comparison.accuracy_comparison.best_model,
+                "m3"
+            );
+            assert_eq!(
+                comparison.performance_comparison.latency_comparison.best_model,
+                "m3"
+            );
         }
     }
 
@@ -288,13 +290,17 @@ mod tests {
         let mut lcg_b_state: u64 = 123;
         let model_a_data: Vec<f64> = (0..50)
             .map(|_| {
-                lcg_a_state = lcg_a_state.wrapping_mul(6364136223846793005u64).wrapping_add(1442695040888963407u64);
+                lcg_a_state = lcg_a_state
+                    .wrapping_mul(6364136223846793005u64)
+                    .wrapping_add(1442695040888963407u64);
                 0.80 + (lcg_a_state >> 11) as f64 / (1u64 << 53) as f64 * 0.1
             })
             .collect();
         let model_b_data: Vec<f64> = (0..50)
             .map(|_| {
-                lcg_b_state = lcg_b_state.wrapping_mul(6364136223846793005u64).wrapping_add(1442695040888963407u64);
+                lcg_b_state = lcg_b_state
+                    .wrapping_mul(6364136223846793005u64)
+                    .wrapping_add(1442695040888963407u64);
                 0.85 + (lcg_b_state >> 11) as f64 / (1u64 << 53) as f64 * 0.1
             })
             .collect();
@@ -361,7 +367,10 @@ mod tests {
         debugger.add_model_snapshot(make_snapshot("v1", 0.8, 50.0)).expect("add v1");
 
         let result = debugger.track_version_diff("v1", "nonexistent").await;
-        assert!(result.is_err(), "Missing model should cause error in version diff");
+        assert!(
+            result.is_err(),
+            "Missing model should cause error in version diff"
+        );
     }
 
     #[tokio::test]
@@ -409,8 +418,12 @@ mod tests {
         let mut debugger = DifferentialDebugger::new(config);
 
         // New model is strictly better
-        debugger.add_model_snapshot(make_snapshot("baseline", 0.80, 60.0)).expect("add baseline");
-        debugger.add_model_snapshot(make_snapshot("new_model", 0.90, 40.0)).expect("add new");
+        debugger
+            .add_model_snapshot(make_snapshot("baseline", 0.80, 60.0))
+            .expect("add baseline");
+        debugger
+            .add_model_snapshot(make_snapshot("new_model", 0.90, 40.0))
+            .expect("add new");
 
         match debugger.detect_regressions("new_model", "baseline").await {
             Ok(result) => {
@@ -437,8 +450,12 @@ mod tests {
         let mut debugger = DifferentialDebugger::new(config);
 
         // New model is worse
-        debugger.add_model_snapshot(make_snapshot("baseline", 0.90, 40.0)).expect("add baseline");
-        debugger.add_model_snapshot(make_snapshot("new_model", 0.70, 60.0)).expect("add new");
+        debugger
+            .add_model_snapshot(make_snapshot("baseline", 0.90, 40.0))
+            .expect("add baseline");
+        debugger
+            .add_model_snapshot(make_snapshot("new_model", 0.70, 60.0))
+            .expect("add new");
 
         match debugger.detect_regressions("new_model", "baseline").await {
             Ok(result) => {
@@ -459,9 +476,7 @@ mod tests {
         debugger.add_model_snapshot(make_snapshot("a", 0.80, 50.0)).expect("add a");
         debugger.add_model_snapshot(make_snapshot("b", 0.85, 45.0)).expect("add b");
 
-        let _ = debugger
-            .compare_models(vec!["a".to_string(), "b".to_string()])
-            .await;
+        let _ = debugger.compare_models(vec!["a".to_string(), "b".to_string()]).await;
 
         match debugger.generate_report().await {
             Ok(report) => {
@@ -719,5 +734,208 @@ mod tests {
         };
         assert!(result.regressions.is_empty());
         assert_eq!(result.improvements.len(), 1);
+    }
+    // ------------------------------------------------------------------
+    // perform_statistical_analysis / welch_t_test: regression tests for
+    // the old empty-stub / fabricated-p-value behavior.
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_statistical_analysis_is_empty_with_fewer_than_three_models() {
+        let mut debugger = DifferentialDebugger::new(make_config());
+        debugger.add_model_snapshot(make_snapshot("a", 0.80, 50.0)).expect("add a");
+        debugger.add_model_snapshot(make_snapshot("b", 0.85, 45.0)).expect("add b");
+
+        let result = debugger
+            .compare_models(vec!["a".to_string(), "b".to_string()])
+            .await
+            .expect("comparison should succeed");
+
+        // The old stub always returned empty maps regardless of input; the
+        // fixed implementation *also* returns empty maps here, but for an
+        // honest, documented reason (< 3 models -> no meaningful
+        // cross-model distribution), not because nothing was implemented.
+        assert!(result.statistical_analysis.p_values.is_empty());
+        assert!(result.statistical_analysis.effect_sizes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_statistical_analysis_computes_real_p_values_for_three_plus_models() {
+        let mut debugger = DifferentialDebugger::new(make_config());
+
+        // Three models with clearly different accuracy: one is a real
+        // outlier relative to the other two.
+        debugger.add_model_snapshot(make_snapshot("a", 0.70, 50.0)).expect("add a");
+        debugger.add_model_snapshot(make_snapshot("b", 0.71, 50.0)).expect("add b");
+        debugger.add_model_snapshot(make_snapshot("c", 0.99, 50.0)).expect("add c"); // outlier
+
+        let result = debugger
+            .compare_models(vec!["a".to_string(), "b".to_string(), "c".to_string()])
+            .await
+            .expect("comparison should succeed");
+
+        let stats = &result.statistical_analysis;
+        // The old stub always returned an empty map here regardless of
+        // input; a real implementation must actually populate it.
+        assert!(
+            !stats.p_values.is_empty(),
+            "p_values must not be empty for 3 models"
+        );
+        assert!(
+            !stats.effect_sizes.is_empty(),
+            "effect_sizes must not be empty for 3 models"
+        );
+        assert!(
+            !stats.confidence_intervals.is_empty(),
+            "confidence_intervals must not be empty for 3 models"
+        );
+
+        // Every p-value must be a real probability, not a fabricated
+        // literal (the old `run_ab_test` path always emitted exactly 0.01
+        // or 0.1 -- these must vary continuously with the data).
+        for &p in stats.p_values.values() {
+            assert!((0.0..=1.0).contains(&p), "p-value {p} out of [0,1]");
+        }
+
+        // Model "c" is a real outlier -- its effect size (z-score) must be
+        // clearly larger in magnitude than "a" or "b"'s.
+        let z_a = stats.effect_sizes["val_accuracy::a"].abs();
+        let z_c = stats.effect_sizes["val_accuracy::c"].abs();
+        assert!(
+            z_c > z_a,
+            "outlier model 'c' (z={z_c}) should have larger |effect size| than 'a' (z={z_a})"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_comparison_summary_reports_significance_not_bare_winner() {
+        let mut debugger = DifferentialDebugger::new(make_config());
+
+        debugger.add_model_snapshot(make_snapshot("a", 0.70, 50.0)).expect("add a");
+        debugger.add_model_snapshot(make_snapshot("b", 0.71, 50.0)).expect("add b");
+        debugger.add_model_snapshot(make_snapshot("c", 0.99, 50.0)).expect("add c");
+
+        let result = debugger
+            .compare_models(vec!["a".to_string(), "b".to_string(), "c".to_string()])
+            .await
+            .expect("comparison should succeed");
+
+        // The old implementation's key_findings claimed a winner with no
+        // significance testing behind it at all. The fixed summary must
+        // say *something* about significance for the winning metric.
+        let accuracy_finding = result
+            .summary
+            .key_findings
+            .iter()
+            .find(|f| f.starts_with("Best accuracy"))
+            .expect("an accuracy finding should be present");
+        assert!(
+            accuracy_finding.contains("significant")
+                || accuracy_finding.contains("distinguishable"),
+            "expected a significance qualifier in the accuracy finding, got: {accuracy_finding}"
+        );
+    }
+
+    /// Deterministic pseudo-random noise generator (LCG), matching the
+    /// pattern used elsewhere in this crate's test suites -- avoids adding
+    /// a `rand` dependency while still giving samples real within-group
+    /// variance (constant/near-constant samples make the t-statistic blow
+    /// up to +-infinity and both p-values underflow to exactly 0.0,
+    /// masking any real difference in p-value between a small and large
+    /// effect).
+    struct NoiseLcg {
+        state: u64,
+    }
+    impl NoiseLcg {
+        fn new(seed: u64) -> Self {
+            Self { state: seed }
+        }
+        fn next_unit(&mut self) -> f64 {
+            self.state =
+                self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (self.state >> 11) as f64 / (1u64 << 53) as f64 // [0, 1)
+        }
+        fn next_noise(&mut self, amplitude: f64) -> f64 {
+            (self.next_unit() - 0.5) * 2.0 * amplitude
+        }
+    }
+
+    #[test]
+    fn test_welch_t_test_computes_varying_p_values_not_fixed_literals() {
+        // The old implementation only ever emitted 0.01 or 0.1. A real
+        // t-test's p-value should shrink continuously as the effect size
+        // grows, given fixed sample size and comparable within-group
+        // variance (real noise, not a near-constant sample).
+        let mut lcg = NoiseLcg::new(7);
+        let a: Vec<f64> = (0..30).map(|_| 1.0 + lcg.next_noise(0.3)).collect();
+        let b_small_diff: Vec<f64> = (0..30).map(|_| 1.1 + lcg.next_noise(0.3)).collect();
+        let b_large_diff: Vec<f64> = (0..30).map(|_| 5.0 + lcg.next_noise(0.3)).collect();
+
+        let small = welch_t_test(&a, &b_small_diff, 0.05).expect("should compute a result");
+        let large = welch_t_test(&a, &b_large_diff, 0.05).expect("should compute a result");
+
+        assert!(
+            large.p_value < small.p_value,
+            "a bigger real effect must produce a smaller p-value: large={}, small={}",
+            large.p_value,
+            small.p_value
+        );
+        assert!((0.0..=1.0).contains(&small.p_value));
+        assert!((0.0..=1.0).contains(&large.p_value));
+        // The large, obvious difference must be flagged significant; the
+        // real test must not just always return the same verdict.
+        assert!(large.is_significant);
+    }
+
+    #[test]
+    fn test_welch_t_test_none_for_degenerate_samples() {
+        // Both samples are exactly constant (zero variance) -- no
+        // meaningful t-test exists; must not divide by zero or fabricate a
+        // result.
+        let a = vec![1.0, 1.0, 1.0];
+        let b = vec![1.0, 1.0, 1.0];
+        assert!(welch_t_test(&a, &b, 0.05).is_none());
+    }
+
+    #[test]
+    fn test_welch_t_test_none_for_too_few_samples() {
+        let a = vec![1.0];
+        let b = vec![2.0, 3.0];
+        assert!(welch_t_test(&a, &b, 0.05).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_ab_test_p_value_is_not_a_fixed_literal() {
+        let mut debugger = DifferentialDebugger::new(make_config());
+
+        let mut lcg = NoiseLcg::new(99);
+        let model_a_data: Vec<f64> = (0..50).map(|_| 1.0 + lcg.next_noise(0.3)).collect();
+        let model_b_data: Vec<f64> = (0..50).map(|_| 1.4 + lcg.next_noise(0.3)).collect();
+
+        let ab_config = ABTestConfig {
+            name: "p_value_variance_test".to_string(),
+            model_a: "a".to_string(),
+            model_b: "b".to_string(),
+            duration_hours: None,
+            sample_size: 50,
+            tracked_metrics: vec!["primary_metric".to_string()],
+            min_effect_size: 0.1,
+            power: 0.8,
+        };
+
+        let result = debugger
+            .run_ab_test(ab_config, model_a_data, model_b_data)
+            .await
+            .expect("ab test should succeed");
+
+        let test = result
+            .statistical_tests
+            .get("primary_metric")
+            .expect("primary_metric test should be present");
+
+        // The old implementation could only ever produce 0.01 or 0.1.
+        assert_ne!(test.p_value, 0.01);
+        assert_ne!(test.p_value, 0.1);
+        assert!((0.0..=1.0).contains(&test.p_value));
     }
 }

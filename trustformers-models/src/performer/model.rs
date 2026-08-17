@@ -3,7 +3,7 @@ use crate::performer::config::PerformerConfig;
 use std::io::Read;
 use trustformers_core::{
     device::Device,
-    errors::Result,
+    errors::{Result, TrustformersError},
     layers::{Embedding, LayerNorm, Linear},
     tensor::Tensor,
     traits::{Config, Layer, Model},
@@ -614,8 +614,28 @@ impl Model for PerformerModel {
         Ok(sequence_output)
     }
 
-    fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
-        Ok(())
+    /// Loading a Performer checkpoint is not implemented.
+    ///
+    /// # Errors
+    ///
+    /// Always fails.
+    ///
+    /// A previous revision returned `Ok(())` without reading a byte, so a caller
+    /// was told the load succeeded while the model kept its random
+    /// initialisation — the failure then surfaced only as nonsense output much
+    /// later. Performer's FAVOR+ attention resamples its random projection matrix at construction time and stores it nowhere; no released checkpoint pairs a weight file with the projection seed that produced it, so a bound model would use different random features than the one that was trained.
+    fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
+        // Drain the stream so the caller's reader is left in a defined state.
+        let mut buffer = Vec::new();
+        std::io::Read::read_to_end(reader, &mut buffer).map_err(|e| {
+            TrustformersError::io_error(format!("failed to read Performer weights: {e}"))
+        })?;
+
+        Err(TrustformersError::not_implemented(
+            "Performer checkpoint loading is not implemented: Performer's FAVOR+ attention resamples its random projection matrix at construction time and stores it nowhere; no released checkpoint pairs a weight file with the projection seed that produced it, so a bound model would use different random features than the one that was trained. Install weights \
+             explicitly through the layer setters instead."
+                .to_string(),
+        ))
     }
 
     fn get_config(&self) -> &Self::Config {

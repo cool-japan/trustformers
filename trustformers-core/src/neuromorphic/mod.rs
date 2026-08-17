@@ -396,14 +396,26 @@ fn convert_rate_coding(weights: &Tensor) -> Result<SpikingNeuralNetwork> {
     Ok(network)
 }
 
-fn convert_temporal_coding(weights: &Tensor) -> Result<SpikingNeuralNetwork> {
-    // Temporal coding conversion (placeholder)
-    convert_rate_coding(weights)
+/// Convert weights to a temporal-coding spiking network.
+///
+/// Not implemented: temporal coding encodes a value in *spike timing* (latency
+/// or phase), which needs a timing model this module does not define. Silently
+/// delegating to rate coding, as this used to, meant selecting a coding scheme
+/// had no effect on the network you got.
+fn convert_temporal_coding(_weights: &Tensor) -> Result<SpikingNeuralNetwork> {
+    Err(anyhow::anyhow!(
+        "temporal spike coding is not implemented; only rate coding is available"
+    ))
 }
 
-fn convert_hybrid_coding(weights: &Tensor) -> Result<SpikingNeuralNetwork> {
-    // Hybrid coding conversion (placeholder)
-    convert_rate_coding(weights)
+/// Convert weights to a hybrid rate/temporal-coding network.
+///
+/// Not implemented for the same reason as [`convert_temporal_coding`]: the
+/// temporal half does not exist.
+fn convert_hybrid_coding(_weights: &Tensor) -> Result<SpikingNeuralNetwork> {
+    Err(anyhow::anyhow!(
+        "hybrid spike coding is not implemented; only rate coding is available"
+    ))
 }
 
 #[cfg(test)]
@@ -495,20 +507,27 @@ mod tests {
         assert!(!config.power_optimization);
     }
 
+    /// Regression test: this used to assert that every coding method
+    /// succeeded, which it did only because temporal and hybrid coding
+    /// silently delegated to rate coding — selecting a coding scheme had no
+    /// effect on the resulting network.
     #[test]
     fn test_conversion_methods() {
         let weights =
             Tensor::from_vec(vec![0.1, 0.2, 0.3, 0.4], &[2, 2]).expect("Tensor from_vec failed");
 
-        let methods = [
-            ConversionMethod::RateCoding,
-            ConversionMethod::TemporalCoding,
-            ConversionMethod::Hybrid,
-        ];
+        // Rate coding is implemented.
+        assert!(convert_to_spiking(&weights, ConversionMethod::RateCoding).is_ok());
 
-        for method in &methods {
-            let result = convert_to_spiking(&weights, *method);
-            assert!(result.is_ok());
+        // The other two are not, and say so rather than returning a rate-coded
+        // network under another name.
+        for method in [ConversionMethod::TemporalCoding, ConversionMethod::Hybrid] {
+            let error = convert_to_spiking(&weights, method)
+                .expect_err("unimplemented coding must not masquerade as rate coding");
+            assert!(
+                error.to_string().contains("not implemented"),
+                "unexpected error for {method:?}: {error}"
+            );
         }
     }
 

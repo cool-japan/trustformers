@@ -11,6 +11,70 @@ use std::vec::Vec;
 use wasm_bindgen::prelude::*;
 use web_sys::{Blob, Worker, WorkerOptions, WorkerType};
 
+// Capability-probe scripts for `js_sys::eval` below. `eval` here is not
+// executing untrusted/user-controlled input — these are fixed, hardcoded
+// strings that only read `typeof`/feature-detection globals (never network
+// or user data), the standard pattern for probing JS-engine capabilities
+// (SharedArrayBuffer, WebAssembly threads, hardwareConcurrency,
+// crossOriginIsolated) that have no Rust-side equivalent.
+//
+// Each must be an IIFE: `js_sys::eval` runs the string as a top-level
+// *script*, where a bare `return` (outside any function) is a
+// `SyntaxError`. The previous versions of these four scripts used a
+// top-level `try { return ...; } catch (e) { return false; }` — always a
+// `SyntaxError`, so `js_sys::eval` always returned `Err` and every probe's
+// `.unwrap_or(false)` made it unconditionally `false` (`get_optimal_thread_count`'s
+// `.unwrap_or(4)` likewise always fired). Wrapping in `(function(){ ... })()`
+// makes `return` valid again.
+
+/// See module-level "Capability-probe scripts" note above.
+const SHARED_ARRAY_BUFFER_SUPPORT_PROBE: &str = r#"
+    (function() {
+        try {
+            return typeof SharedArrayBuffer !== 'undefined' &&
+                   typeof Atomics !== 'undefined' &&
+                   typeof window !== 'undefined' &&
+                   window.crossOriginIsolated;
+        } catch (e) {
+            return false;
+        }
+    })()
+"#;
+
+/// See module-level "Capability-probe scripts" note above.
+const WASM_THREADS_SUPPORT_PROBE: &str = r#"
+    (function() {
+        try {
+            return typeof WebAssembly.Memory !== 'undefined' &&
+                   WebAssembly.Memory.prototype.hasOwnProperty('shared');
+        } catch (e) {
+            return false;
+        }
+    })()
+"#;
+
+/// See module-level "Capability-probe scripts" note above.
+const OPTIMAL_THREAD_COUNT_PROBE: &str = r#"
+    (function() {
+        try {
+            return navigator.hardwareConcurrency || 4;
+        } catch (e) {
+            return 4;
+        }
+    })()
+"#;
+
+/// See module-level "Capability-probe scripts" note above.
+const CROSS_ORIGIN_ISOLATED_PROBE: &str = r#"
+    (function() {
+        try {
+            return typeof window !== 'undefined' && window.crossOriginIsolated;
+        } catch (e) {
+            return false;
+        }
+    })()
+"#;
+
 /// Thread pool manager with SharedArrayBuffer support
 #[wasm_bindgen]
 pub struct ThreadPool {
@@ -84,34 +148,14 @@ impl ThreadPool {
 
     /// Check if SharedArrayBuffer is supported
     pub fn is_shared_array_buffer_supported() -> bool {
-        let js_code = r#"
-            try {
-                return typeof SharedArrayBuffer !== 'undefined' &&
-                       typeof Atomics !== 'undefined' &&
-                       typeof window !== 'undefined' &&
-                       window.crossOriginIsolated;
-            } catch (e) {
-                return false;
-            }
-        "#;
-
-        js_sys::eval(js_code)
+        js_sys::eval(SHARED_ARRAY_BUFFER_SUPPORT_PROBE)
             .map(|result| result.as_bool().unwrap_or(false))
             .unwrap_or(false)
     }
 
     /// Check if WebAssembly threads are supported
     pub fn is_wasm_threads_supported() -> bool {
-        let js_code = r#"
-            try {
-                return typeof WebAssembly.Memory !== 'undefined' &&
-                       WebAssembly.Memory.prototype.hasOwnProperty('shared');
-            } catch (e) {
-                return false;
-            }
-        "#;
-
-        js_sys::eval(js_code)
+        js_sys::eval(WASM_THREADS_SUPPORT_PROBE)
             .map(|result| result.as_bool().unwrap_or(false))
             .unwrap_or(false)
     }
@@ -177,13 +221,30 @@ impl ThreadPool {
         // Worker script that handles SharedArrayBuffer
         let worker_script = self.create_worker_script();
         // BlobPropertyBag not available in web-sys 0.3.81 - using default options
-        let _blob =
-            Blob::new_with_str_sequence(&js_sys::Array::of1(&worker_script.clone().into()))?;
+        let blob = Blob::new_with_str_sequence(&js_sys::Array::of1(&worker_script.clone().into()))?;
 
-        // Url not available in web-sys 0.3.81 - use blob URL directly
-        // This may not work correctly, but it's a placeholder until proper URL API is available
-        let worker_url = "data:application/javascript;charset=utf-8,".to_string() + &worker_script;
-        let worker = Worker::new_with_options(&worker_url, &worker_options)?;
+        // A real `blob:` object URL via `Url::create_object_url_with_blob`
+        // (available in the web-sys version this crate depends on — the
+        // "Url not available" comment this replaced was stale, matching
+        // the same stale claim already fixed in `storage::model_splitting`).
+        // This used to build an unencoded
+        // `"data:application/javascript;charset=utf-8," + worker_script`
+        // string: the script body was never percent-encoded (worker
+        // scripts routinely contain `#`, `%`, spaces, and newlines, which
+        // are not valid literal bytes in a `data:` URL), and even when it
+        // happened to parse, a `data:` URL has an *opaque* origin — which
+        // blocks `postMessage`-ing a `SharedArrayBuffer` to it under
+        // cross-origin isolation, defeating the entire point of this
+        // thread pool. A `blob:` URL created from the page's own origin
+        // has no such restriction.
+        let worker_url = web_sys::Url::create_object_url_with_blob(&blob)?;
+        let worker = Worker::new_with_options(&worker_url, &worker_options);
+        // Revoke immediately: by the time `Worker::new_with_options`
+        // returns, the browser has already resolved/fetched the URL for
+        // worker construction, so the temporary registration is no longer
+        // needed either way (success or failure).
+        let _ = web_sys::Url::revoke_object_url(&worker_url);
+        let worker = worker?;
 
         // Send shared memory to worker
         if let Some(ref shared_memory) = self.shared_memory {
@@ -616,15 +677,7 @@ pub fn is_threading_supported() -> bool {
 /// Get optimal thread count for the current environment
 #[wasm_bindgen]
 pub fn get_optimal_thread_count() -> usize {
-    let js_code = r#"
-        try {
-            return navigator.hardwareConcurrency || 4;
-        } catch (e) {
-            return 4;
-        }
-    "#;
-
-    js_sys::eval(js_code)
+    js_sys::eval(OPTIMAL_THREAD_COUNT_PROBE)
         .ok()
         .and_then(|result| result.as_f64())
         .map(|count| count as usize)
@@ -634,15 +687,7 @@ pub fn get_optimal_thread_count() -> usize {
 /// Get current cross-origin isolation status
 #[wasm_bindgen]
 pub fn is_cross_origin_isolated() -> bool {
-    let js_code = r#"
-        try {
-            return typeof window !== 'undefined' && window.crossOriginIsolated;
-        } catch (e) {
-            return false;
-        }
-    "#;
-
-    js_sys::eval(js_code)
+    js_sys::eval(CROSS_ORIGIN_ISOLATED_PROBE)
         .map(|result| result.as_bool().unwrap_or(false))
         .unwrap_or(false)
 }
@@ -665,5 +710,42 @@ mod tests {
         let _supported = is_threading_supported();
         let _optimal_threads = get_optimal_thread_count();
         let _cross_origin = is_cross_origin_isolated();
+    }
+
+    /// Regression guard for the actual bug (independent of having a real JS
+    /// engine to `eval` in): every probe script must be wrapped in an IIFE.
+    /// `js_sys::eval` runs its argument as a top-level *script*, where a
+    /// bare `return` outside any function body is a `SyntaxError` — the
+    /// old scripts were `try { return ...; } catch (e) { return false; }`
+    /// with no enclosing function, so `js_sys::eval` always returned `Err`
+    /// and every probe's `.unwrap_or(...)` fallback fired unconditionally.
+    /// This can't run the script through a real JS parser natively, but it
+    /// does verify the specific structural fix: an enclosing
+    /// `(function() { ... })()` around every `return`.
+    fn assert_is_iife_wrapped(script: &str, name: &str) {
+        let trimmed = script.trim();
+        assert!(
+            trimmed.starts_with("(function"),
+            "{name} must be wrapped in an IIFE so top-level `return` is valid JS: {trimmed}"
+        );
+        assert!(
+            trimmed.ends_with("})()"),
+            "{name} must actually invoke its wrapping IIFE: {trimmed}"
+        );
+        assert!(
+            trimmed.contains("return"),
+            "{name} should still contain the real probe logic"
+        );
+    }
+
+    #[test]
+    fn test_capability_probe_scripts_are_iife_wrapped() {
+        assert_is_iife_wrapped(
+            SHARED_ARRAY_BUFFER_SUPPORT_PROBE,
+            "SHARED_ARRAY_BUFFER_SUPPORT_PROBE",
+        );
+        assert_is_iife_wrapped(WASM_THREADS_SUPPORT_PROBE, "WASM_THREADS_SUPPORT_PROBE");
+        assert_is_iife_wrapped(OPTIMAL_THREAD_COUNT_PROBE, "OPTIMAL_THREAD_COUNT_PROBE");
+        assert_is_iife_wrapped(CROSS_ORIGIN_ISOLATED_PROBE, "CROSS_ORIGIN_ISOLATED_PROBE");
     }
 }

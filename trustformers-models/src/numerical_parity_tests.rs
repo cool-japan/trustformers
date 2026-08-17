@@ -34,7 +34,8 @@ impl NumericalParityTests {
     /// is not `F32`, or when any element differs by more than `tolerance`. The
     /// message names the offending flat index and both values.
     pub fn assert_tensors_close(actual: &Tensor, expected: &Tensor, tolerance: f32) -> Result<()> {
-        if !(tolerance >= 0.0) {
+        // NaN must be rejected too, so the test is written positively.
+        if tolerance.is_nan() || tolerance < 0.0 {
             return Err(anyhow::anyhow!(
                 "tolerance must be a non-negative number, got {tolerance}"
             ));
@@ -51,7 +52,10 @@ impl NumericalParityTests {
 
                 for (index, (a, e)) in actual_arr.iter().zip(expected_arr.iter()).enumerate() {
                     let difference = (a - e).abs();
-                    if !(difference <= tolerance) {
+                    // A NaN difference (either side NaN) must fail, so the
+                    // comparison is written to catch it explicitly rather than
+                    // relying on a negated `<=`.
+                    if difference.is_nan() || difference > tolerance {
                         return Err(anyhow::anyhow!(
                             "element {index} differs by {difference}: actual {a}, expected {e} \
                              (tolerance {tolerance})"

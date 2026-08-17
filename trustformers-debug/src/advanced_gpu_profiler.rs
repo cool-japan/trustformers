@@ -1263,3 +1263,7 @@ pub struct HighImpactOptimization {
     pub implementation_difficulty: String,
     pub description: String,
 }
+
+#[cfg(test)]
+#[path = "advanced_gpu_profiler_tests.rs"]
+mod advanced_gpu_profiler_tests;

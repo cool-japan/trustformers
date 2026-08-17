@@ -93,10 +93,7 @@ pub enum DashboardMessage {
         peak_gpu_mb: f32,
     },
     /// A checkpoint was written to disk.
-    CheckpointSaved {
-        step: u64,
-        path: String,
-    },
+    CheckpointSaved { step: u64, path: String },
     /// Training finished successfully.
     TrainingComplete {
         total_steps: u64,
@@ -104,14 +101,9 @@ pub enum DashboardMessage {
         duration_secs: f64,
     },
     /// Periodic keep-alive ping.
-    Heartbeat {
-        timestamp_ms: u64,
-    },
+    Heartbeat { timestamp_ms: u64 },
     /// Server-side error notification.
-    Error {
-        code: u32,
-        message: String,
-    },
+    Error { code: u32, message: String },
 }
 
 impl DashboardMessage {
@@ -146,43 +138,65 @@ impl DashboardMessage {
     /// ```
     pub fn to_json(&self) -> String {
         match self {
-            Self::TrainingMetrics { step, loss, learning_rate, throughput_samples_per_sec } => {
+            Self::TrainingMetrics {
+                step,
+                loss,
+                learning_rate,
+                throughput_samples_per_sec,
+            } => {
                 format!(
                     r#"{{"type":"training_metrics","step":{step},"loss":{loss},"learning_rate":{learning_rate},"throughput_samples_per_sec":{throughput_samples_per_sec}}}"#,
                 )
-            }
-            Self::ValidationMetrics { step, val_loss, val_accuracy } => {
+            },
+            Self::ValidationMetrics {
+                step,
+                val_loss,
+                val_accuracy,
+            } => {
                 format!(
                     r#"{{"type":"validation_metrics","step":{step},"val_loss":{val_loss},"val_accuracy":{val_accuracy}}}"#,
                 )
-            }
-            Self::GradientNorm { step, global_norm, per_layer } => {
+            },
+            Self::GradientNorm {
+                step,
+                global_norm,
+                per_layer,
+            } => {
                 let layers_json = Self::per_layer_to_json(per_layer);
                 format!(
                     r#"{{"type":"gradient_norm","step":{step},"global_norm":{global_norm},"per_layer":{layers_json}}}"#,
                 )
-            }
-            Self::MemoryUsage { step, gpu_mb, cpu_mb, peak_gpu_mb } => {
+            },
+            Self::MemoryUsage {
+                step,
+                gpu_mb,
+                cpu_mb,
+                peak_gpu_mb,
+            } => {
                 format!(
                     r#"{{"type":"memory_usage","step":{step},"gpu_mb":{gpu_mb},"cpu_mb":{cpu_mb},"peak_gpu_mb":{peak_gpu_mb}}}"#,
                 )
-            }
+            },
             Self::CheckpointSaved { step, path } => {
                 let escaped = escape_json_string(path);
                 format!(r#"{{"type":"checkpoint_saved","step":{step},"path":"{escaped}"}}"#)
-            }
-            Self::TrainingComplete { total_steps, final_loss, duration_secs } => {
+            },
+            Self::TrainingComplete {
+                total_steps,
+                final_loss,
+                duration_secs,
+            } => {
                 format!(
                     r#"{{"type":"training_complete","total_steps":{total_steps},"final_loss":{final_loss},"duration_secs":{duration_secs}}}"#,
                 )
-            }
+            },
             Self::Heartbeat { timestamp_ms } => {
                 format!(r#"{{"type":"heartbeat","timestamp_ms":{timestamp_ms}}}"#)
-            }
+            },
             Self::Error { code, message } => {
                 let escaped = escape_json_string(message);
                 format!(r#"{{"type":"error","code":{code},"message":"{escaped}"}}"#)
-            }
+            },
         }
     }
 
@@ -214,7 +228,7 @@ fn escape_json_string(s: &str) -> String {
             '\t' => out.push_str("\\t"),
             c if (c as u32) < 0x20 => {
                 let _ = write!(out, "\\u{:04x}", c as u32);
-            }
+            },
             c => out.push(c),
         }
     }
@@ -302,10 +316,7 @@ impl MetricHistory {
 
     /// Returns the most-recently pushed `(step, value)` pair, or `None` if empty.
     pub fn latest(&self) -> Option<(u64, f32)> {
-        self.steps
-            .last()
-            .copied()
-            .zip(self.values.last().copied())
+        self.steps.last().copied().zip(self.values.last().copied())
     }
 
     /// Estimates the linear-regression slope over the last `window` data points.
@@ -535,24 +546,10 @@ impl DashboardServerExt {
                 .copied()
                 .unwrap_or(i as u64);
 
-            let loss = self
-                .loss_history
-                .values
-                .get(i)
-                .map(|v| format!("{v}"))
-                .unwrap_or_default();
-            let lr = self
-                .lr_history
-                .values
-                .get(i)
-                .map(|v| format!("{v}"))
-                .unwrap_or_default();
-            let grad = self
-                .grad_norm_history
-                .values
-                .get(i)
-                .map(|v| format!("{v}"))
-                .unwrap_or_default();
+            let loss = self.loss_history.values.get(i).map(|v| format!("{v}")).unwrap_or_default();
+            let lr = self.lr_history.values.get(i).map(|v| format!("{v}")).unwrap_or_default();
+            let grad =
+                self.grad_norm_history.values.get(i).map(|v| format!("{v}")).unwrap_or_default();
 
             let _ = writeln!(out, "{step},{loss},{lr},{grad}");
         }
@@ -672,7 +669,9 @@ mod tests {
 
     #[test]
     fn test_heartbeat_json() {
-        let msg = DashboardMessage::Heartbeat { timestamp_ms: 999_999 };
+        let msg = DashboardMessage::Heartbeat {
+            timestamp_ms: 999_999,
+        };
         let json = msg.to_json();
         assert!(json.contains("\"type\":\"heartbeat\""));
         assert!(json.contains("\"timestamp_ms\":999999"));
@@ -680,7 +679,10 @@ mod tests {
 
     #[test]
     fn test_error_json() {
-        let msg = DashboardMessage::Error { code: 500, message: "internal error".to_string() };
+        let msg = DashboardMessage::Error {
+            code: 500,
+            message: "internal error".to_string(),
+        };
         let json = msg.to_json();
         assert!(json.contains("\"type\":\"error\""));
         assert!(json.contains("\"code\":500"));
@@ -696,11 +698,19 @@ mod tests {
             "heartbeat"
         );
         assert_eq!(
-            DashboardMessage::Error { code: 0, message: String::new() }.message_type(),
+            DashboardMessage::Error {
+                code: 0,
+                message: String::new()
+            }
+            .message_type(),
             "error"
         );
         assert_eq!(
-            DashboardMessage::CheckpointSaved { step: 0, path: String::new() }.message_type(),
+            DashboardMessage::CheckpointSaved {
+                step: 0,
+                path: String::new()
+            }
+            .message_type(),
             "checkpoint_saved"
         );
     }
@@ -737,7 +747,10 @@ mod tests {
             h.push(i, 10.0 - i as f32 * 0.5);
         }
         let slope = h.trend(10).expect("should compute slope");
-        assert!(slope < 0.0, "loss is decreasing so slope must be negative: {slope}");
+        assert!(
+            slope < 0.0,
+            "loss is decreasing so slope must be negative: {slope}"
+        );
     }
 
     #[test]
@@ -770,7 +783,10 @@ mod tests {
         }
         let smoothed = h.smooth(1.0);
         for (s, &orig) in smoothed.iter().zip(vals.iter()) {
-            assert!((s - orig).abs() < 1e-5, "alpha=1 should pass through: {s} vs {orig}");
+            assert!(
+                (s - orig).abs() < 1e-5,
+                "alpha=1 should pass through: {s} vs {orig}"
+            );
         }
     }
 
@@ -801,7 +817,10 @@ mod tests {
 
     #[test]
     fn test_server_broadcast_and_buffer_full() {
-        let config = DashboardConfig { message_buffer_size: 3, ..Default::default() };
+        let config = DashboardConfig {
+            message_buffer_size: 3,
+            ..Default::default()
+        };
         let mut s = DashboardServerExt::new(config);
         let msg = DashboardMessage::Heartbeat { timestamp_ms: 1 };
         assert!(s.broadcast_message(&msg).is_ok());
@@ -824,9 +843,17 @@ mod tests {
 
     #[test]
     fn test_dashboard_error_display() {
-        assert_eq!(DashboardError::ConnectionFailed.to_string(), "dashboard connection failed");
-        assert_eq!(DashboardError::SerializationError.to_string(), "failed to serialise dashboard message");
+        assert_eq!(
+            DashboardError::ConnectionFailed.to_string(),
+            "dashboard connection failed"
+        );
+        assert_eq!(
+            DashboardError::SerializationError.to_string(),
+            "failed to serialise dashboard message"
+        );
         assert!(DashboardError::BufferFull(10).to_string().contains("10"));
-        assert!(DashboardError::ConfigError("bad port".to_string()).to_string().contains("bad port"));
+        assert!(DashboardError::ConfigError("bad port".to_string())
+            .to_string()
+            .contains("bad port"));
     }
 }

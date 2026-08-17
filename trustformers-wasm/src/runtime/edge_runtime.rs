@@ -72,6 +72,26 @@ impl EdgeCapabilities {
     }
 }
 
+#[cfg(test)]
+impl EdgeCapabilities {
+    /// Test-only constructor bypassing runtime detection.
+    ///
+    /// `detect_runtime_capabilities`/`detect_runtime_type` call into
+    /// `js_sys::global()`, which requires a real JS engine and panics on
+    /// non-wasm32 native targets, so tests elsewhere in the crate that need
+    /// a real (not detected) `EdgeCapabilities` value use this instead.
+    pub(crate) fn for_test() -> Self {
+        EdgeCapabilities {
+            runtime_type: EdgeRuntime::Generic,
+            memory_limit_mb: 256,
+            cpu_time_limit_ms: 60_000,
+            supports_streaming: true,
+            supports_webgpu: false,
+            cold_start_optimization: false,
+        }
+    }
+}
+
 /// Edge runtime detector and optimizer
 #[wasm_bindgen]
 pub struct EdgeRuntimeDetector {

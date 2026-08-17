@@ -89,7 +89,7 @@ impl PerformanceDatabase {
     /// Values at or below zero are rejected: they would make the modelled fused
     /// cost negative or infinite.
     pub fn set_cache_efficiency_gain(&mut self, gain: f64) -> crate::errors::Result<()> {
-        if !(gain > 0.0) || !gain.is_finite() {
+        if gain <= 0.0 || !gain.is_finite() {
             return Err(crate::errors::TrustformersError::invalid_input(format!(
                 "cache efficiency gain must be a positive finite factor, got {gain}"
             )));

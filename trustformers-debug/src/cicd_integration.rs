@@ -38,6 +38,44 @@ pub enum NotificationError {
     Transport(String),
 }
 
+/// POST a JSON payload to `url` with optional extra headers, real HTTP
+/// delivery. Only compiled when `http-integrations` is enabled (see
+/// `Cargo.toml`) -- this pulls in `reqwest` (and, transitively, a TLS stack
+/// that is not pure Rust), so it is intentionally kept out of the default
+/// build.
+#[cfg(feature = "http-integrations")]
+async fn post_json(
+    url: &str,
+    payload: &serde_json::Value,
+    extra_headers: &HashMap<String, String>,
+) -> Result<()> {
+    let client = reqwest::Client::new();
+    let mut request = client.post(url).json(payload);
+    for (key, value) in extra_headers {
+        request = request.header(key, value);
+    }
+
+    let response = request.send().await.map_err(|e| NotificationError::Transport(e.to_string()))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(NotificationError::Transport(format!("HTTP {status}: {body}")).into());
+    }
+    Ok(())
+}
+
+/// Without `http-integrations`, no HTTP client exists in this build: fail
+/// honestly instead of pretending to deliver.
+#[cfg(not(feature = "http-integrations"))]
+async fn post_json(
+    _url: &str,
+    _payload: &serde_json::Value,
+    _extra_headers: &HashMap<String, String>,
+) -> Result<()> {
+    Err(NotificationError::HttpFeatureDisabled.into())
+}
+
 /// CI/CD platform types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CICDPlatform {
@@ -341,15 +379,14 @@ impl CICDIntegration {
         let mut debug_session = DebugSession::new(debug_config);
         debug_session.start().await?;
 
-        // Run analysis (this would be integrated with actual model training/testing)
-        // For now, we'll simulate the process
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Generate debug report
+        // Generate debug report -- this performs the real analysis (tensor
+        // inspection, gradient debugging, memory profiling, ...); there is
+        // nothing left to simulate here.
         let debug_report = debug_session.stop().await?;
+        let analysis_duration_ms = (Utc::now() - start_time).num_milliseconds().max(0) as u64;
 
         // Extract metrics for quality gates and regression detection
-        let metrics = self.extract_metrics_from_report(&debug_report);
+        let metrics = self.extract_metrics_from_report(&debug_report, analysis_duration_ms);
 
         // Run quality gates
         let quality_gate_results = self.evaluate_quality_gates(&metrics);
@@ -408,8 +445,16 @@ impl CICDIntegration {
         Ok(result)
     }
 
-    /// Extract metrics from debug report
-    fn extract_metrics_from_report(&self, report: &DebugReport) -> HashMap<String, f64> {
+    /// Extract metrics from debug report.
+    ///
+    /// `analysis_duration_ms` is the real wall-clock time
+    /// [`Self::run_debug_analysis`] spent running the debug session, passed
+    /// in explicitly since this function has no other way to measure it.
+    fn extract_metrics_from_report(
+        &self,
+        report: &DebugReport,
+        analysis_duration_ms: u64,
+    ) -> HashMap<String, f64> {
         let mut metrics = HashMap::new();
 
         // Extract tensor metrics
@@ -452,12 +497,13 @@ impl CICDIntegration {
             );
         }
 
-        // Extract performance metrics
-        metrics.insert(
-            "total_parameters".to_string(),
-            self.count_model_parameters() as f64,
-        );
-        metrics.insert("training_time_ms".to_string(), 1000.0); // Placeholder
+        // Extract performance metrics. `total_parameters` is only inserted
+        // when a real count is available (see `count_model_parameters`) --
+        // never a fabricated constant.
+        if let Some(total_parameters) = self.count_model_parameters(report) {
+            metrics.insert("total_parameters".to_string(), total_parameters as f64);
+        }
+        metrics.insert("training_time_ms".to_string(), analysis_duration_ms as f64);
 
         metrics
     }
@@ -680,8 +726,8 @@ impl CICDIntegration {
                 } => {
                     self.send_slack_notification(webhook_url, slack_channel, result).await?;
                 },
-                NotificationChannel::Email { recipients } => {
-                    self.send_email_notification(recipients, result).await?;
+                NotificationChannel::Email { recipients, api } => {
+                    self.send_email_notification(recipients, api.as_ref(), result).await?;
                 },
                 NotificationChannel::Teams { webhook_url } => {
                     self.send_teams_notification(webhook_url, result).await?;
@@ -693,8 +739,7 @@ impl CICDIntegration {
                     self.send_webhook_notification(url, headers, result).await?;
                 },
                 NotificationChannel::Custom(_) => {
-                    // Custom notification implementation would go here
-                    tracing::info!("Custom notification not implemented");
+                    return Err(NotificationError::NotImplemented("Custom").into());
                 },
             }
         }
@@ -731,7 +776,15 @@ impl CICDIntegration {
         Ok(())
     }
 
-    /// Helper methods for notification and report generation
+    /// Helper methods for notification and report generation.
+    ///
+    /// Every sender builds its real payload unconditionally (so callers,
+    /// tests and mocks all see the exact JSON that would be sent), then
+    /// delivers it via [`post_json`] when the `http-integrations` feature is
+    /// enabled. Without that feature no HTTP client exists in this build,
+    /// so delivery honestly fails with
+    /// [`NotificationError::HttpFeatureDisabled`] rather than pretending to
+    /// have sent anything.
     async fn send_slack_notification(
         &self,
         webhook_url: &str,
@@ -769,22 +822,26 @@ impl CICDIntegration {
             }]
         });
 
-        tracing::info!("Sending Slack notification to {}: {}", webhook_url, message);
-        // In a real implementation, this would make an HTTP POST request
-
+        post_json(webhook_url, &message, &HashMap::new()).await?;
+        tracing::info!(webhook_url = %webhook_url, "Slack notification delivered");
         Ok(())
     }
 
     async fn send_email_notification(
         &self,
         recipients: &[String],
+        api: Option<&EmailApiConfig>,
         result: &PipelineResult,
     ) -> Result<()> {
+        let Some(api) = api else {
+            return Err(NotificationError::EmailNotConfigured.into());
+        };
+
         let subject = format!(
             "Debug Analysis Report - {} ({})",
             result.commit_hash, result.status
         );
-        let _body = format!(
+        let body = format!(
             "Debug analysis completed for commit {} on branch {}.\n\nStatus: {:?}\nDuration: {}ms\n\nQuality Gates: {} passed, {} failed\nRegressions: {} detected",
             result.commit_hash,
             result.branch,
@@ -795,33 +852,92 @@ impl CICDIntegration {
             result.regression_results.len()
         );
 
-        tracing::info!(
-            "Sending email notification to {:?}: {}",
-            recipients,
-            subject
-        );
-        // In a real implementation, this would send emails
+        let payload = serde_json::json!({
+            "to": recipients,
+            "subject": subject,
+            "body": body,
+        });
 
+        post_json(&api.endpoint, &payload, &api.headers).await?;
+        tracing::info!(recipients = ?recipients, endpoint = %api.endpoint, "Email notification delivered");
         Ok(())
     }
 
     async fn send_teams_notification(
         &self,
         webhook_url: &str,
-        _result: &PipelineResult,
+        result: &PipelineResult,
     ) -> Result<()> {
-        tracing::info!("Sending Teams notification to {}", webhook_url);
-        // Teams notification implementation would go here
+        // Office 365 Connector "MessageCard" format.
+        let theme_color = match result.status {
+            PipelineStatus::Success => "28A745",
+            PipelineStatus::Warning => "FFC107",
+            PipelineStatus::Failed => "DC3545",
+            _ => "6C757D",
+        };
+
+        let message = serde_json::json!({
+            "@type": "MessageCard",
+            "@context": "http://schema.org/extensions",
+            "themeColor": theme_color,
+            "summary": format!("Debug Analysis - {}", result.commit_hash),
+            "sections": [{
+                "activityTitle": format!("Debug Analysis - {}", result.commit_hash),
+                "facts": [
+                    {"name": "Branch", "value": result.branch},
+                    {"name": "Status", "value": format!("{:?}", result.status)},
+                    {"name": "Duration", "value": format!("{}ms", result.duration_ms)},
+                    {"name": "Quality Gates", "value": format!("{} passed, {} failed",
+                        result.quality_gate_results.iter().filter(|r| matches!(r.status, QualityGateStatus::Passed)).count(),
+                        result.quality_gate_results.iter().filter(|r| matches!(r.status, QualityGateStatus::Failed)).count())},
+                    {"name": "Regressions", "value": format!("{} detected", result.regression_results.len())},
+                ],
+            }],
+        });
+
+        post_json(webhook_url, &message, &HashMap::new()).await?;
+        tracing::info!(webhook_url = %webhook_url, "Teams notification delivered");
         Ok(())
     }
 
     async fn send_discord_notification(
         &self,
         webhook_url: &str,
-        _result: &PipelineResult,
+        result: &PipelineResult,
     ) -> Result<()> {
-        tracing::info!("Sending Discord notification to {}", webhook_url);
-        // Discord notification implementation would go here
+        // Discord webhook "embeds" format.
+        let color = match result.status {
+            PipelineStatus::Success => 0x28_A7_45,
+            PipelineStatus::Warning => 0xFF_C1_07,
+            PipelineStatus::Failed => 0xDC_35_45,
+            _ => 0x6C_75_7D,
+        };
+
+        let message = serde_json::json!({
+            "embeds": [{
+                "title": format!("Debug Analysis - {}", result.commit_hash),
+                "description": format!("Branch: {} | Status: {:?} | Duration: {}ms",
+                    result.branch, result.status, result.duration_ms),
+                "color": color,
+                "fields": [
+                    {
+                        "name": "Quality Gates",
+                        "value": format!("{} passed, {} failed",
+                            result.quality_gate_results.iter().filter(|r| matches!(r.status, QualityGateStatus::Passed)).count(),
+                            result.quality_gate_results.iter().filter(|r| matches!(r.status, QualityGateStatus::Failed)).count()),
+                        "inline": true
+                    },
+                    {
+                        "name": "Regressions",
+                        "value": format!("{} detected", result.regression_results.len()),
+                        "inline": true
+                    }
+                ]
+            }]
+        });
+
+        post_json(webhook_url, &message, &HashMap::new()).await?;
+        tracing::info!(webhook_url = %webhook_url, "Discord notification delivered");
         Ok(())
     }
 
@@ -829,14 +945,11 @@ impl CICDIntegration {
         &self,
         url: &str,
         headers: &HashMap<String, String>,
-        _result: &PipelineResult,
+        result: &PipelineResult,
     ) -> Result<()> {
-        tracing::info!(
-            "Sending webhook notification to {} with headers: {:?}",
-            url,
-            headers
-        );
-        // Generic webhook notification implementation would go here
+        let payload = serde_json::to_value(result)?;
+        post_json(url, &payload, headers).await?;
+        tracing::info!(url = %url, "Generic webhook notification delivered");
         Ok(())
     }
 
@@ -1045,9 +1158,14 @@ impl CICDIntegration {
         }
     }
 
-    fn count_model_parameters(&self) -> u64 {
-        // Placeholder implementation
-        1000000
+    /// Real parameter count, if one is reachable from the debug report.
+    /// `DebugReport` does not currently carry model architecture metadata
+    /// (see `ModelDiagnosticsReport`/`ArchitecturalAnalysis`), so this
+    /// honestly returns `None` rather than fabricating a number; callers
+    /// must simply omit the `total_parameters` metric until a real source
+    /// is wired through the debug session.
+    fn count_model_parameters(&self, _report: &DebugReport) -> Option<u64> {
+        None
     }
 
     /// Get pipeline history
@@ -1089,44 +1207,344 @@ impl Default for CICDConfig {
     }
 }
 
-// Additional trait implementations for the report types
-impl DebugReport {
-    pub fn total_nan_count(&self) -> u32 {
-        // Placeholder implementation
-        0
+// Additional accessor implementations used when extracting CI/CD metrics
+// from a debug report. `DebugReport` itself intentionally has no
+// `total_nan_count`/`total_inf_count` here: those real, data-derived
+// methods already live on `TensorInspectionReport`
+// (`report.tensor_report.total_nan_count()`), which is what
+// `extract_metrics_from_report` actually calls.
+
+impl crate::GradientDebugReport {
+    /// Real mean of the latest per-layer gradient norms. `0.0` when no layer
+    /// status has been recorded yet (rather than a fabricated `1.0`).
+    pub fn average_gradient_norm(&self) -> f64 {
+        let norms: Vec<f64> =
+            self.status.layer_statuses.values().map(|s| s.latest_gradient_norm).collect();
+        mean_gradient_norm(&norms)
     }
 
-    pub fn total_inf_count(&self) -> u32 {
-        // Placeholder implementation
-        0
+    /// Real layer names whose latest gradient norm is vanishing, using the
+    /// same `1e-8` threshold as [`Self::has_vanishing_gradients`].
+    pub fn vanishing_gradient_layers(&self) -> Vec<String> {
+        let norms: HashMap<String, f64> = self
+            .status
+            .layer_statuses
+            .iter()
+            .map(|(name, status)| (name.clone(), status.latest_gradient_norm))
+            .collect();
+        layers_matching(&norms, |norm| norm < 1e-8)
+    }
+
+    /// Real layer names whose latest gradient norm is exploding, using the
+    /// same `100.0` threshold as [`Self::has_exploding_gradients`].
+    pub fn exploding_gradient_layers(&self) -> Vec<String> {
+        let norms: HashMap<String, f64> = self
+            .status
+            .layer_statuses
+            .iter()
+            .map(|(name, status)| (name.clone(), status.latest_gradient_norm))
+            .collect();
+        layers_matching(&norms, |norm| norm > 100.0)
     }
 }
 
-impl crate::GradientDebugReport {
-    pub fn average_gradient_norm(&self) -> f64 {
-        // Placeholder implementation
-        1.0
+/// Real mean of a set of gradient norms. `0.0` when empty (rather than a
+/// fabricated default).
+fn mean_gradient_norm(norms: &[f64]) -> f64 {
+    if norms.is_empty() {
+        0.0
+    } else {
+        norms.iter().sum::<f64>() / norms.len() as f64
     }
+}
 
-    pub fn vanishing_gradient_layers(&self) -> Vec<String> {
-        // Placeholder implementation
-        Vec::new()
-    }
-
-    pub fn exploding_gradient_layers(&self) -> Vec<String> {
-        // Placeholder implementation
-        Vec::new()
-    }
+/// Names of layers whose norm satisfies `predicate` -- shared by both
+/// vanishing- and exploding-gradient detection so they stay in lock-step.
+fn layers_matching(norms: &HashMap<String, f64>, predicate: impl Fn(f64) -> bool) -> Vec<String> {
+    norms
+        .iter()
+        .filter(|(_, &norm)| predicate(norm))
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
 impl crate::MemoryProfilingReport {
+    /// Real peak memory usage in bytes, derived from the already-real
+    /// `peak_memory_mb` field this report is built from.
     pub fn peak_memory_usage(&self) -> f64 {
-        // Placeholder implementation
-        1024.0 * 1024.0 * 100.0 // 100 MB
+        self.peak_memory_mb * 1024.0 * 1024.0
     }
 
+    /// Real memory-efficiency proxy: `1 - fragmentation_ratio`, both drawn
+    /// from this report's already-real fragmentation analysis.
     pub fn memory_efficiency(&self) -> f64 {
-        // Placeholder implementation
-        0.85 // 85% efficiency
+        (1.0 - self.fragmentation_analysis.fragmentation_ratio).clamp(0.0, 1.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_result(status: PipelineStatus) -> PipelineResult {
+        PipelineResult {
+            run_id: Uuid::new_v4(),
+            timestamp: Utc::now(),
+            commit_hash: "abc123".to_string(),
+            branch: "main".to_string(),
+            stage: PipelineStage::Debug,
+            status,
+            debug_report: None,
+            quality_gate_results: Vec::new(),
+            regression_results: Vec::new(),
+            performance_data: None,
+            artifacts: Vec::new(),
+            duration_ms: 42,
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Real per-report accessor methods (no longer hardcoded placeholders)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_mean_gradient_norm_is_real_not_fixed_one() {
+        // The old implementation always returned 1.0 regardless of input.
+        assert_eq!(mean_gradient_norm(&[]), 0.0);
+        assert_eq!(mean_gradient_norm(&[2.0, 4.0, 6.0]), 4.0);
+        assert_ne!(mean_gradient_norm(&[2.0, 4.0, 6.0]), 1.0);
+    }
+
+    #[test]
+    fn test_layers_matching_finds_real_vanishing_and_exploding_layers() {
+        let mut norms = HashMap::new();
+        norms.insert("healthy".to_string(), 0.5);
+        norms.insert("vanished".to_string(), 1e-10);
+        norms.insert("exploded".to_string(), 500.0);
+
+        // The old implementation always returned an empty Vec regardless of
+        // input, for both vanishing and exploding layers.
+        let vanishing = layers_matching(&norms, |n| n < 1e-8);
+        assert_eq!(vanishing, vec!["vanished".to_string()]);
+
+        let exploding = layers_matching(&norms, |n| n > 100.0);
+        assert_eq!(exploding, vec!["exploded".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_memory_report_accessors_reflect_real_profiler_fields() {
+        use crate::memory_profiler::{AllocationType, MemoryProfiler, MemoryProfilingConfig};
+
+        let mut profiler = MemoryProfiler::new(MemoryProfilingConfig::default());
+        profiler.start().await.expect("profiler should start");
+        let id = profiler
+            .record_allocation(4096, AllocationType::Tensor, vec!["test".to_string()])
+            .expect("allocation should record");
+        profiler.record_deallocation(id).expect("deallocation should record");
+        let report = profiler.stop().await.expect("profiler should stop");
+
+        // The old implementation ignored the report entirely and always
+        // returned a hardcoded 100MB / 0.85, regardless of its real fields.
+        assert_eq!(
+            report.peak_memory_usage(),
+            report.peak_memory_mb * 1024.0 * 1024.0
+        );
+        assert_eq!(
+            report.memory_efficiency(),
+            (1.0 - report.fragmentation_analysis.fragmentation_ratio).clamp(0.0, 1.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_count_model_parameters_is_honest_absence_not_a_million() {
+        let integration = CICDIntegration::new(CICDConfig::default());
+        let mut session = DebugSession::new(DebugConfig::default());
+        session.start().await.expect("session should start");
+        let report = session.stop().await.expect("session should stop");
+
+        // The old implementation always returned 1_000_000 regardless of
+        // whether any model was ever involved.
+        assert_eq!(integration.count_model_parameters(&report), None);
+    }
+
+    // ------------------------------------------------------------------
+    // Notification delivery: real payload shape via a local mock server,
+    // and an honest, structured failure when the feature is disabled.
+    // ------------------------------------------------------------------
+
+    #[cfg(feature = "http-integrations")]
+    mod http_delivery {
+        use super::*;
+        use axum::{extract::State, routing::post, Json, Router};
+        use std::sync::Arc;
+        use tokio::net::TcpListener;
+        use tokio::sync::Mutex as AsyncMutex;
+
+        #[derive(Default, Clone)]
+        struct Captured {
+            body: Option<serde_json::Value>,
+        }
+
+        async fn capture(
+            State(state): State<Arc<AsyncMutex<Captured>>>,
+            Json(body): Json<serde_json::Value>,
+        ) -> &'static str {
+            state.lock().await.body = Some(body);
+            "ok"
+        }
+
+        /// Start a real local HTTP server (127.0.0.1, OS-assigned port; never
+        /// touches the network) that captures whatever JSON body is POSTed
+        /// to `/hook`.
+        async fn start_mock_server() -> (String, Arc<AsyncMutex<Captured>>) {
+            let state = Arc::new(AsyncMutex::new(Captured::default()));
+            let app = Router::new().route("/hook", post(capture)).with_state(state.clone());
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock server");
+            let addr = listener.local_addr().expect("mock server local addr");
+            tokio::spawn(async move {
+                let _ = axum::serve(listener, app).await;
+            });
+            (format!("http://{addr}/hook"), state)
+        }
+
+        #[tokio::test]
+        async fn test_slack_notification_sends_real_payload() {
+            let (url, state) = start_mock_server().await;
+            let integration = CICDIntegration::new(CICDConfig::default());
+            let result = sample_result(PipelineStatus::Success);
+
+            integration
+                .send_slack_notification(&url, "#ci-alerts", &result)
+                .await
+                .expect("mock server should accept the request");
+
+            let captured = state.lock().await.body.clone().expect("payload should be captured");
+            assert_eq!(captured["channel"], "#ci-alerts");
+            assert_eq!(captured["attachments"][0]["color"], "good");
+            assert!(captured["attachments"][0]["title"]
+                .as_str()
+                .expect("title should be a string")
+                .contains(&result.commit_hash));
+        }
+
+        #[tokio::test]
+        async fn test_teams_notification_sends_real_payload() {
+            let (url, state) = start_mock_server().await;
+            let integration = CICDIntegration::new(CICDConfig::default());
+            let result = sample_result(PipelineStatus::Failed);
+
+            integration
+                .send_teams_notification(&url, &result)
+                .await
+                .expect("mock server should accept the request");
+
+            let captured = state.lock().await.body.clone().expect("payload should be captured");
+            assert_eq!(captured["@type"], "MessageCard");
+            assert_eq!(captured["themeColor"], "DC3545");
+        }
+
+        #[tokio::test]
+        async fn test_discord_notification_sends_real_payload() {
+            let (url, state) = start_mock_server().await;
+            let integration = CICDIntegration::new(CICDConfig::default());
+            let result = sample_result(PipelineStatus::Warning);
+
+            integration
+                .send_discord_notification(&url, &result)
+                .await
+                .expect("mock server should accept the request");
+
+            let captured = state.lock().await.body.clone().expect("payload should be captured");
+            assert!(captured["embeds"][0]["title"]
+                .as_str()
+                .expect("title should be a string")
+                .contains(&result.commit_hash));
+        }
+
+        #[tokio::test]
+        async fn test_generic_webhook_sends_real_pipeline_result() {
+            let (url, state) = start_mock_server().await;
+            let integration = CICDIntegration::new(CICDConfig::default());
+            let result = sample_result(PipelineStatus::Success);
+
+            integration
+                .send_webhook_notification(&url, &HashMap::new(), &result)
+                .await
+                .expect("mock server should accept the request");
+
+            let captured = state.lock().await.body.clone().expect("payload should be captured");
+            assert_eq!(captured["commit_hash"], result.commit_hash);
+            assert_eq!(captured["duration_ms"], result.duration_ms);
+        }
+
+        #[tokio::test]
+        async fn test_email_notification_sends_real_payload_when_configured() {
+            let (url, state) = start_mock_server().await;
+            let integration = CICDIntegration::new(CICDConfig::default());
+            let result = sample_result(PipelineStatus::Success);
+            let api = EmailApiConfig {
+                endpoint: url,
+                headers: HashMap::new(),
+            };
+
+            integration
+                .send_email_notification(&["dev@example.com".to_string()], Some(&api), &result)
+                .await
+                .expect("mock server should accept the request");
+
+            let captured = state.lock().await.body.clone().expect("payload should be captured");
+            assert_eq!(captured["to"][0], "dev@example.com");
+            assert!(captured["subject"]
+                .as_str()
+                .expect("subject should be a string")
+                .contains(&result.commit_hash));
+        }
+    }
+
+    #[cfg(not(feature = "http-integrations"))]
+    mod http_disabled {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_slack_notification_fails_honestly_without_feature() {
+            let integration = CICDIntegration::new(CICDConfig::default());
+            let result = sample_result(PipelineStatus::Success);
+
+            let err = integration
+                .send_slack_notification("http://127.0.0.1:1/hook", "#ci", &result)
+                .await
+                .expect_err("must not silently pretend to have sent anything");
+            assert!(err.to_string().contains("http-integrations"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_email_notification_is_honestly_not_configured_without_api() {
+        let integration = CICDIntegration::new(CICDConfig::default());
+        let result = sample_result(PipelineStatus::Success);
+
+        let err = integration
+            .send_email_notification(&["dev@example.com".to_string()], None, &result)
+            .await
+            .expect_err("must not silently pretend to have sent an email");
+        assert!(err.to_string().contains("endpoint configured"));
+    }
+
+    #[tokio::test]
+    async fn test_custom_notification_channel_errors_instead_of_silently_succeeding() {
+        let mut config = CICDConfig::default();
+        config.enable_alert_systems = true;
+        config.notification_channels = vec![NotificationChannel::Custom("pagerduty".to_string())];
+        let integration = CICDIntegration::new(config);
+        let result = sample_result(PipelineStatus::Success);
+
+        // The old implementation logged "not implemented" and then returned
+        // `Ok(())` from the whole dispatch loop -- a caller had no way to
+        // tell the notification never went anywhere.
+        let err = integration
+            .send_notifications(&result)
+            .await
+            .expect_err("an unimplemented channel must not report success");
+        assert!(err.to_string().contains("no delivery implementation"));
     }
 }

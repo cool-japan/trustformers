@@ -1,4 +1,8 @@
 use crate::deberta::config::DebertaConfig;
+use crate::weight_loading::binding::{
+    bind_embedding, bind_linear, take_norm_bias, take_norm_weight,
+};
+use crate::weight_loading::checkpoint::{Checkpoint, LoadReport, UnusedTensors};
 use scirs2_core::ndarray::{s, Array1, Array2, Array3, Array4, Axis, Ix2, Ix3}; // SciRS2 Integration Policy
 use trustformers_core::device::Device;
 use trustformers_core::errors::{Result, TrustformersError};
@@ -7,7 +11,7 @@ use trustformers_core::layers::{
 };
 use trustformers_core::ops::activations::gelu;
 use trustformers_core::tensor::Tensor;
-use trustformers_core::traits::Layer;
+use trustformers_core::traits::{Layer, Model, TokenizedInput};
 
 #[derive(Debug, Clone)]
 pub struct DebertaEmbeddings {
@@ -845,6 +849,254 @@ impl DebertaModel {
         let encoder_output = self.encoder.forward(hidden_states, attention_mask)?;
 
         Ok(encoder_output)
+    }
+}
+
+impl Model for DebertaModel {
+    type Config = DebertaConfig;
+    type Input = TokenizedInput;
+    type Output = Tensor;
+
+    fn forward(&self, input: Self::Input) -> Result<Self::Output> {
+        let ids = Array1::from_vec(input.input_ids);
+        let hidden = DebertaModel::forward(self, &ids, None)?;
+        Ok(Tensor::F32(hidden.into_dyn()))
+    }
+
+    /// Load a HuggingFace DeBERTa checkpoint (safetensors or `torch.save`).
+    ///
+    /// See [`DebertaModel::load_from_checkpoint`] for the name map.
+    fn load_pretrained(&mut self, reader: &mut dyn std::io::Read) -> Result<()> {
+        self.load_pretrained_report(reader).map(|_| ())
+    }
+
+    fn get_config(&self) -> &Self::Config {
+        &self.config
+    }
+
+    fn num_parameters(&self) -> usize {
+        let hidden = self.config.hidden_size;
+        let embeddings = self.config.vocab_size * hidden + 2 * hidden;
+        let per_layer = 4 * hidden * hidden
+            + 4 * hidden
+            + 2 * hidden * self.config.intermediate_size
+            + hidden
+            + self.config.intermediate_size
+            + 4 * hidden;
+        let relative = self.encoder.layers.first().map_or(0, |layer| {
+            layer.attention.self_attention.rel_embeddings.len()
+        });
+        embeddings + self.config.num_hidden_layers * per_layer + relative
+    }
+}
+
+impl DebertaModel {
+    /// Checkpoint namespaces a DeBERTa encoder legitimately does not consume.
+    pub(crate) const ALLOWED_UNUSED_PREFIXES: &'static [&'static str] = &[
+        "cls.",
+        "classifier.",
+        "qa_outputs.",
+        "pooler.",
+        "lm_predictions.",
+    ];
+
+    /// Non-parameter buffers HuggingFace stores alongside DeBERTa's weights.
+    pub(crate) const ALLOWED_UNUSED_SUFFIXES: &'static [&'static str] =
+        &["embeddings.position_ids", "embeddings.token_type_ids"];
+
+    /// Load pretrained weights and report exactly what was bound.
+    ///
+    /// # Errors
+    ///
+    /// See [`DebertaModel::load_from_checkpoint`].
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn std::io::Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        self.load_from_checkpoint(&checkpoint)
+    }
+
+    /// Bind an already-parsed checkpoint into this model.
+    ///
+    /// DeBERTa's tensor layout is BERT's with two additions that matter here:
+    /// the **relative-position embedding table**
+    /// (`encoder.rel_embeddings.weight`), which the disentangled attention
+    /// projects to form its c2p/p2c terms, and — when `share_att_key` is off —
+    /// separate `pos_key_proj` / `pos_query_proj` projections. With
+    /// `share_att_key` on (the default) those reuse the content projections and
+    /// the checkpoint carries no separate tensors for them, which is a genuine
+    /// weight sharing rather than a gap.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint does not look like a DeBERTa checkpoint, when
+    /// any tensor has the wrong shape, when a parameter is missing, or when the
+    /// checkpoint carries weights this architecture does not recognise.
+    pub fn load_from_checkpoint(&mut self, checkpoint: &Checkpoint) -> Result<LoadReport> {
+        let prefix =
+            checkpoint.detect_prefix(&["", "deberta."], "embeddings.word_embeddings.weight")?;
+        let mut binder = checkpoint.binder(&prefix);
+
+        let config = self.config.clone();
+        let hidden = config.hidden_size;
+        let intermediate = config.intermediate_size;
+
+        bind_embedding(
+            &mut binder,
+            "embeddings.word_embeddings",
+            config.vocab_size,
+            hidden,
+            &mut self.embeddings.word_embeddings,
+        )?;
+        if let Some(w) = take_norm_weight(&mut binder, "embeddings.LayerNorm", hidden)? {
+            self.embeddings.layer_norm.set_weight(w)?;
+        }
+        if let Some(b) = take_norm_bias(&mut binder, "embeddings.LayerNorm", hidden)? {
+            self.embeddings.layer_norm.set_bias(b)?;
+        }
+
+        // The relative-position table is shared by every layer in a HuggingFace
+        // DeBERTa export, so it is bound once and copied into each block.
+        let rel_name = binder.qualified("encoder.rel_embeddings.weight");
+        let shared_rel = match checkpoint.get(&rel_name) {
+            Some(tensor) => {
+                binder.mark_consumed(&rel_name);
+                let expected = self
+                    .encoder
+                    .layers
+                    .first()
+                    .map(|layer| layer.attention.self_attention.rel_embeddings.dim());
+                let values = tensor.data().map_err(|e| {
+                    TrustformersError::tensor_op_error(
+                        "failed to read the relative-position table",
+                        &e.to_string(),
+                    )
+                })?;
+                match (expected, tensor.shape().as_slice()) {
+                    (Some((rows, cols)), [t_rows, t_cols])
+                        if rows == *t_rows && cols == *t_cols =>
+                    {
+                        Some(
+                            Array2::from_shape_vec((rows, cols), values)
+                                .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
+                        )
+                    },
+                    (Some(dim), other) => {
+                        return Err(TrustformersError::shape_error(format!(
+                            "relative-position table has shape {other:?} but this model expects \
+                             {dim:?}"
+                        )))
+                    },
+                    (None, _) => None,
+                }
+            },
+            None => None,
+        };
+
+        for (index, layer) in self.encoder.layers.iter_mut().enumerate() {
+            let base = format!("encoder.layer.{index}");
+
+            bind_linear(
+                &mut binder,
+                &format!("{base}.attention.self.query_proj"),
+                hidden,
+                hidden,
+                true,
+                &mut layer.attention.self_attention.query_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{base}.attention.self.key_proj"),
+                hidden,
+                hidden,
+                true,
+                &mut layer.attention.self_attention.key_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{base}.attention.self.value_proj"),
+                hidden,
+                hidden,
+                true,
+                &mut layer.attention.self_attention.value_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{base}.attention.output.dense"),
+                hidden,
+                hidden,
+                true,
+                &mut layer.attention.output.dense,
+            )?;
+            let attn_norm = format!("{base}.attention.output.LayerNorm");
+            if let Some(w) = take_norm_weight(&mut binder, &attn_norm, hidden)? {
+                layer.attention.output.layer_norm.set_weight(w)?;
+            }
+            if let Some(b) = take_norm_bias(&mut binder, &attn_norm, hidden)? {
+                layer.attention.output.layer_norm.set_bias(b)?;
+            }
+
+            // Feed-forward: `intermediate.dense` then `output.dense`.
+            if let Some(w) = binder.take_shaped(
+                &format!("{base}.intermediate.dense.weight"),
+                &[intermediate, hidden],
+            )? {
+                layer.feed_forward.set_dense_weight(w)?;
+            }
+            if let Some(b) =
+                binder.take_shaped(&format!("{base}.intermediate.dense.bias"), &[intermediate])?
+            {
+                layer.feed_forward.set_dense_bias(b)?;
+            }
+            if let Some(w) = binder.take_shaped(
+                &format!("{base}.output.dense.weight"),
+                &[hidden, intermediate],
+            )? {
+                layer.feed_forward.set_output_weight(w)?;
+            }
+            if let Some(b) = binder.take_shaped(&format!("{base}.output.dense.bias"), &[hidden])? {
+                layer.feed_forward.set_output_bias(b)?;
+            }
+            let out_norm = format!("{base}.output.LayerNorm");
+            if let Some(w) = take_norm_weight(&mut binder, &out_norm, hidden)? {
+                layer.output_layer_norm.set_weight(w)?;
+            }
+            if let Some(b) = take_norm_bias(&mut binder, &out_norm, hidden)? {
+                layer.output_layer_norm.set_bias(b)?;
+            }
+
+            // Optional per-layer position projections (only when the key is not
+            // shared with the content projection).
+            if !config.share_att_key {
+                if let Some(projection) = layer.attention.self_attention.pos_key_proj.as_mut() {
+                    bind_linear(
+                        &mut binder,
+                        &format!("{base}.attention.self.pos_key_proj"),
+                        hidden,
+                        hidden,
+                        true,
+                        projection,
+                    )?;
+                }
+                if let Some(projection) = layer.attention.self_attention.pos_query_proj.as_mut() {
+                    bind_linear(
+                        &mut binder,
+                        &format!("{base}.attention.self.pos_query_proj"),
+                        hidden,
+                        hidden,
+                        true,
+                        projection,
+                    )?;
+                }
+            }
+
+            if let Some(table) = shared_rel.as_ref() {
+                layer.attention.self_attention.set_rel_embeddings(table.clone())?;
+            }
+        }
+
+        binder.finish(UnusedTensors::new(
+            Self::ALLOWED_UNUSED_PREFIXES,
+            Self::ALLOWED_UNUSED_SUFFIXES,
+        ))
     }
 }
 

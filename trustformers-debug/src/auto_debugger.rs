@@ -1318,6 +1318,10 @@ pub struct DataStrategy {
 }
 
 #[cfg(test)]
+#[path = "auto_debugger_tests.rs"]
+mod auto_debugger_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

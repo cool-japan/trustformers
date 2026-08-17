@@ -91,16 +91,42 @@ pub struct QuantumManager {
     device: QuantumDevice,
     circuit_cache: HashMap<String, QuantumCircuit>,
     optimization_enabled: bool,
+    /// Measurement shots taken per circuit execution.
+    shots: usize,
 }
 
 impl QuantumManager {
+    /// Widest circuit the state-vector simulator will attempt.
+    ///
+    /// 20 qubits is 2^20 complex amplitudes (~16 MiB at f64 pairs); beyond
+    /// that the simulation is refused rather than approximated.
+    pub const MAX_SIMULATED_QUBITS: usize = 20;
+
+    /// Default number of measurement shots.
+    pub const DEFAULT_SHOTS: usize = 1024;
+
     /// Create a new quantum manager
     pub fn new(device: QuantumDevice) -> Self {
         Self {
             device,
             circuit_cache: HashMap::new(),
             optimization_enabled: true,
+            shots: Self::DEFAULT_SHOTS,
         }
+    }
+
+    /// Set the number of measurement shots taken per execution.
+    pub fn set_shots(&mut self, shots: usize) -> Result<()> {
+        if shots == 0 {
+            return Err(anyhow::anyhow!("shot count must be at least 1"));
+        }
+        self.shots = shots;
+        Ok(())
+    }
+
+    /// The number of measurement shots taken per execution.
+    pub fn shots(&self) -> usize {
+        self.shots
     }
 
     /// Create a quantum manager with simulator backend
@@ -539,131 +565,101 @@ impl QuantumManager {
         Ok(optimized)
     }
 
-    /// Simulate circuit execution
+    /// Simulate the circuit with a real state-vector simulator.
+    ///
+    /// Every gate is applied to the state vector through
+    /// [`QuantumOperation::apply`], and the measurement counts are sampled from
+    /// the resulting Born-rule probabilities. This replaces a heuristic that
+    /// counted H/CNOT/rotation gates and synthesised counts with
+    /// `rng.random_range(-0.1..0.1)` fudges — it never applied a unitary and
+    /// its output bore no relation to the circuit's actual state.
+    ///
+    /// State-vector simulation is exponential in qubit count; circuits wider
+    /// than [`Self::MAX_SIMULATED_QUBITS`] are rejected rather than
+    /// approximated.
     fn simulate_circuit(&self, circuit: &QuantumCircuit) -> Result<QuantumMeasurement> {
-        // Placeholder simulation - in practice would use a proper quantum simulator
-        let shots = 1024;
-        let mut counts = HashMap::new();
+        if circuit.num_qubits > Self::MAX_SIMULATED_QUBITS {
+            return Err(anyhow::anyhow!(
+                "state-vector simulation of {} qubits needs {} amplitudes; the limit is {} qubits",
+                circuit.num_qubits,
+                1u64 << circuit.num_qubits.min(63),
+                Self::MAX_SIMULATED_QUBITS
+            ));
+        }
 
-        // Enhanced quantum simulation based on circuit structure
-        let num_bits = circuit.num_qubits;
-        let max_states = 2_usize.pow(num_bits.min(12) as u32); // Increased limit for better simulation
-
-        // Analyze circuit to determine likely measurement outcomes
-        let mut hadamard_count = 0;
-        let mut entangling_count = 0;
-        let mut rotation_count = 0;
-
-        // More sophisticated circuit analysis
+        // Apply every gate to the state vector.
+        let mut state = QuantumState::zero_state(circuit.num_qubits);
         for gate in &circuit.gates {
-            match gate.operation_name().as_str() {
-                "H" | "hadamard" => hadamard_count += 1,
-                "CNOT" | "CX" | "CZ" | "SWAP" => entangling_count += 1,
-                "RX" | "RY" | "RZ" | "U1" | "U2" | "U3" => rotation_count += 1,
-                _ => {},
-            }
+            state = gate.apply(&state)?;
         }
 
-        // Generate more realistic probability distribution
-        use std::collections::HashMap;
+        // Born rule: P(i) = |amplitude_i|^2.
+        let mut probabilities_by_index: Vec<f64> =
+            (0..state.amplitudes.len()).map(|index| state.probability(index)).collect();
+
+        let total: f64 = probabilities_by_index.iter().sum();
+        if total <= 0.0 || !total.is_finite() {
+            return Err(anyhow::anyhow!(
+                "circuit produced a zero-norm state; the gate set is not unitary"
+            ));
+        }
+        // Renormalise against accumulated floating-point drift.
+        for probability in &mut probabilities_by_index {
+            *probability /= total;
+        }
+
+        // Sample `shots` measurements from that distribution.
+        let shots = self.shots;
         let mut rng = thread_rng();
+        let mut counts: HashMap<String, usize> = HashMap::new();
 
-        if hadamard_count > 0 && entangling_count > 0 {
-            // Complex quantum states: superposition + entanglement
-            let num_states_to_sample = max_states.clamp(4, 8);
-            let base_prob = 1.0 / num_states_to_sample as f64;
-
-            for i in 0..num_states_to_sample {
-                let bitstring = format!("{:0width$b}", i, width = num_bits);
-                // Entangled superposition shows correlated patterns
-                let correlation_factor = if i % 3 == 0 { 1.5 } else { 0.7 };
-                let prob_variation = rng.random_range(-0.1..0.1);
-                let final_prob = (base_prob * correlation_factor + prob_variation).max(0.01);
-                let count = (shots as f64 * final_prob) as usize;
-                counts.insert(bitstring, count);
-            }
-        } else if hadamard_count > 0 {
-            // Pure superposition: more uniform distribution
-            let num_states_to_sample =
-                (max_states.min(2_usize.pow(hadamard_count.min(4) as u32))).max(2);
-            let base_prob = 1.0 / num_states_to_sample as f64;
-
-            for i in 0..num_states_to_sample {
-                let bitstring = format!("{:0width$b}", i, width = num_bits);
-                // Add realistic quantum fluctuations
-                let prob_variation = rng.random_range(-0.05..0.05);
-                let final_prob = (base_prob + prob_variation).max(0.005);
-                let count = (shots as f64 * final_prob) as usize;
-                counts.insert(bitstring, count);
-            }
-        } else if entangling_count > 0 {
-            // Entangled states: correlations between qubits
-            let bell_states = ["00", "11", "01", "10"];
-            let mut total_weight = 0.0;
-            for (i, state) in bell_states.iter().enumerate() {
-                if state.len() <= num_bits {
-                    let padded_state = format!("{:0>width$}", state, width = num_bits);
-                    // Weight based on entangling gate count and typical Bell state distribution
-                    let base_weight = if i < 2 { 0.35 } else { 0.15 };
-                    let entanglement_factor = 1.0 + (entangling_count as f64 * 0.1);
-                    let weight = base_weight * entanglement_factor;
-                    total_weight += weight;
-                    let count = (shots as f64 * weight) as usize;
-                    counts.insert(padded_state, count);
+        for _ in 0..shots {
+            let sample: f64 = rng.random_range(0.0..1.0);
+            let mut cumulative = 0.0;
+            let mut chosen = probabilities_by_index.len() - 1;
+            for (index, probability) in probabilities_by_index.iter().enumerate() {
+                cumulative += probability;
+                if sample < cumulative {
+                    chosen = index;
+                    break;
                 }
             }
-            // Normalize if needed
-            if total_weight > 1.0 {
-                for (_, count) in counts.iter_mut() {
-                    *count = (*count as f64 / total_weight) as usize;
-                }
-            }
-        } else if rotation_count > 0 {
-            // Rotational states: phase-dependent distributions
-            let num_rotation_states = (rotation_count.min(num_bits)).max(2);
-            for i in 0..num_rotation_states {
-                let bitstring = format!("{:0width$b}", i, width = num_bits);
-                // Rotation gates create phase-dependent amplitudes
-                let phase_factor =
-                    (i as f64 * std::f64::consts::PI / num_rotation_states as f64).cos().abs();
-                let base_prob = 1.0 / num_rotation_states as f64;
-                let final_prob = base_prob * (0.5 + 0.5 * phase_factor);
-                let count = (shots as f64 * final_prob) as usize;
-                counts.insert(bitstring, count);
-            }
-        } else {
-            // Classical states: concentrated distribution
-            let primary_states = ["0".repeat(num_bits), "1".repeat(num_bits)];
-            for (i, state) in primary_states.iter().enumerate() {
-                let weight = if i == 0 { 0.7 } else { 0.3 }; // Bias toward |0⟩ state
-                let count = (shots as f64 * weight) as usize;
-                counts.insert(state.clone(), count);
-            }
+            let bitstring = format!("{:0width$b}", chosen, width = circuit.num_qubits);
+            *counts.entry(bitstring).or_insert(0) += 1;
         }
 
-        // Calculate probabilities
-        let total_shots: usize = counts.values().sum();
-        let probabilities: HashMap<String, f64> = counts
+        // Report the exact probabilities alongside the sampled counts.
+        let probabilities: HashMap<String, f64> = probabilities_by_index
             .iter()
-            .map(|(state, &count)| (state.clone(), count as f64 / total_shots as f64))
+            .enumerate()
+            .filter(|(_, probability)| **probability > 0.0)
+            .map(|(index, probability)| {
+                (
+                    format!("{:0width$b}", index, width = circuit.num_qubits),
+                    *probability,
+                )
+            })
             .collect();
 
         Ok(QuantumMeasurement {
             counts,
             probabilities,
-            shots: total_shots,
+            shots,
         })
     }
 
-    /// Execute circuit on real quantum device
-    fn execute_on_real_device(&self, circuit: &QuantumCircuit) -> Result<QuantumMeasurement> {
-        // Placeholder for real device execution
-        // In practice, this would interface with quantum cloud services
-        println!(
-            "Executing on real quantum device: {:?}",
+    /// Execute the circuit on real quantum hardware.
+    ///
+    /// Not implemented: no quantum cloud client is linked. This previously
+    /// printed "Executing on real quantum device: <backend>" and then ran the
+    /// local simulator, so the caller was told hardware had run their circuit
+    /// when it had not.
+    fn execute_on_real_device(&self, _circuit: &QuantumCircuit) -> Result<QuantumMeasurement> {
+        Err(anyhow::anyhow!(
+            "execution on the {:?} backend: no quantum cloud client is linked into \
+             trustformers-core. Use the local state-vector simulator instead.",
             self.device.backend
-        );
-        self.simulate_circuit(circuit) // For now, fall back to simulation
+        ))
     }
 
     /// Get device information
@@ -715,6 +711,115 @@ impl Default for NoiseModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test: `simulate_circuit` counted H/CNOT/rotation gates and
+    /// synthesised counts with `rng.random_range(-0.1..0.1)` fudges, never
+    /// applying a unitary. A real simulator must reproduce textbook results.
+    #[test]
+    fn test_simulation_applies_real_unitaries() {
+        use crate::quantum::quantum_ops::{RotationAxis, RotationGate};
+
+        let manager = QuantumManager::simulator(1);
+
+        // RX(pi) takes |0> to |1> (up to global phase), so every shot is "1".
+        let mut circuit = QuantumCircuit::new(1);
+        circuit.gates.push(Box::new(RotationGate {
+            qubit: 0,
+            axis: RotationAxis::X,
+            angle: std::f64::consts::PI,
+        }));
+
+        let measurement = manager.simulate_circuit(&circuit).expect("simulation failed");
+        assert_eq!(measurement.shots, QuantumManager::DEFAULT_SHOTS);
+        assert_eq!(
+            measurement.counts.get("1").copied().unwrap_or(0),
+            QuantumManager::DEFAULT_SHOTS,
+            "RX(pi)|0> = |1>, so every shot must read 1: {:?}",
+            measurement.counts
+        );
+        let probability_one = measurement.probabilities.get("1").copied().unwrap_or(0.0);
+        assert!(
+            (probability_one - 1.0).abs() < 1e-9,
+            "P(|1>) must be 1, got {probability_one}"
+        );
+
+        // The identity circuit leaves |0>, so every shot is "0".
+        let identity = QuantumCircuit::new(1);
+        let measurement = manager.simulate_circuit(&identity).expect("simulation failed");
+        assert_eq!(
+            measurement.counts.get("0").copied().unwrap_or(0),
+            QuantumManager::DEFAULT_SHOTS
+        );
+    }
+
+    /// RX(pi/2) puts the qubit in an equal superposition, so the sampled counts
+    /// must straddle 50/50 — a distribution the old heuristic could not produce
+    /// from the circuit itself.
+    #[test]
+    fn test_simulation_samples_from_the_born_rule() {
+        use crate::quantum::quantum_ops::{RotationAxis, RotationGate};
+
+        let mut manager = QuantumManager::simulator(1);
+        manager.set_shots(4096).expect("positive shot count");
+
+        let mut circuit = QuantumCircuit::new(1);
+        circuit.gates.push(Box::new(RotationGate {
+            qubit: 0,
+            axis: RotationAxis::X,
+            angle: std::f64::consts::FRAC_PI_2,
+        }));
+
+        let measurement = manager.simulate_circuit(&circuit).expect("simulation failed");
+        let zeros = measurement.counts.get("0").copied().unwrap_or(0) as f64;
+        let total = measurement.shots as f64;
+        assert!(
+            (zeros / total - 0.5).abs() < 0.06,
+            "an equal superposition must sample near 50/50, got {}",
+            zeros / total
+        );
+
+        // The reported probabilities are exact, not sampled.
+        let probability_zero = measurement.probabilities.get("0").copied().unwrap_or(0.0);
+        assert!(
+            (probability_zero - 0.5).abs() < 1e-9,
+            "got {probability_zero}"
+        );
+    }
+
+    /// A circuit too wide to simulate is refused, not approximated.
+    #[test]
+    fn test_oversized_circuit_is_refused() {
+        let manager = QuantumManager::simulator(64);
+        let circuit = QuantumCircuit::new(QuantumManager::MAX_SIMULATED_QUBITS + 1);
+        let error = manager
+            .simulate_circuit(&circuit)
+            .expect_err("a 21-qubit state vector must not be attempted");
+        assert!(error.to_string().contains("limit"), "unexpected: {error}");
+    }
+
+    /// Regression test: `execute_on_real_device` printed that it was using real
+    /// hardware and then ran the simulator.
+    #[test]
+    fn test_real_device_execution_is_refused() {
+        let manager = QuantumManager::simulator(2);
+        let circuit = QuantumCircuit::new(2);
+        let error = manager
+            .execute_on_real_device(&circuit)
+            .expect_err("no quantum cloud client is linked");
+        assert!(
+            error.to_string().contains("no quantum cloud client"),
+            "unexpected: {error}"
+        );
+    }
+
+    #[test]
+    fn test_shot_count_must_be_positive() {
+        let mut manager = QuantumManager::simulator(1);
+        assert!(manager.set_shots(0).is_err());
+        assert_eq!(manager.shots(), QuantumManager::DEFAULT_SHOTS);
+        manager.set_shots(10).expect("positive");
+        assert_eq!(manager.shots(), 10);
+    }
 
     #[test]
     fn test_quantum_manager_creation() {

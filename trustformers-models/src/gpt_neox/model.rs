@@ -799,7 +799,7 @@ impl GPTNeoXModel {
         }
         // Upload final layer norm to GPU
         self.final_layer_norm.weights_to_gpu_cuda(device)?;
-        println!("✓ GPTNeoXModel: All layer weights cached on CUDA GPU");
+        tracing::debug!("✓ GPTNeoXModel: All layer weights cached on CUDA GPU");
         Ok(())
     }
 
@@ -829,12 +829,12 @@ impl GPTNeoXModel {
                 if let Tensor::F32(ref arr) = final_ln_weight {
                     use scirs2_core::ndarray::s;
                     let first_10 = arr.slice(s![0..10]);
-                    eprintln!(
+                    tracing::warn!(
                         "[DEBUG] final_layer_norm.weight first 10: {:?}",
                         first_10.iter().take(10).collect::<Vec<_>>()
                     );
                     let mean = arr.mean().unwrap_or(0.0);
-                    eprintln!(
+                    tracing::warn!(
                         "[DEBUG] final_layer_norm.weight mean: {:.3} (expected: 6.688)",
                         mean
                     );
@@ -842,7 +842,7 @@ impl GPTNeoXModel {
                 self.final_layer_norm.set_weight(final_ln_weight)?;
             },
             Err(e) => {
-                eprintln!("[ERROR] Failed to load final_layer_norm.weight: {:?}", e);
+                tracing::error!("[ERROR] Failed to load final_layer_norm.weight: {:?}", e);
             },
         }
         match loader.load_tensor("gpt_neox.final_layer_norm.bias") {
@@ -850,7 +850,7 @@ impl GPTNeoXModel {
                 self.final_layer_norm.set_bias(final_ln_bias)?;
             },
             Err(e) => {
-                eprintln!("[ERROR] Failed to load final_layer_norm.bias: {:?}", e);
+                tracing::error!("[ERROR] Failed to load final_layer_norm.bias: {:?}", e);
             },
         }
 
@@ -1017,7 +1017,7 @@ impl GPTNeoXForCausalLM {
     ) -> trustformers_core::errors::Result<()> {
         self.gpt_neox.weights_to_gpu(device)?;
         self.embed_out.weights_to_gpu(device)?;
-        println!("✓ All model weights uploaded to GPU");
+        tracing::debug!("✓ All model weights uploaded to GPU");
         Ok(())
     }
 
@@ -1028,7 +1028,7 @@ impl GPTNeoXForCausalLM {
     ) -> trustformers_core::errors::Result<()> {
         self.gpt_neox.weights_to_gpu_cuda(device)?;
         self.embed_out.weights_to_gpu_cuda(device)?;
-        println!("✓ All model weights uploaded to CUDA GPU");
+        tracing::debug!("✓ All model weights uploaded to CUDA GPU");
         Ok(())
     }
 
@@ -1048,15 +1048,15 @@ impl GPTNeoXForCausalLM {
 
         let mut loader = auto_create_loader(model_path, Some(config))?;
 
-        eprintln!("[DEBUG] Loading embed_out.weight...");
+        tracing::debug!("[DEBUG] Loading embed_out.weight...");
         match loader.load_tensor("embed_out.weight") {
             Ok(embed_out_weights) => {
-                eprintln!("[DEBUG] ✓ embed_out.weight loaded successfully");
+                tracing::debug!("[DEBUG] ✓ embed_out.weight loaded successfully");
                 if let Tensor::F32(ref arr) = embed_out_weights {
                     use scirs2_core::ndarray::s;
-                    eprintln!("[DEBUG] embed_out.weight shape: {:?}", arr.shape());
+                    tracing::debug!("[DEBUG] embed_out.weight shape: {:?}", arr.shape());
                     let first_5 = arr.slice(s![0, 0..5]);
-                    eprintln!(
+                    tracing::warn!(
                         "[DEBUG] embed_out.weight[0, 0..5]: {:?}",
                         first_5.iter().take(5).collect::<Vec<_>>()
                     );
@@ -1064,8 +1064,8 @@ impl GPTNeoXForCausalLM {
                 self.embed_out.set_weight(embed_out_weights)?;
             },
             Err(e) => {
-                eprintln!("[ERROR] Failed to load embed_out.weight: {:?}", e);
-                eprintln!("[WARNING] LM head will use uninitialized/default weights!");
+                tracing::error!("[ERROR] Failed to load embed_out.weight: {:?}", e);
+                tracing::warn!("[WARNING] LM head will use uninitialized/default weights!");
             },
         }
 

@@ -1232,6 +1232,10 @@ pub struct BaselineComparison {
 }
 
 #[cfg(test)]
+#[path = "health_checker_tests.rs"]
+mod health_checker_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::time::SystemTime;

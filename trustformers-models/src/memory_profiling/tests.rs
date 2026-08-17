@@ -90,7 +90,14 @@ async fn test_repeated_samples_track_the_process() {
 /// Allocation counters must come from real registrations.
 #[tokio::test]
 async fn test_allocation_counters_are_registered_events() {
-    let config = types::ProfilerConfig::default();
+    // Keep the profiler's report directory out of the working tree.
+    let config = types::ProfilerConfig {
+        output_dir: std::env::temp_dir()
+            .join("trustformers_memory_profiler_alloc_test")
+            .to_string_lossy()
+            .into_owned(),
+        ..types::ProfilerConfig::default()
+    };
     let profiler = profiler::MemoryProfiler::new(config).expect("profiler creation");
 
     assert_eq!(

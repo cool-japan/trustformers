@@ -13,6 +13,21 @@ use super::metalbackend_type::MetalBackend;
 #[allow(unused_imports)]
 use super::types::{BufferCache, BufferId};
 
+/// # Buffer storage mode
+///
+/// Every GPU-to-GPU op in this module allocates its output `StorageModeShared`, not
+/// `StorageModePrivate`. Private allocations have no CPU mapping, and on this
+/// platform `MTLBuffer::contents` hands back a **non-null pointer that reads as
+/// zeroes** rather than the documented null - so `download_buffer_to_vec` on a
+/// Private intermediate silently produced an all-zero tensor instead of failing.
+/// Live model code does exactly that (`generation/core.rs`, `gpt2/model_core.rs`),
+/// so this was a real source of silently wrong output.
+///
+/// Shared costs nothing here: Apple Silicon has unified memory, so a Shared buffer is
+/// just as GPU-resident as a Private one. `download_buffer_to_vec` additionally
+/// rejects any buffer that is still Private or Memoryless, and
+/// `download_buffer_via_staging` blits such buffers through a Shared staging
+/// allocation.
 #[cfg(all(target_os = "macos", feature = "metal"))]
 impl MetalBackend {
     /// Initialize the Pure-Rust oxicuda-metal compute backend.
@@ -24,13 +39,30 @@ impl MetalBackend {
         let mut backend = oxicuda_metal::MetalBackend::new();
         match backend.init() {
             Ok(()) => {
-                println!("✅ oxicuda-metal compute backend initialized");
+                tracing::info!("oxicuda-metal compute backend initialized");
                 Some(backend)
             },
-            Err(_) => None,
+            Err(error) => {
+                // Never swallow this silently: without the oxicuda backend every
+                // `matmul_gpu_to_gpu_mps` call fails with "MPS not initialized", and a
+                // missing log turns that into an unexplained runtime error.
+                tracing::warn!(
+                    %error,
+                    "oxicuda-metal compute backend failed to initialize; GPU-to-GPU \
+                     matmul will be unavailable"
+                );
+                None
+            },
         }
     }
-    /// Create a persistent GPU buffer and return its ID
+    /// Create a persistent GPU buffer and return its ID.
+    ///
+    /// The entry is **pinned**: this constructor is how long-lived model weights get
+    /// uploaded (see `Linear::ensure_weight_on_gpu`), so it must survive LRU pressure
+    /// from the transient intermediates the `*_gpu_to_gpu` ops mint. Release it with
+    /// [`remove_persistent_buffer`](Self::remove_persistent_buffer) or
+    /// [`clear_buffer_cache`](Self::clear_buffer_cache), or unpin it with
+    /// [`set_buffer_pinned`](Self::set_buffer_pinned) to make it reclaimable.
     pub fn create_persistent_buffer(&self, data: &[f32]) -> Result<BufferId> {
         let buffer = Arc::new(self.create_buffer(data)?);
         let buffer_id = BufferId::new();
@@ -40,7 +72,44 @@ impl MetalBackend {
                 "create_persistent_buffer",
             )
         })?;
+        cache.insert_pinned(buffer_id, buffer);
+        Ok(buffer_id)
+    }
+
+    /// Create a transient GPU buffer: cached, but LRU-evictable under memory pressure.
+    ///
+    /// Use this for scratch inputs that do not need to outlive the op that consumes
+    /// them; use [`create_persistent_buffer`](Self::create_persistent_buffer) for
+    /// weights.
+    pub fn create_transient_buffer(&self, data: &[f32]) -> Result<BufferId> {
+        let buffer = Arc::new(self.create_buffer(data)?);
+        let buffer_id = BufferId::new();
+        let mut cache = self.buffer_cache.lock().map_err(|_| {
+            TrustformersError::hardware_error(
+                "Failed to lock buffer cache",
+                "create_transient_buffer",
+            )
+        })?;
         cache.insert(buffer_id, buffer);
+        Ok(buffer_id)
+    }
+    /// Create a GPU buffer the cache is allowed to reclaim under memory pressure.
+    ///
+    /// **Only use this when the caller can regenerate the contents.** Entries in this
+    /// tier are LRU-evicted once the cache exceeds its byte cap, after which
+    /// `get_persistent_buffer` on the returned id fails with a structured error. Op
+    /// results and weights must not go here - see `types.rs` for why evicting data the
+    /// caller can still name is a correctness bug, not an optimisation.
+    pub fn create_evictable_buffer(&self, data: &[f32]) -> Result<BufferId> {
+        let buffer = Arc::new(self.create_buffer(data)?);
+        let buffer_id = BufferId::new();
+        let mut cache = self.buffer_cache.lock().map_err(|_| {
+            TrustformersError::hardware_error(
+                "Failed to lock buffer cache",
+                "create_evictable_buffer",
+            )
+        })?;
+        cache.insert_evictable(buffer_id, buffer);
         Ok(buffer_id)
     }
     /// Perform GPU-to-GPU matrix multiplication using MPS (100-500x faster than naive kernel)
@@ -73,6 +142,10 @@ impl MetalBackend {
         })?;
         let a_buffer = self.get_persistent_buffer(a_buffer_id)?;
         let b_buffer = self.get_persistent_buffer(b_buffer_id)?;
+        // oxicuda-metal owns a SEPARATE MTLCommandQueue (oxicuda-metal/src/device.rs),
+        // and Metal orders nothing across queues: drain our own queue before handing
+        // these buffers over, or the GEMM can read half-written inputs.
+        self.flush()?;
         // Resident output buffer (Shared so callers can read it back directly).
         let c_buffer = Arc::new(self.device.new_buffer(
             (m * n * mem::size_of::<f32>()) as u64,
@@ -132,6 +205,9 @@ impl MetalBackend {
         })?;
         let a_buffer = self.get_persistent_buffer(a_buffer_id)?;
         let b_buffer = self.get_persistent_buffer(b_buffer_id)?;
+        // Cross-queue hand-off to oxicuda-metal: drain our queue first (see
+        // `matmul_gpu_to_gpu_mps` for the full rationale).
+        self.flush()?;
         // Resident output buffer (Shared so oxicuda's resident GEMM can import it via
         // `register_external`, which requires a CPU-accessible buffer; on Apple Silicon
         // unified memory Shared is still GPU-resident, so there is no readback penalty).
@@ -192,8 +268,7 @@ impl MetalBackend {
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
-        command_buffer.commit();
-        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        self.commit_async(command_buffer);
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -241,8 +316,7 @@ impl MetalBackend {
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
-        command_buffer.commit();
-        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        self.commit_async(command_buffer);
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -307,8 +381,7 @@ impl MetalBackend {
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
-        command_buffer.commit();
-        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        self.commit_async(command_buffer);
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -374,8 +447,7 @@ impl MetalBackend {
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
-        command_buffer.commit();
-        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        self.commit_async(command_buffer);
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -430,8 +502,7 @@ impl MetalBackend {
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
-        command_buffer.commit();
-        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        self.commit_async(command_buffer);
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -452,10 +523,6 @@ impl MetalBackend {
         let batch_size = input_buffer_ids.len();
         let elements_per_tensor = seq_len * hidden_size;
         let total_elements = batch_size * elements_per_tensor;
-        // eprintln!(
-        //     "🔧 stack_gpu_buffers: batch_size={}, seq_len={}, hidden_size={}, total_elements={}",
-        //     batch_size, seq_len, hidden_size, total_elements
-        // );
         let output_buffer = self.device.new_buffer(
             (total_elements * mem::size_of::<f32>()) as u64,
             MTLResourceOptions::StorageModeShared,
@@ -492,8 +559,7 @@ impl MetalBackend {
             encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         }
         encoder.end_encoding();
-        command_buffer.commit();
-        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        self.commit_async(command_buffer);
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -502,16 +568,6 @@ impl MetalBackend {
         cache.insert(output_id, output_buffer_arc.clone());
         // let ptr = output_buffer_arc.contents() as *const f32;
         // let output_slice = unsafe { std::slice::from_raw_parts(ptr, total_elements) };
-        // eprintln!(
-        //     "✅ stack_gpu_buffers complete - first 10 values: {:?}",
-        //     &output_slice[..10.min(total_elements)]
-        // );
-        // eprintln!(
-        //     "   Stats: min={:.4}, max={:.4}, mean={:.4}",
-        //     output_slice.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
-        //     output_slice.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)),
-        //     output_slice.iter().sum::<f32>() / total_elements as f32
-        // );
         Ok(output_id)
     }
     /// Split QKV tensor on GPU (eliminates CPU transfer for attention)
@@ -528,11 +584,11 @@ impl MetalBackend {
         let elements_per_output = batch_size * seq_len * hidden_size;
         let bytes_per_output = (elements_per_output * mem::size_of::<f32>()) as u64;
         let q_buffer =
-            self.device.new_buffer(bytes_per_output, MTLResourceOptions::StorageModePrivate);
+            self.device.new_buffer(bytes_per_output, MTLResourceOptions::StorageModeShared);
         let k_buffer =
-            self.device.new_buffer(bytes_per_output, MTLResourceOptions::StorageModePrivate);
+            self.device.new_buffer(bytes_per_output, MTLResourceOptions::StorageModeShared);
         let v_buffer =
-            self.device.new_buffer(bytes_per_output, MTLResourceOptions::StorageModePrivate);
+            self.device.new_buffer(bytes_per_output, MTLResourceOptions::StorageModeShared);
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
         encoder.set_compute_pipeline_state(&self.split_qkv_pipeline);
@@ -570,8 +626,7 @@ impl MetalBackend {
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
-        command_buffer.commit();
-        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        self.commit_async(command_buffer);
         let q_id = BufferId::new();
         let k_id = BufferId::new();
         let v_id = BufferId::new();
@@ -596,7 +651,7 @@ impl MetalBackend {
         let input_buffer = self.get_persistent_buffer(input_buffer_id)?;
         let output_buffer = self.device.new_buffer(
             (total_size * mem::size_of::<f32>()) as u64,
-            MTLResourceOptions::StorageModePrivate,
+            MTLResourceOptions::StorageModeShared,
         );
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
@@ -621,31 +676,11 @@ impl MetalBackend {
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
-        command_buffer.commit();
-        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        self.commit_async(command_buffer);
         // {
         //     let ptr = output_buffer.contents() as *const f32;
         //     let output_slice = unsafe { std::slice::from_raw_parts(ptr, total_size) };
         //     if seq_len <= 15 {
-        //         eprintln!(
-        //             "🔍 Softmax output (first row): {:?}",
-        //             &output_slice[0..seq_len]
-        //         );
-        //         eprintln!(
-        //             "   First row sum: {:.6} (should be ~1.0)",
-        //             output_slice[0..seq_len].iter().sum::<f32>()
-        //         );
-        //         let last_row_start = (seq_len - 1) * seq_len;
-        //         eprintln!(
-        //             "   Last row: {:?}",
-        //             &output_slice[last_row_start..last_row_start + seq_len]
-        //         );
-        //         eprintln!(
-        //             "   Last row sum: {:.6} (should be ~1.0)",
-        //             output_slice[last_row_start..last_row_start + seq_len].iter().sum::<f32>()
-        //         );
-        //     }
-        // }
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -668,7 +703,7 @@ impl MetalBackend {
         let input_buffer = self.get_persistent_buffer(input_buffer_id)?;
         let output_buffer = self.device.new_buffer(
             (size * mem::size_of::<f32>()) as u64,
-            MTLResourceOptions::StorageModePrivate,
+            MTLResourceOptions::StorageModeShared,
         );
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
@@ -698,8 +733,7 @@ impl MetalBackend {
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
-        command_buffer.commit();
-        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        self.commit_async(command_buffer);
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -725,7 +759,7 @@ impl MetalBackend {
         let input_buffer = self.get_persistent_buffer(input_buffer_id)?;
         let output_buffer = self.device.new_buffer(
             (total_size * mem::size_of::<f32>()) as u64,
-            MTLResourceOptions::StorageModePrivate,
+            MTLResourceOptions::StorageModeShared,
         );
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
@@ -762,8 +796,7 @@ impl MetalBackend {
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
-        command_buffer.commit();
-        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        self.commit_async(command_buffer);
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -786,7 +819,7 @@ impl MetalBackend {
         let input_buffer = self.get_persistent_buffer(input_buffer_id)?;
         let output_buffer = self.device.new_buffer(
             (total_size * mem::size_of::<f32>()) as u64,
-            MTLResourceOptions::StorageModePrivate,
+            MTLResourceOptions::StorageModeShared,
         );
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
@@ -823,8 +856,7 @@ impl MetalBackend {
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
-        command_buffer.commit();
-        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        self.commit_async(command_buffer);
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -851,7 +883,7 @@ impl MetalBackend {
         let src_buffer = self.get_persistent_buffer(heads_buffer_id)?;
         let dst_buffer = self.device.new_buffer(
             (head_size * mem::size_of::<f32>()) as u64,
-            MTLResourceOptions::StorageModePrivate,
+            MTLResourceOptions::StorageModeShared,
         );
         let command_buffer = self.command_queue.new_command_buffer();
         let blit_encoder = command_buffer.new_blit_command_encoder();
@@ -863,8 +895,7 @@ impl MetalBackend {
             (head_size * mem::size_of::<f32>()) as u64,
         );
         blit_encoder.end_encoding();
-        command_buffer.commit();
-        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        self.commit_async(command_buffer);
         let output_buffer_arc = Arc::new(dst_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -885,7 +916,7 @@ impl MetalBackend {
         let input_buffer = self.get_persistent_buffer(input_buffer_id)?;
         let output_buffer = Arc::new(self.device.new_buffer(
             (rows * cols * mem::size_of::<f32>()) as u64,
-            MTLResourceOptions::StorageModePrivate,
+            MTLResourceOptions::StorageModeShared,
         ));
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
@@ -916,8 +947,7 @@ impl MetalBackend {
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
-        command_buffer.commit();
-        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        self.commit_async(command_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
             TrustformersError::hardware_error("Failed to lock buffer cache", "transpose_gpu_to_gpu")
@@ -939,7 +969,7 @@ impl MetalBackend {
         let input_buffer = self.get_persistent_buffer(input_buffer_id)?;
         let output_buffer = Arc::new(self.device.new_buffer(
             (num_heads * rows * cols * mem::size_of::<f32>()) as u64,
-            MTLResourceOptions::StorageModePrivate,
+            MTLResourceOptions::StorageModeShared,
         ));
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
@@ -976,8 +1006,7 @@ impl MetalBackend {
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
-        command_buffer.commit();
-        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        self.commit_async(command_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
             TrustformersError::hardware_error(
@@ -1003,7 +1032,7 @@ impl MetalBackend {
         let input_buffer = self.get_persistent_buffer(input_buffer_id)?;
         let output_buffer = self.device.new_buffer(
             (total_size * mem::size_of::<f32>()) as u64,
-            MTLResourceOptions::StorageModePrivate,
+            MTLResourceOptions::StorageModeShared,
         );
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
@@ -1034,8 +1063,7 @@ impl MetalBackend {
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
-        command_buffer.commit();
-        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        self.commit_async(command_buffer);
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -1064,7 +1092,7 @@ impl MetalBackend {
         let b_buffer = self.get_persistent_buffer(b_buffer_id)?;
         let output_buffer = Arc::new(self.device.new_buffer(
             (num_heads * m * n * mem::size_of::<f32>()) as u64,
-            MTLResourceOptions::StorageModePrivate,
+            MTLResourceOptions::StorageModeShared,
         ));
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
@@ -1139,7 +1167,7 @@ impl MetalBackend {
         let b_buffer = self.get_persistent_buffer(b_buffer_id)?;
         let output_buffer = Arc::new(self.device.new_buffer(
             (num_heads * m * n * mem::size_of::<f32>()) as u64,
-            MTLResourceOptions::StorageModePrivate,
+            MTLResourceOptions::StorageModeShared,
         ));
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
@@ -1188,8 +1216,7 @@ impl MetalBackend {
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
-        command_buffer.commit();
-        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        self.commit_async(command_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
             TrustformersError::hardware_error(
@@ -1216,10 +1243,33 @@ impl MetalBackend {
     ) -> Result<BufferId> {
         let q_buffer = self.get_persistent_buffer(q_buffer_id)?;
         let k_t_buffer = self.get_persistent_buffer(k_t_buffer_id)?;
-        let output_buffer = Arc::new(self.device.new_buffer(
-            (num_heads * seq_len * seq_len * mem::size_of::<f32>()) as u64,
-            MTLResourceOptions::StorageModePrivate,
-        ));
+        // Shape validation. The kernel is unbounded in `seq_len` (online softmax, no
+        // per-thread score array), but it still indexes Q/K^T by the declared shape, so
+        // a mismatched buffer would read past the allocation. Reject that here with a
+        // structured error instead of dispatching a corrupting kernel.
+        Self::validate_fused_attention_shapes(
+            &q_buffer,
+            &k_t_buffer,
+            num_heads,
+            seq_len,
+            seq_len,
+            head_dim,
+            "batched_scaled_matmul_softmax_causal_gpu_to_gpu",
+        )?;
+        // StorageModeShared, not Private: the kernel parks raw scores in this buffer and
+        // the result is read back by tests and by CPU fallbacks. `MTLBuffer::contents`
+        // is null for Private allocations, so a Private output made every readback a
+        // null dereference. On Apple Silicon's unified memory Shared is still fully
+        // GPU-resident, so there is no bandwidth penalty.
+        let output_bytes = num_heads * seq_len * seq_len * mem::size_of::<f32>();
+        self.validate_allocation_bytes(
+            output_bytes,
+            "batched_scaled_matmul_softmax_causal_gpu_to_gpu",
+        )?;
+        let output_buffer = Arc::new(
+            self.device
+                .new_buffer(output_bytes as u64, MTLResourceOptions::StorageModeShared),
+        );
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
         encoder.set_compute_pipeline_state(&self.batched_scaled_matmul_softmax_causal_pipeline);
@@ -1261,8 +1311,7 @@ impl MetalBackend {
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
-        command_buffer.commit();
-        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        self.commit_async(command_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
             TrustformersError::hardware_error(
@@ -1309,11 +1358,28 @@ impl MetalBackend {
     ) -> Result<BufferId> {
         let q_buffer = self.get_persistent_buffer(q_buffer_id)?;
         let k_t_buffer = self.get_persistent_buffer(k_t_buffer_id)?;
+        // Same contract as the causal variant: the kernel is unbounded in `kv_seq_len`,
+        // but the declared shape must match the operand buffers.
+        Self::validate_fused_attention_shapes(
+            &q_buffer,
+            &k_t_buffer,
+            num_heads,
+            q_seq_len,
+            kv_seq_len,
+            head_dim,
+            "batched_scaled_matmul_softmax_gen_gpu_to_gpu",
+        )?;
 
-        let output_buffer = Arc::new(self.device.new_buffer(
-            (num_heads * q_seq_len * kv_seq_len * mem::size_of::<f32>()) as u64,
-            MTLResourceOptions::StorageModePrivate,
-        ));
+        // Shared, not Private - see the causal variant for why.
+        let output_bytes = num_heads * q_seq_len * kv_seq_len * mem::size_of::<f32>();
+        self.validate_allocation_bytes(
+            output_bytes,
+            "batched_scaled_matmul_softmax_gen_gpu_to_gpu",
+        )?;
+        let output_buffer = Arc::new(
+            self.device
+                .new_buffer(output_bytes as u64, MTLResourceOptions::StorageModeShared),
+        );
 
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
@@ -1368,8 +1434,7 @@ impl MetalBackend {
 
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
-        command_buffer.commit();
-        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        self.commit_async(command_buffer);
 
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -1413,10 +1478,6 @@ impl MetalBackend {
             _ => return Ok(*new_buffer_id),
         };
         let total_seq_len = cached_seq_len + new_seq_len;
-        // eprintln!(
-        //     "🔗 GPU KV-cache concat: cached_seq={}, new_seq={}, total={}",
-        //     cached_seq_len, new_seq_len, total_seq_len
-        // );
         let mut cache = self.buffer_cache.lock().map_err(|_| {
             TrustformersError::hardware_error("Failed to lock buffer cache", "concat_kv_cache")
         })?;
@@ -1429,7 +1490,7 @@ impl MetalBackend {
         let output_size = batch_size * num_heads * total_seq_len * head_dim;
         let output_buffer = Arc::new(self.device.new_buffer(
             (output_size * std::mem::size_of::<f32>()) as u64,
-            metal::MTLResourceOptions::StorageModePrivate,
+            metal::MTLResourceOptions::StorageModeShared,
         ));
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
@@ -1471,8 +1532,7 @@ impl MetalBackend {
         );
         encoder.dispatch_thread_groups(threadgroups, threads_per_threadgroup);
         encoder.end_encoding();
-        command_buffer.commit();
-        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        self.commit_async(command_buffer);
         let output_id = BufferId::new();
         cache.insert(output_id, output_buffer);
         Ok(output_id)
@@ -1491,45 +1551,32 @@ impl MetalBackend {
         head_dim: usize,
     ) -> Result<BufferId> {
         let _hidden_size = num_heads * head_dim;
-        // eprintln!(
-        //     "🚀 GPU Multi-Head Attention (OPTIMIZED SYNC): batch={}, seq={}, heads={}, head_dim={}",
-        //     batch_size, seq_len, num_heads, head_dim
-        // );
         if batch_size != 1 {
             return Err(TrustformersError::tensor_op_error(
                 "GPU attention currently only supports batch_size=1",
                 "attention_gpu_to_gpu_optimized",
             ));
         }
-        // eprintln!("   Step 1: Reshaping Q, K, V to separate heads");
         let q_heads = self.reshape_to_heads_gpu(q_buffer_id, seq_len, num_heads, head_dim)?;
         let k_heads = self.reshape_to_heads_gpu(k_buffer_id, seq_len, num_heads, head_dim)?;
         let v_heads = self.reshape_to_heads_gpu(v_buffer_id, seq_len, num_heads, head_dim)?;
         let command_buffer = self.command_queue.new_command_buffer();
         let scale = 1.0 / (head_dim as f32).sqrt();
-        // eprintln!(
-        //     "   Step 2: 🔥 OPTIMIZED batched attention (scale={}, {} heads, SINGLE command buffer)",
-        //     scale, num_heads
-        // );
         let q_heads_buffer = self.get_persistent_buffer(&q_heads)?;
         let k_heads_buffer = self.get_persistent_buffer(&k_heads)?;
         let v_heads_buffer = self.get_persistent_buffer(&v_heads)?;
         let k_heads_t_buffer = Arc::new(self.device.new_buffer(
             (num_heads * seq_len * head_dim * mem::size_of::<f32>()) as u64,
-            MTLResourceOptions::StorageModePrivate,
+            MTLResourceOptions::StorageModeShared,
         ));
         let attn_weights_buffer = Arc::new(self.device.new_buffer(
             (num_heads * seq_len * seq_len * mem::size_of::<f32>()) as u64,
-            MTLResourceOptions::StorageModePrivate,
+            MTLResourceOptions::StorageModeShared,
         ));
         let output_heads_buffer = Arc::new(self.device.new_buffer(
             (num_heads * seq_len * head_dim * mem::size_of::<f32>()) as u64,
-            MTLResourceOptions::StorageModePrivate,
+            MTLResourceOptions::StorageModeShared,
         ));
-        // eprintln!(
-        //     "      2a. Batched transpose K ({} heads) [no wait]",
-        //     num_heads
-        // );
         {
             let encoder = command_buffer.new_compute_command_encoder();
             encoder.set_compute_pipeline_state(&self.batched_transpose_pipeline);
@@ -1566,10 +1613,6 @@ impl MetalBackend {
             encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
             encoder.end_encoding();
         }
-        // eprintln!(
-        //     "      2b. 🔥 FUSED batched scaled matmul + softmax ({} heads) [no wait]",
-        //     num_heads
-        // );
         {
             let encoder = command_buffer.new_compute_command_encoder();
             encoder.set_compute_pipeline_state(&self.batched_scaled_matmul_softmax_causal_pipeline);
@@ -1612,10 +1655,6 @@ impl MetalBackend {
             encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
             encoder.end_encoding();
         }
-        // eprintln!(
-        //     "      2c. Batched matmul @ V ({} heads) [no wait]",
-        //     num_heads
-        // );
         {
             let encoder = command_buffer.new_compute_command_encoder();
             encoder.set_compute_pipeline_state(&self.batched_matmul_pipeline);
@@ -1659,9 +1698,7 @@ impl MetalBackend {
             encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
             encoder.end_encoding();
         }
-        // eprintln!("      → Committing and waiting ONCE for all 3 batched operations");
-        command_buffer.commit();
-        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        self.commit_async(command_buffer);
         let output_heads_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
             TrustformersError::hardware_error(
@@ -1670,17 +1707,8 @@ impl MetalBackend {
             )
         })?;
         cache.insert(output_heads_id, output_heads_buffer);
-        // eprintln!(
-        //     "   ✅ Optimized batched attention: {} heads in 3 operations, 1 wait (vs 3 waits before)",
-        //     num_heads
-        // );
-        // eprintln!(
-        //     "   Step 3: Concatenating heads back to [seq_len, {}]",
-        //     hidden_size
-        // );
         let final_output =
             self.reshape_from_heads_gpu(&output_heads_id, seq_len, num_heads, head_dim)?;
-        // eprintln!("✅ GPU Multi-Head Attention (OPTIMIZED) complete!");
         Ok(final_output)
     }
 }
@@ -1694,7 +1722,7 @@ impl MetalBackend {
 /// releases the three import handles. No host round-trip: the result stays
 /// GPU-resident in `c_buffer`.
 #[cfg(all(target_os = "macos", feature = "metal"))]
-fn oxi_resident_gemm(
+pub(super) fn oxi_resident_gemm(
     oxi: &oxicuda_metal::MetalBackend,
     a_buffer: &Arc<Buffer>,
     b_buffer: &Arc<Buffer>,

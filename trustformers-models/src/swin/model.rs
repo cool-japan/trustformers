@@ -14,12 +14,14 @@
 //!    to attention scores inside each window.
 
 use crate::swin::config::SwinConfig;
+use crate::weight_loading::binding::{bind_linear, take_norm_bias, take_norm_weight};
+use crate::weight_loading::checkpoint::{Checkpoint, LoadReport, UnusedTensors};
 use scirs2_core::ndarray::{s, Array1, Array2, Array3, Array4, Axis, Ix3};
 use trustformers_core::device::Device;
 use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::layers::{feedforward::FeedForward, layernorm::LayerNorm, linear::Linear};
 use trustformers_core::tensor::Tensor;
-use trustformers_core::traits::{Config, Layer};
+use trustformers_core::traits::{Config, Layer, Model};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper utilities
@@ -1095,6 +1097,26 @@ impl SwinModel {
         self.device
     }
 
+    /// Total learnable parameter count.
+    pub fn parameter_count(&self) -> usize {
+        let mut total = self.patch_embed.projection.parameter_count()
+            + self.patch_embed.layer_norm.parameter_count();
+        for stage in &self.stages {
+            for block in &stage.blocks {
+                total += block.attn.qkv.parameter_count()
+                    + block.attn.proj.parameter_count()
+                    + block.attn.relative_position_bias_table.len()
+                    + block.norm1.parameter_count()
+                    + block.ffn.parameter_count()
+                    + block.norm2.parameter_count();
+            }
+            if let Some(merge) = &stage.downsample {
+                total += merge.reduction.parameter_count() + merge.layer_norm.parameter_count();
+            }
+        }
+        total + self.norm.parameter_count()
+    }
+
     /// Run the Swin forward pass.
     ///
     /// Returns globally-pooled feature vector of shape `(B, final_dim)`.
@@ -1144,6 +1166,256 @@ impl SwinModel {
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
+
+impl Model for SwinModel {
+    type Config = SwinConfig;
+    /// `(batch, height, width, channels)` pixel values.
+    type Input = Array4<f32>;
+    /// `(batch, final_dim)` globally-pooled features.
+    type Output = Array2<f32>;
+
+    fn forward(&self, images: Self::Input) -> Result<Self::Output> {
+        SwinModel::forward(self, &images)
+    }
+
+    /// Load a HuggingFace Swin checkpoint (safetensors or `torch.save`).
+    ///
+    /// See [`SwinModel::load_from_checkpoint`] for the name map.
+    fn load_pretrained(&mut self, reader: &mut dyn std::io::Read) -> Result<()> {
+        self.load_pretrained_report(reader).map(|_| ())
+    }
+
+    fn get_config(&self) -> &Self::Config {
+        &self.config
+    }
+
+    fn num_parameters(&self) -> usize {
+        self.parameter_count()
+    }
+}
+
+impl SwinModel {
+    /// Checkpoint namespaces a Swin backbone legitimately does not consume.
+    pub(crate) const ALLOWED_UNUSED_PREFIXES: &'static [&'static str] =
+        &["classifier.", "pooler.", "head."];
+
+    /// Non-parameter buffers HuggingFace stores alongside Swin's weights.
+    ///
+    /// `relative_position_index` is a precomputed integer lookup table derived
+    /// from the window size, not a learned parameter; `attn_mask` is the shifted
+    /// -window mask, likewise derived.
+    pub(crate) const ALLOWED_UNUSED_SUFFIXES: &'static [&'static str] =
+        &["relative_position_index", "attn_mask"];
+
+    /// Load pretrained weights and report exactly what was bound.
+    ///
+    /// # Errors
+    ///
+    /// See [`SwinModel::load_from_checkpoint`].
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn std::io::Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        self.load_from_checkpoint(&checkpoint)
+    }
+
+    /// Bind an already-parsed checkpoint into this model.
+    ///
+    /// Swin is **hierarchical**: its tensors are indexed by
+    /// `encoder.layers.{stage}.blocks.{block}.…`, the channel width *doubles*
+    /// at every stage boundary, and each stage but the last ends with a
+    /// `downsample.reduction` patch-merging projection from `4C` to `2C`. A flat
+    /// per-layer name map — the shape every other encoder in this crate uses —
+    /// cannot express that: it would look for one width throughout and miss the
+    /// merging layers entirely.
+    ///
+    /// The QKV projection is stored **fused** as a single `[3C, C]` tensor, as
+    /// this implementation also holds it, so no split is performed. The
+    /// relative-position **bias table** is a learned parameter and is bound; the
+    /// relative-position **index** next to it is a derived integer lookup and is
+    /// ignored.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint does not look like a Swin checkpoint, when any
+    /// tensor has the wrong shape, when a parameter is missing, or when the
+    /// checkpoint carries weights this architecture does not recognise.
+    pub fn load_from_checkpoint(&mut self, checkpoint: &Checkpoint) -> Result<LoadReport> {
+        let prefix = checkpoint.detect_prefix(
+            &["", "swin."],
+            "embeddings.patch_embeddings.projection.weight",
+        )?;
+        let mut binder = checkpoint.binder(&prefix);
+
+        let config = self.config.clone();
+        let patch = config.patch_size;
+        let channels = config.num_channels;
+        let embed_dim = config.embed_dim;
+        let patch_dim = channels * patch * patch;
+
+        // Patch projection: accept the flattened matrix or the Conv2d kernel.
+        let projection_name = binder.qualified("embeddings.patch_embeddings.projection.weight");
+        match checkpoint.get(&projection_name) {
+            Some(tensor) => {
+                binder.mark_consumed(&projection_name);
+                let shape = tensor.shape();
+                let flattened = if shape == vec![embed_dim, patch_dim] {
+                    tensor.clone()
+                } else if shape == vec![embed_dim, channels, patch, patch] {
+                    tensor.reshape(&[embed_dim, patch_dim])?
+                } else {
+                    return Err(TrustformersError::shape_error(format!(
+                        "patch projection has shape {shape:?} but this model expects \
+                         [{embed_dim}, {patch_dim}] or [{embed_dim}, {channels}, {patch}, {patch}]"
+                    )));
+                };
+                self.patch_embed.projection.set_weight(flattened)?;
+            },
+            None => {
+                return Err(TrustformersError::weight_load_error(
+                    "checkpoint carries no embeddings.patch_embeddings.projection.weight"
+                        .to_string(),
+                ))
+            },
+        }
+        if let Some(bias) =
+            binder.take_shaped("embeddings.patch_embeddings.projection.bias", &[embed_dim])?
+        {
+            self.patch_embed.projection.set_bias(bias)?;
+        }
+        if let Some(w) = take_norm_weight(&mut binder, "embeddings.norm", embed_dim)? {
+            self.patch_embed.layer_norm.set_weight(w)?;
+        }
+        if let Some(b) = take_norm_bias(&mut binder, "embeddings.norm", embed_dim)? {
+            self.patch_embed.layer_norm.set_bias(b)?;
+        }
+
+        for (stage_index, stage) in self.stages.iter_mut().enumerate() {
+            let dim = config.stage_dim(stage_index);
+            let stage_base = format!("encoder.layers.{stage_index}");
+
+            for (block_index, block) in stage.blocks.iter_mut().enumerate() {
+                let base = format!("{stage_base}.blocks.{block_index}");
+
+                if let Some(w) =
+                    take_norm_weight(&mut binder, &format!("{base}.layernorm_before"), dim)?
+                {
+                    block.norm1.set_weight(w)?;
+                }
+                if let Some(b) =
+                    take_norm_bias(&mut binder, &format!("{base}.layernorm_before"), dim)?
+                {
+                    block.norm1.set_bias(b)?;
+                }
+
+                // Fused QKV, exactly as the checkpoint stores it.
+                bind_linear(
+                    &mut binder,
+                    &format!("{base}.attention.self.qkv"),
+                    3 * dim,
+                    dim,
+                    config.qkv_bias,
+                    &mut block.attn.qkv,
+                )?;
+                bind_linear(
+                    &mut binder,
+                    &format!("{base}.attention.output.dense"),
+                    dim,
+                    dim,
+                    true,
+                    &mut block.attn.proj,
+                )?;
+
+                // Learned relative-position bias table.
+                let table_name = format!("{base}.attention.self.relative_position_bias_table");
+                let (rows, cols, heads) = block.attn.relative_position_bias_table.dim();
+                // HuggingFace stores it as [(2*ws-1)^2, num_heads].
+                let flat_rows = rows * cols;
+                if let Some(tensor) = binder.take_shaped(&table_name, &[flat_rows, heads])? {
+                    let values = tensor.data().map_err(|e| {
+                        TrustformersError::tensor_op_error(
+                            "failed to read the relative-position bias table",
+                            &e.to_string(),
+                        )
+                    })?;
+                    block.attn.relative_position_bias_table =
+                        Array3::from_shape_vec((rows, cols, heads), values)
+                            .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                }
+
+                if let Some(w) =
+                    take_norm_weight(&mut binder, &format!("{base}.layernorm_after"), dim)?
+                {
+                    block.norm2.set_weight(w)?;
+                }
+                if let Some(b) =
+                    take_norm_bias(&mut binder, &format!("{base}.layernorm_after"), dim)?
+                {
+                    block.norm2.set_bias(b)?;
+                }
+
+                let intermediate = (dim as f32 * config.mlp_ratio) as usize;
+                if let Some(w) = binder.take_shaped(
+                    &format!("{base}.intermediate.dense.weight"),
+                    &[intermediate, dim],
+                )? {
+                    block.ffn.set_dense_weight(w)?;
+                }
+                if let Some(b) = binder
+                    .take_shaped(&format!("{base}.intermediate.dense.bias"), &[intermediate])?
+                {
+                    block.ffn.set_dense_bias(b)?;
+                }
+                if let Some(w) = binder
+                    .take_shaped(&format!("{base}.output.dense.weight"), &[dim, intermediate])?
+                {
+                    block.ffn.set_output_weight(w)?;
+                }
+                if let Some(b) = binder.take_shaped(&format!("{base}.output.dense.bias"), &[dim])? {
+                    block.ffn.set_output_bias(b)?;
+                }
+            }
+
+            // Patch merging: [4C] norm then a [4C -> 2C] reduction.
+            if let Some(merge) = stage.downsample.as_mut() {
+                let merged = 4 * dim;
+                bind_linear(
+                    &mut binder,
+                    &format!("{stage_base}.downsample.reduction"),
+                    2 * dim,
+                    merged,
+                    false,
+                    &mut merge.reduction,
+                )?;
+                if let Some(w) = take_norm_weight(
+                    &mut binder,
+                    &format!("{stage_base}.downsample.norm"),
+                    merged,
+                )? {
+                    merge.layer_norm.set_weight(w)?;
+                }
+                if let Some(b) = take_norm_bias(
+                    &mut binder,
+                    &format!("{stage_base}.downsample.norm"),
+                    merged,
+                )? {
+                    merge.layer_norm.set_bias(b)?;
+                }
+            }
+        }
+
+        let final_dim = config.final_dim();
+        if let Some(w) = take_norm_weight(&mut binder, "layernorm", final_dim)? {
+            self.norm.set_weight(w)?;
+        }
+        if let Some(b) = take_norm_bias(&mut binder, "layernorm", final_dim)? {
+            self.norm.set_bias(b)?;
+        }
+
+        binder.finish(UnusedTensors::new(
+            Self::ALLOWED_UNUSED_PREFIXES,
+            Self::ALLOWED_UNUSED_SUFFIXES,
+        ))
+    }
+}
 
 #[cfg(test)]
 mod tests {

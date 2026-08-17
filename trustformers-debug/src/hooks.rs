@@ -52,6 +52,22 @@ pub enum Comparison {
     LessEqual,
 }
 
+impl Comparison {
+    /// Evaluate `value <comparison> threshold`. `Equal` uses a small
+    /// relative epsilon rather than exact `==`, since the values being
+    /// compared (loss, gradient norm, memory usage) are computed floats
+    /// that are never expected to match a configured threshold bit-for-bit.
+    fn apply(&self, value: f64, threshold: f64) -> bool {
+        match self {
+            Comparison::Greater => value > threshold,
+            Comparison::Less => value < threshold,
+            Comparison::GreaterEqual => value >= threshold,
+            Comparison::LessEqual => value <= threshold,
+            Comparison::Equal => (value - threshold).abs() <= 1e-9_f64.max(threshold.abs() * 1e-9),
+        }
+    }
+}
+
 /// Hook action types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HookAction {
@@ -101,6 +117,19 @@ pub struct HookContext {
     pub tensor_shape: Vec<usize>,
     pub is_forward: bool,
     pub metadata: HashMap<String, String>,
+    /// Current training loss, if the caller has reported one via
+    /// [`HookManager::set_loss`]. `None` (rather than a fabricated 0.0 or a
+    /// stale value) means no loss has been reported yet for this session --
+    /// [`HookCondition::LossThreshold`] never fires on a hook it has no
+    /// real data to evaluate.
+    pub loss: Option<f64>,
+    /// Current gradient norm, if reported via
+    /// [`HookManager::set_gradient_norm`]. See `loss` for the `None`
+    /// semantics.
+    pub grad_norm: Option<f64>,
+    /// Current memory usage in MB, if reported via
+    /// [`HookManager::set_memory_mb`]. See `loss` for the `None` semantics.
+    pub memory_mb: Option<f64>,
 }
 
 /// Hook execution statistics
@@ -134,6 +163,16 @@ pub struct HookManager {
     execution_count: HashMap<Uuid, usize>,
     global_step: usize,
     enabled: bool,
+    /// Latest reported loss, memory (MB) and gradient norm -- fed into every
+    /// [`HookContext`] built by [`HookManager::execute_hooks`], so
+    /// [`HookCondition::LossThreshold`], [`HookCondition::GradientNormThreshold`]
+    /// and [`HookCondition::MemoryThreshold`] have real values to compare
+    /// against instead of firing unconditionally. See
+    /// [`HookManager::set_loss`] / [`HookManager::set_gradient_norm`] /
+    /// [`HookManager::set_memory_mb`].
+    current_loss: Option<f64>,
+    current_grad_norm: Option<f64>,
+    current_memory_mb: Option<f64>,
 }
 
 impl std::fmt::Debug for HookManager {
@@ -145,6 +184,9 @@ impl std::fmt::Debug for HookManager {
             .field("global_step", &self.global_step)
             .field("enabled", &self.enabled)
             .field("callbacks", &format!("{} callbacks", self.callbacks.len()))
+            .field("current_loss", &self.current_loss)
+            .field("current_grad_norm", &self.current_grad_norm)
+            .field("current_memory_mb", &self.current_memory_mb)
             .finish()
     }
 }
@@ -159,6 +201,9 @@ impl HookManager {
             execution_count: HashMap::new(),
             global_step: 0,
             enabled: true,
+            current_loss: None,
+            current_grad_norm: None,
+            current_memory_mb: None,
         }
     }
 
@@ -219,6 +264,27 @@ impl HookManager {
         self.global_step = step;
     }
 
+    /// Report the current training loss for [`HookCondition::LossThreshold`]
+    /// evaluation. Call this once per step before [`Self::execute_hooks`];
+    /// without it, `LossThreshold` conditions never fire (see
+    /// [`Self::evaluate_condition`]).
+    pub fn set_loss(&mut self, loss: f64) {
+        self.current_loss = Some(loss);
+    }
+
+    /// Report the current gradient norm for
+    /// [`HookCondition::GradientNormThreshold`] evaluation. See
+    /// [`Self::set_loss`].
+    pub fn set_gradient_norm(&mut self, grad_norm: f64) {
+        self.current_grad_norm = Some(grad_norm);
+    }
+
+    /// Report current memory usage (in MB) for
+    /// [`HookCondition::MemoryThreshold`] evaluation. See [`Self::set_loss`].
+    pub fn set_memory_mb(&mut self, memory_mb: f64) {
+        self.current_memory_mb = Some(memory_mb);
+    }
+
     /// Execute hooks for a tensor operation
     pub fn execute_hooks<T>(
         &mut self,
@@ -241,6 +307,9 @@ impl HookManager {
             tensor_shape: tensor_shape.to_vec(),
             is_forward,
             metadata: metadata.unwrap_or_default(),
+            loss: self.current_loss,
+            grad_norm: self.current_grad_norm,
+            memory_mb: self.current_memory_mb,
         };
 
         let mut results = Vec::new();
@@ -423,6 +492,18 @@ impl HookManager {
         }
     }
 
+    /// Evaluate a single [`HookCondition`] against the current context.
+    ///
+    /// `LossThreshold` / `GradientNormThreshold` / `MemoryThreshold` compare
+    /// against real values reported via [`Self::set_loss`] /
+    /// [`Self::set_gradient_norm`] / [`Self::set_memory_mb`]. If the caller
+    /// never reported that metric for this session, the corresponding
+    /// `context` field is `None` and the condition returns `false` -- never
+    /// `true` -- since a threshold cannot honestly be judged "met" against
+    /// data that was never provided. This intentionally differs from the
+    /// old behavior, where every one of these three conditions fired
+    /// unconditionally (`_ => true`) regardless of whether any relevant
+    /// data existed.
     fn evaluate_condition(&self, condition: &HookCondition, context: &HookContext) -> bool {
         match condition {
             HookCondition::StepRange { start, end } => {
@@ -433,8 +514,20 @@ impl HookManager {
                 // This is a placeholder implementation
                 context.metadata.contains_key(name)
             },
-            // Other conditions would need additional context not available here
-            _ => true,
+            HookCondition::LossThreshold {
+                threshold,
+                comparison,
+            } => context.loss.map(|loss| comparison.apply(loss, *threshold)).unwrap_or(false),
+            HookCondition::GradientNormThreshold {
+                threshold,
+                comparison,
+            } => context
+                .grad_norm
+                .map(|grad_norm| comparison.apply(grad_norm, *threshold))
+                .unwrap_or(false),
+            HookCondition::MemoryThreshold { threshold_mb } => {
+                context.memory_mb.map(|memory_mb| memory_mb > *threshold_mb).unwrap_or(false)
+            },
         }
     }
 
@@ -804,6 +897,181 @@ mod tests {
         let r2 = mgr.execute_hooks("layer", &[1u8], &[1], true, None);
         assert_eq!(r2.len(), 1);
         assert!(matches!(r2[0].1, HookResult::Skipped(_)));
+    }
+
+    // ── HookCondition metric thresholds ─────────────────────────────────────
+    //
+    // Regression tests for the `_ => true` bug: LossThreshold /
+    // GradientNormThreshold / MemoryThreshold used to fire on every single
+    // step regardless of the configured threshold. Each test below would
+    // have failed against that old behavior (the "never met" and
+    // "no data reported" cases would incorrectly have produced `Success`).
+
+    fn make_conditional_hook_config(condition: HookCondition) -> HookConfig {
+        HookConfig {
+            id: Uuid::new_v4(),
+            name: "conditional".to_string(),
+            trigger: HookTrigger::Conditional(condition),
+            actions: vec![HookAction::InspectTensor],
+            enabled: true,
+            max_executions: None,
+            layer_patterns: vec![],
+        }
+    }
+
+    #[test]
+    fn test_loss_threshold_does_not_fire_without_reported_loss() {
+        let mut mgr = HookManager::new();
+        let cond = HookCondition::LossThreshold {
+            threshold: 1.0,
+            comparison: Comparison::Greater,
+        };
+        mgr.register_hook(make_conditional_hook_config(cond)).expect("register");
+
+        // No `set_loss` call: the old `_ => true` fallback would fire this
+        // unconditionally even though no loss was ever reported.
+        let results = mgr.execute_hooks("layer", &[1u8], &[1], true, None);
+        assert_eq!(results.len(), 1);
+        assert!(
+            matches!(results[0].1, HookResult::Skipped(_)),
+            "must not fire when no loss has been reported, got {:?}",
+            results[0].1
+        );
+    }
+
+    #[test]
+    fn test_loss_threshold_fires_when_exceeded() {
+        let mut mgr = HookManager::new();
+        let cond = HookCondition::LossThreshold {
+            threshold: 1.0,
+            comparison: Comparison::Greater,
+        };
+        mgr.register_hook(make_conditional_hook_config(cond)).expect("register");
+
+        mgr.set_loss(5.0); // loss spiked above threshold
+        let results = mgr.execute_hooks("layer", &[1u8], &[1], true, None);
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0].1, HookResult::Success));
+    }
+
+    #[test]
+    fn test_loss_threshold_does_not_fire_when_below_threshold() {
+        let mut mgr = HookManager::new();
+        let cond = HookCondition::LossThreshold {
+            threshold: 1.0,
+            comparison: Comparison::Greater,
+        };
+        mgr.register_hook(make_conditional_hook_config(cond)).expect("register");
+
+        mgr.set_loss(0.1); // well below threshold
+        let results = mgr.execute_hooks("layer", &[1u8], &[1], true, None);
+        assert_eq!(results.len(), 1);
+        assert!(
+            matches!(results[0].1, HookResult::Skipped(_)),
+            "must not fire when loss is below the threshold, got {:?}",
+            results[0].1
+        );
+    }
+
+    #[test]
+    fn test_gradient_norm_threshold_does_not_fire_without_reported_norm() {
+        let mut mgr = HookManager::new();
+        let cond = HookCondition::GradientNormThreshold {
+            threshold: 10.0,
+            comparison: Comparison::Greater,
+        };
+        mgr.register_hook(make_conditional_hook_config(cond)).expect("register");
+
+        let results = mgr.execute_hooks("layer", &[1u8], &[1], false, None);
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0].1, HookResult::Skipped(_)));
+    }
+
+    #[test]
+    fn test_gradient_norm_threshold_fires_on_explosion() {
+        let mut mgr = HookManager::new();
+        let cond = HookCondition::GradientNormThreshold {
+            threshold: 10.0,
+            comparison: Comparison::Greater,
+        };
+        mgr.register_hook(make_conditional_hook_config(cond)).expect("register");
+
+        mgr.set_gradient_norm(1000.0); // exploding gradient
+        let results = mgr.execute_hooks("layer", &[1u8], &[1], false, None);
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0].1, HookResult::Success));
+    }
+
+    #[test]
+    fn test_gradient_norm_threshold_respects_less_comparison() {
+        let mut mgr = HookManager::new();
+        // "fire when gradient vanishes below 1e-6"
+        let cond = HookCondition::GradientNormThreshold {
+            threshold: 1e-6,
+            comparison: Comparison::Less,
+        };
+        mgr.register_hook(make_conditional_hook_config(cond)).expect("register");
+
+        mgr.set_gradient_norm(0.5); // healthy gradient, should not fire
+        let healthy = mgr.execute_hooks("layer", &[1u8], &[1], false, None);
+        assert!(matches!(healthy[0].1, HookResult::Skipped(_)));
+
+        mgr.set_gradient_norm(1e-9); // vanished, should fire
+        let vanished = mgr.execute_hooks("layer", &[1u8], &[1], false, None);
+        assert!(matches!(vanished[0].1, HookResult::Success));
+    }
+
+    #[test]
+    fn test_memory_threshold_does_not_fire_without_reported_memory() {
+        let mut mgr = HookManager::new();
+        let cond = HookCondition::MemoryThreshold {
+            threshold_mb: 1000.0,
+        };
+        mgr.register_hook(make_conditional_hook_config(cond)).expect("register");
+
+        let results = mgr.execute_hooks("layer", &[1u8], &[1], true, None);
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0].1, HookResult::Skipped(_)));
+    }
+
+    #[test]
+    fn test_memory_threshold_fires_over_limit() {
+        let mut mgr = HookManager::new();
+        let cond = HookCondition::MemoryThreshold {
+            threshold_mb: 1000.0,
+        };
+        mgr.register_hook(make_conditional_hook_config(cond)).expect("register");
+
+        mgr.set_memory_mb(4096.0);
+        let results = mgr.execute_hooks("layer", &[1u8], &[1], true, None);
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0].1, HookResult::Success));
+    }
+
+    #[test]
+    fn test_memory_threshold_does_not_fire_under_limit() {
+        let mut mgr = HookManager::new();
+        let cond = HookCondition::MemoryThreshold {
+            threshold_mb: 1000.0,
+        };
+        mgr.register_hook(make_conditional_hook_config(cond)).expect("register");
+
+        mgr.set_memory_mb(50.0);
+        let results = mgr.execute_hooks("layer", &[1u8], &[1], true, None);
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0].1, HookResult::Skipped(_)));
+    }
+
+    #[test]
+    fn test_comparison_apply_all_variants() {
+        assert!(Comparison::Greater.apply(2.0, 1.0));
+        assert!(!Comparison::Greater.apply(1.0, 1.0));
+        assert!(Comparison::Less.apply(0.5, 1.0));
+        assert!(!Comparison::Less.apply(1.0, 1.0));
+        assert!(Comparison::GreaterEqual.apply(1.0, 1.0));
+        assert!(Comparison::LessEqual.apply(1.0, 1.0));
+        assert!(Comparison::Equal.apply(1.0, 1.0));
+        assert!(!Comparison::Equal.apply(1.5, 1.0));
     }
 
     // ── clear_hooks ────────────────────────────────────────────────────────

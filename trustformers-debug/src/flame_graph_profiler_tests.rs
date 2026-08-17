@@ -257,7 +257,10 @@ mod tests {
         profiler.start_sampling().expect("start ok");
         // stop_sampling with no samples should fail (no samples = can't build graph)
         let result = profiler.stop_sampling();
-        assert!(result.is_err(), "stop_sampling with no samples should return an error");
+        assert!(
+            result.is_err(),
+            "stop_sampling with no samples should return an error"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -276,7 +279,10 @@ mod tests {
         profiler.add_sample(sample2);
         // build_flame_graph should succeed with samples
         let result = profiler.build_flame_graph();
-        assert!(result.is_ok(), "build_flame_graph should succeed with samples");
+        assert!(
+            result.is_ok(),
+            "build_flame_graph should succeed with samples"
+        );
     }
 
     #[test]
@@ -284,7 +290,10 @@ mod tests {
         let config = make_default_config();
         let mut profiler = FlameGraphProfiler::new(config);
         let result = profiler.build_flame_graph();
-        assert!(result.is_err(), "build_flame_graph should fail without samples");
+        assert!(
+            result.is_err(),
+            "build_flame_graph should fail without samples"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -299,7 +308,10 @@ mod tests {
         profiler.sample_gpu_kernel("matmul_kernel", 5000);
         // Should now have at least one sample
         let result = profiler.build_flame_graph();
-        assert!(result.is_ok(), "build should succeed after GPU kernel sample");
+        assert!(
+            result.is_ok(),
+            "build should succeed after GPU kernel sample"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -322,7 +334,10 @@ mod tests {
         let sample = make_sample(&["main", "current_work"], 2000);
         profiler.add_sample(sample);
         let result = profiler.build_flame_graph();
-        assert!(result.is_ok(), "build should succeed with differential mode");
+        assert!(
+            result.is_ok(),
+            "build should succeed with differential mode"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -449,6 +464,9 @@ mod tests {
         profiler.start_sampling().expect("start ok");
         profiler.add_sample(make_sample(&["main"], 500));
         let result = profiler.stop_sampling();
-        assert!(result.is_ok(), "stop_sampling should succeed with samples present");
+        assert!(
+            result.is_ok(),
+            "stop_sampling should succeed with samples present"
+        );
     }
 }

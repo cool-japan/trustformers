@@ -130,6 +130,12 @@ pub struct MemoryLeak {
     pub allocation_id: Uuid,
     pub size: usize,
     pub age_seconds: f64,
+    /// The real allocation timestamp (from the original
+    /// [`AllocationRecord`]), not derived from `age_seconds` at report time
+    /// -- so callers reconstructing an [`AllocationRecord`] from this leak
+    /// (e.g. [`MemoryProfiler::detect_leak_pattern`]'s `examples`) never
+    /// have to fabricate "allocated just now".
+    pub timestamp: SystemTime,
     pub allocation_type: AllocationType,
     pub stack_trace: Vec<String>,
     pub tags: Vec<String>,
@@ -449,6 +455,7 @@ impl MemoryProfiler {
                         allocation_id: record.id,
                         size: record.size,
                         age_seconds,
+                        timestamp: record.timestamp,
                         allocation_type: record.allocation_type.clone(),
                         stack_trace: record.stack_trace.clone(),
                         tags: record.tags.clone(),
@@ -882,11 +889,12 @@ impl MemoryProfiler {
                 .into_iter()
                 .take(3)
                 .map(|leak| {
-                    // Convert leak to allocation record for example
+                    // Convert leak to allocation record for example, using
+                    // the leak's real allocation timestamp (not "now").
                     AllocationRecord {
                         id: leak.allocation_id,
                         size: leak.size,
-                        timestamp: SystemTime::now(), // Placeholder
+                        timestamp: leak.timestamp,
                         stack_trace: leak.stack_trace,
                         allocation_type: leak.allocation_type,
                         freed: false,

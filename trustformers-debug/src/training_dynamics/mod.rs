@@ -10,3 +10,7 @@ pub mod types_4;
 pub use types::*;
 pub use types_3::*;
 pub use types_4::*;
+
+#[cfg(test)]
+#[path = "../training_dynamics_tests.rs"]
+mod training_dynamics_tests;

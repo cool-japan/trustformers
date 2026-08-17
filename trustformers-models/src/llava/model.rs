@@ -1,7 +1,7 @@
 use crate::llava::config::{LlavaConfig, LlavaVisionConfig};
 use trustformers_core::{
     device::Device,
-    errors::Result,
+    errors::{Result, TrustformersError},
     layers::{Embedding, LayerNorm, Linear},
     ops::activations::{gelu, silu},
     tensor::{DType, Tensor},
@@ -538,25 +538,147 @@ impl LlavaForConditionalGeneration {
         })
     }
 
+    /// Splice the projected image features into the text embedding sequence at
+    /// the positions of the image placeholder token.
+    ///
+    /// LLaVA's prompt format inserts a single `<image>` token
+    /// (`config.mm_patch_token`) where the picture belongs; the model replaces
+    /// that one position with the whole run of projected patch embeddings, so
+    /// the image lands *inside* the sentence — "USER: `<image>` what is in this
+    /// picture?" must put the picture between "USER:" and "what". Everything
+    /// before and after the placeholder keeps its order.
+    ///
+    /// # What this replaces
+    ///
+    /// The previous body took `_input_ids`, ignored it entirely, and returned
+    /// `concat([image_embeds, text_embeds], dim=1)` — the image bolted onto the
+    /// *front* of the prompt, regardless of where the user put the placeholder.
+    /// The `<image>` token itself stayed in the text as an ordinary embedding,
+    /// so the sequence contained both a stray placeholder and a misplaced image,
+    /// and any prompt whose instruction preceded the picture was silently
+    /// reordered.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the tensors are not 3-D `F32`, when their batch or hidden
+    /// dimensions disagree, or when the prompt contains no image placeholder
+    /// while image features were supplied — that combination means the caller
+    /// built the prompt wrongly, and appending the image somewhere arbitrary
+    /// would hide it.
     fn merge_multimodal_embeddings(
         &self,
         text_embeds: Tensor,
         image_embeds: Tensor,
-        _input_ids: &Tensor,
+        input_ids: &Tensor,
     ) -> Result<Tensor> {
-        // This is a simplified implementation
-        // In practice, this would involve more sophisticated merging
-        // based on special image tokens in the input
+        let text_shape = text_embeds.shape();
+        let image_shape = image_embeds.shape();
+        let [batch_size, text_seq_len, hidden_size] = text_shape[..] else {
+            return Err(TrustformersError::shape_error(format!(
+                "text embeddings must be [batch, seq, hidden], got {text_shape:?}"
+            )));
+        };
+        let [image_batch, image_seq_len, image_hidden] = image_shape[..] else {
+            return Err(TrustformersError::shape_error(format!(
+                "image embeddings must be [batch, patches, hidden], got {image_shape:?}"
+            )));
+        };
+        if image_batch != batch_size || image_hidden != hidden_size {
+            return Err(TrustformersError::shape_error(format!(
+                "image embeddings {image_shape:?} do not match text embeddings {text_shape:?}"
+            )));
+        }
 
-        let _batch_size = text_embeds.shape()[0];
-        let _text_seq_len = text_embeds.shape()[1];
-        let _image_seq_len = image_embeds.shape()[1];
-        let _hidden_size = text_embeds.shape()[2];
+        let ids: Vec<u32> = input_ids
+            .data()
+            .map_err(|e| {
+                TrustformersError::tensor_op_error(
+                    "merge_multimodal_embeddings",
+                    &format!("failed to read input_ids: {e}"),
+                )
+            })?
+            .into_iter()
+            .map(|v| v as u32)
+            .collect();
+        if ids.len() != batch_size * text_seq_len {
+            return Err(TrustformersError::shape_error(format!(
+                "input_ids hold {} id(s) but the text embeddings describe {} position(s)",
+                ids.len(),
+                batch_size * text_seq_len
+            )));
+        }
 
-        // For now, concatenate image and text embeddings
-        let merged = Tensor::concat(&[image_embeds, text_embeds], 1)?;
+        let placeholder = self.config.mm_patch_token;
+        let text_values = text_embeds.data().map_err(|e| {
+            TrustformersError::tensor_op_error(
+                "merge_multimodal_embeddings",
+                &format!("failed to read text embeddings: {e}"),
+            )
+        })?;
+        let image_values = image_embeds.data().map_err(|e| {
+            TrustformersError::tensor_op_error(
+                "merge_multimodal_embeddings",
+                &format!("failed to read image embeddings: {e}"),
+            )
+        })?;
 
-        Ok(merged)
+        // Every batch row must expand to the same length for the result to be a
+        // dense tensor, so the placeholder count has to agree across the batch.
+        let mut placeholder_counts = Vec::with_capacity(batch_size);
+        for b in 0..batch_size {
+            let row = &ids[b * text_seq_len..(b + 1) * text_seq_len];
+            placeholder_counts.push(row.iter().filter(|&&id| id == placeholder).count());
+        }
+        let placeholders = placeholder_counts[0];
+        if placeholders == 0 {
+            return Err(TrustformersError::invalid_input_simple(format!(
+                "image features were supplied but the prompt contains no image placeholder \
+                 token ({placeholder}); the image would have to be inserted at an arbitrary \
+                 position"
+            )));
+        }
+        if placeholder_counts.iter().any(|&count| count != placeholders) {
+            return Err(TrustformersError::invalid_input_simple(format!(
+                "every prompt in the batch must carry the same number of image placeholders, \
+                 got {placeholder_counts:?}"
+            )));
+        }
+        if !image_seq_len.is_multiple_of(placeholders) {
+            return Err(TrustformersError::shape_error(format!(
+                "{image_seq_len} image feature(s) cannot be split evenly across {placeholders} \
+                 placeholder(s)"
+            )));
+        }
+        let features_per_placeholder = image_seq_len / placeholders;
+
+        // Each placeholder is replaced by `features_per_placeholder` positions.
+        let merged_seq_len = text_seq_len - placeholders + image_seq_len;
+        let mut merged = vec![0.0f32; batch_size * merged_seq_len * hidden_size];
+
+        for b in 0..batch_size {
+            let mut out_position = 0usize;
+            let mut image_cursor = 0usize;
+            for t in 0..text_seq_len {
+                if ids[b * text_seq_len + t] == placeholder {
+                    for _ in 0..features_per_placeholder {
+                        let src = (b * image_seq_len + image_cursor) * hidden_size;
+                        let dst = (b * merged_seq_len + out_position) * hidden_size;
+                        merged[dst..dst + hidden_size]
+                            .copy_from_slice(&image_values[src..src + hidden_size]);
+                        image_cursor += 1;
+                        out_position += 1;
+                    }
+                } else {
+                    let src = (b * text_seq_len + t) * hidden_size;
+                    let dst = (b * merged_seq_len + out_position) * hidden_size;
+                    merged[dst..dst + hidden_size]
+                        .copy_from_slice(&text_values[src..src + hidden_size]);
+                    out_position += 1;
+                }
+            }
+        }
+
+        Tensor::from_vec(merged, &[batch_size, merged_seq_len, hidden_size])
     }
 }
 
@@ -822,10 +944,83 @@ pub struct LlavaLanguageOutput {
 
 // Helper functions
 
-fn extract_patches(pixel_values: &Tensor, _patch_size: usize) -> Result<Tensor> {
-    // Simplified patch extraction
-    // In practice, this would use proper convolution or unfold operations
-    Ok(pixel_values.clone())
+/// Cut an image batch into a flat grid of non-overlapping square patches.
+///
+/// Input `[batch, channels, height, width]` becomes
+/// `[batch, num_patches, channels * patch_size * patch_size]`, where
+/// `num_patches = (height / patch_size) * (width / patch_size)` and the patches
+/// are emitted in row-major grid order. Each patch's feature vector is laid out
+/// channel-major (`c, py, px`), matching the flattened `Conv2d` kernel that a
+/// HuggingFace ViT patch embedding uses — so the projection's weights line up
+/// with the values it is multiplied by.
+///
+/// # What this replaces
+///
+/// The previous body was `Ok(pixel_values.clone())` under the comment
+/// "Simplified patch extraction". The tensor handed to `patch_embedding` was
+/// therefore the raw `[batch, channels, height, width]` image, while that
+/// `Linear` expects `[.., channels * patch_size²]` — so for any real image the
+/// projection either failed on shape or silently multiplied the wrong numbers,
+/// and the "vision tower" never saw a patch at all.
+///
+/// # Errors
+///
+/// Fails when the input is not a 4-D `F32` tensor, when `patch_size` is 0, or
+/// when the spatial dimensions are not divisible by `patch_size` — a partial
+/// patch at the edge would have to be padded or dropped, and doing either
+/// silently changes what the model sees.
+fn extract_patches(pixel_values: &Tensor, patch_size: usize) -> Result<Tensor> {
+    if patch_size == 0 {
+        return Err(TrustformersError::invalid_input_simple(
+            "patch_size must be greater than 0".to_string(),
+        ));
+    }
+    let shape = pixel_values.shape();
+    let [batch, channels, height, width] = shape[..] else {
+        return Err(TrustformersError::shape_error(format!(
+            "patch extraction expects [batch, channels, height, width], got {shape:?}"
+        )));
+    };
+    if !height.is_multiple_of(patch_size) || !width.is_multiple_of(patch_size) {
+        return Err(TrustformersError::shape_error(format!(
+            "image {height}x{width} is not divisible into {patch_size}x{patch_size} patches"
+        )));
+    }
+
+    let grid_h = height / patch_size;
+    let grid_w = width / patch_size;
+    let num_patches = grid_h * grid_w;
+    let patch_dim = channels * patch_size * patch_size;
+
+    let values = pixel_values.data().map_err(|e| {
+        TrustformersError::tensor_op_error(
+            "extract_patches",
+            &format!("failed to read the pixel tensor: {e}"),
+        )
+    })?;
+
+    let mut out = vec![0.0f32; batch * num_patches * patch_dim];
+    for b in 0..batch {
+        let image_offset = b * channels * height * width;
+        for gy in 0..grid_h {
+            for gx in 0..grid_w {
+                let patch_index = gy * grid_w + gx;
+                let out_offset = (b * num_patches + patch_index) * patch_dim;
+                for c in 0..channels {
+                    let channel_offset = image_offset + c * height * width;
+                    for py in 0..patch_size {
+                        let row = gy * patch_size + py;
+                        let row_offset = channel_offset + row * width + gx * patch_size;
+                        let dest = out_offset + (c * patch_size + py) * patch_size;
+                        out[dest..dest + patch_size]
+                            .copy_from_slice(&values[row_offset..row_offset + patch_size]);
+                    }
+                }
+            }
+        }
+    }
+
+    Tensor::from_vec(out, &[batch, num_patches, patch_dim])
 }
 
 fn scaled_dot_product_attention(
@@ -840,4 +1035,207 @@ fn scaled_dot_product_attention(
     let attn_weights = scores.softmax(-1)?;
     let output = attn_weights.matmul(value)?;
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Patch extraction ────────────────────────────────────────────────────
+
+    /// Regression: `extract_patches` was `Ok(pixel_values.clone())`, so the raw
+    /// `[batch, channels, height, width]` image reached a projection expecting
+    /// `[.., channels * patch_size²]`. This test pins both the output shape and
+    /// the exact patch contents, and fails on the shape alone against the old
+    /// no-op.
+    #[test]
+    fn extract_patches_cuts_a_real_grid() {
+        // One 1-channel 4x4 image whose pixels are their own flat index.
+        let pixels: Vec<f32> = (0..16).map(|i| i as f32).collect();
+        let image = Tensor::from_vec(pixels, &[1, 1, 4, 4]).expect("image must build");
+
+        let patches = extract_patches(&image, 2).expect("patch extraction must succeed");
+        // 2x2 grid of 2x2 patches, each flattened to 1*2*2 = 4 values.
+        assert_eq!(patches.shape(), vec![1, 4, 4]);
+
+        let values = patches.data().expect("readable");
+        // Row-major grid order; each patch is its own 2x2 block of the image.
+        assert_eq!(&values[0..4], &[0.0, 1.0, 4.0, 5.0], "top-left patch");
+        assert_eq!(&values[4..8], &[2.0, 3.0, 6.0, 7.0], "top-right patch");
+        assert_eq!(&values[8..12], &[8.0, 9.0, 12.0, 13.0], "bottom-left patch");
+        assert_eq!(
+            &values[12..16],
+            &[10.0, 11.0, 14.0, 15.0],
+            "bottom-right patch"
+        );
+    }
+
+    /// Channels are interleaved per patch in `(c, py, px)` order, matching the
+    /// flattened `Conv2d` kernel the projection's weights correspond to.
+    #[test]
+    fn extract_patches_lays_out_channels_first_within_a_patch() {
+        // Two channels of a 2x2 image: channel 0 is 0..4, channel 1 is 10..14.
+        let pixels: Vec<f32> = vec![0.0, 1.0, 2.0, 3.0, 10.0, 11.0, 12.0, 13.0];
+        let image = Tensor::from_vec(pixels, &[1, 2, 2, 2]).expect("image must build");
+
+        let patches = extract_patches(&image, 2).expect("patch extraction must succeed");
+        assert_eq!(patches.shape(), vec![1, 1, 8]);
+        assert_eq!(
+            patches.data().expect("readable"),
+            vec![0.0, 1.0, 2.0, 3.0, 10.0, 11.0, 12.0, 13.0],
+            "the single patch must hold channel 0 then channel 1"
+        );
+    }
+
+    #[test]
+    fn extract_patches_rejects_an_indivisible_image() {
+        let image = Tensor::zeros(&[1, 3, 5, 5]).expect("image must build");
+        let err = extract_patches(&image, 2)
+            .expect_err("a 5x5 image cannot be cut into 2x2 patches without padding");
+        assert!(
+            err.to_string().contains("not divisible"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn extract_patches_rejects_a_non_image_tensor() {
+        let flat = Tensor::zeros(&[16]).expect("tensor must build");
+        assert!(extract_patches(&flat, 2).is_err());
+        let image = Tensor::zeros(&[1, 1, 4, 4]).expect("image must build");
+        assert!(extract_patches(&image, 0).is_err());
+    }
+
+    // ── Multimodal merge ────────────────────────────────────────────────────
+
+    fn merge_config(placeholder: u32) -> LlavaConfig {
+        LlavaConfig {
+            vocab_size: 64,
+            hidden_size: 4,
+            intermediate_size: 8,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            mm_patch_token: placeholder,
+            vision_config: LlavaVisionConfig {
+                hidden_size: 4,
+                intermediate_size: 8,
+                num_hidden_layers: 1,
+                num_attention_heads: 2,
+                num_channels: 1,
+                patch_size: 2,
+                image_size: 4,
+                ..LlavaVisionConfig::default()
+            },
+            ..LlavaConfig::default()
+        }
+    }
+
+    /// Regression: `merge_multimodal_embeddings` ignored `input_ids` entirely
+    /// and returned `concat([image, text])` — the image always at the front,
+    /// wherever the prompt actually placed it, with the `<image>` placeholder
+    /// left in the text as a stray embedding.
+    #[test]
+    fn image_features_land_at_the_placeholder_position() {
+        let placeholder = 5u32;
+        let model = LlavaForConditionalGeneration::new(merge_config(placeholder))
+            .expect("model must build");
+
+        // Prompt: [t0, <image>, t2] with distinctive per-position embeddings.
+        let hidden = 4usize;
+        let text: Vec<f32> = vec![
+            1.0, 1.0, 1.0, 1.0, // position 0
+            9.0, 9.0, 9.0, 9.0, // position 1: the placeholder
+            3.0, 3.0, 3.0, 3.0, // position 2
+        ];
+        let text_embeds = Tensor::from_vec(text, &[1, 3, hidden]).expect("text must build");
+        // Two image patches.
+        let image = vec![7.0, 7.0, 7.0, 7.0, 8.0, 8.0, 8.0, 8.0];
+        let image_embeds = Tensor::from_vec(image, &[1, 2, hidden]).expect("image must build");
+        let input_ids =
+            Tensor::from_vec(vec![0.0, placeholder as f32, 2.0], &[1, 3]).expect("ids must build");
+
+        let merged = model
+            .merge_multimodal_embeddings(text_embeds, image_embeds, &input_ids)
+            .expect("merge must succeed");
+
+        // 3 text positions - 1 placeholder + 2 image patches = 4 positions.
+        assert_eq!(merged.shape(), vec![1, 4, hidden]);
+        let values = merged.data().expect("readable");
+        assert_eq!(
+            &values[0..4],
+            &[1.0, 1.0, 1.0, 1.0],
+            "text before the image"
+        );
+        assert_eq!(&values[4..8], &[7.0, 7.0, 7.0, 7.0], "first image patch");
+        assert_eq!(&values[8..12], &[8.0, 8.0, 8.0, 8.0], "second image patch");
+        assert_eq!(
+            &values[12..16],
+            &[3.0, 3.0, 3.0, 3.0],
+            "text after the image"
+        );
+        assert!(
+            !values.iter().any(|v| (*v - 9.0).abs() < 1e-6),
+            "the placeholder's own embedding must be replaced, not kept"
+        );
+    }
+
+    /// A prompt whose instruction precedes the picture must keep that order.
+    /// The old front-concatenation reversed it for every such prompt.
+    #[test]
+    fn text_before_the_image_is_not_reordered() {
+        let placeholder = 5u32;
+        let model = LlavaForConditionalGeneration::new(merge_config(placeholder))
+            .expect("model must build");
+        let hidden = 4usize;
+
+        // Prompt: [t0, t1, <image>] — the picture comes last.
+        let text_embeds = Tensor::from_vec(
+            vec![1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 9.0, 9.0, 9.0, 9.0],
+            &[1, 3, hidden],
+        )
+        .expect("text must build");
+        let image_embeds =
+            Tensor::from_vec(vec![7.0, 7.0, 7.0, 7.0], &[1, 1, hidden]).expect("image must build");
+        let input_ids =
+            Tensor::from_vec(vec![0.0, 1.0, placeholder as f32], &[1, 3]).expect("ids must build");
+
+        let merged = model
+            .merge_multimodal_embeddings(text_embeds, image_embeds, &input_ids)
+            .expect("merge must succeed");
+        let values = merged.data().expect("readable");
+        assert_eq!(merged.shape(), vec![1, 3, hidden]);
+        assert_eq!(&values[0..4], &[1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(&values[4..8], &[2.0, 2.0, 2.0, 2.0]);
+        assert_eq!(
+            &values[8..12],
+            &[7.0, 7.0, 7.0, 7.0],
+            "the image must stay at the end, where the prompt put it"
+        );
+    }
+
+    #[test]
+    fn a_prompt_without_a_placeholder_is_rejected() {
+        let model = LlavaForConditionalGeneration::new(merge_config(5)).expect("model must build");
+        let text_embeds = Tensor::zeros(&[1, 3, 4]).expect("text must build");
+        let image_embeds = Tensor::zeros(&[1, 2, 4]).expect("image must build");
+        let input_ids = Tensor::from_vec(vec![0.0, 1.0, 2.0], &[1, 3]).expect("ids must build");
+        let err = model
+            .merge_multimodal_embeddings(text_embeds, image_embeds, &input_ids)
+            .expect_err("image features with nowhere to go must be an error");
+        assert!(
+            err.to_string().contains("no image placeholder"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn mismatched_hidden_sizes_are_rejected() {
+        let model = LlavaForConditionalGeneration::new(merge_config(5)).expect("model must build");
+        let text_embeds = Tensor::zeros(&[1, 3, 4]).expect("text must build");
+        let image_embeds = Tensor::zeros(&[1, 2, 8]).expect("image must build");
+        let input_ids = Tensor::from_vec(vec![0.0, 5.0, 2.0], &[1, 3]).expect("ids must build");
+        assert!(model
+            .merge_multimodal_embeddings(text_embeds, image_embeds, &input_ids)
+            .is_err());
+    }
 }

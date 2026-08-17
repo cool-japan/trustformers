@@ -16,13 +16,6 @@ pub use detector::{
     RegressionDetector, RegressionMetric, RegressionSeverity,
 };
 pub use statistical::{
-    ChangeDirection,
-    CusumAlert,
-    CusumDetector,
-    StatBaselineStats,
-    StatRegressionConfig,
-    StatRegressionDetector,
-    StatRegressionDirection,
-    StatRegressionEvent,
-    StatRegressionSeverity,
+    ChangeDirection, CusumAlert, CusumDetector, StatBaselineStats, StatRegressionConfig,
+    StatRegressionDetector, StatRegressionDirection, StatRegressionEvent, StatRegressionSeverity,
 };

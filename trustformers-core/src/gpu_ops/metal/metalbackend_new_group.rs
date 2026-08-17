@@ -620,6 +620,21 @@ impl MetalBackend {
             // Output: [num_heads, seq_len, seq_len] attention weights
             // Each thread handles one row (sequence position) for one head
             // Computes: softmax(Q[h,i,:] @ K^T[h,:,:] * alpha) with causal mask
+            //
+            // UNBOUNDED IN seq_len. The previous formulation stashed the score row in a
+            // `float scores[256]` thread-private array, so every seq_len > 256 wrote past
+            // the end of that array - silent GPU memory corruption on any GPT-2 style
+            // context (n_positions = 1024). This version keeps no per-thread score array:
+            //
+            //   pass 1: stream the dot products, writing the RAW score into the output row
+            //           (which is exactly seq_len wide and already allocated) while
+            //           maintaining a running max and a rescaled running sum
+            //           (online / "flash" softmax recurrence);
+            //   pass 2: walk the output row once more turning raw scores into
+            //           exp(score - max) / sum, and zeroing the causally masked tail.
+            //
+            // Cost: one dot-product pass (unchanged) plus one cheap linear pass over the
+            // row. Numerics are identical to the max-subtracted textbook softmax.
             kernel void batched_scaled_matmul_softmax_causal(
                 device const float* Q [[buffer(0)]],      // [num_heads, seq_len, head_dim]
                 device const float* K_T [[buffer(1)]],    // [num_heads, head_dim, seq_len]
@@ -640,12 +655,12 @@ impl MetalBackend {
                 uint k_base = h * (head_dim * seq_len);                    // K^T[h, :, :]
                 uint out_base = h * (seq_len * seq_len) + row * seq_len;  // output[h, row, :]
 
-                // Step 1: Compute scaled dot products (Q @ K^T) for this row
-                // Only compute up to current position (causal mask)
-                float scores[256];  // Max seq_len = 256 for local array
+                // Step 1: stream scaled dot products (Q @ K^T) for this row into the
+                // output row, maintaining the online-softmax running max and sum.
+                // Only positions <= row participate (causal mask).
                 float max_score = -3.402823466e+38f;  // -FLT_MAX
+                float sum = 0.0f;
 
-                // Compute scores and find max for numerical stability
                 for (uint col = 0; col <= row && col < seq_len; ++col) {
                     float dot = 0.0f;
 
@@ -654,21 +669,27 @@ impl MetalBackend {
                         dot += Q[q_base + k] * K_T[k_base + k * seq_len + col];
                     }
 
-                    scores[col] = alpha * dot;  // Apply scaling
-                    max_score = max(max_score, scores[col]);
+                    float score = alpha * dot;  // Apply scaling
+                    // Park the raw score in global memory: the output row is seq_len
+                    // wide, so this needs no thread-private storage at all.
+                    output[out_base + col] = score;
+
+                    // Online softmax recurrence: rescale the running sum whenever the
+                    // running maximum moves, then fold in the new term.
+                    float new_max = max(max_score, score);
+                    sum = sum * exp(max_score - new_max) + exp(score - new_max);
+                    max_score = new_max;
                 }
 
-                // Step 2: Compute exp and sum for softmax
-                float sum = 0.0f;
-                for (uint col = 0; col <= row && col < seq_len; ++col) {
-                    scores[col] = exp(scores[col] - max_score);  // Numerically stable
-                    sum += scores[col];
-                }
+                // A fully masked row cannot happen (col == row is always allowed), but
+                // guard the division anyway so a degenerate dispatch cannot emit NaN.
+                float inv_sum = (sum > 0.0f) ? (1.0f / sum) : 0.0f;
 
-                // Step 3: Normalize and write output with causal masking
+                // Step 2: normalize in place and zero the causally masked tail.
                 for (uint col = 0; col < seq_len; ++col) {
                     if (col <= row) {
-                        output[out_base + col] = scores[col] / sum;  // Normalized attention weight
+                        output[out_base + col] =
+                            exp(output[out_base + col] - max_score) * inv_sum;
                     } else {
                         output[out_base + col] = 0.0f;  // Causal mask: future positions zeroed
                     }
@@ -702,12 +723,17 @@ impl MetalBackend {
                 uint k_base = h * (head_dim * kv_seq_len);                       // K^T[h, :, :]
                 uint out_base = h * (q_seq_len * kv_seq_len) + q_row * kv_seq_len;  // output[h, q_row, :]
 
-                // Step 1: Compute scaled dot products (Q @ K^T) for this query row
-                // Attend to ALL kv positions (they're all in the past for generation)
-                float scores[512];  // Max kv_seq_len = 512 for local array
+                // Step 1: stream scaled dot products (Q @ K^T) for this query row into
+                // the output row, maintaining the online-softmax running max and sum.
+                // Attend to ALL kv positions (they're all in the past for generation).
+                //
+                // UNBOUNDED IN kv_seq_len. This used to keep the score row in a
+                // `float scores[512]` thread-private array, so any generation whose
+                // cached context crossed 512 tokens wrote out of bounds - which is the
+                // ordinary decode path, since kv_seq_len grows by one per emitted token.
                 float max_score = -3.402823466e+38f;  // -FLT_MAX
+                float sum = 0.0f;
 
-                // Compute scores and find max for numerical stability
                 for (uint kv_col = 0; kv_col < kv_seq_len; ++kv_col) {
                     float dot = 0.0f;
 
@@ -716,20 +742,20 @@ impl MetalBackend {
                         dot += Q[q_base + k] * K_T[k_base + k * kv_seq_len + kv_col];
                     }
 
-                    scores[kv_col] = alpha * dot;  // Apply scaling
-                    max_score = max(max_score, scores[kv_col]);
+                    float score = alpha * dot;  // Apply scaling
+                    output[out_base + kv_col] = score;  // Park raw score in global memory
+
+                    float new_max = max(max_score, score);
+                    sum = sum * exp(max_score - new_max) + exp(score - new_max);
+                    max_score = new_max;
                 }
 
-                // Step 2: Compute exp and sum for softmax
-                float sum = 0.0f;
-                for (uint kv_col = 0; kv_col < kv_seq_len; ++kv_col) {
-                    scores[kv_col] = exp(scores[kv_col] - max_score);  // Numerically stable
-                    sum += scores[kv_col];
-                }
+                float inv_sum = (sum > 0.0f) ? (1.0f / sum) : 0.0f;
 
-                // Step 3: Normalize and write output (no causal masking - all KV valid)
+                // Step 2: normalize in place (no causal masking - all KV valid)
                 for (uint kv_col = 0; kv_col < kv_seq_len; ++kv_col) {
-                    output[out_base + kv_col] = scores[kv_col] / sum;  // Normalized attention weight
+                    output[out_base + kv_col] =
+                        exp(output[out_base + kv_col] - max_score) * inv_sum;
                 }
             }
 
@@ -883,12 +909,18 @@ impl MetalBackend {
                 const uint q_block_start = q_block_idx * 32;  // BLOCK_Q = 32
                 const uint q_idx = q_block_start + q_idx_in_block;
 
-                // Early exit if beyond sequence length
-                if (q_idx >= params.q_seq_len) {
-                    return;
-                }
+                // NO early `return` here. BLOCK_Q is 32 and the tail threadgroup of a
+                // q_seq_len that is not a multiple of 32 contains inactive threads; if
+                // those returned, the `threadgroup_barrier`s below would be executed by
+                // a non-uniform subset of the threadgroup (undefined behaviour under
+                // Metal's SIMT model) and `load_kv_block`, which strides its cooperative
+                // load by thread_idx, would leave part of the KV tile unwritten.
+                // Instead every thread runs the whole kernel and `active` masks the
+                // loads and the final stores.
+                const bool active = q_idx < params.q_seq_len;
 
-                // Load Q block into shared memory
+                // Load Q block into shared memory (load_q_block zero-fills out-of-range
+                // rows, so inactive lanes still contribute a well-defined tile entry).
                 threadgroup_barrier(mem_flags::mem_threadgroup);
                 load_q_block(Q, shared_Q, batch_idx, head_idx, q_block_start, q_idx_in_block, params);
                 threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -956,15 +988,18 @@ impl MetalBackend {
                     }
                 }
 
-                // Write output to global memory
-                uint out_offset = ((batch_idx * params.num_heads + head_idx) * params.q_seq_len + q_idx) * params.head_dim;
-                for (uint d = 0; d < params.head_dim; ++d) {
-                    O[out_offset + d] = output[d];
-                }
+                // Write output to global memory (inactive tail lanes stay silent).
+                if (active) {
+                    uint out_offset = ((batch_idx * params.num_heads + head_idx) * params.q_seq_len + q_idx) * params.head_dim;
+                    for (uint d = 0; d < params.head_dim; ++d) {
+                        O[out_offset + d] = output[d];
+                    }
 
-                // Write logsumexp for reference (can be used for backward pass)
-                uint l_offset = (batch_idx * params.num_heads + head_idx) * params.q_seq_len + q_idx;
-                L[l_offset] = max_score + log(sum_exp);
+                    // Write logsumexp for reference (can be used for backward pass)
+                    uint l_offset = (batch_idx * params.num_heads + head_idx) * params.q_seq_len + q_idx;
+                    L[l_offset] = (sum_exp > 0.0f) ? (max_score + log(sum_exp))
+                                                   : -3.402823466e+38f;
+                }
             }
         "#;
         let library = device
@@ -1332,6 +1367,7 @@ impl MetalBackend {
             device,
             command_queue,
             buffer_cache: Arc::new(std::sync::Mutex::new(BufferCache::new())),
+            pending_command_buffers: Arc::new(std::sync::Mutex::new(Vec::new())),
             matmul_pipeline: Arc::new(matmul_pipeline),
             gelu_pipeline: Arc::new(gelu_pipeline),
             matmul_gelu_pipeline: Arc::new(matmul_gelu_pipeline),

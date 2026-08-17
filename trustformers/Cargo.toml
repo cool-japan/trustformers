@@ -17,6 +17,7 @@ workspace = true
 
 [dependencies]
 trustformers-core.workspace = true
+safetensors.workspace = true
 trustformers-tokenizers.workspace = true
 trustformers-models.workspace = true
 trustformers-optim.workspace = true
@@ -105,6 +106,10 @@ clip = ["trustformers-models/clip", "dep:scirs2-core"]
 all-models = ["bert", "roberta", "albert", "gpt2", "gpt_neo", "gpt_j", "t5"]
 candle = ["trustformers-core/candle", "trustformers-training/candle"]
 cuda = ["trustformers-models/cuda"]
+# Real Metal GPU backend for `pipeline::metal_backend` (macOS only). Off by
+# default because it pulls the metal-rs / oxicuda-metal stack; with the feature
+# off every entry point in that module returns FeatureUnavailable rather than a mock.
+metal = ["trustformers-core/metal"]
 async = ["axum", "tower", "tower-http", "async-stream"]
 vision = ["image"]
 audio = []

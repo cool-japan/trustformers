@@ -236,10 +236,7 @@ impl PerfettoExporter {
     /// # Errors
     ///
     /// Returns an error if the file cannot be written.
-    pub fn export_profiler_report(
-        report: &ProfilerReport,
-        path: &std::path::Path,
-    ) -> Result<()> {
+    pub fn export_profiler_report(report: &ProfilerReport, path: &std::path::Path) -> Result<()> {
         let mut trace = PerfettoTrace::new();
         let mut cursor_us: u64 = 0;
 
@@ -302,12 +299,7 @@ fn event_to_value(e: &PerfettoEvent) -> Value {
     }
 
     if !e.args.is_empty() {
-        obj["args"] = Value::Object(
-            e.args
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        );
+        obj["args"] = Value::Object(e.args.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
     }
 
     obj

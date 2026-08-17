@@ -456,16 +456,168 @@ impl AdvancedQuantizer {
         })
     }
 
-    /// Mixed precision quantization
+    /// LLM.int8()-style mixed-precision quantization.
+    ///
+    /// Dettmers et al. (2022) observed that a small fraction of a transformer's
+    /// weights carry outsized magnitudes, and that quantizing *those* coarsely
+    /// is what destroys accuracy. The remedy is to split the tensor: the bulk
+    /// goes to `primary_bits`, the outliers are kept at the wider
+    /// `outlier_bits`, and the two are recombined on dequantization.
+    ///
+    /// This implementation does exactly that:
+    ///
+    /// * an element is an outlier when its magnitude reaches
+    ///   `config.outlier_threshold` — the **absolute** criterion of the paper
+    ///   (its default of `6.0` is a magnitude, not a ratio). Note that the older
+    ///   NF4 path compares against `outlier_threshold × block_abs_max`, under
+    ///   which a threshold of 6 can never fire because no element exceeds six
+    ///   times the block maximum;
+    /// * outlier positions go to `metadata.outlier_indices` and their values,
+    ///   quantized to `outlier_bits` about the block scale, to
+    ///   `metadata.outlier_values`;
+    /// * the remaining elements are quantized to `primary_bits` per block, with
+    ///   the outlier positions excluded from the block's scale so a single spike
+    ///   cannot crush the resolution of its neighbours.
+    ///
+    /// Elements are packed one per byte for `primary_bits <= 8`; the bit width is
+    /// what limits the number of levels, not the storage.
+    ///
+    /// # What this replaces
+    ///
+    /// The previous body took `_primary_bits` and `_outlier_bits`, commented
+    /// "For now, delegate to NF4", and called
+    /// [`AdvancedQuantizer::quantize_nf4`]. A caller asking for 8-bit outliers
+    /// over a 4-bit base silently received uniform NF4 — no error, no warning —
+    /// and the returned [`QuantizationStats`] described the NF4 result while
+    /// `metadata.method` claimed `MixedPrecision`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when either bit width is 0 or greater than 8, when
+    /// `outlier_bits < primary_bits` (which would make the "high precision" path
+    /// the coarser one), or when the tensor cannot be read as `f32`.
     fn quantize_mixed_precision(
         &self,
         tensor: &Tensor,
-        _primary_bits: u8,
-        _outlier_bits: u8,
+        primary_bits: u8,
+        outlier_bits: u8,
     ) -> Result<QuantizedTensor> {
-        // Implementation would detect outliers and use different bit widths
-        // For now, delegate to NF4 as primary quantization
-        self.quantize_nf4(tensor)
+        if primary_bits == 0 || primary_bits > 8 {
+            return Err(TrustformersError::invalid_input_simple(format!(
+                "MixedPrecision primary_bits must be in 1..=8, got {primary_bits}"
+            )));
+        }
+        if outlier_bits == 0 || outlier_bits > 8 {
+            return Err(TrustformersError::invalid_input_simple(format!(
+                "MixedPrecision outlier_bits must be in 1..=8, got {outlier_bits}"
+            )));
+        }
+        if outlier_bits < primary_bits {
+            return Err(TrustformersError::invalid_input_simple(format!(
+                "MixedPrecision outlier_bits ({outlier_bits}) must be at least primary_bits \
+                 ({primary_bits}): outliers are the values that need *more* precision, not less"
+            )));
+        }
+
+        let tensor_data = tensor.data_f32()?;
+        let total_elements = tensor_data.len();
+        if total_elements == 0 {
+            return Err(TrustformersError::invalid_input_simple(
+                "cannot quantize an empty tensor".to_string(),
+            ));
+        }
+        let block_size = self.config.block_size.max(1);
+        let num_blocks = total_elements.div_ceil(block_size);
+
+        // Symmetric signed quantization: `primary_bits` gives levels
+        // [-(2^(b-1) - 1), 2^(b-1) - 1], stored offset into a u8.
+        let primary_levels = ((1u32 << (primary_bits - 1)) - 1).max(1) as f32;
+        let outlier_levels = ((1u32 << (outlier_bits - 1)) - 1).max(1) as f32;
+
+        let mut quantized_data = Vec::with_capacity(total_elements);
+        let mut scales = Vec::with_capacity(num_blocks);
+        let mut outlier_indices = Vec::new();
+        let mut outlier_values = Vec::new();
+
+        for block_idx in 0..num_blocks {
+            let start_idx = block_idx * block_size;
+            let end_idx = (start_idx + block_size).min(total_elements);
+            let block_data = &tensor_data[start_idx..end_idx];
+
+            let abs_max = block_data.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+
+            // First pass: classify by absolute magnitude, as LLM.int8() does.
+            // The primary scale deliberately ignores the outliers — that is the
+            // whole point of separating them, since one spike would otherwise
+            // consume the entire dynamic range of the block.
+            let mut primary_abs_max = 0.0f32;
+            let mut is_outlier = Vec::with_capacity(block_data.len());
+            for &value in block_data {
+                let outlier = value.abs() >= self.config.outlier_threshold;
+                if !outlier {
+                    primary_abs_max = primary_abs_max.max(value.abs());
+                }
+                is_outlier.push(outlier);
+            }
+
+            let primary_scale =
+                if primary_abs_max > 0.0 { primary_abs_max / primary_levels } else { 1.0 };
+            let outlier_scale = if abs_max > 0.0 { abs_max / outlier_levels } else { 1.0 };
+            scales.push(primary_scale);
+
+            // Second pass: quantize.
+            for (local_idx, (&value, &outlier)) in
+                block_data.iter().zip(is_outlier.iter()).enumerate()
+            {
+                if outlier {
+                    // Keep the outlier at `outlier_bits`, round-tripped through
+                    // its own scale so the stored value is the *quantized* one,
+                    // not the original: reporting an exact value for something
+                    // that was quantized would overstate the fidelity.
+                    let level =
+                        (value / outlier_scale).round().clamp(-outlier_levels, outlier_levels);
+                    outlier_indices.push(start_idx + local_idx);
+                    outlier_values.push(level * outlier_scale);
+                    // The primary stream carries 0 at an outlier position; the
+                    // real value is restored from the outlier list.
+                    quantized_data.push(128u8);
+                } else {
+                    let level =
+                        (value / primary_scale).round().clamp(-primary_levels, primary_levels);
+                    quantized_data.push((level as i32 + 128) as u8);
+                }
+            }
+        }
+
+        let final_scales = if self.config.double_quantization {
+            self.double_quantize_scales(&scales)?
+        } else {
+            scales
+        };
+
+        let outliers = if outlier_indices.is_empty() {
+            (None, None)
+        } else {
+            (Some(outlier_indices), Some(outlier_values))
+        };
+
+        Ok(QuantizedTensor {
+            data: quantized_data,
+            scales: final_scales,
+            zero_points: None,
+            shape: tensor.shape().to_vec(),
+            metadata: QuantizationMetadata {
+                method: QuantizationMethod::MixedPrecision {
+                    primary_bits,
+                    outlier_bits,
+                },
+                block_size,
+                outlier_indices: outliers.0,
+                outlier_values: outliers.1,
+                double_quantized: self.config.double_quantization,
+                compute_dtype: self.config.compute_dtype.clone(),
+            },
+        })
     }
 
     /// Dequantize NF4 tensor
@@ -671,10 +823,88 @@ impl AdvancedQuantizer {
         Tensor::from_vec(dequantized_data, &quantized.shape)
     }
 
-    /// Dequantize mixed precision tensor
+    /// Reconstruct a mixed-precision tensor from its two streams.
+    ///
+    /// The primary stream is scaled per block; the outlier positions are then
+    /// overwritten with their higher-precision values. A previous revision
+    /// delegated to [`AdvancedQuantizer::dequantize_nf4`], which reads the data
+    /// as *packed 4-bit pairs* — so it would have decoded a mixed-precision
+    /// payload as twice as many elements of the wrong magnitudes even if the
+    /// quantizer had produced one.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the metadata does not describe a mixed-precision tensor, when
+    /// the payload length does not match the declared shape, or when the outlier
+    /// bookkeeping is inconsistent.
     fn dequantize_mixed_precision(&self, quantized: &QuantizedTensor) -> Result<Tensor> {
-        // For now, delegate to NF4 dequantization
-        self.dequantize_nf4(quantized)
+        let QuantizationMethod::MixedPrecision { .. } = quantized.metadata.method else {
+            return Err(TrustformersError::invalid_input_simple(format!(
+                "dequantize_mixed_precision called on a {:?} tensor",
+                quantized.metadata.method
+            )));
+        };
+
+        let total_elements: usize = quantized.shape.iter().product();
+        if quantized.data.len() != total_elements {
+            return Err(TrustformersError::shape_error(format!(
+                "mixed-precision payload holds {} element(s) but the shape {:?} needs \
+                 {total_elements}",
+                quantized.data.len(),
+                quantized.shape
+            )));
+        }
+        let block_size = quantized.metadata.block_size.max(1);
+        let expected_blocks = total_elements.div_ceil(block_size);
+        if quantized.scales.len() != expected_blocks {
+            return Err(TrustformersError::shape_error(format!(
+                "mixed-precision tensor carries {} scale(s) but {expected_blocks} block(s) of \
+                 size {block_size} were quantized",
+                quantized.scales.len()
+            )));
+        }
+
+        let mut dequantized = vec![0.0f32; total_elements];
+        for (index, &byte) in quantized.data.iter().enumerate() {
+            let block = index / block_size;
+            let scale = quantized.scales[block];
+            let level = byte as i32 - 128;
+            dequantized[index] = level as f32 * scale;
+        }
+
+        // Restore the high-precision outliers over the primary stream.
+        match (
+            &quantized.metadata.outlier_indices,
+            &quantized.metadata.outlier_values,
+        ) {
+            (Some(indices), Some(values)) => {
+                if indices.len() != values.len() {
+                    return Err(TrustformersError::invalid_input_simple(format!(
+                        "mixed-precision tensor records {} outlier position(s) but {} value(s)",
+                        indices.len(),
+                        values.len()
+                    )));
+                }
+                for (&index, &value) in indices.iter().zip(values.iter()) {
+                    if index >= total_elements {
+                        return Err(TrustformersError::shape_error(format!(
+                            "outlier index {index} is out of range for {total_elements} elements"
+                        )));
+                    }
+                    dequantized[index] = value;
+                }
+            },
+            (None, None) => {},
+            _ => {
+                return Err(TrustformersError::invalid_input_simple(
+                    "mixed-precision tensor records outlier indices without values (or the \
+                     reverse)"
+                        .to_string(),
+                ))
+            },
+        }
+
+        Tensor::from_vec(dequantized, &quantized.shape)
     }
 
     /// Double quantization of scaling factors
@@ -1120,6 +1350,185 @@ mod tests {
             "Int8 block-wise must achieve > 2x compression; got {}",
             stats.compression_ratio
         );
+        Ok(())
+    }
+
+    // ── Mixed precision (regression for the silent NF4 downgrade) ───────────
+
+    fn mixed_config(
+        primary_bits: u8,
+        outlier_bits: u8,
+        threshold: f32,
+    ) -> AdvancedQuantizationConfig {
+        AdvancedQuantizationConfig {
+            method: QuantizationMethod::MixedPrecision {
+                primary_bits,
+                outlier_bits,
+            },
+            block_size: 8,
+            double_quantization: false,
+            outlier_threshold: threshold,
+            ..AdvancedQuantizationConfig::default()
+        }
+    }
+
+    /// Regression: `quantize_mixed_precision` ignored both bit widths and called
+    /// `quantize_nf4`, so the returned tensor was NF4 — 4-bit packed two per
+    /// byte — while `metadata.method` claimed `MixedPrecision`.
+    #[test]
+    fn mixed_precision_does_not_silently_produce_nf4() -> Result<()> {
+        let quantizer = AdvancedQuantizer::new(mixed_config(4, 8, 6.0));
+        let data: Vec<f32> = (0..16).map(|i| i as f32 * 0.1 - 0.8).collect();
+        let tensor = Tensor::from_vec(data.clone(), &[16])?;
+
+        let quantized = quantizer.quantize(&tensor)?;
+        assert_eq!(
+            quantized.metadata.method,
+            QuantizationMethod::MixedPrecision {
+                primary_bits: 4,
+                outlier_bits: 8,
+            },
+            "the method recorded must be the method actually used"
+        );
+        assert_eq!(
+            quantized.data.len(),
+            data.len(),
+            "mixed precision stores one element per byte; NF4 packs two, so a 16-element \
+             tensor would have produced 8 bytes under the old delegation"
+        );
+        Ok(())
+    }
+
+    /// The bit widths must actually matter: 8-bit primary quantization must
+    /// reconstruct the tensor more faithfully than 2-bit. Under the old
+    /// delegation both calls returned identical NF4 output.
+    #[test]
+    fn mixed_precision_honours_primary_bits() -> Result<()> {
+        let data: Vec<f32> = (0..32).map(|i| (i as f32 * 0.37).sin()).collect();
+        let tensor = Tensor::from_vec(data.clone(), &[32])?;
+
+        let error_at = |bits: u8| -> Result<f32> {
+            let quantizer = AdvancedQuantizer::new(mixed_config(bits, 8, 100.0));
+            let quantized = quantizer.quantize(&tensor)?;
+            let restored = quantizer.dequantize(&quantized)?.data_f32()?;
+            Ok(data
+                .iter()
+                .zip(restored.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max))
+        };
+
+        let coarse = error_at(2)?;
+        let fine = error_at(8)?;
+        assert!(
+            fine < coarse,
+            "more primary bits must reduce the reconstruction error: 8-bit gave {fine}, \
+             2-bit gave {coarse}"
+        );
+        assert!(
+            fine < 0.05,
+            "8-bit reconstruction must be close, got {fine}"
+        );
+        Ok(())
+    }
+
+    /// Outliers must be detected, recorded and restored at their own precision —
+    /// the `metadata.outlier_*` fields existed but were never populated by the
+    /// mixed-precision path.
+    #[test]
+    fn mixed_precision_preserves_outliers_at_higher_precision() -> Result<()> {
+        // A block of small values with two large spikes.
+        let mut data = vec![0.05f32; 16];
+        data[3] = 40.0;
+        data[11] = -35.0;
+        let tensor = Tensor::from_vec(data.clone(), &[16])?;
+
+        let quantizer = AdvancedQuantizer::new(mixed_config(4, 8, 10.0));
+        let quantized = quantizer.quantize(&tensor)?;
+
+        let indices = quantized
+            .metadata
+            .outlier_indices
+            .as_ref()
+            .expect("the outliers must be recorded, not folded into the primary stream");
+        assert_eq!(indices, &vec![3usize, 11], "both spikes must be detected");
+        assert_eq!(
+            quantized.metadata.outlier_values.as_ref().map(Vec::len),
+            Some(2)
+        );
+
+        let restored = quantizer.dequantize(&quantized)?.data_f32()?;
+        assert!(
+            (restored[3] - 40.0).abs() < 1.0,
+            "the outlier must survive at high precision, got {}",
+            restored[3]
+        );
+        assert!(
+            (restored[11] + 35.0).abs() < 1.0,
+            "the outlier must survive at high precision, got {}",
+            restored[11]
+        );
+        // The small values keep their resolution because the outliers were
+        // excluded from the primary block scale.
+        assert!(
+            (restored[0] - 0.05).abs() < 0.02,
+            "excluding outliers from the block scale must preserve the small values, got {}",
+            restored[0]
+        );
+        Ok(())
+    }
+
+    /// `get_stats` must describe the mixed-precision result, including its
+    /// outlier count. It previously reported the NF4 tensor's statistics.
+    #[test]
+    fn mixed_precision_stats_describe_the_mixed_precision_result() -> Result<()> {
+        let mut data = vec![0.1f32; 16];
+        data[7] = 50.0;
+        let tensor = Tensor::from_vec(data, &[16])?;
+        let quantizer = AdvancedQuantizer::new(mixed_config(4, 8, 10.0));
+        let quantized = quantizer.quantize(&tensor)?;
+        let stats = quantizer.get_stats(&quantized);
+
+        assert_eq!(
+            stats.method,
+            QuantizationMethod::MixedPrecision {
+                primary_bits: 4,
+                outlier_bits: 8,
+            }
+        );
+        assert_eq!(stats.outlier_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_precision_rejects_impossible_bit_widths() {
+        let tensor = Tensor::from_vec(vec![1.0, 2.0], &[2]).expect("tensor must build");
+
+        for (primary, outlier) in [(0u8, 8u8), (4, 0), (9, 9), (8, 4)] {
+            let quantizer = AdvancedQuantizer::new(mixed_config(primary, outlier, 6.0));
+            assert!(
+                quantizer.quantize(&tensor).is_err(),
+                "primary_bits={primary}, outlier_bits={outlier} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_precision_round_trips_without_any_outlier() -> Result<()> {
+        let data: Vec<f32> = (0..24).map(|i| i as f32 * 0.01).collect();
+        let tensor = Tensor::from_vec(data.clone(), &[24])?;
+        // A threshold no element reaches: the outlier lists stay empty.
+        let quantizer = AdvancedQuantizer::new(mixed_config(8, 8, 1000.0));
+        let quantized = quantizer.quantize(&tensor)?;
+        assert!(quantized.metadata.outlier_indices.is_none());
+
+        let restored = quantizer.dequantize(&quantized)?.data_f32()?;
+        for (original, back) in data.iter().zip(restored.iter()) {
+            assert!(
+                (original - back).abs() < 0.005,
+                "8-bit round trip must be accurate: {original} vs {back}"
+            );
+        }
         Ok(())
     }
 }

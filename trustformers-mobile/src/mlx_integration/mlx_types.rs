@@ -1,10 +1,33 @@
-//! MLX Framework Integration for Apple Silicon
+//! MLX-*style* graph execution API for Apple Silicon - implemented on Metal and CPU.
 //!
-//! This module provides native MLX (Machine Learning eXchange) framework integration
-//! for Apple Silicon devices, offering optimized performance through unified memory
-//! architecture, graph optimization, and seamless CPU/GPU/Neural Engine coordination.
-//! MLX is designed specifically for Apple Silicon and provides significant performance
-//! improvements over traditional frameworks.
+//! # This does NOT link Apple's MLX
+//!
+//! Read this before using anything named `Mlx*` here. This module implements an API
+//! *shaped like* Apple's MLX (a declared operation graph, unified-memory allocation,
+//! a compile step, per-op compute-unit assignment). It has **no dependency on, and no
+//! linkage to, Apple's MLX framework or `mlx-rs`** - there is no `mlx` crate in
+//! `Cargo.toml`, no FFI and no `unsafe` graph interop. The `Mlx` prefix is kept only
+//! so existing callers keep compiling; read it as "MLX-style", never as "MLX-backed".
+//!
+//! The module docs used to claim "native MLX (Machine Learning eXchange) framework
+//! integration ... seamless CPU/GPU/Neural Engine coordination" while every operation
+//! ran as a scalar Rust loop on the CPU. That claim is withdrawn.
+//!
+//! # What actually executes
+//!
+//! * With the crate's `metal` feature on macOS, `MatMul`, `Attention` and `LayerNorm`
+//!   dispatch to the real Metal kernels in `trustformers_core::gpu_ops::metal`.
+//! * Otherwise every op runs on the CPU through `trustformers_core` tensor kernels.
+//! * **Nothing ever runs on the Neural Engine.** Neither Metal nor this crate can
+//!   dispatch to the ANE (that needs CoreML), so `AssignedComputeUnit` has no
+//!   `NeuralEngine` variant any more - it was a label no code path acted on.
+//!
+//! # Hardware figures
+//!
+//! Capabilities come from [`super::device_probe::probe_hardware`] (`sysctlbyname`) and,
+//! when the `metal` feature is on, from the live `MTLDevice`. Quantities Apple exposes
+//! no API for (GPU core count, ANE TOPS, memory bandwidth) are `None`, never a spec-sheet
+//! constant.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -344,25 +367,29 @@ pub enum MlxOperation {
 
 /// MLX performance metrics
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Measured execution metrics.
+///
+/// Only quantities this process can actually observe are present. The previous
+/// version hardcoded `cpu_utilization = 75.0`, `gpu_utilization = 85.0`,
+/// `neural_engine_utilization = 90.0`, a constant 15 W and a constant thermal state
+/// under a `// Simulate MLX performance characteristics` comment, and printed them as
+/// telemetry. Those fields are either measured now or gone.
 pub struct MlxPerformanceMetrics {
-    /// Operations per second
+    /// Graph nodes executed per second, from `Instant` timing of the last run.
     pub ops_per_second: f64,
-    /// Memory bandwidth utilization (GB/s)
-    pub memory_bandwidth_gbps: f32,
-    /// CPU utilization percentage
-    pub cpu_utilization: f32,
-    /// GPU utilization percentage
-    pub gpu_utilization: f32,
-    /// Neural Engine utilization percentage
-    pub neural_engine_utilization: f32,
-    /// Power consumption (watts)
-    pub power_consumption_watts: f32,
-    /// Compilation time (milliseconds)
+    /// Wall-clock duration of the last `execute_model` call, in milliseconds.
+    pub last_execution_ms: f64,
+    /// Number of graph nodes executed in the last run.
+    pub last_execution_nodes: usize,
+    /// Process CPU utilisation (percent of one core) sampled via `sysinfo`.
+    /// `None` when the platform does not report it.
+    pub cpu_utilization: Option<f32>,
+    /// Resident set size of this process in GiB, sampled via `sysinfo`.
+    pub process_memory_gb: Option<f32>,
+    /// Bytes the unified memory pool has handed out, in GiB.
+    pub pool_memory_gb: f32,
+    /// Compilation time of the last `compile_model` call, in milliseconds.
     pub compilation_time_ms: f64,
-    /// Memory usage (GB)
-    pub memory_usage_gb: f32,
-    /// Thermal state (0.0-1.0)
-    pub thermal_state: f32,
 }
 
 /// MLX unified compute engine
@@ -374,27 +401,70 @@ pub struct MlxEngine {
     pub(super) memory_pool: UnifiedMemoryPool,
 }
 
-/// Device capabilities for Apple Silicon
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Capabilities of the machine this process is running on.
+///
+/// Every populated field is measured: CPU/memory figures come from `sysctlbyname`
+/// and the Metal fields from the live `MTLDevice`. Fields Apple exposes no query for
+/// are `Option::None` - the previous version reported a chip-spec lookup table plus a
+/// fabricated `mlx_version: "0.15.0"` for a framework that is not linked.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeviceCapabilities {
-    /// Performance core count
-    pub performance_cores: u8,
-    /// Efficiency core count
-    pub efficiency_cores: u8,
-    /// GPU core count
-    pub gpu_cores: u16,
-    /// Neural Engine TOPS
-    pub neural_engine_tops: f32,
-    /// Unified memory size (GB)
+    /// `machdep.cpu.brand_string`, e.g. "Apple M4 Pro".
+    pub cpu_brand: String,
+    /// `hw.perflevel0.logicalcpu`. `None` on hardware without core clusters.
+    pub performance_cores: Option<u32>,
+    /// `hw.perflevel1.logicalcpu`. `None` on hardware without core clusters.
+    pub efficiency_cores: Option<u32>,
+    /// `hw.logicalcpu` - total logical CPUs.
+    pub logical_cores: u32,
+    /// `hw.memsize` converted to GiB.
     pub unified_memory_gb: f32,
-    /// Memory bandwidth (GB/s)
+    /// `hw.optional.amx_version` when present. `None` means "not reported", not "absent".
+    pub amx_version: Option<u32>,
+    /// `MTLDevice.name` when the `metal` feature is on.
+    pub metal_device_name: Option<String>,
+    /// Highest supported `MTLGPUFamily.Apple*` generation, when queryable.
+    pub apple_gpu_family: Option<u32>,
+    /// `MTLDevice.maxBufferLength` in bytes, when queryable.
+    pub metal_max_buffer_bytes: Option<usize>,
+    /// `MTLDevice.recommendedMaxWorkingSetSize` in bytes, when queryable.
+    pub metal_recommended_working_set_bytes: Option<u64>,
+    /// `MTLDevice.hasUnifiedMemory`, when queryable.
+    pub metal_unified_memory: Option<bool>,
+    /// GPU core count. Always `None`: neither Metal nor sysctl exposes it.
+    pub gpu_cores: Option<u16>,
+    /// Neural Engine throughput. Always `None`: Apple publishes no query API.
+    pub neural_engine_tops: Option<f32>,
+    /// Memory bandwidth. Always `None`: Apple publishes no query API.
+    pub memory_bandwidth_gbps: Option<f32>,
+}
+
+/// Apple's **published marketing specifications** for a chip model.
+///
+/// A transcription of Apple's product pages, returned by
+/// [`MlxEngine::published_specs_for`](super::MlxEngine::published_specs_for). It is
+/// explicitly *not* a measurement of the running machine - use
+/// [`DeviceCapabilities`] for that. The distinction exists because the old
+/// `detect_device_capabilities` returned this table under a name that promised
+/// detection.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PublishedChipSpecs {
+    /// Chip these specs describe.
+    pub device: AppleSiliconDevice,
+    /// Published performance-core count.
+    pub performance_cores: u8,
+    /// Published efficiency-core count.
+    pub efficiency_cores: u8,
+    /// Published GPU core count.
+    pub gpu_cores: u16,
+    /// Published Neural Engine throughput in TOPS.
+    pub neural_engine_tops: f32,
+    /// Memory in the base configuration, in GB. Individual machines vary.
+    pub base_configuration_memory_gb: f32,
+    /// Published memory bandwidth in GB/s.
     pub memory_bandwidth_gbps: f32,
-    /// AMX support
+    /// Whether the chip ships Apple's AMX matrix coprocessor.
     pub amx_support: bool,
-    /// Metal version
-    pub metal_version: String,
-    /// MLX version compatibility
-    pub mlx_version: String,
 }
 
 /// Compiled MLX model representation
@@ -417,8 +487,11 @@ pub struct CompiledMlxModel {
 pub struct CompilationMetadata {
     /// Compilation timestamp
     pub compilation_time: std::time::SystemTime,
-    /// MLX version used
-    pub mlx_version: String,
+    /// Which execution backend the graph was compiled for: `"metal"` or `"cpu"`.
+    ///
+    /// Replaces `mlx_version`, which reported the version of a framework this crate
+    /// never linked.
+    pub engine_backend: String,
     /// Optimization level
     pub optimization_level: OptimizationLevel,
     /// Target device
@@ -493,14 +566,13 @@ pub type TensorId = u64;
 /// Assigned compute unit for graph nodes
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AssignedComputeUnit {
-    /// CPU execution
+    /// Executed by CPU kernels.
     CPU,
-    /// GPU execution
-    GPU,
-    /// Neural Engine execution
-    NeuralEngine,
-    /// Hybrid execution
-    Hybrid,
+    /// Executed by the Metal kernels in `trustformers_core::gpu_ops::metal`.
+    ///
+    /// Only reachable when the crate is built with the `metal` feature on macOS; the
+    /// planner assigns `CPU` otherwise rather than labelling work it cannot dispatch.
+    Gpu,
 }
 
 /// Memory layout for optimized execution
@@ -605,9 +677,11 @@ impl Default for MlxConfig {
 }
 
 impl Default for UnifiedMemoryConfig {
+    /// `max_memory_gb: 0.0` means "no explicit cap"; a fixed 16 GiB default made the
+    /// default config unusable on 8 GiB machines.
     fn default() -> Self {
         Self {
-            max_memory_gb: 16.0,
+            max_memory_gb: 0.0,
             bandwidth_optimization: BandwidthOptimization::Balanced,
             pool_strategy: MemoryPoolStrategy::MlxOptimized,
             zero_copy_enabled: true,
@@ -617,22 +691,28 @@ impl Default for UnifiedMemoryConfig {
 }
 
 impl Default for ComputeUnitConfig {
+    /// Auto-sizing defaults.
+    ///
+    /// Zero means "use whatever the probed device has". The previous defaults asked
+    /// for 8 performance cores and 20 GPU cores unconditionally, which exceeded the
+    /// capability table for the default device (M4: 4 performance cores, 10 GPU
+    /// cores) - so `MlxEngine::new(MlxConfig::default())` could never succeed.
     fn default() -> Self {
         Self {
             cpu_config: CpuConfig {
-                performance_cores: 8,
-                efficiency_cores: 4,
+                performance_cores: 0,
+                efficiency_cores: 0,
                 amx_enabled: true,
                 simd_optimization: true,
             },
             gpu_config: GpuConfig {
-                gpu_cores: 20,
+                gpu_cores: 0,
                 mps_integration: true,
                 tbdr_optimization: true,
                 compute_pipeline_preference: ComputePipelinePreference::Balanced,
             },
             neural_engine_config: NeuralEngineConfig {
-                utilization_percentage: 90.0,
+                utilization_percentage: 0.0,
                 int8_quantization: true,
                 batch_optimization: true,
                 model_caching: ModelCachingStrategy::Predictive,

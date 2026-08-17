@@ -6,22 +6,23 @@
 use anyhow::Result;
 use scirs2_core::ndarray::Array1;
 use std::collections::HashMap;
-use trustformers_debug::{MLflowClient, MLflowConfig, MLflowDebugSession, RunStatus};
+use trustformers_debug::{MLflowClient, MLflowConfig, MLflowDebugSession, RunStatus, TrackingMode};
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     // Initialize tracing
     tracing_subscriber::fmt::init();
 
     println!("=== MLflow Integration Demo ===\n");
 
     // Demo 1: Basic MLflow Client Usage
-    demo_basic_client()?;
+    demo_basic_client().await?;
 
     // Demo 2: MLflow Debug Session
-    demo_debug_session()?;
+    demo_debug_session().await?;
 
     // Demo 3: Logging Metrics Over Time
-    demo_metrics_tracking()?;
+    demo_metrics_tracking().await?;
 
     // Demo 4: Artifact Logging
     demo_artifact_logging()?;
@@ -31,10 +32,14 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn demo_basic_client() -> Result<()> {
+async fn demo_basic_client() -> Result<()> {
     println!("--- Demo 1: Basic MLflow Client ---\n");
 
-    // Create MLflow client with default config
+    // Create MLflow client with default config. `mode` is `LocalOnly` here
+    // so this example runs to completion without a real MLflow server:
+    // caches everything in memory instead of a silent no-op HTTP attempt.
+    // Point `tracking_uri` at a real server and set `mode: TrackingMode::Http`
+    // (the default) to actually deliver runs via the MLflow REST API.
     let config = MLflowConfig {
         tracking_uri: "http://localhost:5000".to_string(),
         experiment_name: "trustformers-demo".to_string(),
@@ -43,13 +48,14 @@ fn demo_basic_client() -> Result<()> {
         max_cache_size: 1000,
         log_artifacts: true,
         artifact_dir: std::env::temp_dir().join("mlflow_artifacts"),
+        mode: TrackingMode::LocalOnly,
     };
 
     let mut client = MLflowClient::new(config);
 
     // Start an experiment and run
-    client.start_experiment("transformer-training")?;
-    client.start_run(Some("initial-run"))?;
+    client.start_experiment("transformer-training").await?;
+    client.start_run(Some("initial-run")).await?;
 
     // Log hyperparameters
     client.log_param("learning_rate", "0.001")?;
@@ -78,21 +84,25 @@ fn demo_basic_client() -> Result<()> {
     println!("✓ Logged 10 training steps");
 
     // End the run
-    client.end_run(RunStatus::Finished)?;
+    client.end_run(RunStatus::Finished).await?;
 
     println!("✓ Run completed successfully\n");
 
     Ok(())
 }
 
-fn demo_debug_session() -> Result<()> {
+async fn demo_debug_session() -> Result<()> {
     println!("--- Demo 2: MLflow Debug Session ---\n");
 
-    let config = MLflowConfig::default();
+    // see note in demo_basic_client()
+    let config = MLflowConfig {
+        mode: TrackingMode::LocalOnly,
+        ..MLflowConfig::default()
+    };
     let mut session = MLflowDebugSession::new(config);
 
     // Start debugging session
-    session.start("debugging-experiment", Some("gradient-check"))?;
+    session.start("debugging-experiment", Some("gradient-check")).await?;
 
     println!("✓ Started debug session");
 
@@ -109,21 +119,25 @@ fn demo_debug_session() -> Result<()> {
     println!("✓ Logged debug metrics for 5 steps");
 
     // End session
-    session.end(RunStatus::Finished)?;
+    session.end(RunStatus::Finished).await?;
 
     println!("✓ Debug session completed\n");
 
     Ok(())
 }
 
-fn demo_metrics_tracking() -> Result<()> {
+async fn demo_metrics_tracking() -> Result<()> {
     println!("--- Demo 3: Metrics Tracking ---\n");
 
-    let config = MLflowConfig::default();
+    // see note in demo_basic_client()
+    let config = MLflowConfig {
+        mode: TrackingMode::LocalOnly,
+        ..MLflowConfig::default()
+    };
     let mut client = MLflowClient::new(config);
 
-    client.start_experiment("metrics-demo")?;
-    client.start_run(Some("array-stats"))?;
+    client.start_experiment("metrics-demo").await?;
+    client.start_run(Some("array-stats")).await?;
 
     // Create sample data
     let data = Array1::from_vec(vec![0.5, 1.2, 0.8, 1.5, 0.9, 1.1, 0.7, 1.3]);
@@ -145,7 +159,7 @@ fn demo_metrics_tracking() -> Result<()> {
 
     println!("✓ Logged batch metrics (throughput, latency, memory)");
 
-    client.end_run(RunStatus::Finished)?;
+    client.end_run(RunStatus::Finished).await?;
 
     println!("✓ Metrics tracking completed\n");
 
@@ -155,7 +169,11 @@ fn demo_metrics_tracking() -> Result<()> {
 fn demo_artifact_logging() -> Result<()> {
     println!("--- Demo 4: Artifact Logging ---\n");
 
-    let config = MLflowConfig::default();
+    // see note in demo_basic_client()
+    let config = MLflowConfig {
+        mode: TrackingMode::LocalOnly,
+        ..MLflowConfig::default()
+    };
     let _client = MLflowClient::new(config);
 
     // Note: We don't start experiment/run here to show artifact logging

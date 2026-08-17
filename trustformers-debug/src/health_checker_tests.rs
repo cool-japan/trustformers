@@ -123,7 +123,11 @@ fn test_metric_stability_new() {
     let ms = MetricStability::new(0.01, 0.05);
     // Initial state: no values, should return default stability (0.5 = insufficient data)
     let stability = ms.calculate_stability();
-    assert!((stability - 0.5).abs() < 1e-10, "initial stability should be 0.5, got {}", stability);
+    assert!(
+        (stability - 0.5).abs() < 1e-10,
+        "initial stability should be 0.5, got {}",
+        stability
+    );
 }
 
 #[test]
@@ -143,7 +147,11 @@ fn test_metric_stability_high_stability_constant_values() {
         ms.update(1.0);
     }
     let stability = ms.calculate_stability();
-    assert!(stability > 0.8, "constant values should yield high stability, got {}", stability);
+    assert!(
+        stability > 0.8,
+        "constant values should yield high stability, got {}",
+        stability
+    );
 }
 
 #[test]
@@ -154,7 +162,11 @@ fn test_metric_stability_returns_bounded_value() {
         ms.update(if i % 2 == 0 { 0.0 } else { 10.0 });
     }
     let stability = ms.calculate_stability();
-    assert!(stability >= 0.0 && stability <= 1.0, "stability must be in [0,1], got {}", stability);
+    assert!(
+        (0.0..=1.0).contains(&stability),
+        "stability must be in [0,1], got {}",
+        stability
+    );
 }
 
 // ── ConvergenceAnalyzer ───────────────────────────────────────────────────────
@@ -164,7 +176,11 @@ fn test_convergence_analyzer_new() {
     let analyzer = ConvergenceAnalyzer::new();
     // No data: returns default convergence probability
     let prob = analyzer.calculate_convergence_probability();
-    assert!(prob >= 0.0 && prob <= 1.0, "probability must be [0,1], got {}", prob);
+    assert!(
+        (0.0..=1.0).contains(&prob),
+        "probability must be [0,1], got {}",
+        prob
+    );
 }
 
 #[test]
@@ -174,7 +190,7 @@ fn test_convergence_analyzer_update_loss_only() {
         analyzer.update(Some(2.0 - i as f64 * 0.05), None);
     }
     let prob = analyzer.calculate_convergence_probability();
-    assert!(prob >= 0.0 && prob <= 1.0);
+    assert!((0.0..=1.0).contains(&prob));
 }
 
 #[test]
@@ -184,7 +200,7 @@ fn test_convergence_analyzer_update_accuracy_only() {
         analyzer.update(None, Some(0.5 + i as f64 * 0.02));
     }
     let prob = analyzer.calculate_convergence_probability();
-    assert!(prob >= 0.0 && prob <= 1.0);
+    assert!((0.0..=1.0).contains(&prob));
 }
 
 #[test]
@@ -195,20 +211,21 @@ fn test_convergence_analyzer_sufficient_data_decreasing_loss() {
         analyzer.update(Some(5.0 - i as f64 * 0.03), None);
     }
     let prob = analyzer.calculate_convergence_probability();
-    assert!(prob >= 0.2, "Expected improved convergence probability, got {}", prob);
+    assert!(
+        prob >= 0.2,
+        "Expected improved convergence probability, got {}",
+        prob
+    );
 }
 
 #[test]
 fn test_convergence_analyzer_both_metrics() {
     let mut analyzer = ConvergenceAnalyzer::new();
     for i in 0..30 {
-        analyzer.update(
-            Some(3.0 - i as f64 * 0.05),
-            Some(0.4 + i as f64 * 0.01),
-        );
+        analyzer.update(Some(3.0 - i as f64 * 0.05), Some(0.4 + i as f64 * 0.01));
     }
     let prob = analyzer.calculate_convergence_probability();
-    assert!(prob >= 0.0 && prob <= 1.0);
+    assert!((0.0..=1.0).contains(&prob));
 }
 
 // ── OverfittingDetector ───────────────────────────────────────────────────────
@@ -259,7 +276,7 @@ fn test_overfitting_detector_clear_overfitting_signal() {
         | OverfittingRisk::Low
         | OverfittingRisk::Medium
         | OverfittingRisk::High
-        | OverfittingRisk::Severe => {} // Any risk level accepted; just no panic
+        | OverfittingRisk::Severe => {}, // Any risk level accepted; just no panic
     }
 }
 
@@ -269,7 +286,11 @@ fn test_overfitting_detector_clear_overfitting_signal() {
 fn test_generalization_monitor_new() {
     let monitor = GeneralizationMonitor::new();
     let score = monitor.calculate_generalization_score();
-    assert!(score >= 0.0 && score <= 1.0, "score must be [0,1], got {}", score);
+    assert!(
+        (0.0..=1.0).contains(&score),
+        "score must be [0,1], got {}",
+        score
+    );
 }
 
 #[test]
@@ -277,7 +298,7 @@ fn test_generalization_monitor_update_performance() {
     let mut monitor = GeneralizationMonitor::new();
     monitor.update_performance(0.9, Some(0.85));
     let score = monitor.calculate_generalization_score();
-    assert!(score >= 0.0 && score <= 1.0);
+    assert!((0.0..=1.0).contains(&score));
 }
 
 #[test]
@@ -285,7 +306,7 @@ fn test_generalization_monitor_no_validation() {
     let mut monitor = GeneralizationMonitor::new();
     monitor.update_performance(0.9, None);
     let score = monitor.calculate_generalization_score();
-    assert!(score >= 0.0 && score <= 1.0);
+    assert!((0.0..=1.0).contains(&score));
 }
 
 // ── HealthChecker ─────────────────────────────────────────────────────────────
@@ -344,10 +365,10 @@ fn test_health_checker_assess_health_after_updates() {
         Ok(assessment) => {
             assert!(assessment.overall_health_score >= 0.0);
             assert!(assessment.overall_health_score <= 1.0);
-        }
+        },
         Err(_) => {
             // Assessment may fail if insufficient data
-        }
+        },
     }
 }
 
