@@ -218,6 +218,26 @@ pub trait BatchModel: Send + Sync {
     }
 }
 
+/// A model that can turn a token sequence into a single dense representation.
+///
+/// Implementations must pool the model's own hidden states. Returning a zero
+/// vector, a hash of the input, or any other stand-in is never acceptable: the
+/// caller cannot tell such a vector from a real embedding. A model that has no
+/// hidden states to pool must not implement this trait at all, so the serving
+/// layer can answer "no embedding model available" honestly.
+pub trait EmbeddingModel: Send + Sync {
+    /// Pool the model's hidden states for `ids` into one vector.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `ids` is empty, when the forward pass fails, or when the model
+    /// returns a hidden-state layout this implementation cannot pool.
+    fn embed_tokens(&self, ids: &[u32]) -> Result<Vec<f32>>;
+
+    /// Dimensionality of the vectors [`Self::embed_tokens`] produces.
+    fn embedding_dim(&self) -> usize;
+}
+
 /// Message prefix used when a prompt does not fit the model's context window.
 pub const CONTEXT_WINDOW_EXCEEDED: &str = "context window exceeded";
 

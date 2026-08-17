@@ -1,4 +1,4 @@
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use std::collections::HashMap;
@@ -482,10 +482,19 @@ impl PyWordPieceTokenizer {
     ) -> PyResult<PyObject> {
         match text {
             TextInput::Single(s) => {
-                let pair = text_pair.map(|t| match t {
-                    TextInput::Single(s) => s,
-                    _ => panic!("text_pair must be a string when text is a string"),
-                });
+                // A Rust `panic!` crossing the PyO3 boundary surfaces to Python as an
+                // uncatchable `pyo3_runtime.PanicException` with a Rust backtrace, not a
+                // `TypeError`. A mismatched `text_pair` is ordinary bad input from Python
+                // callers, so it must be a normal, catchable `PyResult` error instead.
+                let pair = match text_pair {
+                    Some(TextInput::Single(s)) => Some(s),
+                    Some(TextInput::Batch(_)) => {
+                        return Err(PyTypeError::new_err(
+                            "text_pair must be a string when text is a string",
+                        ))
+                    },
+                    None => None,
+                };
                 self.encode(
                     py,
                     &s,
@@ -498,10 +507,17 @@ impl PyWordPieceTokenizer {
                 )
             },
             TextInput::Batch(texts) => {
-                let pairs = text_pair.map(|t| match t {
-                    TextInput::Batch(pairs) => pairs.into_iter().map(Some).collect(),
-                    _ => panic!("text_pair must be a list when text is a list"),
-                });
+                let pairs = match text_pair {
+                    Some(TextInput::Batch(pairs)) => {
+                        Some(pairs.into_iter().map(Some).collect())
+                    },
+                    Some(TextInput::Single(_)) => {
+                        return Err(PyTypeError::new_err(
+                            "text_pair must be a list when text is a list",
+                        ))
+                    },
+                    None => None,
+                };
                 self.batch_encode_plus(
                     py,
                     texts,

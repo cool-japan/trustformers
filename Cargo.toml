@@ -71,6 +71,18 @@ pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }
 getrandom = "0.4.3"
 subtle = "2.6.1"
 zeroize = { version = "1.9.0", features = ["derive"] }
+# Post-quantum cryptography (RustCrypto, pure Rust, no C/C++/Fortran).
+# ML-KEM = FIPS 203 (formerly CRYSTALS-Kyber), ML-DSA = FIPS 204 (formerly
+# CRYSTALS-Dilithium), SLH-DSA = FIPS 205 (formerly SPHINCS+).
+ml-kem = { version = "0.3.2", features = ["getrandom"] }
+ml-dsa = "0.1.1"
+slh-dsa = "0.2.0-rc.5"
+# RNG trait crate required for RustCrypto interop (traits only, no generator).
+rand_core = "0.10.1"
+# Arbitrary-precision integers for the Paillier cryptosystem and the
+# Schnorr/Fiat-Shamir sigma protocol (pure Rust).
+num-bigint = "0.5.1"
+num-integer = "0.1.47"
 # Pure-Rust cross-platform system telemetry (CPU utilization, temperature sensors,
 # memory) for hardware/ device metrics. No C/C++ toolchain required.
 sysinfo = { version = "0.38.4", default-features = false, features = ["system", "component"] }
@@ -141,6 +153,7 @@ web-sys = { version = "0.3.103", features = [
     "WorkerType",
     "MessageEvent",
     "MessagePort",
+    "MessageChannel",
     "DedicatedWorkerGlobalScope",
     "BroadcastChannel",
     "ServiceWorker",

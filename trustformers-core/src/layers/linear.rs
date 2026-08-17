@@ -295,22 +295,10 @@ impl Linear {
     ///
     /// This method is typically used when loading pretrained weights.
     pub fn set_weight(&mut self, weight: Tensor) -> Result<()> {
+        // Clear the device buffers first, then install the new transpose cache.
+        self.invalidate_weight_caches();
         self.weight_transposed = Self::build_transposed_weight(&weight);
         self.weight = weight;
-        // Clear cached buffer when weights are updated
-        #[cfg(all(target_os = "macos", feature = "metal"))]
-        {
-            if let Ok(mut buffer_id) = self.weight_buffer_id.write() {
-                *buffer_id = None;
-            }
-        }
-        #[cfg(feature = "cuda")]
-        {
-            // Dropping the handle releases the stale device allocation (refcounted).
-            if let Ok(mut buffer_handle) = self.weight_buffer_id_cuda.write() {
-                *buffer_handle = None;
-            }
-        }
         Ok(())
     }
 
@@ -348,6 +336,53 @@ impl Linear {
     /// `Some(&bias)` if bias is enabled, `None` otherwise.
     pub fn bias(&self) -> Option<&Tensor> {
         self.bias.as_ref()
+    }
+
+    /// Returns a mutable reference to the weight matrix.
+    ///
+    /// This is the write side of [`Linear::weight`], used by
+    /// [`Model::named_tensors_mut`](crate::traits::Model::named_tensors_mut) so a
+    /// checkpoint loader can copy into the live parameter in place.
+    ///
+    /// # Cache invalidation
+    ///
+    /// `Linear` caches `W^T` (and, on Metal/CUDA builds, the device-resident
+    /// transposed buffer). Handing out `&mut Tensor` means the caller can mutate
+    /// the weight without going through [`Linear::set_weight`], so both caches are
+    /// dropped *pessimistically* before the borrow is returned;
+    /// [`Linear::transposed_weight`] then recomputes the transpose on the next
+    /// forward pass. Keeping the stale transpose instead would make every
+    /// subsequent forward silently wrong.
+    pub fn weight_mut(&mut self) -> &mut Tensor {
+        &mut self.weight
+    }
+
+    /// Returns a mutable reference to the bias vector if present.
+    ///
+    /// Returns `None` for a layer created without bias — a caller must not be able
+    /// to conjure a bias into existence through a parameter iterator.
+    pub fn bias_mut(&mut self) -> Option<&mut Tensor> {
+        self.bias.as_mut()
+    }
+
+    /// Drop every cached derivative of `self.weight`.
+    ///
+    /// Mirrors exactly what [`Linear::set_weight`] invalidates.
+    fn invalidate_weight_caches(&mut self) {
+        self.weight_transposed = None;
+        #[cfg(all(target_os = "macos", feature = "metal"))]
+        {
+            if let Ok(mut buffer_id) = self.weight_buffer_id.write() {
+                *buffer_id = None;
+            }
+        }
+        #[cfg(feature = "cuda")]
+        {
+            // Dropping the handle releases the stale device allocation (refcounted).
+            if let Ok(mut buffer_handle) = self.weight_buffer_id_cuda.write() {
+                *buffer_handle = None;
+            }
+        }
     }
 
     /// Returns the total number of learnable parameters in this layer.
@@ -550,12 +585,27 @@ impl Layer for Linear {
     type Input = Tensor;
     type Output = Tensor;
 
+    /// Owning entry point.
+    ///
+    /// The whole computation lives in [`Layer::forward_ref`] because none of it
+    /// needs to own the input; this wrapper simply lends the value it was handed.
+    /// It must *never* be implemented in terms of the trait's default
+    /// `forward_ref`, which clones and calls back into `forward`.
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
+        self.forward_ref(&input)
+    }
+
+    /// Borrowing forward pass — the real implementation.
+    ///
+    /// Attention layers project the *same* hidden-state tensor into Q, K and V,
+    /// so an owning-only API forced three deep clones of `[batch, seq, hidden]`
+    /// per attention block. Nothing below needs ownership, so the borrow is free.
+    fn forward_ref(&self, input: &Self::Input) -> Result<Self::Output> {
         // =====================================================================
         // GPU-TO-GPU PATH: Tensor::Metal (ZERO CPU TRANSFERS!)
         // =====================================================================
         #[cfg(all(target_os = "macos", feature = "metal"))]
-        if let Tensor::Metal(ref input_metal) = input {
+        if let Tensor::Metal(input_metal) = input {
             use crate::gpu_ops::metal::get_metal_backend;
             use crate::tensor::MetalTensorData;
 
@@ -578,7 +628,7 @@ impl Layer for Linear {
                 } else {
                     // Weight not cached - fallback to CPU
                     let cpu_input = input.to_device_enum(&crate::device::Device::CPU)?;
-                    return self.forward(cpu_input);
+                    return self.forward_ref(&cpu_input);
                 }
             };
 
@@ -697,7 +747,7 @@ impl Layer for Linear {
         // GPU-TO-GPU PATH: Tensor::CUDA (ZERO CPU TRANSFERS!)
         // =====================================================================
         #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
-        if let Tensor::CUDA(ref input_cuda) = input {
+        if let Tensor::CUDA(input_cuda) = input {
             use crate::gpu_ops::cuda::get_cuda_backend;
             use crate::tensor::CudaTensorData;
 
@@ -720,7 +770,7 @@ impl Layer for Linear {
                 } else {
                     // Weight not cached - fallback to CPU
                     let cpu_input = input.to_device_enum(&crate::device::Device::CPU)?;
-                    return self.forward(cpu_input);
+                    return self.forward_ref(&cpu_input);
                 }
             };
 
@@ -729,7 +779,7 @@ impl Layer for Linear {
             let device_id = input_cuda.device_id();
             if weight_handle.device_id() != device_id {
                 let cpu_input = input.to_device_enum(&crate::device::Device::CPU)?;
-                return self.forward(cpu_input);
+                return self.forward_ref(&cpu_input);
             }
             let weight_buffer_id = weight_handle.id();
 
@@ -833,7 +883,7 @@ impl Layer for Linear {
                         // We have a cached buffer! Use it for ZERO-COPY matmul
                         use crate::gpu_ops::metal::get_metal_backend;
 
-                        if let (Tensor::F32(inp), Tensor::F32(w_t)) = (&input, weight_t.as_ref()) {
+                        if let (Tensor::F32(inp), Tensor::F32(w_t)) = (input, weight_t.as_ref()) {
                             if inp.ndim() == 2 && w_t.ndim() == 2 {
                                 let inp_shape = inp.shape();
                                 let w_shape = w_t.shape();
@@ -887,7 +937,7 @@ impl Layer for Linear {
             #[cfg(all(target_os = "macos", feature = "metal"))]
             {
                 if self.device.is_gpu() {
-                    dispatch_matmul(&input, weight_t.as_ref(), &self.device)?
+                    dispatch_matmul(input, weight_t.as_ref(), &self.device)?
                 } else {
                     input.matmul(weight_t.as_ref())?
                 }
@@ -899,7 +949,7 @@ impl Layer for Linear {
         } else if input_shape.len() == 3 {
             // Batched 3D input: [batch, seq_len, hidden_size] x [hidden_size, out_features]
             // Handle manually since tensor.matmul doesn't support 3D x 2D
-            match (&input, weight_t.as_ref()) {
+            match (input, weight_t.as_ref()) {
                 (Tensor::F32(inp), Tensor::F32(w)) => {
                     let batch = input_shape[0];
                     let seq_len = input_shape[1];
@@ -995,7 +1045,8 @@ impl Layer for Linear {
                         ))
                     })?;
 
-                    // Use direct BLAS for maximum performance (Accelerate on macOS)
+                    // Route through the pure-Rust GEMM (OxiBLAS on macOS, scirs2-core
+                    // SIMD elsewhere) once the operands are big enough to pay for it.
                     let m = inp_2d.nrows();
                     let n = w_2d.ncols();
                     let k = inp_2d.ncols();
@@ -1006,7 +1057,7 @@ impl Layer for Linear {
                     {
                         inp_2d.dot(&w_2d)
                     } else {
-                        // Use direct BLAS GEMM for 10-50x speedup
+                        // Direct GEMM on the contiguous slices.
                         let inp_slice = inp_2d.as_slice().unwrap_or(&[]);
                         let w_slice = w_2d.as_slice().unwrap_or(&[]);
                         if !inp_slice.is_empty() && !w_slice.is_empty() {
@@ -1062,7 +1113,8 @@ impl Layer for Linear {
                         ))
                     })?;
 
-                    // Use direct BLAS for maximum performance (Accelerate on macOS)
+                    // Route through the pure-Rust GEMM (OxiBLAS on macOS, scirs2-core
+                    // SIMD elsewhere) once the operands are big enough to pay for it.
                     let m = inp_2d.nrows();
                     let n = w_2d.ncols();
                     let k = inp_2d.ncols();
@@ -1073,7 +1125,7 @@ impl Layer for Linear {
                     {
                         inp_2d.dot(&w_2d)
                     } else {
-                        // Use direct BLAS GEMM for 10-50x speedup
+                        // Direct GEMM on the contiguous slices.
                         let inp_slice = inp_2d.as_slice().unwrap_or(&[]);
                         let w_slice = w_2d.as_slice().unwrap_or(&[]);
                         if !inp_slice.is_empty() && !w_slice.is_empty() {

@@ -59,6 +59,30 @@ impl FeedForward {
     pub fn set_output_bias(&mut self, bias: Tensor) -> Result<()> {
         self.output.set_bias(bias)
     }
+
+    /// The dense (first, `hidden -> intermediate`) projection.
+    ///
+    /// Exposed so a model can publish this block's parameters through
+    /// [`Model::named_tensors`](crate::traits::Model::named_tensors) without the
+    /// feed-forward block having to know any checkpoint naming convention.
+    pub fn dense(&self) -> &Linear {
+        &self.dense
+    }
+
+    /// The output (second, `intermediate -> hidden`) projection.
+    pub fn output(&self) -> &Linear {
+        &self.output
+    }
+
+    /// Mutable access to the dense (first) projection.
+    pub fn dense_mut(&mut self) -> &mut Linear {
+        &mut self.dense
+    }
+
+    /// Mutable access to the output (second) projection.
+    pub fn output_mut(&mut self) -> &mut Linear {
+        &mut self.output
+    }
 }
 
 impl Layer for FeedForward {

@@ -39,6 +39,38 @@ pub enum ReportFormat {
     PowerPoint,
 }
 
+impl ReportFormat {
+    /// Whether [`ReportGenerator::export_report`] has a real writer for this
+    /// format. `Pdf` / `Excel` / `PowerPoint` are listed variants of this
+    /// enum (kept for API/config-schema stability -- external configs may
+    /// already reference them) but have no generation library backing them
+    /// in this crate; selecting one is rejected up front by
+    /// [`ReportGenerator::new`] rather than only failing after a caller has
+    /// already paid for the (potentially expensive) analysis and section
+    /// generation that happens before `export_report` is ever called.
+    pub fn is_implemented(&self) -> bool {
+        !matches!(
+            self,
+            ReportFormat::Pdf | ReportFormat::Excel | ReportFormat::PowerPoint
+        )
+    }
+
+    /// Human-readable name used in [`ReportError::UnsupportedFormat`]
+    /// messages.
+    fn label(&self) -> &'static str {
+        match self {
+            ReportFormat::Pdf => "PDF",
+            ReportFormat::Markdown => "Markdown",
+            ReportFormat::Html => "HTML",
+            ReportFormat::Json => "JSON",
+            ReportFormat::Jupyter => "Jupyter",
+            ReportFormat::Latex => "LaTeX",
+            ReportFormat::Excel => "Excel",
+            ReportFormat::PowerPoint => "PowerPoint",
+        }
+    }
+}
+
 /// Report type categories
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ReportType {
@@ -193,15 +225,29 @@ pub struct ReportGenerator {
 }
 
 impl ReportGenerator {
-    /// Create a new report generator
-    pub fn new(config: ReportConfig) -> Self {
-        Self {
+    /// Create a new report generator.
+    ///
+    /// Rejects `config.format` immediately (before any analysis or section
+    /// generation runs) when it names a format this crate cannot write --
+    /// see [`ReportFormat::is_implemented`]. The old behavior accepted any
+    /// format at construction and only discovered the mismatch inside
+    /// `export_report`, after a caller had already paid for the full report
+    /// generation.
+    pub fn new(config: ReportConfig) -> Result<Self, ReportError> {
+        if !config.format.is_implemented() {
+            return Err(ReportError::UnsupportedFormat(format!(
+                "{} export is not implemented; choose one of Markdown, Html, Json, Jupyter, or \
+                 Latex",
+                config.format.label()
+            )));
+        }
+        Ok(Self {
             config,
             debug_data: None,
             profiling_data: None,
             architecture_data: None,
             visualizer: DebugVisualizer::new(VisualizationConfig::default()),
-        }
+        })
     }
 
     /// Add gradient debug data
@@ -1053,9 +1099,70 @@ mod tests {
     #[test]
     fn test_report_generator_creation() {
         let config = ReportConfig::default();
-        let generator = ReportGenerator::new(config);
+        let generator = ReportGenerator::new(config).expect("format should be implemented");
         assert!(generator.debug_data.is_none());
         assert!(generator.profiling_data.is_none());
+    }
+
+    /// Regression test: PDF used to be a silently-accepted `ReportConfig`
+    /// value that only failed inside `export_report`, after a caller had
+    /// already generated the full report. `ReportGenerator::new` must now
+    /// reject it immediately with a clear message.
+    #[test]
+    fn test_new_rejects_pdf_format_immediately_instead_of_at_export_time() {
+        let config = ReportConfig {
+            format: ReportFormat::Pdf,
+            ..Default::default()
+        };
+
+        let err = ReportGenerator::new(config)
+            .expect_err("PDF must be rejected at construction, not accepted and failed later");
+        let message = err.to_string();
+        assert!(
+            message.contains("PDF"),
+            "error should name the rejected format: {message}"
+        );
+    }
+
+    /// Companion: Excel and PowerPoint are the other two `ReportFormat`
+    /// variants with no real writer behind them; both must be rejected the
+    /// same way as PDF, not just PDF alone.
+    #[test]
+    fn test_new_rejects_excel_and_powerpoint_formats() {
+        for format in [ReportFormat::Excel, ReportFormat::PowerPoint] {
+            let config = ReportConfig {
+                format,
+                ..Default::default()
+            };
+            assert!(
+                ReportGenerator::new(config).is_err(),
+                "unimplemented export formats must be rejected at construction"
+            );
+        }
+    }
+
+    /// Companion: formats that *do* have a real writer (see `export_html`,
+    /// `export_markdown`, `export_json`, `export_jupyter`, `export_latex`)
+    /// must still construct successfully -- the fix must not become an
+    /// overly broad rejection of every format.
+    #[test]
+    fn test_new_accepts_every_implemented_format() {
+        for format in [
+            ReportFormat::Markdown,
+            ReportFormat::Html,
+            ReportFormat::Json,
+            ReportFormat::Jupyter,
+            ReportFormat::Latex,
+        ] {
+            let config = ReportConfig {
+                format,
+                ..Default::default()
+            };
+            assert!(
+                ReportGenerator::new(config).is_ok(),
+                "implemented export formats must not be rejected"
+            );
+        }
     }
 
     #[test]
@@ -1067,7 +1174,7 @@ mod tests {
             ..Default::default()
         };
 
-        let generator = ReportGenerator::new(config);
+        let generator = ReportGenerator::new(config).expect("format should be implemented");
         let report = generator.generate().expect("operation failed in test");
 
         assert_eq!(report.metadata.title, "Test Report");
@@ -1077,7 +1184,7 @@ mod tests {
     #[test]
     fn test_section_generation() {
         let config = ReportConfig::default();
-        let generator = ReportGenerator::new(config);
+        let generator = ReportGenerator::new(config).expect("format should be implemented");
 
         let summary = generator.generate_summary_section().expect("operation failed in test");
         assert!(matches!(summary.section_type, ReportSection::Summary));
@@ -1095,7 +1202,7 @@ mod tests {
             ..Default::default()
         };
 
-        let generator = ReportGenerator::new(config);
+        let generator = ReportGenerator::new(config).expect("format should be implemented");
         let report = generator.generate().expect("operation failed in test");
 
         assert_eq!(report.sections.len(), 2);
@@ -1112,7 +1219,7 @@ mod tests {
     #[test]
     fn test_report_serialization() {
         let config = ReportConfig::default();
-        let generator = ReportGenerator::new(config);
+        let generator = ReportGenerator::new(config).expect("format should be implemented");
         let report = generator.generate().expect("operation failed in test");
 
         let json = serde_json::to_string(&report).expect("JSON serialization failed");
@@ -1170,6 +1277,7 @@ mod tests {
             analyzer.analyze().await.expect("architecture analysis should succeed");
 
         let generator = ReportGenerator::new(ReportConfig::default())
+            .expect("Html is implemented")
             .with_debug_data(gradient_report)
             .with_architecture_data(architecture_report);
 
@@ -1209,8 +1317,9 @@ mod tests {
         );
         gradient_report.flow_analysis = FlowAnalysis { layer_analyses };
 
-        let generator =
-            ReportGenerator::new(ReportConfig::default()).with_debug_data(gradient_report);
+        let generator = ReportGenerator::new(ReportConfig::default())
+            .expect("Html is implemented")
+            .with_debug_data(gradient_report);
         let section = generator
             .generate_architecture_section()
             .expect("architecture section generation should succeed");
@@ -1240,8 +1349,9 @@ mod tests {
             recommendations: Vec::new(),
         };
 
-        let generator =
-            ReportGenerator::new(ReportConfig::default()).with_profiling_data(profiling_data);
+        let generator = ReportGenerator::new(ReportConfig::default())
+            .expect("Html is implemented")
+            .with_profiling_data(profiling_data);
         let visualizations = generator
             .generate_visualizations()
             .expect("visualization generation should succeed");

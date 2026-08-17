@@ -9,7 +9,7 @@
 //! Nothing here fabricates output: every call runs the real forward pass of a
 //! real model, and every failure is reported as an error.
 
-use crate::batching::processor::{BatchModel, ModelBatchExecutor, Tokenizer};
+use crate::batching::processor::{BatchModel, EmbeddingModel, ModelBatchExecutor, Tokenizer};
 use anyhow::{anyhow, Context, Result};
 use std::path::Path;
 use std::sync::Arc;
@@ -28,6 +28,7 @@ pub struct Gpt2BatchModel {
     vocab_size: usize,
     eos_token_id: u32,
     n_positions: usize,
+    n_embd: usize,
 }
 
 impl std::fmt::Debug for Gpt2BatchModel {
@@ -50,6 +51,7 @@ impl Gpt2BatchModel {
             vocab_size: config.vocab_size,
             eos_token_id: config.eos_token_id,
             n_positions: config.n_positions,
+            n_embd: config.n_embd,
         }
     }
 
@@ -94,6 +96,79 @@ impl Gpt2BatchModel {
     /// Total number of parameters of the wrapped model.
     pub fn num_parameters(&self) -> usize {
         self.model.num_parameters()
+    }
+
+    /// Width of the model's residual stream, i.e. the size of one hidden-state row.
+    pub fn hidden_size(&self) -> usize {
+        self.n_embd
+    }
+}
+
+impl EmbeddingModel for Gpt2BatchModel {
+    /// Mean-pool the last-layer (post-`ln_f`) hidden states of `ids`.
+    ///
+    /// This is the model's own representation of the sequence, obtained from a
+    /// genuine forward pass through
+    /// [`Gpt2LMHeadModel::logits_and_hidden_states`]; nothing is synthesized. The
+    /// row count returned by the backbone is checked against the input length so
+    /// a layout change cannot silently turn into a plausible-looking but wrong
+    /// vector.
+    fn embed_tokens(&self, ids: &[u32]) -> Result<Vec<f32>> {
+        if ids.is_empty() {
+            return Err(anyhow!("cannot embed an empty token sequence"));
+        }
+        if ids.len() > self.n_positions {
+            return Err(anyhow!(
+                "a sequence of {} token(s) exceeds the model's context window of {} token(s)",
+                ids.len(),
+                self.n_positions
+            ));
+        }
+
+        let (_, hidden_rows) = self
+            .model
+            .logits_and_hidden_states(ids)
+            .map_err(|e| anyhow!("GPT-2 forward pass failed while embedding: {}", e))?;
+
+        if hidden_rows.len() != ids.len() {
+            return Err(anyhow!(
+                "GPT-2 returned {} hidden-state row(s) for {} input token(s); the pooled vector \
+                 would not correspond to the input",
+                hidden_rows.len(),
+                ids.len()
+            ));
+        }
+
+        let mut pooled = vec![0.0f32; self.n_embd];
+        for (index, row) in hidden_rows.iter().enumerate() {
+            if row.len() != self.n_embd {
+                return Err(anyhow!(
+                    "GPT-2 hidden-state row {} has {} value(s); expected the model's hidden size \
+                     of {}",
+                    index,
+                    row.len(),
+                    self.n_embd
+                ));
+            }
+            for (slot, value) in pooled.iter_mut().zip(row.iter()) {
+                *slot += *value;
+            }
+        }
+        let count = hidden_rows.len() as f32;
+        for slot in pooled.iter_mut() {
+            *slot /= count;
+        }
+
+        if pooled.iter().any(|v| !v.is_finite()) {
+            return Err(anyhow!(
+                "GPT-2 produced a non-finite pooled embedding; refusing to return it"
+            ));
+        }
+        Ok(pooled)
+    }
+
+    fn embedding_dim(&self) -> usize {
+        self.n_embd
     }
 }
 
@@ -380,6 +455,50 @@ mod tests {
             },
             other => panic!("expected decoded text output, got {other:?}"),
         }
+    }
+
+    /// The pooled embedding must come from the model's own hidden states, with a
+    /// layout that genuinely corresponds to the input: one row per input token,
+    /// each of `n_embd` values. This pins the assumption the `/v1/embeddings`
+    /// path is built on.
+    #[test]
+    fn gpt2_embedding_pools_real_hidden_states() {
+        let config = tiny_config();
+        let hidden_size = config.n_embd;
+        let model = Gpt2BatchModel::untrained(config).expect("model must build");
+        assert_eq!(model.hidden_size(), hidden_size);
+        assert_eq!(EmbeddingModel::embedding_dim(&model), hidden_size);
+
+        let vector = model.embed_tokens(&[1, 2, 3]).expect("embedding must succeed");
+        assert_eq!(vector.len(), hidden_size);
+        assert!(vector.iter().all(|v| v.is_finite()));
+        assert!(
+            vector.iter().any(|v| v.abs() > f32::EPSILON),
+            "a pooled hidden state must not be an all-zero vector"
+        );
+
+        // Different inputs must give different representations; an implementation
+        // that ignored its input would return the same vector here.
+        let other = model.embed_tokens(&[40, 41, 42]).expect("embedding must succeed");
+        assert_eq!(other.len(), hidden_size);
+        let distance: f32 =
+            vector.iter().zip(other.iter()).map(|(a, b)| (a - b).abs()).sum::<f32>();
+        assert!(
+            distance > f32::EPSILON,
+            "distinct token sequences must yield distinct embeddings"
+        );
+    }
+
+    /// Regression: an empty or over-long sequence is an error, never a zero vector.
+    #[test]
+    fn gpt2_embedding_refuses_impossible_inputs() {
+        let model = Gpt2BatchModel::untrained(tiny_config()).expect("model must build");
+        let empty = model.embed_tokens(&[]).expect_err("empty input must fail");
+        assert!(empty.to_string().contains("empty token sequence"));
+
+        let too_long: Vec<u32> = (0..64).collect();
+        let overflow = model.embed_tokens(&too_long).expect_err("over-long input must fail");
+        assert!(overflow.to_string().contains("context window"));
     }
 
     /// Regression: a missing tokenizer file is an error, never a silent fallback.

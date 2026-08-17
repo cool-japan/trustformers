@@ -21,8 +21,8 @@ pub use aggregator::{
 };
 
 pub use processor::{
-    BatchExecutor, BatchModel, BatchProcessor, DefaultBatchExecutor, ModelBatchExecutor,
-    ProcessingError, ProcessingStats, Tokenizer, NO_MODEL_CONFIGURED,
+    BatchExecutor, BatchModel, BatchProcessor, DefaultBatchExecutor, EmbeddingModel,
+    ModelBatchExecutor, ProcessingError, ProcessingStats, Tokenizer, NO_MODEL_CONFIGURED,
 };
 
 pub use model_executor::{

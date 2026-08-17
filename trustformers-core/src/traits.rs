@@ -318,6 +318,40 @@ pub trait Layer: Send + Sync {
     /// - Numerical errors during computation
     /// - Resource allocation failures
     fn forward(&self, input: Self::Input) -> Result<Self::Output>;
+
+    /// Performs the forward computation **without taking ownership** of the input.
+    ///
+    /// # Why this exists
+    ///
+    /// Attention projects one hidden-state tensor into query, key and value. With
+    /// an owning-only API that is three deep copies of a `[batch, seq, hidden]`
+    /// tensor per attention block, per forward pass — pure waste, because none of
+    /// the projection code needs to own its input. Layers that can compute from a
+    /// borrow override this method; the attention layers call it.
+    ///
+    /// # Contract
+    ///
+    /// An override **must** produce exactly the same output as
+    /// [`Layer::forward`] for the same input. The two are checked against each
+    /// other in the layer test suites.
+    ///
+    /// # Default Implementation
+    ///
+    /// Clones the input and delegates to [`Layer::forward`], so every existing
+    /// implementation keeps working unchanged. A type that overrides
+    /// `forward_ref` must therefore implement `forward` in terms of
+    /// `forward_ref` (or independently) — never the other way round, which would
+    /// recurse forever.
+    ///
+    /// # Errors
+    ///
+    /// The same conditions as [`Layer::forward`].
+    fn forward_ref(&self, input: &Self::Input) -> Result<Self::Output>
+    where
+        Self::Input: Clone,
+    {
+        self.forward(input.clone())
+    }
 }
 
 /// Configuration trait for models and components.

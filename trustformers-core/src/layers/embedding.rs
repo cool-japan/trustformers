@@ -85,6 +85,34 @@ impl Embedding {
         Ok(())
     }
 
+    /// Returns a reference to the embedding table.
+    ///
+    /// Shape `[num_embeddings, embedding_dim]` — the same layout HuggingFace
+    /// checkpoints use for `*.word_embeddings.weight` and friends, so it can be
+    /// exposed directly through
+    /// [`Model::named_tensors`](crate::traits::Model::named_tensors).
+    pub fn weight(&self) -> &Tensor {
+        &self.weight
+    }
+
+    /// Returns a mutable reference to the embedding table.
+    ///
+    /// `Embedding` caches nothing derived from the table, so unlike
+    /// [`crate::layers::Linear::weight_mut`] this needs no invalidation.
+    pub fn weight_mut(&mut self) -> &mut Tensor {
+        &mut self.weight
+    }
+
+    /// Number of rows in the embedding table (the vocabulary size).
+    pub fn num_embeddings(&self) -> usize {
+        self.num_embeddings
+    }
+
+    /// Width of a single embedding vector.
+    pub fn embedding_dim(&self) -> usize {
+        self.embedding_dim
+    }
+
     /// Forward pass with explicit token IDs
     pub fn forward_ids(&self, input_ids: &[u32]) -> Result<Tensor> {
         self.forward(input_ids.to_vec())

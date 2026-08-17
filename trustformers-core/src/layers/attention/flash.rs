@@ -101,6 +101,20 @@ impl FlashAttention {
         &self.config
     }
 
+    /// The four projection layers (`query`, `key`, `value`, `out_proj`).
+    ///
+    /// Exposed so a model can publish this attention block's parameters through
+    /// [`Model::named_tensors`](crate::traits::Model::named_tensors) without the
+    /// attention layer having to know any checkpoint naming convention.
+    pub fn projections(&self) -> &AttentionProjections {
+        &self.projections
+    }
+
+    /// Mutable counterpart of [`FlashAttention::projections`].
+    pub fn projections_mut(&mut self) -> &mut AttentionProjections {
+        &mut self.projections
+    }
+
     /// Get the block size used for tiled computation
     pub fn block_size(&self) -> usize {
         self.block_size
@@ -201,9 +215,12 @@ impl FlashAttention {
         attention_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
         // Apply input projections
-        let query = self.projections.query.forward(query_input.clone())?;
-        let key = self.projections.key.forward(key_input.clone())?;
-        let value = self.projections.value.forward(value_input.clone())?;
+        // `forward_ref` borrows: self-attention passes the *same* hidden-state
+        // tensor three times, and the owning `forward` would deep-copy
+        // `[batch, seq, hidden]` once per projection.
+        let query = self.projections.query.forward_ref(query_input)?;
+        let key = self.projections.key.forward_ref(key_input)?;
+        let value = self.projections.value.forward_ref(value_input)?;
 
         // Split into attention heads
         let q = AttentionUtils::split_heads(&query, self.config.num_heads, self.config.head_dim)?;

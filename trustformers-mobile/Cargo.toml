@@ -28,6 +28,22 @@ tokio.workspace = true
 sha2.workspace = true
 hex.workspace = true
 
+# Cryptography (pure Rust). Used by `advanced_security` / `advanced_privacy_mechanisms`
+# for real post-quantum KEM/signatures, real Paillier homomorphic encryption, real
+# Schnorr/Fiat-Shamir zero-knowledge proofs and real Shamir secret sharing.
+ml-kem.workspace = true
+ml-dsa.workspace = true
+slh-dsa.workspace = true
+rand_core.workspace = true
+num-bigint.workspace = true
+num-integer.workspace = true
+chacha20poly1305.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
+getrandom.workspace = true
+subtle.workspace = true
+zeroize.workspace = true
+
 # SciRS2 Policy: Using SciRS2-Core instead of ndarray/rand
 scirs2-core = { workspace = true }
 fastrand.workspace = true

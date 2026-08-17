@@ -89,6 +89,43 @@ impl LayerNorm {
         Ok(())
     }
 
+    /// Returns a reference to the elementwise scale (`gamma`).
+    ///
+    /// Spelled `weight` to match the HuggingFace / PyTorch checkpoint key
+    /// `*.LayerNorm.weight`, so it can be exposed directly through
+    /// [`Model::named_tensors`](crate::traits::Model::named_tensors).
+    pub fn weight(&self) -> &Tensor {
+        &self.weight
+    }
+
+    /// Returns a reference to the elementwise shift (`beta`).
+    pub fn bias(&self) -> &Tensor {
+        &self.bias
+    }
+
+    /// Returns a mutable reference to the elementwise scale.
+    ///
+    /// `LayerNorm` caches nothing derived from its parameters, so no
+    /// invalidation is needed here.
+    pub fn weight_mut(&mut self) -> &mut Tensor {
+        &mut self.weight
+    }
+
+    /// Returns a mutable reference to the elementwise shift.
+    pub fn bias_mut(&mut self) -> &mut Tensor {
+        &mut self.bias
+    }
+
+    /// The shape the trailing dimensions are normalised over.
+    pub fn normalized_shape(&self) -> &[usize] {
+        &self.normalized_shape
+    }
+
+    /// The epsilon added to the variance for numerical stability.
+    pub fn eps(&self) -> f32 {
+        self.eps
+    }
+
     /// Returns the device this layer uses for computations
     pub fn device(&self) -> Device {
         self.device
@@ -767,6 +804,23 @@ impl RMSNorm {
     pub fn set_weight(&mut self, weight: Tensor) -> Result<()> {
         self.weight = weight;
         Ok(())
+    }
+
+    /// Returns a reference to the elementwise scale.
+    ///
+    /// RMSNorm has no shift term, so there is deliberately no `bias()`.
+    pub fn weight(&self) -> &Tensor {
+        &self.weight
+    }
+
+    /// Returns a mutable reference to the elementwise scale.
+    pub fn weight_mut(&mut self) -> &mut Tensor {
+        &mut self.weight
+    }
+
+    /// The epsilon added inside the reciprocal square root.
+    pub fn eps(&self) -> f32 {
+        self.eps
     }
 
     /// Returns the device this layer uses for computations

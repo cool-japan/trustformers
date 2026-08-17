@@ -34,6 +34,14 @@ half = { workspace = true }
 # Pure-Rust DEFLATE (RFC 1951) for real cache/chunk compression (COOLJAPAN
 # policy forbids flate2/zstd/lz4/etc. directly; oxiarc-* is the substitute).
 oxiarc-deflate = { workspace = true }
+# `futures::future::select_all` for real concurrent-chunk streaming loads
+# (racing several in-flight `JsFuture`s instead of only ever popping the
+# most-recently-started one). Uses the workspace-wide `futures` dependency
+# as-is (default features) - not narrowed to `alloc`-only here, since the
+# workspace-root `futures` entry does not declare `default-features`, and
+# overriding it per-member is rejected by Cargo; changing the shared
+# workspace-level default would risk affecting sibling crates.
+futures = { workspace = true }
 
 # Core web-sys features for essential functionality (full union defined in workspace root Cargo.toml)
 web-sys = { workspace = true }
