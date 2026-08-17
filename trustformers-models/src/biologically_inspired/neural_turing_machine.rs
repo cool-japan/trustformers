@@ -26,6 +26,9 @@ use super::{config::BiologicalConfig, model::BiologicalModelOutput};
 /// Numerical floor used when normalising cosine similarities.
 const COSINE_EPSILON: f32 = 1e-8;
 
+/// Magnitude of the deterministic symmetry-breaking memory initialisation.
+const MEMORY_INIT_SCALE: f32 = 1e-2;
+
 /// Content-based addressing: `softmax(strength · cos(key, memory_row))`.
 ///
 /// `memory` is one batch element laid out row-major as `n × m`.
@@ -243,9 +246,20 @@ impl NTMLayer {
             ));
         }
 
-        // A strictly non-zero initial memory keeps cosine similarity well
-        // defined on the very first timestep.
-        let memory = Tensor::full(1e-3, vec![batch_size, memory_capacity, memory_width])?;
+        // The initial memory must be non-zero (so cosine similarity is defined
+        // on the first timestep) *and* must have linearly independent rows.
+        // A constant memory makes every row point the same way, so content
+        // addressing is exactly uniform for every key — an unstable fixed point
+        // the write head can never escape, because writing a uniform weighting
+        // into identical rows keeps them identical. The deterministic
+        // low-discrepancy pattern below breaks that symmetry without
+        // introducing run-to-run randomness.
+        let mut initial = Vec::with_capacity(batch_size * memory_capacity * memory_width);
+        for index in 0..batch_size * memory_capacity * memory_width {
+            let phase = ((index + 1) as f32) * 0.754_877_7;
+            initial.push(MEMORY_INIT_SCALE * (phase.fract() - 0.5));
+        }
+        let memory = Tensor::from_vec(initial, &[batch_size, memory_capacity, memory_width])?;
 
         let mut read_heads = Vec::new();
         for _ in 0..self.num_read_heads {
@@ -396,9 +410,16 @@ impl NTMLayer {
         }
 
         head.key = params.slice(1, 0, memory_width)?;
-        // β in (0, 10]: a positive strength is required for content addressing.
-        head.key_strength =
-            params.slice(1, memory_width, memory_width + 1)?.sigmoid()?.mul_scalar(10.0)?;
+        // β in [1, 11]. Graves et al. require β > 0; a sigmoid alone can drive
+        // it to ~1e-8, at which point `softmax(β · cos)` is numerically exactly
+        // uniform and content addressing silently stops working. Offsetting by
+        // 1 keeps the head at least as sharp as the raw cosine similarity,
+        // which is the standard `softplus`-style parameterisation.
+        head.key_strength = params
+            .slice(1, memory_width, memory_width + 1)?
+            .sigmoid()?
+            .mul_scalar(10.0)?
+            .add_scalar(1.0)?;
         head.interpolation_gate = params.slice(1, memory_width + 1, memory_width + 2)?.sigmoid()?;
         head.shift_weights = params.slice(1, memory_width + 2, memory_width + 5)?.softmax(1)?;
         // γ in [1, 11]: sharpening must not blur the weighting.

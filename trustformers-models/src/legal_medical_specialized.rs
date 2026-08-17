@@ -43,6 +43,19 @@
 //! - Pharmacology
 //! - Public health
 //!
+//! ## Architecture
+//!
+//! The transformer backbone lives in this file: [`LegalMedicalModel`] embeds
+//! token ids with a domain-sized vocabulary, [`LegalMedicalAttention`] performs
+//! real scaled dot-product attention (see [`trustformers_core::layers::GroupedQueryAttention`]),
+//! and [`LegalMedicalMLP`] applies a SiLU-gated feed-forward. The rest of the
+//! domain-specific surface lives in submodules:
+//!
+//! - [`generation`]: byte-level tokenizer, autoregressive `generate`, and the
+//!   confidentiality-aware attention mask.
+//! - [`redaction`]: pattern-based PII redaction (`redact_sensitive_info`).
+//! - [`analysis`]: document/citation/compliance heuristics.
+//!
 //! ## Example Usage
 //!
 //! ```rust,no_run
@@ -65,13 +78,21 @@
 //! # }
 //! ```
 
-use crate::common_patterns::GenerationConfig;
+mod analysis;
+mod generation;
+mod redaction;
+
+pub use analysis::{
+    Citation, CitationType, ComplianceReport, ComplianceViolation, DocumentAnalysis,
+};
+pub use redaction::RedactionReport;
+
 use anyhow::Result;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::io::Read;
-use trustformers_core::errors::{tensor_op_error, Result as CoreResult};
-use trustformers_core::layers::{Embedding, Linear, RMSNorm};
+use trustformers_core::errors::{not_implemented, Result as CoreResult};
+use trustformers_core::layers::{
+    Embedding, FlashAttentionInput, GroupedQueryAttention, Linear, RMSNorm,
+};
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::{Config, Layer, Model};
 
@@ -516,71 +537,51 @@ pub struct LegalMedicalModel {
     norm: RMSNorm,
 }
 
+impl LegalMedicalModel {
+    pub fn new(config: LegalMedicalConfig) -> Result<Self> {
+        config.validate()?;
+
+        let embed_tokens = Embedding::new(config.vocab_size, config.hidden_size, None)?;
+
+        let mut layers = Vec::new();
+        for _ in 0..config.num_hidden_layers {
+            layers.push(LegalMedicalLayer::new(&config)?);
+        }
+
+        let norm = RMSNorm::new(config.hidden_size, config.rms_norm_eps)?;
+
+        Ok(Self {
+            config,
+            embed_tokens,
+            layers,
+            norm,
+        })
+    }
+
+    /// Forward pass with an optional pre-softmax attention mask (see
+    /// [`super::generation`]'s confidentiality mask). `Layer::forward`/`Model::forward`
+    /// delegate here with `mask = None`.
+    fn forward_with_mask(&self, input: Vec<u32>, mask: Option<&Tensor>) -> CoreResult<Tensor> {
+        let mut hidden_states = self.embed_tokens.forward(input)?;
+        for layer in &self.layers {
+            hidden_states = layer.forward_with_mask(hidden_states, mask)?;
+        }
+        self.norm.forward(hidden_states)
+    }
+}
+
 impl Model for LegalMedicalModel {
     type Config = LegalMedicalConfig;
     type Input = Tensor;
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> CoreResult<Self::Output> {
-        // Convert input to token IDs if needed
         let token_ids: Vec<u32> = input.to_vec_f32()?.into_iter().map(|x| x as u32).collect();
-        let mut hidden_states = self.embed_tokens.forward(token_ids)?;
-
-        // Pass through all layers
-        for layer in &self.layers {
-            hidden_states = layer.forward(hidden_states)?;
-        }
-
-        // Final norm
-        hidden_states = self.norm.forward(hidden_states)?;
-        Ok(hidden_states)
+        self.forward_with_mask(token_ids, None)
     }
 
     fn load_pretrained(&mut self, reader: &mut dyn std::io::Read) -> CoreResult<()> {
-        // Read all data from the reader
-        let mut buffer = Vec::new();
-        let reader = reader;
-        reader.read_to_end(&mut buffer).map_err(|e| {
-            trustformers_core::errors::TrustformersError::io_error(format!(
-                "Failed to read weight data: {}",
-                e
-            ))
-        })?;
-
-        // Validate that we have reasonable weight data
-        if buffer.len() < 1024 {
-            return Err(trustformers_core::errors::TrustformersError::io_error(
-                "Weight data appears to be too small".to_string(),
-            ));
-        }
-
-        // Create a temporary file for the weight loading system
-        let temp_file =
-            std::env::temp_dir().join(format!("legal_medical_weights_{}.bin", std::process::id()));
-        std::fs::write(&temp_file, &buffer).map_err(|e| {
-            trustformers_core::errors::TrustformersError::io_error(format!(
-                "Failed to write temporary weights: {}",
-                e
-            ))
-        })?;
-
-        // Use enhanced loading with fallback for legal/medical models
-        let result = if let Some(path_str) = temp_file.to_str() {
-            println!(
-                "Legal/medical model weight loading - weights successfully processed from {:?}",
-                path_str
-            );
-            Ok(())
-        } else {
-            Err(trustformers_core::errors::TrustformersError::io_error(
-                "Failed to convert temporary file path to string".to_string(),
-            ))
-        };
-
-        // Clean up temporary file
-        let _ = std::fs::remove_file(&temp_file);
-
-        result
+        checked_unimplemented_load(reader, "LegalMedicalModel")
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -604,14 +605,56 @@ pub struct LegalMedicalLayer {
     post_attention_layernorm: RMSNorm,
 }
 
-/// Legal/Medical attention mechanism with privacy protection
+/// Legal/Medical attention mechanism with privacy protection.
+///
+/// Backed by [`GroupedQueryAttention`], which performs real scaled
+/// dot-product attention (`softmax(QK^T / sqrt(head_dim)) V`) with causal
+/// masking and, when `num_key_value_heads < num_attention_heads`,
+/// grouped-query key/value sharing. Setting `num_key_value_heads ==
+/// num_attention_heads` degenerates to standard multi-head attention, so
+/// this one type serves both cases - unlike the previous `q + v` stand-in,
+/// the key projection is not just allocated but actually determines the
+/// output.
 pub struct LegalMedicalAttention {
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
-    o_proj: Linear,
-    #[allow(dead_code)]
-    config: LegalMedicalConfig,
+    attn: GroupedQueryAttention,
+}
+
+impl LegalMedicalAttention {
+    pub fn new(config: &LegalMedicalConfig) -> Result<Self> {
+        let num_kv_heads = config.num_key_value_heads.unwrap_or(config.num_attention_heads);
+        let mut attn = GroupedQueryAttention::new(
+            config.hidden_size,
+            config.num_attention_heads,
+            num_kv_heads,
+            // LegalMedicalConfig does not expose an attention-dropout knob;
+            // 0.0 also keeps inference deterministic.
+            0.0,
+            config.attention_bias,
+        )?;
+        // These are decoder-only causal language models: generation must not
+        // see future tokens.
+        attn.set_causal(true);
+        Ok(Self { attn })
+    }
+
+    pub fn parameter_count(&self) -> usize {
+        self.attn.parameter_count()
+    }
+
+    /// Replace the query/key/value/output projections. Only used by tests to
+    /// prove the key projection actually participates in the output (the
+    /// `q + v` bug this replaces silently discarded it).
+    #[cfg(test)]
+    fn set_projections(&mut self, query: Linear, key: Linear, value: Linear, out_proj: Linear) {
+        self.attn.set_projections(query, key, value, out_proj);
+    }
+
+    fn forward_with_mask(&self, input: Tensor, mask: Option<&Tensor>) -> CoreResult<Tensor> {
+        self.attn.forward(FlashAttentionInput {
+            hidden_states: input,
+            attention_mask: mask.cloned(),
+        })
+    }
 }
 
 /// Legal/Medical MLP with compliance features
@@ -619,11 +662,7 @@ pub struct LegalMedicalMLP {
     gate_proj: Linear,
     up_proj: Linear,
     down_proj: Linear,
-    #[allow(dead_code)]
-    config: LegalMedicalConfig,
 }
-
-// Import actual implementations from trustformers_core
 
 /// Legal/Medical model for causal language modeling
 pub struct LegalMedicalForCausalLM {
@@ -649,142 +688,17 @@ impl LegalMedicalForCausalLM {
         })
     }
 
-    pub fn generate(&self, input: &str, max_length: usize) -> Result<String> {
-        // Create generation config with privacy protection
-        let gen_config = GenerationConfig {
-            max_new_tokens: max_length,
-            temperature: 0.7, // Conservative for legal/medical
-            top_p: 0.8,
-            do_sample: true,
-            repetition_penalty: 1.2, // Reduce repetition
-            ..Default::default()
-        };
-
-        // Apply privacy protection and generate
-        let protected_input = self.apply_privacy_protection(input)?;
-        let generation = self.generate_with_config(&protected_input, &gen_config)?;
-
-        Ok(generation)
-    }
-
-    pub fn analyze_document(&self, text: &str) -> Result<DocumentAnalysis> {
-        // Analyze legal/medical documents
-        let domain_classification = self.classify_domain(text)?;
-        let privacy_sensitive_sections = self.identify_sensitive_sections(text)?;
-        let citation_count = self.count_citations(text)?;
-        let compliance_score = self.calculate_compliance_score(text)?;
-        let key_entities = self.extract_key_entities(text)?;
-        let redaction_suggestions = self.generate_redaction_suggestions(text)?;
-
-        let document_type = self.classify_document_type(text)?;
-
-        Ok(DocumentAnalysis {
-            document_type,
-            domain_classification,
-            privacy_sensitive_sections,
-            citation_count,
-            compliance_score,
-            key_entities,
-            redaction_suggestions,
-        })
-    }
-
-    pub fn redact_sensitive_info(&self, text: &str) -> Result<String> {
-        // Redact sensitive information for privacy compliance
-        let mut redacted_text = text.to_string();
-
-        // Redact common sensitive patterns
-        redacted_text = self.redact_ssn(&redacted_text)?;
-        redacted_text = self.redact_phone_numbers(&redacted_text)?;
-        redacted_text = self.redact_email_addresses(&redacted_text)?;
-        redacted_text = self.redact_dates(&redacted_text)?;
-        redacted_text = self.redact_names(&redacted_text)?;
-        redacted_text = self.redact_addresses(&redacted_text)?;
-        redacted_text = self.redact_medical_ids(&redacted_text)?;
-
-        Ok(redacted_text)
-    }
-
-    pub fn extract_citations(&self, text: &str) -> Result<Vec<Citation>> {
-        // Extract legal citations or medical references
-        let mut citations = Vec::new();
-
-        // Extract legal case citations
-        citations.extend(self.extract_legal_case_citations(text)?);
-
-        // Extract statute citations
-        citations.extend(self.extract_statute_citations(text)?);
-
-        // Extract medical journal citations
-        citations.extend(self.extract_medical_journal_citations(text)?);
-
-        // Extract clinical trial citations
-        citations.extend(self.extract_clinical_trial_citations(text)?);
-
-        Ok(citations)
-    }
-
-    pub fn compliance_check(&self, text: &str) -> Result<ComplianceReport> {
-        // Check document for regulatory compliance
-        let mut violations = Vec::new();
-        let mut recommendations = Vec::new();
-
-        // Check for HIPAA compliance (medical)
-        if self.is_medical_domain() {
-            violations.extend(self.check_hipaa_compliance(text)?);
-        }
-
-        // Check for GDPR compliance (general)
-        violations.extend(self.check_gdpr_compliance(text)?);
-
-        // Check for attorney-client privilege (legal)
-        if self.is_legal_domain() {
-            violations.extend(self.check_attorney_client_privilege(text)?);
-        }
-
-        // Generate recommendations
-        recommendations.extend(self.generate_compliance_recommendations(&violations)?);
-
-        let privacy_compliance = !violations.iter().any(|v| v.violation_type.contains("privacy"));
-        let regulatory_compliance =
-            !violations.iter().any(|v| v.violation_type.contains("regulatory"));
-
-        let overall_score = if violations.is_empty() {
-            1.0
-        } else {
-            1.0 - (violations.len() as f32 * 0.1).min(1.0)
-        };
-
-        Ok(ComplianceReport {
-            overall_score,
-            privacy_compliance,
-            regulatory_compliance,
-            violations,
-            recommendations,
-        })
-    }
-}
-
-// Implementation of LegalMedicalModel
-impl LegalMedicalModel {
-    pub fn new(config: LegalMedicalConfig) -> Result<Self> {
-        config.validate()?;
-
-        let embed_tokens = Embedding::new(config.vocab_size, config.hidden_size, None)?;
-
-        let mut layers = Vec::new();
-        for _ in 0..config.num_hidden_layers {
-            layers.push(LegalMedicalLayer::new(&config)?);
-        }
-
-        let norm = RMSNorm::new(config.hidden_size, config.rms_norm_eps)?;
-
-        Ok(Self {
-            config,
-            embed_tokens,
-            layers,
-            norm,
-        })
+    /// Real forward pass from token ids straight through to logits, with an
+    /// optional pre-softmax attention mask. Used by [`generation`] to drive
+    /// autoregressive decoding without going through the `Layer`/`Model`
+    /// trait objects (which have no room for a mask parameter).
+    fn forward_logits_with_mask(
+        &self,
+        input_ids: &[u32],
+        mask: Option<&Tensor>,
+    ) -> CoreResult<Tensor> {
+        let hidden_states = self.model.forward_with_mask(input_ids.to_vec(), mask)?;
+        self.lm_head.forward(hidden_states)
     }
 }
 
@@ -803,42 +717,23 @@ impl LegalMedicalLayer {
             post_attention_layernorm,
         })
     }
-}
 
-// Implementation of LegalMedicalAttention
-impl LegalMedicalAttention {
-    pub fn new(config: &LegalMedicalConfig) -> Result<Self> {
-        let head_dim = config.hidden_size / config.num_attention_heads;
-        let num_kv_heads = config.num_key_value_heads.unwrap_or(config.num_attention_heads);
+    pub fn parameter_count(&self) -> usize {
+        self.self_attention.parameter_count()
+            + self.feed_forward.parameter_count()
+            + self.input_layernorm.parameter_count()
+            + self.post_attention_layernorm.parameter_count()
+    }
 
-        let q_proj = Linear::new(
-            config.hidden_size,
-            config.num_attention_heads * head_dim,
-            config.attention_bias,
-        );
-        let k_proj = Linear::new(
-            config.hidden_size,
-            num_kv_heads * head_dim,
-            config.attention_bias,
-        );
-        let v_proj = Linear::new(
-            config.hidden_size,
-            num_kv_heads * head_dim,
-            config.attention_bias,
-        );
-        let o_proj = Linear::new(
-            config.num_attention_heads * head_dim,
-            config.hidden_size,
-            config.attention_bias,
-        );
+    fn forward_with_mask(&self, input: Tensor, mask: Option<&Tensor>) -> CoreResult<Tensor> {
+        // Pre-norm architecture
+        let normalized_input = self.input_layernorm.forward(input.clone())?;
+        let attn_output = self.self_attention.forward_with_mask(normalized_input, mask)?;
+        let residual1 = input.add(&attn_output)?;
 
-        Ok(Self {
-            q_proj,
-            k_proj,
-            v_proj,
-            o_proj,
-            config: config.clone(),
-        })
+        let normalized_residual = self.post_attention_layernorm.forward(residual1.clone())?;
+        let mlp_output = self.feed_forward.forward(normalized_residual)?;
+        residual1.add(&mlp_output)
     }
 }
 
@@ -865,8 +760,13 @@ impl LegalMedicalMLP {
             gate_proj,
             up_proj,
             down_proj,
-            config: config.clone(),
         })
+    }
+
+    pub fn parameter_count(&self) -> usize {
+        self.gate_proj.parameter_count()
+            + self.up_proj.parameter_count()
+            + self.down_proj.parameter_count()
     }
 }
 
@@ -876,17 +776,7 @@ impl Layer for LegalMedicalModel {
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> CoreResult<Self::Output> {
-        // Convert token IDs to embeddings
-        let mut hidden_states = self.embed_tokens.forward(input)?;
-
-        // Pass through all layers
-        for layer in &self.layers {
-            hidden_states = layer.forward(hidden_states)?;
-        }
-
-        // Apply final normalization
-        let output = self.norm.forward(hidden_states)?;
-        Ok(output)
+        self.forward_with_mask(input, None)
     }
 }
 
@@ -895,25 +785,7 @@ impl Layer for LegalMedicalLayer {
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> CoreResult<Self::Output> {
-        // Pre-norm architecture
-        let normalized_input = self.input_layernorm.forward(input.clone())?;
-        let attn_output = self.self_attention.forward(normalized_input)?;
-        let residual1 = input.add(&attn_output)?;
-
-        let normalized_residual = self.post_attention_layernorm.forward(residual1.clone())?;
-        let mlp_output = self.feed_forward.forward(normalized_residual)?;
-        let residual2 = residual1.add(&mlp_output)?;
-
-        Ok(residual2)
-    }
-}
-
-impl LegalMedicalLayer {
-    pub fn parameter_count(&self) -> usize {
-        self.self_attention.parameter_count()
-            + self.feed_forward.parameter_count()
-            + self.input_layernorm.parameter_count()
-            + self.post_attention_layernorm.parameter_count()
+        self.forward_with_mask(input, None)
     }
 }
 
@@ -922,35 +794,7 @@ impl Layer for LegalMedicalAttention {
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> CoreResult<Self::Output> {
-        // Privacy-protected attention implementation
-        let q = self.q_proj.forward(input.clone())?;
-        let _k = self.k_proj.forward(input.clone())?;
-        let v = self.v_proj.forward(input)?;
-
-        // Simplified attention with privacy considerations
-        let attention_output = match (&q, &v) {
-            (Tensor::F32(q_arr), Tensor::F32(v_arr)) => {
-                let combined = q_arr + v_arr;
-                Tensor::F32(combined)
-            },
-            _ => {
-                return Err(tensor_op_error(
-                    "tensor_operation",
-                    "Unsupported tensor types for legal/medical attention",
-                ))
-            },
-        };
-
-        self.o_proj.forward(attention_output)
-    }
-}
-
-impl LegalMedicalAttention {
-    pub fn parameter_count(&self) -> usize {
-        self.q_proj.parameter_count()
-            + self.k_proj.parameter_count()
-            + self.v_proj.parameter_count()
-            + self.o_proj.parameter_count()
+        self.forward_with_mask(input, None)
     }
 }
 
@@ -970,7 +814,7 @@ impl Layer for LegalMedicalMLP {
                 Tensor::F32(activated)
             },
             _ => {
-                return Err(tensor_op_error(
+                return Err(trustformers_core::errors::tensor_op_error(
                     "tensor_operation",
                     "Unsupported tensor type for SiLU activation",
                 ))
@@ -984,7 +828,7 @@ impl Layer for LegalMedicalMLP {
                 Tensor::F32(result)
             },
             _ => {
-                return Err(tensor_op_error(
+                return Err(trustformers_core::errors::tensor_op_error(
                     "tensor_operation",
                     "Unsupported tensor types for element-wise multiplication",
                 ))
@@ -995,14 +839,6 @@ impl Layer for LegalMedicalMLP {
     }
 }
 
-impl LegalMedicalMLP {
-    pub fn parameter_count(&self) -> usize {
-        self.gate_proj.parameter_count()
-            + self.up_proj.parameter_count()
-            + self.down_proj.parameter_count()
-    }
-}
-
 // Model trait implementation for LegalMedicalForCausalLM
 impl Model for LegalMedicalForCausalLM {
     type Config = LegalMedicalConfig;
@@ -1010,59 +846,11 @@ impl Model for LegalMedicalForCausalLM {
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> CoreResult<Self::Output> {
-        // Convert Vec<u32> to Tensor
-        let seq_len = input.len();
-        let input_tensor =
-            Tensor::from_vec(input.into_iter().map(|x| x as f32).collect(), &[seq_len])?;
-        let hidden_states = trustformers_core::traits::Model::forward(&self.model, input_tensor)?;
-        let logits = self.lm_head.forward(hidden_states)?;
-        Ok(logits)
+        self.forward_logits_with_mask(&input, None)
     }
 
-    fn load_pretrained(&mut self, reader: &mut dyn Read) -> CoreResult<()> {
-        // Read all data from the reader
-        let mut buffer = Vec::new();
-        let reader = reader;
-        reader.read_to_end(&mut buffer).map_err(|e| {
-            trustformers_core::errors::TrustformersError::io_error(format!(
-                "Failed to read weight data: {}",
-                e
-            ))
-        })?;
-
-        // Validate that we have reasonable weight data
-        if buffer.len() < 1024 {
-            return Err(trustformers_core::errors::TrustformersError::io_error(
-                "Weight data appears to be too small".to_string(),
-            ));
-        }
-
-        // Create a temporary file for the weight loading system
-        let temp_file = std::env::temp_dir().join(format!(
-            "legal_medical_enhanced_weights_{}.bin",
-            std::process::id()
-        ));
-        std::fs::write(&temp_file, &buffer).map_err(|e| {
-            trustformers_core::errors::TrustformersError::io_error(format!(
-                "Failed to write temporary weights: {}",
-                e
-            ))
-        })?;
-
-        // Use enhanced loading with fallback for legal/medical enhanced models
-        let result = if let Some(path_str) = temp_file.to_str() {
-            println!("Legal/medical enhanced model weight loading - weights successfully processed from {:?}", path_str);
-            Ok(())
-        } else {
-            Err(trustformers_core::errors::TrustformersError::io_error(
-                "Failed to convert temporary file path to string".to_string(),
-            ))
-        };
-
-        // Clean up temporary file
-        let _ = std::fs::remove_file(&temp_file);
-
-        result
+    fn load_pretrained(&mut self, reader: &mut dyn std::io::Read) -> CoreResult<()> {
+        checked_unimplemented_load(reader, "LegalMedicalForCausalLM")
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -1074,542 +862,40 @@ impl Model for LegalMedicalForCausalLM {
     }
 }
 
-// Helper methods for LegalMedicalForCausalLM
-impl LegalMedicalForCausalLM {
-    fn apply_privacy_protection(&self, text: &str) -> Result<String> {
-        // Apply basic privacy protection before processing
-        let mut protected_text = text.to_string();
-
-        // Add privacy markers for sensitive content
-        if self.contains_sensitive_info(text)? {
-            protected_text = format!("[PRIVACY_PROTECTED] {}", protected_text);
-        }
-
-        Ok(protected_text)
+/// Shared `load_pretrained` body for this family: reads the stream so I/O
+/// failures are reported honestly, then refuses instead of pretending the
+/// (entirely discarded) bytes became model weights.
+///
+/// The previous implementation wrote the buffer to a temp file, `println!`ed
+/// a success message, deleted the file, and returned `Ok(())` without ever
+/// touching a single layer's weights - a fabricated success. Real checkpoint
+/// binding (matching tensor names to this architecture's layers) is not
+/// implemented for this family; callers that need it should use
+/// [`crate::weight_loading`]'s checkpoint utilities directly against a model
+/// whose layer names are known, rather than this trait method.
+fn checked_unimplemented_load(
+    reader: &mut dyn std::io::Read,
+    architecture: &str,
+) -> CoreResult<()> {
+    let mut buffer = Vec::new();
+    reader.read_to_end(&mut buffer).map_err(|e| {
+        trustformers_core::errors::TrustformersError::io_error(format!(
+            "Failed to read weight data: {}",
+            e
+        ))
+    })?;
+    if buffer.is_empty() {
+        return Err(trustformers_core::errors::TrustformersError::io_error(
+            "Weight data is empty".to_string(),
+        ));
     }
-
-    fn generate_with_config(&self, prompt: &str, _config: &GenerationConfig) -> Result<String> {
-        // Placeholder implementation - in a real implementation, this would
-        // tokenize the prompt, run the forward pass, and decode the output
-        Ok(format!("[Legal/Medical Generated]: {}", prompt))
-    }
-
-    fn classify_domain(&self, text: &str) -> Result<LegalMedicalDomain> {
-        let text_lower = text.to_lowercase();
-
-        // Medical keywords
-        if text_lower.contains("patient")
-            || text_lower.contains("medical")
-            || text_lower.contains("diagnosis")
-        {
-            if text_lower.contains("clinical") || text_lower.contains("treatment") {
-                Ok(LegalMedicalDomain::MedicalClinical)
-            } else if text_lower.contains("research") || text_lower.contains("study") {
-                Ok(LegalMedicalDomain::MedicalResearch)
-            } else if text_lower.contains("drug") || text_lower.contains("medication") {
-                Ok(LegalMedicalDomain::MedicalPharmacology)
-            } else {
-                Ok(LegalMedicalDomain::Medical)
-            }
-        }
-        // Legal keywords
-        else if text_lower.contains("court")
-            || text_lower.contains("legal")
-            || text_lower.contains("contract")
-        {
-            if text_lower.contains("contract") || text_lower.contains("agreement") {
-                Ok(LegalMedicalDomain::LegalContract)
-            } else if text_lower.contains("litigation") || text_lower.contains("lawsuit") {
-                Ok(LegalMedicalDomain::LegalLitigation)
-            } else if text_lower.contains("regulation") || text_lower.contains("compliance") {
-                Ok(LegalMedicalDomain::LegalRegulatory)
-            } else {
-                Ok(LegalMedicalDomain::Legal)
-            }
-        } else {
-            Ok(LegalMedicalDomain::Legal) // Default
-        }
-    }
-
-    fn identify_sensitive_sections(&self, text: &str) -> Result<Vec<String>> {
-        let mut sensitive_sections = Vec::new();
-
-        // Look for patterns that might contain sensitive information
-        if text.contains("SSN") || text.contains("Social Security") {
-            sensitive_sections.push("Social Security Number".to_string());
-        }
-        if text.contains("DOB") || text.contains("Date of Birth") {
-            sensitive_sections.push("Date of Birth".to_string());
-        }
-        if text.contains("@") && text.contains(".") {
-            sensitive_sections.push("Email Address".to_string());
-        }
-
-        Ok(sensitive_sections)
-    }
-
-    fn count_citations(&self, text: &str) -> Result<usize> {
-        // Simple citation counting
-        let mut count = 0;
-
-        // Legal citations (e.g., "v." for versus)
-        count += text.matches(" v. ").count();
-        count += text.matches(" vs. ").count();
-
-        // Medical citations (e.g., journal references)
-        count += text.matches("et al.").count();
-        count += text.matches("DOI:").count();
-
-        Ok(count)
-    }
-
-    fn calculate_compliance_score(&self, text: &str) -> Result<f32> {
-        let mut score = 1.0;
-
-        // Deduct points for potential compliance issues
-        if self.contains_sensitive_info(text)? {
-            score -= 0.3;
-        }
-
-        if text.to_lowercase().contains("confidential")
-            && !text.to_lowercase().contains("privilege")
-        {
-            score -= 0.2;
-        }
-
-        Ok(f32::max(score, 0.0))
-    }
-
-    fn extract_key_entities(&self, text: &str) -> Result<Vec<String>> {
-        let mut entities = Vec::new();
-
-        // Extract potential person names (simplified)
-        let words: Vec<&str> = text.split_whitespace().collect();
-        for window in words.windows(2) {
-            if window[0].chars().next().unwrap_or('a').is_uppercase()
-                && window[1].chars().next().unwrap_or('a').is_uppercase()
-            {
-                entities.push(format!("{} {}", window[0], window[1]));
-            }
-        }
-
-        // Extract organizations (simplified)
-        if text.contains("Inc.") || text.contains("Corp.") || text.contains("LLC") {
-            entities.push("Organization".to_string());
-        }
-
-        Ok(entities)
-    }
-
-    fn generate_redaction_suggestions(&self, text: &str) -> Result<Vec<String>> {
-        let mut suggestions = Vec::new();
-
-        if text.contains("SSN") || text.contains("Social Security") {
-            suggestions.push("Consider redacting Social Security Numbers".to_string());
-        }
-
-        if text.contains("@") && text.contains(".") {
-            suggestions.push("Consider redacting email addresses".to_string());
-        }
-
-        if text.matches(char::is_numeric).count() > 10 {
-            suggestions
-                .push("Consider redacting phone numbers or other numeric identifiers".to_string());
-        }
-
-        Ok(suggestions)
-    }
-
-    fn classify_document_type(&self, text: &str) -> Result<String> {
-        let text_lower = text.to_lowercase();
-
-        if text_lower.contains("contract") || text_lower.contains("agreement") {
-            Ok("Contract".to_string())
-        } else if text_lower.contains("medical record") || text_lower.contains("patient") {
-            Ok("Medical Record".to_string())
-        } else if text_lower.contains("court") || text_lower.contains("filing") {
-            Ok("Court Document".to_string())
-        } else if text_lower.contains("policy") || text_lower.contains("procedure") {
-            Ok("Policy Document".to_string())
-        } else {
-            Ok("General Document".to_string())
-        }
-    }
-
-    fn contains_sensitive_info(&self, text: &str) -> Result<bool> {
-        let text_lower = text.to_lowercase();
-
-        // Check for common sensitive patterns
-        let sensitive_patterns = [
-            "ssn",
-            "social security",
-            "dob",
-            "date of birth",
-            "patient id",
-            "medical record",
-            "confidential",
-        ];
-
-        for pattern in &sensitive_patterns {
-            if text_lower.contains(pattern) {
-                return Ok(true);
-            }
-        }
-
-        // Check for email patterns
-        if text.contains("@") && text.contains(".") {
-            return Ok(true);
-        }
-
-        Ok(false)
-    }
-
-    fn redact_ssn(&self, text: &str) -> Result<String> {
-        // Enhanced SSN redaction with proper regex patterns
-        let mut result = text.to_string();
-
-        // Pattern for XXX-XX-XXXX, XXX XX XXXX, and XXXXXXXXX formats
-        let ssn_regex = Regex::new(r"\b\d{3}[-\s]?\d{2}[-\s]?\d{4}\b")
-            .map_err(|e| anyhow::anyhow!("Failed to compile SSN regex: {}", e))?;
-        result = ssn_regex.replace_all(&result, "[REDACTED_SSN]").to_string();
-
-        // Also redact explicit SSN references
-        if result.contains("SSN") || result.contains("Social Security") {
-            result = result.replace("SSN", "SSN: [REDACTED]");
-            result = result.replace("Social Security", "Social Security: [REDACTED]");
-        }
-
-        Ok(result)
-    }
-
-    fn redact_phone_numbers(&self, text: &str) -> Result<String> {
-        // Enhanced phone number redaction with proper regex patterns
-        let mut result = text.to_string();
-
-        // Pattern for various phone number formats
-        let phone_patterns = [
-            r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}", // (XXX) XXX-XXXX, XXX-XXX-XXXX, XXX.XXX.XXXX
-            r"\+1[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}", // +1 XXX XXX XXXX
-            r"\d{3}[-.\s]?\d{4}",                   // XXX-XXXX (for 7-digit numbers)
-        ];
-
-        for pattern in &phone_patterns {
-            let regex = Regex::new(pattern)
-                .map_err(|e| anyhow::anyhow!("Failed to compile phone regex: {}", e))?;
-            result = regex.replace_all(&result, "[REDACTED_PHONE]").to_string();
-        }
-
-        // Also redact explicit phone references
-        if result.contains("phone") || result.contains("Phone") || result.contains("tel") {
-            result = result.replace("phone", "phone: [REDACTED]");
-            result = result.replace("Phone", "Phone: [REDACTED]");
-            result = result.replace("tel", "tel: [REDACTED]");
-        }
-
-        Ok(result)
-    }
-
-    fn redact_email_addresses(&self, text: &str) -> Result<String> {
-        // Enhanced email redaction with proper regex pattern
-        let mut result = text.to_string();
-
-        // Comprehensive email regex pattern
-        let email_regex = Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b")
-            .map_err(|e| anyhow::anyhow!("Failed to compile email regex: {}", e))?;
-        result = email_regex.replace_all(&result, "[REDACTED_EMAIL]").to_string();
-
-        Ok(result)
-    }
-
-    fn redact_dates(&self, text: &str) -> Result<String> {
-        // Enhanced date redaction with comprehensive patterns
-        let mut result = text.to_string();
-
-        // Various date format patterns
-        let date_patterns = [
-            r"\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b", // MM/DD/YYYY, MM-DD-YYYY
-            r"\b\d{2,4}[-/]\d{1,2}[-/]\d{1,2}\b", // YYYY/MM/DD, YYYY-MM-DD
-            r"\b\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{2,4}\b", // DD Month YYYY
-            r"\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{2,4}\b", // Month DD, YYYY
-            r"\b\d{4}-\d{2}-\d{2}\b", // ISO format YYYY-MM-DD
-        ];
-
-        for pattern in &date_patterns {
-            let regex = Regex::new(pattern)
-                .map_err(|e| anyhow::anyhow!("Failed to compile date regex: {}", e))?;
-            result = regex.replace_all(&result, "[REDACTED_DATE]").to_string();
-        }
-
-        // Also redact explicit date references
-        if result.contains("DOB") || result.contains("Date of Birth") {
-            result = result.replace("DOB", "DOB: [REDACTED]");
-            result = result.replace("Date of Birth", "Date of Birth: [REDACTED]");
-        }
-
-        Ok(result)
-    }
-
-    fn redact_names(&self, text: &str) -> Result<String> {
-        // This is a simplified implementation
-        // In practice, you'd use more sophisticated NER models
-        Ok(text.to_string()) // Placeholder
-    }
-
-    fn redact_addresses(&self, text: &str) -> Result<String> {
-        // Placeholder for address redaction
-        Ok(text.to_string()) // Placeholder
-    }
-
-    fn redact_medical_ids(&self, text: &str) -> Result<String> {
-        // Enhanced medical ID redaction with comprehensive patterns
-        let mut result = text.to_string();
-
-        // Medical ID patterns
-        let medical_id_patterns = [
-            r"\bMRN[-:\s]*\d+\b",           // Medical Record Number
-            r"\bPatient\s+ID[-:\s]*\d+\b",  // Patient ID
-            r"\bChart[-:\s]*\d+\b",         // Chart number
-            r"\bAccount[-:\s]*\d+\b",       // Account number
-            r"\bNPI[-:\s]*\d{10}\b",        // National Provider Identifier
-            r"\bDEA[-:\s]*[A-Z]{2}\d{7}\b", // DEA number
-            r"\bLicense[-:\s]*\d+\b",       // Medical license
-        ];
-
-        for pattern in &medical_id_patterns {
-            let regex = Regex::new(pattern)
-                .map_err(|e| anyhow::anyhow!("Failed to compile medical ID regex: {}", e))?;
-            result = regex.replace_all(&result, "[REDACTED_MEDICAL_ID]").to_string();
-        }
-
-        // Also redact explicit medical ID references
-        if result.contains("MRN") || result.contains("Patient ID") {
-            result = result.replace("MRN", "MRN: [REDACTED]");
-            result = result.replace("Patient ID", "Patient ID: [REDACTED]");
-        }
-
-        Ok(result)
-    }
-
-    fn extract_legal_case_citations(&self, text: &str) -> Result<Vec<Citation>> {
-        let mut citations = Vec::new();
-
-        // Look for "v." pattern (Case vs. Case)
-        for line in text.lines() {
-            if line.contains(" v. ") {
-                citations.push(Citation {
-                    citation_type: CitationType::LegalCase,
-                    text: line.to_string(),
-                    page_number: None,
-                    authority: None,
-                });
-            }
-        }
-
-        Ok(citations)
-    }
-
-    fn extract_statute_citations(&self, text: &str) -> Result<Vec<Citation>> {
-        let mut citations = Vec::new();
-
-        // Look for section symbols and USC references
-        for line in text.lines() {
-            if line.contains("§") || line.contains("U.S.C.") {
-                citations.push(Citation {
-                    citation_type: CitationType::Statute,
-                    text: line.to_string(),
-                    page_number: None,
-                    authority: Some("U.S. Code".to_string()),
-                });
-            }
-        }
-
-        Ok(citations)
-    }
-
-    fn extract_medical_journal_citations(&self, text: &str) -> Result<Vec<Citation>> {
-        let mut citations = Vec::new();
-
-        // Look for "et al." pattern
-        for line in text.lines() {
-            if line.contains("et al.") {
-                citations.push(Citation {
-                    citation_type: CitationType::MedicalJournal,
-                    text: line.to_string(),
-                    page_number: None,
-                    authority: None,
-                });
-            }
-        }
-
-        Ok(citations)
-    }
-
-    fn extract_clinical_trial_citations(&self, text: &str) -> Result<Vec<Citation>> {
-        let mut citations = Vec::new();
-
-        // Look for clinical trial identifiers
-        for line in text.lines() {
-            if line.contains("NCT") || line.contains("clinical trial") {
-                citations.push(Citation {
-                    citation_type: CitationType::ClinicalTrial,
-                    text: line.to_string(),
-                    page_number: None,
-                    authority: None,
-                });
-            }
-        }
-
-        Ok(citations)
-    }
-
-    fn is_medical_domain(&self) -> bool {
-        matches!(
-            self.config.domain,
-            LegalMedicalDomain::Medical
-                | LegalMedicalDomain::MedicalClinical
-                | LegalMedicalDomain::MedicalResearch
-                | LegalMedicalDomain::MedicalPharmacology
-                | LegalMedicalDomain::MedicalRadiology
-                | LegalMedicalDomain::MedicalPublicHealth
-        )
-    }
-
-    fn is_legal_domain(&self) -> bool {
-        matches!(
-            self.config.domain,
-            LegalMedicalDomain::Legal
-                | LegalMedicalDomain::LegalContract
-                | LegalMedicalDomain::LegalLitigation
-                | LegalMedicalDomain::LegalRegulatory
-                | LegalMedicalDomain::LegalIP
-                | LegalMedicalDomain::LegalCriminal
-        )
-    }
-
-    fn check_hipaa_compliance(&self, text: &str) -> Result<Vec<ComplianceViolation>> {
-        let mut violations = Vec::new();
-
-        if self.contains_sensitive_info(text)? {
-            violations.push(ComplianceViolation {
-                violation_type: "HIPAA Privacy".to_string(),
-                severity: "High".to_string(),
-                location: "Throughout document".to_string(),
-                description: "Document contains potentially sensitive health information"
-                    .to_string(),
-                suggested_fix: "Apply appropriate redaction or de-identification".to_string(),
-            });
-        }
-
-        Ok(violations)
-    }
-
-    fn check_gdpr_compliance(&self, text: &str) -> Result<Vec<ComplianceViolation>> {
-        let mut violations = Vec::new();
-
-        if text.contains("@") && text.contains(".") {
-            violations.push(ComplianceViolation {
-                violation_type: "GDPR Privacy".to_string(),
-                severity: "Medium".to_string(),
-                location: "Email addresses".to_string(),
-                description: "Document contains email addresses which may be personal data"
-                    .to_string(),
-                suggested_fix: "Redact or anonymize email addresses".to_string(),
-            });
-        }
-
-        Ok(violations)
-    }
-
-    fn check_attorney_client_privilege(&self, text: &str) -> Result<Vec<ComplianceViolation>> {
-        let mut violations = Vec::new();
-
-        if text.to_lowercase().contains("confidential")
-            && !text.to_lowercase().contains("privilege")
-        {
-            violations.push(ComplianceViolation {
-                violation_type: "Attorney-Client Privilege".to_string(),
-                severity: "High".to_string(),
-                location: "Confidential sections".to_string(),
-                description: "Document marked confidential but privilege not explicitly claimed"
-                    .to_string(),
-                suggested_fix: "Add explicit attorney-client privilege statement".to_string(),
-            });
-        }
-
-        Ok(violations)
-    }
-
-    fn generate_compliance_recommendations(
-        &self,
-        violations: &[ComplianceViolation],
-    ) -> Result<Vec<String>> {
-        let mut recommendations = Vec::new();
-
-        for violation in violations {
-            recommendations.push(format!(
-                "Address {}: {}",
-                violation.violation_type, violation.suggested_fix
-            ));
-        }
-
-        if violations.is_empty() {
-            recommendations.push(
-                "Document appears to be compliant with basic privacy regulations".to_string(),
-            );
-        }
-
-        Ok(recommendations)
-    }
-}
-
-/// Document analysis results
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DocumentAnalysis {
-    pub document_type: String,
-    pub domain_classification: LegalMedicalDomain,
-    pub privacy_sensitive_sections: Vec<String>,
-    pub citation_count: usize,
-    pub compliance_score: f32,
-    pub key_entities: Vec<String>,
-    pub redaction_suggestions: Vec<String>,
-}
-
-/// Citation information
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Citation {
-    pub citation_type: CitationType,
-    pub text: String,
-    pub page_number: Option<u32>,
-    pub authority: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum CitationType {
-    LegalCase,
-    Statute,
-    Regulation,
-    MedicalJournal,
-    ClinicalTrial,
-    DrugLabel,
-}
-
-/// Compliance checking report
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComplianceReport {
-    pub overall_score: f32,
-    pub privacy_compliance: bool,
-    pub regulatory_compliance: bool,
-    pub violations: Vec<ComplianceViolation>,
-    pub recommendations: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComplianceViolation {
-    pub violation_type: String,
-    pub severity: String,
-    pub location: String,
-    pub description: String,
-    pub suggested_fix: String,
+    Err(not_implemented(format!(
+        "{architecture}::load_pretrained: binding a checkpoint's tensors into this \
+         architecture's layers is not implemented (read {} bytes but could not bind them). \
+         Construct the model with default/random weights, or use \
+         trustformers_models::weight_loading for architectures with an implemented binder.",
+        buffer.len()
+    )))
 }
 
 #[cfg(test)]
@@ -1662,5 +948,170 @@ mod tests {
         assert!(config.is_some());
         let config = config.expect("operation failed");
         assert_eq!(config.domain, LegalMedicalDomain::LegalContract);
+    }
+
+    /// A tiny configuration for fast tests: real compute, not a 7B allocation.
+    pub(crate) fn tiny_config() -> LegalMedicalConfig {
+        LegalMedicalConfig {
+            vocab_size: 512,
+            hidden_size: 32,
+            intermediate_size: 64,
+            num_hidden_layers: 2,
+            num_attention_heads: 4,
+            num_key_value_heads: Some(2),
+            max_position_embeddings: 128,
+            rope_scaling: None,
+            ..LegalMedicalConfig::default()
+        }
+    }
+
+    /// Deterministic pseudo-random data so assertions are reproducible.
+    fn deterministic_data(count: usize, seed: u32) -> Vec<f32> {
+        let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(12_345);
+        let mut data = Vec::with_capacity(count);
+        for _ in 0..count {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let unit = (state >> 8) as f32 / (1u32 << 24) as f32;
+            data.push(unit * 2.0 - 1.0);
+        }
+        data
+    }
+
+    fn deterministic_linear(in_features: usize, out_features: usize, seed: u32) -> Linear {
+        let data = deterministic_data(out_features * in_features, seed);
+        let mut layer = Linear::new(in_features, out_features, false);
+        layer
+            .set_weight(Tensor::from_vec(data, &[out_features, in_features]).expect("weight shape"))
+            .expect("set weight");
+        layer
+    }
+
+    #[test]
+    fn attention_is_real_scaled_dot_product_not_q_plus_v() {
+        // Regression test for the `q + v` bug: two attention layers that are
+        // identical except for the key projection must produce different
+        // outputs, because a real key projection participates in the
+        // attention scores. Under the old `let combined = q_arr + v_arr;`
+        // code, `_k` was computed and discarded, so this test would have
+        // failed (identical outputs) against the old implementation.
+        let config = tiny_config();
+        let head_dim = config.hidden_size / config.num_attention_heads;
+        let kv_heads = config.num_key_value_heads.expect("configured");
+        let kv_hidden = kv_heads * head_dim;
+
+        let mut attn_a = LegalMedicalAttention::new(&config).expect("attention a");
+        attn_a.set_projections(
+            deterministic_linear(config.hidden_size, config.hidden_size, 1),
+            deterministic_linear(config.hidden_size, kv_hidden, 2),
+            deterministic_linear(config.hidden_size, kv_hidden, 3),
+            deterministic_linear(config.hidden_size, config.hidden_size, 4),
+        );
+
+        let mut attn_b = LegalMedicalAttention::new(&config).expect("attention b");
+        attn_b.set_projections(
+            deterministic_linear(config.hidden_size, config.hidden_size, 1),
+            // Different key projection only.
+            deterministic_linear(config.hidden_size, kv_hidden, 99),
+            deterministic_linear(config.hidden_size, kv_hidden, 3),
+            deterministic_linear(config.hidden_size, config.hidden_size, 4),
+        );
+
+        // Deliberately *not* a uniform vector repeated across positions: if
+        // every position held the same value, causal softmax over identical
+        // scores would be uniform regardless of K (an average of identical
+        // V rows equals that row no matter how it was weighted), which
+        // would make this test pass even with the old q+v code path by
+        // accident rather than by actually exercising K.
+        let input = Tensor::from_vec(
+            deterministic_data(5 * config.hidden_size, 50),
+            &[5, config.hidden_size],
+        )
+        .expect("input tensor");
+
+        let out_a = attn_a.forward(input.clone()).expect("forward a");
+        let out_b = attn_b.forward(input).expect("forward b");
+
+        let data_a = out_a.data().expect("data a");
+        let data_b = out_b.data().expect("data b");
+        assert_eq!(data_a.len(), data_b.len());
+        let max_diff = data_a
+            .iter()
+            .zip(data_b.iter())
+            .fold(0.0f32, |acc, (x, y)| acc.max((x - y).abs()));
+        assert!(
+            max_diff > 1e-6,
+            "changing only the key projection must change the attention output \
+             (max diff was {max_diff}); the old q+v implementation ignored K entirely"
+        );
+    }
+
+    #[test]
+    fn attention_output_is_finite_and_shape_preserving() {
+        let config = tiny_config();
+        let attn = LegalMedicalAttention::new(&config).expect("attention");
+        let seq_len = 6;
+        let input = Tensor::randn(&[seq_len, config.hidden_size]).expect("input");
+        let output = attn.forward(input).expect("forward");
+        assert_eq!(output.shape(), vec![seq_len, config.hidden_size]);
+        assert!(output.data().expect("data").iter().all(|x| x.is_finite()));
+    }
+
+    #[test]
+    fn causal_attention_does_not_leak_future_tokens() {
+        // With real causal SDPA, changing a later token must not change the
+        // hidden state of an earlier position.
+        let config = tiny_config();
+        let attn = LegalMedicalAttention::new(&config).expect("attention");
+        let seq_len = 6;
+        let base = vec![0.05_f32; seq_len * config.hidden_size];
+        let mut perturbed = base.clone();
+        for value in perturbed[4 * config.hidden_size..].iter_mut() {
+            *value += 3.0;
+        }
+
+        let base_out = attn
+            .forward(Tensor::from_vec(base, &[seq_len, config.hidden_size]).expect("base"))
+            .expect("base forward");
+        let perturbed_out = attn
+            .forward(
+                Tensor::from_vec(perturbed, &[seq_len, config.hidden_size]).expect("perturbed"),
+            )
+            .expect("perturbed forward");
+
+        let prefix = 4 * config.hidden_size;
+        let base_data = base_out.data().expect("base data");
+        let perturbed_data = perturbed_out.data().expect("perturbed data");
+        let max_diff = base_data[..prefix]
+            .iter()
+            .zip(perturbed_data[..prefix].iter())
+            .fold(0.0f32, |acc, (x, y)| acc.max((x - y).abs()));
+        assert!(
+            max_diff < 1e-4,
+            "causal attention leaked future tokens into the past"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_reports_an_honest_error_instead_of_fake_success() {
+        // Regression test for the fabricated-success bug: the old
+        // implementation wrote the input to a temp file, printed a "success"
+        // message, and returned `Ok(())` without loading a single weight.
+        let config = tiny_config();
+        let mut model = LegalMedicalForCausalLM::new(config).expect("model");
+        let bytes = vec![0u8; 4096];
+        let mut reader = std::io::Cursor::new(bytes);
+        let result = Model::load_pretrained(&mut model, &mut reader);
+        assert!(
+            result.is_err(),
+            "load_pretrained must not report success when no weights were actually bound"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_rejects_empty_input() {
+        let config = tiny_config();
+        let mut model = LegalMedicalForCausalLM::new(config).expect("model");
+        let mut reader = std::io::Cursor::new(Vec::<u8>::new());
+        assert!(Model::load_pretrained(&mut model, &mut reader).is_err());
     }
 }

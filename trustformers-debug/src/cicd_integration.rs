@@ -11,6 +11,33 @@ use uuid::Uuid;
 
 use crate::{DebugConfig, DebugReport, DebugSession};
 
+/// Errors from attempting to deliver a CI/CD notification.
+///
+/// Distinguishes *why* nothing was sent (never silently -- see
+/// [`CICDIntegration::send_notifications`]) from a genuine transport
+/// failure once delivery was actually attempted.
+#[derive(Debug, thiserror::Error)]
+pub enum NotificationError {
+    /// This crate was built without the `http-integrations` feature, so no
+    /// HTTP client is available to actually deliver the notification.
+    #[error(
+        "HTTP notification delivery is not enabled: rebuild trustformers-debug with \
+         `--features http-integrations`"
+    )]
+    HttpFeatureDisabled,
+    /// An `Email` channel has no HTTP email API endpoint configured (SMTP is
+    /// out of scope for this crate).
+    #[error("no HTTP email API endpoint configured for this Email notification channel")]
+    EmailNotConfigured,
+    /// This channel kind has no delivery implementation at all.
+    #[error("{0} notification channel has no delivery implementation")]
+    NotImplemented(&'static str),
+    /// The HTTP request was sent but failed (network error or non-success
+    /// status).
+    #[error("notification delivery failed: {0}")]
+    Transport(String),
+}
+
 /// CI/CD platform types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CICDPlatform {
@@ -59,6 +86,13 @@ pub enum ReportFormat {
 pub enum NotificationChannel {
     Email {
         recipients: Vec<String>,
+        /// HTTP email API to POST to (e.g. a transactional-email provider's
+        /// REST endpoint). SMTP is explicitly out of scope. `None` means
+        /// "not configured": `send_email_notification` returns a
+        /// structured [`NotificationError::EmailNotConfigured`] rather than
+        /// silently doing nothing.
+        #[serde(default)]
+        api: Option<EmailApiConfig>,
     },
     Slack {
         webhook_url: String,
@@ -75,6 +109,17 @@ pub enum NotificationChannel {
         headers: HashMap<String, String>,
     },
     Custom(String),
+}
+
+/// HTTP email API configuration (transactional-email provider REST
+/// endpoint). See [`NotificationChannel::Email`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailApiConfig {
+    /// Full URL of the provider's "send email" REST endpoint.
+    pub endpoint: String,
+    /// Extra headers to send with the request (e.g. `Authorization`).
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
 }
 
 /// CI/CD pipeline stage

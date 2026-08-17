@@ -91,14 +91,100 @@ impl HyenaFilter {
         Tensor::from_vec(filter_coeffs, &[length])
     }
 
-    /// Apply convolution using FFT for efficiency
+    /// Causal long convolution computed with a real FFT.
+    ///
+    /// Hyena's operator is `y[t] = Σ_{k=0..K-1} h[k] · x[t−k]` per channel — a
+    /// causal linear convolution with a filter as long as the sequence. Doing it
+    /// directly costs `O(L·K)`; transforming both signals, multiplying
+    /// pointwise and transforming back costs `O(L log L)`, which is the entire
+    /// reason the Hyena architecture is cheap on long sequences.
+    ///
+    /// A previous revision of this method carried the comment "This would use
+    /// FFT libraries like FFTW or cuFFT" and simply called
+    /// [`HyenaFilter::simple_conv`] — the `O(L·K)` triple loop — so the
+    /// `use_fft` configuration flag selected nothing at all. The transform now
+    /// runs through `oxifft`'s pure-Rust FFT-based
+    /// [`convolve`](oxifft::convolve) (`rustfft` is banned by policy). The full
+    /// linear convolution is truncated to the first `seq_len` samples, which is
+    /// exactly the causal part.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the input is neither 2-D (`[seq, hidden]`) nor 3-D
+    /// (`[batch, seq, hidden]`), when the filter is not 1-D, or when the tensor
+    /// data cannot be read.
     fn fft_conv(&self, x: &Tensor, filter: &Tensor) -> Result<Tensor> {
-        // This would use FFT libraries like FFTW or cuFFT
-        // For now, implement a simplified convolution
-        self.simple_conv(x, filter)
+        let x_shape = x.shape();
+        let filter_shape = filter.shape();
+        if filter_shape.len() != 1 {
+            return Err(tensor_op_error(
+                "HyenaFilter::fft_conv",
+                format!("filter must be 1-D, got shape {filter_shape:?}"),
+            ));
+        }
+        let (batch_size, seq_len, hidden_size) = match x_shape.as_slice() {
+            [seq_len, hidden_size] => (1usize, *seq_len, *hidden_size),
+            [batch_size, seq_len, hidden_size] => (*batch_size, *seq_len, *hidden_size),
+            other => {
+                return Err(tensor_op_error(
+                    "HyenaFilter::fft_conv",
+                    format!("unsupported tensor shape for convolution: {other:?}"),
+                ))
+            },
+        };
+        if seq_len == 0 || hidden_size == 0 {
+            return Err(tensor_op_error(
+                "HyenaFilter::fft_conv",
+                format!("cannot convolve an empty tensor with shape {x_shape:?}"),
+            ));
+        }
+
+        let values = x.data().map_err(|e| {
+            tensor_op_error(
+                "HyenaFilter::fft_conv",
+                format!("failed to read the input tensor: {e}"),
+            )
+        })?;
+        let taps = filter.data().map_err(|e| {
+            tensor_op_error(
+                "HyenaFilter::fft_conv",
+                format!("failed to read the filter tensor: {e}"),
+            )
+        })?;
+        if taps.is_empty() {
+            return Err(tensor_op_error(
+                "HyenaFilter::fft_conv",
+                "filter has no taps".to_string(),
+            ));
+        }
+
+        // Convolve each (batch, channel) signal independently. The channel axis
+        // is the fastest-varying one, so the signal has to be gathered with a
+        // `hidden_size` stride before the transform.
+        let mut output = vec![0.0f32; batch_size * seq_len * hidden_size];
+        let mut signal = vec![0.0f32; seq_len];
+        for b in 0..batch_size {
+            let batch_offset = b * seq_len * hidden_size;
+            for channel in 0..hidden_size {
+                for t in 0..seq_len {
+                    signal[t] = values[batch_offset + t * hidden_size + channel];
+                }
+                // `oxifft::convolve` returns the full linear convolution of
+                // length `seq_len + taps - 1`; the causal output is its prefix.
+                let full = oxifft::convolve(&signal, &taps);
+                for t in 0..seq_len {
+                    output[batch_offset + t * hidden_size + channel] = full[t];
+                }
+            }
+        }
+
+        Tensor::from_vec(output, &x_shape)
     }
 
-    /// Simple convolution fallback
+    /// Direct `O(L·K)` causal convolution.
+    ///
+    /// Kept as the reference implementation for short sequences, where the FFT's
+    /// setup cost dominates, and as the oracle the FFT path is tested against.
     fn simple_conv(&self, x: &Tensor, filter: &Tensor) -> Result<Tensor> {
         let filter_len = filter.shape()[0];
 
@@ -187,8 +273,11 @@ impl Layer for HyenaFilter {
             input
         };
 
-        // Apply convolution
-        if self.use_fft && seq_len > 1024 {
+        // Apply convolution. `use_fft` now selects the real FFT path for every
+        // sequence long enough for the transform to be worth its setup cost; the
+        // previous `seq_len > 1024` guard was moot because both branches ran the
+        // same scalar loop.
+        if self.use_fft && seq_len >= 32 {
             self.fft_conv(&modulated_input, &filter)
         } else {
             self.simple_conv(&modulated_input, &filter)
@@ -993,6 +1082,83 @@ impl HyenaForSequenceClassification {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: `fft_conv` delegated straight to the `O(L·K)` scalar loop,
+    /// so nothing in the crate ever performed an FFT.
+    ///
+    /// The FFT path and the direct path must agree to floating-point tolerance
+    /// on the same signal — that is the only thing that makes the fast path
+    /// safe to use. Against the old code this test passed *trivially* (both
+    /// calls ran the same function); the accompanying `fft_conv_matches_a_hand_
+    /// computed_convolution` test below is the one that pins the actual numbers.
+    #[test]
+    fn fft_conv_agrees_with_the_direct_convolution() {
+        let config = create_test_config();
+        let filter_layer =
+            HyenaFilter::new(&config, 64).expect("Hyena filter must build for the test");
+
+        let batch = 2usize;
+        let seq_len = 64usize;
+        let hidden = 5usize;
+        let values: Vec<f32> = (0..batch * seq_len * hidden)
+            .map(|i| ((i * 37) % 23) as f32 - 11.0 + 0.125 * i as f32)
+            .collect();
+        let input = Tensor::from_vec(values, &[batch, seq_len, hidden]).expect("input must build");
+        let filter = filter_layer.generate_filter(seq_len).expect("filter must build");
+
+        let fast = filter_layer.fft_conv(&input, &filter).expect("FFT convolution must succeed");
+        let slow = filter_layer
+            .simple_conv(&input, &filter)
+            .expect("direct convolution must succeed");
+
+        let fast_values = fast.data().expect("readable");
+        let slow_values = slow.data().expect("readable");
+        assert_eq!(fast.shape(), slow.shape());
+        assert_eq!(fast_values.len(), slow_values.len());
+        for (idx, (a, b)) in fast_values.iter().zip(slow_values.iter()).enumerate() {
+            assert!(
+                (a - b).abs() <= 1e-3 * b.abs().max(1.0),
+                "element {idx}: FFT path {a} differs from the direct convolution {b}"
+            );
+        }
+    }
+
+    /// Pin the causal-convolution semantics against a hand-computed result.
+    ///
+    /// With a single channel, `x = [1, 2, 3, 4]` and taps `h = [1, 10, 100]`,
+    /// the causal output is `y[t] = Σ_k h[k] x[t−k]`, i.e.
+    /// `[1, 12, 123, 234]`.
+    #[test]
+    fn fft_conv_matches_a_hand_computed_convolution() {
+        let config = create_test_config();
+        let filter_layer = HyenaFilter::new(&config, 4).expect("filter layer must build");
+
+        let input = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[4, 1]).expect("input must build");
+        let filter = Tensor::from_vec(vec![1.0, 10.0, 100.0], &[3]).expect("filter must build");
+
+        let out = filter_layer.fft_conv(&input, &filter).expect("convolution must succeed");
+        let got = out.data().expect("readable");
+        let want = [1.0f32, 12.0, 123.0, 234.0];
+        assert_eq!(out.shape(), vec![4, 1]);
+        for (idx, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+            assert!(
+                (g - w).abs() < 1e-3,
+                "element {idx}: got {g}, the causal convolution is {w}"
+            );
+        }
+    }
+
+    #[test]
+    fn fft_conv_rejects_a_multi_dimensional_filter() {
+        let config = create_test_config();
+        let filter_layer = HyenaFilter::new(&config, 4).expect("filter layer must build");
+        let input = Tensor::zeros(&[4, 1]).expect("input must build");
+        let filter = Tensor::zeros(&[2, 2]).expect("filter must build");
+        let err = filter_layer
+            .fft_conv(&input, &filter)
+            .expect_err("a 2-D filter is not a convolution kernel here");
+        assert!(err.to_string().contains("1-D"), "unexpected error: {err}");
+    }
 
     fn create_test_config() -> HyenaConfig {
         HyenaConfig {

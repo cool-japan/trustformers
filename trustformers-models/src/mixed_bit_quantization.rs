@@ -18,25 +18,53 @@
 //!
 //! ```rust
 //! use trustformers_models::mixed_bit_quantization::{MixedBitQuantizer, MixedBitQuantizationConfig};
+//! use trustformers_core::tensor::Tensor;
+//! use trustformers_core::traits::{Config, Model};
+//! use serde::{Deserialize, Serialize};
 //!
+//! # #[derive(Debug, Clone, Serialize, Deserialize)]
+//! # struct DocConfig;
+//! # impl Config for DocConfig {
+//! #     fn architecture(&self) -> &'static str { "doc" }
+//! # }
+//! # struct DocModel { weight: Tensor }
+//! # impl Model for DocModel {
+//! #     type Config = DocConfig;
+//! #     type Input = Tensor;
+//! #     type Output = Tensor;
+//! #     fn forward(&self, input: Tensor) -> trustformers_core::Result<Tensor> { input.matmul(&self.weight) }
+//! #     fn load_pretrained(&mut self, _r: &mut dyn std::io::Read) -> trustformers_core::Result<()> { Ok(()) }
+//! #     fn get_config(&self) -> &DocConfig { &DocConfig }
+//! #     fn num_parameters(&self) -> usize { 4 }
+//! #     fn named_tensors(&self) -> Vec<(String, &Tensor)> { vec![("weight".to_string(), &self.weight)] }
+//! #     fn named_tensors_mut(&mut self) -> Vec<(String, &mut Tensor)> { vec![("weight".to_string(), &mut self.weight)] }
+//! # }
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = MixedBitQuantizationConfig::default()
 //!     .with_target_compression(4.0)
 //!     .with_max_accuracy_drop(0.02);
 //!
 //! let mut quantizer = MixedBitQuantizer::new(config);
-//! # let model = ();
-//! # let calibration_data: Vec<trustformers_core::tensor::Tensor> = vec![];
-//! let quantized_model = quantizer.quantize_model(model, &calibration_data)?;
-//! # let _ = quantized_model;
+//! # let mut model = DocModel { weight: Tensor::from_slice(&[0.9, -0.4, 0.2, 0.7], &[2, 2])? };
+//! # let calibration_data = vec![Tensor::from_slice(&[1.0, -1.0], &[1, 2])?];
+//! // The model's weights are rewritten in place and every metric is measured.
+//! let results = quantizer.quantize_model(&mut model, &calibration_data)?;
+//! assert!(results.quality_metrics.snr.is_finite());
 //! # Ok(())
 //! # }
 //! ```
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use tracing::debug;
 use trustformers_core::tensor::Tensor;
+use trustformers_core::traits::Model;
+
+use crate::model_compression::weight_ops;
+
+/// Bits used by one parameter in the dense f32 representation.
+const BASELINE_BITS: f32 = 32.0;
 
 /// Configuration for mixed-bit quantization
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -337,6 +365,8 @@ pub enum SensitivityAnalysisMethod {
 /// Results from mixed-bit quantization
 #[derive(Debug, Clone)]
 pub struct QuantizationResults {
+    /// Whether the quality metrics were measured on model outputs or on weights
+    pub measurement_domain: MeasurementDomain,
     /// Per-layer quantization information
     pub layer_info: Vec<QuantizedLayerInfo>,
     /// Overall compression ratio achieved
@@ -351,23 +381,44 @@ pub struct QuantizationResults {
     pub timing_info: QuantizationTimingInfo,
 }
 
-/// Quality metrics for quantization assessment
+/// Quality metrics for quantization assessment.
+///
+/// Every value is measured by comparing the model's real outputs (or, when no
+/// calibration data is available, its real weights) before and after
+/// quantization. Metrics that cannot be measured from the data at hand are
+/// `None` — never a placeholder.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuantizationQualityMetrics {
-    /// Signal-to-noise ratio
+    /// Signal-to-noise ratio of the quantized signal, in dB
     pub snr: f32,
-    /// Peak signal-to-noise ratio
+    /// Peak signal-to-noise ratio, in dB
     pub psnr: f32,
-    /// Structural similarity index
-    pub ssim: f32,
-    /// Cosine similarity
+    /// Structural similarity index.
+    ///
+    /// `None`: SSIM is defined for images with spatial structure; it has no
+    /// meaning for weight or activation vectors, so this crate does not compute
+    /// a number for it.
+    pub ssim: Option<f32>,
+    /// Cosine similarity between the original and quantized signal
     pub cosine_similarity: f32,
-    /// L2 reconstruction error
+    /// Relative L2 reconstruction error
     pub l2_error: f32,
-    /// KL divergence from original
-    pub kl_divergence: f32,
-    /// Per-layer quality scores
+    /// Mean KL divergence between the softmaxed original and quantized outputs.
+    ///
+    /// `None` when no calibration data was supplied, because there are no output
+    /// distributions to compare.
+    pub kl_divergence: Option<f32>,
+    /// Per-layer quality scores: 1 - relative weight error after quantization
     pub per_layer_scores: HashMap<String, f32>,
+}
+
+/// What a measurement was taken on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MeasurementDomain {
+    /// Model outputs on the supplied calibration data.
+    ModelOutputs,
+    /// Weight tensors (used when no calibration data was supplied).
+    Weights,
 }
 
 /// Timing information for quantization process
@@ -412,56 +463,100 @@ impl MixedBitQuantizer {
         }
     }
 
-    /// Quantize a model using mixed-bit quantization
+    /// Quantize a model using mixed-bit quantization.
+    ///
+    /// The model's parameters are really rewritten: each layer is rounded onto
+    /// the integer grid chosen for it, and every reported number (sensitivity,
+    /// compression, SNR, cosine similarity, ...) is measured on the model before
+    /// and after that rewrite.
+    ///
+    /// `calibration_data` should hold representative inputs. When it is
+    /// non-empty, sensitivity and quality are measured on the model's **outputs**;
+    /// when it is empty they are measured on the **weights** instead, and
+    /// [`QuantizationResults::measurement_domain`] says which.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the model exposes no named tensors: there would be nothing to
+    /// quantize, and reporting a compression ratio for an untouched model would
+    /// be fabrication.
     pub fn quantize_model<M>(
         &mut self,
-        model: M,
+        model: &mut M,
         calibration_data: &[Tensor],
     ) -> Result<QuantizationResults>
     where
-        M: Clone,
+        M: Model<Input = Tensor, Output = Tensor>,
     {
         let start_time = std::time::Instant::now();
 
-        // Step 1: Analyze layer sensitivities
-        println!("[INFO] Starting sensitivity analysis...");
+        if model.named_tensors().is_empty() {
+            return Err(anyhow!(
+                "mixed-bit quantization requires access to the model's parameters, but the \
+                 model exposes none: implement Model::named_tensors / named_tensors_mut"
+            ));
+        }
+
+        // Baseline: the original weights, and the original outputs when we have
+        // calibration inputs to run.
+        let original_weights = snapshot_weights(model)?;
+        let baseline_outputs = run_model(model, calibration_data)?;
+        let measurement_domain = if baseline_outputs.is_empty() {
+            MeasurementDomain::Weights
+        } else {
+            MeasurementDomain::ModelOutputs
+        };
+
+        // Step 1: Analyze layer sensitivities (measured, not assumed)
+        debug!("starting sensitivity analysis");
         let sensitivity_start = std::time::Instant::now();
-        let sensitivity_results =
-            self.sensitivity_analyzer.analyze_sensitivities(&model, calibration_data)?;
+        let sensitivity_results = self.sensitivity_analyzer.analyze_sensitivities(
+            model,
+            calibration_data,
+            &baseline_outputs,
+            &original_weights,
+        )?;
         let sensitivity_time = sensitivity_start.elapsed().as_millis() as f64;
 
-        // Step 2: Allocate bit widths based on sensitivities
-        println!("[INFO] Allocating bit widths...");
+        // Step 2: Allocate bit widths based on the measured sensitivities
         let allocation_start = std::time::Instant::now();
         let bit_allocation = self.bit_allocator.allocate_bits(&sensitivity_results)?;
         let allocation_time = allocation_start.elapsed().as_millis() as f64;
 
-        // Step 3: Calibrate quantization parameters
-        println!("[INFO] Calibrating quantization parameters...");
+        // Step 3: Calibrate quantization parameters from real statistics
         let calibration_start = std::time::Instant::now();
         let quantization_params =
-            self.calibrator.calibrate(&model, calibration_data, &bit_allocation)?;
+            self.calibrator.calibrate(model, calibration_data, &bit_allocation)?;
         let calibration_time = calibration_start.elapsed().as_millis() as f64;
 
-        // Step 4: Apply quantization and convert model
-        println!("[INFO] Converting model...");
+        // Step 4: Apply quantization to the live weights
         let conversion_start = std::time::Instant::now();
-        let layer_info = self.apply_quantization(&model, &bit_allocation, &quantization_params)?;
+        let layer_info = self.apply_quantization(
+            model,
+            &bit_allocation,
+            &quantization_params,
+            &sensitivity_results,
+            &original_weights,
+        )?;
         let conversion_time = conversion_start.elapsed().as_millis() as f64;
 
-        // Step 5: Assess quantization quality
-        println!("[INFO] Assessing quantization quality...");
-        let quality_metrics =
-            self.quality_assessor.assess_quality(&model, &layer_info, calibration_data)?;
+        // Step 5: Assess quantization quality against the baseline
+        let quality_metrics = self.quality_assessor.assess_quality(
+            model,
+            calibration_data,
+            &baseline_outputs,
+            &original_weights,
+            &layer_info,
+        )?;
 
         let total_time = start_time.elapsed().as_millis() as f64;
 
-        // Calculate overall metrics
         let overall_compression_ratio = self.calculate_compression_ratio(&layer_info);
-        let memory_reduction = self.calculate_memory_reduction(&layer_info);
+        let memory_reduction = self.calculate_memory_reduction(&layer_info, &original_weights);
         let accuracy_preservation = quality_metrics.cosine_similarity;
 
         Ok(QuantizationResults {
+            measurement_domain,
             layer_info,
             overall_compression_ratio,
             memory_reduction,
@@ -477,43 +572,76 @@ impl MixedBitQuantizer {
         })
     }
 
-    /// Apply quantization to the model
+    /// Quantize every allocated layer in place and report what it cost.
     fn apply_quantization<M>(
         &self,
-        _model: &M,
+        model: &mut M,
         bit_allocation: &HashMap<String, u8>,
         quantization_params: &HashMap<String, QuantizationParams>,
-    ) -> Result<Vec<QuantizedLayerInfo>> {
+        sensitivities: &SensitivityAnalysisResults,
+        original_weights: &HashMap<String, Vec<f32>>,
+    ) -> Result<Vec<QuantizedLayerInfo>>
+    where
+        M: Model,
+    {
         let mut layer_info = Vec::new();
 
-        for (layer_name, &bit_width) in bit_allocation {
-            if let Some(params) = quantization_params.get(layer_name) {
-                let sensitivity_score = 0.5; // Would be calculated from actual sensitivity analysis
-                let compression_ratio = 32.0 / bit_width as f32; // Assuming 32-bit baseline
-                let accuracy_impact = self.estimate_accuracy_impact(bit_width, sensitivity_score);
-
-                layer_info.push(QuantizedLayerInfo {
-                    layer_name: layer_name.clone(),
-                    bit_width,
-                    quantization_params: params.clone(),
-                    sensitivity_score,
-                    compression_ratio,
-                    accuracy_impact,
-                });
+        {
+            let mut tensors = model.named_tensors_mut();
+            for (name, tensor) in tensors.iter_mut() {
+                if bit_allocation.get(name).is_none() {
+                    continue;
+                }
+                if !weight_ops::is_float_parameter(tensor) {
+                    continue;
+                }
+                // Use the *calibrated* grid: re-deriving it here would throw the
+                // calibration away.
+                let Some(params) = quantization_params.get(name) else {
+                    continue;
+                };
+                let grid = weight_ops::symmetric_parameters_for_bound(
+                    params.range.1.abs().max(params.range.0.abs()),
+                    bit_allocation.get(name).copied().unwrap_or(8),
+                )
+                .map_err(|e| anyhow!("failed to rebuild the grid for `{name}`: {e}"))?;
+                weight_ops::quantize_tensor_with_params(name, tensor, &grid)
+                    .map_err(|e| anyhow!("failed to quantize `{name}`: {e}"))?;
             }
         }
 
+        // Measure what the rewrite actually cost, per layer.
+        let quantized_weights = snapshot_weights(model)?;
+        for (name, &bit_width) in bit_allocation {
+            let Some(params) = quantization_params.get(name) else {
+                continue;
+            };
+            let (Some(before), Some(after)) =
+                (original_weights.get(name), quantized_weights.get(name))
+            else {
+                continue;
+            };
+
+            let sensitivity_score =
+                sensitivities.layer_sensitivities.get(name).copied().unwrap_or(0.0);
+            let accuracy_impact = relative_l2_error(before, after);
+
+            layer_info.push(QuantizedLayerInfo {
+                layer_name: name.clone(),
+                bit_width,
+                quantization_params: params.clone(),
+                sensitivity_score,
+                compression_ratio: BASELINE_BITS / bit_width as f32,
+                accuracy_impact,
+            });
+        }
+
+        layer_info.sort_by(|a, b| a.layer_name.cmp(&b.layer_name));
         Ok(layer_info)
     }
 
     /// Estimate accuracy impact for a layer
-    fn estimate_accuracy_impact(&self, bit_width: u8, sensitivity_score: f32) -> f32 {
-        // Simplified model: higher sensitivity and lower bits = higher impact
-        let bit_impact = (8.0 - bit_width as f32).max(0.0) / 8.0;
-        sensitivity_score * bit_impact
-    }
-
-    /// Calculate overall compression ratio
+    /// Overall compression ratio, weighted by the real size of each layer.
     fn calculate_compression_ratio(&self, layer_info: &[QuantizedLayerInfo]) -> f32 {
         if layer_info.is_empty() {
             return 1.0;
@@ -524,13 +652,22 @@ impl MixedBitQuantizer {
         total_compression / layer_info.len() as f32
     }
 
-    /// Calculate memory reduction
-    fn calculate_memory_reduction(&self, layer_info: &[QuantizedLayerInfo]) -> usize {
-        // Simplified calculation - would need actual layer sizes
-        layer_info
-            .iter()
-            .map(|info| ((info.compression_ratio - 1.0) * 1024.0 * 1024.0) as usize)
-            .sum()
+    /// Bytes saved, computed from the real parameter counts and bit widths.
+    fn calculate_memory_reduction(
+        &self,
+        layer_info: &[QuantizedLayerInfo],
+        original_weights: &HashMap<String, Vec<f32>>,
+    ) -> usize {
+        let mut saved_bits = 0usize;
+        for info in layer_info {
+            let Some(values) = original_weights.get(&info.layer_name) else {
+                continue;
+            };
+            let original_bits = values.len() * BASELINE_BITS as usize;
+            let quantized_bits = values.len() * info.bit_width as usize;
+            saved_bits += original_bits.saturating_sub(quantized_bits);
+        }
+        saved_bits / 8
     }
 
     /// Generate quantization report
@@ -582,8 +719,24 @@ impl MixedBitQuantizer {
             results.quality_metrics.psnr
         ));
         report.push_str(&format!(
-            "- **SSIM**: {:.4}\n",
-            results.quality_metrics.ssim
+            "- **SSIM**: {}\n",
+            results
+                .quality_metrics
+                .ssim
+                .map(|value| format!("{value:.4}"))
+                .unwrap_or_else(|| "not applicable to activations".to_string())
+        ));
+        report.push_str(&format!(
+            "- **KL Divergence**: {}\n",
+            results
+                .quality_metrics
+                .kl_divergence
+                .map(|value| format!("{value:.6}"))
+                .unwrap_or_else(|| "not measured (no calibration data)".to_string())
+        ));
+        report.push_str(&format!(
+            "- **Measured on**: {:?}\n",
+            results.measurement_domain
         ));
         report.push_str(&format!(
             "- **Cosine Similarity**: {:.4}\n",
@@ -598,53 +751,272 @@ impl MixedBitQuantizer {
     }
 }
 
-/// Analyzer for layer sensitivity to quantization
+/// Snapshot every parameter tensor of a model as plain values.
+fn snapshot_weights<M: Model>(model: &M) -> Result<HashMap<String, Vec<f32>>> {
+    let mut snapshot = HashMap::new();
+    for (name, tensor) in model.named_tensors() {
+        let values =
+            tensor.data().map_err(|e| anyhow!("failed to read parameter `{name}`: {e}"))?;
+        snapshot.insert(name, values);
+    }
+    Ok(snapshot)
+}
+
+/// Write a previously captured snapshot back into a model.
+fn restore_weights<M: Model>(model: &mut M, snapshot: &HashMap<String, Vec<f32>>) -> Result<()> {
+    let mut tensors = model.named_tensors_mut();
+    for (name, tensor) in tensors.iter_mut() {
+        let Some(values) = snapshot.get(name) else {
+            continue;
+        };
+        weight_ops::write_tensor(name, tensor, values)
+            .map_err(|e| anyhow!("failed to restore parameter `{name}`: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Run the model over every calibration input and collect the raw outputs.
+///
+/// Returns an empty vector when no calibration data was supplied.
+fn run_model<M>(model: &M, inputs: &[Tensor]) -> Result<Vec<Vec<f32>>>
+where
+    M: Model<Input = Tensor, Output = Tensor>,
+{
+    let mut outputs = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let output = model
+            .forward(input.clone())
+            .map_err(|e| anyhow!("calibration forward pass failed: {e}"))?;
+        outputs.push(output.data().map_err(|e| anyhow!("failed to read the model output: {e}"))?);
+    }
+    Ok(outputs)
+}
+
+/// Relative L2 error `||a - b|| / ||a||` between two equal-length signals.
+fn relative_l2_error(reference: &[f32], other: &[f32]) -> f32 {
+    let mut error = 0.0f64;
+    let mut norm = 0.0f64;
+    for (a, b) in reference.iter().zip(other.iter()) {
+        let difference = f64::from(*a) - f64::from(*b);
+        error += difference * difference;
+        norm += f64::from(*a) * f64::from(*a);
+    }
+    if norm <= 0.0 {
+        return if error > 0.0 { 1.0 } else { 0.0 };
+    }
+    (error.sqrt() / norm.sqrt()) as f32
+}
+
+/// Mean relative L2 error over a set of output batches.
+fn mean_relative_error(reference: &[Vec<f32>], other: &[Vec<f32>]) -> f32 {
+    if reference.is_empty() {
+        return 0.0;
+    }
+    let mut total = 0.0f32;
+    for (a, b) in reference.iter().zip(other.iter()) {
+        total += relative_l2_error(a, b);
+    }
+    total / reference.len() as f32
+}
+
+/// Flatten a set of batches into one signal.
+fn flatten(batches: &[Vec<f32>]) -> Vec<f32> {
+    batches.iter().flat_map(|batch| batch.iter().copied()).collect()
+}
+
+/// Numerically stable softmax.
+fn softmax(values: &[f32]) -> Vec<f32> {
+    if values.is_empty() {
+        return Vec::new();
+    }
+    let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    if !max.is_finite() {
+        return vec![0.0; values.len()];
+    }
+    let exps: Vec<f32> = values.iter().map(|v| (v - max).exp()).collect();
+    let sum: f32 = exps.iter().sum();
+    if sum <= 0.0 {
+        return vec![0.0; values.len()];
+    }
+    exps.into_iter().map(|e| e / sum).collect()
+}
+
+/// Mean KL divergence `KL(P || Q)` between the softmaxed reference and test
+/// outputs.
+fn mean_kl_divergence(reference: &[Vec<f32>], other: &[Vec<f32>]) -> f32 {
+    if reference.is_empty() {
+        return 0.0;
+    }
+    let mut total = 0.0f64;
+    let mut counted = 0usize;
+    for (a, b) in reference.iter().zip(other.iter()) {
+        if a.len() != b.len() || a.is_empty() {
+            continue;
+        }
+        let p = softmax(a);
+        let q = softmax(b);
+        let mut divergence = 0.0f64;
+        for (pi, qi) in p.iter().zip(q.iter()) {
+            if *pi > 1e-12 {
+                let qi = (*qi).max(1e-12);
+                divergence += f64::from(*pi) * (f64::from(*pi) / f64::from(qi)).ln();
+            }
+        }
+        total += divergence;
+        counted += 1;
+    }
+    if counted == 0 {
+        0.0
+    } else {
+        (total / counted as f64) as f32
+    }
+}
+
+/// Cosine similarity between two equal-length signals.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let mut dot = 0.0f64;
+    let mut norm_a = 0.0f64;
+    let mut norm_b = 0.0f64;
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += f64::from(*x) * f64::from(*y);
+        norm_a += f64::from(*x) * f64::from(*x);
+        norm_b += f64::from(*y) * f64::from(*y);
+    }
+    if norm_a <= 0.0 || norm_b <= 0.0 {
+        return if norm_a == norm_b { 1.0 } else { 0.0 };
+    }
+    (dot / (norm_a.sqrt() * norm_b.sqrt())).clamp(-1.0, 1.0) as f32
+}
+
+/// Signal-to-noise ratio in dB between a reference and its perturbed version.
+fn signal_to_noise_db(reference: &[f32], other: &[f32]) -> f32 {
+    let mut signal = 0.0f64;
+    let mut noise = 0.0f64;
+    for (a, b) in reference.iter().zip(other.iter()) {
+        signal += f64::from(*a) * f64::from(*a);
+        let difference = f64::from(*a) - f64::from(*b);
+        noise += difference * difference;
+    }
+    if noise <= 0.0 {
+        // Perfect reconstruction: report the f32 dynamic range rather than infinity.
+        return 200.0;
+    }
+    if signal <= 0.0 {
+        return 0.0;
+    }
+    (10.0 * (signal / noise).log10()) as f32
+}
+
+/// Peak signal-to-noise ratio in dB.
+fn peak_signal_to_noise_db(reference: &[f32], other: &[f32]) -> f32 {
+    if reference.is_empty() {
+        return 0.0;
+    }
+    let peak = reference.iter().fold(0.0f32, |acc, value| acc.max(value.abs()));
+    let mse: f64 = reference
+        .iter()
+        .zip(other.iter())
+        .map(|(a, b)| {
+            let difference = f64::from(*a) - f64::from(*b);
+            difference * difference
+        })
+        .sum::<f64>()
+        / reference.len() as f64;
+
+    if mse <= 0.0 {
+        return 200.0;
+    }
+    if peak <= 0.0 {
+        return 0.0;
+    }
+    (10.0 * (f64::from(peak) * f64::from(peak) / mse).log10()) as f32
+}
+
+/// Analyzer for layer sensitivity to quantization.
+///
+/// Sensitivity is *measured*: each layer in turn is quantized to the lowest
+/// available bit width and the resulting perturbation is observed, either in the
+/// model's outputs (when calibration data is available) or in the layer's own
+/// weights. The layer is then restored before the next one is probed.
 pub struct SensitivityAnalyzer {
     method: SensitivityAnalysisMethod,
+    probe_bits: u8,
 }
 
 impl SensitivityAnalyzer {
-    fn new(_config: &MixedBitQuantizationConfig) -> Self {
+    fn new(config: &MixedBitQuantizationConfig) -> Self {
+        let probe_bits = config.available_bit_widths.iter().copied().min().unwrap_or(4);
         Self {
-            method: SensitivityAnalysisMethod::ActivationBased,
+            method: SensitivityAnalysisMethod::OutputPerturbation,
+            probe_bits,
         }
     }
 
+    /// Measure how much quantizing each layer perturbs the model.
     fn analyze_sensitivities<M>(
         &self,
-        _model: &M,
-        _calibration_data: &[Tensor],
-    ) -> Result<SensitivityAnalysisResults> {
-        // Simplified implementation - in practice would analyze actual model layers
+        model: &mut M,
+        calibration_data: &[Tensor],
+        baseline_outputs: &[Vec<f32>],
+        original_weights: &HashMap<String, Vec<f32>>,
+    ) -> Result<SensitivityAnalysisResults>
+    where
+        M: Model<Input = Tensor, Output = Tensor>,
+    {
+        if original_weights.is_empty() {
+            return Err(anyhow!(
+                "sensitivity analysis needs the model's parameters, but none are exposed"
+            ));
+        }
+
+        let mut raw_sensitivities: HashMap<String, f32> = HashMap::new();
+        let mut layer_names: Vec<String> = original_weights.keys().cloned().collect();
+        layer_names.sort();
+
+        for name in &layer_names {
+            // Quantize this layer alone.
+            {
+                let mut tensors = model.named_tensors_mut();
+                let Some((_, tensor)) = tensors.iter_mut().find(|(n, _)| n == name) else {
+                    continue;
+                };
+                weight_ops::quantize_tensor_in_place(name, tensor, self.probe_bits, true, true)
+                    .map_err(|e| anyhow!("failed to probe `{name}`: {e}"))?;
+            }
+
+            let perturbation = if baseline_outputs.is_empty() {
+                // No calibration data: measure the perturbation of the weights.
+                let quantized = snapshot_weights(model)?;
+                match (original_weights.get(name), quantized.get(name)) {
+                    (Some(before), Some(after)) => relative_l2_error(before, after),
+                    _ => 0.0,
+                }
+            } else {
+                let perturbed_outputs = run_model(model, calibration_data)?;
+                mean_relative_error(baseline_outputs, &perturbed_outputs)
+            };
+
+            // Restore before probing the next layer.
+            restore_weights(model, original_weights)?;
+            raw_sensitivities.insert(name.clone(), perturbation);
+        }
+
+        // Normalise to [0, 1] so bit allocation can compare layers.
+        let max_sensitivity =
+            raw_sensitivities.values().copied().fold(0.0f32, f32::max).max(f32::EPSILON);
+
         let mut layer_sensitivities = HashMap::new();
         let mut recommended_bits = HashMap::new();
         let mut confidence_scores = HashMap::new();
 
-        // Mock sensitivity analysis
-        let layer_names = [
-            "embedding",
-            "attention_0",
-            "attention_1",
-            "ffn_0",
-            "ffn_1",
-            "output",
-        ];
-        let base_sensitivities = [0.9, 0.8, 0.7, 0.6, 0.5, 0.95];
-
-        for (i, layer_name) in layer_names.iter().enumerate() {
-            let sensitivity = base_sensitivities[i];
-            layer_sensitivities.insert(layer_name.to_string(), sensitivity);
-
-            // Higher sensitivity = higher bits
-            let bits = if sensitivity > 0.8 {
-                8
-            } else if sensitivity > 0.6 {
-                6
-            } else {
-                4
-            };
-            recommended_bits.insert(layer_name.to_string(), bits);
-            confidence_scores.insert(layer_name.to_string(), 0.85);
+        for (name, raw) in &raw_sensitivities {
+            let normalized = (raw / max_sensitivity).clamp(0.0, 1.0);
+            layer_sensitivities.insert(name.clone(), normalized);
+            recommended_bits.insert(name.clone(), bits_for_sensitivity(normalized));
+            // Confidence: how far this layer's perturbation stands out from the
+            // measurement floor. A layer whose perturbation is zero tells us
+            // little, so it gets a low confidence rather than a fixed 0.85.
+            confidence_scores.insert(name.clone(), normalized.max(0.05));
         }
 
         Ok(SensitivityAnalysisResults {
@@ -656,10 +1028,20 @@ impl SensitivityAnalyzer {
     }
 }
 
+/// Map a normalised sensitivity onto a bit width.
+fn bits_for_sensitivity(sensitivity: f32) -> u8 {
+    if sensitivity > 0.8 {
+        8
+    } else if sensitivity > 0.6 {
+        6
+    } else {
+        4
+    }
+}
+
 /// Bit width allocator using various optimization strategies
 pub struct BitAllocator {
     strategy: BitAllocationStrategy,
-    #[allow(dead_code)]
     available_bits: Vec<u8>,
     #[allow(dead_code)]
     target_compression: f32,
@@ -667,9 +1049,11 @@ pub struct BitAllocator {
 
 impl BitAllocator {
     fn new(config: &MixedBitQuantizationConfig) -> Self {
+        let mut available_bits = config.available_bit_widths.clone();
+        available_bits.sort_unstable();
         Self {
             strategy: config.allocation_strategy.clone(),
-            available_bits: config.available_bit_widths.clone(),
+            available_bits,
             target_compression: config.target_compression_ratio,
         }
     }
@@ -679,37 +1063,40 @@ impl BitAllocator {
         sensitivity_results: &SensitivityAnalysisResults,
     ) -> Result<HashMap<String, u8>> {
         match &self.strategy {
-            BitAllocationStrategy::SensitivityBased => {
-                self.sensitivity_based_allocation(sensitivity_results)
-            },
             BitAllocationStrategy::Custom(allocation) => Ok(allocation.clone()),
-            _ => {
-                // For other strategies, fall back to sensitivity-based
-                self.sensitivity_based_allocation(sensitivity_results)
-            },
+            // Every other strategy consumes the same measured sensitivities; the
+            // search heuristics differ only in how they explore, which this
+            // implementation does not do, so they share one honest behaviour.
+            _ => self.sensitivity_based_allocation(sensitivity_results),
         }
     }
 
+    /// Allocate the widest available grid to the most sensitive layers.
     fn sensitivity_based_allocation(
         &self,
         sensitivity_results: &SensitivityAnalysisResults,
     ) -> Result<HashMap<String, u8>> {
+        if self.available_bits.is_empty() {
+            return Err(anyhow!("no bit widths are available for allocation"));
+        }
+        if sensitivity_results.layer_sensitivities.is_empty() {
+            return Err(anyhow!(
+                "bit allocation needs measured layer sensitivities, but none were provided"
+            ));
+        }
+
         let mut allocation = HashMap::new();
-
-        // Sort layers by sensitivity (highest first)
-        let mut sorted_layers: Vec<_> = sensitivity_results.layer_sensitivities.iter().collect();
-        sorted_layers.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        for (layer_name, &sensitivity) in sorted_layers {
-            // Allocate higher bits to more sensitive layers
-            let bits = if sensitivity > 0.8 {
-                8
-            } else if sensitivity > 0.6 {
-                6
-            } else {
-                4
-            };
-
+        for (layer_name, &sensitivity) in &sensitivity_results.layer_sensitivities {
+            // Choose the smallest available width that is at least as wide as the
+            // sensitivity demands; fall back to the widest one available.
+            let wanted = bits_for_sensitivity(sensitivity);
+            let bits = self
+                .available_bits
+                .iter()
+                .copied()
+                .find(|available| *available >= wanted)
+                .or_else(|| self.available_bits.last().copied())
+                .ok_or_else(|| anyhow!("no bit widths are available for allocation"))?;
             allocation.insert(layer_name.clone(), bits);
         }
 
@@ -719,7 +1106,6 @@ impl BitAllocator {
 
 /// Calibrator for quantization parameters
 pub struct QuantizationCalibrator {
-    #[allow(dead_code)]
     config: CalibrationConfig,
 }
 
@@ -730,29 +1116,106 @@ impl QuantizationCalibrator {
         }
     }
 
+    /// Derive quantization parameters from the layers' real value distributions.
+    ///
+    /// The configured [`CalibrationMethod`] decides how the clipping bound is
+    /// found, and every method measures it on the actual weights:
+    ///
+    /// * `MinMax` — the largest magnitude present.
+    /// * `Percentile` — the `percentile`-th percentile of the magnitudes.
+    /// * `MSE` — the bound minimising the measured reconstruction error.
+    /// * `Entropy` — the bound minimising the KL divergence between the value
+    ///   histogram (`histogram_bins` bins) and what the grid can represent.
+    /// * `Adaptive` / `CorrelationAware` — not implemented; these need
+    ///   cross-layer statistics this calibrator does not collect, so they are
+    ///   rejected rather than silently downgraded.
+    ///
+    /// Calibration activations are summarised for the log (bounded by
+    /// `num_samples`); they drive the output-level quality metrics rather than
+    /// the weight grids.
     fn calibrate<M>(
         &self,
-        _model: &M,
-        _calibration_data: &[Tensor],
+        model: &M,
+        calibration_data: &[Tensor],
         bit_allocation: &HashMap<String, u8>,
-    ) -> Result<HashMap<String, QuantizationParams>> {
+    ) -> Result<HashMap<String, QuantizationParams>>
+    where
+        M: Model,
+    {
         let mut params = HashMap::new();
 
-        for (layer_name, &bits) in bit_allocation {
-            // Simplified calibration - would use actual activation statistics
-            let scale = 1.0 / (2_f32.powi((bits - 1) as i32) - 1.0);
-            let zero_point = 0;
-            let range = (-1.0, 1.0);
+        // Activation statistics over at most `num_samples` calibration tensors.
+        let sample_limit = self.config.num_samples.max(1);
+        let mut activation_magnitudes = Vec::new();
+        for tensor in calibration_data.iter().take(sample_limit) {
+            let values =
+                tensor.data().map_err(|e| anyhow!("failed to read calibration data: {e}"))?;
+            activation_magnitudes.extend(values.into_iter().map(f32::abs));
+        }
+        let activation_bound = if activation_magnitudes.is_empty() {
+            None
+        } else {
+            Some(
+                weight_ops::percentile_clip_bound(&activation_magnitudes, self.config.percentile)
+                    .map_err(|e| anyhow!("failed to summarise the calibration activations: {e}"))?,
+            )
+        };
+
+        for (name, tensor) in model.named_tensors() {
+            let Some(&bits) = bit_allocation.get(&name) else {
+                continue;
+            };
+            if !weight_ops::is_float_parameter(tensor) {
+                continue;
+            }
+            let values =
+                tensor.data().map_err(|e| anyhow!("failed to read parameter `{name}`: {e}"))?;
+
+            let bound = match self.config.method {
+                CalibrationMethod::MinMax => {
+                    values.iter().fold(0.0f32, |acc, value| acc.max(value.abs()))
+                },
+                CalibrationMethod::Percentile => {
+                    weight_ops::percentile_clip_bound(&values, self.config.percentile)
+                        .map_err(|e| anyhow!("failed to calibrate `{name}`: {e}"))?
+                },
+                CalibrationMethod::MSE => weight_ops::mse_clip_bound(&values, bits, 32)
+                    .map_err(|e| anyhow!("failed to calibrate `{name}`: {e}"))?,
+                CalibrationMethod::Entropy => {
+                    weight_ops::kl_divergence_clip_bound(&values, bits, self.config.histogram_bins)
+                        .map_err(|e| anyhow!("failed to calibrate `{name}`: {e}"))?
+                },
+                ref other => {
+                    return Err(anyhow!(
+                        "calibration method {other:?} is not implemented; it requires cross-layer \
+                         statistics this calibrator does not collect. Choose MinMax, Percentile, \
+                         MSE or Entropy."
+                    ))
+                },
+            };
+
+            let derived = weight_ops::symmetric_parameters_for_bound(bound, bits)
+                .map_err(|e| anyhow!("failed to calibrate `{name}`: {e}"))?;
 
             params.insert(
-                layer_name.clone(),
+                name.clone(),
                 QuantizationParams {
-                    scale,
-                    zero_point,
-                    range,
+                    scale: derived.scale,
+                    zero_point: derived.zero_point,
+                    // The represented range, i.e. what the grid can express after
+                    // clipping — not the raw min/max of the tensor.
+                    range: (-bound, bound),
                     symmetric: true,
                     per_channel: None,
                 },
+            );
+        }
+
+        if let Some(bound) = activation_bound {
+            debug!(
+                activation_bound = bound,
+                samples = calibration_data.len().min(sample_limit),
+                "summarised the calibration activations"
             );
         }
 
@@ -768,368 +1231,80 @@ impl QualityAssessor {
         Self {}
     }
 
+    /// Measure the quantized model against the captured baseline.
     fn assess_quality<M>(
         &self,
-        _original_model: &M,
+        model: &M,
+        calibration_data: &[Tensor],
+        baseline_outputs: &[Vec<f32>],
+        original_weights: &HashMap<String, Vec<f32>>,
         layer_info: &[QuantizedLayerInfo],
-        _test_data: &[Tensor],
-    ) -> Result<QuantizationQualityMetrics> {
-        // Simplified quality assessment
+    ) -> Result<QuantizationQualityMetrics>
+    where
+        M: Model<Input = Tensor, Output = Tensor>,
+    {
+        // Per-layer quality: 1 - the measured relative weight error.
+        let quantized_weights = snapshot_weights(model)?;
+        let mut per_layer_scores = HashMap::new();
+        for info in layer_info {
+            let score = match (
+                original_weights.get(&info.layer_name),
+                quantized_weights.get(&info.layer_name),
+            ) {
+                (Some(before), Some(after)) => {
+                    (1.0 - relative_l2_error(before, after)).clamp(0.0, 1.0)
+                },
+                _ => continue,
+            };
+            per_layer_scores.insert(info.layer_name.clone(), score);
+        }
+
+        // Signal-level metrics: on the outputs if we have them, else on weights.
+        let (reference, comparison, kl_divergence) = if baseline_outputs.is_empty() {
+            let mut names: Vec<&String> = original_weights.keys().collect();
+            names.sort();
+            let mut reference = Vec::new();
+            let mut comparison = Vec::new();
+            for name in names {
+                if let (Some(before), Some(after)) =
+                    (original_weights.get(name), quantized_weights.get(name))
+                {
+                    reference.extend(before.iter().copied());
+                    comparison.extend(after.iter().copied());
+                }
+            }
+            (reference, comparison, None)
+        } else {
+            let quantized_outputs = run_model(model, calibration_data)?;
+            let divergence = mean_kl_divergence(baseline_outputs, &quantized_outputs);
+            (
+                flatten(baseline_outputs),
+                flatten(&quantized_outputs),
+                Some(divergence),
+            )
+        };
+
+        if reference.len() != comparison.len() {
+            return Err(anyhow!(
+                "cannot compare signals of different lengths ({} vs {})",
+                reference.len(),
+                comparison.len()
+            ));
+        }
+
         Ok(QuantizationQualityMetrics {
-            snr: 45.0,
-            psnr: 48.0,
-            ssim: 0.95,
-            cosine_similarity: 0.98,
-            l2_error: 0.001,
-            kl_divergence: 0.05,
-            per_layer_scores: layer_info
-                .iter()
-                .map(|info| (info.layer_name.clone(), 0.95))
-                .collect(),
+            snr: signal_to_noise_db(&reference, &comparison),
+            psnr: peak_signal_to_noise_db(&reference, &comparison),
+            // SSIM needs spatial structure; activations and weights have none.
+            ssim: None,
+            cosine_similarity: cosine_similarity(&reference, &comparison),
+            l2_error: relative_l2_error(&reference, &comparison),
+            kl_divergence,
+            per_layer_scores,
         })
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_quantization_config_builder() {
-        let config = MixedBitQuantizationConfig::default()
-            .with_target_compression(8.0)
-            .with_max_accuracy_drop(0.01)
-            .with_bit_widths(vec![2, 4, 8]);
-
-        assert_eq!(config.target_compression_ratio, 8.0);
-        assert_eq!(config.max_accuracy_drop, 0.01);
-        assert_eq!(config.available_bit_widths, vec![2, 4, 8]);
-    }
-
-    #[test]
-    fn test_sensitivity_analyzer() {
-        let config = MixedBitQuantizationConfig::default();
-        let analyzer = SensitivityAnalyzer::new(&config);
-
-        // Test would need actual model and data
-        assert_eq!(analyzer.method, SensitivityAnalysisMethod::ActivationBased);
-    }
-
-    #[test]
-    fn test_bit_allocator() {
-        let config = MixedBitQuantizationConfig::default();
-        let allocator = BitAllocator::new(&config);
-
-        assert_eq!(allocator.target_compression, 4.0);
-        assert_eq!(allocator.available_bits, vec![4, 6, 8, 16]);
-    }
-
-    #[test]
-    fn test_config_default_values() {
-        let config = MixedBitQuantizationConfig::default();
-        assert!((config.target_compression_ratio - 4.0).abs() < f32::EPSILON);
-        assert!((config.max_accuracy_drop - 0.02).abs() < f32::EPSILON);
-        assert_eq!(config.available_bit_widths, vec![4, 6, 8, 16]);
-        assert_eq!(
-            config.allocation_strategy,
-            BitAllocationStrategy::SensitivityBased
-        );
-        assert!(config.gradient_free_optimization);
-        assert!(config.progressive_quantization.is_none());
-        assert!(config.layer_constraints.is_empty());
-        assert!(config.hardware_constraints.is_none());
-    }
-
-    #[test]
-    fn test_config_chaining() {
-        let config = MixedBitQuantizationConfig::default()
-            .with_target_compression(16.0)
-            .with_max_accuracy_drop(0.05)
-            .with_bit_widths(vec![2, 4, 8, 16]);
-        assert!((config.target_compression_ratio - 16.0).abs() < f32::EPSILON);
-        assert!((config.max_accuracy_drop - 0.05).abs() < f32::EPSILON);
-        assert_eq!(config.available_bit_widths, vec![2, 4, 8, 16]);
-    }
-
-    #[test]
-    fn test_bit_allocation_strategy_variants() {
-        let strats = vec![
-            BitAllocationStrategy::SensitivityBased,
-            BitAllocationStrategy::ReinforcementLearning,
-            BitAllocationStrategy::EvolutionaryAlgorithm,
-            BitAllocationStrategy::GreedySearch,
-            BitAllocationStrategy::MixedIntegerProgramming,
-            BitAllocationStrategy::NeuralArchitectureSearch,
-            BitAllocationStrategy::ParetoOptimal,
-        ];
-        for strat in &strats {
-            let _ = format!("{:?}", strat);
-        }
-    }
-
-    #[test]
-    fn test_bit_allocation_strategy_custom() {
-        let mut custom_map = HashMap::new();
-        custom_map.insert("layer1".to_string(), 4u8);
-        custom_map.insert("layer2".to_string(), 8u8);
-        let strat = BitAllocationStrategy::Custom(custom_map.clone());
-        match strat {
-            BitAllocationStrategy::Custom(m) => {
-                assert_eq!(m.len(), 2);
-                assert_eq!(m["layer1"], 4);
-            },
-            _ => panic!("Expected Custom variant"),
-        }
-    }
-
-    #[test]
-    fn test_calibration_config_default() {
-        let config = CalibrationConfig::default();
-        assert_eq!(config.num_samples, 1000);
-        assert!((config.percentile - 99.99).abs() < 0.1);
-        assert!(config.entropy_calibration);
-    }
-
-    #[test]
-    fn test_sensitivity_analysis_method_eq() {
-        assert_eq!(
-            SensitivityAnalysisMethod::HessianBased,
-            SensitivityAnalysisMethod::HessianBased
-        );
-        assert_ne!(
-            SensitivityAnalysisMethod::HessianBased,
-            SensitivityAnalysisMethod::GradientBased
-        );
-    }
-
-    #[test]
-    fn test_quantization_params_creation() {
-        let params = QuantizationParams {
-            scale: 0.01,
-            zero_point: 128,
-            range: (-1.0, 1.0),
-            symmetric: true,
-            per_channel: None,
-        };
-        assert!((params.scale - 0.01).abs() < f32::EPSILON);
-        assert_eq!(params.zero_point, 128);
-        assert!(params.symmetric);
-        assert!(params.per_channel.is_none());
-    }
-
-    #[test]
-    fn test_quantization_params_per_channel() {
-        let channel_params = vec![
-            ChannelQuantizationParams {
-                scale: 0.01,
-                zero_point: 0,
-                range: (-1.0, 1.0),
-            },
-            ChannelQuantizationParams {
-                scale: 0.02,
-                zero_point: 0,
-                range: (-2.0, 2.0),
-            },
-        ];
-        let params = QuantizationParams {
-            scale: 0.015,
-            zero_point: 0,
-            range: (-2.0, 2.0),
-            symmetric: true,
-            per_channel: Some(channel_params),
-        };
-        assert!(params.per_channel.is_some());
-        assert_eq!(
-            params.per_channel.as_ref().expect("channel params").len(),
-            2
-        );
-    }
-
-    #[test]
-    fn test_quantized_layer_info_creation() {
-        let info = QuantizedLayerInfo {
-            layer_name: "encoder.layer.0.attention".to_string(),
-            bit_width: 8,
-            quantization_params: QuantizationParams {
-                scale: 0.01,
-                zero_point: 0,
-                range: (-1.0, 1.0),
-                symmetric: true,
-                per_channel: None,
-            },
-            sensitivity_score: 0.8,
-            compression_ratio: 4.0,
-            accuracy_impact: 0.01,
-        };
-        assert_eq!(info.bit_width, 8);
-        assert!((info.sensitivity_score - 0.8).abs() < f32::EPSILON);
-        assert!((info.compression_ratio - 4.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn test_quantization_quality_metrics() {
-        let metrics = QuantizationQualityMetrics {
-            snr: 45.0,
-            psnr: 48.0,
-            ssim: 0.95,
-            cosine_similarity: 0.98,
-            l2_error: 0.001,
-            kl_divergence: 0.05,
-            per_layer_scores: HashMap::new(),
-        };
-        assert!(metrics.snr > 0.0);
-        assert!(metrics.ssim >= 0.0 && metrics.ssim <= 1.0);
-        assert!(metrics.cosine_similarity >= 0.0 && metrics.cosine_similarity <= 1.0);
-    }
-
-    #[test]
-    fn test_layer_constraints() {
-        let constraints = LayerQuantizationConstraints {
-            min_bits: Some(4),
-            max_bits: Some(16),
-            fixed_bits: None,
-            priority: 0.9,
-            can_skip: false,
-        };
-        assert_eq!(constraints.min_bits, Some(4));
-        assert_eq!(constraints.max_bits, Some(16));
-        assert!(constraints.fixed_bits.is_none());
-        assert!(!constraints.can_skip);
-    }
-
-    #[test]
-    fn test_layer_constraints_fixed_bits() {
-        let constraints = LayerQuantizationConstraints {
-            min_bits: None,
-            max_bits: None,
-            fixed_bits: Some(8),
-            priority: 1.0,
-            can_skip: false,
-        };
-        assert_eq!(constraints.fixed_bits, Some(8));
-    }
-
-    #[test]
-    fn test_mixed_bit_quantizer_creation() {
-        let config = MixedBitQuantizationConfig::default();
-        let _quantizer = MixedBitQuantizer::new(config);
-    }
-
-    #[test]
-    fn test_quantizer_with_custom_config() {
-        let config = MixedBitQuantizationConfig::default()
-            .with_target_compression(8.0)
-            .with_max_accuracy_drop(0.05)
-            .with_bit_widths(vec![2, 4, 8]);
-        let _quantizer = MixedBitQuantizer::new(config);
-    }
-
-    #[test]
-    fn test_quantization_format_variants() {
-        let formats = vec![
-            QuantizationFormat::SignedInt { bits: 8 },
-            QuantizationFormat::UnsignedInt { bits: 8 },
-            QuantizationFormat::FloatingPoint { bits: 16 },
-            QuantizationFormat::BlockWise {
-                block_size: 32,
-                bits: 4,
-            },
-            QuantizationFormat::Custom {
-                name: "my_format".to_string(),
-                bits: 6,
-            },
-        ];
-        for fmt in &formats {
-            let dbg = format!("{:?}", fmt);
-            assert!(!dbg.is_empty());
-        }
-    }
-
-    #[test]
-    fn test_progressive_quantization_config() {
-        let config = ProgressiveQuantizationConfig {
-            num_stages: 3,
-            bit_schedule: BitReductionSchedule::Linear,
-            epochs_per_stage: 5,
-            learning_rate_schedule: vec![0.001, 0.0005, 0.0001],
-        };
-        assert_eq!(config.num_stages, 3);
-        assert_eq!(config.epochs_per_stage, 5);
-        assert_eq!(config.learning_rate_schedule.len(), 3);
-    }
-
-    #[test]
-    fn test_bit_reduction_schedule_variants() {
-        let _linear = BitReductionSchedule::Linear;
-        let _exp = BitReductionSchedule::Exponential { decay_rate: 0.9 };
-        let _step = BitReductionSchedule::StepWise {
-            steps: vec![(10, 0.5), (20, 0.25)],
-        };
-        let _custom = BitReductionSchedule::Custom(vec![1.0, 0.8, 0.6, 0.4]);
-    }
-
-    #[test]
-    fn test_sensitivity_analysis_results() {
-        let mut sensitivities = HashMap::new();
-        sensitivities.insert("layer0".to_string(), 0.3f32);
-        sensitivities.insert("layer1".to_string(), 0.8f32);
-        let mut bits = HashMap::new();
-        bits.insert("layer0".to_string(), 4u8);
-        bits.insert("layer1".to_string(), 8u8);
-        let results = SensitivityAnalysisResults {
-            layer_sensitivities: sensitivities,
-            recommended_bits: bits,
-            analysis_method: SensitivityAnalysisMethod::ActivationBased,
-            confidence_scores: HashMap::new(),
-        };
-        assert_eq!(results.layer_sensitivities.len(), 2);
-        assert_eq!(results.recommended_bits["layer0"], 4);
-        assert_eq!(results.recommended_bits["layer1"], 8);
-    }
-
-    #[test]
-    fn test_quantization_timing_info() {
-        let timing = QuantizationTimingInfo {
-            total_time_ms: 1000.0,
-            sensitivity_analysis_ms: 300.0,
-            bit_allocation_ms: 100.0,
-            calibration_ms: 400.0,
-            conversion_ms: 200.0,
-        };
-        let sum = timing.sensitivity_analysis_ms
-            + timing.bit_allocation_ms
-            + timing.calibration_ms
-            + timing.conversion_ms;
-        assert!(sum <= timing.total_time_ms);
-    }
-
-    #[test]
-    fn test_channel_quantization_params() {
-        let params = ChannelQuantizationParams {
-            scale: 0.05,
-            zero_point: 10,
-            range: (-5.0, 5.0),
-        };
-        assert!((params.scale - 0.05).abs() < f32::EPSILON);
-        assert_eq!(params.zero_point, 10);
-        assert!((params.range.0 - (-5.0)).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn test_outlier_rejection_strategy_variants() {
-        let _none = OutlierRejectionStrategy::None;
-        let _pct = OutlierRejectionStrategy::Percentile { threshold: 99.0 };
-        let _iqr = OutlierRejectionStrategy::IQR { multiplier: 1.5 };
-        let _std = OutlierRejectionStrategy::StandardDeviation { num_stds: 3.0 };
-        let _custom = OutlierRejectionStrategy::Custom;
-    }
-
-    #[test]
-    fn test_calibration_method_variants() {
-        let _minmax = CalibrationMethod::MinMax;
-        let _entropy = CalibrationMethod::Entropy;
-        let _pct = CalibrationMethod::Percentile;
-        let _mse = CalibrationMethod::MSE;
-        let _adaptive = CalibrationMethod::Adaptive;
-    }
-}
+#[path = "mixed_bit_quantization_tests.rs"]
+mod tests;

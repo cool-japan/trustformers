@@ -704,6 +704,14 @@ impl KernelFusionEngine {
         Ok(true)
     }
 
+    /// Estimate the speedup fusing these nodes would give, from the cost model.
+    ///
+    /// This is a *model estimate*, not a measurement: per-operation costs, the
+    /// avoided launch overhead and the cache-efficiency factor all come from
+    /// [`PerformanceDatabase`], which is populated with defaults unless the
+    /// caller has recorded real measurements into it. Treat the result as a
+    /// ranking heuristic for choosing between fusion candidates, not as a
+    /// predicted wall-clock ratio.
     fn estimate_fusion_benefit(
         &self,
         node_ids: &[String],
@@ -729,9 +737,11 @@ impl KernelFusionEngine {
             }
         }
 
-        // Estimate fused cost (reduced launch overhead, better cache utilization)
-        let launch_overhead_reduction = (node_ids.len() - 1) as f64 * 1000.0; // Save 1µs per avoided launch
-        let cache_efficiency_gain = 1.2; // 20% improvement from better cache utilization
+        // Estimate the fused cost from the same cost model. Both terms below
+        // are model parameters, not measurements; see the doc comment.
+        let launch_overhead_reduction =
+            (node_ids.len().saturating_sub(1)) as f64 * db.launch_overhead_ns() as f64;
+        let cache_efficiency_gain = db.cache_efficiency_gain();
 
         let fused_cost =
             (total_individual_cost - launch_overhead_reduction) / cache_efficiency_gain;
@@ -770,35 +780,101 @@ impl KernelFusionEngine {
 
     fn generate_cpu_kernel(&self, opportunity: &FusionOpportunity) -> Result<KernelImplementation> {
         let kernel_code = match &opportunity.pattern {
-            FusionPattern::ElementWiseChain(ops) => self.generate_elementwise_cpu_code(ops),
+            FusionPattern::ElementWiseChain(ops) => self.generate_elementwise_cpu_code(ops)?,
             FusionPattern::LinearActivation { .. } => self.generate_linear_activation_cpu_code(),
-            _ => "// Generic fused kernel implementation".to_string(),
+            other => {
+                return Err(crate::errors::TrustformersError::not_implemented(format!(
+                    "CPU kernel generation for fusion pattern {:?}",
+                    other
+                )))
+            },
         };
 
         Ok(KernelImplementation::CPU(kernel_code))
     }
 
-    fn generate_elementwise_cpu_code(&self, ops: &[OperationType]) -> String {
-        let mut code = String::new();
-        code.push_str("void fused_elementwise_kernel(float* input, float* output, int size) {\n");
+    /// Emit C source for an element-wise chain.
+    ///
+    /// Binary operations take their second operand from a companion array, so
+    /// `Add` really adds the other operand — it used to emit `value + 1.0f`,
+    /// an increment-by-one that silently replaced the caller's addition.
+    ///
+    /// An operation this generator cannot express is an error, not a dropped
+    /// line: emitting a `// Other operation` comment produced source that
+    /// quietly computed the wrong thing.
+    fn generate_elementwise_cpu_code(&self, ops: &[OperationType]) -> Result<String> {
+        // Binary ops need one extra input array each.
+        let binary_count = ops.iter().filter(|op| Self::is_binary_elementwise(op)).count();
+
+        let mut signature = String::from("void fused_elementwise_kernel(const float* input");
+        for index in 0..binary_count {
+            signature.push_str(&format!(", const float* operand{}", index));
+        }
+        signature.push_str(", float* output, int size) {\n");
+
+        let mut code = signature;
         code.push_str("    #pragma omp parallel for\n");
         code.push_str("    for (int i = 0; i < size; i++) {\n");
         code.push_str("        float value = input[i];\n");
 
+        let mut operand_index = 0usize;
         for op in ops {
-            match op {
-                OperationType::Add => code.push_str("        value = value + 1.0f; // Simplified\n"),
-                OperationType::ReLU => code.push_str("        value = fmaxf(0.0f, value);\n"),
-                OperationType::GELU => code.push_str("        value = 0.5f * value * (1.0f + tanhf(0.797885f * (value + 0.044715f * value * value * value)));\n"),
-                _ => code.push_str("        // Other operation\n"),
-            }
+            let line = match op {
+                OperationType::Add => {
+                    let line = format!("        value = value + operand{}[i];\n", operand_index);
+                    operand_index += 1;
+                    line
+                },
+                OperationType::Subtract => {
+                    let line = format!("        value = value - operand{}[i];\n", operand_index);
+                    operand_index += 1;
+                    line
+                },
+                OperationType::Multiply => {
+                    let line = format!("        value = value * operand{}[i];\n", operand_index);
+                    operand_index += 1;
+                    line
+                },
+                OperationType::Divide => {
+                    let line = format!("        value = value / operand{}[i];\n", operand_index);
+                    operand_index += 1;
+                    line
+                },
+                OperationType::ReLU => "        value = fmaxf(0.0f, value);\n".to_string(),
+                OperationType::GELU => "        value = 0.5f * value * (1.0f + tanhf(0.797885f * (value + 0.044715f * value * value * value)));\n".to_string(),
+                OperationType::Sigmoid => {
+                    "        value = 1.0f / (1.0f + expf(-value));\n".to_string()
+                },
+                OperationType::Tanh => "        value = tanhf(value);\n".to_string(),
+                OperationType::Swish => {
+                    "        value = value / (1.0f + expf(-value));\n".to_string()
+                },
+                other => {
+                    return Err(crate::errors::TrustformersError::not_implemented(format!(
+                        "element-wise kernel generation for {:?}",
+                        other
+                    )))
+                },
+            };
+            code.push_str(&line);
         }
 
         code.push_str("        output[i] = value;\n");
         code.push_str("    }\n");
         code.push_str("}\n");
 
-        code
+        Ok(code)
+    }
+
+    /// Whether an element-wise operation consumes a second operand.
+    fn is_binary_elementwise(op: &OperationType) -> bool {
+        matches!(
+            op,
+            OperationType::Add
+                | OperationType::Subtract
+                | OperationType::Multiply
+                | OperationType::Divide
+        )
     }
 
     fn generate_linear_activation_cpu_code(&self) -> String {
@@ -902,6 +978,89 @@ impl Default for KernelFusionEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test: the generated element-wise kernel emitted
+    /// `value = value + 1.0f; // Simplified` for `Add`, so any consumer of the
+    /// source got an increment-by-one instead of an element-wise addition.
+    #[test]
+    fn test_generated_add_uses_the_second_operand() {
+        let engine = KernelFusionEngine::new();
+        let code = engine
+            .generate_elementwise_cpu_code(&[OperationType::Add, OperationType::ReLU])
+            .expect("Add and ReLU are supported");
+
+        assert!(
+            !code.contains("value + 1.0f"),
+            "the increment-by-one must not reappear:\n{code}"
+        );
+        assert!(
+            code.contains("value = value + operand0[i];"),
+            "Add must consume its second operand:\n{code}"
+        );
+        assert!(
+            code.contains("const float* operand0"),
+            "the second operand must appear in the signature:\n{code}"
+        );
+        assert!(code.contains("fmaxf(0.0f, value)"), "ReLU is still emitted");
+    }
+
+    /// Multiple binary operations each get their own operand array.
+    #[test]
+    fn test_generated_kernel_numbers_each_operand() {
+        let engine = KernelFusionEngine::new();
+        let code = engine
+            .generate_elementwise_cpu_code(&[
+                OperationType::Add,
+                OperationType::Multiply,
+                OperationType::Subtract,
+            ])
+            .expect("all three are supported");
+
+        for index in 0..3 {
+            assert!(
+                code.contains(&format!("const float* operand{index}")),
+                "operand{index} must be declared:\n{code}"
+            );
+        }
+        assert!(code.contains("value + operand0[i]"));
+        assert!(code.contains("value * operand1[i]"));
+        assert!(code.contains("value - operand2[i]"));
+    }
+
+    /// Regression test: an unsupported operation used to emit
+    /// `// Other operation`, silently dropping it from the generated kernel.
+    #[test]
+    fn test_unsupported_operation_is_an_error_not_a_comment() {
+        let engine = KernelFusionEngine::new();
+        let error = engine
+            .generate_elementwise_cpu_code(&[OperationType::Add, OperationType::Softmax])
+            .expect_err("Softmax is not an element-wise op this generator can emit");
+        assert!(
+            error.to_string().contains("Softmax"),
+            "the error must name the operation it cannot emit: {error}"
+        );
+    }
+
+    /// The cost-model parameters are settable and validated.
+    #[test]
+    fn test_cost_model_parameters_are_explicit() {
+        use crate::kernel_fusion::performance::PerformanceDatabase;
+
+        let mut database = PerformanceDatabase::new();
+        assert_eq!(database.launch_overhead_ns(), 1_000);
+        assert!((database.cache_efficiency_gain() - 1.2).abs() < 1e-9);
+
+        database.set_launch_overhead_ns(250);
+        assert_eq!(database.launch_overhead_ns(), 250);
+
+        database.set_cache_efficiency_gain(1.05).expect("a positive factor is valid");
+        assert!((database.cache_efficiency_gain() - 1.05).abs() < 1e-9);
+
+        // A factor that would make the modelled fused cost nonsense is rejected.
+        assert!(database.set_cache_efficiency_gain(0.0).is_err());
+        assert!(database.set_cache_efficiency_gain(-1.0).is_err());
+        assert!(database.set_cache_efficiency_gain(f64::INFINITY).is_err());
+    }
     use crate::kernel_fusion::graph::{
         ComputationGraph, DataType, Device as GraphDevice, GraphNode, MemoryLayout, NodeMetadata,
         TensorInfo,

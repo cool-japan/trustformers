@@ -528,8 +528,21 @@ impl CompressionPipeline {
             return Err(no_named_tensors("quantization"));
         }
 
+        let mut quantized_any = false;
         for (name, tensor) in tensors.iter_mut() {
+            // Integer buffers are not weights; rewriting them would corrupt the model.
+            if !weight_ops::is_float_parameter(tensor) {
+                continue;
+            }
             weight_ops::quantize_tensor_in_place(name, tensor, bits, signed, symmetric)?;
+            quantized_any = true;
+        }
+        drop(tensors);
+
+        if !quantized_any {
+            return Err(TrustformersError::invalid_operation(
+                "quantization found no floating-point parameter to quantize".to_string(),
+            ));
         }
 
         model.quantization_config = Some(QuantizationConfig {
@@ -620,6 +633,9 @@ impl CompressionPipeline {
                 return Err(no_named_tensors("Huffman coding"));
             }
             for (name, tensor) in tensors {
+                if !weight_ops::is_float_parameter(tensor) {
+                    continue;
+                }
                 let values = weight_ops::tensor_values(&name, tensor)?;
                 let params = weight_ops::derive_quantization_parameters(
                     &values,
@@ -684,7 +700,7 @@ impl CompressionPipeline {
 
         match strategy {
             PruningStrategy::Magnitude | PruningStrategy::LotteryTicket => {
-                // Global magnitude threshold across every parameter tensor.
+                // Global magnitude threshold across every floating-point tensor.
                 let mut all_values = Vec::new();
                 {
                     let tensors = model.model.named_tensors();
@@ -692,14 +708,32 @@ impl CompressionPipeline {
                         return Err(no_named_tensors("pruning"));
                     }
                     for (name, tensor) in tensors {
+                        if !weight_ops::is_float_parameter(tensor) {
+                            continue;
+                        }
                         all_values.extend(weight_ops::tensor_values(&name, tensor)?);
                     }
                 }
+                if all_values.is_empty() {
+                    return Err(TrustformersError::invalid_operation(
+                        "pruning found no floating-point parameter to prune".to_string(),
+                    ));
+                }
+
                 let threshold = weight_ops::magnitude_threshold_for(&all_values, sparsity)?;
+                // Exactly `target` weights must go. Everything strictly below the
+                // threshold is removed; the remainder is taken from the ties, so a
+                // model of identical weights still reaches the requested sparsity.
+                let target = ((all_values.len() as f32) * sparsity).round() as usize;
+                let below = all_values.iter().filter(|value| value.abs() < threshold).count();
+                let mut tie_budget = target.saturating_sub(below);
 
                 let mut tensors = model.model.named_tensors_mut();
                 for (name, tensor) in tensors.iter_mut() {
-                    weight_ops::prune_below_threshold(name, tensor, threshold)?;
+                    if !weight_ops::is_float_parameter(tensor) {
+                        continue;
+                    }
+                    weight_ops::prune_at_threshold(name, tensor, threshold, &mut tie_budget)?;
                 }
             },
             PruningStrategy::Random => {
@@ -715,6 +749,9 @@ impl CompressionPipeline {
                     return Err(no_named_tensors("pruning"));
                 }
                 for (name, tensor) in tensors.iter_mut() {
+                    if !weight_ops::is_float_parameter(tensor) {
+                        continue;
+                    }
                     weight_ops::random_prune_in_place(name, tensor, sparsity, &mut rng)?;
                 }
             },
@@ -764,8 +801,8 @@ impl CompressionPipeline {
 
         let mut pruned_any = false;
         for (name, tensor) in tensors.iter_mut() {
-            if tensor.shape().len() != 2 {
-                // Biases and norms have no structure to remove.
+            if tensor.shape().len() != 2 || !weight_ops::is_float_parameter(tensor) {
+                // Biases, norms and integer buffers have no structure to remove.
                 continue;
             }
             weight_ops::structured_prune_in_place(name, tensor, pruning_ratio, axis, false)?;
@@ -815,7 +852,7 @@ impl CompressionPipeline {
             }
             for (name, tensor) in tensors.iter_mut() {
                 let shape = tensor.shape();
-                if shape.len() != 2 {
+                if shape.len() != 2 || !weight_ops::is_float_parameter(tensor) {
                     continue;
                 }
                 let full_rank = shape[0].min(shape[1]);
@@ -858,8 +895,20 @@ impl CompressionPipeline {
         if tensors.is_empty() {
             return Err(no_named_tensors("weight clustering"));
         }
+        let mut clustered_any = false;
         for (name, tensor) in tensors.iter_mut() {
+            if !weight_ops::is_float_parameter(tensor) {
+                continue;
+            }
             weight_ops::cluster_weights_in_place(name, tensor, num_clusters, 25)?;
+            clustered_any = true;
+        }
+        drop(tensors);
+
+        if !clustered_any {
+            return Err(TrustformersError::invalid_operation(
+                "weight clustering found no floating-point parameter to cluster".to_string(),
+            ));
         }
 
         model.clustering_config = Some(ClusteringConfig {

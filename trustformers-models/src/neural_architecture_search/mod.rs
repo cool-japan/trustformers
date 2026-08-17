@@ -7,7 +7,7 @@
 //! ## Features
 //!
 //! - **Multiple Search Strategies**: Supports evolutionary search, reinforcement learning-based search,
-//!   differentiable architecture search (DARTS), and random search
+//!   a REINFORCE controller, Bayesian optimization and random search
 //! - **Flexible Search Space**: Define custom architecture search spaces with constraints
 //! - **Multi-Objective Optimization**: Balance accuracy, efficiency, memory usage, and latency
 //! - **Progressive Search**: Start with simple architectures and progressively increase complexity
@@ -39,7 +39,7 @@
 //!     let mut searcher = NeuralArchitectureSearcher::new(config)?;
 //!     let best_architecture = searcher.search()?;
 //!
-//!     println!("Best architecture: {:?}", best_architecture);
+//!     let _ = best_architecture;
 //!     Ok(())
 //! }
 //! ```
@@ -48,7 +48,17 @@ use scirs2_core::random::*; // SciRS2 Integration Policy (was: use rand::{Rng, R
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use tracing::debug;
 use trustformers_core::errors::{invalid_input, Result, TrustformersError};
+
+pub mod proxy;
+pub mod strategies;
+
+pub use proxy::{ArchitectureEvaluator, MeasuredPerformance, ProxyTaskConfig, ProxyTaskEvaluator};
+pub use strategies::{
+    crowding_distances, encode_architecture, non_dominated_fronts, GaussianProcess,
+    ReinforceController,
+};
 
 /// Configuration for Neural Architecture Search
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,10 +109,8 @@ pub enum SearchStrategy {
     Random,
     /// Evolutionary algorithm-based search
     Evolutionary,
-    /// Reinforcement learning-based search
+    /// Reinforcement learning-based search with a REINFORCE controller
     ReinforcementLearning,
-    /// Differentiable Architecture Search (DARTS)
-    DARTS,
     /// Progressive search with increasing complexity
     Progressive,
     /// Bayesian optimization
@@ -650,6 +658,8 @@ pub struct NeuralArchitectureSearcher {
     best_architecture: Option<ArchitectureEvaluation>,
     evaluation_history: Vec<ArchitectureEvaluation>,
     rng: StdRng,
+    /// Performs the real train-and-evaluate loop for every candidate.
+    evaluator: Box<dyn ArchitectureEvaluator>,
 }
 
 impl NeuralArchitectureSearcher {
@@ -667,7 +677,24 @@ impl NeuralArchitectureSearcher {
             best_architecture: None,
             evaluation_history: Vec::new(),
             rng,
+            evaluator: Box::new(ProxyTaskEvaluator::new()),
         })
+    }
+
+    /// Create a searcher that evaluates candidates with a caller-supplied
+    /// evaluator (for example a real training pipeline).
+    pub fn with_evaluator(
+        config: NASConfig,
+        evaluator: Box<dyn ArchitectureEvaluator>,
+    ) -> Result<Self> {
+        let mut searcher = Self::new(config)?;
+        searcher.evaluator = evaluator;
+        Ok(searcher)
+    }
+
+    /// Description of what the fitness numbers were measured on.
+    pub fn evaluator_description(&self) -> String {
+        self.evaluator.description()
     }
 
     /// Run the architecture search
@@ -676,7 +703,6 @@ impl NeuralArchitectureSearcher {
             SearchStrategy::Random => self.random_search(),
             SearchStrategy::Evolutionary => self.evolutionary_search(),
             SearchStrategy::ReinforcementLearning => self.rl_search(),
-            SearchStrategy::DARTS => self.darts_search(),
             SearchStrategy::Progressive => self.progressive_search(),
             SearchStrategy::BayesianOptimization => self.bayesian_search(),
             SearchStrategy::NSGA2 => self.nsga2_search(),
@@ -693,10 +719,7 @@ impl NeuralArchitectureSearcher {
 
             if i % 100 == 0 {
                 if let Some(ref best) = self.best_architecture {
-                    println!(
-                        "Random search iteration {}, best fitness: {:.4}",
-                        i, best.fitness
-                    );
+                    debug!(iteration = i, best = best.fitness, "random search progress");
                 }
             }
         }
@@ -737,10 +760,10 @@ impl NeuralArchitectureSearcher {
             // Environmental selection
             self.environmental_selection(offspring)?;
 
-            println!(
-                "Generation {}, best fitness: {:.4}",
+            debug!(
                 generation,
-                self.best_architecture.as_ref().map_or(0.0, |a| a.fitness)
+                best = self.best_architecture.as_ref().map_or(0.0, |a| a.fitness),
+                "evolutionary search progress"
             );
         }
 
@@ -749,45 +772,35 @@ impl NeuralArchitectureSearcher {
         })
     }
 
+    /// Reinforcement-learning search driven by a REINFORCE controller.
+    ///
+    /// The controller keeps a categorical policy over every search-space
+    /// dimension, samples architectures from it, and shifts probability mass
+    /// towards the actions whose **measured** fitness beat the running baseline.
     fn rl_search(&mut self) -> Result<ArchitectureEvaluation> {
-        // Simplified RL-based search using random policy
-        // In practice, this would use a neural network controller
+        let mut controller = ReinforceController::new(&self.search_space, 0.5);
+
         for i in 0..self.config.max_evaluations {
-            let architecture = Architecture::random(&self.search_space, &mut self.rng);
-            let evaluation = self.evaluate_architecture(architecture)?;
+            let (architecture, actions) = controller.sample(&self.search_space, &mut self.rng);
 
-            self.update_best(&evaluation);
-            self.evaluation_history.push(evaluation);
-
-            if i % 100 == 0 {
-                println!(
-                    "RL search iteration {}, best fitness: {:.4}",
-                    i,
-                    self.best_architecture.as_ref().map_or(0.0, |a| a.fitness)
-                );
+            // A candidate the search space rejects is skipped; any *other*
+            // failure (a broken objective, a diverging evaluator) is propagated
+            // rather than hidden behind a shorter history.
+            if self.search_space.validate_architecture(&architecture).is_err() {
+                continue;
             }
-        }
-
-        self.best_architecture.clone().ok_or_else(|| {
-            TrustformersError::invalid_config("No architecture found during search".to_string())
-        })
-    }
-
-    fn darts_search(&mut self) -> Result<ArchitectureEvaluation> {
-        // Simplified DARTS implementation
-        // In practice, this would use differentiable architecture representations
-        for i in 0..self.config.max_evaluations {
-            let architecture = Architecture::random(&self.search_space, &mut self.rng);
             let evaluation = self.evaluate_architecture(architecture)?;
 
+            controller.update(&actions, evaluation.fitness);
             self.update_best(&evaluation);
             self.evaluation_history.push(evaluation);
 
             if i % 100 == 0 {
-                println!(
-                    "DARTS iteration {}, best fitness: {:.4}",
-                    i,
-                    self.best_architecture.as_ref().map_or(0.0, |a| a.fitness)
+                debug!(
+                    iteration = i,
+                    baseline = controller.baseline(),
+                    best = self.best_architecture.as_ref().map_or(0.0, |a| a.fitness),
+                    "REINFORCE search progress"
                 );
             }
         }
@@ -822,11 +835,11 @@ impl NeuralArchitectureSearcher {
                 self.evaluation_history.push(evaluation);
 
                 if i % 50 == 0 {
-                    println!(
-                        "Progressive search stage {}, iteration {}, best fitness: {:.4}",
+                    debug!(
                         stage,
-                        i,
-                        self.best_architecture.as_ref().map_or(0.0, |a| a.fitness)
+                        iteration = i,
+                        best = self.best_architecture.as_ref().map_or(0.0, |a| a.fitness),
+                        "progressive search progress"
                     );
                 }
             }
@@ -837,34 +850,63 @@ impl NeuralArchitectureSearcher {
         })
     }
 
+    /// Bayesian optimization with a Gaussian-process surrogate.
+    ///
+    /// After an initial random design the search fits a GP to the **measured**
+    /// fitness of everything evaluated so far and picks the candidate with the
+    /// highest Expected Improvement out of a freshly sampled pool.
     fn bayesian_search(&mut self) -> Result<ArchitectureEvaluation> {
-        // Simplified Bayesian optimization
-        // In practice, this would use Gaussian processes or neural networks as surrogate models
+        const INITIAL_DESIGN: usize = 10;
+        const CANDIDATE_POOL: usize = 32;
+
+        let mut observations: Vec<Vec<f32>> = Vec::new();
+        let mut targets: Vec<f32> = Vec::new();
+
         for i in 0..self.config.max_evaluations {
-            let architecture = if i < 10 {
-                // Random exploration for initial samples
+            let architecture = if i < INITIAL_DESIGN || observations.len() < 2 {
                 Architecture::random(&self.search_space, &mut self.rng)
             } else {
-                // Use best architecture as guidance (simplified acquisition function)
-                let best = self.best_architecture.as_ref().ok_or_else(|| {
-                    TrustformersError::invalid_config(
-                        "No best architecture available for guidance".to_string(),
-                    )
-                })?;
-                let mut arch = best.architecture.clone();
-                arch.mutate(&self.search_space, 0.2, &mut self.rng);
-                arch
+                let surrogate =
+                    GaussianProcess::fit(observations.clone(), targets.clone(), 0.5, 1e-4);
+
+                let mut best_candidate: Option<(f32, Architecture)> = None;
+                for _ in 0..CANDIDATE_POOL {
+                    let candidate = Architecture::random(&self.search_space, &mut self.rng);
+                    let encoding = encode_architecture(&candidate, &self.search_space);
+                    let acquisition = surrogate.expected_improvement(&encoding);
+                    let better = best_candidate
+                        .as_ref()
+                        .map(|(score, _)| acquisition > *score)
+                        .unwrap_or(true);
+                    if better {
+                        best_candidate = Some((acquisition, candidate));
+                    }
+                }
+
+                match best_candidate {
+                    Some((_, candidate)) => candidate,
+                    None => Architecture::random(&self.search_space, &mut self.rng),
+                }
             };
 
+            let encoding = encode_architecture(&architecture, &self.search_space);
+            if self.search_space.validate_architecture(&architecture).is_err() {
+                continue;
+            }
             let evaluation = self.evaluate_architecture(architecture)?;
+
+            observations.push(encoding);
+            targets.push(evaluation.fitness);
+
             self.update_best(&evaluation);
             self.evaluation_history.push(evaluation);
 
             if i % 100 == 0 {
-                println!(
-                    "Bayesian search iteration {}, best fitness: {:.4}",
-                    i,
-                    self.best_architecture.as_ref().map_or(0.0, |a| a.fitness)
+                debug!(
+                    iteration = i,
+                    observations = observations.len(),
+                    best = self.best_architecture.as_ref().map_or(0.0, |a| a.fitness),
+                    "Bayesian search progress"
                 );
             }
         }
@@ -898,10 +940,10 @@ impl NeuralArchitectureSearcher {
             // Multi-objective environmental selection
             self.nsga2_selection(offspring)?;
 
-            println!(
-                "NSGA-II generation {}, population size: {}",
+            debug!(
                 generation,
-                self.population.len()
+                population = self.population.len(),
+                "NSGA-II generation complete"
             );
         }
 
@@ -985,58 +1027,173 @@ impl NeuralArchitectureSearcher {
         Ok(())
     }
 
+    /// NSGA-II environmental selection: fast non-dominated sorting followed by
+    /// crowding-distance tie-breaking within the last accepted front.
     fn nsga2_selection(&mut self, offspring: Vec<ArchitectureEvaluation>) -> Result<()> {
-        // Simplified NSGA-II selection
-        // In practice, this would implement proper non-dominated sorting and crowding distance
-        self.environmental_selection(offspring)
+        let mut combined = std::mem::take(&mut self.population);
+        combined.extend(offspring);
+
+        let objective_names: Vec<String> = self
+            .config
+            .objectives
+            .iter()
+            .map(|objective| objective.name().to_string())
+            .collect();
+
+        let fronts = non_dominated_fronts(&combined, &objective_names);
+        let mut selected: Vec<usize> = Vec::with_capacity(self.config.population_size);
+
+        for front in &fronts {
+            if selected.len() + front.len() <= self.config.population_size {
+                selected.extend(front.iter().copied());
+                continue;
+            }
+
+            // Partially accept this front, preferring the least crowded members.
+            let distances = crowding_distances(&combined, front, &objective_names);
+            let mut ordered: Vec<(usize, f32)> = front.iter().copied().zip(distances).collect();
+            ordered.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            for (index, _) in ordered {
+                if selected.len() >= self.config.population_size {
+                    break;
+                }
+                selected.push(index);
+            }
+            break;
+        }
+
+        // Rebuild the population in the selected order.
+        let mut keep = vec![false; combined.len()];
+        for index in &selected {
+            keep[*index] = true;
+        }
+        let mut new_population = Vec::with_capacity(selected.len());
+        for (index, evaluation) in combined.into_iter().enumerate() {
+            if keep[index] {
+                new_population.push(evaluation);
+            }
+        }
+        self.population = new_population;
+
+        // Track the best scalarised individual for reporting.
+        if let Some(best) = self
+            .population
+            .iter()
+            .max_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap_or(std::cmp::Ordering::Equal))
+        {
+            let should_update = self
+                .best_architecture
+                .as_ref()
+                .is_none_or(|current| best.fitness > current.fitness);
+            if should_update {
+                self.best_architecture = Some(best.clone());
+            }
+        }
+
+        Ok(())
     }
 
-    fn evaluate_architecture(&self, architecture: Architecture) -> Result<ArchitectureEvaluation> {
+    /// Train and evaluate one candidate architecture.
+    ///
+    /// The accuracy comes from the evaluator's **measured** held-out accuracy
+    /// after really training the candidate; latency is the evaluator's measured
+    /// inference time. Size and memory objectives use the architecture's analytic
+    /// cost model, which is recorded as such in `evaluation.info` so a reader can
+    /// tell measurements from estimates.
+    ///
+    /// # Errors
+    ///
+    /// * The architecture violates the search space's constraints.
+    /// * An objective has no measurement source (`Energy`, or a `Custom`
+    ///   objective the evaluator does not report). Scoring those with a constant
+    ///   would make the whole search meaningless.
+    fn evaluate_architecture(
+        &mut self,
+        architecture: Architecture,
+    ) -> Result<ArchitectureEvaluation> {
         let start_time = std::time::Instant::now();
 
         // Validate architecture
         self.search_space.validate_architecture(&architecture)?;
 
+        let measured = self.evaluator.evaluate(&architecture)?;
         let mut evaluation = ArchitectureEvaluation::new(architecture);
+
+        evaluation.info.insert("evaluator".to_string(), self.evaluator.description());
+        evaluation.info.insert(
+            "trained_parameters".to_string(),
+            measured.trained_parameters.to_string(),
+        );
+        evaluation.info.insert(
+            "train_loss".to_string(),
+            format!("{:.6}", measured.train_loss),
+        );
 
         // Compute metrics based on objectives
         for objective in &self.config.objectives {
-            let (metric_name, metric_value) = match objective {
-                OptimizationObjective::Accuracy { .. } => {
-                    // Simulate accuracy evaluation
-                    let complexity =
-                        evaluation.architecture.estimate_parameters() as f32 / 1000000.0;
-                    let accuracy =
-                        0.85 + (complexity / 100.0).min(0.1) - (complexity / 1000.0).max(0.0);
-                    ("accuracy", accuracy.clamp(0.0, 1.0))
-                },
+            let (metric_name, metric_value, source) = match objective {
+                OptimizationObjective::Accuracy { .. } => (
+                    "accuracy",
+                    measured.accuracy.clamp(0.0, 1.0),
+                    "measured_holdout_accuracy",
+                ),
                 OptimizationObjective::Latency { .. } => {
-                    let latency = evaluation.architecture.estimate_latency();
-                    ("latency", 1.0 / (1.0 + latency)) // Invert for maximization
+                    // Measured inference time, inverted so that higher is better.
+                    let latency_ms = (measured.inference_seconds * 1000.0) as f32;
+                    (
+                        "latency",
+                        1.0 / (1.0 + latency_ms),
+                        "measured_inference_time",
+                    )
                 },
                 OptimizationObjective::Memory { .. } => {
                     let memory = evaluation.architecture.estimate_memory_mb();
-                    ("memory", 1.0 / (1.0 + memory / 1000.0)) // Invert for maximization
+                    (
+                        "memory",
+                        1.0 / (1.0 + memory / 1000.0),
+                        "analytic_cost_model",
+                    )
                 },
                 OptimizationObjective::ModelSize { .. } => {
                     let params = evaluation.architecture.estimate_parameters() as f32;
-                    ("model_size", 1.0 / (1.0 + params / 1000000.0)) // Invert for maximization
+                    (
+                        "model_size",
+                        1.0 / (1.0 + params / 1_000_000.0),
+                        "analytic_cost_model",
+                    )
                 },
                 OptimizationObjective::Efficiency { .. } => {
+                    // Measured accuracy per estimated million parameters.
                     let params = evaluation.architecture.estimate_parameters() as f32;
-                    let latency = evaluation.architecture.estimate_latency();
-                    ("efficiency", 1.0 / (1.0 + params / 1000000.0 + latency))
+                    (
+                        "efficiency",
+                        measured.accuracy / (1.0 + params / 1_000_000.0),
+                        "measured_accuracy_over_analytic_size",
+                    )
                 },
                 OptimizationObjective::Energy { .. } => {
-                    let energy = evaluation.architecture.estimate_latency() * 0.5; // Simplified
-                    ("energy", 1.0 / (1.0 + energy))
+                    return Err(TrustformersError::invalid_config(
+                        "the Energy objective has no measurement source: this crate cannot read \
+                         an energy counter, and scoring it with a formula would fabricate the \
+                         result. Remove the objective or supply an ArchitectureEvaluator that \
+                         reports `energy` as a custom metric."
+                            .to_string(),
+                    ));
                 },
                 OptimizationObjective::Custom { name, .. } => {
-                    (name.as_str(), 0.5) // Default value for custom objectives
+                    let value = measured.custom_metrics.get(name).copied().ok_or_else(|| {
+                        TrustformersError::invalid_config(format!(
+                            "custom objective `{name}` was requested but the evaluator did not \
+                             report a metric with that name"
+                        ))
+                    })?;
+                    (name.as_str(), value, "evaluator_custom_metric")
                 },
             };
 
             evaluation.metrics.insert(metric_name.to_string(), metric_value);
+            evaluation.info.insert(format!("{metric_name}_source"), source.to_string());
         }
 
         // Compute overall fitness as weighted sum
@@ -1117,128 +1274,5 @@ impl fmt::Display for SearchStatistics {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_nas_config_default() {
-        let config = NASConfig::default();
-        assert_eq!(config.max_evaluations, 1000);
-        assert_eq!(config.population_size, 50);
-        assert!(matches!(config.strategy, SearchStrategy::Evolutionary));
-    }
-
-    #[test]
-    fn test_transformer_search_space() {
-        let space = SearchSpace::transformer_space();
-        assert!(space.dimensions.contains_key("num_layers"));
-        assert!(space.dimensions.contains_key("hidden_size"));
-        assert!(space.choices.contains_key("activation"));
-    }
-
-    #[test]
-    fn test_architecture_random_generation() {
-        let space = SearchSpace::transformer_space();
-        let mut rng = StdRng::seed_from_u64(42);
-        let arch = Architecture::random(&space, &mut rng);
-
-        assert!(!arch.dimensions.is_empty());
-        assert!(!arch.choices.is_empty());
-    }
-
-    #[test]
-    fn test_architecture_parameter_estimation() {
-        let mut arch = Architecture::new();
-        arch.dimensions.insert("hidden_size".to_string(), 768);
-        arch.dimensions.insert("num_layers".to_string(), 12);
-        arch.dimensions.insert("vocab_size".to_string(), 32000);
-
-        let params = arch.estimate_parameters();
-        assert!(params > 100_000_000); // Should be reasonable for BERT-base
-    }
-
-    #[test]
-    fn test_architecture_constraint_validation() {
-        let space = SearchSpace::transformer_space();
-        let mut arch = Architecture::new();
-        arch.dimensions.insert("hidden_size".to_string(), 768);
-        arch.dimensions.insert("num_heads".to_string(), 12);
-        arch.dimensions.insert("intermediate_size".to_string(), 3072);
-
-        assert!(space.validate_architecture(&arch).is_ok());
-
-        // Test invalid architecture
-        arch.dimensions.insert("hidden_size".to_string(), 777); // Not divisible by 12
-        assert!(space.validate_architecture(&arch).is_err());
-    }
-
-    #[test]
-    fn test_architecture_mutation() {
-        let space = SearchSpace::transformer_space();
-        let mut rng = StdRng::seed_from_u64(42);
-        let mut arch = Architecture::random(&space, &mut rng);
-        let original = arch.clone();
-
-        arch.mutate(&space, 1.0, &mut rng); // 100% mutation rate
-
-        // Should have some differences
-        let mut differences = 0;
-        for (key, value) in &arch.dimensions {
-            if original.dimensions.get(key) != Some(value) {
-                differences += 1;
-            }
-        }
-        assert!(differences > 0);
-    }
-
-    #[test]
-    fn test_neural_architecture_searcher_creation() {
-        let config = NASConfig::default();
-        let searcher = NeuralArchitectureSearcher::new(config);
-        assert!(searcher.is_ok());
-    }
-
-    #[test]
-    fn test_dimension_range() {
-        let range = DimensionRange::new(1, 10, 2);
-        assert!(range.validate(1));
-        assert!(range.validate(3));
-        assert!(range.validate(9));
-        assert!(!range.validate(2));
-        assert!(!range.validate(11));
-
-        let mut rng = StdRng::seed_from_u64(42);
-        let sample = range.sample(&mut rng);
-        assert!(range.validate(sample));
-    }
-
-    #[test]
-    fn test_optimization_objectives() {
-        let obj1 = OptimizationObjective::Accuracy { weight: 0.7 };
-        let obj2 = OptimizationObjective::Latency { weight: 0.3 };
-
-        assert_eq!(obj1.weight(), 0.7);
-        assert_eq!(obj2.weight(), 0.3);
-        assert_eq!(obj1.name(), "accuracy");
-        assert_eq!(obj2.name(), "latency");
-    }
-
-    #[test]
-    fn test_architecture_crossover() {
-        let space = SearchSpace::transformer_space();
-        let mut rng = StdRng::seed_from_u64(42);
-
-        let parent1 = Architecture::random(&space, &mut rng);
-        let parent2 = Architecture::random(&space, &mut rng);
-
-        let child = parent1.crossover(&parent2, &mut rng);
-
-        // Child should have dimensions from both parents
-        assert_eq!(child.dimensions.len(), parent1.dimensions.len());
-        assert_eq!(child.choices.len(), parent1.choices.len());
-        assert_eq!(
-            child.metadata.generation,
-            std::cmp::max(parent1.metadata.generation, parent2.metadata.generation) + 1
-        );
-    }
-}
+#[path = "tests.rs"]
+mod tests;

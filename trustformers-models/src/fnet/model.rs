@@ -3,7 +3,7 @@ use crate::fnet::config::FNetConfig;
 use std::io::Read;
 use trustformers_core::{
     device::Device,
-    errors::Result,
+    errors::{tensor_op_error, Result},
     layers::{Embedding, LayerNorm, Linear},
     tensor::Tensor,
     traits::{Config, Layer, Model},
@@ -59,24 +59,55 @@ impl FourierTransform {
         }
     }
 
-    /// Apply Discrete Fourier Transform (DFT)
+    /// Apply the 2-D Discrete Fourier Transform and keep its real part.
+    ///
+    /// This is FNet's token-mixing operation: `Re(F_seq(F_hidden(x)))`.
+    ///
+    /// # Why this needs complex arithmetic
+    ///
+    /// A previous revision built a single matrix holding only
+    /// `cos(-2πkj/N)/√N` and applied it twice. That is **not** the real part of
+    /// the 2-D DFT. Writing the 1-D basis as `e^{-2πi kn/N} = c - i·s`, the
+    /// separable 2-D transform gives
+    ///
+    /// ```text
+    /// Re(X)[k, l] = Σ_n Σ_m x[n, m] · (c_kn·c_lm − s_kn·s_lm)
+    /// ```
+    ///
+    /// The dropped `−s·s` term is exactly what the cosine-only version threw
+    /// away, so its output was a *different linear map* — cosine mixing, not a
+    /// Fourier transform. Both the sine and the cosine components are carried
+    /// through here, so the imaginary part produced by the first axis
+    /// contributes to the real part after the second, as it must.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the input is neither 2-D (`[seq, hidden]`) nor 3-D
+    /// (`[batch, seq, hidden]`), or when an intermediate reshape fails.
     fn apply_dft(&self, x: &Tensor) -> Result<Tensor> {
         // x: [batch_size, seq_len, hidden_size] or [seq_len, hidden_size]
         // Normalise to 3-D so all downstream math is consistent.
         let (x3d, was_2d) =
             if x.shape().len() == 2 { (x.unsqueeze(0)?, true) } else { (x.clone(), false) };
-        let _batch_size = x3d.shape()[0];
-        let _seq_len = x3d.shape()[1];
-        let _hidden_size = x3d.shape()[2];
+        if x3d.shape().len() != 3 {
+            return Err(tensor_op_error(
+                "FourierTransform::apply_dft",
+                format!(
+                    "expected a [seq, hidden] or [batch, seq, hidden] tensor, got shape {:?}",
+                    x.shape()
+                ),
+            ));
+        }
 
-        // Apply DFT along sequence dimension first
-        let x_seq_dft = self.dft_1d(&x3d, 1)?; // DFT along dimension 1 (seq_len)
+        // DFT along the sequence axis. The input is real, so the transform's
+        // imaginary part starts here.
+        let (real_seq, imag_seq) = self.dft_1d_complex(&x3d, None, 1)?;
 
-        // Apply DFT along hidden dimension
-        let x_both_dft = self.dft_1d(&x_seq_dft, 2)?; // DFT along dimension 2 (hidden_size)
+        // DFT along the hidden axis, carrying the complex intermediate.
+        let (real_both, _imag_both) = self.dft_1d_complex(&real_seq, Some(&imag_seq), 2)?;
 
-        // Take real part only (common practice in FNet)
-        let out3d = self.real_part(&x_both_dft)?;
+        // Take the real part (FNet discards the imaginary component).
+        let out3d = real_both;
 
         // Restore original rank if input was 2-D
         if was_2d {
@@ -87,9 +118,17 @@ impl FourierTransform {
     }
 
     /// Apply Real DFT (more efficient variant)
+    ///
+    /// For a real-valued input the negative frequencies are the conjugates of
+    /// the positive ones, so the real part of the full transform is identical to
+    /// the real part of the half-spectrum transform. The result is therefore the
+    /// same as [`FourierTransform::apply_dft`], and this variant delegates to it
+    /// rather than pretending to a different numeric result.
+    ///
+    /// # Errors
+    ///
+    /// See [`FourierTransform::apply_dft`].
     fn apply_real_dft(&self, x: &Tensor) -> Result<Tensor> {
-        // Similar to DFT but optimized for real inputs
-        // For simplicity, we'll implement this as regular DFT taking real part
         self.apply_dft(x)
     }
 
@@ -159,73 +198,125 @@ impl FourierTransform {
         Tensor::from_vec(matrix, &[n, n])
     }
 
-    /// 1D DFT implementation (simplified)
-    fn dft_1d(&self, x: &Tensor, dim: i32) -> Result<Tensor> {
-        // This is a simplified implementation
-        // In practice, you'd use an efficient FFT library
-
-        let shape = x.shape();
-        let n = shape[dim as usize];
-
-        // For simplicity, we'll approximate DFT with a learned transformation
-        // that captures the frequency domain mixing behavior
-
-        // Create a pseudo-DFT matrix that mixes elements
-        let mut dft_matrix = Vec::new();
-        let pi = std::f32::consts::PI;
-
+    /// Orthonormal 1-D DFT basis matrices `C[k, j] = cos(2πkj/n)/√n` and
+    /// `S[k, j] = sin(2πkj/n)/√n`.
+    ///
+    /// The forward transform is `X[k] = Σ_j x[j] e^{-2πi kj/n} / √n`, i.e.
+    /// `Re(X) = C·x` and `Im(X) = −S·x` for a real `x`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `n` is 0 or when the basis tensors cannot be built.
+    fn dft_basis(&self, n: usize) -> Result<(Tensor, Tensor)> {
+        if n == 0 {
+            return Err(tensor_op_error(
+                "FourierTransform::dft_basis",
+                "cannot build a DFT basis for a zero-length axis".to_string(),
+            ));
+        }
+        let mut cos_matrix = Vec::with_capacity(n * n);
+        let mut sin_matrix = Vec::with_capacity(n * n);
+        let scale = 1.0 / (n as f32).sqrt();
+        let two_pi = 2.0 * std::f32::consts::PI;
         for k in 0..n {
             for j in 0..n {
-                let angle = -2.0 * pi * (k * j) as f32 / n as f32;
-                let real_part = angle.cos() / (n as f32).sqrt();
-                dft_matrix.push(real_part);
+                // (k*j) mod n keeps the angle small for long axes, which matters
+                // for f32 precision once k*j exceeds 2^24.
+                let angle = two_pi * ((k * j) % n) as f32 / n as f32;
+                cos_matrix.push(angle.cos() * scale);
+                sin_matrix.push(angle.sin() * scale);
             }
         }
-
-        let dft_tensor = Tensor::from_vec(dft_matrix, &[n, n])?;
-
-        // Apply transformation along the specified dimension.
-        // Both dim=1 (seq) and dim=2 (hidden) use the same reshape strategy:
-        // flatten all outer dims into one batch axis so the matmul is always 2-D.
-        let dft_shape = dft_tensor.shape();
-        let dft_dim0 = dft_shape.len().saturating_sub(2);
-        let dft_dim1 = dft_shape.len().saturating_sub(1);
-        let dft_t = dft_tensor.transpose(dft_dim0, dft_dim1)?;
-
-        if dim == 1 {
-            // Along sequence dimension: treat [batch, seq_len, hidden_size] as
-            // [batch * hidden_size, seq_len] by transposing seq<->hidden first.
-            let batch_size = shape[0];
-            let seq_len = shape[1];
-            let hidden_size = shape[2];
-
-            // Transpose to [batch, hidden_size, seq_len]
-            let x_t = x.transpose(1, 2)?;
-            // Flatten to [batch * hidden_size, seq_len]
-            let reshaped = x_t.reshape(&[batch_size * hidden_size, seq_len])?;
-            // Apply DFT: [batch*hidden, seq] @ [seq, seq] -> [batch*hidden, seq]
-            let transformed = reshaped.matmul(&dft_t)?;
-            // Restore to [batch, hidden_size, seq_len] then transpose back
-            let restored = transformed.reshape(&[batch_size, hidden_size, seq_len])?;
-            restored.transpose(1, 2)
-        } else {
-            // Along hidden dimension - reshape [batch, seq_len, hidden_size] into
-            // [batch * seq_len, hidden_size] so the matmul is 2-D.
-            let batch_size = shape[0];
-            let seq_len = shape[1];
-            let hidden_size = shape[2];
-
-            let reshaped = x.reshape(&[batch_size * seq_len, hidden_size])?;
-            let transformed = reshaped.matmul(&dft_t)?;
-            transformed.reshape(&[batch_size, seq_len, hidden_size])
-        }
+        Ok((
+            Tensor::from_vec(cos_matrix, &[n, n])?,
+            Tensor::from_vec(sin_matrix, &[n, n])?,
+        ))
     }
 
-    /// Extract real part of complex tensor
-    fn real_part(&self, x: &Tensor) -> Result<Tensor> {
-        // Since we're working with real tensors, just return as-is
-        // In a full implementation, this would handle complex numbers
-        Ok(x.clone())
+    /// Apply a 1-D DFT along `dim` to a complex-valued 3-D tensor.
+    ///
+    /// The input is `real + i·imag` (`imag = None` means a real input). The
+    /// transform is the orthonormal forward DFT, so with `C = cos` and
+    /// `S = sin` bases:
+    ///
+    /// ```text
+    /// Re(out) = C·real + S·imag
+    /// Im(out) = C·imag − S·real
+    /// ```
+    ///
+    /// Both components are returned, because dropping the imaginary part between
+    /// the two axes of a 2-D transform changes the result — that omission is
+    /// what made the previous cosine-only implementation something other than a
+    /// Fourier transform.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `dim` is not 1 or 2, when the tensor is not 3-D, or when a
+    /// reshape / matmul fails.
+    fn dft_1d_complex(
+        &self,
+        real: &Tensor,
+        imag: Option<&Tensor>,
+        dim: usize,
+    ) -> Result<(Tensor, Tensor)> {
+        let shape = real.shape();
+        if shape.len() != 3 {
+            return Err(tensor_op_error(
+                "FourierTransform::dft_1d_complex",
+                format!("expected a 3-D tensor, got shape {shape:?}"),
+            ));
+        }
+        if dim != 1 && dim != 2 {
+            return Err(tensor_op_error(
+                "FourierTransform::dft_1d_complex",
+                format!("DFT axis must be 1 (sequence) or 2 (hidden), got {dim}"),
+            ));
+        }
+        let batch_size = shape[0];
+        let seq_len = shape[1];
+        let hidden_size = shape[2];
+        let n = shape[dim];
+
+        let (cos_basis, sin_basis) = self.dft_basis(n)?;
+        // The rows of the basis are frequencies; a right-multiply `x @ Bᵀ`
+        // computes `Σ_j x[.., j] B[k, j]` for every k, which is the transform.
+        let cos_t = cos_basis.transpose(0, 1)?;
+        let sin_t = sin_basis.transpose(0, 1)?;
+
+        // Flatten so the axis under transform is the last one and the matmul is 2-D.
+        let flatten = |t: &Tensor| -> Result<Tensor> {
+            if dim == 1 {
+                // [batch, seq, hidden] -> [batch, hidden, seq] -> [batch*hidden, seq]
+                t.transpose(1, 2)?.reshape(&[batch_size * hidden_size, seq_len])
+            } else {
+                t.reshape(&[batch_size * seq_len, hidden_size])
+            }
+        };
+        let restore = |t: Tensor| -> Result<Tensor> {
+            if dim == 1 {
+                t.reshape(&[batch_size, hidden_size, seq_len])?.transpose(1, 2)
+            } else {
+                t.reshape(&[batch_size, seq_len, hidden_size])
+            }
+        };
+
+        let real_flat = flatten(real)?;
+        let real_cos = real_flat.matmul(&cos_t)?;
+        let real_sin = real_flat.matmul(&sin_t)?;
+
+        let (out_real_flat, out_imag_flat) = match imag {
+            Some(imag) => {
+                let imag_flat = flatten(imag)?;
+                let imag_cos = imag_flat.matmul(&cos_t)?;
+                let imag_sin = imag_flat.matmul(&sin_t)?;
+                // Re = C·re + S·im ; Im = C·im − S·re
+                (real_cos.add(&imag_sin)?, imag_cos.sub(&real_sin)?)
+            },
+            // Real input: Re = C·re ; Im = −S·re
+            None => (real_cos, real_sin.scalar_mul(-1.0)?),
+        };
+
+        Ok((restore(out_real_flat)?, restore(out_imag_flat)?))
     }
 }
 
@@ -704,6 +795,118 @@ mod tests {
     fn make_input(seq_len: usize) -> (Vec<u32>, Option<Vec<u32>>, Option<Vec<u32>>) {
         let ids: Vec<u32> = (0..seq_len as u32).collect();
         (ids, None, None)
+    }
+
+    // ── Fourier transform correctness ────────────────────────────────────────
+
+    /// Reference orthonormal 2-D DFT real part, computed directly from the
+    /// definition with `f64` complex accumulation.
+    fn reference_dft_real(values: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; rows * cols];
+        let scale = 1.0 / ((rows as f64).sqrt() * (cols as f64).sqrt());
+        for k in 0..rows {
+            for l in 0..cols {
+                let mut re = 0.0f64;
+                for n in 0..rows {
+                    for m in 0..cols {
+                        let angle = -2.0
+                            * std::f64::consts::PI
+                            * ((k * n) as f64 / rows as f64 + (l * m) as f64 / cols as f64);
+                        re += values[n * cols + m] as f64 * angle.cos();
+                    }
+                }
+                out[k * cols + l] = (re * scale) as f32;
+            }
+        }
+        out
+    }
+
+    fn fourier_layer(kind: &str) -> FourierTransform {
+        let mut config = tiny_config();
+        config.fourier_transform_type = kind.to_string();
+        config.use_bias_in_fourier = false;
+        FourierTransform::new(&config).expect("Fourier layer must build")
+    }
+
+    /// Regression: `apply_dft` used a cosine-only basis applied twice, dropping
+    /// the `−sin·sin` cross term of the separable 2-D transform. That is a
+    /// different linear map, so its output does not match the real part of a
+    /// genuine 2-D DFT and this comparison fails against it.
+    #[test]
+    fn dft_matches_the_real_part_of_a_direct_2d_fourier_transform() {
+        let rows = 6usize;
+        let cols = 4usize;
+        // A deterministic, non-symmetric signal: a symmetric one would hide the
+        // missing sine term because its sine components vanish.
+        let values: Vec<f32> = (0..rows * cols)
+            .map(|i| ((i * 7) % 13) as f32 - 6.0 + 0.25 * i as f32)
+            .collect();
+        let input = Tensor::from_vec(values.clone(), &[rows, cols]).expect("input must build");
+
+        let layer = fourier_layer("dft");
+        let output = layer.forward(input).expect("Fourier transform must succeed");
+        let got = output.data().expect("output must be readable");
+        let want = reference_dft_real(&values, rows, cols);
+
+        assert_eq!(got.len(), want.len());
+        for (idx, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+            assert!(
+                (g - w).abs() < 1e-3,
+                "element {idx}: FNet produced {g}, the true 2-D DFT real part is {w}"
+            );
+        }
+    }
+
+    /// Parseval / DC sanity: the `[0, 0]` output bin of an orthonormal 2-D DFT
+    /// is the signal's sum divided by `sqrt(rows*cols)`, for any signal.
+    #[test]
+    fn dft_dc_bin_equals_the_normalised_signal_sum() {
+        let rows = 4usize;
+        let cols = 8usize;
+        let values: Vec<f32> = (0..rows * cols).map(|i| (i as f32) * 0.3 - 2.0).collect();
+        let input = Tensor::from_vec(values.clone(), &[rows, cols]).expect("input must build");
+
+        let layer = fourier_layer("dft");
+        let output = layer.forward(input).expect("Fourier transform must succeed");
+        let got = output.data().expect("output must be readable");
+
+        let expected_dc =
+            values.iter().sum::<f32>() / ((rows as f32).sqrt() * (cols as f32).sqrt());
+        assert!(
+            (got[0] - expected_dc).abs() < 1e-3,
+            "DC bin {} must equal the normalised sum {expected_dc}",
+            got[0]
+        );
+    }
+
+    #[test]
+    fn dft_preserves_the_input_shape_for_batched_input() {
+        let layer = fourier_layer("dft");
+        let input = Tensor::from_vec((0..2 * 5 * 3).map(|i| i as f32).collect(), &[2, 5, 3])
+            .expect("input must build");
+        let output = layer.forward(input).expect("Fourier transform must succeed");
+        assert_eq!(output.shape(), vec![2, 5, 3]);
+    }
+
+    #[test]
+    fn real_dft_agrees_with_the_full_dft_for_real_input() {
+        let values: Vec<f32> = (0..4 * 4).map(|i| ((i * 5) % 7) as f32).collect();
+        let full = fourier_layer("dft")
+            .forward(Tensor::from_vec(values.clone(), &[4, 4]).expect("input must build"))
+            .expect("dft must succeed")
+            .data()
+            .expect("readable");
+        let real = fourier_layer("real_dft")
+            .forward(Tensor::from_vec(values, &[4, 4]).expect("input must build"))
+            .expect("real_dft must succeed")
+            .data()
+            .expect("readable");
+        for (a, b) in full.iter().zip(real.iter()) {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "real_dft diverged from dft: {a} vs {b}"
+            );
+        }
     }
 
     // ── Config tests ─────────────────────────────────────────────────────────

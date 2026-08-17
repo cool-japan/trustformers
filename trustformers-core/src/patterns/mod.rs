@@ -13,14 +13,15 @@ pub use builder::{
 };
 
 pub use config_unification::{
-    merge_unified_configs, AccessControlConfig, AccessControlModel, AuthenticationConfig,
-    AuthenticationMethod, BenchmarkConfig, BenchmarkFrequency, CacheConfig, CacheEvictionPolicy,
-    ConfigManager, ConfigMetadata, ConfigSource, CpuLimits, DebugConfig, DebugLevel,
-    DebugOutputFormat, EncryptionConfig, EnvironmentConfig, EnvironmentType, GpuLimits,
-    KeyManagementConfig, KeyStorageLocation, LogFormat, LogLevel, LogOutput, LogRotation,
-    LoggingConfig, MemoryLimits, NetworkLimits, OptimizationConfig, OptimizationLevel,
-    PerformanceConfig, PrecisionConfig, PrecisionType, ProfilingLevel, ResourceConfig,
-    SecurityConfig, SecurityLevel, StorageLimits, TimeoutConfig, UnifiedConfig,
+    merge_unified_config_with_overrides, merge_unified_configs, AccessControlConfig,
+    AccessControlModel, AuthenticationConfig, AuthenticationMethod, BenchmarkConfig,
+    BenchmarkFrequency, CacheConfig, CacheEvictionPolicy, ConfigManager, ConfigMetadata,
+    ConfigSource, CpuLimits, DebugConfig, DebugLevel, DebugOutputFormat, EncryptionConfig,
+    EnvironmentConfig, EnvironmentType, GpuLimits, KeyManagementConfig, KeyStorageLocation,
+    LogFormat, LogLevel, LogOutput, LogRotation, LoggingConfig, MemoryLimits, NetworkLimits,
+    OptimizationConfig, OptimizationLevel, PerformanceConfig, PrecisionConfig, PrecisionType,
+    ProfilingLevel, ResourceConfig, SecurityConfig, SecurityLevel, StorageLimits, TimeoutConfig,
+    UnifiedConfig,
 };
 
 /// Re-export macros for convenience

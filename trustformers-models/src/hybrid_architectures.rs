@@ -517,6 +517,8 @@ pub struct HybridArchitecture {
     pub adaptive_controller: Option<AdaptiveController>,
     /// Cross-modal processor
     pub cross_modal_processor: Option<CrossModalProcessor>,
+    /// Learned fusion / ensemble parameters, owned so they persist across calls
+    pub fusion_operator: components::FusionOperator,
 }
 
 /// Individual component instance
@@ -800,6 +802,7 @@ impl HybridArchitecture {
             fusion_layers,
             adaptive_controller,
             cross_modal_processor,
+            fusion_operator: components::FusionOperator::new(),
         })
     }
 
@@ -1003,7 +1006,7 @@ impl HybridArchitecture {
 
     /// Fuse multiple outputs using specified method
     fn fuse_outputs(
-        &self,
+        &mut self,
         outputs: &[Tensor],
         fusion_method: &ParallelFusionMethod,
     ) -> Result<Tensor> {
@@ -1015,7 +1018,7 @@ impl HybridArchitecture {
             return Ok(outputs[0].clone());
         }
 
-        components::fuse(outputs, fusion_method)
+        self.fusion_operator.fuse(outputs, fusion_method)
     }
 
     /// Bottom-up hierarchical processing
@@ -1110,7 +1113,7 @@ impl HybridArchitecture {
     /// weights, so weighted averaging, boosting and dynamic selection all use
     /// measured performance rather than a fixed constant.
     fn combine_ensemble_outputs(
-        &self,
+        &mut self,
         outputs: &[Tensor],
         combination_method: &EnsembleMethod,
     ) -> Result<Tensor> {
@@ -1120,7 +1123,7 @@ impl HybridArchitecture {
             .filter(|component| component.state.is_active)
             .map(|component| component.metrics.accuracy_contribution)
             .collect();
-        components::combine_ensemble(outputs, &weights, combination_method)
+        self.fusion_operator.combine_ensemble(outputs, &weights, combination_method)
     }
 
     /// Initialize components from configuration

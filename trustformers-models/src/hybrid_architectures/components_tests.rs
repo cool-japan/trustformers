@@ -213,7 +213,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     use crate::hybrid_architectures::components::{
-        activation_energy, combine_ensemble, fuse, prediction_confidence, ComponentModule,
+        activation_energy, prediction_confidence, ComponentModule, FusionOperator,
     };
 
     fn sequence(batch: usize, seq: usize, width: usize, seed: f32) -> Tensor {
@@ -432,7 +432,7 @@ mod tests {
             ParallelFusionMethod::CrossAttention,
             ParallelFusionMethod::MultiModal,
         ] {
-            let fused = fuse(&inputs, &method).expect("fuse");
+            let fused = FusionOperator::new().fuse(&inputs, &method).expect("fuse");
             assert_eq!(
                 fused.shape(),
                 inputs[0].shape(),
@@ -451,7 +451,8 @@ mod tests {
     fn test_additive_and_multiplicative_fusion_match_their_definitions() {
         let inputs = fusion_inputs();
 
-        let added = fuse(&inputs, &ParallelFusionMethod::Addition)
+        let added = FusionOperator::new()
+            .fuse(&inputs, &ParallelFusionMethod::Addition)
             .expect("add")
             .to_vec_f32()
             .expect("v");
@@ -461,7 +462,8 @@ mod tests {
             "mean of 2.0 and 0.5 is 1.25"
         );
 
-        let multiplied = fuse(&inputs, &ParallelFusionMethod::Multiplication)
+        let multiplied = FusionOperator::new()
+            .fuse(&inputs, &ParallelFusionMethod::Multiplication)
             .expect("mul")
             .to_vec_f32()
             .expect("v");
@@ -472,12 +474,14 @@ mod tests {
     #[test]
     fn test_single_input_fusion_is_the_identity() {
         let inputs = vec![fusion_inputs()[0].clone()];
-        let fused = fuse(&inputs, &ParallelFusionMethod::Gating).expect("fuse");
+        let fused = FusionOperator::new()
+            .fuse(&inputs, &ParallelFusionMethod::Gating)
+            .expect("fuse");
         assert_eq!(
             fused.to_vec_f32().expect("f"),
             inputs[0].to_vec_f32().expect("i")
         );
-        assert!(fuse(&[], &ParallelFusionMethod::Addition).is_err());
+        assert!(FusionOperator::new().fuse(&[], &ParallelFusionMethod::Addition).is_err());
     }
 
     // --- ensembles ---
@@ -494,7 +498,9 @@ mod tests {
             EnsembleMethod::Stacking,
             EnsembleMethod::Boosting,
         ] {
-            let combined = combine_ensemble(&outputs, &weights, &method).expect("combine");
+            let combined = FusionOperator::new()
+                .combine_ensemble(&outputs, &weights, &method)
+                .expect("combine");
             let values = combined.to_vec_f32().expect("v");
             assert!(
                 values.iter().zip(first.iter()).any(|(x, y)| (x - y).abs() > 1e-6),
@@ -506,11 +512,11 @@ mod tests {
     #[test]
     fn test_weighted_averaging_matches_its_weights() {
         let outputs = fusion_inputs();
-        let combined =
-            combine_ensemble(&outputs, &[0.25, 0.75], &EnsembleMethod::WeightedAveraging)
-                .expect("combine")
-                .to_vec_f32()
-                .expect("v");
+        let combined = FusionOperator::new()
+            .combine_ensemble(&outputs, &[0.25, 0.75], &EnsembleMethod::WeightedAveraging)
+            .expect("combine")
+            .to_vec_f32()
+            .expect("v");
         // 0.25 * 1.0 + 0.75 * -1.0 = -0.5
         assert!((combined[0] + 0.5).abs() < 1e-6, "{combined:?}");
     }
@@ -518,7 +524,8 @@ mod tests {
     #[test]
     fn test_dynamic_selection_picks_the_best_member() {
         let outputs = fusion_inputs();
-        let selected = combine_ensemble(&outputs, &[0.1, 0.9], &EnsembleMethod::DynamicSelection)
+        let selected = FusionOperator::new()
+            .combine_ensemble(&outputs, &[0.1, 0.9], &EnsembleMethod::DynamicSelection)
             .expect("combine");
         assert_eq!(
             selected.to_vec_f32().expect("v"),
@@ -533,11 +540,11 @@ mod tests {
             Tensor::from_vec(vec![2.0, 1.0, 0.0], &[1, 3]).expect("b"),
             Tensor::from_vec(vec![0.0, 5.0, 0.0], &[1, 3]).expect("c"),
         ];
-        let combined =
-            combine_ensemble(&members, &[1.0, 1.0, 1.0], &EnsembleMethod::MajorityVoting)
-                .expect("vote")
-                .to_vec_f32()
-                .expect("v");
+        let combined = FusionOperator::new()
+            .combine_ensemble(&members, &[1.0, 1.0, 1.0], &EnsembleMethod::MajorityVoting)
+            .expect("vote")
+            .to_vec_f32()
+            .expect("v");
         assert_eq!(
             combined,
             vec![1.0, 0.0, 0.0],
@@ -646,5 +653,78 @@ mod tests {
             .expect("config");
         let mut architecture = HybridArchitecture::new(config).expect("architecture");
         assert!(architecture.forward(&[sequence(1, 2, 4, 0.1)]).is_err());
+    }
+
+    #[test]
+    fn test_fusion_parameters_persist_across_calls() {
+        // Regression: building the projection inside `fuse` re-randomized the
+        // weights on every call, so the same inputs gave different outputs.
+        let inputs = fusion_inputs();
+        let mut operator = FusionOperator::new();
+
+        for method in [
+            ParallelFusionMethod::Concatenation,
+            ParallelFusionMethod::Gating,
+            ParallelFusionMethod::CrossAttention,
+        ] {
+            let first = operator.fuse(&inputs, &method).expect("first");
+            let second = operator.fuse(&inputs, &method).expect("second");
+            assert_eq!(
+                first.to_vec_f32().expect("a"),
+                second.to_vec_f32().expect("b"),
+                "{method:?} must be deterministic across calls"
+            );
+        }
+        assert!(
+            operator.parameter_count() > 0,
+            "the operator must own the projections it uses"
+        );
+    }
+
+    #[test]
+    fn test_stacking_ensemble_is_deterministic() {
+        let outputs = fusion_inputs();
+        let mut operator = FusionOperator::new();
+        let first = operator
+            .combine_ensemble(&outputs, &[0.5, 0.5], &EnsembleMethod::Stacking)
+            .expect("first");
+        let second = operator
+            .combine_ensemble(&outputs, &[0.5, 0.5], &EnsembleMethod::Stacking)
+            .expect("second");
+        assert_eq!(
+            first.to_vec_f32().expect("a"),
+            second.to_vec_f32().expect("b")
+        );
+    }
+
+    #[test]
+    fn test_architecture_forward_is_deterministic() {
+        let config = HybridConfig::builder()
+            .add_component(ArchitecturalComponent::Attention {
+                attention_type: AttentionType::SelfAttention,
+                num_heads: 2,
+                key_dim: 8,
+            })
+            .add_component(ArchitecturalComponent::RNN {
+                layers: 1,
+                hidden_size: 8,
+                cell_type: RNNCellType::GRU,
+                bidirectional: false,
+            })
+            .fusion_strategy(FusionStrategy::Parallel {
+                fusion_method: ParallelFusionMethod::Concatenation,
+            })
+            .build()
+            .expect("config");
+        let mut architecture = HybridArchitecture::new(config).expect("architecture");
+        let input = sequence(1, 3, 8, 0.3);
+
+        let first = architecture.forward(std::slice::from_ref(&input)).expect("first");
+        let second = architecture.forward(std::slice::from_ref(&input)).expect("second");
+        assert_eq!(
+            first.to_vec_f32().expect("a"),
+            second.to_vec_f32().expect("b"),
+            "a forward pass must not re-randomize its own parameters"
+        );
     }
 }

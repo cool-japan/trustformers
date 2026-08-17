@@ -361,3 +361,255 @@ impl BertFixtureSpec {
         build_safetensors(&self.tensors())
     }
 }
+
+/// Fixture builder for a LLaMA-family decoder-only checkpoint.
+///
+/// Yi, Mistral, StarCoder2, Phi-4, Nemotron and the LLaMA line all ship the same
+/// HuggingFace tensor layout — `model.layers.{i}.self_attn.{q,k,v,o}_proj`,
+/// `model.layers.{i}.mlp.{gate,up,down}_proj`, two RMS norms per layer and a
+/// final `model.norm` — differing only in widths, in whether the projections
+/// carry biases, and in whether the MLP is gated. One spec therefore covers all
+/// of them, which is what makes a per-model round-trip test cheap enough to be
+/// worth having for every architecture.
+#[derive(Debug, Clone)]
+pub struct DecoderFixtureSpec {
+    /// Prefix the checkpoint nests the backbone under, e.g. `"model."` or `""`.
+    pub prefix: String,
+    /// Vocabulary size.
+    pub vocab_size: usize,
+    /// Residual-stream width.
+    pub hidden_size: usize,
+    /// Feed-forward inner width.
+    pub intermediate_size: usize,
+    /// Number of decoder layers.
+    pub num_layers: usize,
+    /// Output width of `q_proj` (`num_attention_heads * head_dim`).
+    pub q_width: usize,
+    /// Output width of `k_proj` / `v_proj` (`num_key_value_heads * head_dim`).
+    pub kv_width: usize,
+    /// Whether the attention projections carry biases.
+    pub attention_bias: bool,
+    /// Whether the MLP projections carry biases.
+    pub mlp_bias: bool,
+    /// Whether the MLP is gated (`gate_proj` + `up_proj` + `down_proj`) rather
+    /// than a plain two-layer FFN (`fc1` + `fc2`).
+    pub gated_mlp: bool,
+    /// Whether each layer carries a `post_attention_layernorm` (a parallel
+    /// architecture such as Phi-2 has only `input_layernorm`).
+    pub post_attention_norm: bool,
+    /// Whether the norms carry biases (LayerNorm) rather than being RMS norms.
+    pub norm_bias: bool,
+    /// Whether to emit a standalone `lm_head.weight`.
+    pub include_lm_head: bool,
+    /// Spelling of the attention output projection (`o_proj` or `dense`).
+    pub attention_output_name: String,
+}
+
+impl DecoderFixtureSpec {
+    /// A LLaMA-style (SwiGLU, RMS norm, no biases) spec.
+    pub fn llama_style(
+        prefix: &str,
+        vocab_size: usize,
+        hidden_size: usize,
+        intermediate_size: usize,
+        num_layers: usize,
+        q_width: usize,
+        kv_width: usize,
+    ) -> Self {
+        Self {
+            prefix: prefix.to_string(),
+            vocab_size,
+            hidden_size,
+            intermediate_size,
+            num_layers,
+            q_width,
+            kv_width,
+            attention_bias: false,
+            mlp_bias: false,
+            gated_mlp: true,
+            post_attention_norm: true,
+            norm_bias: false,
+            include_lm_head: false,
+            attention_output_name: "o_proj".to_string(),
+        }
+    }
+
+    /// Every tensor a decoder of this shape expects, each with a distinct
+    /// deterministic ramp so a test can tell two parameters apart.
+    pub fn tensors(&self) -> Vec<F32Tensor> {
+        let prefix = &self.prefix;
+        let hidden = self.hidden_size;
+        let intermediate = self.intermediate_size;
+        let mut seed = 0.0f32;
+        let mut next_seed = || {
+            seed += 1.0;
+            seed
+        };
+
+        let mut tensors = vec![F32Tensor::ramp(
+            &format!("{prefix}embed_tokens.weight"),
+            &[self.vocab_size, hidden],
+            next_seed(),
+        )];
+
+        let push_linear = |tensors: &mut Vec<F32Tensor>,
+                           name: String,
+                           out: usize,
+                           inp: usize,
+                           bias: bool,
+                           s: f32| {
+            tensors.push(F32Tensor::ramp(&format!("{name}.weight"), &[out, inp], s));
+            if bias {
+                tensors.push(F32Tensor::ramp(&format!("{name}.bias"), &[out], s + 0.25));
+            }
+        };
+
+        for layer in 0..self.num_layers {
+            let attn = format!("{prefix}layers.{layer}.self_attn");
+            let seeds = [
+                next_seed(),
+                next_seed(),
+                next_seed(),
+                next_seed(),
+                next_seed(),
+                next_seed(),
+                next_seed(),
+            ];
+            push_linear(
+                &mut tensors,
+                format!("{attn}.q_proj"),
+                self.q_width,
+                hidden,
+                self.attention_bias,
+                seeds[0],
+            );
+            push_linear(
+                &mut tensors,
+                format!("{attn}.k_proj"),
+                self.kv_width,
+                hidden,
+                self.attention_bias,
+                seeds[1],
+            );
+            push_linear(
+                &mut tensors,
+                format!("{attn}.v_proj"),
+                self.kv_width,
+                hidden,
+                self.attention_bias,
+                seeds[2],
+            );
+            push_linear(
+                &mut tensors,
+                format!("{attn}.{}", self.attention_output_name),
+                hidden,
+                self.q_width,
+                self.attention_bias,
+                seeds[3],
+            );
+
+            let mlp = format!("{prefix}layers.{layer}.mlp");
+            if self.gated_mlp {
+                push_linear(
+                    &mut tensors,
+                    format!("{mlp}.gate_proj"),
+                    intermediate,
+                    hidden,
+                    self.mlp_bias,
+                    seeds[4],
+                );
+                push_linear(
+                    &mut tensors,
+                    format!("{mlp}.up_proj"),
+                    intermediate,
+                    hidden,
+                    self.mlp_bias,
+                    seeds[5],
+                );
+                push_linear(
+                    &mut tensors,
+                    format!("{mlp}.down_proj"),
+                    hidden,
+                    intermediate,
+                    self.mlp_bias,
+                    seeds[6],
+                );
+            } else {
+                push_linear(
+                    &mut tensors,
+                    format!("{mlp}.fc1"),
+                    intermediate,
+                    hidden,
+                    self.mlp_bias,
+                    seeds[4],
+                );
+                push_linear(
+                    &mut tensors,
+                    format!("{mlp}.fc2"),
+                    hidden,
+                    intermediate,
+                    self.mlp_bias,
+                    seeds[5],
+                );
+            }
+
+            let input_norm = format!("{prefix}layers.{layer}.input_layernorm");
+            tensors.push(F32Tensor::ramp(
+                &format!("{input_norm}.weight"),
+                &[hidden],
+                next_seed(),
+            ));
+            if self.norm_bias {
+                tensors.push(F32Tensor::ramp(
+                    &format!("{input_norm}.bias"),
+                    &[hidden],
+                    next_seed(),
+                ));
+            }
+            if self.post_attention_norm {
+                let post_norm = format!("{prefix}layers.{layer}.post_attention_layernorm");
+                tensors.push(F32Tensor::ramp(
+                    &format!("{post_norm}.weight"),
+                    &[hidden],
+                    next_seed(),
+                ));
+                if self.norm_bias {
+                    tensors.push(F32Tensor::ramp(
+                        &format!("{post_norm}.bias"),
+                        &[hidden],
+                        next_seed(),
+                    ));
+                }
+            }
+        }
+
+        let final_norm = format!("{prefix}norm");
+        tensors.push(F32Tensor::ramp(
+            &format!("{final_norm}.weight"),
+            &[hidden],
+            next_seed(),
+        ));
+        if self.norm_bias {
+            tensors.push(F32Tensor::ramp(
+                &format!("{final_norm}.bias"),
+                &[hidden],
+                next_seed(),
+            ));
+        }
+
+        if self.include_lm_head {
+            tensors.push(F32Tensor::ramp(
+                "lm_head.weight",
+                &[self.vocab_size, hidden],
+                next_seed(),
+            ));
+        }
+
+        tensors
+    }
+
+    /// The fixture serialised as a safetensors byte stream.
+    pub fn safetensors(&self) -> Vec<u8> {
+        build_safetensors(&self.tensors())
+    }
+}

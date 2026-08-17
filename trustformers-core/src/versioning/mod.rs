@@ -16,7 +16,8 @@ mod storage;
 
 pub use deployment::{
     ActiveDeployment, DeploymentConfig, DeploymentEvent, DeploymentEventType, DeploymentManager,
-    DeploymentStatistics, DeploymentStatus, DeploymentStrategy, Environment, HealthStatus,
+    DeploymentStatistics, DeploymentStatus, DeploymentStrategy, Environment, HealthProbe,
+    HealthStatus,
 };
 pub use integration::{
     ModelRoutingResult, PromotionResult, VersionExperimentConfig, VersionExperimentResult,

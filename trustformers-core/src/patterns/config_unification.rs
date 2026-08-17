@@ -959,32 +959,76 @@ impl Default for ConfigManager {
     }
 }
 
-/// Deep-merge two unified configurations.
+/// Merge a *partial* override, expressed as JSON, on top of a base config.
 ///
-/// The merge is field-wise over the serde representation: every value present
-/// in `override_config` wins, and every field it does not mention keeps the
-/// value from `base`. Nested objects are merged recursively, so overriding a
-/// single `logging.level` no longer discards the whole `resources` section —
-/// which is what returning `override_config` wholesale used to do.
+/// This is the unambiguous merge: only the keys present in `overrides` change,
+/// nested objects merge recursively, and arrays are replaced wholesale (a list
+/// in an override is a complete specification of that list).
 ///
-/// Arrays are replaced rather than concatenated: a list in an override is a
-/// complete specification of that list.
-pub fn merge_unified_configs(
+/// ```
+/// use trustformers_core::patterns::{merge_unified_config_with_overrides, UnifiedConfig};
+///
+/// let mut base = UnifiedConfig::default();
+/// base.metadata.name = "service".to_string();
+///
+/// let merged = merge_unified_config_with_overrides(
+///     base,
+///     serde_json::json!({"logging": {"level": "Warn"}}),
+/// )
+/// .expect("valid override");
+///
+/// // The override only mentioned the log level, so the name survives.
+/// assert_eq!(merged.metadata.name, "service");
+/// ```
+pub fn merge_unified_config_with_overrides(
     base: UnifiedConfig,
-    override_config: UnifiedConfig,
+    overrides: serde_json::Value,
 ) -> Result<UnifiedConfig> {
     let mut merged = serde_json::to_value(&base).map_err(|error| {
         crate::errors::TrustformersError::serialization_error(format!(
             "failed to serialize base config: {error}"
         ))
     })?;
-    let overrides = serde_json::to_value(&override_config).map_err(|error| {
-        crate::errors::TrustformersError::serialization_error(format!(
-            "failed to serialize override config: {error}"
-        ))
-    })?;
 
     merge_json_values(&mut merged, overrides);
+
+    serde_json::from_value(merged).map_err(|error| {
+        crate::errors::TrustformersError::serialization_error(format!(
+            "merged configuration is not a valid UnifiedConfig: {error}"
+        ))
+    })
+}
+
+/// Merge two fully-populated unified configurations.
+///
+/// `UnifiedConfig` has no optional fields, so an override struct always carries
+/// a value for *every* setting; there is no "unset" to fall back on. This
+/// function therefore treats a field whose override value equals
+/// `UnifiedConfig::default()`'s value as "not specified" and keeps `base`'s
+/// value for it; every other field takes the override.
+///
+/// The consequence, stated plainly: an override that deliberately sets a field
+/// *back to the type default* cannot be distinguished from one that never
+/// touched it. When that matters, use
+/// [`merge_unified_config_with_overrides`], which takes a partial JSON
+/// override and has no such ambiguity.
+pub fn merge_unified_configs(
+    base: UnifiedConfig,
+    override_config: UnifiedConfig,
+) -> Result<UnifiedConfig> {
+    let serialize = |config: &UnifiedConfig, what: &str| -> Result<serde_json::Value> {
+        serde_json::to_value(config).map_err(|error| {
+            crate::errors::TrustformersError::serialization_error(format!(
+                "failed to serialize {what} config: {error}"
+            ))
+        })
+    };
+
+    let mut merged = serialize(&base, "base")?;
+    let overrides = serialize(&override_config, "override")?;
+    let defaults = serialize(&UnifiedConfig::default(), "default")?;
+
+    merge_json_against_defaults(&mut merged, &overrides, &defaults);
 
     serde_json::from_value(merged).map_err(|error| {
         crate::errors::TrustformersError::serialization_error(format!(
@@ -1010,9 +1054,120 @@ fn merge_json_values(target: &mut serde_json::Value, overrides: serde_json::Valu
     }
 }
 
+/// Recursively merge `overrides` into `target`, skipping override values that
+/// are indistinguishable from the type's default.
+fn merge_json_against_defaults(
+    target: &mut serde_json::Value,
+    overrides: &serde_json::Value,
+    defaults: &serde_json::Value,
+) {
+    match (target, overrides, defaults) {
+        (
+            serde_json::Value::Object(target_map),
+            serde_json::Value::Object(override_map),
+            serde_json::Value::Object(default_map),
+        ) => {
+            for (key, value) in override_map {
+                let default_value = default_map.get(key);
+                match target_map.get_mut(key) {
+                    Some(existing) => match default_value {
+                        Some(default_value) => {
+                            merge_json_against_defaults(existing, value, default_value)
+                        },
+                        // No default to compare against: the override wins.
+                        None => *existing = value.clone(),
+                    },
+                    None => {
+                        target_map.insert(key.clone(), value.clone());
+                    },
+                }
+            }
+        },
+        (target_slot, value, default_value) => {
+            // A leaf that still holds the type default carries no information.
+            if value != default_value {
+                *target_slot = value.clone();
+            }
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test: `merge_unified_configs` ignored `base` entirely and
+    /// returned `override_config`, so layering a partial override wiped every
+    /// unrelated section.
+    #[test]
+    fn test_merge_keeps_base_fields_the_override_does_not_change() -> Result<()> {
+        let mut base = UnifiedConfig::default();
+        base.metadata.name = "base-name".to_string();
+        base.metadata.version = "1.2.3".to_string();
+        base.resources.memory.max_heap_bytes = Some(4096);
+        base.logging.level = LogLevel::Debug;
+
+        // The override only cares about the logging level.
+        let mut override_config = UnifiedConfig::default();
+        override_config.logging.level = LogLevel::Warn;
+
+        let merged = merge_unified_configs(base.clone(), override_config)?;
+
+        assert_eq!(
+            merged.logging.level,
+            LogLevel::Warn,
+            "the override must win"
+        );
+        assert_eq!(
+            merged.metadata.name, "base-name",
+            "a field the override never mentioned must survive"
+        );
+        assert_eq!(merged.metadata.version, "1.2.3");
+        assert_eq!(
+            merged.resources.memory.max_heap_bytes,
+            Some(4096),
+            "an untouched section must not be reset to its default"
+        );
+
+        Ok(())
+    }
+
+    /// The unambiguous partial-override API keeps everything it does not name.
+    #[test]
+    fn test_partial_json_override_keeps_the_rest_of_the_base() -> Result<()> {
+        let mut base = UnifiedConfig::default();
+        base.metadata.name = "base-name".to_string();
+        base.resources.memory.max_heap_bytes = Some(4096);
+
+        let merged = merge_unified_config_with_overrides(
+            base,
+            serde_json::json!({"logging": {"level": "Warn"}}),
+        )?;
+
+        assert_eq!(merged.logging.level, LogLevel::Warn);
+        assert_eq!(merged.metadata.name, "base-name");
+        assert_eq!(merged.resources.memory.max_heap_bytes, Some(4096));
+        Ok(())
+    }
+
+    #[test]
+    fn test_merge_json_values_is_recursive() {
+        let mut target = serde_json::json!({
+            "a": {"x": 1, "y": 2},
+            "b": [1, 2, 3],
+            "c": "keep",
+        });
+        merge_json_values(
+            &mut target,
+            serde_json::json!({"a": {"y": 20, "z": 30}, "b": [9]}),
+        );
+
+        assert_eq!(target["a"]["x"], 1, "untouched nested field survives");
+        assert_eq!(target["a"]["y"], 20, "overridden nested field wins");
+        assert_eq!(target["a"]["z"], 30, "new nested field is added");
+        assert_eq!(target["b"], serde_json::json!([9]), "arrays are replaced");
+        assert_eq!(target["c"], "keep");
+    }
     use tempfile::tempdir;
 
     #[test]

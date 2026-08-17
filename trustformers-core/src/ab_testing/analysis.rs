@@ -306,36 +306,19 @@ impl StatisticalAnalyzer {
         })
     }
 
-    /// Calculate p-value (simplified)
-    fn calculate_p_value(&self, t_stat: f64, _df: f64) -> f64 {
-        // Simplified normal approximation
-        // In practice, use proper t-distribution
-        let z = t_stat;
-        2.0 * (1.0 - self.normal_cdf(z))
+    /// Two-sided p-value from the exact Student-t distribution.
+    ///
+    /// A normal approximation would understate p at the sample sizes A/B tests
+    /// actually run at (n = 10 per arm understates it by ~25%), declaring
+    /// experiments significant early. Degrees of freedom are used, not
+    /// discarded.
+    fn calculate_p_value(&self, t_stat: f64, df: f64) -> f64 {
+        crate::statistics::student_t_two_sided_p_value(t_stat, df).unwrap_or(1.0)
     }
 
-    /// Normal CDF approximation
+    /// Standard normal CDF.
     fn normal_cdf(&self, x: f64) -> f64 {
-        0.5 * (1.0 + self.erf(x / std::f64::consts::SQRT_2))
-    }
-
-    /// Error function approximation
-    fn erf(&self, x: f64) -> f64 {
-        // Abramowitz and Stegun approximation
-        let a1 = 0.254829592;
-        let a2 = -0.284496736;
-        let a3 = 1.421413741;
-        let a4 = -1.453152027;
-        let a5 = 1.061405429;
-        let p = 0.3275911;
-
-        let sign = if x < 0.0 { -1.0 } else { 1.0 };
-        let x = x.abs();
-
-        let t = 1.0 / (1.0 + p * x);
-        let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x).exp();
-
-        sign * y
+        crate::statistics::normal_cdf(x)
     }
 
     /// Calculate statistical power
@@ -411,6 +394,36 @@ impl StatisticalAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test: `calculate_p_value` discarded its `df` argument and
+    /// used a normal approximation, so a small experiment looked significant
+    /// far too early.
+    #[test]
+    fn test_p_value_uses_degrees_of_freedom() {
+        let analyzer = StatisticalAnalyzer::new();
+
+        // With df = 10 the two-sided 5% critical value is 2.228.
+        let p_small_sample = analyzer.calculate_p_value(2.228, 10.0);
+        assert!(
+            (p_small_sample - 0.05).abs() < 5e-4,
+            "df=10, t=2.228 should give p ~= 0.05, got {p_small_sample}"
+        );
+
+        // The normal approximation the old code used gives ~0.026 here.
+        let normal_approximation = 2.0 * (1.0 - analyzer.normal_cdf(2.228));
+        assert!(
+            p_small_sample > normal_approximation * 1.5,
+            "the exact p ({p_small_sample}) must be well above the normal approximation \
+             ({normal_approximation})"
+        );
+
+        // The p-value must actually depend on df: more data, smaller p.
+        let p_large_sample = analyzer.calculate_p_value(2.228, 1000.0);
+        assert!(
+            p_large_sample < p_small_sample,
+            "1000 df should give a smaller p ({p_large_sample}) than 10 df ({p_small_sample})"
+        );
+    }
     use crate::ab_testing::MetricValue;
 
     fn create_test_data(mean: f64, std_dev: f64, size: usize) -> Vec<MetricDataPoint> {

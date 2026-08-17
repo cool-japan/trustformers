@@ -34,6 +34,15 @@
 //! - Statistics and probability theory
 //! - Computational mathematics
 //!
+//! ## Architecture
+//!
+//! [`ScientificModel`] embeds token ids with a domain-sized vocabulary and
+//! [`ScientificAttention`] performs real scaled dot-product attention (see
+//! [`trustformers_core::layers::GroupedQueryAttention`]), followed by a
+//! SiLU-gated [`ScientificMLP`]. [`ScientificForCausalLM::generate`] drives
+//! real autoregressive decoding through a byte-level tokenizer (see the
+//! `generate_with_config` doc below) rather than echoing the prompt.
+//!
 //! ## Example Usage
 //!
 //! ```rust,no_run
@@ -55,13 +64,29 @@
 //! ```
 
 use crate::common_patterns::GenerationConfig;
+use crate::generation_utils::GenerationUtils;
 use anyhow::Result;
+use scirs2_core::random::*;
 use serde::{Deserialize, Serialize};
-use std::io::Read;
-use trustformers_core::errors::{tensor_op_error, Result as CoreResult};
-use trustformers_core::layers::{Embedding, Linear, RMSNorm};
+use trustformers_core::errors::{not_implemented, tensor_op_error, Result as CoreResult};
+use trustformers_core::layers::{
+    Embedding, FlashAttentionInput, GroupedQueryAttention, Linear, RMSNorm,
+};
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::{Config, Layer, Model};
+
+/// First token id used for byte-level tokens; ids below this are reserved
+/// (`bos_token_id`/`eos_token_id`/padding). See [`ScientificForCausalLM::generate`].
+const BYTE_TOKEN_OFFSET: u32 = 8;
+/// One token per possible byte value.
+const BYTE_VOCAB_SIZE: u32 = 256;
+/// Hard safety cap on total sequence length regardless of the caller's
+/// `max_new_tokens`.
+const MAX_SEQUENCE_LENGTH: usize = 4096;
+
+fn min_vocab_size() -> usize {
+    (BYTE_TOKEN_OFFSET + BYTE_VOCAB_SIZE) as usize
+}
 
 /// Scientific domain specialization types
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -426,63 +451,11 @@ impl Model for ScientificModel {
     fn forward(&self, input: Self::Input) -> CoreResult<Self::Output> {
         // Convert input to token IDs if needed
         let token_ids: Vec<u32> = input.to_vec_f32()?.into_iter().map(|x| x as u32).collect();
-        let mut hidden_states = self.embed_tokens.forward(token_ids)?;
-
-        // Pass through all layers
-        for layer in &self.layers {
-            hidden_states = layer.forward(hidden_states)?;
-        }
-
-        // Final norm
-        hidden_states = self.norm.forward(hidden_states)?;
-        Ok(hidden_states)
+        Layer::forward(self, token_ids)
     }
 
     fn load_pretrained(&mut self, reader: &mut dyn std::io::Read) -> CoreResult<()> {
-        // Read all data from the reader
-        let mut buffer = Vec::new();
-        let reader = reader;
-        reader.read_to_end(&mut buffer).map_err(|e| {
-            trustformers_core::errors::TrustformersError::io_error(format!(
-                "Failed to read weight data: {}",
-                e
-            ))
-        })?;
-
-        // Validate that we have reasonable weight data
-        if buffer.len() < 1024 {
-            return Err(trustformers_core::errors::TrustformersError::io_error(
-                "Weight data appears to be too small".to_string(),
-            ));
-        }
-
-        // Create a temporary file for the weight loading system
-        let temp_file =
-            std::env::temp_dir().join(format!("scientific_weights_{}.bin", std::process::id()));
-        std::fs::write(&temp_file, &buffer).map_err(|e| {
-            trustformers_core::errors::TrustformersError::io_error(format!(
-                "Failed to write temporary weights: {}",
-                e
-            ))
-        })?;
-
-        // Use enhanced loading with fallback for scientific models
-        let result = if let Some(path_str) = temp_file.to_str() {
-            println!(
-                "Scientific model weight loading - weights successfully processed from {:?}",
-                path_str
-            );
-            Ok(())
-        } else {
-            Err(trustformers_core::errors::TrustformersError::io_error(
-                "Failed to convert temporary file path to string".to_string(),
-            ))
-        };
-
-        // Clean up temporary file
-        let _ = std::fs::remove_file(&temp_file);
-
-        result
+        checked_unimplemented_load(reader, "ScientificModel")
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -506,14 +479,16 @@ pub struct ScientificLayer {
     post_attention_layernorm: RMSNorm,
 }
 
-/// Scientific attention mechanism
+/// Scientific attention mechanism.
+///
+/// Backed by [`GroupedQueryAttention`], which performs real scaled
+/// dot-product attention (`softmax(QK^T / sqrt(head_dim)) V`) with causal
+/// masking and, when `num_key_value_heads < num_attention_heads`,
+/// grouped-query key/value sharing. The previous implementation computed
+/// `q_proj(x) + v_proj(x)` and discarded the key projection entirely; this
+/// one actually uses it to compute attention scores.
 pub struct ScientificAttention {
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
-    o_proj: Linear,
-    #[allow(dead_code)]
-    config: ScientificConfig,
+    attn: GroupedQueryAttention,
 }
 
 /// Scientific MLP with domain-aware processing
@@ -521,11 +496,7 @@ pub struct ScientificMLP {
     gate_proj: Linear,
     up_proj: Linear,
     down_proj: Linear,
-    #[allow(dead_code)]
-    config: ScientificConfig,
 }
-
-// Import actual implementations from trustformers_core
 
 /// Scientific model for causal language modeling
 pub struct ScientificForCausalLM {
@@ -551,7 +522,31 @@ impl ScientificForCausalLM {
         })
     }
 
+    /// Generate a continuation of `input`, sampling with a fresh
+    /// (non-reproducible) random source. For reproducible output see
+    /// [`ScientificForCausalLM::generate_with_seed`].
+    ///
+    /// This used to return `Ok(format!("[Scientific Generated]: {}", prompt))`,
+    /// a formatted echo of the input. It now runs real autoregressive
+    /// decoding: a byte-level tokenizer (see the module-level docs) encodes
+    /// the prompt, the real transformer forward pass produces logits at each
+    /// step, and [`GenerationUtils`] samples the next token. With random
+    /// (untrained) weights the output is not fluent prose, but it is genuine
+    /// model output that varies with the seed, prompt, and weights.
     pub fn generate(&self, input: &str, max_length: usize) -> Result<String> {
+        let mut rng = thread_rng();
+        self.generate_impl(input, max_length, &mut rng)
+    }
+
+    /// Generate a continuation of `input` with a seeded RNG, so the output is
+    /// reproducible for a fixed model, prompt, and seed - and changes when
+    /// the seed changes.
+    pub fn generate_with_seed(&self, input: &str, max_length: usize, seed: u64) -> Result<String> {
+        let mut rng = StdRng::seed_from_u64(seed);
+        self.generate_impl(input, max_length, &mut rng)
+    }
+
+    fn generate_impl(&self, input: &str, max_length: usize, rng: &mut impl Rng) -> Result<String> {
         // Create generation config optimized for scientific text
         let gen_config = GenerationConfig {
             max_new_tokens: max_length,
@@ -564,9 +559,7 @@ impl ScientificForCausalLM {
 
         // Enhance prompt for scientific context
         let enhanced_prompt = self.enhance_scientific_prompt(input)?;
-        let generation = self.generate_with_config(&enhanced_prompt, &gen_config)?;
-
-        Ok(generation)
+        self.generate_with_config(&enhanced_prompt, &gen_config, rng)
     }
 
     pub fn analyze_scientific_text(&self, text: &str) -> Result<ScientificAnalysis> {
@@ -608,8 +601,8 @@ impl ScientificForCausalLM {
             ..Default::default()
         };
 
-        let hypothesis = self.generate_with_config(&hypothesis_prompt, &gen_config)?;
-        Ok(hypothesis)
+        let mut rng = thread_rng();
+        self.generate_with_config(&hypothesis_prompt, &gen_config, &mut rng)
     }
 
     pub fn summarize_paper(&self, paper_text: &str) -> Result<String> {
@@ -626,8 +619,123 @@ impl ScientificForCausalLM {
             ..Default::default()
         };
 
-        let summary = self.generate_with_config(&summary_prompt, &gen_config)?;
-        Ok(summary)
+        let mut rng = thread_rng();
+        self.generate_with_config(&summary_prompt, &gen_config, &mut rng)
+    }
+
+    /// Real forward pass from token ids straight through to logits. Used by
+    /// generation to drive autoregressive decoding without going through the
+    /// `Layer`/`Model` trait objects.
+    fn forward_logits(&self, input_ids: &[u32]) -> CoreResult<Tensor> {
+        let hidden_states = Layer::forward(&self.model, input_ids.to_vec())?;
+        self.lm_head.forward(hidden_states)
+    }
+
+    /// Encode `text` as byte-level token ids, prefixed with `bos_token_id`.
+    /// See the module-level docs for why this crate defines its own
+    /// tokenizer rather than assuming a BPE vocabulary these configs do not
+    /// actually ship.
+    fn encode_text(&self, text: &str) -> Result<Vec<u32>> {
+        if self.config.vocab_size < min_vocab_size() {
+            anyhow::bail!(
+                "vocab_size {} is too small for the byte-level tokenizer (needs >= {})",
+                self.config.vocab_size,
+                min_vocab_size()
+            );
+        }
+        let mut ids = Vec::with_capacity(text.len() + 1);
+        ids.push(self.config.bos_token_id);
+        ids.extend(text.bytes().map(|b| BYTE_TOKEN_OFFSET + b as u32));
+        Ok(ids)
+    }
+
+    /// Decode generated token ids back to text; ids outside the byte range
+    /// carry no text content and are dropped.
+    fn decode_tokens(tokens: &[u32]) -> String {
+        let bytes: Vec<u8> = tokens
+            .iter()
+            .filter_map(|&t| {
+                if (BYTE_TOKEN_OFFSET..BYTE_TOKEN_OFFSET + BYTE_VOCAB_SIZE).contains(&t) {
+                    Some((t - BYTE_TOKEN_OFFSET) as u8)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// Run real autoregressive generation and decode only the newly
+    /// generated suffix - never the prompt itself, which is what made the
+    /// old implementation an echo rather than generation.
+    fn generate_with_config(
+        &self,
+        prompt: &str,
+        config: &GenerationConfig,
+        rng: &mut impl Rng,
+    ) -> Result<String> {
+        let prompt_ids = self.encode_text(prompt)?;
+        let prompt_len = prompt_ids.len();
+        let mut generated = prompt_ids;
+        let target_len = (prompt_len + config.max_new_tokens).min(prompt_len + MAX_SEQUENCE_LENGTH);
+
+        while generated.len() < target_len {
+            let logits_tensor = self.forward_logits(&generated)?;
+            let mut logits = last_position_logits(&logits_tensor)?;
+
+            restrict_logits_to_byte_vocab(&mut logits, self.config.eos_token_id);
+            GenerationUtils::apply_temperature(&mut logits, config.temperature);
+            GenerationUtils::apply_repetition_penalty(
+                &mut logits,
+                &generated,
+                config.repetition_penalty,
+                1.0,
+            );
+
+            let next_token = if !config.do_sample {
+                GenerationUtils::sample_greedy(&logits)
+            } else if let Some(k) = config.top_k {
+                GenerationUtils::sample_top_k(&logits, k, rng)?
+            } else {
+                let p = config.top_p.clamp(1e-4, 1.0);
+                GenerationUtils::sample_top_p(&logits, p, rng)?
+            };
+
+            generated.push(next_token);
+            if next_token == self.config.eos_token_id {
+                break;
+            }
+        }
+
+        Ok(Self::decode_tokens(&generated[prompt_len..]))
+    }
+}
+
+/// Extract the logits for the last sequence position from a `[seq_len,
+/// vocab_size]` logits tensor.
+fn last_position_logits(logits: &Tensor) -> Result<Vec<f32>> {
+    let shape = logits.shape();
+    if shape.len() != 2 {
+        anyhow::bail!(
+            "expected a 2-D [seq_len, vocab_size] logits tensor, got {:?}",
+            shape
+        );
+    }
+    let (seq_len, vocab_size) = (shape[0], shape[1]);
+    let data = logits.data()?;
+    let start = (seq_len - 1) * vocab_size;
+    Ok(data[start..start + vocab_size].to_vec())
+}
+
+/// Restrict sampling to the byte-token range plus EOS, so decoding is always
+/// exact.
+fn restrict_logits_to_byte_vocab(logits: &mut [f32], eos_token_id: u32) {
+    for (id, logit) in logits.iter_mut().enumerate() {
+        let id = id as u32;
+        let in_byte_range = (BYTE_TOKEN_OFFSET..BYTE_TOKEN_OFFSET + BYTE_VOCAB_SIZE).contains(&id);
+        if !in_byte_range && id != eos_token_id {
+            *logit = f32::NEG_INFINITY;
+        }
     }
 }
 
@@ -674,37 +782,27 @@ impl ScientificLayer {
 // Implementation of ScientificAttention
 impl ScientificAttention {
     pub fn new(config: &ScientificConfig) -> Result<Self> {
-        let head_dim = config.hidden_size / config.num_attention_heads;
         let num_kv_heads = config.num_key_value_heads.unwrap_or(config.num_attention_heads);
+        let mut attn = GroupedQueryAttention::new(
+            config.hidden_size,
+            config.num_attention_heads,
+            num_kv_heads,
+            // ScientificConfig does not expose an attention-dropout knob;
+            // 0.0 also keeps inference deterministic.
+            0.0,
+            config.attention_bias,
+        )?;
+        // Decoder-only causal language model: generation must not see future
+        // tokens.
+        attn.set_causal(true);
+        Ok(Self { attn })
+    }
 
-        let q_proj = Linear::new(
-            config.hidden_size,
-            config.num_attention_heads * head_dim,
-            config.attention_bias,
-        );
-        let k_proj = Linear::new(
-            config.hidden_size,
-            num_kv_heads * head_dim,
-            config.attention_bias,
-        );
-        let v_proj = Linear::new(
-            config.hidden_size,
-            num_kv_heads * head_dim,
-            config.attention_bias,
-        );
-        let o_proj = Linear::new(
-            config.num_attention_heads * head_dim,
-            config.hidden_size,
-            config.attention_bias,
-        );
-
-        Ok(Self {
-            q_proj,
-            k_proj,
-            v_proj,
-            o_proj,
-            config: config.clone(),
-        })
+    /// Replace the query/key/value/output projections. Only used by tests to
+    /// prove the key projection actually participates in the output.
+    #[cfg(test)]
+    fn set_projections(&mut self, query: Linear, key: Linear, value: Linear, out_proj: Linear) {
+        self.attn.set_projections(query, key, value, out_proj);
     }
 }
 
@@ -731,7 +829,6 @@ impl ScientificMLP {
             gate_proj,
             up_proj,
             down_proj,
-            config: config.clone(),
         })
     }
 }
@@ -788,35 +885,16 @@ impl Layer for ScientificAttention {
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> CoreResult<Self::Output> {
-        // Domain-aware attention implementation
-        let q = self.q_proj.forward(input.clone())?;
-        let _k = self.k_proj.forward(input.clone())?;
-        let v = self.v_proj.forward(input)?;
-
-        // Simplified attention with scientific context awareness
-        let attention_output = match (&q, &v) {
-            (Tensor::F32(q_arr), Tensor::F32(v_arr)) => {
-                let combined = q_arr + v_arr;
-                Tensor::F32(combined)
-            },
-            _ => {
-                return Err(tensor_op_error(
-                    "tensor_operation",
-                    "Unsupported tensor types for scientific attention",
-                ))
-            },
-        };
-
-        self.o_proj.forward(attention_output)
+        self.attn.forward(FlashAttentionInput {
+            hidden_states: input,
+            attention_mask: None,
+        })
     }
 }
 
 impl ScientificAttention {
     pub fn parameter_count(&self) -> usize {
-        self.q_proj.parameter_count()
-            + self.k_proj.parameter_count()
-            + self.v_proj.parameter_count()
-            + self.o_proj.parameter_count()
+        self.attn.parameter_count()
     }
 }
 
@@ -876,62 +954,11 @@ impl Model for ScientificForCausalLM {
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> CoreResult<Self::Output> {
-        // Convert Vec<u32> to Tensor
-        let seq_len = input.len();
-        let input_tensor =
-            Tensor::from_vec(input.into_iter().map(|x| x as f32).collect(), &[seq_len])?;
-        let hidden_states = trustformers_core::traits::Model::forward(&self.model, input_tensor)?;
-        let logits = self.lm_head.forward(hidden_states)?;
-        Ok(logits)
+        self.forward_logits(&input)
     }
 
-    fn load_pretrained(&mut self, reader: &mut dyn Read) -> CoreResult<()> {
-        // Read all data from the reader
-        let mut buffer = Vec::new();
-        let reader = reader;
-        reader.read_to_end(&mut buffer).map_err(|e| {
-            trustformers_core::errors::TrustformersError::io_error(format!(
-                "Failed to read weight data: {}",
-                e
-            ))
-        })?;
-
-        // Validate that we have reasonable weight data
-        if buffer.len() < 1024 {
-            return Err(trustformers_core::errors::TrustformersError::io_error(
-                "Weight data appears to be too small".to_string(),
-            ));
-        }
-
-        // Create a temporary file for the weight loading system
-        let temp_file = std::env::temp_dir().join(format!(
-            "scientific_enhanced_weights_{}.bin",
-            std::process::id()
-        ));
-        std::fs::write(&temp_file, &buffer).map_err(|e| {
-            trustformers_core::errors::TrustformersError::io_error(format!(
-                "Failed to write temporary weights: {}",
-                e
-            ))
-        })?;
-
-        // Use enhanced loading with fallback for scientific models
-        let result = if let Some(path_str) = temp_file.to_str() {
-            println!(
-                "Scientific model weight loading - weights successfully processed from {:?}",
-                path_str
-            );
-            Ok(())
-        } else {
-            Err(trustformers_core::errors::TrustformersError::io_error(
-                "Failed to convert temporary file path to string".to_string(),
-            ))
-        };
-
-        // Clean up temporary file
-        let _ = std::fs::remove_file(&temp_file);
-
-        result
+    fn load_pretrained(&mut self, reader: &mut dyn std::io::Read) -> CoreResult<()> {
+        checked_unimplemented_load(reader, "ScientificForCausalLM")
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -941,6 +968,37 @@ impl Model for ScientificForCausalLM {
     fn num_parameters(&self) -> usize {
         self.model.num_parameters() + self.lm_head.parameter_count()
     }
+}
+
+/// Shared `load_pretrained` body for this family: reads the stream so I/O
+/// failures are reported honestly, then refuses instead of pretending the
+/// (entirely discarded) bytes became model weights. The previous
+/// implementation wrote the buffer to a temp file, `println!`ed a success
+/// message, deleted the file, and returned `Ok(())` without touching a
+/// single layer's weights.
+fn checked_unimplemented_load(
+    reader: &mut dyn std::io::Read,
+    architecture: &str,
+) -> CoreResult<()> {
+    let mut buffer = Vec::new();
+    reader.read_to_end(&mut buffer).map_err(|e| {
+        trustformers_core::errors::TrustformersError::io_error(format!(
+            "Failed to read weight data: {}",
+            e
+        ))
+    })?;
+    if buffer.is_empty() {
+        return Err(trustformers_core::errors::TrustformersError::io_error(
+            "Weight data is empty".to_string(),
+        ));
+    }
+    Err(not_implemented(format!(
+        "{architecture}::load_pretrained: binding a checkpoint's tensors into this \
+         architecture's layers is not implemented (read {} bytes but could not bind them). \
+         Construct the model with default/random weights, or use \
+         trustformers_models::weight_loading for architectures with an implemented binder.",
+        buffer.len()
+    )))
 }
 
 // Helper methods for ScientificForCausalLM
@@ -959,12 +1017,6 @@ impl ScientificForCausalLM {
 
         let enhanced = format!("{} {}", domain_context, prompt);
         Ok(enhanced)
-    }
-
-    fn generate_with_config(&self, prompt: &str, _config: &GenerationConfig) -> Result<String> {
-        // Placeholder implementation - in a real implementation, this would
-        // tokenize the prompt, run the forward pass, and decode the output
-        Ok(format!("[Scientific Generated]: {}", prompt))
     }
 
     fn classify_scientific_domain(&self, text: &str) -> Result<ScientificDomain> {
@@ -1065,7 +1117,7 @@ impl ScientificForCausalLM {
         count += text.matches("$$").count() / 2; // Paired delimiters
 
         // Count inline math
-        count += text.matches("$").count() / 2; // Paired delimiters
+        count += text.matches('$').count() / 2; // Paired delimiters
 
         // Count equals signs as rough equation indicator
         count += text.matches(" = ").count();
@@ -1319,5 +1371,185 @@ mod tests {
     fn test_config_validation() {
         let config = ScientificConfig::scientific_7b();
         assert!(config.validate().is_ok());
+    }
+
+    /// A tiny configuration for fast tests: real compute, not a 7B allocation.
+    fn tiny_config() -> ScientificConfig {
+        ScientificConfig {
+            vocab_size: 512,
+            hidden_size: 32,
+            intermediate_size: 64,
+            num_hidden_layers: 2,
+            num_attention_heads: 4,
+            num_key_value_heads: Some(2),
+            max_position_embeddings: 128,
+            rope_scaling: None,
+            ..ScientificConfig::default()
+        }
+    }
+
+    /// Deterministic pseudo-random data so assertions are reproducible.
+    fn deterministic_data(count: usize, seed: u32) -> Vec<f32> {
+        let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(12_345);
+        let mut data = Vec::with_capacity(count);
+        for _ in 0..count {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let unit = (state >> 8) as f32 / (1u32 << 24) as f32;
+            data.push(unit * 2.0 - 1.0);
+        }
+        data
+    }
+
+    fn deterministic_linear(in_features: usize, out_features: usize, seed: u32) -> Linear {
+        let data = deterministic_data(out_features * in_features, seed);
+        let mut layer = Linear::new(in_features, out_features, false);
+        layer
+            .set_weight(Tensor::from_vec(data, &[out_features, in_features]).expect("weight shape"))
+            .expect("set weight");
+        layer
+    }
+
+    #[test]
+    fn attention_is_real_scaled_dot_product_not_q_plus_v() {
+        // Regression test for the `q + v` bug: two attention layers that are
+        // identical except for the key projection must produce different
+        // outputs.
+        let config = tiny_config();
+        let head_dim = config.hidden_size / config.num_attention_heads;
+        let kv_heads = config.num_key_value_heads.expect("configured");
+        let kv_hidden = kv_heads * head_dim;
+
+        let mut attn_a = ScientificAttention::new(&config).expect("attention a");
+        attn_a.set_projections(
+            deterministic_linear(config.hidden_size, config.hidden_size, 1),
+            deterministic_linear(config.hidden_size, kv_hidden, 2),
+            deterministic_linear(config.hidden_size, kv_hidden, 3),
+            deterministic_linear(config.hidden_size, config.hidden_size, 4),
+        );
+
+        let mut attn_b = ScientificAttention::new(&config).expect("attention b");
+        attn_b.set_projections(
+            deterministic_linear(config.hidden_size, config.hidden_size, 1),
+            deterministic_linear(config.hidden_size, kv_hidden, 99),
+            deterministic_linear(config.hidden_size, kv_hidden, 3),
+            deterministic_linear(config.hidden_size, config.hidden_size, 4),
+        );
+
+        // Deliberately *not* a uniform vector repeated across positions: if
+        // every position held the same value, causal softmax over identical
+        // scores would be uniform regardless of K (an average of identical
+        // V rows equals that row no matter how it was weighted), which
+        // would make this test pass even with the old q+v code path by
+        // accident rather than by actually exercising K.
+        let input = Tensor::from_vec(
+            deterministic_data(5 * config.hidden_size, 50),
+            &[5, config.hidden_size],
+        )
+        .expect("input tensor");
+
+        let out_a = attn_a.forward(input.clone()).expect("forward a");
+        let out_b = attn_b.forward(input).expect("forward b");
+
+        let data_a = out_a.data().expect("data a");
+        let data_b = out_b.data().expect("data b");
+        let max_diff = data_a
+            .iter()
+            .zip(data_b.iter())
+            .fold(0.0f32, |acc, (x, y)| acc.max((x - y).abs()));
+        assert!(
+            max_diff > 1e-6,
+            "changing only the key projection must change the attention output \
+             (max diff was {max_diff}); the old q+v implementation ignored K entirely"
+        );
+    }
+
+    #[test]
+    fn causal_attention_does_not_leak_future_tokens() {
+        let config = tiny_config();
+        let attn = ScientificAttention::new(&config).expect("attention");
+        let seq_len = 6;
+        let base = vec![0.05_f32; seq_len * config.hidden_size];
+        let mut perturbed = base.clone();
+        for value in perturbed[4 * config.hidden_size..].iter_mut() {
+            *value += 3.0;
+        }
+
+        let base_out = attn
+            .forward(Tensor::from_vec(base, &[seq_len, config.hidden_size]).expect("base"))
+            .expect("base forward");
+        let perturbed_out = attn
+            .forward(
+                Tensor::from_vec(perturbed, &[seq_len, config.hidden_size]).expect("perturbed"),
+            )
+            .expect("perturbed forward");
+
+        let prefix = 4 * config.hidden_size;
+        let base_data = base_out.data().expect("base data");
+        let perturbed_data = perturbed_out.data().expect("perturbed data");
+        let max_diff = base_data[..prefix]
+            .iter()
+            .zip(perturbed_data[..prefix].iter())
+            .fold(0.0f32, |acc, (x, y)| acc.max((x - y).abs()));
+        assert!(
+            max_diff < 1e-4,
+            "causal attention leaked future tokens into the past"
+        );
+    }
+
+    fn model() -> ScientificForCausalLM {
+        ScientificForCausalLM::new(tiny_config()).expect("model construction")
+    }
+
+    #[test]
+    fn generate_does_not_echo_the_prompt() {
+        let m = model();
+        let prompt = "The quantum mechanical behavior of superconductors";
+        let output = m.generate_with_seed(prompt, 12, 7).expect("generate");
+        assert!(
+            !output.contains(prompt),
+            "output must not echo the prompt back: {output:?}"
+        );
+        assert!(!output.starts_with("[Scientific Generated]"));
+    }
+
+    #[test]
+    fn generate_with_seed_is_reproducible() {
+        let m = model();
+        let a = m.generate_with_seed("Consider the following hypothesis", 16, 42).expect("a");
+        let b = m.generate_with_seed("Consider the following hypothesis", 16, 42).expect("b");
+        assert_eq!(a, b, "the same seed must produce the same output");
+    }
+
+    #[test]
+    fn different_seeds_produce_different_output() {
+        let m = model();
+        let a = m.generate_with_seed("Consider the following hypothesis", 24, 1).expect("a");
+        let b = m.generate_with_seed("Consider the following hypothesis", 24, 2).expect("b");
+        assert_ne!(
+            a, b,
+            "different seeds must (almost certainly) sample different tokens"
+        );
+    }
+
+    #[test]
+    fn encode_decode_byte_roundtrip() {
+        let m = model();
+        let text = "E = mc^2 describes mass-energy equivalence.";
+        let ids = m.encode_text(text).expect("encode");
+        assert_eq!(ids[0], m.config.bos_token_id);
+        let decoded = ScientificForCausalLM::decode_tokens(&ids[1..]);
+        assert_eq!(decoded, text);
+    }
+
+    #[test]
+    fn load_pretrained_reports_an_honest_error_instead_of_fake_success() {
+        let config = tiny_config();
+        let mut model = ScientificForCausalLM::new(config).expect("model");
+        let mut reader = std::io::Cursor::new(vec![0u8; 4096]);
+        let result = Model::load_pretrained(&mut model, &mut reader);
+        assert!(
+            result.is_err(),
+            "load_pretrained must not report success when no weights were actually bound"
+        );
     }
 }

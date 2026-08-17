@@ -4,15 +4,19 @@
 //! interactive visualizations, and live data streaming for comprehensive neural network monitoring.
 
 use anyhow::Result;
-use scirs2_core::random::*; // SciRS2 Integration Policy
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use sysinfo::System;
 use tokio::sync::broadcast;
 use tokio::time::interval;
 use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
+
+/// Number of most-recent samples of a category examined for a *sustained*
+/// threshold breach (as opposed to a single noisy spike).
+const SUSTAINED_BREACH_WINDOW: usize = 5;
 
 /// Configuration for the real-time dashboard
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -308,6 +312,11 @@ pub struct RealtimeDashboard {
     active_connections: Arc<Mutex<usize>>,
     total_data_points: Arc<Mutex<usize>>,
     is_running: Arc<Mutex<bool>>,
+    /// Long-lived host telemetry handle (real `sysinfo` readings). Kept
+    /// long-lived rather than recreated per call because CPU-usage
+    /// measurement is delta-based: `sysinfo` needs two refreshes spaced
+    /// apart in real time to report a meaningful percentage.
+    system_info: Arc<Mutex<System>>,
 }
 
 impl RealtimeDashboard {
@@ -325,6 +334,7 @@ impl RealtimeDashboard {
             active_connections: Arc::new(Mutex::new(0)),
             total_data_points: Arc::new(Mutex::new(0)),
             is_running: Arc::new(Mutex::new(false)),
+            system_info: Arc::new(Mutex::new(System::new_all())),
         }
     }
 
@@ -362,105 +372,36 @@ impl RealtimeDashboard {
 
     /// Add a metric data point
     pub fn add_metric(&self, category: MetricCategory, label: String, value: f64) -> Result<()> {
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
-
-        let data_point = MetricDataPoint {
-            timestamp,
-            value,
-            label,
-            category: category.clone(),
-        };
-
-        // Add to metric data with size limit
-        {
-            let mut data = self
-                .metric_data
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Failed to acquire metric data lock"))?;
-            let category_data = data.entry(category.clone()).or_insert_with(VecDeque::new);
-
-            category_data.push_back(data_point.clone());
-
-            let max_points = self
-                .config
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Failed to acquire config lock"))?
-                .max_data_points;
-            while category_data.len() > max_points {
-                category_data.pop_front();
-            }
-        }
-
-        // Increment total data points counter
-        {
-            if let Ok(mut total) = self.total_data_points.lock() {
-                *total += 1;
-            }
-        }
-
-        // Broadcast update to WebSocket clients
-        let message = WebSocketMessage::MetricUpdate {
-            data: vec![data_point],
-        };
-
-        let _ = self.websocket_sender.send(message);
-
-        // Check for alerts
-        self.check_for_alerts(&category, value);
-
-        Ok(())
+        self.add_metrics(vec![(category, label, value)])
     }
 
-    /// Add multiple metrics at once
+    /// Add multiple metrics at once. Stores each point (bounded by
+    /// `max_data_points`), broadcasts the batch, and evaluates each real
+    /// value against the configured alert thresholds -- the same path used
+    /// by the periodic host-telemetry collector, so manually-supplied and
+    /// automatically-collected metrics raise alerts identically.
     pub fn add_metrics(&self, metrics: Vec<(MetricCategory, String, f64)>) -> Result<()> {
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
+        let thresholds = self
+            .config
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Failed to acquire config lock"))?
+            .alert_thresholds
+            .clone();
+        let max_points = self
+            .config
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Failed to acquire config lock"))?
+            .max_data_points;
 
-        let mut data_points = Vec::new();
-
-        // Process all metrics
-        for (category, label, value) in metrics {
-            let data_point = MetricDataPoint {
-                timestamp,
-                value,
-                label,
-                category: category.clone(),
-            };
-
-            // Add to metric data
-            {
-                let mut data =
-                    self.metric_data.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                let category_data = data.entry(category.clone()).or_default();
-                category_data.push_back(data_point.clone());
-
-                let max_points = self
-                    .config
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .max_data_points;
-                while category_data.len() > max_points {
-                    category_data.pop_front();
-                }
-            }
-
-            data_points.push(data_point);
-
-            // Check for alerts
-            self.check_for_alerts(&category, value);
-        }
-
-        // Update total counter
-        {
-            let mut total =
-                self.total_data_points.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            *total += data_points.len();
-        }
-
-        // Broadcast batch update
-        let message = WebSocketMessage::MetricUpdate { data: data_points };
-        let _ = self.websocket_sender.send(message);
-
-        Ok(())
+        ingest_metrics(
+            &self.metric_data,
+            &self.total_data_points,
+            max_points,
+            &self.alert_history,
+            &thresholds,
+            &self.websocket_sender,
+            metrics,
+        )
     }
 
     /// Create an alert
@@ -569,7 +510,10 @@ impl RealtimeDashboard {
     /// Start periodic data collection
     async fn start_data_collection(&self) -> Result<()> {
         let config = self.config.clone();
-        let _metric_data = self.metric_data.clone();
+        let metric_data = self.metric_data.clone();
+        let total_data_points = self.total_data_points.clone();
+        let alert_history = self.alert_history.clone();
+        let system_info = self.system_info.clone();
         let websocket_sender = self.websocket_sender.clone();
         let is_running = self.is_running.clone();
 
@@ -584,10 +528,26 @@ impl RealtimeDashboard {
             while *is_running.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) {
                 interval.tick().await;
 
-                // Collect system metrics periodically
-                if let Ok(metrics) = Self::collect_system_metrics(&config).await {
-                    let message = WebSocketMessage::MetricUpdate { data: metrics };
-                    let _ = websocket_sender.send(message);
+                // Collect real host telemetry, then store + alert on it via the
+                // exact same path `add_metric`/`add_metrics` use -- real values
+                // that never reach `metric_data`/the alert thresholds would be
+                // pointless to have collected in the first place.
+                let (metrics, max_points, thresholds) = {
+                    let cfg = config.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let metrics = collect_system_metrics(&cfg, &system_info);
+                    (metrics, cfg.max_data_points, cfg.alert_thresholds.clone())
+                };
+
+                if !metrics.is_empty() {
+                    let _ = ingest_metrics(
+                        &metric_data,
+                        &total_data_points,
+                        max_points,
+                        &alert_history,
+                        &thresholds,
+                        &websocket_sender,
+                        metrics,
+                    );
                 }
             }
         });
@@ -602,6 +562,8 @@ impl RealtimeDashboard {
         let alert_history = self.alert_history.clone();
         let active_connections = self.active_connections.clone();
         let total_data_points = self.total_data_points.clone();
+        let metric_data = self.metric_data.clone();
+        let system_info = self.system_info.clone();
         let is_running = self.is_running.clone();
 
         tokio::spawn(async move {
@@ -622,8 +584,8 @@ impl RealtimeDashboard {
                     data_points_collected: *total_data_points
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner()),
-                    memory_usage_mb: 0.0,   // Placeholder
-                    cpu_usage_percent: 0.0, // Placeholder
+                    memory_usage_mb: dashboard_footprint_mb(&metric_data),
+                    cpu_usage_percent: estimate_cpu_usage(&system_info),
                 };
 
                 let message = WebSocketMessage::SystemStats { stats };
@@ -636,8 +598,10 @@ impl RealtimeDashboard {
 
     /// Start alert monitoring
     async fn start_alert_monitoring(&self) -> Result<()> {
-        let config = self.config.clone();
         let metric_data = self.metric_data.clone();
+        let config = self.config.clone();
+        let alert_history = self.alert_history.clone();
+        let websocket_sender = self.websocket_sender.clone();
         let is_running = self.is_running.clone();
 
         tokio::spawn(async move {
@@ -646,152 +610,32 @@ impl RealtimeDashboard {
             while *is_running.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) {
                 interval.tick().await;
 
-                // Monitor for threshold breaches and create alerts
-                Self::check_threshold_breaches(&config, &metric_data).await;
+                // Monitor the real, now-populated history for sustained
+                // threshold breaches and create alerts.
+                let thresholds = {
+                    let cfg = config.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    cfg.alert_thresholds.clone()
+                };
+                check_threshold_breaches(
+                    &metric_data,
+                    &thresholds,
+                    &alert_history,
+                    &websocket_sender,
+                );
             }
         });
 
         Ok(())
     }
 
-    /// Collect system metrics
-    async fn collect_system_metrics(
-        config: &Arc<Mutex<DashboardConfig>>,
-    ) -> Result<Vec<MetricDataPoint>> {
-        let mut metrics = Vec::new();
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
-
-        let cfg = config.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        if cfg.enable_memory_profiling {
-            // Simulate memory metrics
-            let memory_usage = Self::get_memory_usage();
-            metrics.push(MetricDataPoint {
-                timestamp,
-                value: memory_usage,
-                label: "Memory Usage".to_string(),
-                category: MetricCategory::Memory,
-            });
-        }
-
-        if cfg.enable_gpu_monitoring {
-            // Simulate GPU metrics
-            let gpu_utilization = Self::get_gpu_utilization();
-            metrics.push(MetricDataPoint {
-                timestamp,
-                value: gpu_utilization,
-                label: "GPU Utilization".to_string(),
-                category: MetricCategory::GPU,
-            });
-
-            let gpu_memory = Self::get_gpu_memory_usage();
-            metrics.push(MetricDataPoint {
-                timestamp,
-                value: gpu_memory,
-                label: "GPU Memory".to_string(),
-                category: MetricCategory::GPU,
-            });
-        }
-
-        Ok(metrics)
-    }
-
-    /// Check for alerts based on new metric value
-    fn check_for_alerts(&self, category: &MetricCategory, value: f64) {
-        let config = self.config.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let thresholds = &config.alert_thresholds;
-
-        match category {
-            MetricCategory::Memory if value > thresholds.memory_threshold => {
-                let _ = self.create_alert(
-                    AlertSeverity::Warning,
-                    category.clone(),
-                    "High Memory Usage".to_string(),
-                    format!(
-                        "Memory usage is {:.1}% (threshold: {:.1}%)",
-                        value, thresholds.memory_threshold
-                    ),
-                    Some(value),
-                    Some(thresholds.memory_threshold),
-                );
-            },
-            MetricCategory::GPU if value > thresholds.gpu_utilization_threshold => {
-                let _ = self.create_alert(
-                    AlertSeverity::Warning,
-                    category.clone(),
-                    "High GPU Utilization".to_string(),
-                    format!(
-                        "GPU utilization is {:.1}% (threshold: {:.1}%)",
-                        value, thresholds.gpu_utilization_threshold
-                    ),
-                    Some(value),
-                    Some(thresholds.gpu_utilization_threshold),
-                );
-            },
-            MetricCategory::Training if value > thresholds.loss_spike_threshold => {
-                let _ = self.create_alert(
-                    AlertSeverity::Error,
-                    category.clone(),
-                    "Training Loss Spike".to_string(),
-                    format!(
-                        "Loss spike detected: {:.4} (threshold: {:.4})",
-                        value, thresholds.loss_spike_threshold
-                    ),
-                    Some(value),
-                    Some(thresholds.loss_spike_threshold),
-                );
-            },
-            _ => {},
-        }
-    }
-
-    /// Check for threshold breaches across all metrics
-    async fn check_threshold_breaches(
-        config: &Arc<Mutex<DashboardConfig>>,
-        metric_data: &Arc<Mutex<HashMap<MetricCategory, VecDeque<MetricDataPoint>>>>,
-    ) {
-        let _config = config.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _data = metric_data.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        // Implementation would check for patterns, sustained threshold breaches, etc.
-        // This is a placeholder for more complex alert logic
-    }
-
-    /// Simulate getting memory usage
-    fn get_memory_usage() -> f64 {
-        // Placeholder - in real implementation would use system APIs
-        50.0 + (thread_rng().random::<f64>() * 40.0)
-    }
-
-    /// Simulate getting GPU utilization
-    fn get_gpu_utilization() -> f64 {
-        // Placeholder - in real implementation would use NVIDIA ML, ROCm, etc.
-        30.0 + (thread_rng().random::<f64>() * 60.0)
-    }
-
-    /// Simulate getting GPU memory usage
-    fn get_gpu_memory_usage() -> f64 {
-        // Placeholder - in real implementation would use GPU APIs
-        40.0 + (thread_rng().random::<f64>() * 50.0)
-    }
-
     /// Estimate memory usage of dashboard
     fn estimate_memory_usage(&self) -> f64 {
-        let data = self.metric_data.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut total_points = 0;
-
-        for deque in data.values() {
-            total_points += deque.len();
-        }
-
-        // Rough estimate: ~100 bytes per data point
-        (total_points * 100) as f64 / (1024.0 * 1024.0)
+        dashboard_footprint_mb(&self.metric_data)
     }
 
-    /// Estimate CPU usage
+    /// Real, host-wide CPU usage percentage (see [`estimate_cpu_usage`] free function).
     fn estimate_cpu_usage(&self) -> f64 {
-        // Simple placeholder - in real implementation would use system APIs
-        5.0 + (thread_rng().random::<f64>() * 10.0)
+        estimate_cpu_usage(&self.system_info)
     }
 
     /// AI-powered anomaly detection for metric patterns
@@ -1247,6 +1091,289 @@ impl RealtimeDashboard {
     }
 }
 
+// ============================================================================
+// Free functions
+//
+// These take explicit `&Mutex<_>` / `&Arc<_>` references rather than `&self`
+// so they can be shared between `&self` methods (`add_metric`, `get_system_stats`,
+// ...) and the background tasks spawned by `start()`, which only hold cloned
+// `Arc`s of individual fields (not the whole `RealtimeDashboard`).
+// ============================================================================
+
+/// Store metric points (bounded by `max_data_points`), broadcast the batch,
+/// and evaluate each real value against the alert thresholds. The single
+/// path used by `add_metric`/`add_metrics` and by the periodic host-telemetry
+/// collector, so manually-supplied and automatically-collected metrics are
+/// treated identically.
+#[allow(clippy::too_many_arguments)]
+fn ingest_metrics(
+    metric_data: &Mutex<HashMap<MetricCategory, VecDeque<MetricDataPoint>>>,
+    total_data_points: &Mutex<usize>,
+    max_data_points: usize,
+    alert_history: &Mutex<VecDeque<DashboardAlert>>,
+    thresholds: &AlertThresholds,
+    websocket_sender: &broadcast::Sender<WebSocketMessage>,
+    metrics: Vec<(MetricCategory, String, f64)>,
+) -> Result<()> {
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
+    let mut data_points = Vec::with_capacity(metrics.len());
+
+    for (category, label, value) in metrics {
+        let data_point = MetricDataPoint {
+            timestamp,
+            value,
+            label,
+            category: category.clone(),
+        };
+
+        {
+            let mut data = metric_data.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let category_data = data.entry(category.clone()).or_default();
+            category_data.push_back(data_point.clone());
+            while category_data.len() > max_data_points {
+                category_data.pop_front();
+            }
+        }
+
+        data_points.push(data_point);
+        evaluate_alert(
+            alert_history,
+            websocket_sender,
+            thresholds,
+            &category,
+            value,
+        );
+    }
+
+    {
+        let mut total = total_data_points.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *total += data_points.len();
+    }
+
+    let message = WebSocketMessage::MetricUpdate { data: data_points };
+    let _ = websocket_sender.send(message);
+
+    Ok(())
+}
+
+/// Evaluate one real metric value against the configured thresholds and, on
+/// breach, record + broadcast a real alert (real value, real threshold --
+/// never derived from randomness).
+fn evaluate_alert(
+    alert_history: &Mutex<VecDeque<DashboardAlert>>,
+    websocket_sender: &broadcast::Sender<WebSocketMessage>,
+    thresholds: &AlertThresholds,
+    category: &MetricCategory,
+    value: f64,
+) {
+    let (severity, title, message, threshold) = match category {
+        MetricCategory::Memory if value > thresholds.memory_threshold => (
+            AlertSeverity::Warning,
+            "High Memory Usage".to_string(),
+            format!(
+                "Memory usage is {:.1}% (threshold: {:.1}%)",
+                value, thresholds.memory_threshold
+            ),
+            thresholds.memory_threshold,
+        ),
+        MetricCategory::GPU if value > thresholds.gpu_utilization_threshold => (
+            AlertSeverity::Warning,
+            "High GPU Utilization".to_string(),
+            format!(
+                "GPU utilization is {:.1}% (threshold: {:.1}%)",
+                value, thresholds.gpu_utilization_threshold
+            ),
+            thresholds.gpu_utilization_threshold,
+        ),
+        MetricCategory::Training if value > thresholds.loss_spike_threshold => (
+            AlertSeverity::Error,
+            "Training Loss Spike".to_string(),
+            format!(
+                "Loss spike detected: {:.4} (threshold: {:.4})",
+                value, thresholds.loss_spike_threshold
+            ),
+            thresholds.loss_spike_threshold,
+        ),
+        _ => return,
+    };
+
+    let alert = DashboardAlert {
+        id: Uuid::new_v4().to_string(),
+        timestamp: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+        severity,
+        category: category.clone(),
+        title,
+        message,
+        value: Some(value),
+        threshold: Some(threshold),
+    };
+
+    {
+        let mut history = alert_history.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        history.push_back(alert.clone());
+        while history.len() > 100 {
+            history.pop_front();
+        }
+    }
+
+    let _ = websocket_sender.send(WebSocketMessage::Alert { alert });
+}
+
+/// Look for a *sustained* threshold breach: the last [`SUSTAINED_BREACH_WINDOW`]
+/// real samples of a category all above threshold (as opposed to a single
+/// noisy spike, which `evaluate_alert` already covers per-sample). Reads the
+/// real, now-populated `metric_data` history -- this used to lock both
+/// mutexes and do nothing.
+fn check_threshold_breaches(
+    metric_data: &Mutex<HashMap<MetricCategory, VecDeque<MetricDataPoint>>>,
+    thresholds: &AlertThresholds,
+    alert_history: &Mutex<VecDeque<DashboardAlert>>,
+    websocket_sender: &broadcast::Sender<WebSocketMessage>,
+) {
+    let breaches: Vec<(MetricCategory, f64, f64)> = {
+        let data = metric_data.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        [
+            (MetricCategory::Memory, thresholds.memory_threshold),
+            (MetricCategory::GPU, thresholds.gpu_utilization_threshold),
+        ]
+        .into_iter()
+        .filter_map(|(category, threshold)| {
+            let points = data.get(&category)?;
+            if points.len() < SUSTAINED_BREACH_WINDOW {
+                return None;
+            }
+            let recent: Vec<f64> =
+                points.iter().rev().take(SUSTAINED_BREACH_WINDOW).map(|p| p.value).collect();
+            if recent.iter().all(|&v| v > threshold) {
+                let avg = recent.iter().sum::<f64>() / recent.len() as f64;
+                Some((category, avg, threshold))
+            } else {
+                None
+            }
+        })
+        .collect()
+    };
+
+    for (category, avg_value, threshold) in breaches {
+        let alert = DashboardAlert {
+            id: Uuid::new_v4().to_string(),
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            severity: AlertSeverity::Error,
+            category: category.clone(),
+            title: format!("Sustained {category:?} threshold breach"),
+            message: format!(
+                "{category:?} has stayed above {threshold:.1} for the last \
+                 {SUSTAINED_BREACH_WINDOW} samples (avg {avg_value:.1})"
+            ),
+            value: Some(avg_value),
+            threshold: Some(threshold),
+        };
+
+        {
+            let mut history = alert_history.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            history.push_back(alert.clone());
+            while history.len() > 100 {
+                history.pop_front();
+            }
+        }
+        let _ = websocket_sender.send(WebSocketMessage::Alert { alert });
+    }
+}
+
+/// Collect real host telemetry (`sysinfo`) for the categories enabled in
+/// `cfg`, as `(category, label, value)` tuples ready for [`ingest_metrics`].
+/// GPU readings are honestly omitted (not fabricated) when no GPU telemetry
+/// backend is available -- see [`get_gpu_utilization`].
+fn collect_system_metrics(
+    cfg: &DashboardConfig,
+    system_info: &Mutex<System>,
+) -> Vec<(MetricCategory, String, f64)> {
+    let mut metrics = Vec::new();
+
+    if cfg.enable_memory_profiling {
+        if let Some(memory_usage) = get_memory_usage(system_info) {
+            metrics.push((
+                MetricCategory::Memory,
+                "Memory Usage".to_string(),
+                memory_usage,
+            ));
+        }
+    }
+
+    if cfg.enable_gpu_monitoring {
+        match get_gpu_utilization() {
+            Some(gpu_utilization) => {
+                metrics.push((
+                    MetricCategory::GPU,
+                    "GPU Utilization".to_string(),
+                    gpu_utilization,
+                ));
+            },
+            None => tracing::debug!(
+                "GPU monitoring is enabled but no GPU telemetry backend is available on this \
+                 build/machine; skipping (not fabricating a reading)."
+            ),
+        }
+        if let Some(gpu_memory) = get_gpu_memory_usage() {
+            metrics.push((MetricCategory::GPU, "GPU Memory".to_string(), gpu_memory));
+        }
+    }
+
+    metrics
+}
+
+/// Real system memory usage, as a percentage of total memory.
+fn get_memory_usage(system_info: &Mutex<System>) -> Option<f64> {
+    let mut sys = system_info.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    sys.refresh_memory();
+    let total = sys.total_memory();
+    if total == 0 {
+        return None;
+    }
+    Some(sys.used_memory() as f64 / total as f64 * 100.0)
+}
+
+/// Real GPU utilization percentage -- always `None`. No pure-Rust,
+/// C/C++-free GPU telemetry backend (NVML/ROCm-SMI) is wired into this
+/// build (see the `cuda`/`rocm`/`tpu` Cargo features, which are placeholders
+/// today), so this honestly reports "unavailable on this machine" rather
+/// than fabricating a number.
+fn get_gpu_utilization() -> Option<f64> {
+    None
+}
+
+/// Real GPU memory usage percentage -- see [`get_gpu_utilization`].
+fn get_gpu_memory_usage() -> Option<f64> {
+    None
+}
+
+/// Real host-wide CPU usage percentage via `sysinfo`. CPU usage is
+/// delta-based: the very first reading in a process is not meaningful, but
+/// `system_info` is long-lived on `RealtimeDashboard` and refreshed on every
+/// call, so accuracy improves as the dashboard runs.
+fn estimate_cpu_usage(system_info: &Mutex<System>) -> f64 {
+    let mut sys = system_info.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    sys.refresh_cpu_usage();
+    sys.global_cpu_usage() as f64
+}
+
+/// Rough estimate (in MB) of the dashboard's own retained metric-history
+/// footprint, not host telemetry.
+fn dashboard_footprint_mb(
+    metric_data: &Mutex<HashMap<MetricCategory, VecDeque<MetricDataPoint>>>,
+) -> f64 {
+    let data = metric_data.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let total_points: usize = data.values().map(|deque| deque.len()).sum();
+    // Rough estimate: ~100 bytes per data point.
+    (total_points * 100) as f64 / (1024.0 * 1024.0)
+}
+
 /// Dashboard builder for easier configuration
 #[derive(Debug, Default)]
 pub struct DashboardBuilder {
@@ -1392,23 +1519,32 @@ mod tests {
         let _ =
             dashboard_clone.add_metric(MetricCategory::Training, "test_metric".to_string(), 42.0);
 
-        // Try to receive a message (with timeout)
-        let message_result = tokio::time::timeout(Duration::from_millis(100), stream.next()).await;
+        // The subscriber legitimately also sees other real broadcasts (host
+        // telemetry from the periodic collector, `SystemStats` updates, ...),
+        // so scan the stream for the specific update rather than assuming
+        // it's the very first message -- a real client would do the same.
+        let found = tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                match stream.next().await {
+                    Some(Ok(WebSocketMessage::MetricUpdate { data })) => {
+                        if let Some(point) = data.iter().find(|p| p.label == "test_metric") {
+                            return Some(point.clone());
+                        }
+                    },
+                    Some(_) => continue,
+                    None => return None,
+                }
+            }
+        })
+        .await;
 
         dashboard_clone.stop();
 
-        // Check if we received a message
-        assert!(message_result.is_ok());
-        if let Ok(Some(Ok(message))) = message_result {
-            match message {
-                WebSocketMessage::MetricUpdate { data } => {
-                    assert!(!data.is_empty());
-                    assert_eq!(data[0].value, 42.0);
-                    assert_eq!(data[0].label, "test_metric");
-                },
-                _ => panic!("Expected MetricUpdate message"),
-            }
-        }
+        let point = found
+            .expect("should not time out waiting for the test_metric update")
+            .expect("stream should not end before the test_metric update arrives");
+        assert_eq!(point.value, 42.0);
+        assert_eq!(point.label, "test_metric");
     }
 
     #[tokio::test]
@@ -1448,5 +1584,152 @@ mod tests {
         assert_eq!(data.len(), 2);
         assert_eq!(data[0].value, 2.0); // First of the remaining two
         assert_eq!(data[1].value, 3.0); // Last added
+    }
+
+    #[test]
+    fn test_get_memory_usage_is_real_not_random() {
+        let system_info = Mutex::new(System::new_all());
+        let a = get_memory_usage(&system_info).expect("memory usage should be available");
+        let b = get_memory_usage(&system_info).expect("memory usage should be available");
+        assert!((0.0..=100.0).contains(&a));
+        assert!((0.0..=100.0).contains(&b));
+        // The old implementation was `50.0 + thread_rng().random::<f64>() * 40.0`,
+        // i.e. uniformly random over a 40-point-wide band on every call. Two
+        // real readings taken back-to-back on the same host must be far more
+        // stable than that.
+        assert!(
+            (a - b).abs() < 10.0,
+            "consecutive real memory readings should be close: {a} vs {b}"
+        );
+    }
+
+    #[test]
+    fn test_estimate_cpu_usage_is_real_not_random() {
+        let system_info = Mutex::new(System::new_all());
+        let cpu = estimate_cpu_usage(&system_info);
+        // A real reading is a finite, non-negative percentage. The old
+        // implementation was a fixed `5.0..=15.0` band regardless of the
+        // host; a real one is unbounded above (though in practice well
+        // under a few hundred) since it comes straight from the OS.
+        assert!(cpu.is_finite() && cpu >= 0.0, "got {cpu}");
+    }
+
+    #[test]
+    fn test_gpu_metrics_are_honestly_absent_not_fabricated() {
+        // The old implementation always returned a random number (e.g. in
+        // [30, 90] for utilization) regardless of whether a GPU -- or any
+        // GPU telemetry backend -- was actually present.
+        assert_eq!(get_gpu_utilization(), None);
+        assert_eq!(get_gpu_memory_usage(), None);
+
+        let cfg = DashboardConfig {
+            enable_gpu_monitoring: true,
+            ..Default::default()
+        };
+        let system_info = Mutex::new(System::new_all());
+        let metrics = collect_system_metrics(&cfg, &system_info);
+        assert!(
+            metrics.iter().all(|(category, _, _)| *category != MetricCategory::GPU),
+            "no fabricated GPU metric should be emitted when no GPU backend is available"
+        );
+    }
+
+    #[test]
+    fn test_check_threshold_breaches_raises_a_real_alert() {
+        let metric_data: Mutex<HashMap<MetricCategory, VecDeque<MetricDataPoint>>> =
+            Mutex::new(HashMap::new());
+        let alert_history: Mutex<VecDeque<DashboardAlert>> = Mutex::new(VecDeque::new());
+        let (websocket_sender, _rx) = broadcast::channel(16);
+        let thresholds = AlertThresholds::default();
+
+        {
+            let mut data = metric_data.lock().expect("lock should not be poisoned");
+            let points = data.entry(MetricCategory::Memory).or_default();
+            for i in 0..SUSTAINED_BREACH_WINDOW {
+                points.push_back(MetricDataPoint {
+                    timestamp: i as u64,
+                    value: thresholds.memory_threshold + 5.0,
+                    label: "Memory Usage".to_string(),
+                    category: MetricCategory::Memory,
+                });
+            }
+        }
+
+        // The old implementation locked both mutexes and returned without
+        // ever inspecting the data or creating an alert.
+        check_threshold_breaches(&metric_data, &thresholds, &alert_history, &websocket_sender);
+
+        let history = alert_history.lock().expect("lock should not be poisoned");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].category, MetricCategory::Memory);
+        assert!(
+            history[0].value.expect("alert should carry a value") > thresholds.memory_threshold
+        );
+    }
+
+    #[test]
+    fn test_check_threshold_breaches_ignores_non_sustained_spikes() {
+        let metric_data: Mutex<HashMap<MetricCategory, VecDeque<MetricDataPoint>>> =
+            Mutex::new(HashMap::new());
+        let alert_history: Mutex<VecDeque<DashboardAlert>> = Mutex::new(VecDeque::new());
+        let (websocket_sender, _rx) = broadcast::channel(16);
+        let thresholds = AlertThresholds::default();
+
+        {
+            let mut data = metric_data.lock().expect("lock should not be poisoned");
+            let points = data.entry(MetricCategory::Memory).or_default();
+            // One spike above threshold, rest comfortably below it.
+            points.push_back(MetricDataPoint {
+                timestamp: 0,
+                value: thresholds.memory_threshold + 5.0,
+                label: "Memory Usage".to_string(),
+                category: MetricCategory::Memory,
+            });
+            for i in 1..SUSTAINED_BREACH_WINDOW {
+                points.push_back(MetricDataPoint {
+                    timestamp: i as u64,
+                    value: thresholds.memory_threshold - 20.0,
+                    label: "Memory Usage".to_string(),
+                    category: MetricCategory::Memory,
+                });
+            }
+        }
+
+        check_threshold_breaches(&metric_data, &thresholds, &alert_history, &websocket_sender);
+
+        let history = alert_history.lock().expect("lock should not be poisoned");
+        assert!(
+            history.is_empty(),
+            "a single spike must not be treated as a sustained breach"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_automatic_collection_actually_records_real_memory_metrics() {
+        let dashboard =
+            Arc::new(DashboardBuilder::new().update_frequency(20).memory_profiling(true).build());
+        let handle = dashboard.clone();
+
+        tokio::spawn(async move {
+            let _ = handle.start().await;
+        });
+
+        // Long enough for several 20ms collection ticks.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        dashboard.stop();
+
+        // The old implementation captured `_metric_data` (a deliberately
+        // unused clone) in the collection task and only ever broadcast
+        // metrics over the WebSocket channel, so `metric_data` -- and
+        // therefore `get_historical_data` -- stayed empty forever for
+        // automatically-collected categories.
+        let memory_data = dashboard.get_historical_data(&MetricCategory::Memory);
+        assert!(
+            !memory_data.is_empty(),
+            "the periodic collector must actually store real telemetry, not just broadcast it"
+        );
+        for point in &memory_data {
+            assert!((0.0..=100.0).contains(&point.value));
+        }
     }
 }

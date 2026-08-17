@@ -15,6 +15,14 @@ pub struct FusedKernel {
     pub operations: Vec<String>, // Original operation IDs
     pub inputs: Vec<TensorInfo>,
     pub outputs: Vec<TensorInfo>,
+    /// Cost-model estimate of the speedup this fusion would give.
+    ///
+    /// Derived from [`crate::kernel_fusion::performance::PerformanceDatabase`],
+    /// whose parameters are conventional defaults until real measurements are
+    /// recorded into it. Use it to rank fusion candidates against each other,
+    /// not as a predicted wall-clock ratio — and note that nothing in this
+    /// crate executes the generated kernel, so no speedup is realised here at
+    /// all.
     pub estimated_speedup: f64,
     pub memory_savings: usize,
     pub implementation: KernelImplementation,

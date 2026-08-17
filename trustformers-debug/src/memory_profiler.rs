@@ -30,10 +30,15 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::interval;
 use uuid::Uuid;
+
+/// Cap on the number of periodic timeline snapshots retained in memory, so the
+/// background sampler cannot grow the profiler's own footprint without bound.
+const MAX_TIMELINE_SNAPSHOTS: usize = 10_000;
 
 /// Configuration for memory profiling
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,7 +247,11 @@ pub struct MemoryProfilingReport {
 
     // Performance metrics
     pub profiling_overhead_ms: f64,
-    pub sampling_accuracy: f64,
+    /// Fraction (`0.0..=1.0`) of the expected periodic samples the background
+    /// sampler actually took, computed from real elapsed time and the
+    /// configured sampling interval. `None` when heap tracking was disabled,
+    /// since no sampling was ever expected.
+    pub sampling_accuracy: Option<f64>,
 }
 
 /// Statistics for each allocation type
@@ -271,6 +280,10 @@ pub struct MemoryProfiler {
     type_stats: Arc<Mutex<HashMap<AllocationType, AllocationTypeStats>>>,
     running: Arc<Mutex<bool>>,
     profiling_start_time: Option<Instant>,
+    /// Number of periodic snapshots the background sampler actually took.
+    /// Compared against the expected count (elapsed time / sampling interval)
+    /// to report a real `sampling_accuracy` instead of a fabricated constant.
+    samples_taken: Arc<AtomicU64>,
 }
 
 impl MemoryProfiler {
@@ -285,6 +298,7 @@ impl MemoryProfiler {
             type_stats: Arc::new(Mutex::new(HashMap::new())),
             running: Arc::new(Mutex::new(false)),
             profiling_start_time: None,
+            samples_taken: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -407,51 +421,14 @@ impl MemoryProfiler {
     /// Get current memory usage snapshot
     pub fn get_memory_snapshot(&self) -> Result<MemorySnapshot> {
         let allocations = self.allocations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _type_stats = self.type_stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let timeline = self.memory_timeline.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let mut total_heap = 0;
-        let mut used_heap = 0;
-        let mut allocation_count = 0;
-        let mut free_count = 0;
-        let mut allocations_by_type = HashMap::new();
-        let mut allocations_by_size = HashMap::new();
-
-        for record in allocations.values() {
-            total_heap += record.size;
-
-            if !record.freed {
-                used_heap += record.size;
-                allocation_count += 1;
-
-                *allocations_by_type.entry(record.allocation_type.clone()).or_insert(0) +=
-                    record.size;
-
-                let size_bucket = self.get_size_bucket(record.size);
-                *allocations_by_size.entry(size_bucket).or_insert(0) += 1;
-            } else {
-                free_count += 1;
-            }
-        }
-
-        let free_heap = total_heap - used_heap;
-        let fragmentation_ratio =
-            if total_heap > 0 { free_heap as f64 / total_heap as f64 } else { 0.0 };
-
-        let gc_pressure_score = self.calculate_gc_pressure_score();
-
-        Ok(MemorySnapshot {
-            timestamp: SystemTime::now(),
-            total_heap_bytes: total_heap,
-            used_heap_bytes: used_heap,
-            free_heap_bytes: free_heap,
-            peak_heap_bytes: used_heap, // Simplified for now
-            allocation_count,
-            free_count,
-            fragmentation_ratio,
-            gc_pressure_score,
-            allocations_by_type,
-            allocations_by_size,
-        })
+        let (allocation_rate, deallocation_rate) = allocation_rates_from_timeline(&timeline);
+        Ok(snapshot_from_allocations(
+            &allocations,
+            allocation_rate,
+            deallocation_rate,
+        ))
     }
 
     /// Detect memory leaks
@@ -564,10 +541,18 @@ impl MemoryProfiler {
 
     /// Analyze GC pressure
     pub fn analyze_gc_pressure(&self) -> Result<GCPressureAnalysis> {
+        // Computed first (acquires and releases its own locks) so `memory_timeline`
+        // below isn't reentrant-locked while this call is in flight.
+        let fragmentation_ratio = self.get_memory_snapshot()?.fragmentation_ratio;
+
         let timeline = self.memory_timeline.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let pressure_score = self.calculate_gc_pressure_score();
         let (allocation_rate, deallocation_rate) = self.calculate_allocation_rates(&timeline);
+        let pressure_score = self.calculate_gc_pressure_score(
+            allocation_rate,
+            deallocation_rate,
+            fragmentation_ratio,
+        );
         let churn_rate = allocation_rate.min(deallocation_rate);
 
         let pressure_level = match pressure_score {
@@ -611,8 +596,10 @@ impl MemoryProfiler {
     async fn start_sampling(&self) -> Result<()> {
         let interval_duration = Duration::from_millis(self.config.sampling_interval_ms);
         let mut interval = interval(interval_duration);
-        let _timeline = Arc::clone(&self.memory_timeline);
+        let timeline = Arc::clone(&self.memory_timeline);
+        let allocations = Arc::clone(&self.allocations);
         let running = Arc::clone(&self.running);
+        let samples_taken = Arc::clone(&self.samples_taken);
 
         tokio::spawn(async move {
             loop {
@@ -628,8 +615,27 @@ impl MemoryProfiler {
                     break;
                 }
 
-                // This would normally sample actual memory usage
-                // For now, we'll use a placeholder implementation
+                // Take a real snapshot of the allocation table tracked so far and
+                // append it to the timeline, using the same computation as
+                // `get_memory_snapshot` so on-demand and periodic snapshots agree.
+                {
+                    let allocations_guard =
+                        allocations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let mut timeline_guard =
+                        timeline.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let (allocation_rate, deallocation_rate) =
+                        allocation_rates_from_timeline(&timeline_guard);
+                    let snapshot = snapshot_from_allocations(
+                        &allocations_guard,
+                        allocation_rate,
+                        deallocation_rate,
+                    );
+                    timeline_guard.push_back(snapshot);
+                    while timeline_guard.len() > MAX_TIMELINE_SNAPSHOTS {
+                        timeline_guard.pop_front();
+                    }
+                }
+                samples_taken.fetch_add(1, Ordering::Relaxed);
             }
         });
 
@@ -681,7 +687,7 @@ impl MemoryProfiler {
             // Create size buckets
             let mut size_buckets = HashMap::new();
             for record in allocations.values() {
-                let bucket = self.get_size_bucket(record.size);
+                let bucket = size_bucket(record.size);
                 *size_buckets.entry(bucket).or_insert(0) += 1;
             }
 
@@ -734,18 +740,48 @@ impl MemoryProfiler {
             allocations_by_type: type_stats_snapshot,
             allocations_by_size_bucket,
             profiling_overhead_ms,
-            sampling_accuracy: 0.95, // Placeholder
+            sampling_accuracy: self.compute_sampling_accuracy(duration_secs),
         })
     }
 
+    /// Real sampling-accuracy signal: how many of the periodic snapshots the
+    /// background sampler was expected to take (elapsed time / configured
+    /// interval) it actually took. `None` when heap tracking was never enabled,
+    /// since no sampling was ever expected to happen.
+    fn compute_sampling_accuracy(&self, duration_secs: f64) -> Option<f64> {
+        if !self.config.enable_heap_tracking {
+            return None;
+        }
+        let interval_secs = (self.config.sampling_interval_ms.max(1) as f64) / 1000.0;
+        let expected_samples = (duration_secs / interval_secs).max(1.0);
+        let actual_samples = self.samples_taken.load(Ordering::Relaxed) as f64;
+        Some((actual_samples / expected_samples).min(1.0))
+    }
+
+    /// Capture a real stack trace at the allocation site via
+    /// `std::backtrace::Backtrace::force_capture`, which (unlike `capture()`)
+    /// ignores `RUST_BACKTRACE`/`RUST_LIB_BACKTRACE` and always attempts to
+    /// resolve frames, so allocation traces never silently depend on the
+    /// caller's environment. Each returned string is one real stack frame
+    /// (function symbol); if the platform cannot resolve frames at all, a
+    /// single explicit "unavailable" entry is returned instead of fabricating
+    /// frame names.
     fn capture_stack_trace(&self) -> Vec<String> {
-        // Placeholder implementation - in a real implementation,
-        // this would capture the actual call stack
-        vec![
-            "function_a".to_string(),
-            "function_b".to_string(),
-            "main".to_string(),
-        ]
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        match backtrace.status() {
+            std::backtrace::BacktraceStatus::Captured => {
+                let frames = parse_backtrace_frames(&backtrace);
+                if frames.is_empty() {
+                    vec!["<stack trace captured but no frames could be resolved>".to_string()]
+                } else {
+                    frames
+                }
+            },
+            std::backtrace::BacktraceStatus::Unsupported => {
+                vec!["<stack trace unavailable: unsupported on this platform>".to_string()]
+            },
+            _ => vec!["<stack trace unavailable>".to_string()],
+        }
     }
 
     fn update_type_stats(
@@ -791,17 +827,6 @@ impl MemoryProfiler {
         };
     }
 
-    fn get_size_bucket(&self, size: usize) -> String {
-        match size {
-            0..=1024 => "0-1KB".to_string(),
-            1025..=10240 => "1-10KB".to_string(),
-            10241..=102400 => "10-100KB".to_string(),
-            102401..=1048576 => "100KB-1MB".to_string(),
-            1048577..=10485760 => "1-10MB".to_string(),
-            _ => ">10MB".to_string(),
-        }
-    }
-
     fn classify_leak_severity(&self, size: usize, age_seconds: f64) -> LeakSeverity {
         let large_size = size > self.config.large_allocation_threshold;
         let old_age = age_seconds > 1800.0; // 30 minutes
@@ -816,33 +841,20 @@ impl MemoryProfiler {
         }
     }
 
-    fn calculate_gc_pressure_score(&self) -> f64 {
-        // Simplified GC pressure calculation
-        // In a real implementation, this would consider allocation patterns,
-        // heap growth rate, and other factors
-        0.3 // Placeholder value
+    /// GC-pressure heuristic derived from *measured* allocation churn and heap
+    /// fragmentation (both real, caller-supplied signals) rather than a fixed
+    /// constant. See [`gc_pressure_score`] for the formula.
+    fn calculate_gc_pressure_score(
+        &self,
+        allocation_rate: f64,
+        deallocation_rate: f64,
+        fragmentation_ratio: f64,
+    ) -> f64 {
+        gc_pressure_score(allocation_rate, deallocation_rate, fragmentation_ratio)
     }
 
     fn calculate_allocation_rates(&self, timeline: &VecDeque<MemorySnapshot>) -> (f64, f64) {
-        if timeline.len() < 2 {
-            return (0.0, 0.0);
-        }
-
-        // Simplified rate calculation
-        let first = &timeline[0];
-        let last = &timeline[timeline.len() - 1];
-
-        let duration = last
-            .timestamp
-            .duration_since(first.timestamp)
-            .unwrap_or(Duration::from_secs(1))
-            .as_secs_f64();
-
-        let allocation_rate =
-            (last.allocation_count as f64 - first.allocation_count as f64) / duration;
-        let deallocation_rate = (last.free_count as f64 - first.free_count as f64) / duration;
-
-        (allocation_rate.max(0.0), deallocation_rate.max(0.0))
+        allocation_rates_from_timeline(timeline)
     }
 
     // Pattern detection methods
@@ -978,6 +990,140 @@ impl MemoryProfiler {
     }
 }
 
+// ============================================================================
+// Free functions shared between on-demand snapshotting (`get_memory_snapshot`)
+// and the periodic background sampler (`start_sampling`), so both derive their
+// numbers from the exact same real computation instead of two implementations
+// that could silently drift apart.
+// ============================================================================
+
+/// Classify an allocation size into a human-readable bucket label.
+fn size_bucket(size: usize) -> String {
+    match size {
+        0..=1024 => "0-1KB".to_string(),
+        1025..=10240 => "1-10KB".to_string(),
+        10241..=102400 => "10-100KB".to_string(),
+        102401..=1048576 => "100KB-1MB".to_string(),
+        1048577..=10485760 => "1-10MB".to_string(),
+        _ => ">10MB".to_string(),
+    }
+}
+
+/// GC-pressure heuristic in `[0.0, 1.0]` derived from measured allocation
+/// churn (allocations/deallocations per second, saturating at a reference
+/// rate of 1000/s) blended with real heap fragmentation. This is a documented
+/// heuristic over real signals, not a fabricated constant: it moves when the
+/// underlying allocation behavior moves, and is reproducible for identical
+/// inputs.
+fn gc_pressure_score(
+    allocation_rate: f64,
+    deallocation_rate: f64,
+    fragmentation_ratio: f64,
+) -> f64 {
+    let churn = allocation_rate.min(deallocation_rate).max(0.0);
+    let churn_component = (churn / 1000.0).min(1.0);
+    let fragmentation_component = fragmentation_ratio.clamp(0.0, 1.0);
+    (0.7 * churn_component + 0.3 * fragmentation_component).clamp(0.0, 1.0)
+}
+
+/// Allocation/deallocation rates (events per second) computed from the first
+/// and last entries of a real timeline of snapshots. Returns `(0.0, 0.0)` when
+/// fewer than two samples exist yet (no rate can be observed).
+fn allocation_rates_from_timeline(timeline: &VecDeque<MemorySnapshot>) -> (f64, f64) {
+    if timeline.len() < 2 {
+        return (0.0, 0.0);
+    }
+
+    let first = &timeline[0];
+    let last = &timeline[timeline.len() - 1];
+
+    let duration = last
+        .timestamp
+        .duration_since(first.timestamp)
+        .unwrap_or(Duration::from_secs(1))
+        .as_secs_f64()
+        .max(f64::EPSILON);
+
+    let allocation_rate = (last.allocation_count as f64 - first.allocation_count as f64) / duration;
+    let deallocation_rate = (last.free_count as f64 - first.free_count as f64) / duration;
+
+    (allocation_rate.max(0.0), deallocation_rate.max(0.0))
+}
+
+/// Build a real `MemorySnapshot` from the current allocation table plus
+/// already-computed rate signals. Used both for on-demand snapshots and for
+/// each periodic sample the background sampler takes.
+fn snapshot_from_allocations(
+    allocations: &HashMap<Uuid, AllocationRecord>,
+    allocation_rate: f64,
+    deallocation_rate: f64,
+) -> MemorySnapshot {
+    let mut total_heap = 0usize;
+    let mut used_heap = 0usize;
+    let mut allocation_count = 0usize;
+    let mut free_count = 0usize;
+    let mut allocations_by_type: HashMap<AllocationType, usize> = HashMap::new();
+    let mut allocations_by_size: HashMap<String, usize> = HashMap::new();
+
+    for record in allocations.values() {
+        total_heap += record.size;
+
+        if !record.freed {
+            used_heap += record.size;
+            allocation_count += 1;
+            *allocations_by_type.entry(record.allocation_type.clone()).or_insert(0) += record.size;
+            *allocations_by_size.entry(size_bucket(record.size)).or_insert(0) += 1;
+        } else {
+            free_count += 1;
+        }
+    }
+
+    let free_heap = total_heap.saturating_sub(used_heap);
+    let fragmentation_ratio =
+        if total_heap > 0 { free_heap as f64 / total_heap as f64 } else { 0.0 };
+    let gc_pressure_score =
+        gc_pressure_score(allocation_rate, deallocation_rate, fragmentation_ratio);
+
+    MemorySnapshot {
+        timestamp: SystemTime::now(),
+        total_heap_bytes: total_heap,
+        used_heap_bytes: used_heap,
+        free_heap_bytes: free_heap,
+        peak_heap_bytes: used_heap, // Simplified: current usage, not a tracked running peak.
+        allocation_count,
+        free_count,
+        fragmentation_ratio,
+        gc_pressure_score,
+        allocations_by_type,
+        allocations_by_size,
+    }
+}
+
+/// Parse one real symbol name per frame out of `Backtrace`'s `Debug` output.
+///
+/// `std::backtrace::Backtrace` does not expose a stable structured frame API
+/// (its `Debug` impl is documented as "likely to change over time"), so this
+/// scans for the `fn: "..."` entries the standard library's renderer emits
+/// per frame — robust to the surrounding formatting/whitespace, and to
+/// optional `file:`/`line:` fields being present or absent per frame.
+fn parse_backtrace_frames(backtrace: &std::backtrace::Backtrace) -> Vec<String> {
+    let rendered = format!("{backtrace:?}");
+    const NEEDLE: &str = "fn: \"";
+    let mut frames = Vec::new();
+    let mut rest = rendered.as_str();
+    while let Some(start) = rest.find(NEEDLE) {
+        rest = &rest[start + NEEDLE.len()..];
+        match rest.find('"') {
+            Some(end) => {
+                frames.push(rest[..end].to_string());
+                rest = &rest[end + 1..];
+            },
+            None => break,
+        }
+    }
+    frames
+}
+
 impl PartialOrd for LeakSeverity {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
@@ -1008,7 +1154,6 @@ mod tests {
     use tokio;
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore] // FIXME: This test has implementation issues causing slow execution
     async fn test_memory_profiler_basic() -> Result<()> {
         let config = MemoryProfilingConfig {
             sampling_interval_ms: 1000, // Slower sampling for faster tests
@@ -1016,8 +1161,16 @@ mod tests {
         };
         let mut profiler = MemoryProfiler::new(config);
 
-        // Wrap in timeout to prevent hanging
-        let test_result = tokio::time::timeout(Duration::from_millis(500), async {
+        // Wrap in a generous (but still bounded) timeout to guard against a
+        // hang. `record_allocation` now captures a *real* stack trace via
+        // `std::backtrace::Backtrace::force_capture`, and the first call in a
+        // process pays a one-time symbol-resolution cost against this
+        // binary's (large) debug info -- observed ~0.5s even though every
+        // later call is sub-millisecond. 500ms was tuned for the old fake,
+        // zero-cost placeholder and is no longer a realistic budget for real
+        // work; several seconds of headroom keeps this a fast test while
+        // still catching an actual hang.
+        let test_result = tokio::time::timeout(Duration::from_secs(5), async {
             profiler.start().await?;
 
             // Record some allocations
@@ -1051,7 +1204,7 @@ mod tests {
 
         match test_result {
             Ok(result) => result,
-            Err(_) => Err(anyhow::anyhow!("Test timed out after 500ms")),
+            Err(_) => Err(anyhow::anyhow!("Test timed out after 5s")),
         }
     }
 
@@ -1078,15 +1231,12 @@ mod tests {
 
     #[test]
     fn test_size_buckets() {
-        let config = MemoryProfilingConfig::default();
-        let profiler = MemoryProfiler::new(config);
-
-        assert_eq!(profiler.get_size_bucket(512), "0-1KB");
-        assert_eq!(profiler.get_size_bucket(5120), "1-10KB");
-        assert_eq!(profiler.get_size_bucket(51200), "10-100KB");
-        assert_eq!(profiler.get_size_bucket(512000), "100KB-1MB");
-        assert_eq!(profiler.get_size_bucket(5120000), "1-10MB");
-        assert_eq!(profiler.get_size_bucket(51200000), ">10MB");
+        assert_eq!(size_bucket(512), "0-1KB");
+        assert_eq!(size_bucket(5120), "1-10KB");
+        assert_eq!(size_bucket(51200), "10-100KB");
+        assert_eq!(size_bucket(512000), "100KB-1MB");
+        assert_eq!(size_bucket(5120000), "1-10MB");
+        assert_eq!(size_bucket(51200000), ">10MB");
     }
 
     #[test]
@@ -1111,5 +1261,134 @@ mod tests {
             profiler.classify_leak_severity(524288, 1900.0),
             LeakSeverity::Medium
         );
+    }
+
+    #[test]
+    fn test_capture_stack_trace_is_real_not_the_old_hardcoded_placeholder() {
+        let config = MemoryProfilingConfig::default();
+        let profiler = MemoryProfiler::new(config);
+
+        let frames = profiler.capture_stack_trace();
+
+        // The old implementation always returned this exact 3-element vector
+        // regardless of call site; a real backtrace never matches it.
+        assert_ne!(
+            frames,
+            vec![
+                "function_a".to_string(),
+                "function_b".to_string(),
+                "main".to_string()
+            ]
+        );
+        assert!(
+            !frames.is_empty(),
+            "a captured backtrace must contain at least one frame"
+        );
+        assert!(
+            frames.iter().all(|f| !f.trim().is_empty()),
+            "no frame string should be empty"
+        );
+    }
+
+    #[test]
+    fn test_gc_pressure_score_is_computed_from_real_signals_not_a_constant() {
+        // The old implementation always returned 0.3 regardless of input.
+        let idle = gc_pressure_score(0.0, 0.0, 0.0);
+        let busy = gc_pressure_score(2000.0, 2000.0, 0.9);
+
+        assert_eq!(
+            idle, 0.0,
+            "no churn and no fragmentation must score zero pressure"
+        );
+        assert!(
+            busy > idle,
+            "high churn + high fragmentation must score higher than idle"
+        );
+        assert!((0.0..=1.0).contains(&busy));
+        assert_ne!(idle, 0.3, "must not be the old fabricated constant");
+        assert_ne!(busy, 0.3, "must not be the old fabricated constant");
+    }
+
+    #[test]
+    fn test_allocation_rates_from_timeline_uses_real_deltas() {
+        let mut timeline = VecDeque::new();
+        let t0 = SystemTime::now();
+        timeline.push_back(MemorySnapshot {
+            timestamp: t0,
+            total_heap_bytes: 0,
+            used_heap_bytes: 0,
+            free_heap_bytes: 0,
+            peak_heap_bytes: 0,
+            allocation_count: 0,
+            free_count: 0,
+            fragmentation_ratio: 0.0,
+            gc_pressure_score: 0.0,
+            allocations_by_type: HashMap::new(),
+            allocations_by_size: HashMap::new(),
+        });
+        timeline.push_back(MemorySnapshot {
+            timestamp: t0 + Duration::from_secs(2),
+            total_heap_bytes: 0,
+            used_heap_bytes: 0,
+            free_heap_bytes: 0,
+            peak_heap_bytes: 0,
+            allocation_count: 20,
+            free_count: 10,
+            fragmentation_ratio: 0.0,
+            gc_pressure_score: 0.0,
+            allocations_by_type: HashMap::new(),
+            allocations_by_size: HashMap::new(),
+        });
+
+        let (alloc_rate, dealloc_rate) = allocation_rates_from_timeline(&timeline);
+        assert!(
+            (alloc_rate - 10.0).abs() < 1e-9,
+            "20 allocations over 2s => 10/s, got {alloc_rate}"
+        );
+        assert!(
+            (dealloc_rate - 5.0).abs() < 1e-9,
+            "10 frees over 2s => 5/s, got {dealloc_rate}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_sampling_accuracy_is_none_when_tracking_disabled() -> Result<()> {
+        let config = MemoryProfilingConfig {
+            enable_heap_tracking: false,
+            ..Default::default()
+        };
+        let mut profiler = MemoryProfiler::new(config);
+        profiler.start().await?;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let report = profiler.stop().await?;
+
+        // The old implementation always reported `0.95` regardless of whether
+        // sampling ever ran.
+        assert_eq!(report.sampling_accuracy, None);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_sampling_accuracy_is_real_when_tracking_enabled() -> Result<()> {
+        let config = MemoryProfilingConfig {
+            enable_heap_tracking: true,
+            sampling_interval_ms: 20,
+            ..Default::default()
+        };
+        let mut profiler = MemoryProfiler::new(config);
+        profiler.start().await?;
+        // Long enough for several sampler ticks at a 20ms interval.
+        tokio::time::sleep(Duration::from_millis(220)).await;
+        let report = profiler.stop().await?;
+
+        let accuracy = report.sampling_accuracy.expect("tracking was enabled");
+        assert!((0.0..=1.0).contains(&accuracy));
+        assert_ne!(accuracy, 0.95, "must not be the old fabricated constant");
+        // The periodic sampler should have actually produced timeline entries.
+        assert!(
+            !report.memory_timeline.is_empty(),
+            "background sampler must record real snapshots, not do nothing"
+        );
+        Ok(())
     }
 }

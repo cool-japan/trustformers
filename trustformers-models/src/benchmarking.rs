@@ -105,20 +105,47 @@ impl BenchmarkSuite {
             model_fn(input)?;
         }
 
-        // Benchmark
-        let mut durations = Vec::new();
+        if self.config.benchmark_iterations == 0 {
+            return Err(anyhow::anyhow!(
+                "benchmark_iterations is 0, so no timing sample can be taken for {test_name}"
+            ));
+        }
+
+        // Benchmark.
+        //
+        // `Duration::as_millis()` truncates to whole milliseconds, so every
+        // sub-millisecond forward pass used to be recorded as exactly `0.0 ms`,
+        // which made `avg_latency_ms` zero and `1000.0 / 0.0` report an
+        // *infinite* throughput. Timings are kept as `Duration` and converted
+        // with `as_secs_f64()` so the full nanosecond resolution survives.
+        let mut durations: Vec<Duration> = Vec::with_capacity(self.config.benchmark_iterations);
         for _ in 0..self.config.benchmark_iterations {
             let start = Instant::now();
             model_fn(input)?;
-            durations.push(start.elapsed().as_millis() as f64);
+            durations.push(start.elapsed());
         }
 
+        let samples_ms: Vec<f64> = durations.iter().map(|d| d.as_secs_f64() * 1_000.0).collect();
+        let total_secs: f64 = durations.iter().map(Duration::as_secs_f64).sum();
+
         // Calculate statistics
-        let avg_latency_ms = durations.iter().sum::<f64>() / durations.len() as f64;
-        let variance = durations.iter().map(|&x| (x - avg_latency_ms).powi(2)).sum::<f64>()
-            / durations.len() as f64;
+        let avg_latency_ms = samples_ms.iter().sum::<f64>() / samples_ms.len() as f64;
+        let variance = samples_ms.iter().map(|&x| (x - avg_latency_ms).powi(2)).sum::<f64>()
+            / samples_ms.len() as f64;
         let std_latency_ms = variance.sqrt();
-        let throughput = 1000.0 / avg_latency_ms; // samples per second
+
+        // Throughput is derived from the *total* measured wall time rather than
+        // from a reciprocal of a possibly-zero average. A zero total means the
+        // platform clock did not advance across the whole loop, which is a
+        // measurement failure, not an infinitely fast model.
+        if total_secs <= 0.0 || !total_secs.is_finite() {
+            return Err(anyhow::anyhow!(
+                "monotonic clock did not advance across {} iteration(s) of {test_name}; \
+                 throughput cannot be measured on this platform",
+                self.config.benchmark_iterations
+            ));
+        }
+        let throughput = self.config.benchmark_iterations as f64 / total_secs;
 
         Ok(BenchmarkResult {
             test_name: test_name.to_string(),
@@ -242,6 +269,65 @@ mod tests {
         let inputs = BenchmarkUtils::create_test_inputs(&[2, 4], &[10, 20])?;
         assert_eq!(inputs.len(), 4);
         Ok(())
+    }
+
+    /// Regression: sub-millisecond work must not report `0.00 ms` and infinite
+    /// throughput.
+    ///
+    /// The previous implementation stored `start.elapsed().as_millis() as f64`,
+    /// so a forward pass faster than one millisecond was recorded as exactly
+    /// zero; `avg_latency_ms` then became `0.0` and `1000.0 / 0.0` produced
+    /// `inf` samples/s. Both assertions below fail against that code.
+    #[test]
+    fn sub_millisecond_benchmarks_report_real_latency_and_finite_throughput() {
+        let config = BenchmarkConfig {
+            warmup_iterations: 1,
+            benchmark_iterations: 8,
+            batch_sizes: vec![1],
+            sequence_lengths: vec![4],
+        };
+        let mut suite = BenchmarkSuite::new(config);
+        // A clone is far faster than a millisecond on any supported platform.
+        suite.add_model("identity", |t: &Tensor| Ok(t.clone()));
+
+        let results = suite.run_benchmarks().expect("benchmark run must succeed");
+        assert_eq!(results.len(), 1);
+        let result = &results[0];
+
+        assert!(
+            result.avg_latency_ms > 0.0,
+            "sub-millisecond latency must not be truncated to zero, got {}",
+            result.avg_latency_ms
+        );
+        assert!(
+            result.throughput.is_finite() && result.throughput > 0.0,
+            "throughput must be a finite positive rate, got {}",
+            result.throughput
+        );
+        assert!(
+            result.std_latency_ms.is_finite(),
+            "standard deviation must be finite, got {}",
+            result.std_latency_ms
+        );
+    }
+
+    #[test]
+    fn zero_iteration_benchmarks_are_rejected_rather_than_reporting_nan() {
+        let config = BenchmarkConfig {
+            warmup_iterations: 0,
+            benchmark_iterations: 0,
+            batch_sizes: vec![1],
+            sequence_lengths: vec![2],
+        };
+        let mut suite = BenchmarkSuite::new(config);
+        suite.add_model("identity", |t: &Tensor| Ok(t.clone()));
+        let err = suite
+            .run_benchmarks()
+            .expect_err("a benchmark with no iterations must not report a measurement");
+        assert!(
+            err.to_string().contains("benchmark_iterations is 0"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

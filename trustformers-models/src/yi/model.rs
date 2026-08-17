@@ -1,3 +1,7 @@
+use crate::weight_loading::binding::{
+    bind_embedding, bind_linear, take_norm_weight, DECODER_BUFFER_SUFFIXES,
+};
+use crate::weight_loading::checkpoint::{Checkpoint, LoadReport, UnusedTensors};
 use crate::yi::config::YiConfig;
 use scirs2_core::ndarray::{ArrayD, IxDyn};
 use std::io::Read;
@@ -28,6 +32,28 @@ impl YiRmsNorm {
 
     pub fn parameter_count(&self) -> usize {
         self.weight.len()
+    }
+
+    /// Install the normalisation gain from a checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `weight` does not have the shape this norm was built for.
+    pub fn set_weight(&mut self, weight: Tensor) -> Result<()> {
+        if weight.shape() != self.weight.shape() {
+            return Err(TrustformersError::shape_error(format!(
+                "YiRmsNorm expects a {:?} gain, got {:?}",
+                self.weight.shape(),
+                weight.shape()
+            )));
+        }
+        self.weight = weight;
+        Ok(())
+    }
+
+    /// The current normalisation gain.
+    pub fn weight(&self) -> &Tensor {
+        &self.weight
     }
 }
 
@@ -127,9 +153,9 @@ impl YiRotaryEmbedding {
 
 /// Yi SwiGLU Feed-Forward Network (no bias, same as LLaMA).
 pub struct YiMLP {
-    gate_proj: Linear,
-    up_proj: Linear,
-    down_proj: Linear,
+    pub(crate) gate_proj: Linear,
+    pub(crate) up_proj: Linear,
+    pub(crate) down_proj: Linear,
 }
 
 impl YiMLP {
@@ -183,10 +209,10 @@ impl Layer for YiMLP {
 
 /// Yi Grouped Query Attention (no bias, repeat KV heads).
 pub struct YiAttention {
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
-    o_proj: Linear,
+    pub(crate) q_proj: Linear,
+    pub(crate) k_proj: Linear,
+    pub(crate) v_proj: Linear,
+    pub(crate) o_proj: Linear,
     rotary_emb: YiRotaryEmbedding,
     num_heads: usize,
     num_kv_heads: usize,
@@ -358,10 +384,10 @@ fn make_contiguous(t: Tensor) -> Result<Tensor> {
 
 /// Single Yi decoder layer (pre-norm).
 pub struct YiDecoderLayer {
-    self_attn: YiAttention,
-    mlp: YiMLP,
-    input_layernorm: YiRmsNorm,
-    post_attention_layernorm: YiRmsNorm,
+    pub(crate) self_attn: YiAttention,
+    pub(crate) mlp: YiMLP,
+    pub(crate) input_layernorm: YiRmsNorm,
+    pub(crate) post_attention_layernorm: YiRmsNorm,
 }
 
 impl YiDecoderLayer {
@@ -468,10 +494,13 @@ impl Model for YiModel {
         self.run(input_ids)
     }
 
-    fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
-        Err(TrustformersError::not_implemented(
-            "Weight loading not yet implemented for Yi".to_string(),
-        ))
+    /// Load a HuggingFace Yi checkpoint (safetensors or `torch.save`).
+    ///
+    /// See [`YiModel::load_checkpoint`] for the name map and the failure modes.
+    fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        self.load_checkpoint(&checkpoint, &["lm_head."])?;
+        Ok(())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -480,6 +509,133 @@ impl Model for YiModel {
 
     fn num_parameters(&self) -> usize {
         self.parameter_count()
+    }
+}
+
+impl YiModel {
+    /// Bind a parsed checkpoint into this model.
+    ///
+    /// Yi follows the LLaMA tensor layout, so both the `model.*`-prefixed
+    /// (`YiForCausalLM`) and the bare (`YiModel`) HuggingFace exports are
+    /// accepted. `allowed_unused_prefixes` names namespaces this base model
+    /// legitimately ignores — the LM head lives on [`YiForCausalLM`], not here.
+    ///
+    /// The load is all-or-nothing on real weights: a parameter the checkpoint
+    /// does not carry is recorded and reported by
+    /// [`WeightBinder::finish`](crate::weight_loading::checkpoint::WeightBinder::finish),
+    /// never substituted, so a checkpoint that does not match the architecture
+    /// cannot leave randomly-initialised tensors in place while returning `Ok`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint does not look like a Yi checkpoint, when any
+    /// tensor has the wrong shape, when a parameter is missing, or when the
+    /// checkpoint carries weights this architecture does not recognise.
+    pub fn load_checkpoint(
+        &mut self,
+        checkpoint: &Checkpoint,
+        allowed_unused_prefixes: &[&str],
+    ) -> Result<LoadReport> {
+        let prefix = checkpoint.detect_prefix(&["model.", ""], "embed_tokens.weight")?;
+        let mut binder = checkpoint.binder(&prefix);
+
+        let hidden = self.config.hidden_size;
+        let head_dim = self.config.head_dim();
+        let q_width = self.config.num_attention_heads * head_dim;
+        let kv_width = self.config.num_key_value_heads * head_dim;
+        let intermediate = self.config.intermediate_size;
+
+        bind_embedding(
+            &mut binder,
+            "embed_tokens",
+            self.config.vocab_size,
+            hidden,
+            &mut self.embed_tokens,
+        )?;
+
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            let attn = format!("layers.{i}.self_attn");
+            bind_linear(
+                &mut binder,
+                &format!("{attn}.q_proj"),
+                q_width,
+                hidden,
+                false,
+                &mut layer.self_attn.q_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{attn}.k_proj"),
+                kv_width,
+                hidden,
+                false,
+                &mut layer.self_attn.k_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{attn}.v_proj"),
+                kv_width,
+                hidden,
+                false,
+                &mut layer.self_attn.v_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{attn}.o_proj"),
+                hidden,
+                q_width,
+                false,
+                &mut layer.self_attn.o_proj,
+            )?;
+
+            let mlp = format!("layers.{i}.mlp");
+            bind_linear(
+                &mut binder,
+                &format!("{mlp}.gate_proj"),
+                intermediate,
+                hidden,
+                false,
+                &mut layer.mlp.gate_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{mlp}.up_proj"),
+                intermediate,
+                hidden,
+                false,
+                &mut layer.mlp.up_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{mlp}.down_proj"),
+                hidden,
+                intermediate,
+                false,
+                &mut layer.mlp.down_proj,
+            )?;
+
+            if let Some(w) =
+                take_norm_weight(&mut binder, &format!("layers.{i}.input_layernorm"), hidden)?
+            {
+                layer.input_layernorm.set_weight(w)?;
+            }
+            if let Some(w) = take_norm_weight(
+                &mut binder,
+                &format!("layers.{i}.post_attention_layernorm"),
+                hidden,
+            )? {
+                layer.post_attention_layernorm.set_weight(w)?;
+            }
+        }
+
+        if let Some(w) = take_norm_weight(&mut binder, "norm", hidden)? {
+            self.norm.set_weight(w)?;
+        }
+
+        binder.finish(UnusedTensors::new(
+            allowed_unused_prefixes,
+            DECODER_BUFFER_SUFFIXES,
+        ))
     }
 }
 
@@ -548,10 +704,49 @@ impl Model for YiForCausalLM {
         YiForCausalLM::forward(self, input_ids)
     }
 
-    fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
-        Err(TrustformersError::not_implemented(
-            "Weight loading not yet implemented for Yi".to_string(),
-        ))
+    /// Load a HuggingFace `YiForCausalLM` checkpoint.
+    ///
+    /// The backbone is bound first, then the LM head. A checkpoint with
+    /// `tie_word_embeddings` carries no `lm_head.weight`; the input embedding
+    /// matrix is reused in that case, which is exactly what the tied
+    /// configuration means — not a fallback.
+    ///
+    /// # Errors
+    ///
+    /// See [`YiModel::load_checkpoint`]; additionally fails when the checkpoint
+    /// holds neither an LM head nor an embedding matrix to tie it to, or when
+    /// the head has the wrong shape.
+    fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        self.model.load_checkpoint(&checkpoint, &["lm_head."])?;
+
+        let config = self.model.config();
+        let expected = [config.vocab_size, config.hidden_size];
+        let head = match checkpoint.get("lm_head.weight") {
+            Some(weight) => weight,
+            None => {
+                let embed_name = if checkpoint.contains("model.embed_tokens.weight") {
+                    "model.embed_tokens.weight"
+                } else {
+                    "embed_tokens.weight"
+                };
+                checkpoint.get(embed_name).ok_or_else(|| {
+                    tensor_op_error(
+                        "YiForCausalLM::load_pretrained",
+                        "checkpoint holds neither lm_head.weight nor an embedding matrix to tie \
+                         it to",
+                    )
+                })?
+            },
+        };
+        if head.shape() != expected {
+            return Err(TrustformersError::shape_error(format!(
+                "language-model head has shape {:?} but this model expects {expected:?}",
+                head.shape()
+            )));
+        }
+        self.lm_head.set_weight(head.clone())?;
+        Ok(())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -741,5 +936,206 @@ mod tests {
         let shape = output.shape();
         // LM head projects to vocab size: [1, seq_len, vocab_size]
         assert_eq!(shape[2], cfg.vocab_size, "last dim must match vocab_size");
+    }
+
+    // ── Real checkpoint loading ─────────────────────────────────────────────
+
+    use crate::weight_loading::test_support::{build_safetensors, DecoderFixtureSpec, F32Tensor};
+
+    fn loading_config() -> YiConfig {
+        YiConfig {
+            vocab_size: 12,
+            hidden_size: 8,
+            intermediate_size: 16,
+            num_hidden_layers: 2,
+            num_attention_heads: 4,
+            num_key_value_heads: 2,
+            rope_theta: 5_000_000.0,
+            rms_norm_eps: 1e-5,
+            max_position_embeddings: 16,
+            tie_word_embeddings: false,
+        }
+    }
+
+    fn fixture(config: &YiConfig, prefix: &str) -> DecoderFixtureSpec {
+        let head_dim = config.head_dim();
+        DecoderFixtureSpec::llama_style(
+            prefix,
+            config.vocab_size,
+            config.hidden_size,
+            config.intermediate_size,
+            config.num_hidden_layers,
+            config.num_attention_heads * head_dim,
+            config.num_key_value_heads * head_dim,
+        )
+    }
+
+    /// Regression: `load_pretrained` returned `not_implemented`, so no Yi
+    /// checkpoint could ever reach the model. It now binds every parameter, and
+    /// the proof is that the checkpoint's exact values arrive in the layers.
+    #[test]
+    fn load_pretrained_binds_every_parameter_from_the_checkpoint() {
+        let config = loading_config();
+        let spec = fixture(&config, "model.");
+        let tensors = spec.tensors();
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = YiModel::new(config.clone()).expect("model must build");
+        model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect("a matching checkpoint must load");
+
+        let expected_q = tensors
+            .iter()
+            .find(|t| t.name == "model.layers.0.self_attn.q_proj.weight")
+            .expect("fixture must carry q_proj")
+            .values
+            .clone();
+        assert_eq!(
+            model.layers[0].self_attn.q_proj.weight().data().expect("readable"),
+            expected_q,
+            "q_proj must hold the checkpoint's values"
+        );
+
+        let expected_down = tensors
+            .iter()
+            .find(|t| t.name == "model.layers.1.mlp.down_proj.weight")
+            .expect("fixture must carry down_proj")
+            .values
+            .clone();
+        assert_eq!(
+            model.layers[1].mlp.down_proj.weight().data().expect("readable"),
+            expected_down
+        );
+
+        let expected_norm = tensors
+            .iter()
+            .find(|t| t.name == "model.norm.weight")
+            .expect("fixture must carry the final norm")
+            .values
+            .clone();
+        assert_eq!(model.norm.weight().data().expect("readable"), expected_norm);
+    }
+
+    /// Grouped-query attention: `k_proj`/`v_proj` are narrower than `q_proj`.
+    /// A loader that assumed a square projection would reject this fixture.
+    #[test]
+    fn load_pretrained_respects_grouped_query_attention_widths() {
+        let config = loading_config();
+        let head_dim = config.head_dim();
+        let mut model = YiModel::new(config.clone()).expect("model must build");
+        let bytes = fixture(&config, "model.").safetensors();
+        model.load_pretrained(&mut bytes.as_slice()).expect("checkpoint must load");
+
+        assert_eq!(
+            model.layers[0].self_attn.k_proj.weight().shape(),
+            vec![config.num_key_value_heads * head_dim, config.hidden_size]
+        );
+        assert_eq!(
+            model.layers[0].self_attn.q_proj.weight().shape(),
+            vec![config.num_attention_heads * head_dim, config.hidden_size]
+        );
+    }
+
+    #[test]
+    fn load_pretrained_reports_a_missing_parameter_instead_of_inventing_it() {
+        let config = loading_config();
+        let mut tensors = fixture(&config, "model.").tensors();
+        tensors.retain(|t| t.name != "model.layers.1.mlp.up_proj.weight");
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = YiModel::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("an incomplete checkpoint must not load silently");
+        assert!(
+            err.to_string().contains("layers.1.mlp.up_proj.weight"),
+            "the error must name the gap: {err}"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_rejects_a_foreign_tensor() {
+        let config = loading_config();
+        let mut tensors = fixture(&config, "model.").tensors();
+        tensors.push(F32Tensor::ramp(
+            "model.layers.9.mystery.weight",
+            &[8, 8],
+            99.0,
+        ));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = YiModel::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("an unrecognised weight must fail the load");
+        assert!(
+            err.to_string().contains("mystery.weight"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_rejects_a_checkpoint_for_a_different_configuration() {
+        let config = loading_config();
+        let wider = YiConfig {
+            hidden_size: 16,
+            intermediate_size: 32,
+            ..config.clone()
+        };
+        let bytes = fixture(&wider, "model.").safetensors();
+
+        let mut model = YiModel::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a mismatched checkpoint must not be reshaped into place");
+        assert!(err.to_string().contains("expects"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn load_pretrained_rejects_bytes_that_are_not_a_checkpoint() {
+        let mut model = YiModel::new(loading_config()).expect("model must build");
+        let garbage = vec![0xABu8; 4096];
+        let err = model
+            .load_pretrained(&mut garbage.as_slice())
+            .expect_err("garbage must not be accepted as weights");
+        assert!(
+            err.to_string().contains("unrecognised checkpoint container"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn causal_lm_loads_the_head_and_ties_it_when_absent() {
+        let config = loading_config();
+
+        // Explicit head.
+        let mut spec = fixture(&config, "model.");
+        spec.include_lm_head = true;
+        let tensors = spec.tensors();
+        let bytes = build_safetensors(&tensors);
+        let mut model = YiForCausalLM::new(config.clone()).expect("model must build");
+        model.load_pretrained(&mut bytes.as_slice()).expect("checkpoint must load");
+        let head = tensors
+            .iter()
+            .find(|t| t.name == "lm_head.weight")
+            .expect("fixture must carry the head")
+            .values
+            .clone();
+        assert_eq!(model.lm_head.weight().data().expect("readable"), head);
+
+        // Tied head: no `lm_head.weight`, so the embedding matrix is reused.
+        let tied_tensors = fixture(&config, "model.").tensors();
+        let tied_bytes = build_safetensors(&tied_tensors);
+        let mut tied = YiForCausalLM::new(config).expect("model must build");
+        tied.load_pretrained(&mut tied_bytes.as_slice())
+            .expect("tied checkpoint must load");
+        let embeddings = tied_tensors
+            .iter()
+            .find(|t| t.name == "model.embed_tokens.weight")
+            .expect("fixture must carry the embeddings")
+            .values
+            .clone();
+        assert_eq!(tied.lm_head.weight().data().expect("readable"), embeddings);
     }
 }

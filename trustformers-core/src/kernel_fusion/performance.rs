@@ -7,11 +7,19 @@ use crate::kernel_fusion::graph::Device;
 use crate::kernel_fusion::operation_types::OperationType;
 use std::collections::HashMap;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PerformanceDatabase {
     pub operation_costs: HashMap<OperationType, OperationCost>,
     pub fusion_benefits: HashMap<String, f64>, // pattern hash -> speedup
     pub device_characteristics: HashMap<Device, DeviceCharacteristics>,
+    /// Nanoseconds of launch overhead avoided per fused-away kernel launch.
+    ///
+    /// A model parameter, not a measurement. Set it from a real launch-overhead
+    /// microbenchmark with [`Self::set_launch_overhead_ns`] when you have one.
+    launch_overhead_ns: u64,
+    /// Multiplicative cost reduction attributed to better cache locality after
+    /// fusion. Also a model parameter; see [`Self::set_cache_efficiency_gain`].
+    cache_efficiency_gain: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -41,9 +49,53 @@ pub struct FusionStatistics {
     pub patterns_used: HashMap<String, u64>,
 }
 
+impl Default for PerformanceDatabase {
+    fn default() -> Self {
+        Self {
+            operation_costs: HashMap::new(),
+            fusion_benefits: HashMap::new(),
+            device_characteristics: HashMap::new(),
+            // 1 microsecond per avoided launch, and a 20% cache-locality
+            // reduction: conventional starting values for the cost model, to
+            // be replaced by measurements via the setters below.
+            launch_overhead_ns: 1_000,
+            cache_efficiency_gain: 1.2,
+        }
+    }
+}
+
 impl PerformanceDatabase {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Nanoseconds of launch overhead avoided per fused-away launch.
+    pub fn launch_overhead_ns(&self) -> u64 {
+        self.launch_overhead_ns
+    }
+
+    /// Set the avoided-launch-overhead parameter from a real measurement.
+    pub fn set_launch_overhead_ns(&mut self, overhead_ns: u64) {
+        self.launch_overhead_ns = overhead_ns;
+    }
+
+    /// Cache-locality cost reduction factor (1.0 = no benefit modelled).
+    pub fn cache_efficiency_gain(&self) -> f64 {
+        self.cache_efficiency_gain
+    }
+
+    /// Set the cache-efficiency parameter from a real measurement.
+    ///
+    /// Values at or below zero are rejected: they would make the modelled fused
+    /// cost negative or infinite.
+    pub fn set_cache_efficiency_gain(&mut self, gain: f64) -> crate::errors::Result<()> {
+        if !(gain > 0.0) || !gain.is_finite() {
+            return Err(crate::errors::TrustformersError::invalid_input(format!(
+                "cache efficiency gain must be a positive finite factor, got {gain}"
+            )));
+        }
+        self.cache_efficiency_gain = gain;
+        Ok(())
     }
 
     pub fn add_operation_cost(&mut self, op_type: OperationType, cost: OperationCost) {

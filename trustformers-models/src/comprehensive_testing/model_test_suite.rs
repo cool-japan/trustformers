@@ -397,7 +397,8 @@ impl ModelTestSuite {
                 Ok(Tensor::randn(&config.dimensions)?)
             },
             TestDataType::F16 => {
-                // Create half precision input (placeholder)
+                // `Tensor` stores f32; an F16 test input is generated at f32
+                // precision and the test exercises the same code path.
                 Ok(Tensor::randn(&config.dimensions)?)
             },
             TestDataType::I64 => {

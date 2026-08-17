@@ -1,4 +1,8 @@
 use crate::starcoder2::config::StarCoder2Config;
+use crate::weight_loading::binding::{
+    bind_embedding, bind_linear, take_norm_weight, DECODER_BUFFER_SUFFIXES,
+};
+use crate::weight_loading::checkpoint::{Checkpoint, LoadReport, UnusedTensors};
 use scirs2_core::ndarray::{ArrayD, IxDyn};
 use std::io::Read;
 use trustformers_core::{
@@ -28,6 +32,30 @@ impl StarCoder2RmsNorm {
 
     pub fn parameter_count(&self) -> usize {
         self.weight.len()
+    }
+}
+
+impl StarCoder2RmsNorm {
+    /// Install the normalisation gain from a checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `weight` does not have the shape this norm was built for.
+    pub fn set_weight(&mut self, weight: Tensor) -> Result<()> {
+        if weight.shape() != self.weight.shape() {
+            return Err(TrustformersError::shape_error(format!(
+                "StarCoder2RmsNorm expects a {:?} gain, got {:?}",
+                self.weight.shape(),
+                weight.shape()
+            )));
+        }
+        self.weight = weight;
+        Ok(())
+    }
+
+    /// The current normalisation gain.
+    pub fn weight(&self) -> &Tensor {
+        &self.weight
     }
 }
 
@@ -192,9 +220,9 @@ impl StarCoder2RotaryEmbedding {
 /// Identical topology to LLaMA but **all projections carry a bias term**,
 /// matching the StarCoder2 training configuration.
 pub struct StarCoder2MLP {
-    gate_proj: Linear,
-    up_proj: Linear,
-    down_proj: Linear,
+    pub(crate) gate_proj: Linear,
+    pub(crate) up_proj: Linear,
+    pub(crate) down_proj: Linear,
 }
 
 impl StarCoder2MLP {
@@ -253,10 +281,10 @@ impl Layer for StarCoder2MLP {
 /// with two KV heads shared among all query heads.  All projections include
 /// bias terms when `use_bias = true`.
 pub struct StarCoder2Attention {
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
-    o_proj: Linear,
+    pub(crate) q_proj: Linear,
+    pub(crate) k_proj: Linear,
+    pub(crate) v_proj: Linear,
+    pub(crate) o_proj: Linear,
     rotary_emb: StarCoder2RotaryEmbedding,
     num_heads: usize,
     num_kv_heads: usize,
@@ -463,10 +491,10 @@ fn make_contiguous(t: Tensor) -> Result<Tensor> {
 
 /// Single StarCoder2 decoder layer (pre-norm, attention then MLP).
 pub struct StarCoder2DecoderLayer {
-    self_attn: StarCoder2Attention,
-    mlp: StarCoder2MLP,
-    input_layernorm: StarCoder2RmsNorm,
-    post_attention_layernorm: StarCoder2RmsNorm,
+    pub(crate) self_attn: StarCoder2Attention,
+    pub(crate) mlp: StarCoder2MLP,
+    pub(crate) input_layernorm: StarCoder2RmsNorm,
+    pub(crate) post_attention_layernorm: StarCoder2RmsNorm,
 }
 
 impl StarCoder2DecoderLayer {
@@ -574,10 +602,13 @@ impl Model for StarCoder2Model {
         self.run(input_ids)
     }
 
-    fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
-        Err(TrustformersError::not_implemented(
-            "Weight loading not yet implemented for StarCoder2".to_string(),
-        ))
+    /// Load a HuggingFace StarCoder2 checkpoint (safetensors or `torch.save`).
+    ///
+    /// See [`StarCoder2Model::load_checkpoint`] for the name map and the failure modes.
+    fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        self.load_checkpoint(&checkpoint, &["lm_head."])?;
+        Ok(())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -634,10 +665,51 @@ impl Model for StarCoder2ForCausalLM {
         StarCoder2ForCausalLM::forward(self, input_ids)
     }
 
-    fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
-        Err(TrustformersError::not_implemented(
-            "Weight loading not yet implemented for StarCoder2".to_string(),
-        ))
+    /// Load a HuggingFace StarCoder2ForCausalLM checkpoint.
+    ///
+    /// The backbone is bound first, then the LM head. A checkpoint with tied
+    /// word embeddings carries no `lm_head.weight`; the input embedding matrix
+    /// is reused in that case, which is exactly what the tied configuration
+    /// means — not a fallback to something invented.
+    ///
+    /// # Errors
+    ///
+    /// See [`StarCoder2Model::load_checkpoint`]; additionally fails when the checkpoint
+    /// holds neither an LM head nor an embedding matrix to tie it to, or when
+    /// the head has the wrong shape.
+    fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        self.model.load_checkpoint(&checkpoint, &["lm_head."])?;
+
+        let expected = [
+            self.model.config().vocab_size,
+            self.model.config().hidden_size,
+        ];
+        let head = match checkpoint.get("lm_head.weight") {
+            Some(weight) => weight,
+            None => {
+                let embed_name = if checkpoint.contains("model.embed_tokens.weight") {
+                    "model.embed_tokens.weight"
+                } else {
+                    "embed_tokens.weight"
+                };
+                checkpoint.get(embed_name).ok_or_else(|| {
+                    TrustformersError::weight_load_error(
+                        "checkpoint holds neither lm_head.weight nor an embedding matrix to tie \
+                         it to"
+                            .to_string(),
+                    )
+                })?
+            },
+        };
+        if head.shape() != expected {
+            return Err(TrustformersError::shape_error(format!(
+                "language-model head has shape {:?} but this model expects {expected:?}",
+                head.shape()
+            )));
+        }
+        self.lm_head.set_weight(head.clone())?;
+        Ok(())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -652,6 +724,134 @@ impl Model for StarCoder2ForCausalLM {
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
+
+impl StarCoder2Model {
+    /// Bind a parsed checkpoint into this model.
+    ///
+    /// The HuggingFace export nests the backbone under `model.`; the bare
+    /// layout is accepted too. `allowed_unused_prefixes` names namespaces this
+    /// base model legitimately ignores (the LM head lives on the causal-LM
+    /// wrapper, not here).
+    ///
+    /// A parameter the checkpoint does not carry is *recorded* and reported by
+    /// [`WeightBinder::finish`](crate::weight_loading::checkpoint::WeightBinder::finish),
+    /// never substituted, so a mismatched checkpoint cannot leave
+    /// randomly-initialised tensors in place while the load returns `Ok`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint does not look like a StarCoder2 checkpoint,
+    /// when any tensor has the wrong shape, when a parameter is missing, or when
+    /// the checkpoint carries weights this architecture does not recognise.
+    pub fn load_checkpoint(
+        &mut self,
+        checkpoint: &Checkpoint,
+        allowed_unused_prefixes: &[&str],
+    ) -> Result<LoadReport> {
+        let prefix = checkpoint.detect_prefix(&["model.", ""], "embed_tokens.weight")?;
+        let mut binder = checkpoint.binder(&prefix);
+
+        let hidden = self.config.hidden_size;
+        let head_dim = self.config.head_dim();
+        let q_width = self.config.num_attention_heads * head_dim;
+        let kv_width = self.config.num_key_value_heads * head_dim;
+        let intermediate = self.config.intermediate_size;
+        let attention_bias = self.config.use_bias;
+        let mlp_bias = self.config.use_bias;
+
+        bind_embedding(
+            &mut binder,
+            "embed_tokens",
+            self.config.vocab_size,
+            hidden,
+            &mut self.embed_tokens,
+        )?;
+
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            let attn = format!("layers.{i}.self_attn");
+            bind_linear(
+                &mut binder,
+                &format!("{attn}.q_proj"),
+                q_width,
+                hidden,
+                attention_bias,
+                &mut layer.self_attn.q_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{attn}.k_proj"),
+                kv_width,
+                hidden,
+                attention_bias,
+                &mut layer.self_attn.k_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{attn}.v_proj"),
+                kv_width,
+                hidden,
+                attention_bias,
+                &mut layer.self_attn.v_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{attn}.o_proj"),
+                hidden,
+                q_width,
+                attention_bias,
+                &mut layer.self_attn.o_proj,
+            )?;
+
+            let mlp = format!("layers.{i}.mlp");
+            bind_linear(
+                &mut binder,
+                &format!("{mlp}.gate_proj"),
+                intermediate,
+                hidden,
+                mlp_bias,
+                &mut layer.mlp.gate_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{mlp}.up_proj"),
+                intermediate,
+                hidden,
+                mlp_bias,
+                &mut layer.mlp.up_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{mlp}.down_proj"),
+                hidden,
+                intermediate,
+                mlp_bias,
+                &mut layer.mlp.down_proj,
+            )?;
+
+            if let Some(w) =
+                take_norm_weight(&mut binder, &format!("layers.{i}.input_layernorm"), hidden)?
+            {
+                layer.input_layernorm.set_weight(w)?;
+            }
+            if let Some(w) = take_norm_weight(
+                &mut binder,
+                &format!("layers.{i}.post_attention_layernorm"),
+                hidden,
+            )? {
+                layer.post_attention_layernorm.set_weight(w)?;
+            }
+        }
+
+        if let Some(w) = take_norm_weight(&mut binder, "norm", hidden)? {
+            self.norm.set_weight(w)?;
+        }
+
+        binder.finish(UnusedTensors::new(
+            allowed_unused_prefixes,
+            DECODER_BUFFER_SUFFIXES,
+        ))
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -901,5 +1101,167 @@ mod tests {
             causal.parameter_count() > base.parameter_count(),
             "CausalLM must have more params than base"
         );
+    }
+
+    // ── Real checkpoint loading ─────────────────────────────────────────────
+
+    use crate::weight_loading::test_support::{build_safetensors, DecoderFixtureSpec, F32Tensor};
+
+    fn loading_config() -> StarCoder2Config {
+        StarCoder2Config {
+            vocab_size: 12,
+            hidden_size: 8,
+            intermediate_size: 16,
+            num_hidden_layers: 2,
+            num_attention_heads: 4,
+            num_key_value_heads: 2,
+            sliding_window: None,
+            rope_theta: 10000.0,
+            rms_norm_eps: 1e-5,
+            max_position_embeddings: 16,
+            use_bias: true,
+        }
+    }
+
+    fn loading_fixture(config: &StarCoder2Config) -> DecoderFixtureSpec {
+        let head_dim = config.head_dim();
+        let mut spec = DecoderFixtureSpec::llama_style(
+            "model.",
+            config.vocab_size,
+            config.hidden_size,
+            config.intermediate_size,
+            config.num_hidden_layers,
+            config.num_attention_heads * head_dim,
+            config.num_key_value_heads * head_dim,
+        );
+        spec.attention_bias = config.use_bias;
+        spec.mlp_bias = config.use_bias;
+        spec
+    }
+
+    /// Regression: `load_pretrained` returned `not_implemented`, so no StarCoder2 checkpoint
+    /// could ever reach the model's parameters. It now binds every one of them,
+    /// and the proof is that the checkpoint's exact values arrive in the layers.
+    #[test]
+    fn load_pretrained_binds_every_parameter_from_the_checkpoint() {
+        let config = loading_config();
+        let tensors = loading_fixture(&config).tensors();
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = StarCoder2Model::new(config).expect("model must build");
+        model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect("a matching checkpoint must load");
+
+        for name in [
+            "model.layers.0.self_attn.q_proj.weight",
+            "model.layers.1.mlp.down_proj.weight",
+            "model.norm.weight",
+        ] {
+            let expected = tensors
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("fixture must carry {name}"))
+                .values
+                .clone();
+            let actual = match name {
+                "model.layers.0.self_attn.q_proj.weight" => {
+                    model.layers[0].self_attn.q_proj.weight().data().expect("readable")
+                },
+                "model.layers.1.mlp.down_proj.weight" => {
+                    model.layers[1].mlp.down_proj.weight().data().expect("readable")
+                },
+                _ => model.norm.weight().data().expect("readable"),
+            };
+            assert_eq!(actual, expected, "{name} must hold the checkpoint's values");
+        }
+    }
+
+    /// Grouped-query attention: `k_proj`/`v_proj` are narrower than `q_proj`.
+    /// A loader that assumed a square projection would reject this fixture.
+    #[test]
+    fn load_pretrained_respects_grouped_query_attention_widths() {
+        let config = loading_config();
+        let head_dim = config.head_dim();
+        let bytes = loading_fixture(&config).safetensors();
+        let mut model = StarCoder2Model::new(config.clone()).expect("model must build");
+        model.load_pretrained(&mut bytes.as_slice()).expect("checkpoint must load");
+
+        assert_eq!(
+            model.layers[0].self_attn.k_proj.weight().shape(),
+            vec![config.num_key_value_heads * head_dim, config.hidden_size]
+        );
+        assert_eq!(
+            model.layers[0].self_attn.q_proj.weight().shape(),
+            vec![config.num_attention_heads * head_dim, config.hidden_size]
+        );
+    }
+
+    #[test]
+    fn load_pretrained_reports_a_missing_parameter_instead_of_inventing_it() {
+        let config = loading_config();
+        let mut tensors = loading_fixture(&config).tensors();
+        tensors.retain(|t| t.name != "model.layers.1.mlp.up_proj.weight");
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = StarCoder2Model::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("an incomplete checkpoint must not load silently");
+        assert!(
+            err.to_string().contains("layers.1.mlp.up_proj.weight"),
+            "the error must name the gap: {err}"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_rejects_a_foreign_tensor() {
+        let config = loading_config();
+        let mut tensors = loading_fixture(&config).tensors();
+        tensors.push(F32Tensor::ramp(
+            "model.layers.9.mystery.weight",
+            &[4, 4],
+            99.0,
+        ));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = StarCoder2Model::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("an unrecognised weight must fail the load");
+        assert!(
+            err.to_string().contains("mystery.weight"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_rejects_bytes_that_are_not_a_checkpoint() {
+        let mut model = StarCoder2Model::new(loading_config()).expect("model must build");
+        let garbage = vec![0xABu8; 4096];
+        let err = model
+            .load_pretrained(&mut garbage.as_slice())
+            .expect_err("garbage must not be accepted as weights");
+        assert!(
+            err.to_string().contains("unrecognised checkpoint container"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_rejects_a_checkpoint_for_a_different_configuration() {
+        let config = loading_config();
+        let wider = StarCoder2Config {
+            hidden_size: config.hidden_size * 2,
+            intermediate_size: config.intermediate_size * 2,
+            ..config.clone()
+        };
+        let bytes = loading_fixture(&wider).safetensors();
+
+        let mut model = StarCoder2Model::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a mismatched checkpoint must not be reshaped into place");
+        assert!(err.to_string().contains("expects"), "unexpected: {err}");
     }
 }

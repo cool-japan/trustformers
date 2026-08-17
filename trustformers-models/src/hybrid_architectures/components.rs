@@ -18,6 +18,8 @@
 //! | `GNN` | not implemented — no graph structure reaches the forward pass |
 //! | `Custom` | not implemented — the configuration carries no executable body |
 
+use std::collections::HashMap;
+
 use trustformers_core::{
     errors::{not_implemented, Result, TrustformersError},
     layers::{FeedForward, LayerNorm, Linear, MultiHeadAttention},
@@ -594,222 +596,280 @@ fn mean_of(outputs: &[Tensor]) -> Result<Tensor> {
     sum.scalar_div(outputs.len() as f32)
 }
 
-/// Fuse a set of component outputs.
+/// Owns the learned parameters used by the fusion and ensemble operators.
 ///
-/// All fusion methods are real tensor operations; none of them returns
-/// `outputs[0]` unchanged (except in the degenerate single-input case, where
-/// that *is* the answer).
-pub fn fuse(outputs: &[Tensor], method: &ParallelFusionMethod) -> Result<Tensor> {
-    if outputs.is_empty() {
-        return Err(TrustformersError::shape_error(
-            "fusion needs at least one output".to_string(),
-        ));
-    }
-    if outputs.len() == 1 {
-        return Ok(outputs[0].clone());
-    }
-
-    let reference = outputs[0].shape();
-    let same_shape = outputs.iter().all(|o| o.shape() == reference);
-
-    match method {
-        ParallelFusionMethod::Concatenation => {
-            // Concatenate along the feature axis, then project back to the
-            // original width so the pipeline shape is preserved.
-            let axis = reference.len().saturating_sub(1);
-            let concatenated = Tensor::concat(outputs, axis)?.contiguous()?;
-            let width = *reference.last().ok_or_else(|| {
-                TrustformersError::shape_error("fusion inputs have no features".to_string())
-            })?;
-            let projection = Linear::new(width * outputs.len(), width, false);
-            projection.forward(concatenated)
-        },
-        ParallelFusionMethod::Addition => {
-            if !same_shape {
-                return Err(TrustformersError::shape_error(
-                    "additive fusion needs identically shaped outputs".to_string(),
-                ));
-            }
-            mean_of(outputs)
-        },
-        ParallelFusionMethod::Multiplication => {
-            if !same_shape {
-                return Err(TrustformersError::shape_error(
-                    "multiplicative fusion needs identically shaped outputs".to_string(),
-                ));
-            }
-            let mut product = outputs[0].clone();
-            for output in &outputs[1..] {
-                product = product.mul(output)?;
-            }
-            Ok(product)
-        },
-        ParallelFusionMethod::Gating => {
-            if !same_shape {
-                return Err(TrustformersError::shape_error(
-                    "gated fusion needs identically shaped outputs".to_string(),
-                ));
-            }
-            // g = sigmoid(W [a; b]);  out = g * a + (1 - g) * b, folded left.
-            let width = *reference.last().ok_or_else(|| {
-                TrustformersError::shape_error("fusion inputs have no features".to_string())
-            })?;
-            let axis = reference.len().saturating_sub(1);
-            let gate_projection = Linear::new(width * 2, width, true);
-
-            let mut fused = outputs[0].clone();
-            for output in &outputs[1..] {
-                let pair = Tensor::concat(&[fused.clone(), output.clone()], axis)?.contiguous()?;
-                let gate = gate_projection.forward(pair)?.sigmoid()?;
-                let complement = Tensor::ones_like(&gate)?.sub(&gate)?;
-                fused = gate.mul(&fused)?.add(&complement.mul(output)?)?;
-            }
-            Ok(fused)
-        },
-        ParallelFusionMethod::CrossAttention => {
-            if !same_shape {
-                return Err(TrustformersError::shape_error(
-                    "cross-attention fusion needs identically shaped outputs".to_string(),
-                ));
-            }
-            let width = *reference.last().ok_or_else(|| {
-                TrustformersError::shape_error("fusion inputs have no features".to_string())
-            })?;
-            let attention = MultiHeadAttention::new(width, usable_heads(width, 4), 0.0, true)?;
-
-            // Each later output attends over the running fusion result.
-            let (mut fused, original) = as_sequence(&outputs[0])?;
-            for output in &outputs[1..] {
-                let (context, _) = as_sequence(output)?;
-                let attended =
-                    attention.forward_attention(&fused, &context, &context, None, false)?;
-                fused = fused.add(&attended)?;
-            }
-            fused.reshape(&original)
-        },
-        ParallelFusionMethod::MultiModal => {
-            if !same_shape {
-                return Err(TrustformersError::shape_error(
-                    "multimodal fusion needs identically shaped outputs".to_string(),
-                ));
-            }
-            // Modality-weighted sum with weights learned from the modality
-            // means, normalised with a softmax so the fusion is a convex
-            // combination that still depends on every input.
-            let mut energies = Vec::with_capacity(outputs.len());
-            for output in outputs {
-                let values = output.to_vec_f32()?;
-                let mean = values.iter().sum::<f32>() / values.len().max(1) as f32;
-                energies.push(mean);
-            }
-            let max = energies.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let exponentials: Vec<f32> = energies.iter().map(|e| (e - max).exp()).collect();
-            let total: f32 = exponentials.iter().sum();
-
-            let mut fused: Option<Tensor> = None;
-            for (output, weight) in outputs.iter().zip(exponentials.iter()) {
-                let scaled = output.mul_scalar(weight / total.max(f32::EPSILON))?;
-                fused = Some(match fused {
-                    Some(sum) => sum.add(&scaled)?,
-                    None => scaled,
-                });
-            }
-            fused.ok_or_else(|| {
-                TrustformersError::shape_error("multimodal fusion produced nothing".to_string())
-            })
-        },
-    }
+/// Projections are built once, on first use, and keyed by their shape. Building
+/// them inside the fusion call instead would re-randomize the weights on every
+/// forward pass, so the same input would produce a different output each time —
+/// the operator has to own its parameters to be a layer at all.
+#[derive(Debug, Default)]
+pub struct FusionOperator {
+    /// Linear projections, keyed by `(role, in_features, out_features)`.
+    projections: HashMap<(&'static str, usize, usize), Linear>,
+    /// Cross-attention layers, keyed by feature width.
+    cross_attention: HashMap<usize, MultiHeadAttention>,
 }
 
-/// Combine ensemble member outputs.
-///
-/// `weights` are the members' recorded performance scores; they drive the
-/// weighted, boosting and dynamic-selection combinators.
-pub fn combine_ensemble(
-    outputs: &[Tensor],
-    weights: &[f32],
-    method: &EnsembleMethod,
-) -> Result<Tensor> {
-    if outputs.is_empty() {
-        return Err(TrustformersError::shape_error(
-            "ensemble needs at least one member".to_string(),
-        ));
-    }
-    if outputs.len() == 1 {
-        return Ok(outputs[0].clone());
+impl FusionOperator {
+    /// Create an operator with no instantiated parameters.
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    let reference = outputs[0].shape();
-    if outputs.iter().any(|o| o.shape() != reference) {
-        return Err(TrustformersError::shape_error(
-            "ensemble members must produce identically shaped outputs".to_string(),
-        ));
+    fn projection(
+        &mut self,
+        role: &'static str,
+        in_features: usize,
+        out_features: usize,
+        bias: bool,
+    ) -> &Linear {
+        self.projections
+            .entry((role, in_features, out_features))
+            .or_insert_with(|| Linear::new(in_features, out_features, bias))
     }
 
-    match method {
-        EnsembleMethod::MajorityVoting => {
-            // Each member votes for its argmax class per row; the winning class
-            // is returned as a one-hot distribution.
-            let (_, rows, features, shape) = rows_and_features(&outputs[0])?;
-            let member_data: Vec<Vec<f32>> =
-                outputs.iter().map(|o| o.to_vec_f32()).collect::<Result<_>>()?;
+    fn attention(&mut self, width: usize) -> Result<&MultiHeadAttention> {
+        if let std::collections::hash_map::Entry::Vacant(slot) = self.cross_attention.entry(width) {
+            slot.insert(MultiHeadAttention::new(
+                width,
+                usable_heads(width, 4),
+                0.0,
+                true,
+            )?);
+        }
+        self.cross_attention.get(&width).ok_or_else(|| {
+            TrustformersError::shape_error("cross-attention layer was not cached".to_string())
+        })
+    }
 
-            let mut result = vec![0.0f32; rows * features];
-            for row in 0..rows {
-                let mut votes = vec![0usize; features];
-                for data in &member_data {
-                    let slice = &data[row * features..(row + 1) * features];
-                    votes[argmax(slice)] += 1;
+    /// Total trainable scalars owned by the operator.
+    pub fn parameter_count(&self) -> usize {
+        self.projections.values().map(|p| p.parameter_count()).sum::<usize>()
+            + self.cross_attention.values().map(|a| a.parameter_count()).sum::<usize>()
+    }
+
+    /// Fuse a set of component outputs.
+    ///
+    /// All fusion methods are real tensor operations; none of them returns
+    /// `outputs[0]` unchanged (except in the degenerate single-input case,
+    /// where that *is* the answer).
+    pub fn fuse(&mut self, outputs: &[Tensor], method: &ParallelFusionMethod) -> Result<Tensor> {
+        if outputs.is_empty() {
+            return Err(TrustformersError::shape_error(
+                "fusion needs at least one output".to_string(),
+            ));
+        }
+        if outputs.len() == 1 {
+            return Ok(outputs[0].clone());
+        }
+
+        let reference = outputs[0].shape();
+        let same_shape = outputs.iter().all(|o| o.shape() == reference);
+
+        match method {
+            ParallelFusionMethod::Concatenation => {
+                // Concatenate along the feature axis, then project back to the
+                // original width so the pipeline shape is preserved.
+                let axis = reference.len().saturating_sub(1);
+                let concatenated = Tensor::concat(outputs, axis)?.contiguous()?;
+                let width = *reference.last().ok_or_else(|| {
+                    TrustformersError::shape_error("fusion inputs have no features".to_string())
+                })?;
+                let projection =
+                    self.projection("concat_fusion", width * outputs.len(), width, false);
+                projection.forward(concatenated)
+            },
+            ParallelFusionMethod::Addition => {
+                if !same_shape {
+                    return Err(TrustformersError::shape_error(
+                        "additive fusion needs identically shaped outputs".to_string(),
+                    ));
                 }
-                let winner = votes
+                mean_of(outputs)
+            },
+            ParallelFusionMethod::Multiplication => {
+                if !same_shape {
+                    return Err(TrustformersError::shape_error(
+                        "multiplicative fusion needs identically shaped outputs".to_string(),
+                    ));
+                }
+                let mut product = outputs[0].clone();
+                for output in &outputs[1..] {
+                    product = product.mul(output)?;
+                }
+                Ok(product)
+            },
+            ParallelFusionMethod::Gating => {
+                if !same_shape {
+                    return Err(TrustformersError::shape_error(
+                        "gated fusion needs identically shaped outputs".to_string(),
+                    ));
+                }
+                // g = sigmoid(W [a; b]);  out = g * a + (1 - g) * b, folded left.
+                let width = *reference.last().ok_or_else(|| {
+                    TrustformersError::shape_error("fusion inputs have no features".to_string())
+                })?;
+                let axis = reference.len().saturating_sub(1);
+                let gate_projection =
+                    self.projection("gate_fusion", width * 2, width, true).clone();
+
+                let mut fused = outputs[0].clone();
+                for output in &outputs[1..] {
+                    let pair =
+                        Tensor::concat(&[fused.clone(), output.clone()], axis)?.contiguous()?;
+                    let gate = gate_projection.forward(pair)?.sigmoid()?;
+                    let complement = Tensor::ones_like(&gate)?.sub(&gate)?;
+                    fused = gate.mul(&fused)?.add(&complement.mul(output)?)?;
+                }
+                Ok(fused)
+            },
+            ParallelFusionMethod::CrossAttention => {
+                if !same_shape {
+                    return Err(TrustformersError::shape_error(
+                        "cross-attention fusion needs identically shaped outputs".to_string(),
+                    ));
+                }
+                let width = *reference.last().ok_or_else(|| {
+                    TrustformersError::shape_error("fusion inputs have no features".to_string())
+                })?;
+                let attention = self.attention(width)?;
+
+                // Each later output attends over the running fusion result.
+                let (mut fused, original) = as_sequence(&outputs[0])?;
+                for output in &outputs[1..] {
+                    let (context, _) = as_sequence(output)?;
+                    let attended =
+                        attention.forward_attention(&fused, &context, &context, None, false)?;
+                    fused = fused.add(&attended)?;
+                }
+                fused.reshape(&original)
+            },
+            ParallelFusionMethod::MultiModal => {
+                if !same_shape {
+                    return Err(TrustformersError::shape_error(
+                        "multimodal fusion needs identically shaped outputs".to_string(),
+                    ));
+                }
+                // Modality-weighted sum with weights learned from the modality
+                // means, normalised with a softmax so the fusion is a convex
+                // combination that still depends on every input.
+                let mut energies = Vec::with_capacity(outputs.len());
+                for output in outputs {
+                    let values = output.to_vec_f32()?;
+                    let mean = values.iter().sum::<f32>() / values.len().max(1) as f32;
+                    energies.push(mean);
+                }
+                let max = energies.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let exponentials: Vec<f32> = energies.iter().map(|e| (e - max).exp()).collect();
+                let total: f32 = exponentials.iter().sum();
+
+                let mut fused: Option<Tensor> = None;
+                for (output, weight) in outputs.iter().zip(exponentials.iter()) {
+                    let scaled = output.mul_scalar(weight / total.max(f32::EPSILON))?;
+                    fused = Some(match fused {
+                        Some(sum) => sum.add(&scaled)?,
+                        None => scaled,
+                    });
+                }
+                fused.ok_or_else(|| {
+                    TrustformersError::shape_error("multimodal fusion produced nothing".to_string())
+                })
+            },
+        }
+    }
+
+    /// Combine ensemble member outputs.
+    ///
+    /// `weights` are the members' recorded performance scores; they drive the
+    /// weighted, boosting and dynamic-selection combinators.
+    pub fn combine_ensemble(
+        &mut self,
+        outputs: &[Tensor],
+        weights: &[f32],
+        method: &EnsembleMethod,
+    ) -> Result<Tensor> {
+        if outputs.is_empty() {
+            return Err(TrustformersError::shape_error(
+                "ensemble needs at least one member".to_string(),
+            ));
+        }
+        if outputs.len() == 1 {
+            return Ok(outputs[0].clone());
+        }
+
+        let reference = outputs[0].shape();
+        if outputs.iter().any(|o| o.shape() != reference) {
+            return Err(TrustformersError::shape_error(
+                "ensemble members must produce identically shaped outputs".to_string(),
+            ));
+        }
+
+        match method {
+            EnsembleMethod::MajorityVoting => {
+                // Each member votes for its argmax class per row; the winning class
+                // is returned as a one-hot distribution.
+                let (_, rows, features, shape) = rows_and_features(&outputs[0])?;
+                let member_data: Vec<Vec<f32>> =
+                    outputs.iter().map(|o| o.to_vec_f32()).collect::<Result<_>>()?;
+
+                let mut result = vec![0.0f32; rows * features];
+                for row in 0..rows {
+                    let mut votes = vec![0usize; features];
+                    for data in &member_data {
+                        let slice = &data[row * features..(row + 1) * features];
+                        votes[argmax(slice)] += 1;
+                    }
+                    let winner = votes
+                        .iter()
+                        .enumerate()
+                        .max_by_key(|(_, count)| **count)
+                        .map(|(index, _)| index)
+                        .unwrap_or(0);
+                    result[row * features + winner] = 1.0;
+                }
+                Tensor::from_vec(result, &shape)
+            },
+            EnsembleMethod::WeightedAveraging | EnsembleMethod::Boosting => {
+                // Boosting differs only in that the weights are the members'
+                // sequentially accumulated scores, which the caller supplies.
+                let normalised = normalised_weights(weights, outputs.len());
+                let mut sum: Option<Tensor> = None;
+                for (output, weight) in outputs.iter().zip(normalised.iter()) {
+                    let scaled = output.mul_scalar(*weight)?;
+                    sum = Some(match sum {
+                        Some(total) => total.add(&scaled)?,
+                        None => scaled,
+                    });
+                }
+                sum.ok_or_else(|| {
+                    TrustformersError::shape_error("ensemble produced nothing".to_string())
+                })
+            },
+            EnsembleMethod::Bagging => mean_of(outputs),
+            EnsembleMethod::Stacking => {
+                // A linear meta-learner over the concatenated member outputs.
+                let axis = reference.len().saturating_sub(1);
+                let width = *reference.last().ok_or_else(|| {
+                    TrustformersError::shape_error("ensemble outputs have no features".to_string())
+                })?;
+                let stacked = Tensor::concat(outputs, axis)?.contiguous()?;
+                let meta_learner =
+                    self.projection("stacking_meta", width * outputs.len(), width, false);
+                meta_learner.forward(stacked)
+            },
+            EnsembleMethod::DynamicSelection => {
+                // Pick the member with the highest recorded score; ties go to the
+                // first member.
+                let normalised = normalised_weights(weights, outputs.len());
+                let best = normalised
                     .iter()
                     .enumerate()
-                    .max_by_key(|(_, count)| **count)
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                     .map(|(index, _)| index)
                     .unwrap_or(0);
-                result[row * features + winner] = 1.0;
-            }
-            Tensor::from_vec(result, &shape)
-        },
-        EnsembleMethod::WeightedAveraging | EnsembleMethod::Boosting => {
-            // Boosting differs only in that the weights are the members'
-            // sequentially accumulated scores, which the caller supplies.
-            let normalised = normalised_weights(weights, outputs.len());
-            let mut sum: Option<Tensor> = None;
-            for (output, weight) in outputs.iter().zip(normalised.iter()) {
-                let scaled = output.mul_scalar(*weight)?;
-                sum = Some(match sum {
-                    Some(total) => total.add(&scaled)?,
-                    None => scaled,
-                });
-            }
-            sum.ok_or_else(|| {
-                TrustformersError::shape_error("ensemble produced nothing".to_string())
-            })
-        },
-        EnsembleMethod::Bagging => mean_of(outputs),
-        EnsembleMethod::Stacking => {
-            // A linear meta-learner over the concatenated member outputs.
-            let axis = reference.len().saturating_sub(1);
-            let width = *reference.last().ok_or_else(|| {
-                TrustformersError::shape_error("ensemble outputs have no features".to_string())
-            })?;
-            let stacked = Tensor::concat(outputs, axis)?.contiguous()?;
-            let meta_learner = Linear::new(width * outputs.len(), width, false);
-            meta_learner.forward(stacked)
-        },
-        EnsembleMethod::DynamicSelection => {
-            // Pick the member with the highest recorded score; ties go to the
-            // first member.
-            let normalised = normalised_weights(weights, outputs.len());
-            let best = normalised
-                .iter()
-                .enumerate()
-                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(index, _)| index)
-                .unwrap_or(0);
-            Ok(outputs[best].clone())
-        },
+                Ok(outputs[best].clone())
+            },
+        }
     }
 }
 

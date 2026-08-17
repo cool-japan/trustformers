@@ -82,6 +82,32 @@ impl DebertaEmbeddings {
     }
 }
 
+/// DeBERTa's disentangled self-attention.
+///
+/// The DeBERTa paper (He et al., 2021, §3.1) decomposes the attention logit
+/// between token `i` and token `j` into three additive terms:
+///
+/// ```text
+/// A[i, j] = Q_c[i]·K_c[j]      (content → content)
+///         + Q_c[i]·K_r[δ(i,j)] (content → position, "c2p")
+///         + K_c[j]·Q_r[δ(j,i)] (position → content, "p2c")
+/// ```
+///
+/// where `δ(i, j)` is the bucketed relative distance and `K_r` / `Q_r` are the
+/// key/query projections of a *learned relative-position embedding table*. The
+/// sum is scaled by `1/sqrt(3 · d)` rather than `1/sqrt(d)`, because three terms
+/// of comparable magnitude are being added.
+///
+/// # What this replaces
+///
+/// A previous revision computed `pos_query_proj.forward(hidden_states)` and
+/// immediately discarded the result into `let _pos_query_layer = …`, then added
+/// `relative_pos[i, j] as f32 * 0.01` to every head's logits — a scalar that is
+/// *linear in the signed distance*, identical across heads, and completely
+/// independent of the projections it had just computed. Under it, token 5
+/// attending to token 0 always got exactly `+0.05`, whatever the content. That
+/// is not disentangled attention; it is a hand-written linear position bias with
+/// no learned parameters, and it made `p2c` and `c2p` numerically identical.
 #[derive(Debug, Clone)]
 pub struct DebertaDisentangledSelfAttention {
     pub query_proj: Linear,
@@ -90,11 +116,20 @@ pub struct DebertaDisentangledSelfAttention {
     pub pos_query_proj: Option<Linear>, // For content-to-position attention
     pub pos_key_proj: Option<Linear>,   // For position-to-content attention
     pub pos_proj: Option<Linear>,       // Position embeddings projection
+    /// Learned relative-position embedding table, `[2 * span, hidden_size]`.
+    ///
+    /// Row `k` holds the embedding of relative distance `k - span`, so the table
+    /// covers `[-span, span)`. This is the `P` matrix of the paper; without it
+    /// there is nothing for `pos_query_proj` / `pos_key_proj` to project, which
+    /// is why the previous revision had no choice but to invent a scalar.
+    pub rel_embeddings: Array2<f32>,
     pub dropout: f32,
     pub num_attention_heads: usize,
     pub attention_head_size: usize,
     pub all_head_size: usize,
     pub max_relative_positions: i32,
+    /// Half-width of the relative-position window, always > 0.
+    pub position_buckets: usize,
     pub pos_att_type: Vec<String>,
     pub share_att_key: bool,
     device: Device,
@@ -143,6 +178,30 @@ impl DebertaDisentangledSelfAttention {
             None
         };
 
+        // `max_relative_positions = -1` means "no explicit limit", in which case
+        // HuggingFace falls back to `max_position_embeddings`. The window is
+        // always a concrete positive number here, because the relative-position
+        // embedding table needs a row count.
+        let position_buckets = if config.max_relative_positions > 0 {
+            config.max_relative_positions as usize
+        } else {
+            config.max_position_embeddings
+        }
+        .max(1);
+
+        // The relative-position table is a real learned parameter. It is
+        // initialised deterministically (a small, distinct value per row and
+        // column) so that an un-loaded model is reproducible rather than random,
+        // and it is overwritten wholesale by
+        // `DebertaDisentangledSelfAttention::set_rel_embeddings` when a
+        // checkpoint supplies `rel_embeddings.weight`.
+        let rows = position_buckets * 2;
+        let scale = config.initializer_range;
+        let rel_embeddings = Array2::from_shape_fn((rows, config.hidden_size), |(r, c)| {
+            let phase = (r as f32 * 0.7 + c as f32 * 0.13).sin();
+            phase * scale
+        });
+
         Ok(Self {
             query_proj: Linear::new_with_device(config.hidden_size, all_head_size, true, device),
             key_proj: Linear::new_with_device(config.hidden_size, all_head_size, true, device),
@@ -150,15 +209,74 @@ impl DebertaDisentangledSelfAttention {
             pos_query_proj,
             pos_key_proj,
             pos_proj,
+            rel_embeddings,
             dropout: config.attention_probs_dropout_prob,
             num_attention_heads: config.num_attention_heads,
             attention_head_size,
             all_head_size,
             max_relative_positions: config.max_relative_positions,
+            position_buckets,
             pos_att_type: config.pos_att_type.clone(),
             share_att_key: config.share_att_key,
             device,
         })
+    }
+
+    /// Install a relative-position embedding table from a checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `table` does not have the `[2 * position_buckets, hidden]`
+    /// shape this attention block was configured for.
+    pub fn set_rel_embeddings(&mut self, table: Array2<f32>) -> Result<()> {
+        if table.dim() != self.rel_embeddings.dim() {
+            return Err(TrustformersError::shape_error(format!(
+                "DeBERTa relative-position table must be {:?}, got {:?}",
+                self.rel_embeddings.dim(),
+                table.dim()
+            )));
+        }
+        self.rel_embeddings = table;
+        Ok(())
+    }
+
+    /// Bucket index into [`Self::rel_embeddings`] for the distance `query - key`.
+    ///
+    /// The signed distance is clamped to `[-span, span - 1]` and shifted so that
+    /// distance `-span` maps to row 0 and distance `span - 1` to the last row.
+    fn relative_bucket(&self, query_index: usize, key_index: usize) -> usize {
+        let span = self.position_buckets as i64;
+        let distance = query_index as i64 - key_index as i64;
+        let clamped = distance.clamp(-span, span - 1);
+        (clamped + span) as usize
+    }
+
+    /// Project the relative-position table through a `Linear` and split it into
+    /// per-head `[rows, head_size]` slices.
+    fn project_relative(&self, projection: &Linear) -> Result<Array3<f32>> {
+        let rows = self.rel_embeddings.nrows();
+        let input = Tensor::F32(self.rel_embeddings.clone().into_dyn());
+        let projected = projection.forward(input)?;
+        let projected = match projected {
+            Tensor::F32(arr) => arr
+                .into_dimensionality::<Ix2>()
+                .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
+            _ => {
+                return Err(TrustformersError::tensor_op_error(
+                    "Expected F32 tensor from the relative-position projection",
+                    "attention",
+                ))
+            },
+        };
+        // [rows, all_head_size] -> [rows, num_heads, head_size]
+        projected
+            .to_shape((rows, self.num_attention_heads, self.attention_head_size))
+            .map(|view| view.to_owned())
+            .map_err(|e| {
+                TrustformersError::shape_error(format!(
+                    "relative-position projection has the wrong width: {e}"
+                ))
+            })
     }
 
     pub fn device(&self) -> Device {
@@ -185,7 +303,12 @@ impl DebertaDisentangledSelfAttention {
         Ok(reshaped.permuted_axes([0, 2, 1, 3]))
     }
 
-    fn build_relative_position(&self, query_size: usize, key_size: usize) -> Array2<i32> {
+    /// The signed, clamped relative distance matrix `δ(i, j) = i − j`.
+    ///
+    /// Exposed for inspection and testing; the attention logits are built from
+    /// [`Self::relative_bucket`], which maps the same distances onto rows of the
+    /// learned embedding table.
+    pub fn build_relative_position(&self, query_size: usize, key_size: usize) -> Array2<i32> {
         let mut relative_positions = Array2::zeros((query_size, key_size));
 
         for i in 0..query_size {
@@ -264,7 +387,16 @@ impl DebertaDisentangledSelfAttention {
         let mut attention_scores =
             Array4::zeros((batch_size, self.num_attention_heads, seq_len, seq_len));
 
-        // Content-to-content attention
+        // The paper divides by sqrt(3 * d) when all three terms are present,
+        // because it sums three dot products of comparable magnitude. Scale by
+        // the number of terms this configuration actually enables, so a
+        // content-only model still gets the usual 1/sqrt(d).
+        let use_c2p = self.pos_att_type.iter().any(|t| t == "c2p");
+        let use_p2c = self.pos_att_type.iter().any(|t| t == "p2c");
+        let num_terms = 1 + usize::from(use_c2p) + usize::from(use_p2c);
+        let scale = 1.0 / ((num_terms * self.attention_head_size) as f32).sqrt();
+
+        // Term 1: content → content, Q_c[i] · K_c[j].
         for b in 0..batch_size {
             for h in 0..self.num_attention_heads {
                 let q = query_layer.slice(s![b, h, .., ..]);
@@ -280,59 +412,78 @@ impl DebertaDisentangledSelfAttention {
                             .map(|(a, b)| a * b)
                             .sum();
 
-                        attention_scores[[b, h, i, j]] =
-                            score / (self.attention_head_size as f32).sqrt();
+                        attention_scores[[b, h, i, j]] = score * scale;
                     }
                 }
             }
         }
 
-        // Add position-aware attention if enabled
-        if self.pos_att_type.contains(&"c2p".to_string()) {
-            // Content-to-position attention
-            if let Some(pos_query_proj) = &self.pos_query_proj {
-                let pos_query_input = Tensor::F32(hidden_states.clone().into_dyn());
-                let pos_query_result = pos_query_proj.forward(pos_query_input)?;
-                let pos_query_layer = match pos_query_result {
-                    Tensor::F32(arr) => arr
-                        .into_dimensionality::<Ix3>()
-                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
-                    _ => {
-                        return Err(TrustformersError::tensor_op_error(
-                            "Expected F32 tensor from pos query projection",
-                            "attention",
-                        ))
-                    },
+        // Term 2: content → position, Q_c[i] · K_r[δ(i, j)].
+        //
+        // `pos_key_proj` is the relative-position *key* projection. DeBERTa's
+        // `share_att_key` reuses the content key projection for it, which is why
+        // no separate `pos_key_proj` is constructed in that case — a genuine
+        // weight sharing, not a stand-in.
+        if use_c2p {
+            let key_projection =
+                match (&self.pos_key_proj, self.share_att_key) {
+                    (Some(proj), _) => proj,
+                    (None, true) => &self.key_proj,
+                    (None, false) => return Err(TrustformersError::model_error(
+                        "DeBERTa is configured for c2p attention without share_att_key, but no \
+                         relative-position key projection was built"
+                            .to_string(),
+                    )),
                 };
-                let _pos_query_layer = self.transpose_for_scores(&pos_query_layer)?;
+            let rel_keys = self.project_relative(key_projection)?;
 
-                // Build relative position embeddings
-                let relative_pos = self.build_relative_position(seq_len, seq_len);
-
-                // Add relative position bias (simplified implementation)
-                for b in 0..batch_size {
-                    for h in 0..self.num_attention_heads {
-                        for i in 0..seq_len {
-                            for j in 0..seq_len {
-                                let pos_bias = relative_pos[[i, j]] as f32 * 0.01; // Simplified bias
-                                attention_scores[[b, h, i, j]] += pos_bias;
+            for b in 0..batch_size {
+                for h in 0..self.num_attention_heads {
+                    let q = query_layer.slice(s![b, h, .., ..]);
+                    for i in 0..seq_len {
+                        for j in 0..seq_len {
+                            let bucket = self.relative_bucket(i, j);
+                            let mut term = 0.0f32;
+                            for d in 0..self.attention_head_size {
+                                term += q[[i, d]] * rel_keys[[bucket, h, d]];
                             }
+                            attention_scores[[b, h, i, j]] += term * scale;
                         }
                     }
                 }
             }
         }
 
-        if self.pos_att_type.contains(&"p2c".to_string()) {
-            // Position-to-content attention (simplified)
-            let relative_pos = self.build_relative_position(seq_len, seq_len);
+        // Term 3: position → content, K_c[j] · Q_r[δ(j, i)].
+        //
+        // Note the *reversed* distance: the p2c term asks "how does position j
+        // relate to the content at i", so its bucket is `δ(j, i)`, the negation
+        // of the c2p bucket. Using the same bucket for both — as the previous
+        // scalar bias did — collapses the two terms into one.
+        if use_p2c {
+            let query_projection =
+                match (&self.pos_query_proj, self.share_att_key) {
+                    (Some(proj), _) => proj,
+                    (None, true) => &self.query_proj,
+                    (None, false) => return Err(TrustformersError::model_error(
+                        "DeBERTa is configured for p2c attention without share_att_key, but no \
+                         relative-position query projection was built"
+                            .to_string(),
+                    )),
+                };
+            let rel_queries = self.project_relative(query_projection)?;
 
             for b in 0..batch_size {
                 for h in 0..self.num_attention_heads {
+                    let k = key_layer.slice(s![b, h, .., ..]);
                     for i in 0..seq_len {
                         for j in 0..seq_len {
-                            let pos_bias = relative_pos[[i, j]] as f32 * 0.01; // Simplified bias
-                            attention_scores[[b, h, i, j]] += pos_bias;
+                            let bucket = self.relative_bucket(j, i);
+                            let mut term = 0.0f32;
+                            for d in 0..self.attention_head_size {
+                                term += k[[j, d]] * rel_queries[[bucket, h, d]];
+                            }
+                            attention_scores[[b, h, i, j]] += term * scale;
                         }
                     }
                 }
@@ -410,10 +561,20 @@ impl DebertaDisentangledSelfAttention {
         // Transpose back to (batch_size, seq_len, num_heads, head_size)
         let context_layer = context_layer.permuted_axes([0, 2, 1, 3]);
 
-        // Reshape to (batch_size, seq_len, all_head_size)
+        // Reshape to (batch_size, seq_len, all_head_size).
+        //
+        // `permuted_axes` leaves the array non-contiguous, so `to_shape` can
+        // legitimately fail; reporting that is the contract of this
+        // `Result`-returning function, not a reason to panic.
         let context_layer = context_layer
             .to_shape((batch_size, seq_len, self.all_head_size))
-            .expect("operation failed")
+            .map_err(|e| {
+                TrustformersError::shape_error(format!(
+                    "failed to merge DeBERTa attention heads back into \
+                     [{batch_size}, {seq_len}, {}]: {e}",
+                    self.all_head_size
+                ))
+            })?
             .to_owned();
 
         Ok(context_layer)
@@ -1085,5 +1246,173 @@ mod tests {
     fn test_deberta_base_config_validates() {
         let cfg = DebertaConfig::base();
         cfg.validate().expect("base config should be valid");
+    }
+
+    // ── Disentangled attention (regression for the linear-in-distance fake) ──
+
+    fn attention_config(pos_att_type: Vec<String>) -> DebertaConfig {
+        DebertaConfig {
+            hidden_size: 8,
+            num_attention_heads: 2,
+            intermediate_size: 16,
+            max_relative_positions: 4,
+            pos_att_type,
+            share_att_key: true,
+            ..mini_config()
+        }
+    }
+
+    /// Deterministic, non-symmetric hidden states so that the c2p and p2c terms
+    /// genuinely differ.
+    fn hidden(seq_len: usize, hidden_size: usize) -> Array3<f32> {
+        Array3::from_shape_fn((1, seq_len, hidden_size), |(_, t, d)| {
+            ((t * 7 + d * 3) % 11) as f32 * 0.1 - 0.5
+        })
+    }
+
+    /// Regression: the c2p and p2c terms were both `relative_pos[i,j] * 0.01`,
+    /// so enabling one or the other produced *identical* logits, and enabling
+    /// both simply doubled the same scalar. The real terms contract the content
+    /// projections against the relative-position table with mirrored buckets, so
+    /// they must differ.
+    #[test]
+    fn c2p_and_p2c_terms_are_different_functions() {
+        let seq_len = 5usize;
+        let hidden_size = 8usize;
+        let states = hidden(seq_len, hidden_size);
+
+        let c2p = DebertaDisentangledSelfAttention::new(&attention_config(vec!["c2p".to_string()]))
+            .expect("c2p attention must build");
+        let p2c = DebertaDisentangledSelfAttention::new(&attention_config(vec!["p2c".to_string()]))
+            .expect("p2c attention must build");
+
+        let c2p_out = c2p.forward(&states, None).expect("c2p forward must succeed");
+        let p2c_out = p2c.forward(&states, None).expect("p2c forward must succeed");
+
+        let max_difference = c2p_out
+            .iter()
+            .zip(p2c_out.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_difference > 1e-4,
+            "content-to-position and position-to-content must be different terms, \
+             largest difference was {max_difference}"
+        );
+    }
+
+    /// The relative-position table is a real parameter: changing it changes the
+    /// output. Under the old scalar bias, the table did not exist and the
+    /// projections were discarded, so nothing about the positional pathway was
+    /// learnable.
+    #[test]
+    fn the_relative_position_table_affects_the_output() {
+        let seq_len = 4usize;
+        let hidden_size = 8usize;
+        let states = hidden(seq_len, hidden_size);
+
+        let mut attention = DebertaDisentangledSelfAttention::new(&attention_config(vec![
+            "c2p".to_string(),
+            "p2c".to_string(),
+        ]))
+        .expect("attention must build");
+
+        let before = attention.forward(&states, None).expect("forward must succeed");
+
+        let (rows, cols) = attention.rel_embeddings.dim();
+        let replacement = Array2::from_shape_fn((rows, cols), |(r, c)| {
+            ((r * 5 + c * 2) % 9) as f32 * 0.25 - 1.0
+        });
+        attention
+            .set_rel_embeddings(replacement)
+            .expect("a correctly-shaped table must be accepted");
+
+        let after = attention.forward(&states, None).expect("forward must succeed");
+        let max_difference = before
+            .iter()
+            .zip(after.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_difference > 1e-4,
+            "replacing the relative-position table must change the attention output, \
+             largest difference was {max_difference}"
+        );
+    }
+
+    /// The positional pathway must depend on the *content* as well as the
+    /// distance. The old bias added the same number for every pair at a given
+    /// distance regardless of what the tokens were, so two sequences with
+    /// identical shapes but different values received identical position terms.
+    #[test]
+    fn the_positional_term_depends_on_content_not_only_distance() {
+        let seq_len = 4usize;
+        let hidden_size = 8usize;
+        let attention = DebertaDisentangledSelfAttention::new(&attention_config(vec![
+            "c2p".to_string(),
+            "p2c".to_string(),
+        ]))
+        .expect("attention must build");
+        let content_only = DebertaDisentangledSelfAttention {
+            pos_att_type: Vec::new(),
+            ..attention.clone()
+        };
+
+        let states_a = hidden(seq_len, hidden_size);
+        let states_b = Array3::from_shape_fn((1, seq_len, hidden_size), |(_, t, d)| {
+            ((t * 3 + d * 5) % 7) as f32 * 0.2 - 0.7
+        });
+
+        let delta = |states: &Array3<f32>| -> f32 {
+            let with_pos = attention.forward(states, None).expect("forward must succeed");
+            let without = content_only.forward(states, None).expect("forward must succeed");
+            with_pos
+                .iter()
+                .zip(without.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max)
+        };
+
+        let delta_a = delta(&states_a);
+        let delta_b = delta(&states_b);
+        assert!(
+            delta_a > 1e-4 && delta_b > 1e-4,
+            "the positional pathway must move the logits"
+        );
+        assert!(
+            (delta_a - delta_b).abs() > 1e-5,
+            "the positional contribution must depend on the content, but two different \
+             sequences produced the same shift ({delta_a} vs {delta_b})"
+        );
+    }
+
+    #[test]
+    fn relative_buckets_are_mirrored_between_c2p_and_p2c() {
+        let attention = DebertaDisentangledSelfAttention::new(&attention_config(vec![
+            "c2p".to_string(),
+            "p2c".to_string(),
+        ]))
+        .expect("attention must build");
+        let span = attention.position_buckets;
+        // δ(3, 1) = +2 and δ(1, 3) = -2 must land on opposite sides of the table.
+        assert_eq!(attention.relative_bucket(3, 1), span + 2);
+        assert_eq!(attention.relative_bucket(1, 3), span - 2);
+        // Distances beyond the window clamp rather than index out of bounds.
+        assert_eq!(attention.relative_bucket(1000, 0), span * 2 - 1);
+        assert_eq!(attention.relative_bucket(0, 1000), 0);
+    }
+
+    #[test]
+    fn a_wrongly_shaped_relative_position_table_is_rejected() {
+        let mut attention =
+            DebertaDisentangledSelfAttention::new(&attention_config(vec!["c2p".to_string()]))
+                .expect("attention must build");
+        let err = attention
+            .set_rel_embeddings(Array2::zeros((3, 3)))
+            .expect_err("a mismatched table must not be installed");
+        assert!(
+            err.to_string().contains("relative-position table"),
+            "unexpected: {err}"
+        );
     }
 }

@@ -366,6 +366,10 @@ impl ModelCheckpoint {
     /// [`CHECKPOINT_STATE_KEY`], so the payload can be written straight to disk or
     /// parsed with the production checkpoint reader.
     ///
+    /// Values are stored at `f32` precision. Restoring writes them back through
+    /// the target parameter's own dtype, so an `F64` parameter stays `F64` (at
+    /// the checkpoint's `f32` precision) instead of silently becoming `F32`.
+    ///
     /// # Errors
     ///
     /// Returns an error when the model exposes no named tensors — capturing an
@@ -451,7 +455,14 @@ impl ModelCheckpoint {
                             target.shape()
                         ));
                     }
-                    **target = source.clone();
+                    // Write through the shared weight writer so the *target's*
+                    // dtype survives: replacing an F64 parameter with the F32
+                    // payload would silently change the model's precision.
+                    let values = source
+                        .data()
+                        .map_err(|e| anyhow!("failed to read checkpoint tensor {name}: {e}"))?;
+                    crate::model_compression::weight_ops::write_tensor(name, target, &values)
+                        .map_err(|e| anyhow!("failed to restore parameter {name}: {e}"))?;
                     restored += 1;
                     seen.insert(name.clone());
                 },
@@ -744,14 +755,29 @@ impl ErrorRecoveryManager {
             }]
         });
 
+        let overall_start = Instant::now();
         for strategy in strategies {
-            if self.execute_recovery_strategy(&strategy, error, &category)? {
-                self.record_recovery_attempt(category.clone(), strategy, true, error);
+            let started = Instant::now();
+            let recovered = self.execute_recovery_strategy(&strategy, error, &category)?;
+            if recovered {
+                self.record_recovery_attempt(
+                    category.clone(),
+                    strategy,
+                    true,
+                    error,
+                    started.elapsed(),
+                );
                 return Ok(true);
             }
         }
 
-        self.record_recovery_attempt(category, RecoveryStrategy::NoRecovery, false, error);
+        self.record_recovery_attempt(
+            category,
+            RecoveryStrategy::NoRecovery,
+            false,
+            error,
+            overall_start.elapsed(),
+        );
         Ok(false)
     }
 
@@ -767,9 +793,12 @@ impl ErrorRecoveryManager {
                 max_attempts: _,
                 base_delay_ms,
             } => {
-                // Basic retry is handled by the main loop, just wait
+                // Waiting is not a recovery: the retry loop in
+                // `execute_with_recovery` is what may fix the problem, and it
+                // records its own success. Reporting `true` here would count a
+                // sleep as a successful recovery in the metrics.
                 std::thread::sleep(Duration::from_millis(*base_delay_ms));
-                Ok(true)
+                Ok(false)
             },
 
             RecoveryStrategy::MemoryCleanup => {
@@ -967,12 +996,14 @@ impl ErrorRecoveryManager {
     }
 
     /// Record a recovery attempt
+    /// Record a recovery attempt, including how long the strategy really took.
     fn record_recovery_attempt(
         &mut self,
         category: ErrorCategory,
         strategy: RecoveryStrategy,
         success: bool,
         error: &Error,
+        duration: Duration,
     ) {
         let attempt = RecoveryAttempt {
             attempt_id: Uuid::new_v4(),
@@ -980,7 +1011,7 @@ impl ErrorRecoveryManager {
             error_category: category.clone(),
             strategy: strategy.clone(),
             success,
-            duration_ms: 0, // Would be calculated in real implementation
+            duration_ms: duration.as_millis() as u64,
             error_message: error.to_string(),
             context: HashMap::new(),
         };
@@ -1025,14 +1056,20 @@ impl ErrorRecoveryManager {
         }
     }
 
-    /// Record failed recovery
+    /// Record failed recovery, timing it from when the failing attempt started.
     fn record_failed_recovery(
         &mut self,
         category: ErrorCategory,
-        _start_time: Instant,
+        start_time: Instant,
         error: &Error,
     ) {
-        self.record_recovery_attempt(category, RecoveryStrategy::NoRecovery, false, error);
+        self.record_recovery_attempt(
+            category,
+            RecoveryStrategy::NoRecovery,
+            false,
+            error,
+            start_time.elapsed(),
+        );
     }
 
     /// Get current recovery metrics

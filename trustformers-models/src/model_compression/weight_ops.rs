@@ -9,7 +9,7 @@ use std::collections::{BinaryHeap, HashMap};
 
 use trustformers_core::{
     errors::{Result, TrustformersError},
-    tensor::Tensor,
+    tensor::{DType, Tensor},
 };
 
 /// Statistics produced by a pruning pass over one tensor.
@@ -70,7 +70,22 @@ pub fn tensor_values(name: &str, tensor: &Tensor) -> Result<Vec<f32>> {
     })
 }
 
-/// Write values back into a tensor, preserving its shape.
+/// Is this a floating-point parameter that weight transforms may rewrite?
+///
+/// Integer buffers (token ids, position indices) are *not* weights: rewriting
+/// them with rounded floats would corrupt the model, so every transform skips
+/// them instead.
+pub fn is_float_parameter(tensor: &Tensor) -> bool {
+    matches!(tensor.dtype(), DType::F32 | DType::F64)
+}
+
+/// Write values back into a tensor, preserving its shape **and its dtype**.
+///
+/// # Errors
+///
+/// Fails when the value count does not match the shape, or when the parameter is
+/// not a float tensor — silently turning an `F64` weight into `F32`, or
+/// truncating floats into an integer buffer, would corrupt the model.
 pub fn write_tensor(name: &str, tensor: &mut Tensor, values: &[f32]) -> Result<()> {
     let shape = tensor.shape();
     let expected: usize = shape.iter().product();
@@ -80,8 +95,21 @@ pub fn write_tensor(name: &str, tensor: &mut Tensor, values: &[f32]) -> Result<(
             values.len()
         )));
     }
-    *tensor = Tensor::from_slice(values, &shape)?;
-    Ok(())
+
+    match tensor.dtype() {
+        DType::F32 => {
+            *tensor = Tensor::from_slice(values, &shape)?;
+            Ok(())
+        },
+        DType::F64 => {
+            let widened: Vec<f64> = values.iter().map(|value| f64::from(*value)).collect();
+            *tensor = Tensor::from_vec_with_dtype(widened, &shape, DType::F64)?;
+            Ok(())
+        },
+        other => Err(TrustformersError::invalid_operation(format!(
+            "parameter `{name}` has dtype {other:?}; weight transforms only rewrite F32 and F64              parameters, because writing float values into any other representation would              silently change the model"
+        ))),
+    }
 }
 
 /// Derive affine quantization parameters from a tensor's real value range.
@@ -113,25 +141,22 @@ pub fn derive_quantization_parameters(
         (0, ((1i64 << bits as i64) - 1) as i32)
     };
 
-    let min = values.iter().copied().fold(f32::INFINITY, f32::min);
-    let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    if !min.is_finite() || !max.is_finite() {
+    if values.iter().any(|value| !value.is_finite()) {
         return Err(TrustformersError::invalid_operation(
             "cannot quantize a tensor that contains non-finite values".to_string(),
         ));
     }
+    let min = values.iter().copied().fold(f32::INFINITY, f32::min);
+    let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
 
     if symmetric {
         let bound = min.abs().max(max.abs());
-        let levels = qmax.max(1) as f32;
-        let scale = if bound > 0.0 { bound / levels } else { 1.0 };
-        Ok(QuantizationParameters {
-            scale,
-            zero_point: 0,
-            qmin,
-            qmax,
-        })
+        Ok(symmetric_parameters_for_bound(bound, bits)?)
     } else {
+        // The represented range must contain zero, otherwise the zero point falls
+        // outside the integer grid and every value saturates.
+        let min = min.min(0.0);
+        let max = max.max(0.0);
         let span = max - min;
         let levels = (qmax - qmin).max(1) as f32;
         let scale = if span > 0.0 { span / levels } else { 1.0 };
@@ -143,6 +168,210 @@ pub fn derive_quantization_parameters(
             qmax,
         })
     }
+}
+
+/// Symmetric quantization parameters for an explicit clipping bound.
+///
+/// Values beyond `±bound` saturate. Calibration methods that clip outliers
+/// (percentile, MSE, KL) produce their bound and hand it to this function.
+pub fn symmetric_parameters_for_bound(bound: f32, bits: u8) -> Result<QuantizationParameters> {
+    if !(1..=32).contains(&bits) {
+        return Err(TrustformersError::invalid_config(format!(
+            "quantization needs between 1 and 32 bits, got {bits}"
+        )));
+    }
+    if !bound.is_finite() || bound < 0.0 {
+        return Err(TrustformersError::invalid_config(format!(
+            "the clipping bound must be finite and non-negative, got {bound}"
+        )));
+    }
+
+    let half = 1i64 << (bits as i64 - 1);
+    let qmin = (-half) as i32;
+    let qmax = (half - 1) as i32;
+    let levels = qmax.max(1) as f32;
+    let scale = if bound > 0.0 { bound / levels } else { 1.0 };
+
+    Ok(QuantizationParameters {
+        scale,
+        zero_point: 0,
+        qmin,
+        qmax,
+    })
+}
+
+/// Quantize a tensor with *given* parameters and write the reconstruction back.
+///
+/// This is what a calibrated pipeline must use: re-deriving the scale from the
+/// tensor would silently discard the calibration.
+pub fn quantize_tensor_with_params(
+    name: &str,
+    tensor: &mut Tensor,
+    params: &QuantizationParameters,
+) -> Result<Vec<i32>> {
+    let values = tensor_values(name, tensor)?;
+
+    let mut levels = Vec::with_capacity(values.len());
+    let mut reconstructed = Vec::with_capacity(values.len());
+    for value in &values {
+        let level = params.quantize(*value);
+        levels.push(level);
+        reconstructed.push(params.dequantize(level));
+    }
+
+    write_tensor(name, tensor, &reconstructed)?;
+    Ok(levels)
+}
+
+/// Clipping bound at the given percentile of `|values|`.
+///
+/// `percentile` is in `[0, 100]`; 100 reduces to plain min/max calibration.
+pub fn percentile_clip_bound(values: &[f32], percentile: f32) -> Result<f32> {
+    if values.is_empty() {
+        return Err(TrustformersError::invalid_operation(
+            "cannot calibrate an empty tensor".to_string(),
+        ));
+    }
+    let mut magnitudes: Vec<f32> = values.iter().map(|value| value.abs()).collect();
+    magnitudes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let fraction = (percentile / 100.0).clamp(0.0, 1.0);
+    let index = (((magnitudes.len() - 1) as f32) * fraction).round() as usize;
+    Ok(magnitudes[index.min(magnitudes.len() - 1)])
+}
+
+/// Clipping bound that minimises the mean-squared quantization error.
+///
+/// Sweeps candidate bounds between a small fraction of the maximum magnitude and
+/// the maximum itself, measuring the real reconstruction error for each.
+pub fn mse_clip_bound(values: &[f32], bits: u8, candidates: usize) -> Result<f32> {
+    if values.is_empty() {
+        return Err(TrustformersError::invalid_operation(
+            "cannot calibrate an empty tensor".to_string(),
+        ));
+    }
+    let max = values.iter().fold(0.0f32, |acc, value| acc.max(value.abs()));
+    if max <= 0.0 {
+        return Ok(0.0);
+    }
+
+    let steps = candidates.max(2);
+    let mut best_bound = max;
+    let mut best_error = f64::INFINITY;
+
+    for step in 1..=steps {
+        let bound = max * (step as f32 / steps as f32);
+        let params = symmetric_parameters_for_bound(bound, bits)?;
+        let mut error = 0.0f64;
+        for value in values {
+            let reconstructed = params.dequantize(params.quantize(*value));
+            let difference = f64::from(*value) - f64::from(reconstructed);
+            error += difference * difference;
+        }
+        if error < best_error {
+            best_error = error;
+            best_bound = bound;
+        }
+    }
+
+    Ok(best_bound)
+}
+
+/// Clipping bound chosen by minimising the KL divergence between the value
+/// distribution and its quantized approximation.
+///
+/// This is the histogram algorithm used by production post-training quantizers:
+/// build a histogram of `|values|`, then for every candidate cut-off compare the
+/// reference distribution against the distribution the quantized grid can
+/// represent, and keep the cut-off with the smallest divergence.
+pub fn kl_divergence_clip_bound(values: &[f32], bits: u8, bins: usize) -> Result<f32> {
+    if values.is_empty() {
+        return Err(TrustformersError::invalid_operation(
+            "cannot calibrate an empty tensor".to_string(),
+        ));
+    }
+    if !(1..=32).contains(&bits) {
+        return Err(TrustformersError::invalid_config(format!(
+            "quantization needs between 1 and 32 bits, got {bits}"
+        )));
+    }
+
+    let max = values.iter().fold(0.0f32, |acc, value| acc.max(value.abs()));
+    if max <= 0.0 {
+        return Ok(0.0);
+    }
+
+    let bins = bins.clamp(16, 4096);
+    let levels = (1usize << (bits as usize - 1)).max(2);
+    if levels >= bins {
+        // The grid is at least as fine as the histogram: no clipping helps.
+        return Ok(max);
+    }
+
+    let mut histogram = vec![0.0f64; bins];
+    for value in values {
+        let position = (value.abs() / max * bins as f32) as usize;
+        histogram[position.min(bins - 1)] += 1.0;
+    }
+
+    let mut best_bound = max;
+    let mut best_divergence = f64::INFINITY;
+
+    for cut in levels..=bins {
+        // Reference distribution: everything above the cut folds into the last bin.
+        let mut reference: Vec<f64> = histogram[..cut].to_vec();
+        let outliers: f64 = histogram[cut..].iter().sum();
+        if let Some(last) = reference.last_mut() {
+            *last += outliers;
+        }
+        let reference_total: f64 = reference.iter().sum();
+        if reference_total <= 0.0 {
+            continue;
+        }
+
+        // Candidate distribution: merge the reference into `levels` groups and
+        // spread each group's mass back over its non-empty bins.
+        let mut candidate = vec![0.0f64; cut];
+        for level in 0..levels {
+            let start = level * cut / levels;
+            let end = ((level + 1) * cut / levels).min(cut);
+            if start >= end {
+                continue;
+            }
+            let mass: f64 = histogram[start..end].iter().sum();
+            let occupied = histogram[start..end].iter().filter(|count| **count > 0.0).count();
+            if occupied == 0 || mass <= 0.0 {
+                continue;
+            }
+            let share = mass / occupied as f64;
+            for (offset, count) in histogram[start..end].iter().enumerate() {
+                if *count > 0.0 {
+                    candidate[start + offset] = share;
+                }
+            }
+        }
+        let candidate_total: f64 = candidate.iter().sum();
+        if candidate_total <= 0.0 {
+            continue;
+        }
+
+        let mut divergence = 0.0f64;
+        for (p, q) in reference.iter().zip(candidate.iter()) {
+            let p = p / reference_total;
+            if p <= 0.0 {
+                continue;
+            }
+            let q = (q / candidate_total).max(1e-12);
+            divergence += p * (p / q).ln();
+        }
+
+        if divergence < best_divergence {
+            best_divergence = divergence;
+            best_bound = max * cut as f32 / bins as f32;
+        }
+    }
+
+    Ok(best_bound)
 }
 
 /// Quantize a tensor to `bits` and write the reconstructed values back.
@@ -177,15 +406,21 @@ pub fn quantize_tensor_in_place(
 
 /// Zero the smallest-magnitude weights of a tensor until `sparsity` is reached.
 ///
-/// `sparsity` is the fraction of weights to remove, in `[0, 1)`. Weights already
-/// at zero count towards the target.
+/// `sparsity` is the fraction of weights to remove, in `[0, 1)`. The removal is
+/// **rank-based**, so a tensor whose weights are all equal still loses exactly
+/// the requested fraction instead of everything or nothing.
 pub fn magnitude_prune_in_place(
     name: &str,
     tensor: &mut Tensor,
     sparsity: f32,
 ) -> Result<PruneStats> {
-    let threshold = magnitude_threshold_for(&tensor_values(name, tensor)?, sparsity)?;
-    prune_below_threshold(name, tensor, threshold)
+    let values = tensor_values(name, tensor)?;
+    let threshold = magnitude_threshold_for(&values, sparsity)?;
+    let target = ((values.len() as f32) * sparsity).round() as usize;
+    // Weights strictly below the threshold always go; ties fill the remainder.
+    let below = values.iter().filter(|value| value.abs() < threshold).count();
+    let mut tie_budget = target.saturating_sub(below);
+    prune_at_threshold(name, tensor, threshold, &mut tie_budget)
 }
 
 /// Compute the magnitude threshold that removes `sparsity` of the values.
@@ -207,35 +442,54 @@ pub fn magnitude_threshold_for(values: &[f32], sparsity: f32) -> Result<f32> {
         return Ok(0.0);
     }
     let index = cut.min(magnitudes.len()) - 1;
-    // Anything with |w| <= threshold is removed.
+    // Weights below this magnitude are removed outright; weights exactly at it
+    // are removed only while the tie budget lasts (see `prune_at_threshold`).
     Ok(magnitudes[index])
 }
 
-/// Zero every weight whose magnitude is at or below `threshold`.
-pub fn prune_below_threshold(
+/// Zero every weight below `threshold`, spending `tie_budget` on the weights that
+/// sit exactly at it.
+///
+/// The tie budget is what makes global pruning exact: a threshold alone cannot
+/// distinguish between "remove all the 0.5s" and "remove three of them", and a
+/// tensor of identical weights would otherwise be wiped out entirely (or left
+/// untouched, depending on the comparison operator).
+pub fn prune_at_threshold(
     name: &str,
     tensor: &mut Tensor,
     threshold: f32,
+    tie_budget: &mut usize,
 ) -> Result<PruneStats> {
     let mut values = tensor_values(name, tensor)?;
     let total = values.len();
-    let mut zeroed = 0usize;
 
     for value in &mut values {
-        if value.abs() <= threshold {
+        let magnitude = value.abs();
+        if magnitude < threshold {
             *value = 0.0;
-        }
-        if *value == 0.0 {
-            zeroed += 1;
+        } else if magnitude == threshold && *tie_budget > 0 && *value != 0.0 {
+            *value = 0.0;
+            *tie_budget -= 1;
         }
     }
 
+    let zeroed = values.iter().filter(|value| **value == 0.0).count();
     write_tensor(name, tensor, &values)?;
     Ok(PruneStats {
         total,
         zeroed,
         threshold,
     })
+}
+
+/// Zero every weight whose magnitude is strictly below `threshold`.
+pub fn prune_below_threshold(
+    name: &str,
+    tensor: &mut Tensor,
+    threshold: f32,
+) -> Result<PruneStats> {
+    let mut budget = 0usize;
+    prune_at_threshold(name, tensor, threshold, &mut budget)
 }
 
 /// Zero a random `sparsity` fraction of the weights (the pruning baseline).

@@ -1,3 +1,7 @@
+use crate::weight_loading::binding::{
+    bind_embedding, bind_linear, take_norm_bias, take_norm_weight, DECODER_BUFFER_SUFFIXES,
+};
+use crate::weight_loading::checkpoint::{Checkpoint, LoadReport, UnusedTensors};
 use std::io::Read;
 
 use crate::nemotron::config::{NemotronConfig, NormType};
@@ -36,6 +40,30 @@ impl NemotronRmsNorm {
             weight,
             eps: eps as f32,
         })
+    }
+}
+
+impl NemotronRmsNorm {
+    /// Install the normalisation gain from a checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `weight` does not have the shape this norm was built for.
+    pub fn set_weight(&mut self, weight: Tensor) -> Result<()> {
+        if weight.shape() != self.weight.shape() {
+            return Err(TrustformersError::shape_error(format!(
+                "NemotronRmsNorm expects a {:?} gain, got {:?}",
+                self.weight.shape(),
+                weight.shape()
+            )));
+        }
+        self.weight = weight;
+        Ok(())
+    }
+
+    /// The current normalisation gain.
+    pub fn weight(&self) -> &Tensor {
+        &self.weight
     }
 }
 
@@ -78,6 +106,47 @@ impl NemotronLayerNorm {
     }
 }
 
+impl NemotronLayerNorm {
+    /// Install the normalisation gain from a checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `weight` does not have the shape this norm was built for.
+    pub fn set_weight(&mut self, weight: Tensor) -> Result<()> {
+        if weight.shape() != self.weight.shape() {
+            return Err(TrustformersError::shape_error(format!(
+                "NemotronLayerNorm expects a {:?} gain, got {:?}",
+                self.weight.shape(),
+                weight.shape()
+            )));
+        }
+        self.weight = weight;
+        Ok(())
+    }
+
+    /// Install the normalisation shift from a checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `bias` does not have the shape this norm was built for.
+    pub fn set_bias(&mut self, bias: Tensor) -> Result<()> {
+        if bias.shape() != self.bias.shape() {
+            return Err(TrustformersError::shape_error(format!(
+                "NemotronLayerNorm expects a {:?} shift, got {:?}",
+                self.bias.shape(),
+                bias.shape()
+            )));
+        }
+        self.bias = bias;
+        Ok(())
+    }
+
+    /// The current normalisation gain.
+    pub fn weight(&self) -> &Tensor {
+        &self.weight
+    }
+}
+
 impl Layer for NemotronLayerNorm {
     type Input = Tensor;
     type Output = Tensor;
@@ -111,6 +180,53 @@ impl NemotronNorm {
         match norm_type {
             NormType::RmsNorm => Ok(NemotronNorm::Rms(NemotronRmsNorm::new(dim, eps)?)),
             NormType::LayerNorm => Ok(NemotronNorm::Layer(NemotronLayerNorm::new(dim, eps)?)),
+        }
+    }
+}
+
+impl NemotronNorm {
+    /// Install the normalisation gain, whichever norm flavour this is.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `weight` has the wrong shape.
+    pub fn set_weight(&mut self, weight: Tensor) -> Result<()> {
+        match self {
+            NemotronNorm::Rms(n) => n.set_weight(weight),
+            NemotronNorm::Layer(n) => n.set_weight(weight),
+        }
+    }
+
+    /// Install the normalisation shift.
+    ///
+    /// RMS normalisation has no shift, so a checkpoint that carries one for an
+    /// RMS-configured model describes a different architecture and is rejected
+    /// rather than silently dropped.
+    ///
+    /// # Errors
+    ///
+    /// Fails for an RMS norm, or when `bias` has the wrong shape.
+    pub fn set_bias(&mut self, bias: Tensor) -> Result<()> {
+        match self {
+            NemotronNorm::Rms(_) => Err(TrustformersError::weight_load_error(
+                "this model is configured with RMS normalisation, which has no bias, but the \
+                 checkpoint carries one"
+                    .to_string(),
+            )),
+            NemotronNorm::Layer(n) => n.set_bias(bias),
+        }
+    }
+
+    /// Whether this norm flavour carries a bias.
+    pub fn has_bias(&self) -> bool {
+        matches!(self, NemotronNorm::Layer(_))
+    }
+
+    /// The current normalisation gain.
+    pub fn weight(&self) -> &Tensor {
+        match self {
+            NemotronNorm::Rms(n) => n.weight(),
+            NemotronNorm::Layer(n) => n.weight(),
         }
     }
 }
@@ -196,9 +312,9 @@ impl NemotronPartialRotaryEmbedding {
 ///
 /// `output = down_proj( squared_relu(gate_proj(x)) * up_proj(x) )`
 pub struct NemotronMLP {
-    gate_proj: Linear,
-    up_proj: Linear,
-    down_proj: Linear,
+    pub(crate) gate_proj: Linear,
+    pub(crate) up_proj: Linear,
+    pub(crate) down_proj: Linear,
 }
 
 impl NemotronMLP {
@@ -264,10 +380,10 @@ impl Layer for NemotronMLP {
 ///
 /// Attention projections have no bias terms (`attention_bias = false`).
 pub struct NemotronAttention {
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
-    o_proj: Linear,
+    pub(crate) q_proj: Linear,
+    pub(crate) k_proj: Linear,
+    pub(crate) v_proj: Linear,
+    pub(crate) o_proj: Linear,
     rotary_emb: NemotronPartialRotaryEmbedding,
     num_heads: usize,
     num_kv_heads: usize,
@@ -397,10 +513,10 @@ impl Layer for NemotronAttention {
 
 /// A single Nemotron transformer decoder layer.
 pub struct NemotronDecoderLayer {
-    self_attn: NemotronAttention,
-    mlp: NemotronMLP,
-    input_layernorm: NemotronNorm,
-    post_attention_layernorm: NemotronNorm,
+    pub(crate) self_attn: NemotronAttention,
+    pub(crate) mlp: NemotronMLP,
+    pub(crate) input_layernorm: NemotronNorm,
+    pub(crate) post_attention_layernorm: NemotronNorm,
 }
 
 impl NemotronDecoderLayer {
@@ -441,10 +557,10 @@ impl Layer for NemotronDecoderLayer {
 
 /// Nemotron base model (embedding + N decoder layers + final norm).
 pub struct NemotronModel {
-    config: NemotronConfig,
-    embed_tokens: Embedding,
-    layers: Vec<NemotronDecoderLayer>,
-    norm: NemotronNorm,
+    pub(crate) config: NemotronConfig,
+    pub(crate) embed_tokens: Embedding,
+    pub(crate) layers: Vec<NemotronDecoderLayer>,
+    pub(crate) norm: NemotronNorm,
 }
 
 impl NemotronModel {
@@ -497,7 +613,14 @@ impl Model for NemotronModel {
         self.norm.forward(hidden)
     }
 
-    fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
+    /// Load a HuggingFace Nemotron checkpoint (safetensors or `torch.save`).
+    ///
+    /// A previous revision returned `Ok(())` without reading a byte, so every
+    /// "load" left the freshly-initialised weights in place while reporting
+    /// success. See [`NemotronModel::load_checkpoint`] for the name map.
+    fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        self.load_checkpoint(&checkpoint, &["lm_head."])?;
         Ok(())
     }
 
@@ -514,6 +637,144 @@ impl Model for NemotronModel {
         let norms = 2 * c.hidden_size;
         let layer = attn + mlp + norms;
         embed + c.num_hidden_layers * layer + c.hidden_size
+    }
+}
+
+impl NemotronModel {
+    /// Bind a parsed checkpoint into this model.
+    ///
+    /// Nemotron follows the LLaMA tensor layout with two configurable twists:
+    /// the attention and MLP projections may carry biases (`attention_bias` /
+    /// `mlp_bias`), and the norms may be LayerNorms rather than RMS norms
+    /// (`norm_type`). Both are read from the config rather than assumed, so a
+    /// checkpoint for the other variant fails instead of loading half its
+    /// tensors.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint does not look like a Nemotron checkpoint, when
+    /// any tensor has the wrong shape, when a parameter is missing, or when the
+    /// checkpoint carries weights this architecture does not recognise.
+    pub fn load_checkpoint(
+        &mut self,
+        checkpoint: &Checkpoint,
+        allowed_unused_prefixes: &[&str],
+    ) -> Result<LoadReport> {
+        let prefix = checkpoint.detect_prefix(&["model.", ""], "embed_tokens.weight")?;
+        let mut binder = checkpoint.binder(&prefix);
+
+        let hidden = self.config.hidden_size;
+        let head_dim = self.config.head_dim;
+        let q_width = self.config.num_attention_heads * head_dim;
+        let kv_width = self.config.num_key_value_heads * head_dim;
+        let intermediate = self.config.intermediate_size;
+        let attention_bias = self.config.attention_bias;
+        let mlp_bias = self.config.mlp_bias;
+        let norm_has_bias = self.norm.has_bias();
+
+        bind_embedding(
+            &mut binder,
+            "embed_tokens",
+            self.config.vocab_size,
+            hidden,
+            &mut self.embed_tokens,
+        )?;
+
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            let attn = format!("layers.{i}.self_attn");
+            bind_linear(
+                &mut binder,
+                &format!("{attn}.q_proj"),
+                q_width,
+                hidden,
+                attention_bias,
+                &mut layer.self_attn.q_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{attn}.k_proj"),
+                kv_width,
+                hidden,
+                attention_bias,
+                &mut layer.self_attn.k_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{attn}.v_proj"),
+                kv_width,
+                hidden,
+                attention_bias,
+                &mut layer.self_attn.v_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{attn}.o_proj"),
+                hidden,
+                q_width,
+                attention_bias,
+                &mut layer.self_attn.o_proj,
+            )?;
+
+            let mlp = format!("layers.{i}.mlp");
+            bind_linear(
+                &mut binder,
+                &format!("{mlp}.gate_proj"),
+                intermediate,
+                hidden,
+                mlp_bias,
+                &mut layer.mlp.gate_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{mlp}.up_proj"),
+                intermediate,
+                hidden,
+                mlp_bias,
+                &mut layer.mlp.up_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{mlp}.down_proj"),
+                hidden,
+                intermediate,
+                mlp_bias,
+                &mut layer.mlp.down_proj,
+            )?;
+
+            let input_norm = format!("layers.{i}.input_layernorm");
+            if let Some(w) = take_norm_weight(&mut binder, &input_norm, hidden)? {
+                layer.input_layernorm.set_weight(w)?;
+            }
+            if norm_has_bias {
+                if let Some(b) = take_norm_bias(&mut binder, &input_norm, hidden)? {
+                    layer.input_layernorm.set_bias(b)?;
+                }
+            }
+
+            let post_norm = format!("layers.{i}.post_attention_layernorm");
+            if let Some(w) = take_norm_weight(&mut binder, &post_norm, hidden)? {
+                layer.post_attention_layernorm.set_weight(w)?;
+            }
+            if norm_has_bias {
+                if let Some(b) = take_norm_bias(&mut binder, &post_norm, hidden)? {
+                    layer.post_attention_layernorm.set_bias(b)?;
+                }
+            }
+        }
+
+        if let Some(w) = take_norm_weight(&mut binder, "norm", hidden)? {
+            self.norm.set_weight(w)?;
+        }
+        if norm_has_bias {
+            if let Some(b) = take_norm_bias(&mut binder, "norm", hidden)? {
+                self.norm.set_bias(b)?;
+            }
+        }
+
+        binder.finish(UnusedTensors::new(
+            allowed_unused_prefixes,
+            DECODER_BUFFER_SUFFIXES,
+        ))
     }
 }
 
@@ -810,5 +1071,172 @@ mod tests {
         let model = NemotronModel::new(cfg).expect("model must build");
         let input = Tensor::from_vec(vec![1.0_f32], &[1]).expect("f32 token must build");
         let _ = model.forward(input);
+    }
+
+    // ── Real checkpoint loading ─────────────────────────────────────────────
+
+    use crate::weight_loading::test_support::{build_safetensors, DecoderFixtureSpec, F32Tensor};
+
+    fn loading_config() -> NemotronConfig {
+        NemotronConfig {
+            vocab_size: 12,
+            hidden_size: 8,
+            intermediate_size: 16,
+            num_hidden_layers: 2,
+            num_attention_heads: 4,
+            num_key_value_heads: 2,
+            head_dim: 2,
+            max_position_embeddings: 16,
+            rms_norm_eps: 1e-5,
+            rope_theta: 10000.0,
+            partial_rotary_factor: 0.5,
+            hidden_act: "relu2".to_string(),
+            tie_word_embeddings: false,
+            norm_type: NormType::RmsNorm,
+            attention_bias: false,
+            mlp_bias: false,
+        }
+    }
+
+    fn loading_fixture(config: &NemotronConfig) -> DecoderFixtureSpec {
+        let head_dim = config.head_dim;
+        let mut spec = DecoderFixtureSpec::llama_style(
+            "model.",
+            config.vocab_size,
+            config.hidden_size,
+            config.intermediate_size,
+            config.num_hidden_layers,
+            config.num_attention_heads * head_dim,
+            config.num_key_value_heads * head_dim,
+        );
+        spec.attention_bias = config.attention_bias;
+        spec.mlp_bias = config.mlp_bias;
+        spec
+    }
+
+    /// Regression: `load_pretrained` silently returned `Ok(())` without reading a byte, so no Nemotron checkpoint
+    /// could ever reach the model's parameters. It now binds every one of them,
+    /// and the proof is that the checkpoint's exact values arrive in the layers.
+    #[test]
+    fn load_pretrained_binds_every_parameter_from_the_checkpoint() {
+        let config = loading_config();
+        let tensors = loading_fixture(&config).tensors();
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = NemotronModel::new(config).expect("model must build");
+        model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect("a matching checkpoint must load");
+
+        for name in [
+            "model.layers.0.self_attn.q_proj.weight",
+            "model.layers.1.mlp.down_proj.weight",
+            "model.norm.weight",
+        ] {
+            let expected = tensors
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("fixture must carry {name}"))
+                .values
+                .clone();
+            let actual = match name {
+                "model.layers.0.self_attn.q_proj.weight" => {
+                    model.layers[0].self_attn.q_proj.weight().data().expect("readable")
+                },
+                "model.layers.1.mlp.down_proj.weight" => {
+                    model.layers[1].mlp.down_proj.weight().data().expect("readable")
+                },
+                _ => model.norm.weight().data().expect("readable"),
+            };
+            assert_eq!(actual, expected, "{name} must hold the checkpoint's values");
+        }
+    }
+
+    /// Grouped-query attention: `k_proj`/`v_proj` are narrower than `q_proj`.
+    /// A loader that assumed a square projection would reject this fixture.
+    #[test]
+    fn load_pretrained_respects_grouped_query_attention_widths() {
+        let config = loading_config();
+        let head_dim = config.head_dim;
+        let bytes = loading_fixture(&config).safetensors();
+        let mut model = NemotronModel::new(config.clone()).expect("model must build");
+        model.load_pretrained(&mut bytes.as_slice()).expect("checkpoint must load");
+
+        assert_eq!(
+            model.layers[0].self_attn.k_proj.weight().shape(),
+            vec![config.num_key_value_heads * head_dim, config.hidden_size]
+        );
+        assert_eq!(
+            model.layers[0].self_attn.q_proj.weight().shape(),
+            vec![config.num_attention_heads * head_dim, config.hidden_size]
+        );
+    }
+
+    #[test]
+    fn load_pretrained_reports_a_missing_parameter_instead_of_inventing_it() {
+        let config = loading_config();
+        let mut tensors = loading_fixture(&config).tensors();
+        tensors.retain(|t| t.name != "model.layers.1.mlp.up_proj.weight");
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = NemotronModel::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("an incomplete checkpoint must not load silently");
+        assert!(
+            err.to_string().contains("layers.1.mlp.up_proj.weight"),
+            "the error must name the gap: {err}"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_rejects_a_foreign_tensor() {
+        let config = loading_config();
+        let mut tensors = loading_fixture(&config).tensors();
+        tensors.push(F32Tensor::ramp(
+            "model.layers.9.mystery.weight",
+            &[4, 4],
+            99.0,
+        ));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = NemotronModel::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("an unrecognised weight must fail the load");
+        assert!(
+            err.to_string().contains("mystery.weight"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_rejects_bytes_that_are_not_a_checkpoint() {
+        let mut model = NemotronModel::new(loading_config()).expect("model must build");
+        let garbage = vec![0xABu8; 4096];
+        let err = model
+            .load_pretrained(&mut garbage.as_slice())
+            .expect_err("garbage must not be accepted as weights");
+        assert!(
+            err.to_string().contains("unrecognised checkpoint container"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_rejects_a_checkpoint_for_a_different_configuration() {
+        let config = loading_config();
+        let wider = NemotronConfig {
+            hidden_size: config.hidden_size * 2,
+            intermediate_size: config.intermediate_size * 2,
+            ..config.clone()
+        };
+        let bytes = loading_fixture(&wider).safetensors();
+
+        let mut model = NemotronModel::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a mismatched checkpoint must not be reshaped into place");
+        assert!(err.to_string().contains("expects"), "unexpected: {err}");
     }
 }

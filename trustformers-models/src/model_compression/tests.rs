@@ -292,8 +292,17 @@ fn test_quantization_actually_rounds_weights() {
         );
     }
 
-    // 4-bit storage of 10 parameters is 5 bytes.
-    assert_eq!(compressed.model_size_bytes().expect("size"), 5);
+    // The reported size is the surviving parameters at 4 bits each — small
+    // weights that quantized to zero no longer need storing.
+    let nonzero = compressed.nonzero_parameter_count().expect("nonzero count");
+    assert!(
+        nonzero < 10,
+        "a coarse grid must flush small weights to zero"
+    );
+    assert_eq!(
+        compressed.model_size_bytes().expect("size"),
+        nonzero * 4 / 8
+    );
 }
 
 #[test]
@@ -542,4 +551,104 @@ fn test_structured_pruning_removes_whole_rows() {
         zero_rows, 2,
         "half of the four rows must be removed entirely"
     );
+}
+
+#[test]
+fn test_pruning_preserves_parameter_dtypes_and_skips_integer_buffers() {
+    use trustformers_core::tensor::DType;
+
+    let mut model = sample_model();
+    model.weight = Tensor::from_vec_with_dtype(
+        vec![0.9, -0.05, 0.02, 0.8, -0.7, 0.01, 0.03, 0.6],
+        &[4, 2],
+        DType::F64,
+    )
+    .expect("f64 weights");
+    // A non-weight integer buffer must survive untouched.
+    model.bias = Tensor::from_vec_with_dtype(vec![7.0, 9.0], &[2], DType::I64).expect("ids");
+
+    let pipeline = CompressionPipeline::new(utils::simple_pruning_config(0.5)).expect("pipeline");
+    let compressed = pipeline.compress(model).expect("compression");
+
+    assert_eq!(
+        compressed.model.weight.dtype(),
+        DType::F64,
+        "an F64 weight must not become F32"
+    );
+    assert_eq!(compressed.model.bias.dtype(), DType::I64);
+    assert_eq!(
+        compressed.model.bias.data().expect("ids"),
+        vec![7.0, 9.0],
+        "an integer buffer is not a weight and must not be pruned"
+    );
+    assert!(
+        compressed.model.weight.data().expect("weights").iter().any(|v| *v == 0.0),
+        "the float weights must still have been pruned"
+    );
+}
+
+#[test]
+fn test_global_pruning_reaches_the_target_with_identical_weights() {
+    // Every weight has the same magnitude: a naive threshold comparison would
+    // zero the whole model or none of it.
+    let model = TinyModel::new(
+        &[1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0],
+        &[4, 2],
+        &[1.0, -1.0],
+    );
+
+    let pipeline = CompressionPipeline::new(utils::simple_pruning_config(0.5)).expect("pipeline");
+    let compressed = pipeline.compress(model).expect("compression");
+
+    let remaining = compressed.nonzero_parameter_count().expect("nonzero count");
+    assert_eq!(
+        remaining, 5,
+        "half of ten identical weights must be removed, not all or none"
+    );
+}
+
+#[test]
+fn test_compression_requires_a_floating_point_parameter() {
+    use trustformers_core::tensor::DType;
+
+    struct IntegerOnlyModel {
+        config: TinyConfig,
+        ids: Tensor,
+    }
+
+    impl Model for IntegerOnlyModel {
+        type Config = TinyConfig;
+        type Input = Tensor;
+        type Output = Tensor;
+        fn forward(&self, input: Tensor) -> Result<Tensor> {
+            Ok(input)
+        }
+        fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
+            Ok(())
+        }
+        fn get_config(&self) -> &TinyConfig {
+            &self.config
+        }
+        fn num_parameters(&self) -> usize {
+            2
+        }
+        fn named_tensors(&self) -> Vec<(String, &Tensor)> {
+            vec![("ids".to_string(), &self.ids)]
+        }
+        fn named_tensors_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+            vec![("ids".to_string(), &mut self.ids)]
+        }
+    }
+
+    let model = IntegerOnlyModel {
+        config: TinyConfig,
+        ids: Tensor::from_vec_with_dtype(vec![1.0, 2.0], &[2], DType::I64).expect("ids"),
+    };
+
+    let pipeline = CompressionPipeline::new(utils::simple_pruning_config(0.5)).expect("pipeline");
+    let error = match pipeline.compress(model) {
+        Ok(_) => panic!("a model with no float weights cannot be compressed"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("floating-point"), "{error}");
 }

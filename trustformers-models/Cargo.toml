@@ -37,7 +37,9 @@ sysinfo.workspace = true
 # Structured logging facade: libraries must not write to stdout.
 tracing.workspace = true
 regex.workspace = true
-approx.workspace = true
+# Pure-Rust FFT: Hyena's long-convolution operator runs through oxifft's
+# FFT-based `convolve` instead of an O(L*K) scalar loop. (rustfft is banned.)
+oxifft.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true

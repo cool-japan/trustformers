@@ -322,3 +322,157 @@ fn test_levels_to_symbols_rejects_wide_grids() {
     };
     assert!(levels_to_symbols(&[0, 1], &params).is_err());
 }
+
+// ---------------------------------------------------------------------------
+// dtype preservation and exact rank-based pruning
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_write_tensor_preserves_the_dtype() {
+    use trustformers_core::tensor::DType;
+
+    let mut f64_tensor = Tensor::from_vec_with_dtype(vec![1.0, 2.0, 3.0, 4.0], &[2, 2], DType::F64)
+        .expect("f64 tensor");
+    assert_eq!(f64_tensor.dtype(), DType::F64);
+
+    write_tensor("w", &mut f64_tensor, &[0.5, 0.5, 0.5, 0.5]).expect("write");
+    assert_eq!(
+        f64_tensor.dtype(),
+        DType::F64,
+        "an F64 parameter must not silently become F32"
+    );
+    assert_eq!(f64_tensor.data().expect("values"), vec![0.5, 0.5, 0.5, 0.5]);
+
+    // Quantization goes through the same writer.
+    let mut f64_weights =
+        Tensor::from_vec_with_dtype(vec![1.0, -0.5, 0.25, 0.75], &[2, 2], DType::F64)
+            .expect("f64 tensor");
+    quantize_tensor_in_place("w", &mut f64_weights, 4, true, true).expect("quantization");
+    assert_eq!(f64_weights.dtype(), DType::F64);
+}
+
+#[test]
+fn test_write_tensor_refuses_integer_buffers() {
+    use trustformers_core::tensor::DType;
+
+    let mut ids =
+        Tensor::from_vec_with_dtype(vec![1.0, 2.0, 3.0], &[3], DType::I64).expect("i64 tensor");
+    assert!(!is_float_parameter(&ids));
+
+    let error = write_tensor("ids", &mut ids, &[0.5, 0.5, 0.5])
+        .expect_err("writing floats into an integer buffer must fail");
+    assert!(error.to_string().contains("F32 and F64"), "{error}");
+    // The buffer is untouched.
+    assert_eq!(ids.data().expect("values"), vec![1.0, 2.0, 3.0]);
+}
+
+#[test]
+fn test_pruning_identical_weights_removes_exactly_the_requested_fraction() {
+    // Every weight has the same magnitude: a `<=` threshold would wipe the whole
+    // tensor and a `<` threshold would spare all of it.
+    let mut tensor = tensor_from(&[1.0, -1.0, 1.0, -1.0], &[4]);
+    let stats = magnitude_prune_in_place("w", &mut tensor, 0.5).expect("pruning");
+
+    assert_eq!(
+        stats.zeroed, 2,
+        "exactly half of four equal weights must go"
+    );
+    let values = tensor.data().expect("weights");
+    assert_eq!(values.iter().filter(|v| **v == 0.0).count(), 2);
+    assert_eq!(values.iter().filter(|v| **v != 0.0).count(), 2);
+}
+
+#[test]
+fn test_pruning_with_ties_at_the_threshold() {
+    // Three weights share the threshold magnitude; only one may be removed.
+    let mut tensor = tensor_from(&[0.1, 0.5, 0.5, 0.5, 0.9], &[5]);
+    let stats = magnitude_prune_in_place("w", &mut tensor, 0.4).expect("pruning");
+
+    assert_eq!(stats.zeroed, 2, "40% of five weights is two");
+    let values = tensor.data().expect("weights");
+    assert_eq!(values[0], 0.0, "the smallest weight always goes");
+    assert!(
+        (values[4] - 0.9).abs() < 1e-6,
+        "the largest weight survives"
+    );
+    assert_eq!(values[1..4].iter().filter(|v| **v == 0.0).count(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Calibration bounds
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_percentile_clip_bound_ignores_outliers() {
+    let mut values = vec![0.1f32; 99];
+    values.push(100.0); // one extreme outlier
+
+    let min_max = values.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
+    let percentile = percentile_clip_bound(&values, 95.0).expect("percentile");
+
+    assert!((min_max - 100.0).abs() < 1e-6);
+    assert!(
+        percentile < 1.0,
+        "the 95th percentile must ignore the outlier, got {percentile}"
+    );
+}
+
+#[test]
+fn test_mse_clip_bound_minimises_the_measured_error() {
+    let mut values: Vec<f32> = (0..200).map(|i| (i as f32 / 200.0) * 0.2 - 0.1).collect();
+    values.push(50.0);
+
+    let max = values.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
+    let bound = mse_clip_bound(&values, 4, 32).expect("mse bound");
+    assert!(bound > 0.0 && bound <= max, "bound {bound} out of range");
+
+    let error = |bound: f32| -> f64 {
+        let params = symmetric_parameters_for_bound(bound, 4).expect("params");
+        values
+            .iter()
+            .map(|value| {
+                let difference =
+                    f64::from(*value) - f64::from(params.dequantize(params.quantize(*value)));
+                difference * difference
+            })
+            .sum()
+    };
+
+    // The chosen bound must be no worse than plain min/max, and no worse than any
+    // other candidate on the sweep.
+    let chosen = error(bound);
+    assert!(chosen <= error(max) + 1e-9, "{chosen} vs {}", error(max));
+    for step in 1..=32 {
+        let candidate = max * (step as f32 / 32.0);
+        assert!(
+            chosen <= error(candidate) + 1e-6,
+            "the sweep must return its own optimum: {chosen} > {} at {candidate}",
+            error(candidate)
+        );
+    }
+}
+
+#[test]
+fn test_kl_clip_bound_is_within_range() {
+    let values: Vec<f32> = (0..1024)
+        .map(|i| ((i % 17) as f32 - 8.0) * 0.01 + if i == 0 { 5.0 } else { 0.0 })
+        .collect();
+    let max = values.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
+
+    let bound = kl_divergence_clip_bound(&values, 8, 256).expect("kl bound");
+    assert!(bound > 0.0 && bound <= max, "bound {bound} out of range");
+    assert!(kl_divergence_clip_bound(&[], 8, 256).is_err());
+}
+
+#[test]
+fn test_quantize_with_params_uses_the_supplied_grid() {
+    let mut tensor = tensor_from(&[10.0, -10.0, 1.0], &[3]);
+    // A deliberately tight grid: the large values must saturate at ±2.
+    let params = symmetric_parameters_for_bound(2.0, 8).expect("params");
+    quantize_tensor_with_params("w", &mut tensor, &params).expect("quantization");
+
+    let values = tensor.data().expect("weights");
+    assert!((values[0] - 2.0).abs() < 0.02, "got {}", values[0]);
+    assert!((values[1] + 2.0).abs() < 0.02, "got {}", values[1]);
+    assert!((values[2] - 1.0).abs() < 0.02, "got {}", values[2]);
+}

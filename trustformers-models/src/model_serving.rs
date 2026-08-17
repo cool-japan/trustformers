@@ -516,6 +516,37 @@ impl HealthMonitor {
     pub fn should_run_health_check(&self) -> bool {
         self.last_health_check.elapsed() >= self.health_check_interval
     }
+
+    /// Record that a health-check sweep has just run.
+    ///
+    /// Without this, `should_run_health_check` stayed true forever after the
+    /// first interval elapsed and the "check" was re-triggered on every poll.
+    pub fn mark_health_check_run(&mut self) {
+        self.last_health_check = Instant::now();
+    }
+
+    /// Whether an instance's circuit breaker currently permits requests.
+    ///
+    /// `Open` means the breaker has tripped on repeated failures;
+    /// `HalfOpen`/`Closed` both admit traffic. Unknown instances are reported
+    /// unhealthy rather than assumed fine.
+    pub fn is_instance_admitting(&self, instance_id: &str) -> bool {
+        match self.circuit_breakers.get(instance_id) {
+            Some(breaker) => breaker.state() != CircuitBreakerState::Open,
+            None => false,
+        }
+    }
+}
+
+/// A change in an instance's health, as observed by a health-check sweep.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealthTransition {
+    /// Instance whose health flag changed.
+    pub instance_id: String,
+    /// Health flag before the sweep.
+    pub was_healthy: bool,
+    /// Health flag after the sweep.
+    pub is_healthy: bool,
 }
 
 /// Type alias for model inference function
@@ -616,8 +647,28 @@ impl ModelServingManager {
         Ok(health_monitor.get_health_status())
     }
 
-    /// Perform health check on all instances
-    pub async fn perform_health_check(&self) -> Result<()> {
+    /// Reconcile every instance's health flag with its circuit-breaker state.
+    ///
+    /// Returns the set of instances whose health flag *changed* during this
+    /// sweep, so a caller can log or alert on transitions.
+    ///
+    /// The circuit breakers are the authority: they observe real request
+    /// successes and failures through
+    /// [`HealthMonitor::record_success`]/[`HealthMonitor::record_failure`], and
+    /// trip to `Open` after `failure_threshold` consecutive failures. This
+    /// method propagates that verdict into the load balancer, which is what
+    /// actually excludes an instance from routing — before, the two structures
+    /// never talked to each other, so a repeatedly-failing instance kept
+    /// receiving traffic.
+    ///
+    /// A previous revision consisted of `if should_check { /* Health check
+    /// logic would go here */ }`: it acquired the lock, did nothing with it,
+    /// never updated `last_health_check`, and returned `Ok(())`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the health-monitor or load-balancer lock is poisoned.
+    pub async fn perform_health_check(&self) -> Result<Vec<HealthTransition>> {
         let should_check = {
             let health_monitor = self.health_monitor.lock().map_err(|_| {
                 TrustformersError::runtime_error(
@@ -627,18 +678,47 @@ impl ModelServingManager {
             health_monitor.should_run_health_check()
         };
 
-        if should_check {
-            // In a real implementation, this would perform actual health checks
-            // For now, we'll just update the health monitor's last check time
-            let mut _health_monitor = self.health_monitor.lock().map_err(|_| {
+        if !should_check {
+            return Ok(Vec::new());
+        }
+
+        // Snapshot the breaker verdicts, then release the monitor lock before
+        // touching the balancer so the two locks are never held at once.
+        let verdicts: Vec<(String, bool)> = {
+            let mut health_monitor = self.health_monitor.lock().map_err(|_| {
                 TrustformersError::runtime_error(
                     "Failed to acquire health monitor lock".to_string(),
                 )
             })?;
-            // Health check logic would go here
+            let instance_ids: Vec<String> =
+                health_monitor.get_health_status().keys().cloned().collect();
+            let verdicts = instance_ids
+                .iter()
+                .map(|id| (id.clone(), health_monitor.is_instance_admitting(id)))
+                .collect();
+            health_monitor.mark_health_check_run();
+            verdicts
+        };
+
+        let mut transitions = Vec::new();
+        let mut balancer = self.load_balancer.lock().map_err(|_| {
+            TrustformersError::runtime_error("Failed to acquire load balancer lock".to_string())
+        })?;
+        for (instance_id, is_healthy) in verdicts {
+            if let Some(instance) = balancer.instances.iter_mut().find(|i| i.id == instance_id) {
+                if instance.is_healthy != is_healthy {
+                    transitions.push(HealthTransition {
+                        instance_id: instance_id.clone(),
+                        was_healthy: instance.is_healthy,
+                        is_healthy,
+                    });
+                }
+                instance.is_healthy = is_healthy;
+                instance.last_health_check = Instant::now();
+            }
         }
 
-        Ok(())
+        Ok(transitions)
     }
 
     /// Submit a request for processing
@@ -747,40 +827,40 @@ impl ModelServingManager {
         }))
     }
 
-    /// Process an inference request using the configured model
+    /// Process an inference request using the configured model.
+    ///
+    /// # Errors
+    ///
+    /// Fails when no model function has been installed with
+    /// [`ModelServingManager::set_inference_fn`], and when the model itself fails.
+    ///
+    /// A previous revision handled the no-model case by sleeping for
+    /// `min(100, numel/1000)` milliseconds and returning `request.input` — the
+    /// caller's own tensor — as the "prediction". The response carried a
+    /// plausible-looking `processing_time`, the metrics counted it as a
+    /// successful inference, and nothing anywhere indicated that no model had
+    /// run. Echoing the input is now an error, so an unconfigured server fails
+    /// loudly instead of serving fabricated results.
     async fn process_inference(&self, request: &InferenceRequest) -> Result<Tensor> {
-        match &self.model_fn {
-            Some(model_fn) => {
-                // Use the configured model function for actual inference
-                let model_fn = Arc::clone(model_fn);
-                let input_tensor = request.input.clone();
+        let Some(model_fn) = &self.model_fn else {
+            return Err(TrustformersError::runtime_error(format!(
+                "request {} cannot be served: this ModelServingManager has no model function \
+                 installed. Call `set_inference_fn` with the model's forward pass before serving \
+                 requests.",
+                request.id
+            )));
+        };
 
-                // Run inference in a blocking task to avoid blocking the async runtime
-                let output = tokio::task::spawn_blocking(move || (model_fn)(input_tensor))
-                    .await
-                    .map_err(|e| {
-                    TrustformersError::runtime_error(format!("Inference task failed: {}", e))
-                })??;
+        // Use the configured model function for actual inference
+        let model_fn = Arc::clone(model_fn);
+        let input_tensor = request.input.clone();
 
-                Ok(output)
-            },
-            None => {
-                // Fallback: enhanced simulation with basic tensor operations
-                let input = &request.input;
+        // Run inference in a blocking task to avoid blocking the async runtime
+        let output = tokio::task::spawn_blocking(move || (model_fn)(input_tensor)).await.map_err(
+            |e| TrustformersError::runtime_error(format!("Inference task failed: {}", e)),
+        )??;
 
-                // Simulate some computation time based on tensor size
-                let tensor_size = match input {
-                    Tensor::F32(arr) => arr.len(),
-                    Tensor::I64(arr) => arr.len(),
-                    _ => 1000, // Default size
-                };
-                let processing_time = std::cmp::min(100, tensor_size / 1000); // Max 100ms
-                tokio::time::sleep(Duration::from_millis(processing_time as u64)).await;
-
-                // Return input tensor for now (can be enhanced with basic transformations)
-                Ok(request.input.clone())
-            },
-        }
+        Ok(output)
     }
 
     /// Get current serving metrics
@@ -1303,6 +1383,118 @@ mod tests {
 
         let metrics = manager.get_metrics().await;
         assert_eq!(metrics.total_requests, 1);
+    }
+
+    /// Regression: an unconfigured server slept and echoed the caller's own
+    /// tensor back as the "prediction", and the metrics counted it as a
+    /// successful inference.
+    ///
+    /// The old code returned `Ok(request.input.clone())`, so `response.output`
+    /// was `Ok` and equal to the input — both assertions below failed.
+    #[tokio::test]
+    async fn a_server_with_no_model_errors_instead_of_echoing_the_input() {
+        let config = ServingConfig::default();
+        let manager = ModelServingManager::new(config);
+        manager
+            .add_instance(ModelInstance::new("test-instance".to_string(), 1.0))
+            .expect("instance must register");
+
+        let input =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[1, 4]).expect("input tensor must build");
+        let request = InferenceRequest::new(input.clone(), RequestPriority::Normal);
+        manager.submit_request(request).await.expect("request must enqueue");
+
+        let response = manager
+            .process_next_request()
+            .await
+            .expect("processing must return a response envelope")
+            .expect("a queued request must produce a response");
+
+        let err = response
+            .output
+            .expect_err("no model is installed, so no prediction may be produced");
+        assert!(
+            err.to_string().contains("no model function installed"),
+            "unexpected error: {err}"
+        );
+
+        let metrics = manager.get_metrics().await;
+        assert_eq!(
+            metrics.successful_requests, 0,
+            "an inference that never ran must not be counted as a success"
+        );
+    }
+
+    /// With a model installed, the same path returns that model's real output.
+    #[tokio::test]
+    async fn a_server_with_a_model_returns_the_model_output() {
+        let config = ServingConfig::default();
+        let mut manager = ModelServingManager::new(config);
+        manager.set_inference_fn(Arc::new(|input: Tensor| input.scalar_mul(2.0)));
+        manager
+            .add_instance(ModelInstance::new("test-instance".to_string(), 1.0))
+            .expect("instance must register");
+
+        let input = Tensor::from_vec(vec![1.0, 2.0], &[2]).expect("input must build");
+        manager
+            .submit_request(InferenceRequest::new(input, RequestPriority::Normal))
+            .await
+            .expect("request must enqueue");
+
+        let response = manager
+            .process_next_request()
+            .await
+            .expect("processing must succeed")
+            .expect("a response must be produced");
+        let output = response.output.expect("the model must produce an output");
+        assert_eq!(output.data().expect("readable"), vec![2.0, 4.0]);
+    }
+
+    /// Regression: `perform_health_check` acquired the health-monitor lock,
+    /// executed an empty block and returned. A repeatedly-failing instance kept
+    /// its `is_healthy = true` flag and kept receiving traffic.
+    #[tokio::test]
+    async fn health_checks_propagate_circuit_breaker_verdicts_to_the_balancer() {
+        let config = ServingConfig {
+            // Run the sweep on the very next call rather than after 30 s.
+            health_check_interval_seconds: 0,
+            ..ServingConfig::default()
+        };
+        let manager = ModelServingManager::new(config);
+        manager
+            .add_instance(ModelInstance::new("flaky".to_string(), 1.0))
+            .expect("instance must register");
+
+        assert_eq!(
+            manager.healthy_instances_count().expect("count must be readable"),
+            1
+        );
+
+        // Trip the circuit breaker: the default threshold is 3 failures.
+        {
+            let mut monitor =
+                manager.health_monitor.lock().expect("health monitor lock must be free");
+            for _ in 0..3 {
+                monitor.record_failure("flaky");
+            }
+        }
+
+        let transitions =
+            manager.perform_health_check().await.expect("a health sweep must succeed");
+        assert_eq!(
+            transitions,
+            vec![HealthTransition {
+                instance_id: "flaky".to_string(),
+                was_healthy: true,
+                is_healthy: false,
+            }],
+            "the tripped breaker must be reported as a health transition"
+        );
+        assert_eq!(
+            manager.healthy_instances_count().expect("count must be readable"),
+            0,
+            "a tripped instance must be excluded from routing"
+        );
     }
 
     #[test]

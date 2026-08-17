@@ -1,7 +1,6 @@
 //! Main checkpoint converter implementation
 
 use anyhow::{anyhow, Result};
-use log;
 use scirs2_core::parallel_ops::*; // SciRS2 Policy compliant (replaces rayon)
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -328,12 +327,18 @@ impl CheckpointConverter {
                     ));
                 }
 
-                // For now, we'll store metadata about the split in the tensor
-                // The actual splitting should be handled by the conversion pipeline
-                log::warn!(
-                    "Split transform applied - requires special handling in conversion pipeline"
-                );
-                Ok(())
+                // A Split turns one tensor into several, which this
+                // single-tensor-in-place API cannot express. Returning Ok(())
+                // with the tensor untouched produced a checkpoint whose fused
+                // QKV weight was never split — a silently wrong conversion.
+                Err(anyhow!(
+                    "Split {{ axis: {}, sizes: {:?} }} cannot be applied in place: it produces {} \
+                     tensors from one. The conversion pipeline has no multi-output path, so this \
+                     mapping rule cannot be honoured.",
+                    axis,
+                    sizes,
+                    sizes.len()
+                ))
             },
             WeightTransform::Merge { axis } => {
                 // Note: Merge transform requires special handling during conversion
@@ -346,12 +351,14 @@ impl CheckpointConverter {
                     ));
                 }
 
-                // For now, we'll store metadata about the merge in the tensor
-                // The actual merging should be handled by the conversion pipeline
-                log::warn!(
-                    "Merge transform applied - requires special handling in conversion pipeline"
-                );
-                Ok(())
+                // A Merge consumes several tensors to produce one, which
+                // this single-tensor-in-place API cannot express.
+                Err(anyhow!(
+                    "Merge {{ axis: {} }} cannot be applied in place: it consumes several tensors \
+                     to produce one. The conversion pipeline has no multi-input path, so this \
+                     mapping rule cannot be honoured.",
+                    axis
+                ))
             },
             WeightTransform::ConvFormat { from, to } => {
                 // Convert convolution weight formats between NCHW and NHWC

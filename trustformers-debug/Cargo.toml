@@ -34,6 +34,16 @@ plotters = { workspace = true, optional = true }
 crossterm = { workspace = true, optional = true }
 ratatui = { workspace = true, optional = true }
 
+# Pure-Rust cross-platform system telemetry (CPU/memory) for the realtime dashboard.
+# No C/C++ toolchain required (default-features = false at the workspace level).
+sysinfo.workspace = true
+
+# COOLJAPAN Pure-Rust Policy (Campaign B): reqwest pulls rustls -> aws-lc-rs ->
+# aws-lc-sys (C/C++ via cmake/cc). Keep it OUT of the default tree by making it
+# optional; only the `http-integrations` feature (real CI/CD webhook delivery,
+# real MLflow REST tracking) needs it.
+reqwest = { workspace = true, optional = true }
+
 # Video generation dependencies
 gif = { workspace = true, optional = true }
 image = { workspace = true, optional = true }
@@ -70,12 +80,21 @@ scirs2-core = { workspace = true }
 tokio-test.workspace = true
 criterion.workspace = true
 tempfile.workspace = true
+# Local-only mock HTTP servers for cicd_integration/mlflow_integration tests
+# (bound to 127.0.0.1:0, never touches the network).
+axum.workspace = true
 
 [features]
 # Default features are Pure-Rust only (COOLJAPAN Pure-Rust policy): no flate2/miniz_oxide.
 # `visual` is intentionally NOT in `default` — it pulls plotters -> image -> png ->
 # flate2/miniz_oxide (policy-banned compression). Opt in explicitly via `--features visual`.
 default = []
+# Real HTTP delivery: CI/CD webhook notifications (Slack/Teams/Discord/generic webhook)
+# and the MLflow REST API 2.0 tracking client. NOT in `default` — pulls reqwest ->
+# rustls -> aws-lc-rs -> aws-lc-sys (C/C++ via cmake/cc). Without this feature the
+# HTTP-shaped APIs return a structured "feature disabled" error instead of pretending
+# to send.
+http-integrations = ["dep:reqwest"]
 visual = ["plotters", "ratatui", "crossterm"]  # ratatui (maintained tui fork); pulls flate2 (non-default only)
 video = ["gif", "image", "ffmpeg-next"]
 gif = ["dep:gif", "image"]

@@ -7,7 +7,7 @@ mod analysis;
 mod deployment;
 mod experiment;
 mod metrics;
-mod routing;
+pub mod routing;
 
 pub use analysis::{ConfidenceLevel, StatisticalAnalyzer, TestRecommendation, TestResult};
 pub use deployment::{
@@ -16,7 +16,9 @@ pub use deployment::{
 };
 pub use experiment::{Experiment, ExperimentConfig, Variant};
 pub use metrics::{MetricCollector, MetricDataPoint, MetricType, MetricValue};
-pub use routing::{RoutingStrategy, TrafficSplitter, UserSegment};
+pub use routing::{
+    Platform, RoutingStrategy, SegmentCondition, TrafficSplitter, UserContext, UserSegment,
+};
 
 use anyhow::Result;
 use parking_lot::RwLock;
@@ -58,8 +60,21 @@ impl ABTestManager {
         Ok(experiment_id)
     }
 
-    /// Route a request to appropriate variant
+    /// Route a request to the appropriate variant, knowing only the user id.
+    ///
+    /// An experiment whose segments target attributes, geography or platform
+    /// cannot be routed this way; use [`Self::route_request_with_context`].
     pub fn route_request(&self, experiment_id: &str, user_id: &str) -> Result<Variant> {
+        self.route_request_with_context(experiment_id, user_id, &routing::UserContext::default())
+    }
+
+    /// Route a request using what is known about the user.
+    pub fn route_request_with_context(
+        &self,
+        experiment_id: &str,
+        user_id: &str,
+        context: &routing::UserContext,
+    ) -> Result<Variant> {
         let experiments = self.experiments.read();
         let experiment_uuid = uuid::Uuid::parse_str(experiment_id)?;
         let experiment = experiments
@@ -67,7 +82,7 @@ impl ABTestManager {
             .find(|e| *e.id() == experiment_uuid)
             .ok_or_else(|| anyhow::anyhow!("Experiment not found"))?;
 
-        self.traffic_splitter.route(experiment, user_id)
+        self.traffic_splitter.route_with_context(experiment, user_id, context)
     }
 
     /// Record a metric for an experiment

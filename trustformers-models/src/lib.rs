@@ -441,10 +441,10 @@ pub mod model_serving;
 // Extended LSTM (xLSTM) models with exponential gating and matrix memory
 pub mod xlstm;
 
-// Biologically-inspired models (temporarily disabled due to compilation errors)
+// Biologically-inspired models
 pub mod biologically_inspired;
 
-// Quantum-classical hybrid models (temporarily disabled due to compiler crash)
+// Quantum-classical hybrid models
 pub mod quantum_classical_hybrids;
 
 // Benchmarking and performance analysis tools
@@ -617,9 +617,10 @@ pub use cross_attention::{
     HierarchicalCrossAttention, MultiHeadCrossAttention, SparseCrossAttention,
 };
 pub use curriculum_learning::{
+    gradient_norm_difficulty, input_complexity_difficulty, sequence_length_difficulty,
     utils as curriculum_learning_utils, CurriculumAnalysis, CurriculumConfig,
     CurriculumEpochOutput, CurriculumExample, CurriculumLearningOutput, CurriculumLearningTrainer,
-    CurriculumStats, CurriculumStrategy, DifficultyMeasure, PacingFunction,
+    CurriculumStats, CurriculumStrategy, DifficultyMeasure, DifficultyScorer, PacingFunction,
 };
 pub use dynamic_pruning::*;
 pub use error_recovery::{
@@ -643,14 +644,14 @@ pub use hyena::{
     HyenaConfig, HyenaForLanguageModeling, HyenaForSequenceClassification, HyenaModel,
 };
 pub use knowledge_distillation::{
-    utils as knowledge_distillation_utils, DistillationConfig, DistillationOutput,
-    DistillationStrategy, KnowledgeDistillationTrainer, ProgressiveStage, StudentOutputs,
-    TeacherOutputs,
+    hard_target_cross_entropy, utils as knowledge_distillation_utils, DistillationConfig,
+    DistillationOutput, DistillationStrategy, KnowledgeDistillationTrainer, ProgressiveStage,
+    StudentOutputs, TeacherOutputs,
 };
 pub use legal_medical_specialized::{
     Citation, CitationType, ComplianceReport, ComplianceViolation, DocumentAnalysis,
     LegalMedicalConfig, LegalMedicalDomain, LegalMedicalForCausalLM, LegalMedicalModel,
-    LegalMedicalSpecialTokens, LegalSystem, MedicalStandard, PrivacyRequirement,
+    LegalMedicalSpecialTokens, LegalSystem, MedicalStandard, PrivacyRequirement, RedactionReport,
 };
 #[cfg(feature = "linformer")]
 pub use linformer::{
@@ -687,8 +688,9 @@ pub use model_compression::{
     StructuredPruningGranularity,
 };
 pub use model_serving::{
-    InferenceRequest, InferenceResponse, LoadBalancer, LoadBalancingStrategy, ModelInstance,
-    ModelServingManager, RequestPriority, RequestQueue, ServingConfig, ServingMetrics,
+    HealthTransition, InferenceRequest, InferenceResponse, LoadBalancer, LoadBalancingStrategy,
+    ModelInstance, ModelServingManager, RequestPriority, RequestQueue, ServingConfig,
+    ServingMetrics,
 };
 pub use moe::{
     glam_config, switch_config, Expert, ExpertParallel, MLPExpert, MoEConfig, RouterOutput,
@@ -761,21 +763,12 @@ pub use xlstm::{
     XLSTMForSequenceClassification, XLSTMLayer, XLSTMModel, XLSTMState,
 };
 
-// pub use biologically_inspired::{
-//     BiologicalConfig, BiologicalArchitecture, NeuronModel, PlasticityType, MemoryType as BiologicalMemoryType,
-//     BiologicalModel, BiologicalModelOutput, BiologicalModelForCausalLM, BiologicalModelForSequenceClassification,
-//     BiologicalMemoryStats, SpikingNeuralNetwork, HopfieldNetwork, LiquidTimeConstantNetwork,
-//     NeuralTuringMachine, ReservoirComputing, CapsuleNetwork, DendriticComputation, BiologicalMemory,
-// }; // Temporarily disabled due to compilation errors
-// pub use quantum_classical_hybrids::{
-//     QuantumClassicalConfig, QuantumHybridArchitecture, QuantumAnsatzConfig, QuantumMeasurementStrategy,
-//     QuantumErrorMitigation, HybridTrainingStrategy, QuantumConnectivity,
-//     QuantumClassicalModel, QuantumClassicalModelOutput, QuantumClassicalModelForCausalLM,
-//     QuantumClassicalModelForSequenceClassification, QuantumClassicalModelStats,
-//     QuantumTransformer, QuantumGraphNeuralNetwork, QuantumConvolutionalNN, QuantumRecurrentNN,
-//     QuantumAttentionLayer, QuantumEmbeddingModel, QuantumOptimizer, QuantumTrainingManager,
-//     QuantumTrainingMetrics, QuantumTrainingStats,
-// }; // Temporarily disabled due to compiler crash
+// `biologically_inspired` and `quantum_classical_hybrids` are compiled and
+// publicly reachable through their own modules (`pub mod` above). They are
+// deliberately not flattened into the crate root: their type names
+// (`MemoryType`, `TaskType`, ...) collide with several already re-exported here,
+// so callers reach them as
+// `trustformers_models::biologically_inspired::BiologicalModel`.
 
 #[cfg(test)]
 mod tests {

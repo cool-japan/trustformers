@@ -330,9 +330,8 @@ impl<M: Model<Input = Tensor, Output = Tensor>> CurriculumLearningTrainer<M> {
                 })
             },
             DifficultyMeasure::GradientNormDifficulty => {
-                // Compute gradient norm as difficulty measure
-                // This is a simplified implementation
-                Ok(0.5) // Placeholder
+                let outputs = self.model.forward(input.clone())?;
+                gradient_norm_difficulty(&outputs, target)
             },
             DifficultyMeasure::ConfidenceDifficulty => {
                 let outputs = self.model.forward(input.clone())?;
@@ -340,17 +339,16 @@ impl<M: Model<Input = Tensor, Output = Tensor>> CurriculumLearningTrainer<M> {
                 let max_prob = self.compute_max_probability(&probs)?;
                 Ok(1.0 - max_prob) // Lower confidence = higher difficulty
             },
-            DifficultyMeasure::LengthDifficulty => {
-                // For sequence data, use length as difficulty measure
-                let seq_len = input.shape()[1] as f32; // Assuming [batch, seq_len, ...]
-                Ok(seq_len / 1000.0) // Normalize by typical sequence length
-            },
-            DifficultyMeasure::ComplexityDifficulty => {
-                // Compute complexity-based difficulty
-                // This could be entropy, edge density, etc.
-                Ok(0.5) // Placeholder
-            },
+            DifficultyMeasure::LengthDifficulty => sequence_length_difficulty(input),
+            DifficultyMeasure::ComplexityDifficulty => input_complexity_difficulty(input),
             DifficultyMeasure::MultiCriteria { measures, weights } => {
+                if measures.len() != weights.len() {
+                    return Err(invalid_input(format!(
+                        "MultiCriteria difficulty has {} measure(s) but {} weight(s)",
+                        measures.len(),
+                        weights.len()
+                    )));
+                }
                 let mut total_difficulty = 0.0;
                 let mut total_weight = 0.0;
 
@@ -361,19 +359,32 @@ impl<M: Model<Input = Tensor, Output = Tensor>> CurriculumLearningTrainer<M> {
                     total_weight += weight;
                 }
 
-                Ok(if total_weight > 0.0 { total_difficulty / total_weight } else { 0.5 })
+                if total_weight <= 0.0 {
+                    return Err(invalid_input(
+                        "MultiCriteria difficulty weights sum to zero, so no combined score can \
+                         be formed"
+                            .to_string(),
+                    ));
+                }
+                Ok(total_difficulty / total_weight)
             },
             DifficultyMeasure::LearnedDifficulty { .. } => {
-                if let Some(scorer) = &self.difficulty_scorer {
-                    scorer.score_difficulty(input, target)
-                } else {
-                    Ok(0.5)
-                }
+                let scorer = self.difficulty_scorer.as_ref().ok_or_else(|| {
+                    invalid_input(
+                        "LearnedDifficulty was configured but no difficulty scorer was \
+                         constructed for this trainer"
+                            .to_string(),
+                    )
+                })?;
+                scorer.score_difficulty(input, target)
             },
-            DifficultyMeasure::ManualDifficulty => {
-                // Manual difficulty should already be set
-                Ok(0.5) // Default if not set
-            },
+            DifficultyMeasure::ManualDifficulty => Err(invalid_input(
+                "ManualDifficulty requires every example to carry a caller-supplied difficulty \
+                 score, but this example has none (its difficulty is still 0.0). Set the score \
+                 with `CurriculumExample::new(input, target, difficulty)` or pick an automatic \
+                 measure."
+                    .to_string(),
+            )),
         }
     }
 
@@ -392,40 +403,38 @@ impl<M: Model<Input = Tensor, Output = Tensor>> CurriculumLearningTrainer<M> {
                     invalid_input(format!("Failed to convert loss tensor to scalar: {}", e))
                 })
             },
-            DifficultyMeasure::LengthDifficulty => {
-                let seq_len = input.shape()[1] as f32; // Assuming [batch, seq_len, ...]
-                Ok(seq_len / 1000.0) // Normalize by typical sequence length
-            },
+            DifficultyMeasure::LengthDifficulty => sequence_length_difficulty(input),
             DifficultyMeasure::GradientNormDifficulty => {
-                // Compute gradient norm-based difficulty
-                Ok(0.5) // Placeholder - could be enhanced with actual gradient computation
+                let outputs = self.model.forward(input.clone())?;
+                gradient_norm_difficulty(&outputs, target)
             },
             DifficultyMeasure::ConfidenceDifficulty => {
-                // Compute confidence-based difficulty (higher uncertainty = harder)
-                let _outputs = self.model.forward(input.clone())?;
-                // Simple confidence measure based on max probability
-                Ok(0.5) // Placeholder - could compute actual confidence metrics
+                let outputs = self.model.forward(input.clone())?;
+                let probs = outputs.softmax(-1)?;
+                let max_prob = self.compute_max_probability(&probs)?;
+                Ok(1.0 - max_prob)
             },
-            DifficultyMeasure::ComplexityDifficulty => {
-                // Compute complexity-based difficulty
-                // This could be entropy, edge density, etc.
-                Ok(0.5) // Placeholder - could be enhanced with actual complexity computation
-            },
+            DifficultyMeasure::ComplexityDifficulty => input_complexity_difficulty(input),
             DifficultyMeasure::LearnedDifficulty { .. } => {
-                if let Some(scorer) = &self.difficulty_scorer {
-                    scorer.score_difficulty(input, target)
-                } else {
-                    Ok(0.5)
-                }
+                let scorer = self.difficulty_scorer.as_ref().ok_or_else(|| {
+                    invalid_input(
+                        "LearnedDifficulty was configured but no difficulty scorer was \
+                         constructed for this trainer"
+                            .to_string(),
+                    )
+                })?;
+                scorer.score_difficulty(input, target)
             },
-            DifficultyMeasure::ManualDifficulty => {
-                // Manual difficulty should already be set
-                Ok(0.5) // Default if not set
-            },
-            DifficultyMeasure::MultiCriteria { .. } => {
-                // Prevent infinite recursion by returning a default value
-                Ok(0.5)
-            },
+            DifficultyMeasure::ManualDifficulty => Err(invalid_input(
+                "ManualDifficulty requires a caller-supplied difficulty score; it cannot be \
+                 derived from the example"
+                    .to_string(),
+            )),
+            DifficultyMeasure::MultiCriteria { .. } => Err(invalid_input(
+                "MultiCriteria difficulty measures cannot be nested inside another MultiCriteria \
+                 measure; flatten the list instead"
+                    .to_string(),
+            )),
         }
     }
 
@@ -862,24 +871,241 @@ impl<M: Model<Input = Tensor, Output = Tensor>> CurriculumLearningTrainer<M> {
     }
 }
 
-/// Difficulty scorer for learned difficulty estimation
+/// Difficulty of an example measured by the norm of the loss gradient with
+/// respect to the model's output logits.
+///
+/// For softmax cross-entropy the gradient of the loss w.r.t. the logits has the
+/// closed form `p - q`, where `p = softmax(logits)` and `q` is the target
+/// distribution (a one-hot vector for a class index). This is the *real*
+/// gradient, not an approximation of it: the analytic form is exact, so no
+/// autodiff pass is needed to obtain it. Its L2 norm is large when the model
+/// puts its mass on the wrong class and small when it already predicts the
+/// target confidently — precisely the "hard example" signal the curriculum
+/// wants.
+///
+/// The norm is averaged over the batch and squashed into `[0, 1)` with
+/// `n / (1 + n)` so that it composes with the other measures, which are also
+/// unit-scaled.
+///
+/// A previous revision returned the constant `0.5` for this measure, which made
+/// the resulting curriculum ordering meaningless: every example tied.
+///
+/// # Errors
+///
+/// Fails when the tensors cannot be read as `f32`, when the output has no class
+/// axis, or when the targets match neither the class-index nor the one-hot
+/// layout.
+pub fn gradient_norm_difficulty(outputs: &Tensor, target: &Tensor) -> Result<f32> {
+    let probs = outputs.softmax(-1)?;
+    let prob_shape = probs.shape();
+    let num_classes = *prob_shape.last().ok_or_else(|| {
+        invalid_input("model outputs are a scalar; no class axis to differentiate".to_string())
+    })?;
+    if num_classes == 0 {
+        return Err(invalid_input(format!(
+            "model outputs with shape {prob_shape:?} carry no class scores"
+        )));
+    }
+    let batch_size: usize = prob_shape[..prob_shape.len() - 1].iter().product();
+    if batch_size == 0 {
+        return Err(invalid_input(format!(
+            "model outputs with shape {prob_shape:?} carry no examples"
+        )));
+    }
+
+    let prob_data = probs
+        .data()
+        .map_err(|e| invalid_input(format!("failed to read the model's probabilities: {e}")))?;
+    let target_data = target
+        .data()
+        .map_err(|e| invalid_input(format!("failed to read targets: {e}")))?;
+
+    let mut total_norm = 0.0f32;
+    for b in 0..batch_size {
+        let row = &prob_data[b * num_classes..(b + 1) * num_classes];
+        let mut squared = 0.0f32;
+        if target_data.len() == batch_size {
+            let raw = target_data[b];
+            if raw < 0.0 || raw.fract() != 0.0 {
+                return Err(invalid_input(format!(
+                    "target {raw} at batch position {b} is not a non-negative integer class index"
+                )));
+            }
+            let class = raw as usize;
+            if class >= num_classes {
+                return Err(invalid_input(format!(
+                    "target class {class} at batch position {b} is out of range for \
+                     {num_classes} classes"
+                )));
+            }
+            for (c, &p) in row.iter().enumerate() {
+                let g = if c == class { p - 1.0 } else { p };
+                squared += g * g;
+            }
+        } else if target_data.len() == batch_size * num_classes {
+            let target_row = &target_data[b * num_classes..(b + 1) * num_classes];
+            for (&p, &q) in row.iter().zip(target_row.iter()) {
+                let g = p - q;
+                squared += g * g;
+            }
+        } else {
+            return Err(invalid_input(format!(
+                "targets with {} element(s) match neither class indices ([{batch_size}]) nor \
+                 one-hot labels ([{batch_size}, {num_classes}]) for outputs with shape \
+                 {prob_shape:?}",
+                target_data.len()
+            )));
+        }
+        total_norm += squared.sqrt();
+    }
+
+    let mean_norm = total_norm / batch_size as f32;
+    Ok(mean_norm / (1.0 + mean_norm))
+}
+
+/// Difficulty of an example measured by the length of its sequence axis.
+///
+/// Longer sequences are harder, and the score is squashed into `[0, 1)` with
+/// `len / (1 + len)` after normalising by a 512-token reference length so that
+/// the measure never saturates at exactly 1 and stays comparable with the other
+/// unit-scaled measures.
+///
+/// # Errors
+///
+/// Fails when the input has no sequence axis (fewer than two dimensions).
+pub fn sequence_length_difficulty(input: &Tensor) -> Result<f32> {
+    let shape = input.shape();
+    let seq_len = match shape.len() {
+        0 => {
+            return Err(invalid_input(
+                "LengthDifficulty needs a sequence axis, but the input is a scalar".to_string(),
+            ))
+        },
+        1 => shape[0],
+        // [batch, seq_len, ...]
+        _ => shape[1],
+    };
+    let normalised = seq_len as f32 / 512.0;
+    Ok(normalised / (1.0 + normalised))
+}
+
+/// Difficulty of an example measured by the Shannon entropy of its own value
+/// distribution.
+///
+/// A featureless input (a constant image patch, a padded sequence) concentrates
+/// all of its mass in one histogram bin and scores near 0; an input whose values
+/// spread evenly across the observed range scores near 1. The histogram is built
+/// over the input's *own* min/max range with `sqrt(n)` bins (capped at 64), so
+/// the measure is scale-invariant, and the entropy is divided by `log2(bins)` to
+/// land in `[0, 1]`.
+///
+/// A previous revision returned the constant `0.5`, so an all-zero tensor and a
+/// richly-structured one were declared equally complex.
+///
+/// # Errors
+///
+/// Fails when the input cannot be read as `f32` or holds no elements.
+pub fn input_complexity_difficulty(input: &Tensor) -> Result<f32> {
+    let values = input
+        .data()
+        .map_err(|e| invalid_input(format!("failed to read the example's values: {e}")))?;
+    if values.is_empty() {
+        return Err(invalid_input(
+            "ComplexityDifficulty cannot score an empty input tensor".to_string(),
+        ));
+    }
+    if values.iter().any(|v| !v.is_finite()) {
+        return Err(invalid_input(
+            "ComplexityDifficulty cannot score an input holding NaN or infinite values".to_string(),
+        ));
+    }
+
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    for &v in &values {
+        min = min.min(v);
+        max = max.max(v);
+    }
+    let range = max - min;
+    if range <= f32::EPSILON {
+        // Every value identical: zero entropy, the least complex input there is.
+        return Ok(0.0);
+    }
+
+    let bins = ((values.len() as f32).sqrt().round() as usize).clamp(2, 64);
+    let mut histogram = vec![0usize; bins];
+    for &v in &values {
+        let position = ((v - min) / range * bins as f32) as usize;
+        histogram[position.min(bins - 1)] += 1;
+    }
+
+    let total = values.len() as f32;
+    let mut entropy = 0.0f32;
+    for &count in &histogram {
+        if count > 0 {
+            let p = count as f32 / total;
+            entropy -= p * p.log2();
+        }
+    }
+    Ok((entropy / (bins as f32).log2()).clamp(0.0, 1.0))
+}
+
+/// Difficulty scorer for learned difficulty estimation.
+///
+/// A learned scorer is an *auxiliary network* trained to predict per-example
+/// difficulty. This crate ships no such network and no format for one, so a
+/// scorer configured with
+/// [`DifficultyMeasure::LearnedDifficulty`] reports that honestly rather than
+/// returning an invented score — a previous revision returned the constant
+/// `0.5`, which silently degraded a "learned" curriculum to no curriculum at
+/// all.
 pub struct DifficultyScorer {
     /// Scoring method
-    #[allow(dead_code)]
     method: DifficultyMeasure,
 }
 
 impl DifficultyScorer {
+    /// Build a scorer for the given measure.
+    ///
+    /// # Errors
+    ///
+    /// Never fails; the `Result` is kept for API compatibility.
     pub fn new(method: &DifficultyMeasure) -> Result<Self> {
         Ok(Self {
             method: method.clone(),
         })
     }
 
-    pub fn score_difficulty(&self, _input: &Tensor, _target: &Tensor) -> Result<f32> {
-        // Implement learned difficulty scoring
-        // This would typically involve a separate neural network
-        Ok(0.5) // Placeholder
+    /// The measure this scorer was built for.
+    pub fn method(&self) -> &DifficultyMeasure {
+        &self.method
+    }
+
+    /// Score an example.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for [`DifficultyMeasure::LearnedDifficulty`] when no
+    /// auxiliary difficulty network is available — which is always, since no
+    /// loader for one exists. Other measures are delegated to the corresponding
+    /// analytic scorer.
+    pub fn score_difficulty(&self, input: &Tensor, _target: &Tensor) -> Result<f32> {
+        match &self.method {
+            DifficultyMeasure::LearnedDifficulty { difficulty_network } => {
+                Err(invalid_input(format!(
+                    "LearnedDifficulty requires a trained auxiliary difficulty network, and none \
+                     can be loaded: no loader for such a network exists in this crate (configured \
+                     path: {}). Use LossBasedDifficulty, ConfidenceDifficulty, \
+                     GradientNormDifficulty, LengthDifficulty or ComplexityDifficulty instead.",
+                    difficulty_network.as_deref().unwrap_or("<none configured>")
+                )))
+            },
+            DifficultyMeasure::LengthDifficulty => sequence_length_difficulty(input),
+            DifficultyMeasure::ComplexityDifficulty => input_complexity_difficulty(input),
+            other => Err(invalid_input(format!(
+                "DifficultyScorer cannot score {other:?} on its own; it needs the trainer's model"
+            ))),
+        }
     }
 }
 
@@ -1028,35 +1254,93 @@ pub mod utils {
         Ok(examples)
     }
 
-    /// Simple cross-entropy loss computation for difficulty estimation
-    fn simple_cross_entropy_loss(outputs: &Tensor, targets: &Tensor) -> Result<Tensor> {
+    /// Cross-entropy loss used to score example difficulty.
+    ///
+    /// `outputs` has shape `[batch, num_classes]`; `targets` is either class
+    /// indices (`[batch]`) or one-hot / soft labels (`[batch, num_classes]`).
+    ///
+    /// The previous implementation indexed the *flat* probability buffer with the
+    /// bare class index — `prob_data[target_idx]` — with no `batch * num_classes`
+    /// stride. Every sample after the first therefore read a probability
+    /// belonging to row 0, so the returned difficulty was wrong for the whole
+    /// batch tail and identical for any two batches that shared a first row. It
+    /// also swallowed every error into a hardcoded `1.0`, which is exactly the
+    /// kind of fabricated metric a curriculum then sorts on.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the tensors cannot be read as `f32`, when the shapes do not
+    /// describe a `[batch, num_classes]` scoring problem, or when a class index
+    /// is out of range.
+    pub fn simple_cross_entropy_loss(outputs: &Tensor, targets: &Tensor) -> Result<Tensor> {
         // Apply softmax to get probabilities
         let probs = outputs.softmax(-1)?;
-
-        // Simple cross-entropy: -log(p_target)
-        // This is a simplified version for difficulty estimation
-        match targets.data() {
-            Ok(target_data) => {
-                if let Ok(prob_data) = probs.data() {
-                    let batch_size = targets.shape()[0];
-                    let mut total_loss = 0.0f32;
-
-                    for i in 0..batch_size {
-                        let target_idx = target_data[i] as usize;
-                        if target_idx < prob_data.len() {
-                            let prob = prob_data[target_idx].max(1e-8); // Avoid log(0)
-                            total_loss += -prob.ln();
-                        }
-                    }
-
-                    let mean_loss = total_loss / batch_size as f32;
-                    Ok(Tensor::scalar(mean_loss)?)
-                } else {
-                    Ok(Tensor::scalar(1.0f32)?)
-                }
-            },
-            Err(_) => Ok(Tensor::scalar(1.0f32)?),
+        let prob_shape = probs.shape();
+        let num_classes = *prob_shape.last().ok_or_else(|| {
+            invalid_input(
+                "model outputs are a scalar; cross-entropy needs a class axis".to_string(),
+            )
+        })?;
+        if num_classes == 0 {
+            return Err(invalid_input(format!(
+                "model outputs with shape {prob_shape:?} carry no class scores"
+            )));
         }
+        let batch_size: usize = prob_shape[..prob_shape.len() - 1].iter().product();
+        if batch_size == 0 {
+            return Err(invalid_input(format!(
+                "model outputs with shape {prob_shape:?} carry no examples"
+            )));
+        }
+
+        let prob_data = probs
+            .data()
+            .map_err(|e| invalid_input(format!("failed to read the model's probabilities: {e}")))?;
+        let target_data = targets
+            .data()
+            .map_err(|e| invalid_input(format!("failed to read targets: {e}")))?;
+
+        let mut total_loss = 0.0f32;
+        if target_data.len() == batch_size {
+            // Class indices: -log p[b, target[b]], with the batch stride applied.
+            for b in 0..batch_size {
+                let raw = target_data[b];
+                if raw < 0.0 || raw.fract() != 0.0 {
+                    return Err(invalid_input(format!(
+                        "target {raw} at batch position {b} is not a non-negative integer class \
+                         index"
+                    )));
+                }
+                let class = raw as usize;
+                if class >= num_classes {
+                    return Err(invalid_input(format!(
+                        "target class {class} at batch position {b} is out of range for \
+                         {num_classes} classes"
+                    )));
+                }
+                let prob = prob_data[b * num_classes + class].max(1e-8);
+                total_loss -= prob.ln();
+            }
+        } else if target_data.len() == batch_size * num_classes {
+            // One-hot / soft labels: -sum_c q[b, c] * log p[b, c].
+            for b in 0..batch_size {
+                for c in 0..num_classes {
+                    let weight = target_data[b * num_classes + c];
+                    if weight != 0.0 {
+                        total_loss -= weight * prob_data[b * num_classes + c].max(1e-8).ln();
+                    }
+                }
+            }
+        } else {
+            return Err(invalid_input(format!(
+                "targets with {} element(s) match neither class indices ([{batch_size}]) nor \
+                 one-hot labels ([{batch_size}, {num_classes}]) for outputs with shape \
+                 {prob_shape:?}",
+                target_data.len()
+            )));
+        }
+
+        Tensor::scalar(total_loss / batch_size as f32)
     }
 
     /// Create examples with manual difficulty scores
@@ -1082,13 +1366,15 @@ pub mod utils {
         baseline_accuracies: &[f32],
         curriculum_accuracies: &[f32],
     ) -> CurriculumAnalysis {
-        // Use 0.0 as default for empty accuracy arrays (no training = no accuracy)
+        // Use 0.0 as default for empty accuracy arrays (no training = no accuracy).
+        // Libraries must not write to stdout/stderr, so the degenerate case is
+        // reported through the `tracing` facade instead of `eprintln!`.
         let baseline_final = baseline_accuracies.last().copied().unwrap_or_else(|| {
-            eprintln!("Warning: Empty baseline accuracies array, using 0.0");
+            tracing::warn!("empty baseline accuracy history; reporting 0.0 final accuracy");
             0.0
         });
         let curriculum_final = curriculum_accuracies.last().copied().unwrap_or_else(|| {
-            eprintln!("Warning: Empty curriculum accuracies array, using 0.0");
+            tracing::warn!("empty curriculum accuracy history; reporting 0.0 final accuracy");
             0.0
         });
 
@@ -1120,6 +1406,124 @@ pub struct CurriculumAnalysis {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: `simple_cross_entropy_loss` indexed the flat probability
+    /// buffer with the bare class index and no batch stride, so every sample
+    /// after the first read row 0's probabilities.
+    ///
+    /// Row 0 is confident about class 0 and row 1 about class 2. With the stride
+    /// bug, the loss for row 1's label (class 2) was read from row 0 — where
+    /// class 2 is unlikely — so the reported difficulty was large. The correct
+    /// value is small, because row 1 does predict class 2.
+    #[test]
+    fn cross_entropy_applies_the_batch_stride() {
+        let outputs = Tensor::from_vec(vec![5.0, 0.0, 0.0, 0.0, 0.0, 5.0], &[2, 3])
+            .expect("outputs must build");
+        let targets = Tensor::from_vec(vec![0.0, 2.0], &[2]).expect("targets must build");
+
+        let loss = utils::simple_cross_entropy_loss(&outputs, &targets)
+            .expect("cross-entropy must succeed")
+            .to_scalar()
+            .expect("scalar");
+        // Both rows predict their own label confidently, so the mean loss is the
+        // single-row value log(1 + 2 e^-5) ~= 0.01342.
+        assert!(
+            (loss - 0.013_42).abs() < 1e-3,
+            "both rows predict their own label; loss must be small, got {loss}"
+        );
+
+        // Swapping the labels must cost much more — impossible if row 1 is read
+        // from row 0's slice.
+        let swapped = Tensor::from_vec(vec![2.0, 0.0], &[2]).expect("targets must build");
+        let swapped_loss = utils::simple_cross_entropy_loss(&outputs, &swapped)
+            .expect("cross-entropy must succeed")
+            .to_scalar()
+            .expect("scalar");
+        assert!(
+            swapped_loss > loss + 1.0,
+            "swapped labels must be far more costly: {swapped_loss} vs {loss}"
+        );
+    }
+
+    /// Regression: the gradient-norm measure returned a constant `0.5`, so a
+    /// confidently-correct example and a confidently-wrong one tied.
+    #[test]
+    fn gradient_norm_difficulty_separates_easy_from_hard_examples() {
+        let outputs = Tensor::from_vec(vec![5.0, 0.0, 0.0], &[1, 3]).expect("outputs must build");
+        let easy_target = Tensor::from_vec(vec![0.0], &[1]).expect("target must build");
+        let hard_target = Tensor::from_vec(vec![2.0], &[1]).expect("target must build");
+
+        let easy = gradient_norm_difficulty(&outputs, &easy_target).expect("scoring must succeed");
+        let hard = gradient_norm_difficulty(&outputs, &hard_target).expect("scoring must succeed");
+
+        assert!(
+            hard > easy,
+            "a wrong confident prediction must score harder: easy={easy}, hard={hard}"
+        );
+        assert!(
+            (0.0..=1.0).contains(&easy) && (0.0..=1.0).contains(&hard),
+            "difficulties must be unit-scaled: {easy}, {hard}"
+        );
+        assert_ne!(easy, 0.5, "the measure must not be the old constant");
+    }
+
+    /// Regression: the complexity measure returned a constant `0.5`, so a
+    /// featureless input and a varied one were declared equally complex.
+    #[test]
+    fn complexity_difficulty_separates_flat_from_varied_inputs() {
+        let flat = Tensor::zeros(&[64]).expect("flat tensor must build");
+        let varied = Tensor::from_vec((0..64).map(|i| i as f32).collect(), &[64])
+            .expect("varied tensor must build");
+
+        let flat_score = input_complexity_difficulty(&flat).expect("scoring must succeed");
+        let varied_score = input_complexity_difficulty(&varied).expect("scoring must succeed");
+
+        assert!(
+            flat_score < 1e-6,
+            "a constant input has no entropy, got {flat_score}"
+        );
+        assert!(
+            varied_score > 0.9,
+            "a uniformly-spread input is near-maximally complex, got {varied_score}"
+        );
+    }
+
+    /// Regression: the length measure divided by a hardcoded 1000 and could
+    /// exceed 1; and every unscored measure fell through to 0.5.
+    #[test]
+    fn length_difficulty_is_monotonic_and_bounded() {
+        let short = Tensor::zeros(&[1, 8, 4]).expect("tensor must build");
+        let long = Tensor::zeros(&[1, 4096, 4]).expect("tensor must build");
+        let short_score = sequence_length_difficulty(&short).expect("scoring must succeed");
+        let long_score = sequence_length_difficulty(&long).expect("scoring must succeed");
+        assert!(
+            long_score > short_score,
+            "longer sequences must be harder: {short_score} vs {long_score}"
+        );
+        assert!(
+            long_score < 1.0,
+            "the measure must stay below 1, got {long_score}"
+        );
+    }
+
+    /// Regression: a `LearnedDifficulty` scorer returned the constant `0.5`
+    /// while claiming to be a learned score.
+    #[test]
+    fn learned_difficulty_reports_the_absent_network_instead_of_inventing_a_score() {
+        let scorer = DifficultyScorer::new(&DifficultyMeasure::LearnedDifficulty {
+            difficulty_network: Some("scorer.safetensors".to_string()),
+        })
+        .expect("scorer must build");
+        let input = Tensor::zeros(&[1, 4]).expect("tensor must build");
+        let target = Tensor::zeros(&[1]).expect("tensor must build");
+        let err = scorer
+            .score_difficulty(&input, &target)
+            .expect_err("no learned network exists, so no score may be produced");
+        assert!(
+            err.to_string().contains("auxiliary difficulty network"),
+            "unexpected error: {err}"
+        );
+    }
 
     #[test]
     fn test_curriculum_config_default() {

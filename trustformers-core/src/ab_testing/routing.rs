@@ -7,6 +7,7 @@ use scirs2_core::random::*;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 /// Traffic routing strategy
 #[derive(Debug, Clone)]
@@ -37,17 +38,70 @@ pub struct UserSegment {
 /// Conditions for segment matching
 #[derive(Debug, Clone)]
 pub enum SegmentCondition {
-    /// User ID matches pattern
+    /// The user id contains this substring.
     UserIdPattern(String),
-    /// User has specific attribute
+    /// The user's attribute `.0` equals `.1`.
+    ///
+    /// Evaluated against the [`UserContext`] passed to
+    /// [`TrafficSplitter::route_with_context`]. Routing without a context
+    /// cannot evaluate this and is an error, not a silent non-match.
     HasAttribute(String, String),
-    /// User is in specific geographic region
+    /// The user's `geo_region` equals this value.
+    ///
+    /// Needs a [`UserContext`], like `HasAttribute`.
     GeoRegion(String),
-    /// User is using specific platform
+    /// The user's platform equals this value.
+    ///
+    /// Needs a [`UserContext`], like `HasAttribute`.
     Platform(Platform),
-    /// Custom condition function
-    Custom(String), // In practice, this would be a function pointer
+    /// A named predicate registered with
+    /// [`TrafficSplitter::register_custom_condition`].
+    Custom(String),
 }
+
+/// What the router knows about the user being routed.
+///
+/// Segment conditions other than [`SegmentCondition::UserIdPattern`] can only
+/// be evaluated against this; routing an experiment that targets a geo or
+/// platform segment without one is reported as an error rather than quietly
+/// routing nobody into the segment.
+#[derive(Debug, Clone, Default)]
+pub struct UserContext {
+    /// Arbitrary user attributes, keyed by name.
+    pub attributes: HashMap<String, String>,
+    /// The user's geographic region, if known.
+    pub geo_region: Option<String>,
+    /// The user's platform, if known.
+    pub platform: Option<Platform>,
+}
+
+impl UserContext {
+    /// An empty context.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set an attribute.
+    pub fn with_attribute(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.attributes.insert(key.into(), value.into());
+        self
+    }
+
+    /// Set the geographic region.
+    pub fn with_geo_region(mut self, region: impl Into<String>) -> Self {
+        self.geo_region = Some(region.into());
+        self
+    }
+
+    /// Set the platform.
+    pub fn with_platform(mut self, platform: Platform) -> Self {
+        self.platform = Some(platform);
+        self
+    }
+}
+
+/// A user-supplied segment predicate backing [`SegmentCondition::Custom`].
+pub type CustomSegmentPredicate = Arc<dyn Fn(&str, &UserContext) -> bool + Send + Sync>;
 
 /// Platform types
 #[derive(Debug, Clone, PartialEq)]
@@ -66,6 +120,8 @@ pub struct TrafficSplitter {
     sticky_cache: parking_lot::RwLock<HashMap<String, String>>,
     /// Round-robin counters
     round_robin_counters: parking_lot::RwLock<HashMap<String, usize>>,
+    /// Predicates backing [`SegmentCondition::Custom`], keyed by name.
+    custom_conditions: parking_lot::RwLock<HashMap<String, CustomSegmentPredicate>>,
 }
 
 impl Default for TrafficSplitter {
@@ -81,6 +137,7 @@ impl TrafficSplitter {
             default_strategy: RoutingStrategy::HashBased,
             sticky_cache: parking_lot::RwLock::new(HashMap::new()),
             round_robin_counters: parking_lot::RwLock::new(HashMap::new()),
+            custom_conditions: parking_lot::RwLock::new(HashMap::new()),
         }
     }
 
@@ -90,11 +147,34 @@ impl TrafficSplitter {
             default_strategy: strategy,
             sticky_cache: parking_lot::RwLock::new(HashMap::new()),
             round_robin_counters: parking_lot::RwLock::new(HashMap::new()),
+            custom_conditions: parking_lot::RwLock::new(HashMap::new()),
         }
     }
 
-    /// Route a user to a variant
+    /// Register the predicate backing a [`SegmentCondition::Custom`] name.
+    pub fn register_custom_condition<F>(&self, name: impl Into<String>, predicate: F)
+    where
+        F: Fn(&str, &UserContext) -> bool + Send + Sync + 'static,
+    {
+        self.custom_conditions.write().insert(name.into(), Arc::new(predicate));
+    }
+
+    /// Route a user to a variant, with no information about the user beyond
+    /// their id.
+    ///
+    /// Errors when the routing strategy targets a segment that needs user
+    /// attributes, geography or platform: use [`Self::route_with_context`].
     pub fn route(&self, experiment: &Experiment, user_id: &str) -> Result<Variant> {
+        self.route_with_context(experiment, user_id, &UserContext::default())
+    }
+
+    /// Route a user to a variant using what is known about them.
+    pub fn route_with_context(
+        &self,
+        experiment: &Experiment,
+        user_id: &str,
+        context: &UserContext,
+    ) -> Result<Variant> {
         // Check if experiment is running
         if experiment.status() != ExperimentStatus::Running {
             return Ok(experiment.config().control_variant.clone());
@@ -105,7 +185,7 @@ impl TrafficSplitter {
             RoutingStrategy::HashBased => self.route_hash_based(experiment, user_id),
             RoutingStrategy::RoundRobin => self.route_round_robin(experiment),
             RoutingStrategy::SegmentBased(segments) => {
-                self.route_segment_based(experiment, user_id, segments)
+                self.route_segment_based(experiment, user_id, segments, context)
             },
             RoutingStrategy::WeightedRandom(weights) => {
                 self.route_weighted_random(experiment, weights)
@@ -162,10 +242,11 @@ impl TrafficSplitter {
         experiment: &Experiment,
         user_id: &str,
         segments: &[UserSegment],
+        context: &UserContext,
     ) -> Result<Variant> {
         // Check if user matches any segment
         for segment in segments {
-            if !self.matches_segment(user_id, &segment.condition) {
+            if !self.matches_segment(user_id, &segment.condition, context)? {
                 continue;
             }
 
@@ -243,28 +324,59 @@ impl TrafficSplitter {
         None
     }
 
-    /// Check if user matches segment condition
-    fn matches_segment(&self, user_id: &str, condition: &SegmentCondition) -> bool {
+    /// Evaluate a segment condition against the user and their context.
+    ///
+    /// A condition that needs information the context does not carry is an
+    /// error: silently returning `false` routed nobody into the segment while
+    /// the experiment still reported results as if the segment were simply
+    /// empty.
+    fn matches_segment(
+        &self,
+        user_id: &str,
+        condition: &SegmentCondition,
+        context: &UserContext,
+    ) -> Result<bool> {
         match condition {
-            SegmentCondition::UserIdPattern(pattern) => {
-                // Simple pattern matching (in practice, use regex)
-                user_id.contains(pattern)
+            SegmentCondition::UserIdPattern(pattern) => Ok(user_id.contains(pattern)),
+            SegmentCondition::HasAttribute(key, expected) => {
+                match context.attributes.get(key) {
+                    Some(actual) => Ok(actual == expected),
+                    None if context.attributes.is_empty() => Err(anyhow::anyhow!(
+                        "segment targets attribute '{}' but the routing call supplied no user \
+                         attributes; use TrafficSplitter::route_with_context",
+                        key
+                    )),
+                    // The context was supplied but does not have this attribute:
+                    // the user genuinely does not match.
+                    None => Ok(false),
+                }
             },
-            SegmentCondition::HasAttribute(_, _) => {
-                // Would require user attribute lookup
-                false
+            SegmentCondition::GeoRegion(region) => match &context.geo_region {
+                Some(actual) => Ok(actual == region),
+                None => Err(anyhow::anyhow!(
+                    "segment targets geo region '{}' but the routing call supplied no region; \
+                     use TrafficSplitter::route_with_context",
+                    region
+                )),
             },
-            SegmentCondition::GeoRegion(_) => {
-                // Would require geo lookup
-                false
+            SegmentCondition::Platform(platform) => match &context.platform {
+                Some(actual) => Ok(actual == platform),
+                None => Err(anyhow::anyhow!(
+                    "segment targets platform {:?} but the routing call supplied no platform; \
+                     use TrafficSplitter::route_with_context",
+                    platform
+                )),
             },
-            SegmentCondition::Platform(_) => {
-                // Would require platform detection
-                false
-            },
-            SegmentCondition::Custom(_) => {
-                // Would execute custom function
-                false
+            SegmentCondition::Custom(name) => {
+                let predicate = self.custom_conditions.read().get(name).cloned();
+                match predicate {
+                    Some(predicate) => Ok(predicate(user_id, context)),
+                    None => Err(anyhow::anyhow!(
+                        "segment uses custom condition '{}', which has no registered predicate; \
+                         call TrafficSplitter::register_custom_condition first",
+                        name
+                    )),
+                }
             },
         }
     }
@@ -287,6 +399,114 @@ impl TrafficSplitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test: attribute / geo / platform / custom segment conditions
+    /// all returned `false`, so an experiment targeting them silently routed
+    /// nobody and reported the segment as simply empty.
+    #[test]
+    fn test_segment_conditions_are_evaluated_against_the_context() {
+        let splitter = TrafficSplitter::new();
+        let context = UserContext::new()
+            .with_attribute("tier", "premium")
+            .with_geo_region("EU")
+            .with_platform(Platform::Web);
+
+        assert!(splitter
+            .matches_segment(
+                "user-1",
+                &SegmentCondition::HasAttribute("tier".to_string(), "premium".to_string()),
+                &context
+            )
+            .expect("attribute is available"));
+        assert!(!splitter
+            .matches_segment(
+                "user-1",
+                &SegmentCondition::HasAttribute("tier".to_string(), "free".to_string()),
+                &context
+            )
+            .expect("attribute is available"));
+
+        assert!(splitter
+            .matches_segment(
+                "user-1",
+                &SegmentCondition::GeoRegion("EU".to_string()),
+                &context
+            )
+            .expect("region is available"));
+        assert!(!splitter
+            .matches_segment(
+                "user-1",
+                &SegmentCondition::GeoRegion("US".to_string()),
+                &context
+            )
+            .expect("region is available"));
+
+        assert!(splitter
+            .matches_segment(
+                "user-1",
+                &SegmentCondition::Platform(Platform::Web),
+                &context
+            )
+            .expect("platform is available"));
+    }
+
+    /// A condition the routing call cannot evaluate must be an error, not a
+    /// silent non-match.
+    #[test]
+    fn test_segment_conditions_without_context_are_errors() {
+        let splitter = TrafficSplitter::new();
+        let empty = UserContext::default();
+
+        assert!(splitter
+            .matches_segment("u", &SegmentCondition::GeoRegion("EU".to_string()), &empty)
+            .is_err());
+        assert!(splitter
+            .matches_segment("u", &SegmentCondition::Platform(Platform::Web), &empty)
+            .is_err());
+        assert!(splitter
+            .matches_segment(
+                "u",
+                &SegmentCondition::HasAttribute("tier".to_string(), "premium".to_string()),
+                &empty
+            )
+            .is_err());
+        assert!(splitter
+            .matches_segment("u", &SegmentCondition::Custom("vip".to_string()), &empty)
+            .is_err());
+
+        // A registered custom predicate is really invoked.
+        splitter.register_custom_condition("vip", |user_id: &str, _context: &UserContext| {
+            user_id.starts_with("vip-")
+        });
+        assert!(splitter
+            .matches_segment(
+                "vip-1",
+                &SegmentCondition::Custom("vip".to_string()),
+                &empty
+            )
+            .expect("predicate registered"));
+        assert!(!splitter
+            .matches_segment(
+                "other",
+                &SegmentCondition::Custom("vip".to_string()),
+                &empty
+            )
+            .expect("predicate registered"));
+    }
+
+    /// The user-id pattern condition still works without any context.
+    #[test]
+    fn test_user_id_pattern_needs_no_context() {
+        let splitter = TrafficSplitter::new();
+        let empty = UserContext::default();
+        assert!(splitter
+            .matches_segment(
+                "beta-user-7",
+                &SegmentCondition::UserIdPattern("beta".to_string()),
+                &empty
+            )
+            .expect("no context needed"));
+    }
     use crate::ab_testing::ExperimentConfig;
 
     fn create_test_experiment() -> Experiment {

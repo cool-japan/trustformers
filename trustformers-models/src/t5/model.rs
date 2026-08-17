@@ -1189,8 +1189,22 @@ impl T5LayerNorm {
         // T5 uses RMS norm without bias
         match (&hidden_states, &self.weight) {
             (Tensor::F32(x), Tensor::F32(w)) => {
-                // Calculate RMS
-                let variance = x.mapv(|v| v * v).mean().expect("operation failed") + self.epsilon;
+                // Calculate RMS.
+                //
+                // `ArrayD::mean()` returns `None` for an empty array, and the
+                // previous revision unwrapped it with `.expect("operation
+                // failed")` — a panic in the middle of a `Result`-returning
+                // forward pass, reached by any zero-length hidden state. An
+                // empty input is a caller mistake, so it is reported as an
+                // error rather than aborting the process.
+                let mean_square = x.mapv(|v| v * v).mean().ok_or_else(|| {
+                    TrustformersError::shape_error(format!(
+                        "T5LayerNorm::forward received an empty hidden state with shape {:?}; \
+                         RMS normalisation is undefined over zero elements",
+                        x.shape()
+                    ))
+                })?;
+                let variance = mean_square + self.epsilon;
                 let x = x / variance.sqrt();
 
                 // Apply weight
@@ -1258,6 +1272,46 @@ pub struct T5LMOutput {
 mod tests {
     use super::*;
     use trustformers_core::traits::Config;
+
+    /// Regression: `T5LayerNorm::forward` used `.expect("operation failed")` on
+    /// `ArrayD::mean()`, which is `None` for an empty array — so a zero-length
+    /// hidden state aborted the process instead of returning the `Err` the
+    /// signature promises. This test panics (rather than failing) against the
+    /// old code.
+    #[test]
+    fn t5_layer_norm_returns_an_error_for_an_empty_hidden_state() {
+        let norm = T5LayerNorm::new(4, 1e-6);
+        let empty = Tensor::zeros(&[0, 4]).expect("an empty tensor must be constructible");
+        let err = norm
+            .forward(empty)
+            .expect_err("an empty hidden state must be a structured error, not a panic");
+        assert!(
+            err.to_string().contains("empty hidden state"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn t5_layer_norm_normalises_a_non_empty_hidden_state() {
+        let norm = T5LayerNorm::new(4, 1e-6);
+        let input =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[1, 4]).expect("input tensor must build");
+        let out = norm.forward(input).expect("a normal forward must succeed");
+        match out {
+            Tensor::F32(arr) => {
+                // rms = sqrt(mean(1,4,9,16) + eps) = sqrt(7.5 + 1e-6)
+                let rms = (7.5f32 + 1e-6).sqrt();
+                let expected = [1.0 / rms, 2.0 / rms, 3.0 / rms, 4.0 / rms];
+                for (got, want) in arr.iter().zip(expected.iter()) {
+                    assert!(
+                        (got - want).abs() < 1e-5,
+                        "RMS-normalised value {got} differs from {want}"
+                    );
+                }
+            },
+            other => panic!("expected an F32 tensor, got {other:?}"),
+        }
+    }
 
     fn small_t5_config() -> T5Config {
         T5Config {
