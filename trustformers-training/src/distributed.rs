@@ -1244,4 +1244,318 @@ mod tests {
         let result = trainer.backward(&mut gradients);
         assert!(result.is_ok(), "empty gradient map should be fine");
     }
+
+    // ── Unavailable backends must never fabricate a result ────────────────
+    //
+    // The previous implementation handed out NCCL/Gloo/MPI process groups whose
+    // `all_reduce` was `scalar_mul(1.0)` and whose `broadcast` multiplied every
+    // non-root rank's tensor by 0.99/0.98/0.97. These tests fail against that
+    // code: they require an error, and they require the tensor to be untouched.
+
+    fn unavailable_config(backend: DistributedBackend) -> DistributedConfig {
+        DistributedConfig {
+            world_size: 4,
+            rank: 1,
+            backend,
+            master_addr: "127.0.0.1".to_string(),
+            master_port: 29600,
+            gradient_compression: false,
+            bucket_size_mb: 25,
+        }
+    }
+
+    #[test]
+    fn nccl_gloo_and_mpi_are_reported_unavailable_not_simulated() {
+        for (backend, name) in [
+            (DistributedBackend::NCCL, "NCCL"),
+            (DistributedBackend::Gloo, "Gloo"),
+            (DistributedBackend::MPI, "MPI"),
+        ] {
+            let Err(error) = init_distributed_training(unavailable_config(backend)) else {
+                panic!("an unavailable backend must not yield a process group in test");
+            };
+            let message = error.to_string();
+            assert!(message.contains(name), "{message}");
+            assert!(message.contains("unavailable"), "{message}");
+        }
+    }
+
+    #[test]
+    fn unavailable_backend_constructors_fail() {
+        assert!(NCCLProcessGroup::new(0, 2, 0, "127.0.0.1".to_string(), 29600).is_err());
+        assert!(GlooProcessGroup::new(0, 2, "127.0.0.1".to_string(), 29600).is_err());
+        assert!(MPIProcessGroup::new(0, 2).is_err());
+
+        for reason in [
+            NCCLProcessGroup::unavailable_reason(),
+            GlooProcessGroup::unavailable_reason(),
+            MPIProcessGroup::unavailable_reason(),
+        ] {
+            assert!(
+                reason.contains("Tcp"),
+                "the error must point at the working backend: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn simulated_group_refuses_multi_rank_collectives_instead_of_no_oping() {
+        let pg = SimulatedProcessGroup::new(1, 4);
+        let original = vec![0.25f32, -0.5, 1.0];
+
+        let mut tensor = Tensor::from_slice(&original, &[3]).expect("tensor must build in test");
+        assert!(pg.broadcast(&mut tensor, 0).is_err());
+        assert_eq!(
+            tensor.to_vec_f32().expect("tensor read must succeed in test"),
+            original,
+            "a failed broadcast must not scale the tensor"
+        );
+
+        let mut tensors =
+            vec![Tensor::from_slice(&original, &[3]).expect("tensor must build in test")];
+        assert!(pg.all_reduce(&mut tensors).is_err());
+        assert_eq!(
+            tensors[0].to_vec_f32().expect("tensor read must succeed in test"),
+            original
+        );
+
+        assert!(pg.reduce(&mut tensor, 0).is_err());
+        assert!(pg.barrier().is_err());
+    }
+
+    #[test]
+    fn detect_gpu_count_never_invents_devices() {
+        // The previous implementation returned `Ok(8)` on any host without
+        // `CUDA_VISIBLE_DEVICES`. The environment is read, never written, so
+        // this test is safe to run in parallel with any other.
+        match std::env::var("CUDA_VISIBLE_DEVICES") {
+            Err(_) => {
+                let error = detect_gpu_count()
+                    .expect_err("no enumeration source means no device count in test");
+                assert!(error.to_string().contains("no GPU devices"), "{error}");
+            },
+            Ok(devices) => {
+                let expected = devices.split(',').filter(|entry| !entry.trim().is_empty()).count();
+                if expected == 0 {
+                    assert!(detect_gpu_count().is_err());
+                } else {
+                    assert_eq!(
+                        detect_gpu_count().expect("a populated env var must parse in test"),
+                        expected
+                    );
+                }
+            },
+        }
+    }
+
+    // ── Gradient compression is a real codec, not an inert flag ───────────
+
+    #[test]
+    fn topk_codec_keeps_exactly_the_largest_entries() {
+        let mut values = vec![0.5f32, -0.01, 0.02, 0.03, -0.9, 0.04, 0.05, 0.06];
+        GradientCompressionConfig::TopK { ratio: 0.25 }
+            .apply(&mut values)
+            .expect("codec must run in test");
+
+        assert_eq!(values.iter().filter(|value| **value != 0.0).count(), 2);
+        assert_eq!(values[0], 0.5);
+        assert_eq!(values[4], -0.9);
+    }
+
+    #[test]
+    fn quantize_codec_snaps_to_the_reconstruction_grid() {
+        let original = vec![-1.0f32, -0.3, 0.2, 1.0];
+        let mut values = original.clone();
+        GradientCompressionConfig::Quantize { bits: 2 }
+            .apply(&mut values)
+            .expect("codec must run in test");
+
+        // 2 bits over [-1, 1] gives levels {-1, -1/3, 1/3, 1}.
+        assert_ne!(values, original, "quantization must move the values");
+        let step = 2.0f32 / 3.0;
+        for (quantized, raw) in values.iter().zip(&original) {
+            let level = (quantized + 1.0) / step;
+            assert!(
+                (level - level.round()).abs() < 1e-4,
+                "{quantized} is not on the grid"
+            );
+            assert!((quantized - raw).abs() <= step / 2.0 + 1e-5);
+        }
+    }
+
+    #[test]
+    fn codecs_reject_invalid_settings() {
+        let mut values = vec![1.0f32; 4];
+        assert!(GradientCompressionConfig::TopK { ratio: 0.0 }.apply(&mut values).is_err());
+        assert!(GradientCompressionConfig::TopK { ratio: f32::NAN }.apply(&mut values).is_err());
+        assert!(GradientCompressionConfig::Quantize { bits: 1 }.apply(&mut values).is_err());
+        assert!(GradientCompressionConfig::Quantize { bits: 9 }.apply(&mut values).is_err());
+    }
+
+    #[test]
+    fn enabling_gradient_compression_changes_the_synchronised_gradient() {
+        // Magnitudes are chosen so the post-compression global norm stays below
+        // the clipping threshold, isolating the codec's effect.
+        let raw = vec![0.5f32, 0.01, 0.02, 0.03];
+
+        let run = |compress: bool| -> Vec<f32> {
+            let config = DistributedConfig {
+                world_size: 1,
+                rank: 0,
+                backend: DistributedBackend::Simulated,
+                master_addr: "localhost".to_string(),
+                master_port: 29500,
+                gradient_compression: compress,
+                bucket_size_mb: 25,
+            };
+            let pg = Arc::new(SimulatedProcessGroup::new(0, 1));
+            let trainer = DataParallelTrainer::new(DummyModel::new(), pg, config)
+                .expect("trainer must build in test");
+
+            let mut gradients = HashMap::new();
+            gradients.insert(
+                "w".to_string(),
+                Tensor::from_slice(&raw, &[4]).expect("tensor must build in test"),
+            );
+            trainer.backward(&mut gradients).expect("backward must succeed in test");
+            gradients["w"].to_vec_f32().expect("tensor read must succeed in test")
+        };
+
+        let dense = run(false);
+        let compressed = run(true);
+
+        assert_eq!(dense, raw, "without compression the gradient is untouched");
+        assert_eq!(
+            compressed,
+            vec![0.5f32, 0.0, 0.0, 0.0],
+            "10% top-k must keep one entry and zero the rest"
+        );
+    }
+
+    #[test]
+    fn bucket_plan_respects_the_byte_budget_and_is_rank_independent() {
+        let config = DistributedConfig {
+            world_size: 1,
+            rank: 0,
+            backend: DistributedBackend::Simulated,
+            master_addr: "localhost".to_string(),
+            master_port: 29500,
+            gradient_compression: false,
+            bucket_size_mb: 1,
+        };
+        let pg = Arc::new(SimulatedProcessGroup::new(0, 1));
+        let trainer = DataParallelTrainer::new(DummyModel::new(), pg, config)
+            .expect("trainer must build in test");
+
+        // Three tensors of 512 KiB each: two fit in a 1 MiB bucket, the third
+        // starts a new one.
+        let elements = 128 * 1024;
+        let mut gradients = HashMap::new();
+        for name in ["a", "b", "c"] {
+            gradients.insert(
+                name.to_string(),
+                Tensor::zeros(&[elements]).expect("tensor must build in test"),
+            );
+        }
+
+        let plan = trainer.bucket_plan(&gradients);
+        assert_eq!(
+            plan,
+            vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["c".to_string()]
+            ]
+        );
+    }
+
+    // ── Real multi-rank data-parallel training ────────────────────────────
+
+    #[test]
+    fn data_parallel_trainer_averages_gradients_across_real_ranks() {
+        use crate::distributed_collective::run_in_process;
+
+        let per_rank = run_in_process(4, |rank, group| -> Vec<f32> {
+            let config = DistributedConfig {
+                world_size: 4,
+                rank,
+                backend: DistributedBackend::InProcess,
+                master_addr: "localhost".to_string(),
+                master_port: 29500,
+                gradient_compression: false,
+                bucket_size_mb: 25,
+            };
+            let pg: Arc<dyn ProcessGroup> = group;
+            let trainer = DataParallelTrainer::new(DummyModel::new(), pg, config)
+                .expect("trainer must build in test");
+
+            let mut gradients = HashMap::new();
+            gradients.insert(
+                "w".to_string(),
+                Tensor::from_slice(&[rank as f32, 2.0 * rank as f32], &[2])
+                    .expect("tensor must build in test"),
+            );
+            // `backward` also clips; the mean here has norm < 1 so clipping is
+            // the identity and the assertion isolates the collective.
+            trainer.backward(&mut gradients).expect("backward must succeed in test");
+            gradients["w"].to_vec_f32().expect("tensor read must succeed in test")
+        })
+        .expect("in-process run must succeed in test");
+
+        // mean(0,1,2,3) = 1.5 -> norm of [1.5, 3.0] is > 1, so clipping scales
+        // both by 1/norm. The ratio between the components is what the
+        // collective determines, and every rank must agree exactly.
+        for values in &per_rank {
+            assert_eq!(
+                values, &per_rank[0],
+                "every rank must leave with the same gradient"
+            );
+            approx::assert_relative_eq!(values[1] / values[0], 2.0f32, epsilon = 1e-5);
+        }
+    }
+
+    #[test]
+    fn broadcast_parameters_requires_a_registry_and_then_synchronises() {
+        use crate::distributed_collective::run_in_process;
+
+        let config_for = |rank: usize| DistributedConfig {
+            world_size: 3,
+            rank,
+            backend: DistributedBackend::InProcess,
+            master_addr: "localhost".to_string(),
+            master_port: 29500,
+            gradient_compression: false,
+            bucket_size_mb: 25,
+        };
+
+        let per_rank = run_in_process(3, move |rank, group| -> Vec<f32> {
+            let pg: Arc<dyn ProcessGroup> = group;
+            let trainer = DataParallelTrainer::new(DummyModel::new(), pg, config_for(rank))
+                .expect("trainer must build in test");
+
+            assert!(
+                trainer.broadcast_parameters().is_err(),
+                "an empty registry must error, not invent parameters"
+            );
+
+            let mut parameters = HashMap::new();
+            parameters.insert(
+                "w".to_string(),
+                Tensor::from_slice(&[rank as f32 + 1.0, 10.0 * (rank as f32 + 1.0)], &[2])
+                    .expect("tensor must build in test"),
+            );
+            trainer
+                .register_parameters(parameters)
+                .expect("registration must succeed in test");
+
+            let synchronized =
+                trainer.broadcast_parameters().expect("broadcast must succeed in test");
+            synchronized["w"].to_vec_f32().expect("tensor read must succeed in test")
+        })
+        .expect("in-process run must succeed in test");
+
+        // Rank 0 owned [1, 10]; every rank must end up with exactly that.
+        for values in &per_rank {
+            assert_eq!(values, &vec![1.0f32, 10.0]);
+        }
+    }
 }

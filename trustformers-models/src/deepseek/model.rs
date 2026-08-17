@@ -682,18 +682,20 @@ impl DeepSeekMlaAttention {
     ///
     /// A one-token sequence attends only to itself, so the softmax is trivially
     /// `1` and the output is `W_O · v` — the real mechanism, not an approximation.
-    /// Inputs shorter than `hidden_size` are zero-padded and longer ones are
-    /// truncated, which makes the length precondition of
-    /// [`forward_sequence`](Self::forward_sequence) hold by construction.
     /// Returns the output vector `[hidden_size]`.
-    pub fn forward_token(&self, x: &[f32]) -> Vec<f32> {
-        let mut token = vec![0.0f32; self.hidden_size];
-        let copied = x.len().min(self.hidden_size);
-        token[..copied].copy_from_slice(&x[..copied]);
-        // The length now matches exactly, so `forward_sequence` cannot fail; the
-        // fallback keeps the infallible signature without hiding a real error.
-        self.forward_sequence(&token, 1)
-            .unwrap_or_else(|_| vec![0.0f32; self.hidden_size])
+    ///
+    /// `x` must be exactly `hidden_size` long. A shorter or longer buffer is a
+    /// caller error and is reported as one: zero-padding a short input (and
+    /// silently dropping the tail of a long one) would hand back a full-length
+    /// vector that no caller can tell apart from a genuine activation.
+    pub fn forward_token(&self, x: &[f32]) -> Result<Vec<f32>> {
+        if x.len() != self.hidden_size {
+            return Err(tensor_op_error(
+                "DeepSeekMlaAttention::forward_token",
+                format!("expected {} elements, got {}", self.hidden_size, x.len()),
+            ));
+        }
+        self.forward_sequence(x, 1)
     }
 
     pub fn kv_lora_rank(&self) -> usize {
@@ -1273,12 +1275,44 @@ mod tests {
         let cfg = test_cfg();
         let mla = DeepSeekMlaAttention::new(&cfg);
         let x = lcg_vec(cfg.hidden_size, 5);
-        let out = mla.forward_token(&x);
+        let out = mla.forward_token(&x).expect("forward_token");
         assert_eq!(
             out.len(),
             cfg.hidden_size,
             "MLA forward_token output should have hidden_size elements"
         );
+    }
+
+    /// A wrong-length token must be reported, not padded/truncated into a
+    /// full-length answer. The previous implementation zero-padded a short input
+    /// and returned `hidden_size` plausible values.
+    #[test]
+    fn test_mla_forward_token_rejects_wrong_length() {
+        let cfg = test_cfg();
+        let mla = DeepSeekMlaAttention::new(&cfg);
+        assert!(
+            mla.forward_token(&lcg_vec(cfg.hidden_size - 1, 6)).is_err(),
+            "a short token must not be zero-padded into a fabricated activation"
+        );
+        assert!(
+            mla.forward_token(&lcg_vec(cfg.hidden_size + 1, 7)).is_err(),
+            "a long token must not be silently truncated"
+        );
+    }
+
+    /// `forward_token` is the one-token case of `forward_sequence`, not a
+    /// separate approximation: the two must agree exactly.
+    #[test]
+    fn test_mla_forward_token_matches_single_step_sequence() {
+        let cfg = test_cfg();
+        let mla = DeepSeekMlaAttention::new(&cfg);
+        let x = lcg_vec(cfg.hidden_size, 8);
+        let token_out = mla.forward_token(&x).expect("forward_token");
+        let seq_out = mla.forward_sequence(&x, 1).expect("forward_sequence");
+        assert_eq!(token_out.len(), seq_out.len());
+        for (i, (a, b)) in token_out.iter().zip(seq_out.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-6, "element {i}: {a} vs {b}");
+        }
     }
 
     #[test]
@@ -1435,8 +1469,8 @@ mod tests {
     fn test_mla_output_is_not_constant() {
         let cfg = test_cfg();
         let mla = DeepSeekMlaAttention::new(&cfg);
-        let out_a = mla.forward_token(&lcg_vec(cfg.hidden_size, 606));
-        let out_b = mla.forward_token(&lcg_vec(cfg.hidden_size, 707));
+        let out_a = mla.forward_token(&lcg_vec(cfg.hidden_size, 606)).expect("forward a");
+        let out_b = mla.forward_token(&lcg_vec(cfg.hidden_size, 707)).expect("forward b");
         let diff = out_a
             .iter()
             .zip(out_b.iter())

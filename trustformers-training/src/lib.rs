@@ -148,6 +148,9 @@ pub mod distributed;
 /// [`distributed::ProcessGroup`].
 pub mod distributed_collective;
 pub mod distributed_overlap;
+/// ZeRO stage-1 optimizer-state sharding over a real
+/// [`distributed::ProcessGroup`].
+pub mod distributed_zero;
 pub mod dpo;
 pub mod elastic_training;
 pub mod error_codes;
@@ -205,8 +208,12 @@ pub use continual::{
 };
 pub use distributed::{
     init_distributed_training, utils as distributed_utils, DataParallelTrainer, DistributedBackend,
-    DistributedConfig, ProcessGroup,
+    DistributedConfig, GradientCompressionConfig, ProcessGroup,
 };
+pub use distributed_collective::{
+    run_in_process, CollectiveProcessGroup, InProcessProcessGroup, TcpProcessGroup,
+};
+pub use distributed_zero::{ShardAssignment, ZeroMemoryReport, ZeroStage, ZeroStage1Optimizer};
 pub use experiment_management::{
     ABTestConfig, ABTestResults, ABTestStatus, ArtifactType, DataLineage, DataSplit,
     EnvironmentInfo, ExperimentFilters, ExperimentManager, ExperimentMetadata, ExperimentReport,

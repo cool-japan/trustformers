@@ -15,6 +15,7 @@ impl VocabIntelligenceAnalyzer {
             config,
             similarity_cache: HashMap::new(),
             evolution_history: Vec::new(),
+            last_vocab_tokens: None,
         }
     }
 
@@ -332,6 +333,12 @@ impl VocabIntelligenceAnalyzer {
     ) -> Result<EvolutionAnalysis> {
         let vocab = tokenizer.get_vocab();
 
+        // Real added/removed-token diff against the *previous* call's
+        // vocabulary, computed before `last_vocab_tokens` below is
+        // overwritten with this call's vocabulary.
+        let changes = self.calculate_evolution_changes(&vocab);
+        self.last_vocab_tokens = Some(vocab.keys().cloned().collect());
+
         // Create current snapshot
         let current_snapshot = EvolutionSnapshot {
             timestamp: chrono::Utc::now().timestamp() as u64,
@@ -342,7 +349,7 @@ impl VocabIntelligenceAnalyzer {
                 subword_efficiency: self.calculate_subword_efficiency(&vocab),
                 cross_lingual_efficiency: self.calculate_cross_lingual_efficiency(&vocab),
             },
-            changes: self.calculate_evolution_changes(&vocab),
+            changes,
         };
 
         // Add to evolution history
@@ -1129,25 +1136,68 @@ impl VocabIntelligenceAnalyzer {
         (char_set.len() as f32 / 256.0).min(1.0) * 100.0
     }
 
-    /// Calculate evolution changes from previous snapshot
+    /// Calculate evolution changes since the previous
+    /// `analyze_vocabulary_evolution` call, via a real added/removed-token
+    /// diff against `self.last_vocab_tokens` (the vocabulary snapshot taken
+    /// the last time this ran). Returns no changes before any prior
+    /// snapshot exists, since there is nothing yet to diff against.
+    ///
+    /// An earlier version of this function never looked at `current_vocab`
+    /// at all: whenever the vocabulary merely exceeded 1000 tokens, it
+    /// unconditionally reported a single fabricated `TokenAdded` change
+    /// naming a token (`"new_token"`) that need not exist in the vocabulary,
+    /// with an invented `performance_impact` of exactly `0.1` regardless of
+    /// how much (if anything) had actually changed.
     fn calculate_evolution_changes(
         &self,
         current_vocab: &HashMap<String, u32>,
     ) -> Vec<VocabularyChange> {
-        if self.evolution_history.is_empty() {
+        // How many affected token names to list per change before summarizing
+        // the rest by count only, so a wholesale vocabulary swap cannot blow
+        // up this report's size.
+        const MAX_AFFECTED_TOKENS_LISTED: usize = 100;
+
+        let Some(previous_tokens) = &self.last_vocab_tokens else {
             return Vec::new();
-        }
+        };
+        let previous_count = previous_tokens.len().max(1);
+
+        let current_tokens: HashSet<&String> = current_vocab.keys().collect();
+        let previous_token_refs: HashSet<&String> = previous_tokens.iter().collect();
 
         let mut changes = Vec::new();
 
-        // For now, generate some example changes
-        // In a real implementation, this would compare with previous vocabulary state
-        if current_vocab.len() > 1000 {
+        let mut added: Vec<String> =
+            current_tokens.difference(&previous_token_refs).map(|s| (*s).clone()).collect();
+        if !added.is_empty() {
+            added.sort();
+            let total_added = added.len();
+            added.truncate(MAX_AFFECTED_TOKENS_LISTED);
             changes.push(VocabularyChange {
                 change_type: ChangeType::TokenAdded,
-                affected_tokens: vec!["new_token".to_string()],
-                impact_description: "New tokens added to vocabulary".to_string(),
-                performance_impact: 0.1,
+                affected_tokens: added,
+                impact_description: format!(
+                    "{} token(s) added to the vocabulary since the previous snapshot",
+                    total_added
+                ),
+                performance_impact: total_added as f32 / previous_count as f32,
+            });
+        }
+
+        let mut removed: Vec<String> =
+            previous_token_refs.difference(&current_tokens).map(|s| (*s).clone()).collect();
+        if !removed.is_empty() {
+            removed.sort();
+            let total_removed = removed.len();
+            removed.truncate(MAX_AFFECTED_TOKENS_LISTED);
+            changes.push(VocabularyChange {
+                change_type: ChangeType::TokenRemoved,
+                affected_tokens: removed,
+                impact_description: format!(
+                    "{} token(s) removed from the vocabulary since the previous snapshot",
+                    total_removed
+                ),
+                performance_impact: total_removed as f32 / previous_count as f32,
             });
         }
 
@@ -1371,6 +1421,55 @@ mod tests {
         let analyzer = VocabIntelligenceAnalyzer::new(config);
         assert_eq!(analyzer.similarity_cache.len(), 0);
         assert_eq!(analyzer.evolution_history.len(), 0);
+        assert!(analyzer.last_vocab_tokens.is_none());
+    }
+
+    /// Regression test for the fabricated evolution-change bug: an earlier
+    /// version of `calculate_evolution_changes` ignored `current_vocab`
+    /// entirely and, whenever the vocabulary merely exceeded 1000 tokens,
+    /// unconditionally reported a single `TokenAdded` change naming a
+    /// fabricated token (`"new_token"`, which need not exist anywhere in the
+    /// vocabulary) with a hardcoded `performance_impact` of exactly `0.1`.
+    #[test]
+    fn test_calculate_evolution_changes_reports_real_diff_not_fabricated_example() {
+        let config = VocabIntelligenceConfig::default();
+        let mut analyzer = VocabIntelligenceAnalyzer::new(config);
+
+        // No prior snapshot yet (`last_vocab_tokens` is `None`): must report
+        // no changes, regardless of vocabulary size. The old code instead
+        // fabricated a change here whenever `evolution_history` was
+        // non-empty and the vocabulary exceeded 1000 tokens.
+        let large_vocab: HashMap<String, u32> =
+            (0..1500).map(|i| (format!("tok_{}", i), i as u32)).collect();
+        assert!(analyzer.calculate_evolution_changes(&large_vocab).is_empty());
+
+        // Seed a "previous snapshot" of exactly {"tok_0", "tok_1"}, then diff
+        // against a vocabulary that really added "brand_new" and really
+        // removed "tok_0".
+        analyzer.last_vocab_tokens =
+            Some(["tok_0".to_string(), "tok_1".to_string()].into_iter().collect());
+        let mut next_vocab = HashMap::new();
+        next_vocab.insert("tok_1".to_string(), 0);
+        next_vocab.insert("brand_new".to_string(), 1);
+
+        let changes = analyzer.calculate_evolution_changes(&next_vocab);
+
+        let added = changes
+            .iter()
+            .find(|c| matches!(c.change_type, ChangeType::TokenAdded))
+            .expect("must report the real added token");
+        assert_eq!(added.affected_tokens, vec!["brand_new".to_string()]);
+        assert_ne!(
+            added.affected_tokens,
+            vec!["new_token".to_string()],
+            "must never emit the old fabricated literal token name"
+        );
+
+        let removed = changes
+            .iter()
+            .find(|c| matches!(c.change_type, ChangeType::TokenRemoved))
+            .expect("must report the real removed token");
+        assert_eq!(removed.affected_tokens, vec!["tok_0".to_string()]);
     }
 
     #[test]

@@ -591,8 +591,10 @@ mod tests {
 
     #[test]
     fn test_select_penalizes_repetition_in_context() {
-        let mut cfg = ContrastiveSearchConfig::default();
-        cfg.degeneration_penalty = 0.9; // high penalty
+        let cfg = ContrastiveSearchConfig {
+            degeneration_penalty: 0.9, // high penalty
+            ..ContrastiveSearchConfig::default()
+        };
 
         // Context is in direction [1, 0]
         let context = vec![vec![1.0_f32, 0.0]];
@@ -634,9 +636,11 @@ mod tests {
 
     #[test]
     fn test_decoder_is_finished_on_eos() {
-        let mut cfg = ContrastiveSearchConfig::default();
-        cfg.eos_token_id = Some(99);
-        cfg.max_length = 100;
+        let cfg = ContrastiveSearchConfig {
+            eos_token_id: Some(99),
+            max_length: 100,
+            ..ContrastiveSearchConfig::default()
+        };
         let mut decoder = ContrastiveDecoder::new(cfg);
 
         let candidates = vec![make_candidate(99, 1.0, vec![1.0_f32])];
@@ -648,8 +652,10 @@ mod tests {
 
     #[test]
     fn test_decoder_is_finished_on_max_length() {
-        let mut cfg = ContrastiveSearchConfig::default();
-        cfg.max_length = 2;
+        let cfg = ContrastiveSearchConfig {
+            max_length: 2,
+            ..ContrastiveSearchConfig::default()
+        };
         let mut decoder = ContrastiveDecoder::new(cfg);
 
         for i in 0..2u32 {
@@ -707,9 +713,11 @@ mod tests {
 
     #[test]
     fn test_contrastive_decode_stops_at_eos() {
-        let mut cfg = ContrastiveSearchConfig::default();
-        cfg.eos_token_id = Some(100);
-        cfg.max_length = 20;
+        let cfg = ContrastiveSearchConfig {
+            eos_token_id: Some(100),
+            max_length: 20,
+            ..ContrastiveSearchConfig::default()
+        };
 
         // Steps: step 0 emits EOS immediately
         let steps: Vec<Vec<CandidateToken>> = vec![
@@ -903,10 +911,14 @@ mod tests {
         let cand = make_candidate(1, 0.8, vec![1.0_f32, 0.0]);
 
         // Two configs differing only in alpha (proxy for temperature effect on scores).
-        let mut cfg_low = ContrastiveSearchConfig::default();
-        cfg_low.degeneration_penalty = 0.1;
-        let mut cfg_high = ContrastiveSearchConfig::default();
-        cfg_high.degeneration_penalty = 0.9;
+        let cfg_low = ContrastiveSearchConfig {
+            degeneration_penalty: 0.1,
+            ..ContrastiveSearchConfig::default()
+        };
+        let cfg_high = ContrastiveSearchConfig {
+            degeneration_penalty: 0.9,
+            ..ContrastiveSearchConfig::default()
+        };
 
         let score_low = contrastive_score(&cand, &context, cfg_low.degeneration_penalty);
         let score_high = contrastive_score(&cand, &context, cfg_high.degeneration_penalty);
@@ -926,7 +938,7 @@ mod tests {
         // Anchor embedding.
         let anchor = vec![1.0_f32, 0.0];
         // Candidates at various similarities.
-        let candidates = vec![
+        let candidates = [
             (0usize, vec![1.0_f32, 0.0]),  // sim=1.0 (positive / hard negative)
             (1usize, vec![0.7_f32, 0.7]),  // sim≈0.707
             (2usize, vec![0.0_f32, 1.0]),  // sim=0.0
@@ -996,10 +1008,12 @@ mod tests {
     /// EOS should not fire before min_length is reached.
     #[test]
     fn test_decoder_eos_respects_min_length() {
-        let mut cfg = ContrastiveSearchConfig::default();
-        cfg.eos_token_id = Some(99);
-        cfg.min_length = 3;
-        cfg.max_length = 20;
+        let cfg = ContrastiveSearchConfig {
+            eos_token_id: Some(99),
+            min_length: 3,
+            max_length: 20,
+            ..ContrastiveSearchConfig::default()
+        };
         let mut decoder = ContrastiveDecoder::new(cfg);
 
         // First two steps produce EOS token — should NOT trigger stop.

@@ -266,4 +266,55 @@ mod tests {
         let paths = search_paths("r50k_base");
         assert!(paths.iter().any(|p| p.ends_with("r50k_base.tiktoken")));
     }
+
+    /// The documented `$TRUSTFORMERS_TIKTOKEN_DIR` override must actually
+    /// resolve a rank file — this is the mechanism that lets the no-argument
+    /// encoding constructors load a real table instead of inventing one.
+    ///
+    /// The encoding name is unique to this test, so setting the process-wide
+    /// environment variable cannot change what any other test resolves (no other
+    /// test asks for this name, and the sibling tests that read the variable
+    /// look for `{cl100k,r50k}_base.tiktoken`, which this fixture never creates).
+    #[test]
+    fn test_env_override_resolves_a_rank_file() {
+        const ENCODING: &str = "trustformers_ranks_env_fixture";
+
+        let dir =
+            std::env::temp_dir().join(format!("trustformers_tiktoken_env_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir must be creatable");
+
+        let mut ranks = RankMap::new();
+        ranks.insert(b"a".to_vec(), 0);
+        ranks.insert(b"b".to_vec(), 1);
+        ranks.insert(b"ab".to_vec(), 2);
+
+        let mut buffer: Vec<u8> = Vec::new();
+        write_ranks(&ranks, &mut buffer).expect("serialization must succeed");
+        let path = dir.join(format!("{}.tiktoken", ENCODING));
+        std::fs::write(&path, &buffer).expect("rank file must be writable");
+
+        let previous = std::env::var(RANK_DIR_ENV).ok();
+        std::env::set_var(RANK_DIR_ENV, &dir);
+        let located = find_rank_file(ENCODING);
+        match previous {
+            Some(value) => std::env::set_var(RANK_DIR_ENV, value),
+            None => std::env::remove_var(RANK_DIR_ENV),
+        }
+
+        let located = located.expect("the env override must resolve the rank file");
+        assert_eq!(located, path);
+        assert_eq!(
+            load_ranks_from_file(&located).expect("the located file must parse"),
+            ranks
+        );
+
+        // Without the override the made-up encoding resolves nowhere and the
+        // error explains how to supply the file.
+        assert!(find_rank_file(ENCODING).is_none());
+        let message = missing_rank_file_error(ENCODING).to_string();
+        assert!(message.contains(RANK_DIR_ENV));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
 }

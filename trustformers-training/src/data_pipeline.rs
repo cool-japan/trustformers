@@ -1214,7 +1214,7 @@ impl DataPipeline {
         };
 
         let mut batch = Vec::with_capacity(collected.len());
-        for (sample, result) in collected.into_iter().zip(results.into_iter()) {
+        for (sample, result) in collected.into_iter().zip(results) {
             if result.is_valid {
                 batch.push(sample);
                 continue;
@@ -1687,16 +1687,21 @@ mod tests {
             },
             batching: BatchingConfig {
                 batch_size: 2,
-                drop_last: false,
-                dynamic_batching: false,
-                max_tokens: None,
+                dynamic: false,
+                max_batch_size: 2,
                 strategy: BatchingStrategy::Fixed,
+                drop_last: false,
             },
             caching: CachingConfig {
                 enabled: false,
-                cache_size: 0,
                 cache_type: CacheType::Memory,
+                max_size_gb: 0.0,
                 eviction_policy: EvictionPolicy::LRU,
+                compression: CompressionConfig {
+                    enabled: false,
+                    algorithm: CompressionAlgorithm::Zstd,
+                    level: 0,
+                },
             },
         }
     }
@@ -1709,32 +1714,15 @@ mod tests {
                 adaptive: AdaptiveAugmentationConfig {
                     enabled: false,
                     strategy: AdaptationStrategy::PerformanceBased {
-                        metric: "loss".to_string(),
+                        target_metric: "loss".to_string(),
                         threshold: 0.0,
                     },
-                    frequency: 0,
-                    success_criteria: SuccessCriteria {
-                        min_improvement: 0.0,
-                        evaluation_window: 0,
-                        confidence_level: 0.0,
-                    },
+                    update_frequency: 0,
+                    metrics: vec![],
                 },
                 scheduling: AugmentationScheduling {
-                    schedule_type: ScheduleType::Constant,
+                    schedule_type: ScheduleType::Fixed,
                     parameters: HashMap::new(),
-                },
-                preprocessing: PreprocessingConfig {
-                    steps: vec![],
-                    normalization: NormalizationConfig {
-                        norm_type: NormalizationType::Standard,
-                        parameters: HashMap::new(),
-                        per_feature: false,
-                    },
-                    feature_extraction: FeatureExtractionConfig {
-                        methods: vec![],
-                        dimensions: HashMap::new(),
-                        caching: false,
-                    },
                 },
             },
             curriculum: CurriculumLearningConfig {
@@ -1778,12 +1766,18 @@ mod tests {
             },
             multimodal: MultiModalConfig {
                 modalities: vec![],
-                fusion_strategy: FusionStrategy::Early,
+                fusion_strategy: FusionStrategy::EarlyFusion,
                 alignment: AlignmentConfig {
-                    method: AlignmentMethod::Temporal,
-                    parameters: HashMap::new(),
+                    method: AlignmentMethod::Timestamp,
+                    temporal_alignment: false,
                 },
-                missing_modality: MissingModalityHandling::Skip,
+                preprocessing: MultiModalPreprocessing {
+                    synchronization: SynchronizationConfig {
+                        require_all: false,
+                        sync_window: Duration::from_secs(1),
+                    },
+                    missing_modality_handling: MissingModalityHandling::Skip,
+                },
             },
             validation: DataValidationConfig {
                 rules: vec![],
@@ -1794,11 +1788,6 @@ mod tests {
                 num_workers: 1,
                 backend: ProcessingBackend::Threading,
                 load_balancing: LoadBalancingStrategy::RoundRobin,
-                synchronization: SynchronizationConfig {
-                    sync_frequency: 1,
-                    barrier: false,
-                    timeout: Duration::from_secs(1),
-                },
             },
         };
         let pipeline = DataPipeline::new(config);

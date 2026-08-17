@@ -1067,6 +1067,15 @@ impl Default for MLOptimizerConfig {
 pub struct OptimizationResult {
     pub timestamp: SystemTime,
     pub optimization_type: OptimizationType,
+    /// Fraction of step time this change is *predicted* to save, derived from
+    /// the metrics that were measured and the parameter change that was
+    /// actually applied.
+    ///
+    /// This is a prediction, never an observation: the change has not run yet
+    /// when the result is produced. It is always a function of
+    /// [`PerformanceMetrics`] and the applied delta — never a constant.
+    /// Compare consecutive [`PerformanceMetrics::step_time`] samples for the
+    /// realised effect.
     pub performance_improvement: f32,
     pub parameters_changed: HashMap<String, f32>,
 }
@@ -1145,6 +1154,10 @@ impl PerformanceMLOptimizer {
         Ok(optimizations)
     }
 
+    /// Interconnect bandwidth, in MB/s, below which gradient compression is
+    /// worth enabling: roughly a single saturated 1 GbE link.
+    pub const SLOW_INTERCONNECT_MBPS: f32 = 125.0;
+
     fn optimize_batch_sizes(
         &self,
         metrics: &PerformanceMetrics,
@@ -1163,73 +1176,121 @@ impl PerformanceMLOptimizer {
             model.predict_optimal_batch_size(avg_utilization, avg_memory)?;
 
         let current_batch = config.dynamic_batching.initial_batch_size as f32;
-        let improvement = (predicted_optimal_batch - current_batch) / current_batch;
-
-        if improvement.abs() > 0.1 {
-            // At least 10% change
-            config.dynamic_batching.initial_batch_size = predicted_optimal_batch as usize;
-
-            let mut params_changed = HashMap::new();
-            params_changed.insert("batch_size".to_string(), predicted_optimal_batch);
-
-            Ok(Some(OptimizationResult {
-                timestamp: SystemTime::now(),
-                optimization_type: OptimizationType::BatchSizeOptimization,
-                performance_improvement: improvement,
-                parameters_changed: params_changed,
-            }))
-        } else {
-            Ok(None)
+        if !(current_batch > 0.0 && predicted_optimal_batch > 0.0) {
+            return Ok(None);
         }
+        let size_change = (predicted_optimal_batch - current_batch) / current_batch;
+
+        if size_change.abs() <= 0.1 {
+            // Less than a 10% change is not worth disturbing the schedule for.
+            return Ok(None);
+        }
+        config.dynamic_batching.initial_batch_size = predicted_optimal_batch as usize;
+
+        // A larger batch amortizes the fixed per-step collective over more
+        // samples, so it removes `1 - current/new` of the communication phase.
+        // A *smaller* batch is chosen to relieve memory pressure and predicts no
+        // step-time saving at all — reporting the raw size delta as a
+        // "performance improvement" would invert the sign of a slowdown.
+        let predicted = if predicted_optimal_batch > current_batch {
+            (metrics.communication_overhead * (1.0 - current_batch / predicted_optimal_batch))
+                .clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        let mut params_changed = HashMap::new();
+        params_changed.insert("batch_size".to_string(), predicted_optimal_batch);
+
+        Ok(Some(OptimizationResult {
+            timestamp: SystemTime::now(),
+            optimization_type: OptimizationType::BatchSizeOptimization,
+            performance_improvement: predicted,
+            parameters_changed: params_changed,
+        }))
     }
 
+    /// Tighten the gradient-compression ratio when communication dominates the
+    /// step.
+    ///
+    /// The predicted saving follows directly from the change that is applied:
+    /// transferred bytes scale with the target ratio, so shrinking it from
+    /// `old` to `new` removes `1 - new/old` of the communication time, and
+    /// communication is [`PerformanceMetrics::communication_overhead`] of the
+    /// step. No constant is invented.
     fn optimize_compression(
         &self,
         metrics: &PerformanceMetrics,
         config: &mut DistributedConfig,
     ) -> Result<Option<OptimizationResult>> {
-        if metrics.communication_overhead > 0.3 {
-            // High communication overhead
-            // Switch to more aggressive compression
-            config.compression.target_ratio = (config.compression.target_ratio * 0.8).max(0.05);
+        const FLOOR: f32 = 0.05;
+        const TIGHTEN: f32 = 0.8;
 
-            let mut params_changed = HashMap::new();
-            params_changed.insert(
-                "compression_ratio".to_string(),
-                config.compression.target_ratio,
-            );
-
-            Ok(Some(OptimizationResult {
-                timestamp: SystemTime::now(),
-                optimization_type: OptimizationType::CompressionOptimization,
-                performance_improvement: 0.15, // Estimated 15% improvement
-                parameters_changed: params_changed,
-            }))
-        } else {
-            Ok(None)
+        if metrics.communication_overhead <= 0.3 {
+            return Ok(None);
         }
+
+        let old_ratio = config.compression.target_ratio;
+        let new_ratio = (old_ratio * TIGHTEN).max(FLOOR);
+        if !(old_ratio.is_finite() && old_ratio > 0.0) || new_ratio >= old_ratio {
+            // Already at the floor: there is nothing left to tighten, so there
+            // is no optimization to report.
+            return Ok(None);
+        }
+        config.compression.target_ratio = new_ratio;
+
+        let payload_reduction = 1.0 - new_ratio / old_ratio;
+        let predicted = (metrics.communication_overhead * payload_reduction).clamp(0.0, 1.0);
+
+        let mut params_changed = HashMap::new();
+        params_changed.insert("compression_ratio".to_string(), new_ratio);
+
+        Ok(Some(OptimizationResult {
+            timestamp: SystemTime::now(),
+            optimization_type: OptimizationType::CompressionOptimization,
+            performance_improvement: predicted,
+            parameters_changed: params_changed,
+        }))
     }
 
+    /// Turn gradient compression on when the interconnect is the bottleneck.
+    ///
+    /// This is the only communication knob [`DistributedConfig`] exposes — it
+    /// carries no topology, bucket-size or overlap setting — so when
+    /// compression is already enabled there is nothing to change and the
+    /// function reports no optimization rather than an imagined one.
+    ///
+    /// `bandwidth_utilization` is a measured MB/s figure; below
+    /// [`SLOW_INTERCONNECT_MBPS`](Self::SLOW_INTERCONNECT_MBPS) the link is
+    /// slower than a single 1 GbE hop and compression pays for itself.
     fn optimize_communication(
         &self,
         metrics: &PerformanceMetrics,
-        _config: &mut DistributedConfig,
+        config: &mut DistributedConfig,
     ) -> Result<Option<OptimizationResult>> {
-        // Simplified communication optimization
-        if metrics.bandwidth_utilization < 0.5 {
-            // Could increase communication frequency or adjust topology
-            let mut params_changed = HashMap::new();
-            params_changed.insert("communication_frequency".to_string(), 1.2);
-
-            Ok(Some(OptimizationResult {
-                timestamp: SystemTime::now(),
-                optimization_type: OptimizationType::CommunicationPatternOptimization,
-                performance_improvement: 0.08, // Estimated 8% improvement
-                parameters_changed: params_changed,
-            }))
-        } else {
-            Ok(None)
+        if metrics.bandwidth_utilization >= Self::SLOW_INTERCONNECT_MBPS
+            || config.compression.enabled
+        {
+            return Ok(None);
         }
+
+        config.compression.enabled = true;
+
+        // Enabling compression removes `1 - target_ratio` of the transferred
+        // bytes from a phase that takes `communication_overhead` of the step.
+        let ratio = config.compression.target_ratio.clamp(0.0, 1.0);
+        let predicted = (metrics.communication_overhead * (1.0 - ratio)).clamp(0.0, 1.0);
+
+        let mut params_changed = HashMap::new();
+        params_changed.insert("compression_enabled".to_string(), 1.0);
+        params_changed.insert("compression_ratio".to_string(), ratio);
+
+        Ok(Some(OptimizationResult {
+            timestamp: SystemTime::now(),
+            optimization_type: OptimizationType::CommunicationPatternOptimization,
+            performance_improvement: predicted,
+            parameters_changed: params_changed,
+        }))
     }
 
     pub fn get_optimization_history(&self) -> &[OptimizationResult] {
@@ -1486,7 +1547,7 @@ mod tests {
         let mut state = HashMap::new();
         state.insert(
             "w".to_string(),
-            Tensor::from_slice(&vec![0.5f32; 256], &[256]).expect("tensor must build in test"),
+            Tensor::from_slice(&[0.5f32; 256], &[256]).expect("tensor must build in test"),
         );
         let full = manager.create_checkpoint(1, &state).expect("checkpoint in test");
 
@@ -1621,5 +1682,154 @@ mod tests {
         let prediction =
             analyzer.predict(Duration::from_secs(60)).expect("Operation failed in test");
         assert!(prediction > 1.0); // Should predict increasing trend
+    }
+
+    // ── ML optimizer: predictions must be derived, never constants ────────
+    //
+    // The previous implementation returned `performance_improvement: 0.15` for
+    // every compression change and `0.08` for every "communication" change —
+    // the latter without touching the configuration at all. These tests fail
+    // against that code because they vary the measured metrics and require the
+    // reported prediction to move with them.
+
+    fn metrics(communication_overhead: f32, bandwidth_mbps: f32) -> PerformanceMetrics {
+        PerformanceMetrics {
+            throughput: 100.0,
+            gpu_utilization: vec![0.75],
+            memory_usage: vec![0.6],
+            communication_overhead,
+            compression_ratio: 1.0,
+            bandwidth_utilization: bandwidth_mbps,
+            step_time: Duration::from_millis(100),
+        }
+    }
+
+    #[test]
+    fn compression_prediction_tracks_the_measured_communication_overhead() {
+        let optimizer = PerformanceMLOptimizer::new(MLOptimizerConfig::default());
+
+        let mut light = DistributedConfig::new();
+        light.compression.target_ratio = 0.5;
+        let light_result = optimizer
+            .optimize_compression(&metrics(0.4, 1000.0), &mut light)
+            .expect("optimization must succeed in test")
+            .expect("high communication overhead must trigger a change in test");
+
+        let mut heavy = DistributedConfig::new();
+        heavy.compression.target_ratio = 0.5;
+        let heavy_result = optimizer
+            .optimize_compression(&metrics(0.8, 1000.0), &mut heavy)
+            .expect("optimization must succeed in test")
+            .expect("high communication overhead must trigger a change in test");
+
+        assert!(
+            heavy_result.performance_improvement > light_result.performance_improvement,
+            "a heavier communication phase must predict a larger saving: {} vs {}",
+            heavy_result.performance_improvement,
+            light_result.performance_improvement
+        );
+
+        // 20% fewer bytes out of a phase that is 80% of the step.
+        assert!((heavy_result.performance_improvement - 0.8 * 0.2).abs() < 1e-5);
+
+        // And the configuration really changed.
+        assert!((heavy.compression.target_ratio - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn compression_at_the_floor_reports_no_optimization() {
+        let optimizer = PerformanceMLOptimizer::new(MLOptimizerConfig::default());
+        let mut config = DistributedConfig::new();
+        config.compression.target_ratio = 0.05;
+
+        assert!(optimizer
+            .optimize_compression(&metrics(0.9, 1000.0), &mut config)
+            .expect("optimization must succeed in test")
+            .is_none());
+        assert!((config.compression.target_ratio - 0.05).abs() < 1e-6);
+    }
+
+    #[test]
+    fn communication_optimization_applies_a_real_change_or_reports_none() {
+        let optimizer = PerformanceMLOptimizer::new(MLOptimizerConfig::default());
+
+        // Fast link: nothing to do.
+        let mut fast = DistributedConfig::new();
+        assert!(optimizer
+            .optimize_communication(&metrics(0.5, 10_000.0), &mut fast)
+            .expect("optimization must succeed in test")
+            .is_none());
+        assert!(!fast.compression.enabled);
+
+        // Slow link with compression off: the knob is really turned.
+        let mut slow = DistributedConfig::new();
+        slow.compression.enabled = false;
+        slow.compression.target_ratio = 0.25;
+        let result = optimizer
+            .optimize_communication(&metrics(0.5, 10.0), &mut slow)
+            .expect("optimization must succeed in test")
+            .expect("a slow interconnect must enable compression in test");
+        assert!(slow.compression.enabled, "the config must actually change");
+        assert!((result.performance_improvement - 0.5 * 0.75).abs() < 1e-5);
+
+        // Already enabled: no further knob exists, so nothing is claimed.
+        assert!(optimizer
+            .optimize_communication(&metrics(0.5, 10.0), &mut slow)
+            .expect("optimization must succeed in test")
+            .is_none());
+    }
+
+    #[test]
+    fn shrinking_the_batch_never_reports_a_speedup() {
+        let optimizer = PerformanceMLOptimizer::new(MLOptimizerConfig::default());
+
+        // High utilization and high memory pressure => the model shrinks the
+        // batch. The old code reported the negative size delta as an
+        // "improvement".
+        let mut config = DistributedConfig::new();
+        config.dynamic_batching.initial_batch_size = 128;
+        let pressured = PerformanceMetrics {
+            gpu_utilization: vec![0.95],
+            memory_usage: vec![0.95],
+            ..metrics(0.5, 1000.0)
+        };
+
+        let result = optimizer
+            .optimize_batch_sizes(&pressured, &mut config)
+            .expect("optimization must succeed in test")
+            .expect("a >10% size change must be reported in test");
+
+        assert!(config.dynamic_batching.initial_batch_size < 128);
+        assert_eq!(
+            result.performance_improvement, 0.0,
+            "a batch reduction taken for memory headroom predicts no speedup"
+        );
+    }
+
+    #[test]
+    fn growing_the_batch_predicts_amortised_communication() {
+        let optimizer = PerformanceMLOptimizer::new(MLOptimizerConfig::default());
+
+        let mut config = DistributedConfig::new();
+        config.dynamic_batching.initial_batch_size = 8;
+        let idle = PerformanceMetrics {
+            gpu_utilization: vec![0.5],
+            memory_usage: vec![0.3],
+            ..metrics(0.5, 1000.0)
+        };
+
+        let result = optimizer
+            .optimize_batch_sizes(&idle, &mut config)
+            .expect("optimization must succeed in test")
+            .expect("an idle GPU must grow the batch in test");
+
+        let new_batch = config.dynamic_batching.initial_batch_size as f32;
+        assert!(new_batch > 8.0);
+        let expected = 0.5 * (1.0 - 8.0 / new_batch);
+        assert!(
+            (result.performance_improvement - expected).abs() < 1e-4,
+            "predicted {} but the derivation gives {expected}",
+            result.performance_improvement
+        );
     }
 }

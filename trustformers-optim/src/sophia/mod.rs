@@ -96,30 +96,27 @@ impl SophiaParamState {
     }
 }
 
-/// Diagonal Hessian estimate via (simplified) Hutchinson estimator.
+/// Diagonal Gauss-Newton (empirical-Fisher) curvature estimate `h_i = g_i²`.
 ///
-/// For a squared-loss model the exact diagonal is `grad²`.  For general
-/// models this is the Hutchinson approximation `(grad * u)²` where `u` is a
-/// Rademacher vector (here we use `u = 1` everywhere for simplicity, which
-/// reduces to `grad²`).
+/// # Which Sophia variant this is
+///
+/// This is **Sophia-G**'s curvature proxy without label resampling, *not* Sophia-H.
+/// The real Hutchinson estimator is `u ⊙ (H u)` for a Rademacher `u`, which needs a
+/// Hessian-vector product and therefore a closure over the loss; nothing in this
+/// module can evaluate one. The previous signature took a Rademacher vector `u` and
+/// computed `(g·u)²` — but `u ∈ {−1, +1}` makes `(g·u)² ≡ g²`, so the parameter could
+/// not affect any output. It has been removed rather than left as a knob that does
+/// nothing.
 ///
 /// # Arguments
 ///
 /// * `grad` – gradient vector.
-/// * `u`    – Rademacher random vector (each element ∈ {−1, +1}).
-///   When `u` is all-ones this returns the exact squared gradient.
 ///
 /// # Returns
 ///
-/// A `Vec<f32>` with `h_i = (grad_i * u_i)²`.
-pub fn hutchinson_hessian_estimate(grad: &[f32], u: &[f32]) -> Vec<f32> {
-    grad.iter()
-        .zip(u.iter())
-        .map(|(&g, &ui)| {
-            let val = g * ui;
-            val * val
-        })
-        .collect()
+/// A `Vec<f32>` with `h_i = grad_i²`.
+pub fn gauss_newton_diagonal(grad: &[f32]) -> Vec<f32> {
+    grad.iter().map(|&g| g * g).collect()
 }
 
 /// Perform one Sophia update for a single parameter.
@@ -165,7 +162,8 @@ pub fn sophia_update(
 
     // --- Hessian update (every k steps) ------------------------------------
     if update_hessian {
-        // Simplified Hutchinson: h_new_i = grad_i²
+        // Gauss-Newton (empirical-Fisher) diagonal: h_new_i = grad_i².
+        // See `gauss_newton_diagonal` for why this is not Sophia-H's Hutchinson estimate.
         // Store current gradient into buffer for accumulation
         for (buf, &g) in state.grad_buffer.iter_mut().zip(grad.iter()) {
             *buf = g;
@@ -288,31 +286,30 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // 2. Hessian estimate: simplified grad²
+    // 2. Curvature estimate: Gauss-Newton diagonal grad²
     // -----------------------------------------------------------------------
     #[test]
-    fn test_hutchinson_hessian_grad_squared() {
+    fn test_gauss_newton_diagonal_is_grad_squared() {
         let grad = vec![2.0_f32, -3.0, 0.5];
-        let u = vec![1.0_f32; 3]; // Rademacher = all +1 → exact grad²
-        let h = hutchinson_hessian_estimate(&grad, &u);
+        let h = gauss_newton_diagonal(&grad);
         assert_relative_eq!(h[0], 4.0, epsilon = 1e-6);
         assert_relative_eq!(h[1], 9.0, epsilon = 1e-6);
         assert_relative_eq!(h[2], 0.25, epsilon = 1e-6);
     }
 
     // -----------------------------------------------------------------------
-    // 3. Hessian estimate with Rademacher ±1
+    // 3. The estimate is positive and sign-independent
     // -----------------------------------------------------------------------
     #[test]
-    fn test_hutchinson_hessian_rademacher() {
-        let grad = vec![1.0_f32, -1.0];
-        let u_pos = vec![1.0_f32; 2];
-        let u_neg = vec![-1.0_f32; 2];
-        let h_pos = hutchinson_hessian_estimate(&grad, &u_pos);
-        let h_neg = hutchinson_hessian_estimate(&grad, &u_neg);
-        // (grad * u)² is the same for +1 and -1
-        assert_relative_eq!(h_pos[0], h_neg[0], epsilon = 1e-6);
-        assert_relative_eq!(h_pos[1], h_neg[1], epsilon = 1e-6);
+    fn test_gauss_newton_diagonal_is_sign_independent() {
+        let positive = gauss_newton_diagonal(&[1.0_f32, 2.0]);
+        let negative = gauss_newton_diagonal(&[-1.0_f32, -2.0]);
+        assert_relative_eq!(positive[0], negative[0], epsilon = 1e-6);
+        assert_relative_eq!(positive[1], negative[1], epsilon = 1e-6);
+        assert!(
+            positive.iter().all(|&h| h >= 0.0),
+            "curvature proxy must be non-negative"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -549,24 +546,24 @@ mod extended_tests {
     use approx::assert_relative_eq;
 
     #[test]
-    fn test_sophia_g_hessian_all_ones_u() {
+    fn test_sophia_g_curvature_matches_grad_squared() {
         let grad = vec![3.0_f32, -2.0_f32, 0.5_f32];
-        let u = vec![1.0_f32; 3];
-        let h = hutchinson_hessian_estimate(&grad, &u);
+        let h = gauss_newton_diagonal(&grad);
         assert_relative_eq!(h[0], 9.0, epsilon = 1e-6);
         assert_relative_eq!(h[1], 4.0, epsilon = 1e-6);
         assert_relative_eq!(h[2], 0.25, epsilon = 1e-6);
     }
 
+    /// Regression: the old API advertised a Rademacher randomness knob that could not
+    /// affect any output, because `(g·u)² ≡ g²` for `u ∈ {−1, +1}`.
     #[test]
-    fn test_sophia_g_hessian_negative_u_same_as_positive() {
+    fn test_sophia_g_curvature_matches_the_inert_rademacher_form() {
         let grad = vec![1.5_f32, -0.8_f32];
-        let u_pos = vec![1.0_f32; 2];
-        let u_neg = vec![-1.0_f32; 2];
-        let h_pos = hutchinson_hessian_estimate(&grad, &u_pos);
-        let h_neg = hutchinson_hessian_estimate(&grad, &u_neg);
-        for (p, n) in h_pos.iter().zip(h_neg.iter()) {
-            assert_relative_eq!(p, n, epsilon = 1e-6);
+        let direct = gauss_newton_diagonal(&grad);
+        for (index, &g) in grad.iter().enumerate() {
+            for u in [1.0_f32, -1.0] {
+                assert_relative_eq!(direct[index], (g * u) * (g * u), epsilon = 1e-6);
+            }
         }
     }
 

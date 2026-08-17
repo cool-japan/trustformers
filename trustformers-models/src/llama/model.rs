@@ -1183,6 +1183,82 @@ mod tests {
         }
     }
 
+    /// Every head block must be rotated. The previous implementation touched
+    /// only the leading `self.dim` columns, so every head above index 0 carried
+    /// no positional information at all.
+    #[test]
+    fn test_rope_rotates_every_head_not_just_the_first() {
+        // head_dim = 2 → half = 1 → freqs = [1.0]; two heads → last dim 4.
+        let rope = RotaryEmbedding::new(2, 32, 10000.0);
+        let values = vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0];
+        let q = Tensor::from_vec(values.clone(), &[2, 4]).expect("q");
+        let k = Tensor::from_vec(values, &[2, 4]).expect("k");
+
+        let (q_out, k_out) = rope.apply_rotary_emb(&q, &k, &[0, 1]).expect("rope");
+        let q_data = q_out.to_vec_f32().expect("q data");
+        let k_data = k_out.to_vec_f32().expect("k data");
+        assert_eq!(q_data, k_data, "both tensors share the same angle table");
+
+        // Position 0 is the identity.
+        assert!((q_data[0] - 1.0).abs() < 1e-6);
+        assert!(q_data[1].abs() < 1e-6);
+
+        let (sin_val, cos_val) = (1.0f32.sin(), 1.0f32.cos());
+        // Head 0 at position 1: (1, 0) → (cos, sin).
+        assert!(
+            (q_data[4] - cos_val).abs() < 1e-6,
+            "head 0 x: {}",
+            q_data[4]
+        );
+        assert!(
+            (q_data[5] - sin_val).abs() < 1e-6,
+            "head 0 y: {}",
+            q_data[5]
+        );
+        // Head 1 at position 1: (0, 1) → (-sin, cos) — the block that used to be
+        // left untouched.
+        assert!(
+            (q_data[6] + sin_val).abs() < 1e-6,
+            "head 1 x: {}",
+            q_data[6]
+        );
+        assert!(
+            (q_data[7] - cos_val).abs() < 1e-6,
+            "head 1 y: {}",
+            q_data[7]
+        );
+    }
+
+    /// Under GQA the key tensor is narrower than the query tensor; both must be
+    /// rotated with the same table and neither may be rejected.
+    #[test]
+    fn test_rope_accepts_different_query_and_key_widths() {
+        let rope = RotaryEmbedding::new(2, 32, 10000.0);
+        // q: 2 heads (width 4), k: 1 head (width 2).
+        let q =
+            Tensor::from_vec(vec![1.0f32, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0], &[2, 4]).expect("q");
+        let k = Tensor::from_vec(vec![1.0f32, 0.0, 1.0, 0.0], &[2, 2]).expect("k");
+        let (q_out, k_out) = rope.apply_rotary_emb(&q, &k, &[0, 1]).expect("rope");
+        assert_eq!(q_out.shape(), &[2, 4]);
+        assert_eq!(k_out.shape(), &[2, 2]);
+
+        let q_data = q_out.to_vec_f32().expect("q data");
+        let k_data = k_out.to_vec_f32().expect("k data");
+        let cos_val = 1.0f32.cos();
+        assert!((q_data[4] - cos_val).abs() < 1e-6);
+        assert!((q_data[6] - cos_val).abs() < 1e-6);
+        assert!((k_data[2] - cos_val).abs() < 1e-6);
+    }
+
+    /// A tensor whose width is not a whole number of head blocks is a caller
+    /// error, not something to silently half-rotate.
+    #[test]
+    fn test_rope_rejects_width_that_is_not_a_multiple_of_head_dim() {
+        let rope = RotaryEmbedding::new(4, 32, 10000.0);
+        let q = Tensor::from_vec(vec![0.0f32; 6], &[1, 6]).expect("q");
+        assert!(rope.apply_rotary_emb(&q, &q, &[0]).is_err());
+    }
+
     // -----------------------------------------------------------------------
     // LlamaAttention tests
     // -----------------------------------------------------------------------

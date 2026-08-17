@@ -272,6 +272,213 @@ fn test_decode_keeps_undeclared_sentinels() {
     );
 }
 
+/// Build a BPE-model tokenizer from `(piece, Option<score>)` pairs.
+///
+/// `None` deliberately leaves the piece *unscored*, which is exactly what
+/// [`SentencePieceTokenizer::load_vocab_from_file`] produces for a plain
+/// one-token-per-line vocabulary.
+fn bpe_tokenizer_with(pieces: &[(&str, Option<f32>)]) -> SentencePieceTokenizer {
+    let mut tokenizer = SentencePieceTokenizer::new()
+        .with_model_type(ModelType::Bpe)
+        .with_normalization(false)
+        .with_dummy_prefix(false);
+
+    for (index, (text, score)) in pieces.iter().enumerate() {
+        let id = index as u32;
+        tokenizer.vocab.insert((*text).to_string(), id);
+        tokenizer.id_to_token.insert(id, (*text).to_string());
+        if let Some(score) = score {
+            tokenizer.scores.insert(id, *score);
+        }
+        if *text == "<unk>" {
+            tokenizer.unk_token_id = Some(id);
+            tokenizer.special_tokens.insert((*text).to_string(), id);
+        }
+    }
+
+    tokenizer.refresh_stats();
+    tokenizer
+}
+
+/// SentencePiece BPE merges the highest-scoring adjacent pair first, so the same
+/// input must segment differently when the merge scores are swapped.
+#[test]
+fn test_bpe_model_merges_in_score_order() {
+    // "ab" (-1.0) outscores "bc" (-2.0): "abc" -> ["ab", "c"].
+    let ab_first = bpe_tokenizer_with(&[
+        ("<unk>", Some(0.0)),
+        ("a", Some(-8.0)),
+        ("b", Some(-8.0)),
+        ("c", Some(-8.0)),
+        ("ab", Some(-1.0)),
+        ("bc", Some(-2.0)),
+    ]);
+    assert_eq!(
+        ab_first.tokenize("abc"),
+        vec!["ab".to_string(), "c".to_string()]
+    );
+
+    // Swap the two scores and the segmentation flips to ["a", "bc"].
+    let bc_first = bpe_tokenizer_with(&[
+        ("<unk>", Some(0.0)),
+        ("a", Some(-8.0)),
+        ("b", Some(-8.0)),
+        ("c", Some(-8.0)),
+        ("ab", Some(-2.0)),
+        ("bc", Some(-1.0)),
+    ]);
+    assert_eq!(
+        bc_first.tokenize("abc"),
+        vec!["a".to_string(), "bc".to_string()]
+    );
+}
+
+/// Ties are broken leftmost, and exactly one pair is merged per iteration before
+/// the candidates are recomputed.
+#[test]
+fn test_bpe_model_merges_one_pair_per_iteration_leftmost_on_ties() {
+    let tokenizer =
+        bpe_tokenizer_with(&[("<unk>", Some(0.0)), ("a", Some(-8.0)), ("aa", Some(-1.0))]);
+
+    // Both ("a","a") pairs of "aaa" score -1.0; a rightmost tie-break would
+    // produce ["a", "aa"] instead.
+    assert_eq!(
+        tokenizer.tokenize("aaa"),
+        vec!["aa".to_string(), "a".to_string()],
+        "the leftmost of two equally scored pairs must win"
+    );
+
+    // "aaaa" needs two iterations: merge at 0, recompute, then merge at 1.
+    assert_eq!(
+        tokenizer.tokenize("aaaa"),
+        vec!["aa".to_string(), "aa".to_string()]
+    );
+}
+
+/// Regression: an in-vocabulary piece with no recorded score used to default to
+/// `0.0` — the *maximum* log probability — so it beat every genuinely scored
+/// merge. It must be charged the unknown score instead.
+#[test]
+fn test_bpe_model_unscored_piece_does_not_outrank_scored_merges() {
+    let tokenizer = bpe_tokenizer_with(&[
+        ("<unk>", Some(0.0)),
+        ("a", Some(-5.0)),
+        ("b", Some(-5.0)),
+        ("c", Some(-5.0)),
+        ("ab", Some(-5.0)),
+        ("bc", None), // present in the vocabulary, but unscored
+    ]);
+
+    assert!(
+        tokenizer.unk_score() < -5.0,
+        "unk_score must sit below every scored piece"
+    );
+    assert_eq!(
+        tokenizer.tokenize("abc"),
+        vec!["ab".to_string(), "c".to_string()],
+        "an unscored piece must not be treated as the most probable merge"
+    );
+
+    // The same rule governs the public ranking helper.
+    let ranked = tokenizer.get_tokens_by_score();
+    let bc_score = ranked
+        .iter()
+        .find(|(token, _, _)| token == "bc")
+        .map(|&(_, _, score)| score)
+        .expect("the unscored piece must still be listed");
+    assert!(
+        (bc_score - tokenizer.unk_score()).abs() < 1e-6,
+        "an unscored piece must be reported at unk_score, got {}",
+        bc_score
+    );
+    assert_eq!(
+        ranked.last().map(|(token, _, _)| token.as_str()),
+        Some("bc"),
+        "the unscored piece must rank last, not first"
+    );
+}
+
+/// A plain one-token-per-line vocabulary carries no scores at all; the BPE model
+/// must still segment deterministically rather than picking merges at random.
+#[test]
+fn test_bpe_model_handles_score_less_vocabulary() {
+    let dir = temp_dir_for("plain_vocab");
+    let vocab_path = dir.join("vocab.txt");
+    std::fs::write(&vocab_path, "<unk>\na\nb\nc\nab\n").expect("fixture must be writable");
+
+    let mut tokenizer = SentencePieceTokenizer::new()
+        .with_model_type(ModelType::Bpe)
+        .with_normalization(false)
+        .with_dummy_prefix(false);
+    tokenizer
+        .load_vocab_from_file(vocab_path.to_str().expect("temp path must be UTF-8"))
+        .expect("plain vocabulary must load");
+
+    assert_eq!(tokenizer.vocab_size(), 5);
+    assert_eq!(
+        tokenizer.tokenize("abc"),
+        vec!["ab".to_string(), "c".to_string()]
+    );
+
+    let _ = std::fs::remove_file(&vocab_path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+/// Regression: the plain vocabulary loader ignored marker-named pieces, so a
+/// file that plainly provides `<unk>` still yielded a tokenizer that refused to
+/// encode out-of-vocabulary text ("model has no <unk> piece").
+#[test]
+fn test_plain_vocab_loader_registers_special_tokens() {
+    let dir = temp_dir_for("plain_vocab_specials");
+    let vocab_path = dir.join("vocab.txt");
+    // Line 5 is blank: it must leave a hole, not renumber the pieces after it
+    // and not create an empty-string piece.
+    std::fs::write(&vocab_path, "<pad>\n<unk>\n<s>\n</s>\n\n▁hello\n")
+        .expect("fixture must be writable");
+
+    let mut tokenizer = SentencePieceTokenizer::new().with_normalization(false);
+    tokenizer
+        .load_vocab_from_file(vocab_path.to_str().expect("temp path must be UTF-8"))
+        .expect("plain vocabulary must load");
+
+    assert_eq!(tokenizer.pad_token_id(), Some(0));
+    assert_eq!(tokenizer.unk_token_id(), Some(1));
+    assert_eq!(tokenizer.bos_token_id(), Some(2));
+    assert_eq!(tokenizer.eos_token_id(), Some(3));
+    assert_eq!(tokenizer.token_to_id("▁hello"), Some(5));
+    assert_eq!(tokenizer.token_to_id(""), None);
+    assert_eq!(tokenizer.vocab_size(), 5);
+
+    // The file's <unk> is now usable, so OOV text encodes instead of erroring.
+    let encoded = tokenizer.encode("zzz").expect("the file's <unk> must be usable");
+    assert_eq!(encoded.input_ids, vec![1, 1, 1]);
+
+    let _ = std::fs::remove_file(&vocab_path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+/// A vocabulary file with no pieces is an error, not a silently empty tokenizer.
+#[test]
+fn test_plain_vocab_loader_rejects_an_empty_file() {
+    let dir = temp_dir_for("plain_vocab_empty");
+    let vocab_path = dir.join("empty.txt");
+    std::fs::write(&vocab_path, "\n   \n\n").expect("fixture must be writable");
+
+    let mut tokenizer = SentencePieceTokenizer::new();
+    let error = tokenizer
+        .load_vocab_from_file(vocab_path.to_str().expect("temp path must be UTF-8"))
+        .expect_err("a vocabulary with no pieces must be rejected");
+    assert!(
+        error.to_string().contains("no pieces"),
+        "error must explain the file is empty, got: {}",
+        error
+    );
+    assert_eq!(tokenizer.vocab_size(), 0);
+
+    let _ = std::fs::remove_file(&vocab_path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
 #[test]
 fn test_enhanced_normalization() {
     let tokenizer = SentencePieceTokenizer::new().with_normalization(true).with_dummy_prefix(true);
@@ -279,6 +486,135 @@ fn test_enhanced_normalization() {
     let normalized = tokenizer.normalize_text("Hello  world");
     assert!(normalized.starts_with(WHITESPACE_MARKER));
     assert!(!normalized.contains("  ")); // Extra spaces should be removed
+    assert_eq!(normalized, "▁Hello▁world");
+}
+
+/// The dummy affix is added as a raw space *before* escaping, so switching
+/// escaping off leaves a real space rather than a stray `▁`.
+///
+/// Regression: the affix used to be appended as a `▁` *after* escaping, which
+/// injected a word-boundary marker even into models that disable escaping.
+#[test]
+fn test_dummy_affix_is_added_before_escaping() {
+    let mut tokenizer =
+        SentencePieceTokenizer::new().with_normalization(true).with_dummy_prefix(true);
+    tokenizer.escape_whitespaces = false;
+
+    assert_eq!(tokenizer.normalize_text("Hello  world"), " Hello world");
+    assert!(
+        !tokenizer.normalize_text("Hello  world").contains(WHITESPACE_MARKER),
+        "escaping is off, so no word-boundary marker may appear"
+    );
+}
+
+/// Empty and whitespace-only input take no affix (SentencePiece's
+/// `!norm.empty()` guard), so they tokenize to nothing rather than to a lone
+/// `▁` piece that the vocabulary would have to absorb as an unknown.
+#[test]
+fn test_empty_input_gets_no_dummy_affix() {
+    let tokenizer = SentencePieceTokenizer::new().with_normalization(true).with_dummy_prefix(true);
+
+    assert_eq!(tokenizer.normalize_text(""), "");
+    assert_eq!(tokenizer.normalize_text("   "), "");
+    assert!(tokenizer.tokenize("").is_empty());
+    assert!(tokenizer.tokenize("   ").is_empty());
+}
+
+/// A literal `▁` in the input is ordinary text, not a boundary marker that
+/// already did the job — the affix is still added in front of it.
+#[test]
+fn test_literal_marker_in_input_does_not_suppress_the_affix() {
+    let tokenizer = SentencePieceTokenizer::new().with_normalization(true).with_dummy_prefix(true);
+
+    assert_eq!(
+        tokenizer.normalize_text("▁already marked"),
+        "▁▁already▁marked"
+    );
+}
+
+/// The overwhelmingly common configuration (escaping on, extra whitespace
+/// squeezed, ordinary text) is unaffected by the affix reordering.
+#[test]
+fn test_default_normalization_is_unchanged_for_ordinary_text() {
+    let tokenizer = SentencePieceTokenizer::new().with_normalization(true).with_dummy_prefix(true);
+
+    for (input, expected) in [
+        ("hello world", "▁hello▁world"),
+        ("Hello  world", "▁Hello▁world"),
+        (" leading space", "▁leading▁space"),
+        ("trailing ", "▁trailing"),
+        ("a", "▁a"),
+        ("tab\tsep", "▁tab▁sep"),
+        ("世界 mixed", "▁世界▁mixed"),
+    ] {
+        assert_eq!(
+            tokenizer.normalize_text(input),
+            expected,
+            "normalization changed for {:?}",
+            input
+        );
+    }
+}
+
+/// Regression: `treat_whitespace_as_suffix` was parsed from the model and
+/// exposed by a getter, but tokenization ignored it and still emitted `▁word`
+/// pieces that such a model's vocabulary does not contain.
+#[test]
+fn test_treat_whitespace_as_suffix_moves_the_marker() {
+    let prefix_model =
+        SentencePieceTokenizer::new().with_normalization(true).with_dummy_prefix(true);
+    assert!(!prefix_model.treats_whitespace_as_suffix());
+    assert_eq!(prefix_model.normalize_text("hello world"), "▁hello▁world");
+
+    let suffix_model = SentencePieceTokenizer::new()
+        .with_normalization(true)
+        .with_dummy_prefix(true)
+        .with_whitespace_as_suffix(true);
+    assert!(suffix_model.treats_whitespace_as_suffix());
+    assert_eq!(suffix_model.normalize_text("hello world"), "hello▁world▁");
+
+    // The word model must re-attach the marker on the same side.
+    let word_suffix = suffix_model.with_model_type(ModelType::Word);
+    assert_eq!(
+        word_suffix.tokenize("hello world"),
+        vec!["hello▁".to_string(), "world▁".to_string()]
+    );
+
+    let word_prefix = SentencePieceTokenizer::new()
+        .with_normalization(true)
+        .with_dummy_prefix(true)
+        .with_model_type(ModelType::Word);
+    assert_eq!(
+        word_prefix.tokenize("hello world"),
+        vec!["▁hello".to_string(), "▁world".to_string()]
+    );
+}
+
+/// A suffix-marked vocabulary must actually encode, which it cannot do if the
+/// pieces are built with a leading marker.
+#[test]
+fn test_suffix_model_encodes_against_a_suffix_vocabulary() {
+    let mut tokenizer = SentencePieceTokenizer::new()
+        .with_normalization(true)
+        .with_dummy_prefix(true)
+        .with_whitespace_as_suffix(true);
+
+    for (index, piece) in ["<unk>", "hello▁", "world▁"].iter().enumerate() {
+        let id = index as u32;
+        tokenizer.vocab.insert((*piece).to_string(), id);
+        tokenizer.id_to_token.insert(id, (*piece).to_string());
+        tokenizer.scores.insert(id, if id == 0 { 0.0 } else { -1.0 });
+    }
+    tokenizer.unk_token_id = Some(0);
+    tokenizer.special_tokens.insert("<unk>".to_string(), 0);
+    tokenizer.refresh_stats();
+
+    let encoded = tokenizer.encode("hello world").expect("encoding must succeed");
+    assert_eq!(encoded.input_ids, vec![1, 2]);
+    assert_eq!(
+        tokenizer.decode(&encoded.input_ids).expect("decoding must succeed"),
+        "hello world"
+    );
 }
 
 #[test]

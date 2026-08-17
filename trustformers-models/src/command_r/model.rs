@@ -1478,12 +1478,12 @@ impl CommandRForCausalLM {
 
     /// Load weights through a **memory-mapped** loader.
     ///
-    /// The checkpoint is mapped instead of being read into an intermediate
-    /// buffer, and tensors are materialised one at a time, so peak memory is
-    /// bounded by the model plus the largest single tensor. It is *not* deferred
-    /// loading: when this call returns every weight the model knows about is
-    /// resident. Model parameters are owned `Tensor`s, so there is nothing left
-    /// to resolve on first access.
+    /// The loading config asks for a memory-mapped reader, so tensors are
+    /// materialised one at a time out of the mapping instead of through an
+    /// intermediate copy of the whole checkpoint. It is *not* deferred loading:
+    /// when this call returns, every weight the model knows about is resident.
+    /// Model parameters are owned `Tensor`s, so there is nothing left to resolve
+    /// on first access.
     pub fn load_with_mmap(&mut self, model_path: impl AsRef<std::path::Path>) -> Result<()> {
         use crate::weight_loading::WeightLoadingConfig;
 

@@ -1,9 +1,23 @@
-// Fused operations for improved performance by reducing memory bandwidth
+// Convenience wrappers that chain common operation sequences (activation,
+// bias + activation, linear + activation, ...) behind one call.
+//
+// HONESTY NOTE: despite the "Fused*" names, none of these run a single
+// kernel or reduce memory traffic versus calling the underlying `Tensor`
+// ops directly - each step below (matmul, broadcast_add, softmax, the
+// activation itself, ...) still materializes its own full intermediate
+// tensor, exactly as if the caller had chained those `Tensor` methods by
+// hand. "Fused" here means "one function call for a common op sequence",
+// not "single-pass/fused-kernel execution". A real fusion would need a
+// combined-expression kernel (e.g. one `mapv` pass over the whole
+// expression, or a Metal `matmul_bias_gelu`-style kernel like
+// `gpu_ops::metal::metalbackend_matmul_gelu_f32_group`) that never
+// materializes the intermediate at all.
 use crate::tensor::Tensor;
 use anyhow::Result;
 
-/// Fused GELU activation function
-/// Combines GELU computation into a single kernel to reduce memory accesses
+/// GELU activation (erf-exact or tanh-approximate). See the module-level
+/// honesty note: this is a plain, single-op convenience wrapper, not a
+/// fused/single-pass kernel.
 pub struct FusedGELU {
     approximate: bool,
 }
@@ -81,8 +95,10 @@ impl FusedGELU {
     }
 }
 
-/// Fused bias + activation kernels
-/// Combines bias addition with activation function to reduce memory bandwidth
+/// Bias-add followed by an activation function, as one call. See the
+/// module-level honesty note: `broadcast_add` and the activation each
+/// still materialize their own output tensor - no memory bandwidth is
+/// saved versus calling them separately.
 pub struct FusedBiasActivation {
     activation: ActivationType,
 }
@@ -123,8 +139,9 @@ impl FusedBiasActivation {
     }
 }
 
-/// Fused attention-dropout operation
-/// Combines attention computation with dropout to reduce memory accesses
+/// Softmax followed by dropout, as one call. See the module-level honesty
+/// note: `softmax` and `dropout` each still materialize their own output
+/// tensor - no memory accesses are saved versus calling them separately.
 pub struct FusedAttentionDropout {
     dropout_prob: f32,
     training: bool,
@@ -158,8 +175,10 @@ impl FusedAttentionDropout {
     }
 }
 
-/// Fused linear transformation with activation
-/// Combines weight multiplication, bias addition, and activation in one kernel
+/// Linear transformation (matmul + optional bias) followed by an optional
+/// activation, as one call. See the module-level honesty note: the matmul,
+/// bias-add, and activation each still materialize their own output
+/// tensor - this is not a single fused kernel.
 pub struct FusedLinear {
     weight: Tensor,
     bias: Option<Tensor>,
@@ -207,8 +226,10 @@ impl FusedLinear {
     }
 }
 
-/// Fused matrix multiplication with custom scaling
-/// Optimizes common pattern of matmul followed by scaling
+/// Matrix multiplication followed by scaling, as one call. See the
+/// module-level honesty note: `matmul` and the scaling multiply each still
+/// materialize their own output tensor - this is not a single fused
+/// kernel.
 pub struct FusedMatmulScale {
     scale: f32,
 }

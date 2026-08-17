@@ -1,4 +1,4 @@
-use crate::distributed::ProcessGroup;
+use crate::distributed::{GradientCompressionConfig, ProcessGroup};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -124,6 +124,42 @@ pub struct Parallelism3D {
     // Per-stage computation supplied by the caller (see
     // `Parallelism3D::set_stage_executor`).
     stage_executor: Arc<RwLock<Option<StageExecutor>>>,
+
+    // Per-stage backward computation supplied by the caller (see
+    // `Parallelism3D::set_stage_backward`).
+    stage_backward: Arc<RwLock<Option<StageExecutor>>>,
+
+    // Lossy codec applied by `optimize_memory` for the Medium/High levels.
+    gradient_compression: GradientCompressionConfig,
+
+    // Measurements published by `optimize_pipeline_bubbles`.
+    rebalance_plan: Arc<RwLock<RebalancePlan>>,
+}
+
+/// Which way a pipeline message travels. Encoded into the message tag so that
+/// a forward activation and a backward gradient for the same micro-batch can
+/// never be confused for one another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PipelineDirection {
+    /// Stage `i` → stage `i + 1` (activations).
+    Forward = 0,
+    /// Stage `i` → stage `i - 1` (activation gradients).
+    Backward = 1,
+}
+
+/// What [`Parallelism3D::optimize_pipeline_bubbles`] measured.
+///
+/// This type carries observations and a derived recommendation only; nothing
+/// here is applied automatically, because layer placement and the micro-batch
+/// count belong to the caller.
+#[derive(Debug, Clone, Default)]
+pub struct RebalancePlan {
+    /// Stages whose measured time exceeded twice the average, with that time.
+    pub bottleneck_stages: Vec<(usize, Duration)>,
+    /// `pipeline_bubbles / (forward + backward passes)` at the last call.
+    pub measured_bubble_ratio: f32,
+    /// Micro-batch count that would bring the GPipe bubble under 20%.
+    pub recommended_micro_batches: usize,
 }
 
 /// Computation executed by one pipeline stage: `(inputs, stage) -> outputs`.
@@ -220,6 +256,11 @@ impl Parallelism3D {
             comm_stats: Arc::new(Mutex::new(CommunicationStats::default())),
             memory_manager: Arc::new(Mutex::new(memory_manager)),
             stage_executor: Arc::new(RwLock::new(None)),
+            stage_backward: Arc::new(RwLock::new(None)),
+            // 10% top-k is the classic bandwidth/accuracy compromise; override
+            // with `with_gradient_compression`.
+            gradient_compression: GradientCompressionConfig::default_when_enabled(),
+            rebalance_plan: Arc::new(RwLock::new(RebalancePlan::default())),
         })
     }
 
@@ -239,6 +280,47 @@ impl Parallelism3D {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .is_some()
+    }
+
+    /// Register the backward computation each pipeline stage performs.
+    ///
+    /// The closure receives the gradient of this stage's *outputs* and the
+    /// stage index, and returns the gradient of this stage's *inputs* — which
+    /// is what gets sent to the preceding stage. Without it,
+    /// [`Parallelism3D::backward_pass`] fails with an explicit error rather
+    /// than echoing its input.
+    pub fn set_stage_backward(&self, executor: StageExecutor) {
+        let mut slot = self.stage_backward.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = Some(executor);
+    }
+
+    /// Whether a backward stage executor has been registered.
+    pub fn has_stage_backward(&self) -> bool {
+        self.stage_backward
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+    }
+
+    /// Choose the lossy codec [`Parallelism3D::optimize_memory`] applies at the
+    /// [`MemoryOptimization::Medium`] and [`MemoryOptimization::High`] levels.
+    pub fn with_gradient_compression(mut self, codec: GradientCompressionConfig) -> Self {
+        self.gradient_compression = codec;
+        self
+    }
+
+    /// The active gradient compression codec.
+    pub fn gradient_compression(&self) -> GradientCompressionConfig {
+        self.gradient_compression
+    }
+
+    /// The measurements and recommendation published by the last
+    /// [`Parallelism3D::optimize_pipeline_bubbles`] call.
+    pub fn rebalance_plan(&self) -> RebalancePlan {
+        self.rebalance_plan
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Execute forward pass with 3D parallelism
@@ -319,10 +401,16 @@ impl Parallelism3D {
 
     /// Optimize memory usage based on configuration
     pub fn optimize_memory(&self, tensors: &mut [Tensor]) -> Result<()> {
-        let memory_manager =
-            self.memory_manager.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Read the level and release the lock: every handler below takes the
+        // same `Mutex`, and `std::sync::Mutex` is not reentrant — holding it
+        // across the dispatch deadlocks the caller.
+        let level = {
+            let memory_manager =
+                self.memory_manager.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            memory_manager.memory_optimization_level.clone()
+        };
 
-        match memory_manager.memory_optimization_level {
+        match level {
             MemoryOptimization::None => {
                 // No optimization
                 Ok(())
@@ -349,32 +437,46 @@ impl Parallelism3D {
         }
     }
 
-    /// Handle pipeline bubble optimization
+    /// Measure the pipeline's bubble behaviour and publish a rebalancing plan.
+    ///
+    /// See [`Parallelism3D::rebalance_plan`] for what is produced. The plan is
+    /// a measurement plus a recommendation; nothing is silently mutated.
     pub fn optimize_pipeline_bubbles(&self) -> Result<()> {
-        let state = self.pipeline_state.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        // The helpers below take the same `RwLock`; `std::sync::RwLock` gives no
+        // reentrancy guarantee, so the guard is scoped and dropped first.
+        let (bottleneck_stages, passes, bubbles) = {
+            let state = self.pipeline_state.read().unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        // Analyze pipeline timing patterns
-        let total_stages = self.config.pp_size;
-        let avg_stage_time = state.stage_timings.values().sum::<Duration>() / total_stages as u32;
+            let total_stages = self.config.pp_size.max(1);
+            let avg_stage_time =
+                state.stage_timings.values().sum::<Duration>() / total_stages as u32;
 
-        // Identify bottleneck stages
-        let mut bottleneck_stages = Vec::new();
-        for (stage, timing) in &state.stage_timings {
-            if *timing > avg_stage_time * 2 {
-                bottleneck_stages.push(*stage);
+            let mut bottleneck_stages = Vec::new();
+            for (stage, timing) in &state.stage_timings {
+                if *timing > avg_stage_time * 2 {
+                    bottleneck_stages.push(*stage);
+                }
             }
-        }
+            bottleneck_stages.sort_unstable();
 
-        // Apply bubble reduction strategies
+            (
+                bottleneck_stages,
+                state.forward_passes_completed + state.backward_passes_completed,
+                state.pipeline_bubbles,
+            )
+        };
+
         if !bottleneck_stages.is_empty() {
             self.apply_load_balancing(&bottleneck_stages)?;
         }
 
-        // Track bubble statistics
-        let pipeline_efficiency = 1.0
-            - (state.pipeline_bubbles as f32
-                / (state.forward_passes_completed + state.backward_passes_completed) as f32);
+        // No passes yet means there is nothing to measure; reporting a
+        // efficiency of 1.0 (or NaN) would be an invented number.
+        if passes == 0 {
+            return Ok(());
+        }
 
+        let pipeline_efficiency = 1.0 - (bubbles as f32 / passes as f32);
         if pipeline_efficiency < 0.8 {
             self.adjust_micro_batch_size()?;
         }
@@ -439,35 +541,43 @@ impl Parallelism3D {
         }
     }
 
+    /// PipeDream forward pass.
+    ///
+    /// The per-micro-batch *data flow* is identical to GPipe — the same
+    /// activations move between the same stages — so this runs the GPipe path.
+    /// What PipeDream adds is asynchronous 1F1B scheduling with weight
+    /// stashing, which is a property of the driver loop rather than of a single
+    /// micro-batch, and which this coordinator does not implement. Timing
+    /// therefore matches GPipe; correctness does not differ.
     fn forward_pipedream<M: Model>(
         &self,
         model: &M,
         inputs: &[Tensor],
         micro_batch_id: usize,
     ) -> Result<Vec<Tensor>> {
-        // PipeDream: Interleaved forward and backward passes
-        // Implementation would be more complex, involving asynchronous execution
-        self.forward_gpipe(model, inputs, micro_batch_id) // Simplified for now
+        self.forward_gpipe(model, inputs, micro_batch_id)
     }
 
+    /// PipeDream-2BW forward pass; see [`Self::forward_pipedream`] for the
+    /// schedule caveat.
     fn forward_pipedream_2bw<M: Model>(
         &self,
         model: &M,
         inputs: &[Tensor],
         micro_batch_id: usize,
     ) -> Result<Vec<Tensor>> {
-        // PipeDream-2BW: Bidirectional weight updates
-        self.forward_gpipe(model, inputs, micro_batch_id) // Simplified for now
+        self.forward_gpipe(model, inputs, micro_batch_id)
     }
 
+    /// Interleaved-1F1B forward pass; see [`Self::forward_pipedream`] for the
+    /// schedule caveat.
     fn forward_interleaved_1f1b<M: Model>(
         &self,
         model: &M,
         inputs: &[Tensor],
         micro_batch_id: usize,
     ) -> Result<Vec<Tensor>> {
-        // Interleaved 1F1B: One forward, one backward pattern
-        self.forward_gpipe(model, inputs, micro_batch_id) // Simplified for now
+        self.forward_gpipe(model, inputs, micro_batch_id)
     }
 
     fn forward_adaptive<M: Model>(
@@ -493,51 +603,102 @@ impl Parallelism3D {
         }
     }
 
-    // Backward pass implementations (similar pattern)
+    /// GPipe backward pass: gradients flow from the last stage to the first.
+    ///
+    /// The last stage differentiates the incoming loss gradient; every other
+    /// stage first receives the activation gradient produced by the stage after
+    /// it. Each stage runs the registered backward executor (see
+    /// [`Parallelism3D::set_stage_backward`]) and forwards the result to the
+    /// stage before it.
     fn backward_gpipe<M: Model>(
         &self,
         _model: &mut M,
         gradients: &[Tensor],
-        _micro_batch_id: usize,
+        micro_batch_id: usize,
     ) -> Result<Vec<Tensor>> {
-        // Implement GPipe backward pass
-        Ok(gradients.to_vec()) // Simplified
+        let last_stage = self.config.pp_size.saturating_sub(1);
+
+        let incoming = if self.pp_rank == last_stage {
+            gradients.to_vec()
+        } else {
+            self.receive_from_next_stage(micro_batch_id)?
+        };
+
+        let outgoing = self.run_stage_backward(&incoming, self.pp_rank)?;
+
+        if self.pp_rank > 0 {
+            self.send_to_previous_stage(&outgoing, micro_batch_id)?;
+        }
+
+        Ok(outgoing)
     }
 
+    /// PipeDream backward pass.
+    ///
+    /// The gradient plumbing is identical to GPipe; what PipeDream changes is
+    /// the *schedule* (asynchronous 1F1B with weight stashing), which this
+    /// coordinator does not implement. Selecting it therefore runs the GPipe
+    /// data flow — correct gradients, no schedule overlap — and the difference
+    /// is documented rather than silently claimed.
     fn backward_pipedream<M: Model>(
         &self,
-        _model: &mut M,
+        model: &mut M,
         gradients: &[Tensor],
-        _micro_batch_id: usize,
+        micro_batch_id: usize,
     ) -> Result<Vec<Tensor>> {
-        Ok(gradients.to_vec()) // Simplified
+        self.backward_gpipe(model, gradients, micro_batch_id)
     }
 
+    /// PipeDream-2BW backward pass; see [`Self::backward_pipedream`] for the
+    /// schedule caveat.
     fn backward_pipedream_2bw<M: Model>(
         &self,
-        _model: &mut M,
+        model: &mut M,
         gradients: &[Tensor],
-        _micro_batch_id: usize,
+        micro_batch_id: usize,
     ) -> Result<Vec<Tensor>> {
-        Ok(gradients.to_vec()) // Simplified
+        self.backward_gpipe(model, gradients, micro_batch_id)
     }
 
+    /// Interleaved-1F1B backward pass; see [`Self::backward_pipedream`] for the
+    /// schedule caveat.
     fn backward_interleaved_1f1b<M: Model>(
         &self,
-        _model: &mut M,
+        model: &mut M,
         gradients: &[Tensor],
-        _micro_batch_id: usize,
+        micro_batch_id: usize,
     ) -> Result<Vec<Tensor>> {
-        Ok(gradients.to_vec()) // Simplified
+        self.backward_gpipe(model, gradients, micro_batch_id)
     }
 
+    /// Adaptive backward pass; see [`Self::backward_pipedream`] for the
+    /// schedule caveat.
     fn backward_adaptive<M: Model>(
         &self,
-        _model: &mut M,
+        model: &mut M,
         gradients: &[Tensor],
-        _micro_batch_id: usize,
+        micro_batch_id: usize,
     ) -> Result<Vec<Tensor>> {
-        Ok(gradients.to_vec()) // Simplified
+        self.backward_gpipe(model, gradients, micro_batch_id)
+    }
+
+    /// Run this stage's registered backward computation.
+    ///
+    /// # Errors
+    ///
+    /// When no backward executor has been registered. Echoing the incoming
+    /// gradient back would report a completed backward pass that never ran.
+    fn run_stage_backward(&self, gradients: &[Tensor], stage: usize) -> Result<Vec<Tensor>> {
+        let executor = self.stage_backward.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        match executor.as_ref() {
+            Some(executor) => executor(gradients, stage),
+            None => Err(anyhow!(
+                "no backward executor registered for pipeline stage {stage}: the Model trait \
+                 exposes no per-layer autodiff hook, so 3D parallelism cannot differentiate the \
+                 stage on its own. Register it with Parallelism3D::set_stage_backward"
+            )),
+        }
     }
 
     // Communication methods
@@ -604,14 +765,20 @@ impl Parallelism3D {
 
     /// Message tag for one pipeline transfer.
     ///
-    /// Both endpoints derive the same value from the micro-batch id and the
-    /// message role, so no call-ordering convention is needed between stages
-    /// that execute different code paths.
-    fn pipeline_tag(micro_batch_id: usize, part: u64) -> u64 {
-        (micro_batch_id as u64) << 8 | part
+    /// Both endpoints derive the same value from the micro-batch id, the
+    /// direction and the message role, so no call-ordering convention is needed
+    /// between stages that execute different code paths.
+    fn pipeline_tag(micro_batch_id: usize, direction: PipelineDirection, part: u64) -> u64 {
+        (micro_batch_id as u64) << 9 | (direction as u64) << 8 | part
     }
 
-    /// Send `tensors` to the next pipeline stage.
+    /// Largest number of tensors that fit in one pipeline message.
+    ///
+    /// Parts 0 and 1 carry the header and manifest, and the part index must stay
+    /// inside the 8 bits reserved for it in [`Self::pipeline_tag`].
+    const MAX_PIPELINE_TENSORS: usize = 254;
+
+    /// Send `tensors` to `peer`, labelled with `direction`.
     ///
     /// Wire protocol, in order:
     /// 1. a one-element header holding the manifest length,
@@ -620,15 +787,20 @@ impl Parallelism3D {
     ///
     /// Shapes travel with the data, so the receiver reconstructs exactly what
     /// was sent.
-    fn send_to_next_stage(&self, tensors: &[Tensor], micro_batch_id: usize) -> Result<()> {
-        let next_rank = self.pp_rank + 1;
-        if next_rank >= self.config.pp_size {
+    fn send_stage_tensors(
+        &self,
+        peer: usize,
+        tensors: &[Tensor],
+        micro_batch_id: usize,
+        direction: PipelineDirection,
+    ) -> Result<()> {
+        if tensors.len() > Self::MAX_PIPELINE_TENSORS {
             return Err(anyhow!(
-                "pipeline stage {} is the last stage; there is no next stage to send to",
-                self.pp_rank
+                "a pipeline message carries at most {} tensors, got {}",
+                Self::MAX_PIPELINE_TENSORS,
+                tensors.len()
             ));
         }
-        self.require_pipeline_transport("send_to_next_stage")?;
 
         let mut manifest: Vec<f32> = vec![tensors.len() as f32];
         for tensor in tensors {
@@ -638,13 +810,17 @@ impl Parallelism3D {
         }
 
         let header = Tensor::from_slice(&[manifest.len() as f32], &[1])?;
-        self.pp_group.send(next_rank, Self::pipeline_tag(micro_batch_id, 0), &header)?;
+        self.pp_group.send(
+            peer,
+            Self::pipeline_tag(micro_batch_id, direction, 0),
+            &header,
+        )?;
 
         let manifest_len = manifest.len();
         let manifest_tensor = Tensor::from_slice(&manifest, &[manifest_len])?;
         self.pp_group.send(
-            next_rank,
-            Self::pipeline_tag(micro_batch_id, 1),
+            peer,
+            Self::pipeline_tag(micro_batch_id, direction, 1),
             &manifest_tensor,
         )?;
 
@@ -653,8 +829,8 @@ impl Parallelism3D {
             let length = values.len();
             let flat = Tensor::from_slice(&values, &[length])?;
             self.pp_group.send(
-                next_rank,
-                Self::pipeline_tag(micro_batch_id, 2 + index as u64),
+                peer,
+                Self::pipeline_tag(micro_batch_id, direction, 2 + index as u64),
                 &flat,
             )?;
         }
@@ -669,6 +845,41 @@ impl Parallelism3D {
         Ok(())
     }
 
+    /// Send `tensors` to the next pipeline stage (forward direction).
+    fn send_to_next_stage(&self, tensors: &[Tensor], micro_batch_id: usize) -> Result<()> {
+        let next_rank = self.pp_rank + 1;
+        if next_rank >= self.config.pp_size {
+            return Err(anyhow!(
+                "pipeline stage {} is the last stage; there is no next stage to send to",
+                self.pp_rank
+            ));
+        }
+        self.require_pipeline_transport("send_to_next_stage")?;
+        self.send_stage_tensors(
+            next_rank,
+            tensors,
+            micro_batch_id,
+            PipelineDirection::Forward,
+        )
+    }
+
+    /// Send activation gradients to the previous pipeline stage (backward
+    /// direction).
+    fn send_to_previous_stage(&self, tensors: &[Tensor], micro_batch_id: usize) -> Result<()> {
+        if self.pp_rank == 0 {
+            return Err(anyhow!(
+                "pipeline stage 0 is the first stage; there is no previous stage to send to"
+            ));
+        }
+        self.require_pipeline_transport("send_to_previous_stage")?;
+        self.send_stage_tensors(
+            self.pp_rank - 1,
+            tensors,
+            micro_batch_id,
+            PipelineDirection::Backward,
+        )
+    }
+
     /// Receive the tensors sent by the previous pipeline stage, restoring their
     /// original shapes.
     fn receive_from_previous_stage(&self, micro_batch_id: usize) -> Result<Vec<Tensor>> {
@@ -678,11 +889,36 @@ impl Parallelism3D {
             ));
         }
         self.require_pipeline_transport("receive_from_previous_stage")?;
-        let previous_rank = self.pp_rank - 1;
+        self.recv_stage_tensors(self.pp_rank - 1, micro_batch_id, PipelineDirection::Forward)
+    }
 
+    /// Receive the activation gradients sent by the next pipeline stage.
+    fn receive_from_next_stage(&self, micro_batch_id: usize) -> Result<Vec<Tensor>> {
+        let next_rank = self.pp_rank + 1;
+        if next_rank >= self.config.pp_size {
+            return Err(anyhow!(
+                "pipeline stage {} is the last stage; there is no next stage to receive from",
+                self.pp_rank
+            ));
+        }
+        self.require_pipeline_transport("receive_from_next_stage")?;
+        self.recv_stage_tensors(next_rank, micro_batch_id, PipelineDirection::Backward)
+    }
+
+    /// Receive one pipeline message from `peer`.
+    fn recv_stage_tensors(
+        &self,
+        previous_rank: usize,
+        micro_batch_id: usize,
+        direction: PipelineDirection,
+    ) -> Result<Vec<Tensor>> {
         let header = self
             .pp_group
-            .recv(previous_rank, Self::pipeline_tag(micro_batch_id, 0), &[1])?
+            .recv(
+                previous_rank,
+                Self::pipeline_tag(micro_batch_id, direction, 0),
+                &[1],
+            )?
             .to_vec_f32()?;
         let manifest_len = *header
             .first()
@@ -693,7 +929,7 @@ impl Parallelism3D {
             .pp_group
             .recv(
                 previous_rank,
-                Self::pipeline_tag(micro_batch_id, 1),
+                Self::pipeline_tag(micro_batch_id, direction, 1),
                 &[manifest_len],
             )?
             .to_vec_f32()?;
@@ -724,7 +960,7 @@ impl Parallelism3D {
             let elements: usize = shape.iter().product();
             let flat = self.pp_group.recv(
                 previous_rank,
-                Self::pipeline_tag(micro_batch_id, 2 + index as u64),
+                Self::pipeline_tag(micro_batch_id, direction, 2 + index as u64),
                 &[elements],
             )?;
             tensors.push(Tensor::from_slice(&flat.to_vec_f32()?, &shape)?);
@@ -791,35 +1027,116 @@ impl Parallelism3D {
         Ok(())
     }
 
+    /// Apply the configured lossy gradient codec in place.
+    ///
+    /// The codec is [`GradientCompressionConfig`] from the distributed layer,
+    /// so the arithmetic is shared with `DataParallelTrainer` rather than
+    /// re-invented here. The values really change: top-k zeroes the small
+    /// entries, quantization snaps to the reconstruction grid.
     fn apply_gradient_compression(&self, tensors: &mut [Tensor]) -> Result<()> {
-        // Apply gradient compression techniques
-        for _tensor in tensors.iter_mut() {
-            // Simplified: could implement various compression schemes
-            // - Quantization
-            // - Sparsification
-            // - Low-rank approximation
+        let codec = self.gradient_compression;
+        if codec == GradientCompressionConfig::None {
+            return Ok(());
+        }
+        for tensor in tensors.iter_mut() {
+            let shape = tensor.shape();
+            let mut values = tensor.to_vec_f32()?;
+            codec.apply(&mut values)?;
+            *tensor = Tensor::from_slice(&values, &shape)?;
         }
         Ok(())
     }
 
+    /// CPU offloading.
+    ///
+    /// Tensors in the pure-Rust build already live in host memory — there is no
+    /// device buffer to evict — so this is a genuine no-op and is documented as
+    /// one rather than reported as a saving. It exists so the
+    /// [`MemoryOptimization::High`] path stays explicit about what it does and
+    /// does not do.
     fn apply_cpu_offloading(&self, _tensors: &mut [Tensor]) -> Result<()> {
-        // Offload tensors to CPU memory when not actively used
         Ok(())
     }
 
+    /// ZeRO-style optimizer-state partitioning.
+    ///
+    /// # Errors
+    ///
+    /// Always. ZeRO partitions *optimizer state*, which this type does not own:
+    /// it never sees the optimizer. Silently returning `Ok(())` from
+    /// [`MemoryOptimization::Extreme`] would report a memory saving that never
+    /// happened, so the caller is pointed at the type that implements it.
     fn apply_zero_optimization(&self, _tensors: &mut [Tensor]) -> Result<()> {
-        // Apply ZeRO-style optimizer state partitioning
+        Err(anyhow!(
+            "MemoryOptimization::Extreme requests ZeRO optimizer-state partitioning, which \
+             Parallelism3D cannot perform: it holds no optimizer. Wrap your optimizer in \
+             crate::distributed_zero::ZeroStage1Optimizer over the data-parallel process group, \
+             and select a different MemoryOptimization level here"
+        ))
+    }
+
+    /// Record a rebalancing plan for the stages that are running long.
+    ///
+    /// Layer-to-stage assignment lives in the caller's stage executor (see
+    /// [`Parallelism3D::set_stage_executor`]), so this type cannot move layers
+    /// itself. What it *can* do honestly is publish the measurement: the
+    /// bottleneck stages and their observed times, retrievable with
+    /// [`Parallelism3D::rebalance_plan`].
+    fn apply_load_balancing(&self, bottleneck_stages: &[usize]) -> Result<()> {
+        let timings = {
+            let state = self.pipeline_state.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+            bottleneck_stages
+                .iter()
+                .map(|stage| {
+                    (
+                        *stage,
+                        state.stage_timings.get(stage).copied().unwrap_or_default(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut plan = self.rebalance_plan.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        plan.bottleneck_stages = timings;
         Ok(())
     }
 
-    // Performance optimization methods
-    fn apply_load_balancing(&self, _bottleneck_stages: &[usize]) -> Result<()> {
-        // Implement dynamic load balancing for pipeline stages
-        Ok(())
-    }
-
+    /// Recompute the recommended micro-batch count from the measured bubble
+    /// ratio and publish it in the rebalance plan.
+    ///
+    /// More micro-batches shrink the pipeline bubble (`(pp_size - 1) / (m +
+    /// pp_size - 1)` for GPipe), so the recommendation grows with the observed
+    /// bubble fraction. The value is a recommendation, not an applied change:
+    /// the micro-batch count is part of [`ParallelismConfig`] and belongs to
+    /// whoever constructed this coordinator.
     fn adjust_micro_batch_size(&self) -> Result<()> {
-        // Dynamically adjust micro-batch size to reduce pipeline bubbles
+        let (bubbles, passes) = {
+            let state = self.pipeline_state.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+            (
+                state.pipeline_bubbles,
+                state.forward_passes_completed + state.backward_passes_completed,
+            )
+        };
+        if passes == 0 {
+            return Ok(());
+        }
+
+        let bubble_ratio = (bubbles as f32 / passes as f32).clamp(0.0, 0.99);
+        // Target: keep the bubble fraction under 20%. GPipe's bubble is
+        // (p - 1) / (m + p - 1), so the m that hits a target t is
+        // m = (p - 1) * (1 - t) / t.
+        let stages = self.config.pp_size.max(1) as f32;
+        let target = 0.2f32;
+        let recommended = if bubble_ratio > target {
+            (((stages - 1.0) * (1.0 - target) / target).ceil() as usize)
+                .max(self.config.num_micro_batches)
+        } else {
+            self.config.num_micro_batches
+        };
+
+        let mut plan = self.rebalance_plan.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        plan.measured_bubble_ratio = bubble_ratio;
+        plan.recommended_micro_batches = recommended;
         Ok(())
     }
 
@@ -1110,5 +1427,236 @@ mod tests {
             config.activation_checkpointing,
             deserialized.activation_checkpointing
         );
+    }
+
+    // ── Memory optimisation and pipeline scheduling ──────────────────────
+    //
+    // These assertions would all have failed against the previous
+    // implementation, where `apply_gradient_compression` was an empty loop,
+    // `apply_zero_optimization` returned `Ok(())` without partitioning
+    // anything, and every backward pass returned its input unchanged.
+
+    fn coordinator(memory_optimization: MemoryOptimization) -> Parallelism3D {
+        let config = ParallelismConfig {
+            dp_size: 1,
+            mp_size: 1,
+            pp_size: 1,
+            memory_optimization,
+            ..Default::default()
+        };
+        Parallelism3D::new(
+            config,
+            0,
+            1,
+            Arc::new(SimulatedProcessGroup::new(0, 1)),
+            Arc::new(SimulatedProcessGroup::new(0, 1)),
+            Arc::new(SimulatedProcessGroup::new(0, 1)),
+        )
+        .expect("coordinator must build in test")
+    }
+
+    #[test]
+    fn gradient_compression_really_changes_the_values() {
+        let parallelism = coordinator(MemoryOptimization::Medium)
+            .with_gradient_compression(GradientCompressionConfig::TopK { ratio: 0.25 });
+
+        let values: Vec<f32> = vec![0.01, -5.0, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07];
+        let mut tensors =
+            vec![Tensor::from_slice(&values, &[8]).expect("tensor must build in test")];
+
+        parallelism
+            .optimize_memory(&mut tensors)
+            .expect("optimize_memory must succeed in test");
+
+        let compressed = tensors[0].to_vec_f32().expect("tensor read must succeed in test");
+        assert_ne!(
+            compressed, values,
+            "compression must actually modify the gradient"
+        );
+        // 25% of 8 elements = 2 survivors: the two largest magnitudes.
+        let survivors = compressed.iter().filter(|value| **value != 0.0).count();
+        assert_eq!(
+            survivors, 2,
+            "top-k must keep exactly ceil(8 * 0.25) entries"
+        );
+        approx::assert_relative_eq!(compressed[1], -5.0f32, epsilon = 1e-6);
+        approx::assert_relative_eq!(compressed[7], 0.07f32, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn gradient_compression_none_is_the_identity() {
+        let parallelism = coordinator(MemoryOptimization::Medium)
+            .with_gradient_compression(GradientCompressionConfig::None);
+        let values: Vec<f32> = vec![0.5, -0.25, 0.125, 1.0];
+        let mut tensors =
+            vec![Tensor::from_slice(&values, &[4]).expect("tensor must build in test")];
+        parallelism
+            .optimize_memory(&mut tensors)
+            .expect("optimize_memory must succeed in test");
+        assert_eq!(
+            tensors[0].to_vec_f32().expect("tensor read must succeed in test"),
+            values
+        );
+    }
+
+    #[test]
+    fn extreme_memory_optimization_refuses_to_claim_zero_partitioning() {
+        let parallelism = coordinator(MemoryOptimization::Extreme);
+        let mut tensors = vec![Tensor::ones(&[4]).expect("tensor must build in test")];
+        let error = parallelism
+            .optimize_memory(&mut tensors)
+            .expect_err("Extreme must not silently do nothing in test");
+        assert!(error.to_string().contains("ZeroStage1Optimizer"), "{error}");
+    }
+
+    #[test]
+    fn backward_pass_without_an_executor_is_an_error() {
+        let parallelism = coordinator(MemoryOptimization::None);
+        let mut model = PassthroughModel::default();
+        let gradients = vec![Tensor::ones(&[2]).expect("tensor must build in test")];
+
+        let error = parallelism
+            .backward_pass(&mut model, &gradients, 0)
+            .expect_err("an unregistered backward must fail in test");
+        assert!(error.to_string().contains("set_stage_backward"), "{error}");
+    }
+
+    #[test]
+    fn backward_pass_runs_the_registered_executor() {
+        let parallelism = coordinator(MemoryOptimization::None);
+        parallelism.set_stage_backward(Box::new(|gradients: &[Tensor], _stage| {
+            gradients.iter().map(|tensor| Ok(tensor.scalar_mul(2.0)?)).collect()
+        }));
+
+        let mut model = PassthroughModel::default();
+        let gradients =
+            vec![Tensor::from_slice(&[1.0f32, -2.0], &[2]).expect("tensor must build in test")];
+        let out = parallelism
+            .backward_pass(&mut model, &gradients, 0)
+            .expect("backward must succeed in test");
+
+        assert_eq!(
+            out[0].to_vec_f32().expect("tensor read must succeed in test"),
+            vec![2.0f32, -4.0],
+            "the executor must run; echoing the input back would give [1, -2]"
+        );
+    }
+
+    #[test]
+    fn pipeline_backward_moves_gradients_from_the_last_stage_to_the_first() {
+        use crate::distributed_collective::run_in_process;
+
+        // Two pipeline stages as threads. Stage 1 differentiates the loss
+        // gradient and sends the result to stage 0.
+        let per_rank = run_in_process(2, |rank, group| -> Result<Vec<f32>> {
+            let config = ParallelismConfig {
+                dp_size: 1,
+                mp_size: 1,
+                pp_size: 2,
+                ..Default::default()
+            };
+            let single: Arc<dyn ProcessGroup> = Arc::new(SimulatedProcessGroup::new(0, 1));
+            let pp_group: Arc<dyn ProcessGroup> = group;
+            let parallelism =
+                Parallelism3D::new(config, rank, 2, Arc::clone(&single), single, pp_group)?;
+
+            // Stage `s` multiplies the incoming gradient by (s + 2).
+            parallelism.set_stage_backward(Box::new(|gradients: &[Tensor], stage: usize| {
+                gradients
+                    .iter()
+                    .map(|tensor| Ok(tensor.scalar_mul(stage as f32 + 2.0)?))
+                    .collect()
+            }));
+
+            let mut model = PassthroughModel::default();
+            let seed = vec![Tensor::from_slice(&[1.0f32, 2.0], &[2])?];
+            let out = parallelism.backward_pass(&mut model, &seed, 7)?;
+            Ok(out[0].to_vec_f32()?)
+        })
+        .expect("in-process run must succeed in test");
+
+        let stage0 = per_rank[0].as_ref().expect("stage 0 must complete in test");
+        let stage1 = per_rank[1].as_ref().expect("stage 1 must complete in test");
+
+        // Stage 1 sees the seed and scales by 3; stage 0 receives that and
+        // scales by 2. Nothing here is reachable without a real transfer.
+        assert_eq!(stage1, &vec![3.0f32, 6.0]);
+        assert_eq!(stage0, &vec![6.0f32, 12.0]);
+    }
+
+    #[test]
+    fn pipeline_bubble_optimisation_publishes_a_real_measurement() {
+        let parallelism = coordinator(MemoryOptimization::None);
+        assert_eq!(parallelism.rebalance_plan().recommended_micro_batches, 0);
+
+        {
+            let mut state = parallelism
+                .pipeline_state
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.forward_passes_completed = 10;
+            state.backward_passes_completed = 10;
+            state.pipeline_bubbles = 12; // 60% bubbles, far above the 20% target
+            state.stage_timings.insert(0, Duration::from_millis(10));
+        }
+
+        parallelism
+            .optimize_pipeline_bubbles()
+            .expect("optimisation must succeed in test");
+
+        let plan = parallelism.rebalance_plan();
+        approx::assert_relative_eq!(plan.measured_bubble_ratio, 0.6f32, epsilon = 1e-6);
+        assert!(
+            plan.recommended_micro_batches >= parallelism.config.num_micro_batches,
+            "a high bubble ratio must recommend at least as many micro-batches"
+        );
+    }
+
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    struct PassthroughConfig;
+
+    impl trustformers_core::traits::Config for PassthroughConfig {
+        fn architecture(&self) -> &'static str {
+            "passthrough"
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct PassthroughModel {
+        config: PassthroughConfig,
+    }
+
+    impl Default for PassthroughConfig {
+        fn default() -> Self {
+            Self
+        }
+    }
+
+    impl Model for PassthroughModel {
+        type Config = PassthroughConfig;
+        type Input = Tensor;
+        type Output = Tensor;
+
+        fn forward(
+            &self,
+            input: Self::Input,
+        ) -> std::result::Result<Self::Output, trustformers_core::TrustformersError> {
+            Ok(input)
+        }
+
+        fn load_pretrained(
+            &mut self,
+            _reader: &mut dyn std::io::Read,
+        ) -> std::result::Result<(), trustformers_core::TrustformersError> {
+            Ok(())
+        }
+
+        fn get_config(&self) -> &Self::Config {
+            &self.config
+        }
+
+        fn num_parameters(&self) -> usize {
+            0
+        }
     }
 }

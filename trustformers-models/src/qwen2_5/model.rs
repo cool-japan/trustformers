@@ -845,6 +845,51 @@ mod tests {
         );
     }
 
+    // `rotate_heads_rope` is the function `Qwen25Attention::forward` actually
+    // calls for both Q and K (see `forward` above); `Qwen25RotaryEmbedding::apply`
+    // exercised above is not on that path. `crate::qwen2_5::tests` (in
+    // `qwen2_5/mod.rs`) already covers "every head rotates"
+    // (`test_qwen25_rotate_heads_rope_rotates_every_head`); the two tests
+    // below add the position-dependence coverage that suite does not have —
+    // identity at position 0, and two non-zero positions actually differing
+    // — using a non-degenerate `theta`/`head_dim` (the attention-level
+    // config's `head_dim=2` collapses to a single frequency band of exactly
+    // 1.0 regardless of `theta`, which would mask a broken frequency
+    // computation). Both would have FAILED against a no-op RoPE that left
+    // `data` unchanged, matching the fake implementation the original audit
+    // found.
+
+    /// RoPE at position 0 must be the identity rotation (angle = 0).
+    #[test]
+    fn test_rotate_heads_rope_position_zero_is_identity() {
+        let original = vec![1.0f32, 2.0, 3.0, 4.0];
+        let mut q = original.clone();
+        rotate_heads_rope(&mut q, 1, 4, 10000.0, &[0]);
+        for (a, b) in original.iter().zip(q.iter()) {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "position 0 must be identity: {a} vs {b}"
+            );
+        }
+    }
+
+    /// Two different non-zero positions on the same input vector must rotate
+    /// to different outputs. This fails against a no-op RoPE that just
+    /// leaves `data` unchanged regardless of `position_ids`.
+    #[test]
+    fn test_rotate_heads_rope_differs_by_position() {
+        let base = vec![1.0f32; 4];
+        let mut at_pos0 = base.clone();
+        let mut at_pos5 = base.clone();
+        rotate_heads_rope(&mut at_pos0, 1, 4, 10000.0, &[0]);
+        rotate_heads_rope(&mut at_pos5, 1, 4, 10000.0, &[5]);
+        let differs = at_pos0.iter().zip(at_pos5.iter()).any(|(a, b)| (a - b).abs() > 1e-4);
+        assert!(
+            differs,
+            "RoPE must rotate differently at different positions"
+        );
+    }
+
     // -- Qwen25Attention --
 
     #[test]
@@ -876,6 +921,79 @@ mod tests {
             cfg.num_key_value_heads,
             "KV head count must match config"
         );
+    }
+
+    // Real grouped-query scaled dot-product attention regression tests.
+    // `crate::qwen2_5::tests` (in `qwen2_5/mod.rs`) already covers output
+    // shape, early-token-change propagation, causal masking, prefix
+    // extension, and a `window=1` sliding-window exclusion test, all against
+    // `Qwen25Attention::forward` end to end (RoPE, repeated-KV-head Q@K^T,
+    // causal/sliding-window masking, softmax, @V) — every one of those would
+    // have FAILED against the old fake path, which discarded V and fed a
+    // zero-padded, resized RoPE'd query straight into `o_proj`. The test
+    // below adds a `window=2` variant that is not implied by that suite:
+
+    /// Sliding-window attention must actually restrict the attention span,
+    /// not just be wired through config accessors (`uses_sliding_window`/
+    /// `sliding_window`, already covered above). With `window=2` and
+    /// `seq_len=4`: token 1 (sees positions `{0,1}`, since `1-0=1 < 2`) must
+    /// still be affected by a change to token 0, but token 3 (sees positions
+    /// `{2,3}` only, since `3-0=3 >= 2` excludes position 0) must NOT be —
+    /// the discriminating half that a window which merely gates a flag
+    /// (without actually excluding out-of-window keys) would fail.
+    #[test]
+    fn test_qwen25_attention_sliding_window_restricts_span() {
+        let mut cfg = tiny_qwen25_config();
+        cfg.use_sliding_window = true;
+        cfg.sliding_window = Some(2);
+        cfg.max_window_layers = 0; // layer_idx(0) >= max_window_layers(0) => uses window
+        let attn = Qwen25Attention::new(&cfg, 0, Device::CPU).expect("attention must build");
+        assert!(
+            attn.uses_sliding_window(),
+            "layer 0 must use the sliding window with this config"
+        );
+        assert_eq!(attn.sliding_window(), Some(2));
+
+        let seq_len = 4;
+        let hidden = cfg.hidden_size;
+        let base = lcg_vec(seq_len * hidden, 55);
+        let mut modified = base.clone();
+        for x in modified[0..hidden].iter_mut() {
+            *x += 5.0; // perturb only token 0
+        }
+
+        let out_base = attn
+            .forward(Tensor::from_vec(base, &[seq_len, hidden]).expect("tensor"))
+            .expect("forward base");
+        let out_mod = attn
+            .forward(Tensor::from_vec(modified, &[seq_len, hidden]).expect("tensor"))
+            .expect("forward modified");
+
+        let (a, b) = match (&out_base, &out_mod) {
+            (Tensor::F32(x), Tensor::F32(y)) => (
+                x.as_slice().expect("contiguous").to_vec(),
+                y.as_slice().expect("contiguous").to_vec(),
+            ),
+            _ => panic!("expected F32 outputs"),
+        };
+
+        let row1_differs = a[hidden..2 * hidden]
+            .iter()
+            .zip(&b[hidden..2 * hidden])
+            .any(|(x, y)| (x - y).abs() > 1e-5);
+        assert!(
+            row1_differs,
+            "token 1 is within the sliding window of token 0 and must be affected by its change"
+        );
+
+        let row3_a = &a[3 * hidden..4 * hidden];
+        let row3_b = &b[3 * hidden..4 * hidden];
+        for (x, y) in row3_a.iter().zip(row3_b.iter()) {
+            assert!(
+                (x - y).abs() < 1e-6,
+                "token 3 is outside the sliding window of token 0 and must be unaffected"
+            );
+        }
     }
 
     // -- Qwen25Model --

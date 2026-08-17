@@ -562,7 +562,13 @@ impl VulkanImpl {
         Ok(pipeline)
     }
 
-    /// Flash attention using Vulkan compute shaders
+    /// Flash attention using Vulkan compute shaders.
+    ///
+    /// No attention compute shader is wired up yet (unlike `matmul`, which
+    /// has a real GLSL/SPIR-V shader - see `matmul_cs` below). This
+    /// returns a structured "not implemented" error rather than `Ok(())`
+    /// with `output` left untouched, which is what this used to do while
+    /// still reporting success.
     pub fn flash_attention(
         &mut self,
         query: &Tensor,
@@ -581,9 +587,11 @@ impl VulkanImpl {
                 ));
             }
 
-            // Implementation would be similar to matmul but with attention-specific shader
-            // This is a placeholder for the full implementation
-            Ok(())
+            Err(TrustformersError::not_implemented(
+                "VulkanImpl::flash_attention: no attention compute shader is wired up yet (see \
+                 VulkanImpl::matmul's matmul_cs shader for the pattern to follow)"
+                    .to_string(),
+            ))
         }
 
         #[cfg(not(feature = "vulkan"))]
@@ -595,7 +603,11 @@ impl VulkanImpl {
         }
     }
 
-    /// Layer normalization using Vulkan compute shaders
+    /// Layer normalization using Vulkan compute shaders.
+    ///
+    /// No layer-norm compute shader is wired up yet; returns a structured
+    /// "not implemented" error instead of `Ok(())` with `output` left
+    /// untouched.
     pub fn layer_norm(
         &mut self,
         input: &Tensor,
@@ -606,8 +618,11 @@ impl VulkanImpl {
     ) -> Result<()> {
         #[cfg(feature = "vulkan")]
         {
-            // Implementation would use layer norm compute shader
-            Ok(())
+            Err(TrustformersError::not_implemented(
+                "VulkanImpl::layer_norm: no layer-norm compute shader is wired up yet (see \
+                 VulkanImpl::matmul's matmul_cs shader for the pattern to follow)"
+                    .to_string(),
+            ))
         }
 
         #[cfg(not(feature = "vulkan"))]
@@ -619,12 +634,18 @@ impl VulkanImpl {
         }
     }
 
-    /// GELU activation using Vulkan compute shaders
+    /// GELU activation using Vulkan compute shaders.
+    ///
+    /// No GELU compute shader is wired up yet; returns a structured "not
+    /// implemented" error instead of `Ok(())` with `output` left untouched.
     pub fn gelu(&mut self, input: &Tensor, output: &mut Tensor) -> Result<()> {
         #[cfg(feature = "vulkan")]
         {
-            // Implementation would use GELU compute shader
-            Ok(())
+            Err(TrustformersError::not_implemented(
+                "VulkanImpl::gelu: no GELU compute shader is wired up yet (see \
+                 VulkanImpl::matmul's matmul_cs shader for the pattern to follow)"
+                    .to_string(),
+            ))
         }
 
         #[cfg(not(feature = "vulkan"))]
@@ -636,12 +657,19 @@ impl VulkanImpl {
         }
     }
 
-    /// Reduce sum using Vulkan compute shaders
+    /// Reduce sum using Vulkan compute shaders.
+    ///
+    /// No reduction compute shader is wired up yet; returns a structured
+    /// "not implemented" error instead of `Ok(())` with `output` left
+    /// untouched.
     pub fn reduce_sum(&mut self, input: &Tensor, output: &mut Tensor, dim: usize) -> Result<()> {
         #[cfg(feature = "vulkan")]
         {
-            // Implementation would use reduction compute shader with subgroup operations
-            Ok(())
+            Err(TrustformersError::not_implemented(
+                "VulkanImpl::reduce_sum: no reduction compute shader is wired up yet (see \
+                 VulkanImpl::matmul's matmul_cs shader for the pattern to follow)"
+                    .to_string(),
+            ))
         }
 
         #[cfg(not(feature = "vulkan"))]
@@ -809,6 +837,63 @@ mod tests {
             // assert!(total >= 0);
             // assert!(peak >= 0);
             // assert!(free >= 0);
+        }
+    }
+
+    /// Regression test: before this fix, `flash_attention`/`layer_norm`/
+    /// `gelu`/`reduce_sum` returned `Ok(())` while leaving `output`
+    /// completely untouched - a silent no-op reported as success. This
+    /// asserts the pre-existing (and always correct) `not(feature =
+    /// "vulkan")` behavior, so it runs unconditionally regardless of
+    /// whether this host has a real Vulkan device.
+    #[test]
+    #[cfg(not(feature = "vulkan"))]
+    fn test_unimplemented_ops_error_without_vulkan_feature() {
+        let mut vulkan = VulkanImpl::new().expect("placeholder VulkanImpl always succeeds");
+        let t = Tensor::zeros(&[1, 2, 2]).expect("tensor creation failed");
+        let mut out = Tensor::zeros(&[1, 2, 2]).expect("tensor creation failed");
+        assert!(vulkan.flash_attention(&t, &t, &t, &mut out, 1.0).is_err());
+        assert!(vulkan.layer_norm(&t, &t, None, &mut out, 1e-5).is_err());
+        assert!(vulkan.gelu(&t, &mut out).is_err());
+        assert!(vulkan.reduce_sum(&t, &mut out, 0).is_err());
+    }
+
+    /// Regression test (only meaningfully exercised on a host with a real
+    /// Vulkan device - it silently skips otherwise, matching this file's
+    /// existing hardware-dependent tests): before this fix, these four ops
+    /// returned `Ok(())` under `#[cfg(feature = "vulkan")]` without ever
+    /// writing their output tensor. They must now error instead of
+    /// fabricating a successful result.
+    #[test]
+    #[cfg(feature = "vulkan")]
+    fn test_unimplemented_ops_error_with_real_vulkan_device() {
+        if let Ok(mut vulkan) = VulkanImpl::new() {
+            let q = Tensor::from_vec(vec![1.0; 8], &[1, 2, 4]).expect("tensor creation failed");
+            let mut attn_out = Tensor::zeros(&[1, 2, 4]).expect("tensor creation failed");
+            assert!(
+                vulkan.flash_attention(&q, &q, &q, &mut attn_out, 1.0).is_err(),
+                "flash_attention has no compute shader yet and must error, not silently no-op"
+            );
+
+            let input = Tensor::ones(&[2, 4]).expect("tensor creation failed");
+            let gamma = Tensor::ones(&[4]).expect("tensor creation failed");
+            let mut ln_out = Tensor::zeros(&[2, 4]).expect("tensor creation failed");
+            assert!(
+                vulkan.layer_norm(&input, &gamma, None, &mut ln_out, 1e-5).is_err(),
+                "layer_norm has no compute shader yet and must error"
+            );
+
+            let mut gelu_out = Tensor::zeros(&[2, 4]).expect("tensor creation failed");
+            assert!(
+                vulkan.gelu(&input, &mut gelu_out).is_err(),
+                "gelu has no compute shader yet and must error"
+            );
+
+            let mut sum_out = Tensor::zeros(&[2]).expect("tensor creation failed");
+            assert!(
+                vulkan.reduce_sum(&input, &mut sum_out, 1).is_err(),
+                "reduce_sum has no compute shader yet and must error"
+            );
         }
     }
 }

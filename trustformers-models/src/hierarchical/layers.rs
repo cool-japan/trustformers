@@ -3,7 +3,7 @@ use super::utils::{
     aggregate_hierarchical_features, build_hierarchy, create_tree_mask, HierarchicalOutput,
 };
 use trustformers_core::{
-    errors::Result,
+    errors::{tensor_op_error, Result},
     layers::{LayerNorm, Linear, MultiHeadAttention},
     tensor::Tensor,
     traits::Layer,
@@ -51,8 +51,15 @@ impl Layer for HierarchicalAttention {
     type Output = HierarchicalOutput;
 
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        let _seq_len = input.shape()[1];
         let target_shape = input.shape();
+        // Checked here rather than by indexing blindly: a rank-2 activation used to
+        // reach `input.shape()[1]` and panic before the pooling could report it.
+        if target_shape.len() != 3 {
+            return Err(tensor_op_error(
+                "hierarchical_attention_forward",
+                format!("expected a 3-D [batch, seq, hidden] input, got shape {target_shape:?}"),
+            ));
+        }
 
         // Build hierarchical representation
         let hierarchy = build_hierarchy(
@@ -393,10 +400,19 @@ impl PyramidLayer {
 }
 
 /// Tree attention layer
+///
+/// The tree mask is cached for `max_seq_lengths[0]` positions and re-sized to the
+/// sequence actually being processed on every forward pass. Both tree topologies
+/// are defined purely by index arithmetic on absolute positions — node `i` attends
+/// to `i`, `parent(i)` and its children — so the top-left `n × n` corner of a larger
+/// mask is bit-identical to a mask built for `n` positions, and a longer sequence is
+/// rebuilt rather than truncated.
 pub struct TreeAttention {
     config: HierarchicalConfig,
     attention: MultiHeadAttention,
     tree_mask: Tensor,
+    /// Side length of the cached `tree_mask`.
+    cached_seq_len: usize,
 }
 
 impl TreeAttention {
@@ -408,21 +424,58 @@ impl TreeAttention {
             true, // use_bias
         )?;
 
-        let tree_mask = if let Some(tree_config) = &config.tree_config {
-            create_tree_mask(
-                config.max_seq_lengths[0],
-                tree_config.branching_factor,
-                &tree_config.tree_construction,
-            )?
-        } else {
-            Tensor::zeros(&[config.max_seq_lengths[0], config.max_seq_lengths[0]])?
-        };
+        let cached_seq_len = config.max_seq_lengths.first().copied().unwrap_or(0);
+        let tree_mask = Self::build_mask(&config, cached_seq_len)?;
 
         Ok(Self {
             config,
             attention,
             tree_mask,
+            cached_seq_len,
         })
+    }
+
+    /// Build a `[seq_len, seq_len]` additive tree mask from the configuration.
+    ///
+    /// Without a `tree_config` there is no tree to encode, so the mask is all
+    /// zeros — an additive mask that permits every pair, i.e. plain self-attention.
+    fn build_mask(config: &HierarchicalConfig, seq_len: usize) -> Result<Tensor> {
+        match &config.tree_config {
+            Some(tree_config) => create_tree_mask(
+                seq_len,
+                tree_config.branching_factor,
+                &tree_config.tree_construction,
+            ),
+            None => Tensor::zeros(&[seq_len, seq_len]),
+        }
+    }
+
+    /// The tree mask for exactly `seq_len` positions.
+    ///
+    /// Reuses the cached mask when the length matches, takes its top-left corner
+    /// when the sequence is shorter and rebuilds when it is longer, so a long input
+    /// is never silently truncated onto a short mask.
+    ///
+    /// The corner is exact because both mask builders derive an entry purely from
+    /// the pair of absolute positions — `parent = (i - 1) / branching_factor`,
+    /// `child = branching_factor · i + j + 1` — with no dependence on the total
+    /// length. A future topology that normalised by the sequence length would break
+    /// that invariant and must build its mask directly instead of slicing.
+    fn mask_for(&self, seq_len: usize) -> Result<Tensor> {
+        if seq_len == self.cached_seq_len {
+            return Ok(self.tree_mask.clone());
+        }
+        if seq_len > self.cached_seq_len {
+            return Self::build_mask(&self.config, seq_len);
+        }
+
+        let cached = self.tree_mask.data()?;
+        let mut corner = Vec::with_capacity(seq_len * seq_len);
+        for row in 0..seq_len {
+            let base = row * self.cached_seq_len;
+            corner.extend_from_slice(&cached[base..base + seq_len]);
+        }
+        Tensor::from_vec(corner, &[seq_len, seq_len])
     }
 }
 
@@ -431,11 +484,19 @@ impl Layer for TreeAttention {
     type Output = HierarchicalOutput;
 
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        let _seq_len = input.shape()[1];
+        let shape = input.shape();
+        if shape.len() != 3 {
+            return Err(tensor_op_error(
+                "tree_attention_forward",
+                format!("expected a 3-D [batch, seq, hidden] input, got shape {shape:?}"),
+            ));
+        }
+        let seq_len = shape[1];
 
-        // Apply tree-structured attention with tree mask
+        // Apply tree-structured attention with a mask sized to *this* sequence.
+        let tree_mask = self.mask_for(seq_len)?;
         let masked_output =
-            self.attention.forward_self_attention(&input, Some(&self.tree_mask), false)?;
+            self.attention.forward_self_attention(&input, Some(&tree_mask), false)?;
 
         Ok(HierarchicalOutput {
             output: masked_output,

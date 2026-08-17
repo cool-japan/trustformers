@@ -68,15 +68,22 @@ pub enum SequenceCommunicationPattern {
 /// Sequence splitting strategies
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SequenceSplittingStrategy {
-    /// Split into equal-sized chunks
+    /// Split into equal-sized chunks.
     EqualChunks,
-    /// Split based on attention patterns
+    /// Split at the attention troughs measured by
+    /// [`SequenceParallelism::observe_attention`]. Falls back to deterministic
+    /// uniform chunking while no attention has been observed.
     AttentionBased,
-    /// Split at sentence/paragraph boundaries
+    /// Split at sentence/paragraph boundaries registered with
+    /// [`SequenceParallelism::set_segment_boundaries`]. Errors when none are
+    /// registered — this crate cannot infer them from a sequence length.
     SemanticBoundaries,
-    /// Dynamic splitting based on memory usage
+    /// Uniform chunking whose chunk size shrinks with the measured memory
+    /// pressure.
     Dynamic,
-    /// Split based on content complexity
+    /// Prefix-sum load balancing over the per-position costs registered with
+    /// [`SequenceParallelism::set_position_costs`]. Errors when none are
+    /// registered.
     ComplexityBased,
 }
 
@@ -142,6 +149,14 @@ pub struct SequenceParallelism {
 
     // Measured attention structure driving attention-based partitioning.
     attention_profile: Arc<RwLock<Option<AttentionProfile>>>,
+
+    // Caller-supplied semantic segment boundaries (token offsets) used by
+    // `SequenceSplittingStrategy::SemanticBoundaries`.
+    segment_boundaries: Arc<RwLock<Option<Vec<usize>>>>,
+
+    // Caller-supplied per-position computational cost used by
+    // `SequenceSplittingStrategy::ComplexityBased`.
+    position_costs: Arc<RwLock<Option<Vec<f32>>>>,
 
     // Per-chunk computation supplied by the caller.
     chunk_processor: Arc<RwLock<Option<ChunkProcessor>>>,
@@ -408,6 +423,8 @@ impl SequenceParallelism {
             sequence_group,
             attention_comm_manager: Arc::new(RwLock::new(AttentionCommManager::default())),
             attention_profile: Arc::new(RwLock::new(None)),
+            segment_boundaries: Arc::new(RwLock::new(None)),
+            position_costs: Arc::new(RwLock::new(None)),
             chunk_processor: Arc::new(RwLock::new(None)),
             communication_stats: Arc::new(Mutex::new(SequenceCommunicationStats::default())),
             memory_manager: Arc::new(Mutex::new(SequenceMemoryManager::default())),
@@ -492,6 +509,73 @@ impl SequenceParallelism {
             .clone()
     }
 
+    /// Record the semantic segment boundaries that
+    /// [`SequenceSplittingStrategy::SemanticBoundaries`] must respect.
+    ///
+    /// `boundaries` are token offsets at which a sentence/paragraph/document
+    /// starts. This crate has no tokenizer or sentence splitter, so the
+    /// boundaries have to come from whoever produced the token stream; without
+    /// them semantic splitting reports an error rather than silently degrading
+    /// to uniform chunks.
+    ///
+    /// Offsets are sorted and de-duplicated; `0` is implicit. An offset of `0`
+    /// or a duplicate is accepted and ignored.
+    pub fn set_segment_boundaries(
+        &self,
+        boundaries: impl IntoIterator<Item = usize>,
+    ) -> Result<()> {
+        let mut sorted: Vec<usize> = boundaries.into_iter().filter(|offset| *offset > 0).collect();
+        sorted.sort_unstable();
+        sorted.dedup();
+        if sorted.is_empty() {
+            return Err(anyhow!(
+                "semantic segment boundaries must contain at least one interior offset (> 0)"
+            ));
+        }
+        let mut slot =
+            self.segment_boundaries.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = Some(sorted);
+        Ok(())
+    }
+
+    /// The registered semantic segment boundaries, if any.
+    pub fn segment_boundaries(&self) -> Option<Vec<usize>> {
+        self.segment_boundaries
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Record the per-position computational cost that
+    /// [`SequenceSplittingStrategy::ComplexityBased`] balances over.
+    ///
+    /// `costs[i]` is the relative work required by token `i` — for example the
+    /// number of unmasked keys it attends to, or a measured per-token latency.
+    /// Values must be finite and non-negative. Without a registration,
+    /// complexity-based splitting reports an error instead of inventing scores.
+    pub fn set_position_costs(&self, costs: Vec<f32>) -> Result<()> {
+        if costs.is_empty() {
+            return Err(anyhow!("position costs must not be empty"));
+        }
+        if costs.iter().any(|cost| !cost.is_finite() || *cost < 0.0) {
+            return Err(anyhow!("position costs must be finite and non-negative"));
+        }
+        if costs.iter().sum::<f32>() <= 0.0 {
+            return Err(anyhow!("position costs must not be all zero"));
+        }
+        let mut slot = self.position_costs.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = Some(costs);
+        Ok(())
+    }
+
+    /// The registered per-position costs, if any.
+    pub fn position_costs(&self) -> Option<Vec<f32>> {
+        self.position_costs
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     /// Split a sequence across multiple devices
     pub fn split_sequence(&mut self, total_sequence_length: usize) -> Result<Vec<SequenceChunk>> {
         let chunks = match self.config.splitting_strategy {
@@ -524,9 +608,29 @@ impl SequenceParallelism {
 
     /// Split sequence into equal chunks
     fn split_equal_chunks(&self, total_length: usize) -> Result<Vec<SequenceChunk>> {
-        let chunk_size = self.config.max_sequence_length_per_device;
+        self.split_equal_chunks_of(total_length, self.config.max_sequence_length_per_device)
+    }
+
+    /// Uniform chunking with an explicit chunk size, so callers that adapt the
+    /// size (see [`SequenceParallelism::split_dynamic`]) actually change the
+    /// resulting partition instead of computing a size and discarding it.
+    fn split_equal_chunks_of(
+        &self,
+        total_length: usize,
+        chunk_size: usize,
+    ) -> Result<Vec<SequenceChunk>> {
         let overlap = self.config.overlap_size;
         let num_devices = self.config.sequence_parallel_size;
+
+        if chunk_size <= overlap {
+            return Err(anyhow!(
+                "chunk size ({chunk_size}) must exceed the overlap ({overlap}) or the partition \
+                 cannot advance"
+            ));
+        }
+        if num_devices == 0 {
+            return Err(anyhow!("sequence_parallel_size must be >= 1"));
+        }
 
         let mut chunks = Vec::new();
         let mut current_pos = 0;
@@ -1040,20 +1144,83 @@ impl SequenceParallelism {
         }
     }
 
-    /// Split sequence at semantic boundaries (simplified)
+    /// Split the sequence so that every chunk boundary coincides with a
+    /// registered semantic boundary.
+    ///
+    /// The algorithm walks the ideal uniform split positions and snaps each one
+    /// to the nearest registered boundary that keeps every chunk non-empty and
+    /// no longer than [`SequenceParallelismConfig::max_sequence_length_per_device`].
+    /// Snapping is deterministic (ties resolve to the earlier boundary), so all
+    /// ranks derive the same partition without communicating.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no boundaries have been registered with
+    /// [`SequenceParallelism::set_segment_boundaries`]: this crate cannot
+    /// discover sentence or paragraph boundaries from a length alone, and
+    /// silently falling back to uniform chunks would misreport the strategy
+    /// that ran.
     fn split_semantic_boundaries(&self, total_length: usize) -> Result<Vec<SequenceChunk>> {
-        // For now, fallback to equal chunks
-        // In practice, would use NLP techniques to find sentence/paragraph boundaries
-        self.split_equal_chunks(total_length)
+        let boundaries = self.segment_boundaries().ok_or_else(|| {
+            anyhow!(
+                "SequenceSplittingStrategy::SemanticBoundaries needs the segment offsets of the \
+                 token stream; register them with SequenceParallelism::set_segment_boundaries, or \
+                 select SequenceSplittingStrategy::EqualChunks for uniform partitioning"
+            )
+        })?;
+
+        if total_length == 0 {
+            return Ok(Vec::new());
+        }
+
+        let interior: Vec<usize> =
+            boundaries.into_iter().filter(|offset| *offset < total_length).collect();
+        if interior.is_empty() {
+            return Err(anyhow!(
+                "no registered semantic boundary falls inside a sequence of length {total_length}"
+            ));
+        }
+
+        let target_chunks = self.config.sequence_parallel_size.max(1).min(interior.len() + 1);
+        let max_chunk = self.config.max_sequence_length_per_device.max(1);
+
+        let mut split_points = vec![0usize];
+        for chunk_index in 1..target_chunks {
+            let previous = split_points[chunk_index - 1];
+            let ideal = total_length * chunk_index / target_chunks;
+            let hard_limit = previous.saturating_add(max_chunk).min(total_length);
+
+            // Candidates must advance past `previous`, stay within the per-device
+            // budget, and leave at least one token for every remaining chunk.
+            let remaining_chunks = target_chunks - chunk_index;
+            let latest = hard_limit.min(total_length - remaining_chunks);
+            let chosen = interior
+                .iter()
+                .copied()
+                .filter(|offset| *offset > previous && *offset <= latest)
+                .min_by_key(|offset| (offset.abs_diff(ideal), *offset));
+
+            match chosen {
+                Some(offset) => split_points.push(offset),
+                // No boundary is reachable from here: stop splitting rather than
+                // inventing a cut that is not a semantic boundary.
+                None => break,
+            }
+        }
+        split_points.push(total_length);
+
+        self.create_attention_aware_chunks(total_length, &split_points)
     }
 
-    /// Dynamic sequence splitting based on memory usage
+    /// Dynamic sequence splitting: the chunk size shrinks as memory pressure
+    /// rises, so a device under pressure holds fewer tokens.
     fn split_dynamic(&self, total_length: usize) -> Result<Vec<SequenceChunk>> {
-        let memory_manager =
-            self.memory_manager.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let pressure = memory_manager.memory_pressure;
+        let pressure = {
+            let memory_manager =
+                self.memory_manager.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            memory_manager.memory_pressure
+        };
 
-        // Adjust chunk size based on memory pressure
         let base_chunk_size = self.config.max_sequence_length_per_device;
         let adjusted_chunk_size = if pressure > 0.8 {
             base_chunk_size / 2
@@ -1063,19 +1230,88 @@ impl SequenceParallelism {
             base_chunk_size
         };
 
-        // Create config with adjusted chunk size
-        let mut _adjusted_config = self.config.clone();
-        _adjusted_config.max_sequence_length_per_device = adjusted_chunk_size;
+        // The overlap must stay strictly inside the chunk or the walk below
+        // cannot advance.
+        let adjusted_chunk_size = adjusted_chunk_size.max(self.config.overlap_size + 1);
 
-        // Use equal chunks with adjusted size
-        self.split_equal_chunks(total_length)
+        self.split_equal_chunks_of(total_length, adjusted_chunk_size)
     }
 
-    /// Split sequence based on complexity
+    /// Split the sequence so that every chunk carries a comparable amount of
+    /// work according to the registered per-position costs.
+    ///
+    /// Boundaries are placed where the cumulative cost crosses
+    /// `k * total_cost / chunks`, which is the standard prefix-sum load-balanced
+    /// partition. It is deterministic and depends only on the registered costs,
+    /// so all ranks agree.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no costs have been registered with
+    /// [`SequenceParallelism::set_position_costs`], or when the registered
+    /// vector does not cover `total_length` positions.
     fn split_complexity_based(&self, total_length: usize) -> Result<Vec<SequenceChunk>> {
-        // For now, fallback to equal chunks
-        // In practice, would analyze content complexity to balance computational load
-        self.split_equal_chunks(total_length)
+        let costs = self.position_costs().ok_or_else(|| {
+            anyhow!(
+                "SequenceSplittingStrategy::ComplexityBased needs a per-position cost vector; \
+                 register one with SequenceParallelism::set_position_costs, or select \
+                 SequenceSplittingStrategy::EqualChunks for uniform partitioning"
+            )
+        })?;
+
+        if total_length == 0 {
+            return Ok(Vec::new());
+        }
+        if costs.len() < total_length {
+            return Err(anyhow!(
+                "position costs cover {} positions but the sequence is {} long",
+                costs.len(),
+                total_length
+            ));
+        }
+
+        let target_chunks = self.config.sequence_parallel_size.max(1).min(total_length);
+        if target_chunks == 1 {
+            return self.create_attention_aware_chunks(total_length, &[0, total_length]);
+        }
+
+        let costs = &costs[..total_length];
+        let total_cost: f64 = costs.iter().map(|cost| *cost as f64).sum();
+        if total_cost <= 0.0 {
+            return Err(anyhow!("registered position costs sum to zero"));
+        }
+
+        let mut split_points = vec![0usize];
+        let mut cumulative = 0.0f64;
+        let mut next_chunk = 1usize;
+
+        for (position, cost) in costs.iter().enumerate() {
+            cumulative += *cost as f64;
+            while next_chunk < target_chunks
+                && cumulative >= total_cost * next_chunk as f64 / target_chunks as f64
+            {
+                let candidate = position + 1;
+                let remaining_chunks = target_chunks - next_chunk;
+                let latest = total_length - remaining_chunks;
+                let previous = split_points[next_chunk - 1];
+                // Keep every chunk non-empty even when the cost mass is
+                // concentrated in a few positions.
+                let clamped = candidate.clamp(previous + 1, latest.max(previous + 1));
+                split_points.push(clamped);
+                next_chunk += 1;
+            }
+        }
+
+        // Cost mass can run out before the last boundaries are placed (for
+        // example when the tail has zero cost); finish with unit-width chunks.
+        while next_chunk < target_chunks {
+            let previous = split_points[next_chunk - 1];
+            split_points.push((previous + 1).min(total_length));
+            next_chunk += 1;
+        }
+
+        split_points.push(total_length);
+        self.create_attention_aware_chunks(total_length, &split_points)
     }
 
     /// Process forward pass for a sequence chunk
@@ -1526,135 +1762,5 @@ pub mod utils {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::distributed::SimulatedProcessGroup;
-    use std::sync::Arc;
-
-    #[test]
-    fn test_sequence_parallelism_config() {
-        let config = SequenceParallelismConfig::default();
-        assert_eq!(config.sequence_parallel_size, 1);
-        assert_eq!(config.max_sequence_length_per_device, 2048);
-        assert_eq!(config.overlap_size, 128);
-    }
-
-    #[test]
-    fn test_sequence_parallelism_creation() {
-        let config = SequenceParallelismConfig {
-            sequence_parallel_size: 4,
-            max_sequence_length_per_device: 1024,
-            overlap_size: 64,
-            ..Default::default()
-        };
-
-        let process_group = Arc::new(SimulatedProcessGroup::new(0, 4));
-        let sequence_parallelism = SequenceParallelism::new(config, 0, 4, process_group);
-
-        assert!(sequence_parallelism.is_ok());
-    }
-
-    #[test]
-    #[ignore] // Memory-intensive test causes SIGKILL in constrained environments
-    fn test_equal_chunks_splitting() {
-        let config = SequenceParallelismConfig {
-            sequence_parallel_size: 2,
-            max_sequence_length_per_device: 1000,
-            overlap_size: 100,
-            ..Default::default()
-        };
-
-        let process_group = Arc::new(SimulatedProcessGroup::new(0, 2));
-        let mut sequence_parallelism = SequenceParallelism::new(config, 0, 2, process_group)
-            .expect("operation failed in test");
-
-        let chunks = sequence_parallelism.split_sequence(1800).expect("operation failed in test");
-        assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].start_position, 0);
-        assert_eq!(chunks[0].end_position, 1000);
-        assert_eq!(chunks[1].start_position, 900); // 1000 - 100 overlap
-    }
-
-    #[test]
-    #[ignore] // Memory-intensive test causes SIGKILL in constrained environments
-    fn test_chunk_processing() {
-        let config = SequenceParallelismConfig {
-            sequence_parallel_size: 2,
-            max_sequence_length_per_device: 1000,
-            overlap_size: 100,
-            ..Default::default()
-        };
-
-        let process_group = Arc::new(SimulatedProcessGroup::new(0, 2));
-        let mut sequence_parallelism = SequenceParallelism::new(config, 0, 2, process_group)
-            .expect("operation failed in test");
-
-        let _chunks = sequence_parallelism.split_sequence(1800).expect("operation failed in test");
-
-        let input = Tensor::zeros(&[1000, 768]).expect("tensor operation failed");
-        let result = sequence_parallelism.forward_chunk(0, &input, None);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_gradient_synchronization() {
-        let config = SequenceParallelismConfig {
-            sync_gradients: true,
-            ..Default::default()
-        };
-
-        let process_group = Arc::new(SimulatedProcessGroup::new(0, 1));
-        let sequence_parallelism = SequenceParallelism::new(config, 0, 1, process_group)
-            .expect("operation failed in test");
-
-        let mut gradients = HashMap::new();
-        gradients.insert(
-            "test_param".to_string(),
-            Tensor::ones(&[10, 10]).expect("tensor operation failed"),
-        );
-
-        let result = sequence_parallelism.synchronize_gradients(&mut gradients);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_memory_usage_update() {
-        let config = SequenceParallelismConfig::default();
-        let process_group = Arc::new(SimulatedProcessGroup::new(0, 1));
-        let sequence_parallelism = SequenceParallelism::new(config, 0, 1, process_group)
-            .expect("operation failed in test");
-
-        let result = sequence_parallelism.update_memory_usage(0, 1024 * 1024 * 1024); // 1GB
-        assert!(result.is_ok());
-
-        let stats = sequence_parallelism.get_statistics();
-        assert_eq!(stats.peak_memory_usage, 1024 * 1024 * 1024);
-    }
-
-    #[test]
-    fn test_optimal_sequence_config_calculation() {
-        let config = utils::calculate_optimal_sequence_config(
-            10000,                  // total sequence length
-            8 * 1024 * 1024 * 1024, // 8GB memory per device
-            1024,                   // 1KB per token
-            4,                      // world size
-        )
-        .expect("operation failed in test");
-
-        assert!(config.sequence_parallel_size <= 4);
-        assert!(config.max_sequence_length_per_device > 0);
-    }
-
-    #[test]
-    fn test_communication_cost_estimation() {
-        let config = SequenceParallelismConfig::default();
-        let cost = utils::estimate_communication_cost(&config, 768, 12);
-        assert!(cost > 0.0);
-    }
-
-    #[test]
-    fn test_memory_savings_calculation() {
-        let savings = utils::calculate_memory_savings(10000, 4, 768);
-        assert!(savings > 0.0 && savings < 1.0);
-    }
-}
+#[cfg(test)]
+mod tests;

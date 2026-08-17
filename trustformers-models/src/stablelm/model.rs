@@ -37,6 +37,34 @@ impl RMSNorm {
     pub fn parameter_count(&self) -> usize {
         self.weight.shape().iter().product()
     }
+
+    /// The learned per-channel gain.
+    pub fn weight(&self) -> &Tensor {
+        &self.weight
+    }
+
+    /// Install a checkpoint gain vector.
+    ///
+    /// The shape is checked against the norm this layer was built for: silently
+    /// accepting a mis-shaped vector would make `forward` fail far away from the
+    /// call that actually got it wrong, and skipping the load entirely (as the
+    /// loader used to do) leaves an all-ones gain masquerading as trained
+    /// weights.
+    pub fn set_weight(&mut self, weight: Tensor) -> Result<()> {
+        let expected: usize = self.weight.shape().iter().product();
+        let got: usize = weight.shape().iter().product();
+        if got != expected {
+            return Err(tensor_op_error(
+                "RMSNorm::set_weight",
+                format!(
+                    "expected {expected} gain values, got {got} (shape {:?})",
+                    weight.shape()
+                ),
+            ));
+        }
+        self.weight = weight.to_device_enum(&self.device)?;
+        Ok(())
+    }
 }
 
 impl Layer for RMSNorm {
@@ -441,17 +469,18 @@ impl Layer for StableLMAttention {
     /// KV heads repeated to match the query heads.
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
         let in_shape = input.shape().to_vec();
-        let (batch, seq_len) =
-            match in_shape.len() {
-                2 => (1usize, in_shape[0]),
-                3 => (in_shape[0], in_shape[1]),
-                _ => return Err(tensor_op_error(
+        let (batch, seq_len) = match in_shape.len() {
+            2 => (1usize, in_shape[0]),
+            3 => (in_shape[0], in_shape[1]),
+            _ => {
+                return Err(tensor_op_error(
                     "StableLMAttention::forward",
                     format!(
                         "expected [seq_len, hidden] or [batch, seq_len, hidden], got {in_shape:?}"
                     ),
-                )),
-            };
+                ))
+            },
+        };
         let hidden = in_shape[in_shape.len() - 1];
         let head_dim = self.head_dim;
         if hidden != self.num_heads * head_dim {
@@ -927,9 +956,34 @@ impl Model for StableLMForCausalLM {
 }
 
 impl StableLMForCausalLM {
-    /// Load model weights from a directory containing HuggingFace format weights
+    /// Load model weights from a directory containing HuggingFace format weights.
+    ///
+    /// Every parameter this architecture owns is bound, **including** the two
+    /// RMSNorm gains per decoder layer and the final norm; an earlier revision
+    /// skipped those and left them at their all-ones initialisation, which is
+    /// indistinguishable from a trained gain at the type level but is not the
+    /// checkpoint's model.
+    ///
+    /// A missing tensor is an error, not a silent skip: the previous
+    /// `if let Ok(..)` chain returned `Ok(())` after binding nothing at all when
+    /// the checkpoint used different names, so a caller could run inference on
+    /// randomly initialised weights believing the model was loaded.
+    ///
+    /// `lm_head.weight` is the one genuinely optional entry — StableLM ties the
+    /// head to the input embeddings when it is absent, which is what the tied
+    /// configuration means rather than a fallback guess.
     pub fn load_from_path(&mut self, model_path: impl AsRef<std::path::Path>) -> Result<()> {
-        use crate::weight_loading::{auto_create_loader, WeightLoadingConfig};
+        use crate::weight_loading::{auto_create_loader, WeightLoader, WeightLoadingConfig};
+
+        /// Load a tensor that the architecture requires, naming it on failure.
+        fn required(loader: &mut dyn WeightLoader, name: &str) -> Result<Tensor> {
+            loader.load_tensor(name).map_err(|e| {
+                tensor_op_error(
+                    "StableLMForCausalLM::load_from_path",
+                    format!("checkpoint is missing required tensor `{name}`: {e}"),
+                )
+            })
+        }
 
         let config = WeightLoadingConfig {
             lazy_loading: true,
@@ -938,52 +992,60 @@ impl StableLMForCausalLM {
         };
 
         let mut loader = auto_create_loader(model_path, Some(config))?;
+        let loader = loader.as_mut();
 
-        // Load embedding weights
-        if let Ok(embed_weights) = loader.load_tensor("model.embed_tokens.weight") {
-            self.model.embeddings.word_embeddings.set_weight(embed_weights)?;
-        }
+        let attention_bias = self.model.config.attention_bias;
+        let mlp_bias = self.model.config.mlp_bias;
 
-        // Load layer weights
+        // Token embeddings (kept for the tied-head case below).
+        let embed_weights = required(loader, "model.embed_tokens.weight")?;
+        self.model.embeddings.word_embeddings.set_weight(embed_weights.clone())?;
+
         for (i, layer) in self.model.layers.iter_mut().enumerate() {
-            // Load attention weights
-            let attn_prefix = format!("model.layers.{}.self_attn", i);
+            let attn_prefix = format!("model.layers.{i}.self_attn");
+            let mlp_prefix = format!("model.layers.{i}.mlp");
 
-            if let Ok(q_weight) = loader.load_tensor(&format!("{}.q_proj.weight", attn_prefix)) {
-                layer.self_attn.q_proj.set_weight(q_weight)?;
-            }
-            if let Ok(k_weight) = loader.load_tensor(&format!("{}.k_proj.weight", attn_prefix)) {
-                layer.self_attn.k_proj.set_weight(k_weight)?;
-            }
-            if let Ok(v_weight) = loader.load_tensor(&format!("{}.v_proj.weight", attn_prefix)) {
-                layer.self_attn.v_proj.set_weight(v_weight)?;
-            }
-            if let Ok(o_weight) = loader.load_tensor(&format!("{}.o_proj.weight", attn_prefix)) {
-                layer.self_attn.o_proj.set_weight(o_weight)?;
-            }
-
-            // Load MLP weights
-            let mlp_prefix = format!("model.layers.{}.mlp", i);
-
-            if let Ok(gate_weight) = loader.load_tensor(&format!("{}.gate_proj.weight", mlp_prefix))
-            {
-                layer.mlp.gate_proj.set_weight(gate_weight)?;
-            }
-            if let Ok(up_weight) = loader.load_tensor(&format!("{}.up_proj.weight", mlp_prefix)) {
-                layer.mlp.up_proj.set_weight(up_weight)?;
-            }
-            if let Ok(down_weight) = loader.load_tensor(&format!("{}.down_proj.weight", mlp_prefix))
-            {
-                layer.mlp.down_proj.set_weight(down_weight)?;
+            for (name, projection) in [
+                ("q_proj", &mut layer.self_attn.q_proj),
+                ("k_proj", &mut layer.self_attn.k_proj),
+                ("v_proj", &mut layer.self_attn.v_proj),
+                ("o_proj", &mut layer.self_attn.o_proj),
+            ] {
+                projection
+                    .set_weight(required(loader, &format!("{attn_prefix}.{name}.weight"))?)?;
+                if attention_bias {
+                    projection
+                        .set_bias(required(loader, &format!("{attn_prefix}.{name}.bias"))?)?;
+                }
             }
 
-            // Layer norm weights would be loaded here if RMSNorm supported set_weight
-            // For now, skipping layer norm weight loading
+            for (name, projection) in [
+                ("gate_proj", &mut layer.mlp.gate_proj),
+                ("up_proj", &mut layer.mlp.up_proj),
+                ("down_proj", &mut layer.mlp.down_proj),
+            ] {
+                projection.set_weight(required(loader, &format!("{mlp_prefix}.{name}.weight"))?)?;
+                if mlp_bias {
+                    projection.set_bias(required(loader, &format!("{mlp_prefix}.{name}.bias"))?)?;
+                }
+            }
+
+            layer.input_layernorm.set_weight(required(
+                loader,
+                &format!("model.layers.{i}.input_layernorm.weight"),
+            )?)?;
+            layer.post_attention_layernorm.set_weight(required(
+                loader,
+                &format!("model.layers.{i}.post_attention_layernorm.weight"),
+            )?)?;
         }
 
-        // Load LM head weights
-        if let Ok(lm_head_weight) = loader.load_tensor("lm_head.weight") {
-            self.lm_head.set_weight(lm_head_weight)?;
+        self.model.norm.set_weight(required(loader, "model.norm.weight")?)?;
+
+        // Tied heads store no `lm_head.weight`; reuse the embedding matrix.
+        match loader.load_tensor("lm_head.weight") {
+            Ok(lm_head_weight) => self.lm_head.set_weight(lm_head_weight)?,
+            Err(_) => self.lm_head.set_weight(embed_weights)?,
         }
 
         Ok(())
@@ -1446,6 +1508,231 @@ mod tests {
         let norm_before: f32 = original[head_dim..].iter().map(|v| v * v).sum::<f32>().sqrt();
         let norm_after: f32 = data[head_dim..].iter().map(|v| v * v).sum::<f32>().sqrt();
         assert!((norm_before - norm_after).abs() < 1e-5);
+        Ok(())
+    }
+
+    // ── Checkpoint loading ────────────────────────────────────────────────
+
+    /// A temporary HuggingFace-style model directory, removed on drop.
+    struct TempModelDir {
+        path: std::path::PathBuf,
+    }
+
+    impl TempModelDir {
+        fn new(label: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "trustformers_stablelm_{label}_{}_{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).expect("temp model dir must be creatable");
+            Self { path }
+        }
+
+        fn write_safetensors(&self, tensors: &[crate::weight_loading::test_support::F32Tensor]) {
+            std::fs::write(
+                self.path.join("model.safetensors"),
+                crate::weight_loading::test_support::build_safetensors(tensors),
+            )
+            .expect("fixture checkpoint must be writable");
+        }
+    }
+
+    impl Drop for TempModelDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// Every tensor a StableLM checkpoint for `config` carries.
+    fn checkpoint_tensors(
+        config: &StableLMConfig,
+        with_lm_head: bool,
+    ) -> Vec<crate::weight_loading::test_support::F32Tensor> {
+        use crate::weight_loading::test_support::F32Tensor;
+        let hidden = config.hidden_size;
+        let heads = config.num_attention_heads;
+        let kv_heads = config.num_key_value_heads.unwrap_or(heads);
+        let kv_width = kv_heads * (hidden / heads);
+        let inter = config.intermediate_size;
+
+        let mut tensors = vec![F32Tensor::ramp(
+            "model.embed_tokens.weight",
+            &[config.vocab_size, hidden],
+            0.25,
+        )];
+        for i in 0..config.num_hidden_layers {
+            tensors.extend([
+                F32Tensor::ramp(
+                    &format!("model.layers.{i}.self_attn.q_proj.weight"),
+                    &[hidden, hidden],
+                    1.0,
+                ),
+                F32Tensor::ramp(
+                    &format!("model.layers.{i}.self_attn.k_proj.weight"),
+                    &[kv_width, hidden],
+                    2.0,
+                ),
+                F32Tensor::ramp(
+                    &format!("model.layers.{i}.self_attn.v_proj.weight"),
+                    &[kv_width, hidden],
+                    3.0,
+                ),
+                F32Tensor::ramp(
+                    &format!("model.layers.{i}.self_attn.o_proj.weight"),
+                    &[hidden, hidden],
+                    4.0,
+                ),
+                F32Tensor::ramp(
+                    &format!("model.layers.{i}.mlp.gate_proj.weight"),
+                    &[inter, hidden],
+                    5.0,
+                ),
+                F32Tensor::ramp(
+                    &format!("model.layers.{i}.mlp.up_proj.weight"),
+                    &[inter, hidden],
+                    6.0,
+                ),
+                F32Tensor::ramp(
+                    &format!("model.layers.{i}.mlp.down_proj.weight"),
+                    &[hidden, inter],
+                    7.0,
+                ),
+                F32Tensor::ramp(
+                    &format!("model.layers.{i}.input_layernorm.weight"),
+                    &[hidden],
+                    8.0,
+                ),
+                F32Tensor::ramp(
+                    &format!("model.layers.{i}.post_attention_layernorm.weight"),
+                    &[hidden],
+                    9.0,
+                ),
+            ]);
+        }
+        tensors.push(F32Tensor::ramp("model.norm.weight", &[hidden], 10.0));
+        if with_lm_head {
+            tensors.push(F32Tensor::ramp(
+                "lm_head.weight",
+                &[config.vocab_size, hidden],
+                11.0,
+            ));
+        }
+        tensors
+    }
+
+    /// The RMSNorm gains must come from the checkpoint. The previous loader
+    /// skipped them ("would be loaded here if RMSNorm supported set_weight"),
+    /// leaving the all-ones initialisation in place while reporting success.
+    #[test]
+    fn test_load_from_path_binds_layer_norm_gains() -> Result<()> {
+        let config = tiny_gqa_config();
+        let dir = TempModelDir::new("norms");
+        dir.write_safetensors(&checkpoint_tensors(&config, true));
+
+        let mut model = StableLMForCausalLM::new(config.clone())?;
+        // Before loading, every gain is the all-ones initialisation.
+        assert!(model.model.norm.weight().data()?.iter().all(|v| (v - 1.0).abs() < 1e-9));
+
+        model.load_from_path(&dir.path)?;
+
+        let expect_ramp = |tensor: &Tensor, seed: f32, label: &str| -> Result<()> {
+            let values = tensor.data()?;
+            for (i, value) in values.iter().enumerate() {
+                let expected = seed + i as f32 * 0.5;
+                assert!(
+                    (value - expected).abs() < 1e-5,
+                    "{label}[{i}] = {value}, expected {expected}"
+                );
+            }
+            Ok(())
+        };
+
+        expect_ramp(model.model.norm.weight(), 10.0, "model.norm")?;
+        expect_ramp(
+            model.model.layers[0].input_layernorm.weight(),
+            8.0,
+            "input_layernorm",
+        )?;
+        expect_ramp(
+            model.model.layers[0].post_attention_layernorm.weight(),
+            9.0,
+            "post_attention_layernorm",
+        )?;
+        expect_ramp(model.lm_head.weight(), 11.0, "lm_head")?;
+        Ok(())
+    }
+
+    /// Without `lm_head.weight` the head is tied to the input embeddings.
+    #[test]
+    fn test_load_from_path_ties_lm_head_to_embeddings() -> Result<()> {
+        let config = tiny_gqa_config();
+        let dir = TempModelDir::new("tied");
+        dir.write_safetensors(&checkpoint_tensors(&config, false));
+
+        let mut model = StableLMForCausalLM::new(config.clone())?;
+        model.load_from_path(&dir.path)?;
+
+        let head = model.lm_head.weight().data()?;
+        assert_eq!(head.len(), config.vocab_size * config.hidden_size);
+        for (i, value) in head.iter().enumerate() {
+            let expected = 0.25 + i as f32 * 0.5; // the embedding ramp
+            assert!(
+                (value - expected).abs() < 1e-5,
+                "tied head[{i}] = {value}, expected {expected}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A checkpoint missing a required tensor must fail loudly. The previous
+    /// loader wrapped every lookup in `if let Ok(..)` and returned `Ok(())`
+    /// after binding nothing, so inference ran on random initialisation.
+    #[test]
+    fn test_load_from_path_reports_missing_tensors() -> Result<()> {
+        let config = tiny_gqa_config();
+        let dir = TempModelDir::new("missing");
+        let tensors: Vec<_> = checkpoint_tensors(&config, true)
+            .into_iter()
+            .filter(|t| !t.name.ends_with("post_attention_layernorm.weight"))
+            .collect();
+        dir.write_safetensors(&tensors);
+
+        let mut model = StableLMForCausalLM::new(config)?;
+        let error = model.load_from_path(&dir.path).expect_err("missing tensor must be reported");
+        let message = error.to_string();
+        assert!(
+            message.contains("post_attention_layernorm.weight"),
+            "the error must name the missing tensor, got: {message}"
+        );
+        Ok(())
+    }
+
+    /// A checkpoint whose names do not match the architecture at all must be
+    /// rejected instead of silently leaving a randomly initialised model.
+    #[test]
+    fn test_load_from_path_rejects_unrelated_checkpoint() -> Result<()> {
+        use crate::weight_loading::test_support::F32Tensor;
+        let config = tiny_gqa_config();
+        let dir = TempModelDir::new("unrelated");
+        dir.write_safetensors(&[F32Tensor::ramp("some.other.weight", &[2, 2], 0.0)]);
+
+        let mut model = StableLMForCausalLM::new(config)?;
+        assert!(
+            model.load_from_path(&dir.path).is_err(),
+            "binding nothing must not be reported as a successful load"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_rms_norm_set_weight_rejects_wrong_size() -> Result<()> {
+        let mut norm = RMSNorm::new(4, 1e-6)?;
+        assert!(norm.set_weight(Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3])?).is_err());
+        norm.set_weight(Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[4])?)?;
+        assert_eq!(norm.weight().data()?, vec![1.0, 2.0, 3.0, 4.0]);
         Ok(())
     }
 

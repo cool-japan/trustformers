@@ -18,6 +18,24 @@ use std::sync::Arc;
 pub trait PipelineLayer: Send + Sync {
     fn forward(&self, input: &Tensor) -> Result<Tensor>;
     fn backward(&mut self, grad_output: &Tensor) -> Result<Tensor>;
+
+    /// Apply this step's accumulated gradients (already averaged over the
+    /// accumulation window by `PipelineOptimizer::step`) to whichever of
+    /// this layer's own parameters appear in `grads`, e.g. a plain SGD
+    /// update `param -= lr * grad`. Implementations should ignore any keys
+    /// in `grads` that do not belong to them.
+    ///
+    /// The default implementation honestly reports that this layer has no
+    /// mechanism to apply gradients, rather than silently discarding them
+    /// while `PipelineOptimizer::step` reports success: a layer that holds
+    /// learnable parameters must override this to actually update them.
+    fn apply_gradients(&mut self, grads: &HashMap<String, Tensor>, lr: f32) -> Result<()> {
+        let _ = (grads, lr);
+        Err(runtime_error(
+            "PipelineLayer::apply_gradients is not implemented for this layer type; \
+             PipelineOptimizer::step cannot update its parameters without an override",
+        ))
+    }
 }
 
 /// A single stage in the pipeline
@@ -63,6 +81,15 @@ impl PipelineStage {
             grad = layer.backward(&grad)?;
         }
         Ok(grad)
+    }
+
+    /// Apply `grads` to every layer in this stage (see
+    /// `PipelineLayer::apply_gradients`).
+    pub fn apply_gradients(&mut self, grads: &HashMap<String, Tensor>, lr: f32) -> Result<()> {
+        for layer in self.layers.iter_mut() {
+            layer.apply_gradients(grads, lr)?;
+        }
+        Ok(())
     }
 }
 
@@ -110,6 +137,14 @@ impl PipelineModel {
     /// Get total number of stages
     pub fn num_stages(&self) -> usize {
         self.stages.len()
+    }
+
+    /// Apply `grads` to the local stage's layers (see
+    /// `PipelineLayer::apply_gradients`). Only the local stage is updated:
+    /// exactly like `execute_forward`/`execute_backward` (`local_stage_mut`),
+    /// each rank owns and updates only its own stage's parameters.
+    pub fn apply_gradients(&mut self, grads: &HashMap<String, Tensor>, lr: f32) -> Result<()> {
+        self.local_stage_mut()?.apply_gradients(grads, lr)
     }
 }
 
@@ -402,35 +437,60 @@ impl PipelineExecutor {
         Ok(loss)
     }
 
-    /// Send activation to next stage
+    /// Returns `Ok(())` unconditionally when `other_stage` names the
+    /// caller's own local stage (self-communication is trivially correct:
+    /// there is nothing to transport), and an honest error otherwise.
+    ///
+    /// None of the four `send_*`/`recv_*` methods below can perform a real
+    /// cross-stage transfer today for two independent reasons: (1)
+    /// `PipelineSchedule`'s schedule generators
+    /// (`sequential_schedule`/`one_f1b_schedule`/`interleaved_1f1b_schedule`
+    /// in `model_parallel.rs`) never actually emit
+    /// `PipelineOp::SendActivation`/`RecvActivation`/`SendGradient`/
+    /// `RecvGradient` - only `Forward`/`Backward` - so these are unreachable
+    /// from `execute_step` as currently scheduled; and (2) even if they
+    /// were scheduled, those `PipelineOp` variants carry only a stage id,
+    /// not a microbatch id, so there would be no way to identify *which*
+    /// microbatch's activation/gradient to move. Rather than silently
+    /// returning `Ok(())` for a cross-stage transfer that cannot actually
+    /// happen (the previous behavior), a genuine cross-stage call reports
+    /// that honestly.
+    fn require_local_stage_or_error(&self, other_stage: usize, op: &str) -> Result<bool> {
+        let local_stage_id = self.model.read().local_stage_id;
+        if local_stage_id == Some(other_stage) {
+            return Ok(true);
+        }
+        Err(runtime_error(format!(
+            "PipelineExecutor::{op}: cross-stage transport to/from stage {other_stage} is not \
+             implemented (PipelineOp carries no microbatch id to identify what to transfer, and \
+             no schedule currently emits this op)"
+        )))
+    }
+
+    /// Send activation to `to_stage`. See `require_local_stage_or_error`.
     fn send_activation(&mut self, to_stage: usize) -> Result<()> {
-        // In practice, would use MPI/NCCL for communication
-        Ok(())
+        self.require_local_stage_or_error(to_stage, "send_activation").map(|_| ())
     }
 
-    /// Receive activation from previous stage
+    /// Receive activation from `from_stage`. See `require_local_stage_or_error`.
     fn recv_activation(&mut self, from_stage: usize) -> Result<()> {
-        // In practice, would use MPI/NCCL for communication
-        Ok(())
+        self.require_local_stage_or_error(from_stage, "recv_activation").map(|_| ())
     }
 
-    /// Send gradient to previous stage
+    /// Send gradient to `to_stage`. See `require_local_stage_or_error`.
     fn send_gradient(&mut self, to_stage: usize) -> Result<()> {
-        // In practice, would use MPI/NCCL for communication
-        Ok(())
+        self.require_local_stage_or_error(to_stage, "send_gradient").map(|_| ())
     }
 
-    /// Receive gradient from next stage
+    /// Receive gradient from `from_stage`. See `require_local_stage_or_error`.
     fn recv_gradient(&mut self, from_stage: usize) -> Result<()> {
-        // In practice, would use MPI/NCCL for communication
-        Ok(())
+        self.require_local_stage_or_error(from_stage, "recv_gradient").map(|_| ())
     }
 }
 
 /// Optimizer for pipeline parallel training
 pub struct PipelineOptimizer {
     /// Learning rate
-    #[allow(dead_code)]
     lr: f32,
     /// Weight decay
     _weight_decay: f32,
@@ -467,17 +527,34 @@ impl PipelineOptimizer {
         Ok(())
     }
 
-    /// Apply gradients if accumulation is complete
+    /// Apply gradients if accumulation is complete.
+    ///
+    /// Averages the accumulated gradients over the accumulation window and
+    /// hands them to `model`'s local stage via `PipelineLayer::apply_gradients`
+    /// (an SGD-style `param -= lr * grad` for layers that implement it).
+    /// This used to clear `accumulated_grads` and return `Ok(true)`
+    /// unconditionally - reporting a successful optimizer step that changed
+    /// no parameter at all. It now propagates whatever
+    /// `PipelineModel::apply_gradients` reports: `Err` for a model whose
+    /// layers do not implement gradient application (the default; see
+    /// `PipelineLayer::apply_gradients`), so a caller cannot mistake an
+    /// unimplemented update for a real one.
     pub fn step(&mut self, model: &mut PipelineModel) -> Result<bool> {
         if self.current_step < self.accumulation_steps {
             return Ok(false);
         }
 
-        // Apply accumulated gradients
+        // Average the accumulated gradients over the accumulation window
+        // before applying them.
         let scale = 1.0 / self.accumulation_steps as f32;
+        let averaged: HashMap<String, Tensor> = self
+            .accumulated_grads
+            .iter()
+            .map(|(name, grad)| Ok((name.clone(), grad.mul_scalar(scale)?)))
+            .collect::<Result<_>>()?;
 
-        // In practice, would update model parameters
-        // For now, just clear accumulated gradients
+        model.apply_gradients(&averaged, self.lr)?;
+
         self.accumulated_grads.clear();
         self.current_step = 0;
 
@@ -572,5 +649,163 @@ mod tests {
             .expect("operation failed in test");
 
         assert_eq!(model.num_stages(), 2);
+    }
+
+    fn single_stage_context() -> Arc<ModelParallelContext> {
+        let config = ModelParallelConfig {
+            num_devices: 1,
+            device_ids: vec![0],
+            strategy: ModelParallelStrategy::Pipeline,
+            comm_backend: CommunicationBackend::Custom,
+            ..Default::default()
+        };
+        Arc::new(ModelParallelContext::new(config).expect("mp context"))
+    }
+
+    /// `PipelineLayer` with one real, named, learnable parameter. Used to
+    /// prove `PipelineOptimizer::step` really mutates it via an
+    /// `apply_gradients` override (`param -= lr * grad`), unlike the
+    /// default (see `NoParamsLayer` below).
+    struct LinearLikeLayer {
+        param_name: String,
+        weight: Tensor,
+    }
+
+    impl PipelineLayer for LinearLikeLayer {
+        fn forward(&self, input: &Tensor) -> Result<Tensor> {
+            input.mul(&self.weight)
+        }
+
+        fn backward(&mut self, grad_output: &Tensor) -> Result<Tensor> {
+            Ok(grad_output.clone())
+        }
+
+        fn apply_gradients(&mut self, grads: &HashMap<String, Tensor>, lr: f32) -> Result<()> {
+            if let Some(grad) = grads.get(&self.param_name) {
+                self.weight = self.weight.sub(&grad.mul_scalar(lr)?)?;
+            }
+            Ok(())
+        }
+    }
+
+    /// `PipelineLayer` that does not override `apply_gradients`, exercising
+    /// the trait's default (honest-error) behavior.
+    struct NoParamsLayer;
+
+    impl PipelineLayer for NoParamsLayer {
+        fn forward(&self, input: &Tensor) -> Result<Tensor> {
+            Ok(input.clone())
+        }
+
+        fn backward(&mut self, grad_output: &Tensor) -> Result<Tensor> {
+            Ok(grad_output.clone())
+        }
+    }
+
+    /// Regression test: `PipelineOptimizer::step` used to clear
+    /// `accumulated_grads` and unconditionally return `Ok(true)` without
+    /// ever touching a parameter ("apply gradients" that applied nothing).
+    /// With a layer that implements `apply_gradients`, the real weight must
+    /// change by exactly `lr * grad`.
+    #[test]
+    fn test_optimizer_step_actually_updates_layer_parameters() {
+        let mut model = PipelineModel::new(single_stage_context());
+        let mut stage = PipelineStage::new(0, 0);
+        stage.add_layer(Box::new(LinearLikeLayer {
+            param_name: "w".to_string(),
+            weight: Tensor::from_vec(vec![1.0, 2.0], &[2]).expect("tensor"),
+        }));
+        model.add_stage(stage);
+
+        let input = Tensor::from_vec(vec![1.0, 1.0], &[2]).expect("tensor");
+        let before = model.local_stage().expect("local stage").layers[0]
+            .forward(&input)
+            .expect("forward");
+        assert_eq!(before.data().expect("data"), vec![1.0, 2.0]);
+
+        let mut optimizer = PipelineOptimizer::new(0.1, 0.0, 1);
+        let mut grads = HashMap::new();
+        grads.insert(
+            "w".to_string(),
+            Tensor::from_vec(vec![10.0, 10.0], &[2]).expect("tensor"),
+        );
+        optimizer.accumulate_gradients(grads).expect("accumulate_gradients");
+
+        let applied = optimizer.step(&mut model).expect("step should succeed");
+        assert!(applied);
+
+        // new weight = [1,2] - 0.1 * [10,10] = [0,1]
+        let after = model.local_stage().expect("local stage").layers[0]
+            .forward(&input)
+            .expect("forward");
+        assert_eq!(after.data().expect("data"), vec![0.0, 1.0]);
+    }
+
+    /// Regression test: `step` must not fabricate `Ok(true)` when nothing
+    /// in the model can actually apply the accumulated gradient.
+    #[test]
+    fn test_optimizer_step_errors_when_no_layer_implements_apply_gradients() {
+        let mut model = PipelineModel::new(single_stage_context());
+        let mut stage = PipelineStage::new(0, 0);
+        stage.add_layer(Box::new(NoParamsLayer));
+        model.add_stage(stage);
+
+        let mut optimizer = PipelineOptimizer::new(0.1, 0.0, 1);
+        let mut grads = HashMap::new();
+        grads.insert(
+            "w".to_string(),
+            Tensor::from_vec(vec![1.0], &[1]).expect("tensor"),
+        );
+        optimizer.accumulate_gradients(grads).expect("accumulate_gradients");
+
+        let result = optimizer.step(&mut model);
+        assert!(
+            result.is_err(),
+            "must not report a successful optimizer step that updated nothing"
+        );
+    }
+
+    /// Regression test: `send_activation`/`recv_activation`/`send_gradient`/
+    /// `recv_gradient` used to return `Ok(())` unconditionally for every
+    /// `to_stage`/`from_stage`, silently claiming a cross-stage transfer
+    /// happened when nothing was sent anywhere. Self-stage calls (the only
+    /// case that is actually a no-op transfer) must still succeed; a
+    /// genuinely different stage must now error instead of lying.
+    #[test]
+    fn test_send_recv_ok_for_local_stage_err_for_cross_stage() {
+        let config = ModelParallelConfig {
+            num_devices: 2,
+            device_ids: vec![0, 1],
+            strategy: ModelParallelStrategy::Pipeline,
+            comm_backend: CommunicationBackend::Custom,
+            ..Default::default()
+        };
+        let mp_context = Arc::new(ModelParallelContext::new(config).expect("mp context"));
+        let mut model = PipelineModel::new(mp_context);
+        model.add_stage(PipelineStage::new(0, 0));
+        model.add_stage(PipelineStage::new(1, 1));
+        // rank() is always 0 for `ModelParallelContext::new`, so stage 0
+        // (device_id 0) is local.
+        assert_eq!(model.local_stage_id, Some(0));
+
+        let model = Arc::new(RwLock::new(model));
+        let mut executor = PipelineExecutor::new(model, 1, false).expect("executor");
+
+        assert!(
+            executor.send_activation(0).is_ok(),
+            "self-stage send must succeed"
+        );
+        assert!(
+            executor.recv_activation(0).is_ok(),
+            "self-stage recv must succeed"
+        );
+
+        assert!(
+            executor.send_activation(1).is_err(),
+            "cross-stage send must error, not silently claim success"
+        );
+        assert!(executor.recv_activation(1).is_err());
+        assert!(executor.send_gradient(1).is_err());
+        assert!(executor.recv_gradient(1).is_err());
     }
 }

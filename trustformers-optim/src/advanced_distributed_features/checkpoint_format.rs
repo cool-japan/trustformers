@@ -484,7 +484,7 @@ mod tests {
         let mut sparse = HashMap::new();
         sparse.insert(
             "w".to_string(),
-            Tensor::from_slice(&vec![0.0f32; 512], &[512]).expect("tensor must build in test"),
+            Tensor::from_slice(&[0.0f32; 512], &[512]).expect("tensor must build in test"),
         );
         let encoded = encode_full(&sparse).expect("encode in test");
         let compressed = compress(&encoded);

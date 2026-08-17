@@ -49,7 +49,6 @@
 
 use crate::adam::{Adam, AdamW};
 use crate::averaged_adam::AveragedAdam;
-use crate::enhanced_distributed_training::DistributedConfig;
 use crate::lamb::LAMB;
 use crate::lion::Lion;
 use crate::sgd::SGD;
@@ -159,46 +158,37 @@ impl PerformanceValidator {
 
     /// Run comprehensive validation suite
     pub fn run_comprehensive_validation(&mut self) -> Result<ValidationResults> {
-        println!("🔬 Starting Comprehensive Performance Validation");
-        println!("===============================================");
-
         let session_start = Instant::now();
         let mut results = ValidationResults::new();
 
         // 1. Correctness Validation
-        println!("\\n📐 Step 1: Mathematical Correctness Validation");
         let correctness_results = self.validate_mathematical_correctness()?;
         results.correctness_results = correctness_results;
 
         // 2. Performance Benchmarking
-        println!("\\n⚡ Step 2: Performance Benchmarking");
         let performance_results = self.run_performance_benchmarks()?;
         results.performance_results = performance_results;
 
         // 3. Memory Efficiency Validation
         if self.config.memory_validation {
-            println!("\\n💾 Step 3: Memory Efficiency Validation");
             let memory_results = self.validate_memory_efficiency()?;
             results.memory_results = Some(memory_results);
         }
 
         // 4. Convergence Analysis
         if self.config.convergence_analysis {
-            println!("\\n📈 Step 4: Convergence Analysis");
             let convergence_results = self.analyze_convergence_properties()?;
             results.convergence_results = Some(convergence_results);
         }
 
         // 5. Distributed Training Validation
         if self.config.distributed_validation {
-            println!("\\n🌐 Step 5: Distributed Training Validation");
             let distributed_results = self.validate_distributed_training()?;
             results.distributed_results = Some(distributed_results);
         }
 
         // 6. Regression Detection
         if self.config.regression_detection && self.baseline_results.is_some() {
-            println!("\\n🔍 Step 6: Performance Regression Detection");
             let regression_results =
                 self.detect_performance_regressions(&results.performance_results)?;
             results.regression_results = Some(regression_results);
@@ -215,10 +205,6 @@ impl PerformanceValidator {
         };
         self.validation_history.push(session);
 
-        println!(
-            "\\n✅ Comprehensive Validation Complete ({:.2}s)",
-            total_time.as_secs_f64()
-        );
         Ok(results)
     }
 
@@ -230,8 +216,6 @@ impl PerformanceValidator {
         let test_cases = self.create_mathematical_test_cases()?;
 
         for test_case in &test_cases {
-            println!("   🧮 Testing: {}", test_case.name);
-
             // Test each optimizer on this test case
             let optimizer_results = self.test_optimizers_on_case(test_case)?;
 
@@ -247,13 +231,6 @@ impl PerformanceValidator {
         results.overall_correctness_rate = passed_tests as f64 / total_tests as f64;
         results.passed_tests = passed_tests;
         results.total_tests = total_tests;
-
-        println!(
-            "   ✅ Correctness: {}/{} tests passed ({:.1}%)",
-            passed_tests,
-            total_tests,
-            results.overall_correctness_rate * 100.0
-        );
 
         Ok(results)
     }
@@ -550,8 +527,6 @@ impl PerformanceValidator {
         ];
 
         for scenario in scenarios {
-            println!("   ⚡ Benchmarking: {}", scenario.name);
-
             let scenario_results = self.benchmark_scenario(&scenario)?;
             results.scenario_results.push(scenario_results);
         }
@@ -737,8 +712,6 @@ impl PerformanceValidator {
 
     /// Validate memory efficiency claims
     fn validate_memory_efficiency(&mut self) -> Result<MemoryValidationResults> {
-        println!("   💾 Testing memory efficiency claims...");
-
         let mut results = MemoryValidationResults::new();
 
         // Test 8-bit optimizers memory efficiency
@@ -756,83 +729,147 @@ impl PerformanceValidator {
         Ok(results)
     }
 
+    /// Measures the real state footprint of a quantized optimizer against `Adam`.
+    ///
+    /// Both optimizers are stepped on identical parameters and gradients, then asked
+    /// for the size of the buffers they actually allocated
+    /// ([`StatefulOptimizer::memory_usage`]). Nothing is assumed: the reported
+    /// percentage is `(adam_bytes − quantized_bytes) / adam_bytes`.
     fn test_memory_efficiency_claims(&self) -> Result<HashMap<String, f64>> {
+        use crate::quantized_advanced::Adam4bit;
+        use crate::traits::StatefulOptimizer;
+
         let mut results = HashMap::new();
 
-        // Compare 8-bit optimizers against full precision baselines
-        let test_size = vec![1000, 1000]; // 1M parameters
+        let shape = vec![64, 64];
+        let parameters = create_test_parameters(shape.clone())?;
+        let gradients = create_benchmark_gradients(&shape, 0)?;
 
-        // Test baseline Adam memory usage
-        let baseline_memory = self.measure_optimizer_memory_usage("Adam", &test_size)?;
+        let mut adam = Adam::new(0.001, (0.9, 0.999), 1e-8, 0.0);
+        let mut adam4bit = Adam4bit::new(0.001, 0.9, 0.999, 1e-8, 0.0);
 
-        // Test 8-bit optimizers (if available in crate)
-        // For now, simulate the test with estimated values
-        let eight_bit_memory = (baseline_memory as f64 * 0.25) as usize; // Assume 75% reduction
+        for (name, parameter) in &parameters {
+            let Some(gradient) = gradients.get(name) else {
+                continue;
+            };
+            let mut for_adam = parameter.clone();
+            let mut for_quantized = parameter.clone();
+            adam.update(&mut for_adam, gradient)?;
+            adam4bit.update(&mut for_quantized, gradient)?;
+        }
 
-        let efficiency =
-            (baseline_memory as f64 - eight_bit_memory as f64) / baseline_memory as f64 * 100.0;
-        results.insert("Adam8bit".to_string(), efficiency);
+        let adam_bytes = StatefulOptimizer::memory_usage(&adam).total_bytes;
+        let quantized_bytes = StatefulOptimizer::memory_usage(&adam4bit).total_bytes;
 
-        println!("     ✅ 8-bit Adam: {:.1}% memory reduction", efficiency);
+        if adam_bytes == 0 {
+            return Err(TrustformersError::invalid_state(
+                "Adam reported a zero-byte state after a step; memory validation cannot proceed"
+                    .to_string(),
+            ));
+        }
+
+        let reduction = (adam_bytes as f64 - quantized_bytes as f64) / adam_bytes as f64 * 100.0;
+        results.insert("Adam4bit".to_string(), reduction);
+        results.insert("Adam.state_bytes".to_string(), adam_bytes as f64);
+        results.insert("Adam4bit.state_bytes".to_string(), quantized_bytes as f64);
 
         Ok(results)
     }
 
-    fn measure_optimizer_memory_usage(
-        &self,
-        optimizer_name: &str,
-        parameter_sizes: &[usize],
-    ) -> Result<usize> {
-        let parameters = create_test_parameters(parameter_sizes.to_vec())?;
-        let optimizer = self.create_optimizer_instance(match optimizer_name {
-            "Adam" => OptimizerType::Adam,
-            "AdamW" => OptimizerType::AdamW,
-            "SGD" => OptimizerType::SGD,
-            _ => OptimizerType::Adam,
-        })?;
-
-        self.estimate_memory_usage(&parameters, &optimizer)
-    }
-
+    /// Measures the *real* payload reduction of each gradient-compression method.
+    ///
+    /// Each method compresses a fixed gradient, and the reported percentage is the
+    /// measured drop in transmitted bytes (`indices` plus `values`) relative to the
+    /// dense `f32` payload — not a table of expected ratios.
     fn test_gradient_compression_efficiency(&self) -> Result<HashMap<String, f64>> {
+        use crate::compression::{CompressionMethod, GradientCompressor};
+
         let mut results = HashMap::new();
 
-        // Test different compression algorithms
-        let compression_algorithms = vec![
-            ("TopK", 0.9),          // 90% compression
-            ("Quantization", 0.75), // 75% compression
-            ("PowerSGD", 0.8),      // 80% compression
+        // One 1024-element gradient: sparse methods need a tensor large enough for
+        // their `k` to be meaningful.
+        let shape = vec![1024];
+        let gradients = create_benchmark_gradients(&shape, 7)?;
+        let dense_bytes: usize = gradients
+            .values()
+            .map(|g| g.shape().iter().product::<usize>() * std::mem::size_of::<f32>())
+            .sum();
+        if dense_bytes == 0 {
+            return Err(TrustformersError::invalid_state(
+                "compression validation needs a non-empty gradient".to_string(),
+            ));
+        }
+
+        let methods = [
+            ("TopK", CompressionMethod::TopK { k: 102 }),
+            ("RandomK", CompressionMethod::RandomK { k: 102 }),
+            ("Threshold", CompressionMethod::Threshold { threshold: 0.5 }),
+            ("Quantization", CompressionMethod::Quantization { bits: 8 }),
+            ("SignSGD", CompressionMethod::SignSGD),
         ];
 
-        for (name, expected_ratio) in compression_algorithms {
-            // Simulate compression testing
-            let efficiency = expected_ratio * 100.0;
-            results.insert(name.to_string(), efficiency);
-            println!("     ✅ {} compression: {:.1}% reduction", name, efficiency);
+        for (name, method) in methods {
+            let mut compressor = GradientCompressor::new(method);
+            let compressed = compressor.compress(&gradients)?;
+
+            // Transmitted payload as the representation itself reports it.
+            let payload: usize = compressed.values().map(|c| c.payload_bytes()).sum();
+
+            // The round trip must reconstruct the right number of elements, otherwise
+            // the "saving" is meaningless.
+            let restored = compressor.decompress(&compressed)?;
+            for (grad_name, tensor) in &restored {
+                let expected: usize =
+                    gradients.get(grad_name).map(|g| g.shape().iter().product()).unwrap_or(0);
+                if tensor.data_f32()?.len() != expected {
+                    return Err(TrustformersError::invalid_state(format!(
+                        "{name} decompression returned the wrong element count for '{grad_name}'"
+                    )));
+                }
+            }
+
+            let reduction = (dense_bytes as f64 - payload as f64) / dense_bytes as f64 * 100.0;
+            results.insert(name.to_string(), reduction);
         }
 
         Ok(results)
     }
 
+    /// Measures memory techniques that can be measured in-process.
+    ///
+    /// Only mixed precision is measurable here — it is a dtype change whose effect
+    /// shows up directly in [`Tensor::size_bytes`]. Gradient checkpointing and CPU
+    /// offloading depend on a training loop and a device this crate does not own, so
+    /// no figure is reported for them rather than a plausible-looking literal.
     fn test_memory_optimizations(&self) -> Result<HashMap<String, f64>> {
         let mut results = HashMap::new();
 
-        // Test memory optimization techniques
-        results.insert("GradientCheckpointing".to_string(), 65.0); // 65% memory reduction
-        results.insert("CPUOffloading".to_string(), 80.0); // 80% GPU memory reduction
-        results.insert("MixedPrecision".to_string(), 50.0); // 50% memory reduction
+        let dense = Tensor::from_vec(vec![0.5_f32; 4096], &[64, 64])?;
+        let half = match &dense {
+            Tensor::F32(array) => Tensor::F16(array.mapv(half::f16::from_f32)),
+            other => {
+                return Err(TrustformersError::invalid_state(format!(
+                    "expected an f32 tensor, got {:?}",
+                    other.dtype()
+                )))
+            },
+        };
 
-        for (technique, efficiency) in &results {
-            println!("     ✅ {}: {:.1}% memory reduction", technique, efficiency);
+        let dense_bytes = dense.size_bytes();
+        if dense_bytes == 0 {
+            return Err(TrustformersError::invalid_state(
+                "mixed-precision validation needs a non-empty tensor".to_string(),
+            ));
         }
+        let reduction =
+            (dense_bytes as f64 - half.size_bytes() as f64) / dense_bytes as f64 * 100.0;
+        results.insert("MixedPrecision".to_string(), reduction);
 
         Ok(results)
     }
 
     /// Analyze convergence properties of optimizers
     fn analyze_convergence_properties(&mut self) -> Result<ConvergenceAnalysisResults> {
-        println!("   📈 Analyzing convergence properties...");
-
         let mut results = ConvergenceAnalysisResults::new();
 
         // Test convergence on different problem types
@@ -840,11 +877,11 @@ impl PerformanceValidator {
         results.convergence_tests = convergence_tests;
 
         // Analyze convergence speed
-        let speed_analysis = self.analyze_convergence_speed()?;
+        let speed_analysis = self.analyze_convergence_speed(&results.convergence_tests)?;
         results.speed_analysis = speed_analysis;
 
         // Test convergence stability
-        let stability_analysis = self.analyze_convergence_stability()?;
+        let stability_analysis = self.analyze_convergence_stability(&results.convergence_tests)?;
         results.stability_analysis = stability_analysis;
 
         Ok(results)
@@ -868,41 +905,64 @@ impl PerformanceValidator {
         Ok(results)
     }
 
+    /// Runs a *real* optimization problem and measures the loss it actually reaches.
+    ///
+    /// The objective is the separable quadratic `f(θ) = Σ θ²`, whose gradient `2θ` is
+    /// computed from the current parameters on every iteration. Both the gradient and
+    /// the loss therefore come from the parameters the optimizer produced — the
+    /// previous version stepped the optimizer and then reported a hard-coded
+    /// exponential decay curve that could not have been affected by it.
     fn test_optimizer_convergence(
         &self,
-        name: &str,
+        _name: &str,
         optimizer_type: OptimizerType,
     ) -> Result<ConvergenceTestResult> {
         let mut optimizer = self.create_optimizer_instance(optimizer_type)?;
-        let mut parameters = create_test_parameters(vec![100, 100])?; // 10K parameters
+        let mut parameters = create_test_parameters(vec![32, 32])?;
 
+        // The objective evaluated on the live parameters.
+        let evaluate = |params: &HashMap<String, Tensor>| -> Result<f32> {
+            let mut total = 0.0_f32;
+            let mut count = 0_usize;
+            for tensor in params.values() {
+                for value in tensor.data_f32()? {
+                    total += value * value;
+                    count += 1;
+                }
+            }
+            Ok(if count == 0 { 0.0 } else { total / count as f32 })
+        };
+
+        let initial_loss = evaluate(&parameters)?;
         let mut loss_history = Vec::new();
-        let initial_loss = 1000.0_f32; // Simulated initial loss
         let mut current_loss = initial_loss;
 
-        let max_iterations = 1000;
+        let max_iterations = 500;
         let mut converged = false;
         let mut convergence_iteration = max_iterations;
 
+        // Deterministic parameter visit order keeps anonymous identities stable.
+        let mut names: Vec<String> = parameters.keys().cloned().collect();
+        names.sort();
+
         for iteration in 0..max_iterations {
-            // Simulate training step
-            let gradients = create_benchmark_gradients(&[100, 100], iteration)?;
-
-            for (param_name, gradient) in &gradients {
-                if let Some(param) = parameters.get_mut(param_name) {
-                    optimizer.zero_grad();
-                    optimizer.update(param, gradient)?;
-                    optimizer.step();
-                }
+            for name in &names {
+                let Some(parameter) = parameters.get_mut(name) else {
+                    continue;
+                };
+                let values = parameter.data_f32()?;
+                let gradient = Tensor::from_vec(
+                    values.iter().map(|v| 2.0 * v).collect::<Vec<f32>>(),
+                    &parameter.shape(),
+                )?;
+                optimizer.update(parameter, &gradient)?;
             }
+            optimizer.step();
 
-            // Simulate loss computation (exponential decay with noise)
-            let noise = (iteration as f32 * 0.1).sin() * 0.1;
-            current_loss = initial_loss * (-0.01 * iteration as f32).exp() + noise;
+            current_loss = evaluate(&parameters)?;
             loss_history.push(current_loss);
 
-            // Check convergence
-            if current_loss < 0.01 && !converged {
+            if current_loss < 1e-4 && !converged {
                 converged = true;
                 convergence_iteration = iteration;
                 break;
@@ -916,12 +976,11 @@ impl PerformanceValidator {
         };
 
         let final_loss = current_loss;
-        let loss_reduction = (initial_loss - final_loss) / initial_loss;
-
-        println!(
-            "     ✅ {}: converged={}, rate={:.3}, loss_reduction={:.3}",
-            name, converged, convergence_rate, loss_reduction
-        );
+        let loss_reduction = if initial_loss > 0.0 {
+            (initial_loss - final_loss) / initial_loss
+        } else {
+            0.0
+        };
 
         Ok(ConvergenceTestResult {
             converged,
@@ -933,34 +992,56 @@ impl PerformanceValidator {
         })
     }
 
-    fn analyze_convergence_speed(&self) -> Result<HashMap<String, f64>> {
+    /// Convergence speed derived from the *measured* loss curves.
+    ///
+    /// Speed is the fraction of the iteration budget still unused when the loss first
+    /// dropped below 1% of its initial value; a run that never got there scores 0.
+    fn analyze_convergence_speed(
+        &self,
+        tests: &HashMap<String, ConvergenceTestResult>,
+    ) -> Result<HashMap<String, f64>> {
         let mut results = HashMap::new();
-
-        // Simplified convergence speed analysis
-        results.insert("Adam".to_string(), 0.85);
-        results.insert("AdamW".to_string(), 0.88);
-        results.insert("AveragedAdam".to_string(), 0.92);
-        results.insert("SGD".to_string(), 0.65);
-
+        for (name, test) in tests {
+            let Some(&initial) = test.loss_history.first() else {
+                continue;
+            };
+            let target = initial * 0.01;
+            let reached = test.loss_history.iter().position(|&loss| loss <= target);
+            let total = test.loss_history.len().max(1) as f64;
+            let speed = match reached {
+                Some(index) => 1.0 - (index as f64 / total),
+                None => 0.0,
+            };
+            results.insert(name.clone(), speed);
+        }
         Ok(results)
     }
 
-    fn analyze_convergence_stability(&self) -> Result<HashMap<String, f64>> {
+    /// Convergence stability derived from the *measured* loss curves.
+    ///
+    /// Stability is the fraction of steps in which the loss did not increase.
+    fn analyze_convergence_stability(
+        &self,
+        tests: &HashMap<String, ConvergenceTestResult>,
+    ) -> Result<HashMap<String, f64>> {
         let mut results = HashMap::new();
-
-        // Simplified stability analysis (variance of loss)
-        results.insert("Adam".to_string(), 0.95);
-        results.insert("AdamW".to_string(), 0.93);
-        results.insert("AveragedAdam".to_string(), 0.98);
-        results.insert("SGD".to_string(), 0.80);
-
+        for (name, test) in tests {
+            if test.loss_history.len() < 2 {
+                continue;
+            }
+            let monotone = test
+                .loss_history
+                .windows(2)
+                .filter(|pair| pair[1] <= pair[0] + f32::EPSILON)
+                .count();
+            let stability = monotone as f64 / (test.loss_history.len() - 1) as f64;
+            results.insert(name.clone(), stability);
+        }
         Ok(results)
     }
 
     /// Validate distributed training components
     fn validate_distributed_training(&mut self) -> Result<DistributedValidationResults> {
-        println!("   🌐 Validating distributed training components...");
-
         let mut results = DistributedValidationResults::new();
 
         // Test distributed training scaling
@@ -978,66 +1059,118 @@ impl PerformanceValidator {
         Ok(results)
     }
 
+    /// Measures the real memory reduction ZeRO parameter sharding delivers.
+    ///
+    /// A single process cannot measure multi-GPU speedup, so no speedup figure is
+    /// reported. What *is* measurable is the fraction of a parameter each rank has to
+    /// hold once [`crate::zero::partition_parameters`] shards it, and that is what
+    /// this reports: `1 − shard_bytes / full_bytes` for rank 0 at each world size.
     fn test_distributed_scaling(&self) -> Result<HashMap<String, f64>> {
+        use crate::zero::partition_parameters;
+
         let mut results = HashMap::new();
+        let parameters = create_test_parameters(vec![64, 64])?;
+        let full_elements: usize =
+            parameters.values().map(|t| t.shape().iter().product::<usize>()).sum();
+        if full_elements == 0 {
+            return Err(TrustformersError::invalid_state(
+                "ZeRO validation needs a non-empty parameter set".to_string(),
+            ));
+        }
 
-        // Simulate distributed scaling tests
-        let gpu_counts = vec![1, 2, 4, 8];
-
-        for &gpu_count in &gpu_counts {
-            let _config = DistributedConfig::new().with_gpus(gpu_count);
-
-            // Simulate scaling efficiency
-            let theoretical_speedup = gpu_count as f64;
-            let actual_speedup = theoretical_speedup * 0.85; // 85% efficiency
-            let scaling_efficiency = actual_speedup / theoretical_speedup;
-
-            results.insert(format!("{}-GPU", gpu_count), scaling_efficiency);
-            println!(
-                "     ✅ {}-GPU scaling: {:.1}% efficiency",
-                gpu_count,
-                scaling_efficiency * 100.0
+        for world_size in [1_usize, 2, 4, 8] {
+            let partitions = partition_parameters(&parameters, world_size, 0)?;
+            let shard_elements: usize = partitions
+                .values()
+                .map(|p| p.local_shard.data_f32().map(|d| d.len()).unwrap_or(0))
+                .sum();
+            let reduction = 1.0 - (shard_elements as f64 / full_elements as f64);
+            results.insert(
+                format!("{world_size}-rank-parameter-memory-reduction"),
+                reduction,
             );
         }
 
         Ok(results)
     }
 
+    /// Verifies the collective primitives round-trip exactly.
+    ///
+    /// There is no wire here, so "communication efficiency" is not measurable; what is
+    /// measurable — and much more useful — is whether shard → gather reconstructs the
+    /// original tensor bit-for-bit. The reported value is the fraction of parameters
+    /// that round-tripped exactly at each world size.
     fn test_communication_efficiency(&self) -> Result<HashMap<String, f64>> {
+        use crate::zero::{gather_shards, partition_parameters};
+
         let mut results = HashMap::new();
+        let parameters = create_test_parameters(vec![16, 16])?;
 
-        // Test different communication patterns
-        results.insert("AllReduce".to_string(), 0.92);
-        results.insert("ParameterServer".to_string(), 0.88);
-        results.insert("Gossip".to_string(), 0.85);
-
-        for (pattern, efficiency) in &results {
-            println!(
-                "     ✅ {} communication: {:.1}% efficiency",
-                pattern,
-                efficiency * 100.0
-            );
+        for world_size in [2_usize, 3, 5] {
+            let mut exact = 0_usize;
+            for (name, tensor) in &parameters {
+                let mut shards = Vec::with_capacity(world_size);
+                for rank in 0..world_size {
+                    let partitions = partition_parameters(&parameters, world_size, rank)?;
+                    let shard =
+                        partitions.get(name).map(|p| p.local_shard.clone()).ok_or_else(|| {
+                            TrustformersError::invalid_state(format!(
+                                "no shard produced for '{name}'"
+                            ))
+                        })?;
+                    shards.push(shard);
+                }
+                let gathered = gather_shards(&shards, &tensor.shape())?;
+                if gathered.data_f32()? == tensor.data_f32()? {
+                    exact += 1;
+                }
+            }
+            let fraction = exact as f64 / parameters.len().max(1) as f64;
+            results.insert(format!("{world_size}-rank-gather-exactness"), fraction);
         }
 
         Ok(results)
     }
 
+    /// Exercises the recovery paths that *can* be executed in one process.
+    ///
+    /// Node-failure and network-partition handling need a real cluster and are
+    /// therefore not claimed. Checkpoint recovery is executed for real: an optimizer
+    /// is stepped, checkpointed, restored into a fresh instance, and the restored
+    /// state is compared against the original.
     fn test_fault_tolerance(&self) -> Result<HashMap<String, bool>> {
+        use crate::traits::StatefulOptimizer;
+
         let mut results = HashMap::new();
 
-        // Test fault tolerance scenarios
-        results.insert("NodeFailureRecovery".to_string(), true);
-        results.insert("NetworkPartitionHandling".to_string(), true);
-        results.insert("CheckpointRecovery".to_string(), true);
+        let parameters = create_test_parameters(vec![8, 8])?;
+        let gradients = create_benchmark_gradients(&[8, 8], 3)?;
 
-        for (scenario, passed) in &results {
-            println!(
-                "     {} {}: {}",
-                if *passed { "✅" } else { "❌" },
-                scenario,
-                if *passed { "PASSED" } else { "FAILED" }
-            );
+        let mut original = Adam::new(0.001, (0.9, 0.999), 1e-8, 0.0);
+        let mut names: Vec<String> = parameters.keys().cloned().collect();
+        names.sort();
+        for name in &names {
+            let (Some(parameter), Some(gradient)) = (parameters.get(name), gradients.get(name))
+            else {
+                continue;
+            };
+            let mut working = parameter.clone();
+            original.update_named(name, &mut working, gradient)?;
         }
+
+        let checkpoint = StatefulOptimizer::state_dict(&original)?;
+        let mut restored = Adam::new(0.1, (0.5, 0.5), 1e-3, 0.5);
+        StatefulOptimizer::load_state_dict(&mut restored, checkpoint.clone())?;
+        let round_trip = StatefulOptimizer::state_dict(&restored)?;
+
+        let mut identical = round_trip.len() == checkpoint.len();
+        for (key, tensor) in &checkpoint {
+            match round_trip.get(key) {
+                Some(other) if other.data_f32()? == tensor.data_f32()? => {},
+                _ => identical = false,
+            }
+        }
+        results.insert("CheckpointRecovery".to_string(), identical);
 
         Ok(results)
     }
@@ -1047,8 +1180,6 @@ impl PerformanceValidator {
         &mut self,
         current_results: &PerformanceBenchmarkResults,
     ) -> Result<RegressionAnalysisResults> {
-        println!("   🔍 Detecting performance regressions...");
-
         let baseline = self.baseline_results.as_ref().ok_or_else(|| {
             TrustformersError::invalid_state(
                 "baseline_results must be set before detecting regressions".to_string(),
@@ -1069,21 +1200,6 @@ impl PerformanceValidator {
                         results.regressions.push(regression_info);
                     }
                 }
-            }
-        }
-
-        if results.regressions.is_empty() {
-            println!("     ✅ No performance regressions detected");
-        } else {
-            println!(
-                "     ⚠️  {} performance regressions detected",
-                results.regressions.len()
-            );
-            for regression in &results.regressions {
-                println!(
-                    "       - {}: {:.1}% regression",
-                    regression.optimizer_name, regression.regression_percentage
-                );
             }
         }
 
@@ -1630,96 +1746,5 @@ fn create_benchmark_gradients(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_validation_config_creation() {
-        let config = ValidationConfig::default();
-        assert!(config.statistical_significance);
-        assert!(config.memory_validation);
-        assert_eq!(config.benchmark_iterations, 100);
-        assert_eq!(config.confidence_level, 0.95);
-    }
-
-    #[test]
-    fn test_performance_validator_creation() {
-        let validator = PerformanceValidator::new()
-            .with_statistical_significance(true)
-            .with_memory_validation(true)
-            .with_benchmark_iterations(50);
-
-        assert!(validator.config.statistical_significance);
-        assert!(validator.config.memory_validation);
-        assert_eq!(validator.config.benchmark_iterations, 50);
-    }
-
-    #[test]
-    fn test_mathematical_test_case_creation() {
-        let test_cases = [MathematicalTestCase {
-            name: "Test Case".to_string(),
-            description: "Test Description".to_string(),
-            parameters: HashMap::new(),
-            gradients: HashMap::new(),
-            expected_properties: vec![MathematicalProperty::Convergence],
-            tolerance: 1e-6,
-        }];
-
-        assert_eq!(test_cases.len(), 1);
-        assert_eq!(test_cases[0].name, "Test Case");
-    }
-
-    #[test]
-    fn test_statistical_analyzer() {
-        let analyzer = StatisticalAnalyzer::new();
-        let step_times = vec![
-            Duration::from_millis(10),
-            Duration::from_millis(12),
-            Duration::from_millis(11),
-            Duration::from_millis(9),
-            Duration::from_millis(13),
-        ];
-
-        let metrics = analyzer.analyze(&step_times, 0.95).expect("Operation failed in test");
-        assert!(metrics.mean > Duration::from_millis(9));
-        assert!(metrics.mean < Duration::from_millis(14));
-    }
-
-    #[test]
-    fn test_test_data_creation() {
-        let parameters = create_test_parameters(vec![10, 20]).expect("Operation failed in test");
-        assert_eq!(parameters.len(), 2);
-
-        let gradients = create_benchmark_gradients(&[10, 20], 5).expect("Operation failed in test");
-        assert_eq!(gradients.len(), 2);
-    }
-
-    #[test]
-    fn test_regression_detector() {
-        let detector = RegressionDetector::new();
-
-        let baseline = BenchmarkResult {
-            avg_step_time: Duration::from_millis(10),
-            throughput: 1000.0,
-            memory_usage: 100.0,
-        };
-
-        let current = OptimizerBenchmarkResult {
-            optimizer_name: "TestOptimizer".to_string(),
-            avg_step_time: Duration::from_millis(12), // 20% slower
-            min_step_time: Duration::from_millis(11),
-            max_step_time: Duration::from_millis(13),
-            throughput: 800.0,
-            avg_memory_usage: 100.0,
-            statistical_metrics: None,
-        };
-
-        let regression = detector
-            .detect_regression(&baseline, &current, 5.0)
-            .expect("Operation failed in test");
-        assert!(regression.is_some());
-
-        let regression_info = regression.expect("Operation failed in test");
-        assert!(regression_info.regression_percentage > 5.0);
-    }
-}
+#[path = "performance_validation_tests.rs"]
+mod performance_validation_tests;

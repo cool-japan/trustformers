@@ -343,10 +343,15 @@ impl ProcessGroup for TcpProcessGroup {
 ///
 /// This is the standard way to drive multi-rank code in one process, and the
 /// harness the distributed tests use.
+///
+/// The group is handed to the body as an [`Arc`] so that it can be widened to
+/// `Arc<dyn ProcessGroup>` for the types that store one (for example
+/// [`crate::distributed_zero::ZeroStage1Optimizer`]); method calls work
+/// unchanged through `Deref`.
 pub fn run_in_process<R, F>(world_size: usize, body: F) -> Result<Vec<R>>
 where
     R: Send + 'static,
-    F: Fn(usize, &InProcessProcessGroup) -> R + Send + Sync + 'static,
+    F: Fn(usize, Arc<InProcessProcessGroup>) -> R + Send + Sync + 'static,
 {
     let groups = InProcessProcessGroup::group(world_size)?;
     let body = Arc::new(body);
@@ -356,7 +361,8 @@ where
         .enumerate()
         .map(|(rank, group)| {
             let body = Arc::clone(&body);
-            std::thread::spawn(move || body(rank, &group))
+            let group = Arc::new(group);
+            std::thread::spawn(move || body(rank, group))
         })
         .collect();
 

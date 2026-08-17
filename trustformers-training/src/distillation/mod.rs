@@ -625,7 +625,7 @@ pub fn soft_target_kl_loss(
 ///
 /// `alpha` = weight of the task loss; `1 - alpha` = weight of the distillation loss.
 pub fn combined_distillation_loss(task_loss: f32, distill_loss: f32, alpha: f32) -> f32 {
-    let a = alpha.max(0.0).min(1.0);
+    let a = alpha.clamp(0.0, 1.0);
     a * task_loss + (1.0 - a) * distill_loss
 }
 

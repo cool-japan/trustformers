@@ -742,8 +742,10 @@ mod tests {
 
     #[test]
     fn test_create_pairs_gap_too_small() {
-        let mut cfg = OnlineDpoConfig::default();
-        cfg.hard_pair_threshold = 0.5;
+        let cfg = OnlineDpoConfig {
+            hard_pair_threshold: 0.5,
+            ..OnlineDpoConfig::default()
+        };
         let prompts = vec![vec![1u32, 2]];
         let responses = vec![vec![vec![10u32], vec![20u32]]];
         let rewards = vec![vec![0.8_f32, 0.7]]; // gap = 0.1 < threshold 0.5
@@ -754,8 +756,10 @@ mod tests {
 
     #[test]
     fn test_create_pairs_max_pairs() {
-        let mut cfg = OnlineDpoConfig::default();
-        cfg.max_pairs_per_batch = 2;
+        let cfg = OnlineDpoConfig {
+            max_pairs_per_batch: 2,
+            ..OnlineDpoConfig::default()
+        };
 
         let prompts: Vec<Vec<u32>> = (0..5).map(|i| vec![i as u32]).collect();
         let responses: Vec<Vec<Vec<u32>>> =
@@ -790,9 +794,11 @@ mod tests {
 
     #[test]
     fn test_apply_baseline_fixed() {
-        let mut cfg = OnlineDpoConfig::default();
-        cfg.use_running_mean_baseline = false;
-        cfg.reward_baseline = 0.3;
+        let cfg = OnlineDpoConfig {
+            use_running_mean_baseline: false,
+            reward_baseline: 0.3,
+            ..OnlineDpoConfig::default()
+        };
         let sel = OnlineDpoSelector::new(cfg);
         assert!((sel.apply_baseline(1.0) - 0.7).abs() < 1e-6);
     }
@@ -880,8 +886,10 @@ mod tests {
     #[test]
     fn test_rejection_sampling_gap_threshold_filtering() {
         // Only pairs with reward_gap >= hard_pair_threshold should be kept
-        let mut cfg = OnlineDpoConfig::default();
-        cfg.hard_pair_threshold = 0.5;
+        let cfg = OnlineDpoConfig {
+            hard_pair_threshold: 0.5,
+            ..OnlineDpoConfig::default()
+        };
         let prompts: Vec<Vec<u32>> = (0..4).map(|i| vec![i as u32]).collect();
         let responses: Vec<Vec<Vec<u32>>> =
             (0..4).map(|i| vec![vec![i as u32 * 10], vec![i as u32 * 10 + 1]]).collect();
@@ -978,8 +986,10 @@ mod tests {
     #[test]
     fn test_reward_model_threshold_filtering_multiple_prompts() {
         // With a high threshold, very close reward responses are filtered out
-        let mut cfg = OnlineDpoConfig::default();
-        cfg.hard_pair_threshold = 1.0;
+        let cfg = OnlineDpoConfig {
+            hard_pair_threshold: 1.0,
+            ..OnlineDpoConfig::default()
+        };
         let prompts = vec![vec![1u32], vec![2u32]];
         let responses = vec![vec![vec![1u32], vec![2u32]], vec![vec![3u32], vec![4u32]]];
         let rewards = vec![

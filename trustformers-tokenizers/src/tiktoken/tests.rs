@@ -63,6 +63,119 @@ fn test_byte_pair_merge_follows_rank_order() {
     );
 }
 
+/// Straightforward O(L^2) reference: repeatedly merge the adjacent pair whose
+/// concatenation has the lowest rank (leftmost on a tie), recomputing every
+/// candidate from scratch each round.
+///
+/// `TiktokenTokenizer::byte_pair_merge` computes the same thing but repairs only
+/// the two ranks adjacent to each merge, which is exactly the kind of
+/// optimization that silently drifts. This reference pins it.
+fn naive_byte_pair_merge(ranks: &RankMap, piece: &[u8]) -> Vec<usize> {
+    let mut parts: Vec<Vec<u8>> = piece.iter().map(|&byte| vec![byte]).collect();
+
+    loop {
+        let mut best: Option<(usize, usize)> = None;
+
+        for index in 0..parts.len().saturating_sub(1) {
+            let mut merged = parts[index].clone();
+            merged.extend_from_slice(&parts[index + 1]);
+            if let Some(&rank) = ranks.get(&merged) {
+                let improves = match best {
+                    // Strictly lower only, so the leftmost of two equal ranks
+                    // wins — the same tie-break the real implementation uses.
+                    Some((best_rank, _)) => rank < best_rank,
+                    None => true,
+                };
+                if improves {
+                    best = Some((rank, index));
+                }
+            }
+        }
+
+        let Some((_, index)) = best else { break };
+        let next = parts.remove(index + 1);
+        parts[index].extend_from_slice(&next);
+    }
+
+    parts
+        .iter()
+        .map(|part| *ranks.get(part).expect("every merged part must be ranked"))
+        .collect()
+}
+
+/// A rank table with **unique** ranks (so both implementations break ties the
+/// same way) covering every single byte the fixtures use.
+fn multi_level_ranks() -> RankMap {
+    tiny_ranks(&[
+        (b"a", 0),
+        (b"b", 1),
+        (b"c", 2),
+        (b"d", 3),
+        (b" ", 4),
+        (b"ab", 5),
+        (b"cd", 6),
+        (b"bc", 7),
+        (b"abc", 8),
+        (b"abcd", 9),
+        (b"cdab", 10),
+        (b"aa", 11),
+        (b"dd", 12),
+        (b" a", 13),
+        (b"bcd", 14),
+    ])
+}
+
+/// The incremental rank repair must agree with the naive reference everywhere.
+#[test]
+fn test_byte_pair_merge_matches_naive_reference() {
+    let ranks = multi_level_ranks();
+    let tokenizer = tokenizer_from(ranks.clone());
+
+    for piece in [
+        "abcabcd",
+        "aaab",
+        "ddabcd",
+        "cdabcd",
+        "aaaa",
+        "dcba",
+        "abcd abcd",
+        "a",
+        "ba",
+        "cdabcdab",
+        "dddd",
+        " abc",
+    ] {
+        let bytes = piece.as_bytes();
+        let expected = naive_byte_pair_merge(&ranks, bytes);
+        let actual = tokenizer.encode_piece(bytes).expect("the table is complete");
+        assert_eq!(
+            actual, expected,
+            "incremental merge diverged from the reference for {:?}",
+            piece
+        );
+
+        // ...and the result is a real segmentation of the input bytes.
+        let mut rebuilt: Vec<u8> = Vec::new();
+        for id in &actual {
+            rebuilt.extend_from_slice(
+                tokenizer.decoder.get(id).expect("every emitted id must decode"),
+            );
+        }
+        assert_eq!(rebuilt.as_slice(), bytes);
+    }
+}
+
+/// Hand-computed anchor for the merge order (see the reference walk-through in
+/// the test above): "abcabcd" merges ab, ab, cd, abc, abcd -> ["abc", "abcd"].
+#[test]
+fn test_byte_pair_merge_hand_computed_anchor() {
+    let tokenizer = tokenizer_from(multi_level_ranks());
+    assert_eq!(
+        tokenizer.encode_piece(b"abcabcd").expect("the table is complete"),
+        vec![8, 9]
+    );
+}
+
 #[test]
 fn test_encode_decode_round_trip() {
     let tokenizer = tokenizer_from(table_ab_first());

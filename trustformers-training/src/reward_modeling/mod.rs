@@ -1,8 +1,17 @@
 //! Reward model training for RLHF.
 //!
-//! Implements a preference-based reward model that learns to score responses
-//! using Bradley-Terry and regression loss functions, along with dataset
-//! management for human preference data.
+//! Two complementary pieces:
+//!
+//! * [`RmRewardModel`] — a self-contained **bag-of-words** reward model: a learned linear
+//!   head over hashed token features, trained on preference pairs with the real
+//!   Bradley-Terry / regression gradients. It has no transformer backbone, and does not
+//!   claim one; `RmRewardModelConfig::num_layers` and `dropout_rate` are carried for
+//!   interoperability and are explicitly unused.
+//! * [`training`] — the pieces for a reward head on top of a **real encoder**:
+//!   [`pool_hidden_states`], [`compute_reward_score`] and [`batch_reward_loss`] take hidden
+//!   states you produce with an actual model.
+//!
+//! Plus [`PreferenceDataset`] and friends for managing human preference data.
 
 pub mod training;
 pub use training::{
@@ -113,8 +122,17 @@ impl Default for RmRewardModelConfig {
 // RewardModel
 // ──────────────────────────────────────────────
 
-/// Simplified reward model.  Scoring is deterministic and hash-based so that
-/// unit tests are reproducible without a real neural backend.
+/// A bag-of-words reward model: a learned linear head over hashed token features.
+///
+/// This is a *real*, if small, model — not a stand-in. Text is turned into a
+/// `hidden_size`-dimensional feature vector with the signed hashing trick (see
+/// [`RmRewardModel::embed`]) and scored by a linear head, so the score is a genuine
+/// function of the model's parameters and [`RmRewardModel::train_step`] genuinely changes
+/// it. It carries no contextual/transformer backbone; for that, score pooled hidden states
+/// from a real encoder with [`compute_reward_score`] instead.
+///
+/// Its predecessor hashed the whole string into `[-2, 2]` and ignored `reward_head`
+/// entirely, so training was impossible and every "reward" was an artefact of the hash.
 pub struct RmRewardModel {
     config: RmRewardModelConfig,
     /// Linear reward head weights (length = hidden_size).
@@ -124,33 +142,174 @@ pub struct RmRewardModel {
 }
 
 impl RmRewardModel {
-    /// Construct a new reward model with zero-initialised parameters.
+    /// Construct a new reward model with a zero-initialised head.
+    ///
+    /// A zero head scores every text `bias` (i.e. `0.0`); it is
+    /// [`train_step`](Self::train_step) that gives the model its preferences. The linear
+    /// objective is convex, so a zero start is not a symmetry problem.
     pub fn new(config: RmRewardModelConfig) -> Self {
-        let hidden_size = config.hidden_size;
+        let hidden_size = config.hidden_size.max(1);
         Self {
             config,
-            reward_head: vec![0.01; hidden_size],
+            reward_head: vec![0.0; hidden_size],
             bias: 0.0,
         }
     }
 
-    /// Deterministic mock score for a text in `[−2, 2]`.
+    /// The model's current head weights.
+    pub fn reward_head(&self) -> &[f64] {
+        &self.reward_head
+    }
+
+    /// The model's current bias.
+    pub fn bias(&self) -> f64 {
+        self.bias
+    }
+
+    /// Overwrite the head weights.
     ///
-    /// Uses a djb2-style hash so that different strings reliably produce
-    /// different, reproducible scores without the `rand` crate.
-    pub fn score(&self, text: &str) -> f64 {
-        let mut h: u64 = 5381;
-        for b in text.bytes() {
-            h = h.wrapping_mul(33).wrapping_add(b as u64);
+    /// # Errors
+    ///
+    /// `weights.len() != config.hidden_size`.
+    pub fn set_reward_head(&mut self, weights: Vec<f64>) -> Result<(), RewardError> {
+        if weights.len() != self.reward_head.len() {
+            return Err(RewardError::DimensionMismatch {
+                expected: self.reward_head.len(),
+                actual: weights.len(),
+            });
         }
-        // Map the 64-bit hash into [0, 1) then scale to [-2, 2].
-        let normalised = (h as f64) / (u64::MAX as f64);
-        normalised * 4.0 - 2.0
+        self.reward_head = weights;
+        Ok(())
+    }
+
+    /// Feature vector for `text`: L2-normalised signed token-hash counts.
+    ///
+    /// Tokens are maximal runs of alphanumeric characters, lowercased. Each token `t` is
+    /// hashed once with FNV-1a; the low bits choose the feature index and the top bit its
+    /// sign — the standard signed hashing trick, whose collisions cancel in expectation
+    /// instead of accumulating. The vector is L2-normalised so that a long response cannot
+    /// out-score a short one purely by length.
+    pub fn embed(&self, text: &str) -> Vec<f64> {
+        let dim = self.reward_head.len();
+        let mut features = vec![0.0f64; dim];
+        for token in text.split(|c: char| !c.is_alphanumeric()).filter(|token| !token.is_empty()) {
+            let hash = fnv1a(token.to_lowercase().as_bytes());
+            let index = (hash % dim as u64) as usize;
+            let sign = if hash & (1 << 63) == 0 { 1.0 } else { -1.0 };
+            features[index] += sign;
+        }
+        let norm = features.iter().map(|f| f * f).sum::<f64>().sqrt();
+        if norm > 1e-12 {
+            for feature in &mut features {
+                *feature /= norm;
+            }
+        }
+        features
+    }
+
+    /// Reward for `text`: `reward_head · embed(text) + bias`.
+    pub fn score(&self, text: &str) -> f64 {
+        let features = self.embed(text);
+        let dot: f64 = features.iter().zip(self.reward_head.iter()).map(|(f, w)| f * w).sum();
+        dot + self.bias
     }
 
     /// Score a slice of texts.
     pub fn score_batch(&self, texts: &[&str]) -> Vec<f64> {
         texts.iter().map(|t| self.score(t)).collect()
+    }
+
+    /// One full-batch gradient-descent step on the configured loss.
+    ///
+    /// Because the score is linear in the parameters, `∂L/∂w = ∂L/∂r · φ(text)` with
+    /// `φ = embed(text)`, and the exact gradient of each supported loss is:
+    ///
+    /// ```text
+    /// BradleyTerry(+Margin):  ∂L/∂r_chosen = −σ(−d),  ∂L/∂r_rejected = +σ(−d)
+    ///                          with d = r_chosen − r_rejected (− margin)
+    /// Regression:             ∂L/∂r_chosen = 2(r_chosen − 1),
+    ///                          ∂L/∂r_rejected = 2(r_rejected + 1)
+    /// ```
+    ///
+    /// The bias gradient cancels for the Bradley-Terry losses (they depend only on the
+    /// score *difference*), which is why the bias only moves under `Regression`.
+    ///
+    /// Returns the loss statistics measured **before** the update, so a caller can watch
+    /// them fall across steps.
+    ///
+    /// # Errors
+    ///
+    /// `pairs` is empty, `learning_rate` is not finite and positive, or a score is
+    /// non-finite.
+    pub fn train_step(
+        &mut self,
+        pairs: &[RmPreferencePair],
+        learning_rate: f64,
+    ) -> Result<RewardLossResult, RewardError> {
+        if !learning_rate.is_finite() || learning_rate <= 0.0 {
+            return Err(RewardError::InvalidHyperparameter(format!(
+                "learning_rate must be finite and positive, got {learning_rate}"
+            )));
+        }
+        let stats = self.compute_loss(pairs)?;
+
+        let dim = self.reward_head.len();
+        let mut grad_head = vec![0.0f64; dim];
+        let mut grad_bias = 0.0f64;
+
+        for pair in pairs {
+            let chosen_features = self.embed(&pair.chosen);
+            let rejected_features = self.embed(&pair.rejected);
+            let chosen_score = self.score(&pair.chosen);
+            let rejected_score = self.score(&pair.rejected);
+
+            let (d_chosen, d_rejected) = match self.config.loss_type {
+                RewardLossType::BradleyTerry => {
+                    let diff = chosen_score - rejected_score;
+                    let g = sigmoid(-diff);
+                    (-g, g)
+                },
+                RewardLossType::BradleyTerryWithMargin => {
+                    let diff = chosen_score - rejected_score - self.config.margin;
+                    let g = sigmoid(-diff);
+                    (-g, g)
+                },
+                RewardLossType::Regression => {
+                    (2.0 * (chosen_score - 1.0), 2.0 * (rejected_score + 1.0))
+                },
+            };
+
+            for i in 0..dim {
+                grad_head[i] += d_chosen * chosen_features[i] + d_rejected * rejected_features[i];
+            }
+            grad_bias += d_chosen + d_rejected;
+        }
+
+        let scale = learning_rate / pairs.len() as f64;
+        for i in 0..dim {
+            self.reward_head[i] -= scale * grad_head[i];
+        }
+        self.bias -= scale * grad_bias;
+
+        if !self.reward_head.iter().all(|w| w.is_finite()) || !self.bias.is_finite() {
+            return Err(RewardError::InvalidScore);
+        }
+        Ok(stats)
+    }
+
+    /// Run `epochs` full-batch [`train_step`](Self::train_step)s, returning the statistics
+    /// measured at the start of each one.
+    pub fn train(
+        &mut self,
+        pairs: &[RmPreferencePair],
+        learning_rate: f64,
+        epochs: usize,
+    ) -> Result<Vec<RewardLossResult>, RewardError> {
+        let mut history = Vec::with_capacity(epochs);
+        for _ in 0..epochs {
+            history.push(self.train_step(pairs, learning_rate)?);
+        }
+        Ok(history)
     }
 
     /// Compute the configured loss over a batch of preference pairs.
@@ -240,6 +399,22 @@ impl RmRewardModel {
 #[inline]
 fn sigmoid(x: f64) -> f64 {
     1.0 / (1.0 + (-x).exp())
+}
+
+/// 64-bit FNV-1a, used to place a token in the feature vector.
+///
+/// FNV-1a mixes every byte into both the low bits (which pick the feature index) and the
+/// high bit (which picks the sign), which a multiplicative hash like djb2 does not.
+#[inline]
+fn fnv1a(bytes: &[u8]) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET_BASIS;
+    for &byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
 }
 
 // ──────────────────────────────────────────────
@@ -450,6 +625,17 @@ pub enum RewardError {
     /// A computed score is NaN or infinite.
     #[error("Invalid score: NaN or Inf")]
     InvalidScore,
+    /// A supplied vector does not match the model's `hidden_size`.
+    #[error("Dimension mismatch: expected {expected}, got {actual}")]
+    DimensionMismatch {
+        /// Length the model requires.
+        expected: usize,
+        /// Length that was supplied.
+        actual: usize,
+    },
+    /// A training hyper-parameter is outside its valid range.
+    #[error("Invalid hyper-parameter: {0}")]
+    InvalidHyperparameter(String),
 }
 
 // ──────────────────────────────────────────────
@@ -487,7 +673,7 @@ impl PreferenceDataset {
     /// The first `floor(n * train_fraction)` pairs go to training; the rest to
     /// validation.  `train_fraction` is clamped to `[0, 1]`.
     pub fn split(&self, train_fraction: f64) -> (Self, Self) {
-        let fraction = train_fraction.max(0.0).min(1.0);
+        let fraction = train_fraction.clamp(0.0, 1.0);
         let train_size = (self.pairs.len() as f64 * fraction).floor() as usize;
         let train = Self {
             pairs: self.pairs[..train_size].to_vec(),
@@ -665,33 +851,192 @@ mod tests {
         assert!(result.mean_loss.is_finite());
     }
 
+    /// A small preference set whose signal is a single distinguishing word.
+    fn learnable_pairs() -> Vec<RmPreferencePair> {
+        vec![
+            pair("this answer is helpful", "this answer is harmful"),
+            pair("a helpful and clear reply", "a harmful and clear reply"),
+            pair(
+                "helpful guidance for the user",
+                "harmful guidance for the user",
+            ),
+        ]
+    }
+
     // ── Test 7: pairwise_accuracy (chosen scores higher → 1.0) ───────────
     #[test]
     fn test_pairwise_accuracy_all_correct() {
-        // We need chosen to always score higher.  The scoring function is
-        // deterministic so we just verify the accuracy matches compute_loss.
-        let model = default_model();
-        // Collect pairs where chosen actually scores higher
-        let candidates = [
-            ("alpha text longer chosen", "b"),
-            ("gamma text chosen response", "x"),
-            ("delta response chosen here", "y"),
-        ];
-        let correct_pairs: Vec<RmPreferencePair> = candidates
-            .iter()
-            .filter(|(c, r)| model.score(c) > model.score(r))
-            .map(|(c, r)| pair(c, r))
-            .collect();
+        // Train first so the ordering is a property of the *model*, not of an accident of
+        // the hash: an untrained (zero) head scores everything identically.
+        let mut model = default_model();
+        let pairs = learnable_pairs();
+        model.train(&pairs, 1.0, 200).expect("training should succeed");
+        let acc = model.pairwise_accuracy(&pairs);
+        assert!(
+            (acc - 1.0).abs() < 1e-10,
+            "after training every chosen response should score higher, got {acc}"
+        );
+    }
 
-        if !correct_pairs.is_empty() {
-            let acc = model.pairwise_accuracy(&correct_pairs);
-            assert!(
-                (acc - 1.0).abs() < 1e-10,
-                "all chosen should score higher → accuracy 1.0, got {}",
-                acc
-            );
-        }
-        // If no candidate satisfied the predicate the test is vacuously correct.
+    // ── Regression: the score must be a function of the model's parameters ──
+    #[test]
+    fn test_score_depends_on_the_reward_head() {
+        // The old implementation hashed the text and ignored `reward_head` entirely, so
+        // this assertion could not hold for any pair of weight vectors.
+        let mut model = default_model();
+        let text = "a helpful answer";
+        let features = model.embed(text);
+        assert_eq!(features.len(), RmRewardModelConfig::default().hidden_size);
+
+        assert!(
+            model.score(text).abs() < 1e-12,
+            "a zero head scores every text at the bias (0.0)"
+        );
+
+        let head_a: Vec<f64> = features.iter().map(|f| f * 3.0).collect();
+        model.set_reward_head(head_a).expect("dimension matches");
+        let score_a = model.score(text);
+
+        let head_b: Vec<f64> = features.iter().map(|f| f * -7.0).collect();
+        model.set_reward_head(head_b).expect("dimension matches");
+        let score_b = model.score(text);
+
+        assert!(
+            (score_a - score_b).abs() > 1e-6,
+            "different weights must give different scores, got {score_a} and {score_b}"
+        );
+        // score = w·φ with w = 3φ and |φ| = 1, so the score is exactly 3.
+        assert!((score_a - 3.0).abs() < 1e-9, "expected 3.0, got {score_a}");
+        assert!((score_b + 7.0).abs() < 1e-9, "expected -7.0, got {score_b}");
+
+        assert!(matches!(
+            model.set_reward_head(vec![0.0; 3]),
+            Err(RewardError::DimensionMismatch { .. })
+        ));
+    }
+
+    // ── Regression: training must actually change the model ──────────────
+    #[test]
+    fn test_training_reduces_the_loss_and_learns_the_preference() {
+        let mut model = default_model();
+        let pairs = learnable_pairs();
+
+        let before = model.compute_loss(&pairs).expect("loss");
+        // A zero head cannot separate anything: diff = 0 → −ln σ(0) = ln 2.
+        assert!((before.mean_loss - std::f64::consts::LN_2).abs() < 1e-9);
+        assert!(before.accuracy < 1e-10);
+
+        let history = model.train(&pairs, 1.0, 150).expect("training should succeed");
+        assert_eq!(history.len(), 150);
+        assert!(
+            history[0].mean_loss > history[history.len() - 1].mean_loss,
+            "loss must fall over training: {} -> {}",
+            history[0].mean_loss,
+            history[history.len() - 1].mean_loss
+        );
+
+        let after = model.compute_loss(&pairs).expect("loss");
+        assert!(
+            after.mean_loss < before.mean_loss,
+            "loss must improve: {} -> {}",
+            before.mean_loss,
+            after.mean_loss
+        );
+        assert!(
+            (after.accuracy - 1.0).abs() < 1e-10,
+            "the model should separate every pair, got {}",
+            after.accuracy
+        );
+        assert!(
+            after.mean_margin > 0.0,
+            "chosen responses must score above rejected ones"
+        );
+        // A word that never appeared keeps a zero weight — the head learned from data,
+        // not from a hash of the whole string.
+        let unseen = model.embed("zzzz");
+        let unseen_score: f64 =
+            unseen.iter().zip(model.reward_head().iter()).map(|(f, w)| f * w).sum();
+        assert!(unseen_score.abs() < 1.0);
+    }
+
+    // ── embed(): tokenised, order-free and L2-normalised ─────────────────
+    #[test]
+    fn test_embed_is_tokenised_and_normalised() {
+        let model = default_model();
+
+        let features = model.embed("Helpful, helpful; HELPFUL");
+        let norm = features.iter().map(|f| f * f).sum::<f64>().sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-12,
+            "embedding must be L2-normalised"
+        );
+        // Case and punctuation are not part of the token.
+        assert_eq!(model.embed("helpful helpful helpful"), features);
+
+        // Bag of words: order does not matter, content does.
+        assert_eq!(model.embed("alpha beta"), model.embed("beta alpha"));
+        assert_ne!(model.embed("alpha beta"), model.embed("alpha gamma"));
+
+        // An empty text has no tokens, hence the zero vector (norm 0, not NaN).
+        assert!(model.embed("   ").iter().all(|f| *f == 0.0));
+    }
+
+    // ── train_step rejects a nonsensical learning rate ───────────────────
+    #[test]
+    fn test_train_step_rejects_bad_hyperparameters() {
+        let mut model = default_model();
+        let pairs = learnable_pairs();
+        assert!(matches!(
+            model.train_step(&pairs, 0.0),
+            Err(RewardError::InvalidHyperparameter(_))
+        ));
+        assert!(matches!(
+            model.train_step(&pairs, f64::NAN),
+            Err(RewardError::InvalidHyperparameter(_))
+        ));
+        assert!(matches!(
+            model.train_step(&[], 0.1),
+            Err(RewardError::EmptyBatch)
+        ));
+    }
+
+    // ── Regression drives absolute scores to ±1; Bradley-Terry only the gap ──
+    #[test]
+    fn test_regression_loss_targets_absolute_scores() {
+        let pairs = learnable_pairs();
+
+        let mut regression = RmRewardModel::new(RmRewardModelConfig {
+            loss_type: RewardLossType::Regression,
+            ..Default::default()
+        });
+        regression.train(&pairs, 0.5, 400).expect("train");
+        let stats = regression.compute_loss(&pairs).expect("loss");
+        assert!(
+            (stats.mean_chosen_score - 1.0).abs() < 0.5,
+            "regression pulls chosen scores towards +1, got {}",
+            stats.mean_chosen_score
+        );
+        assert!(
+            (stats.mean_rejected_score + 1.0).abs() < 0.5,
+            "regression pulls rejected scores towards -1, got {}",
+            stats.mean_rejected_score
+        );
+
+        // Bradley-Terry only maximises the *difference*: it is invariant to a constant
+        // shift, so it never targets a particular level and keeps widening the margin.
+        let mut bt = default_model();
+        bt.train(&pairs, 1.0, 400).expect("train");
+        let bt_stats = bt.compute_loss(&pairs).expect("loss");
+        assert!(
+            bt_stats.mean_margin > stats.mean_margin,
+            "unbounded BT margin ({}) should exceed the regression margin ({})",
+            bt_stats.mean_margin,
+            stats.mean_margin
+        );
+        assert!(
+            bt.bias().abs() < 1e-12,
+            "the BT gradient of the bias cancels, so the bias must stay put"
+        );
     }
 
     // ── Test 8: normalize_rewards mean≈0 / std≈1 ─────────────────────────
@@ -782,51 +1127,23 @@ mod tests {
         assert!(p.margin().is_none());
     }
 
-    // ── Test 14: accuracy with equal scores ≈ 0.5 ─────────────────────────
+    // ── Test 14: accuracy is 1.0 in the trained order and 0.0 when reversed ──
     #[test]
-    fn test_accuracy_equal_scores() {
-        // Verify pairwise_accuracy by constructing pairs where we know the
-        // scoring order: for each raw text pair (a, b) the "correct" pair
-        // places the higher-scoring text as chosen; the "wrong" pair swaps them.
-        let model = default_model();
-        let raw = [
-            ("text_a", "text_b"),
-            ("text_c", "text_d"),
-            ("text_e", "text_f"),
-            ("text_g", "text_h"),
-        ];
+    fn test_accuracy_is_inverted_when_the_pairs_are_swapped() {
+        let mut model = default_model();
+        let pairs = learnable_pairs();
+        model.train(&pairs, 1.0, 200).expect("training should succeed");
 
-        let mut correct_pairs: Vec<RmPreferencePair> = Vec::new();
-        let mut wrong_pairs: Vec<RmPreferencePair> = Vec::new();
-        for (a, b) in &raw {
-            let sa = model.score(a);
-            let sb = model.score(b);
-            if (sa - sb).abs() < 1e-12 {
-                // Scores are identical; skip this pair (ties don't count for either).
-                continue;
-            }
-            if sa > sb {
-                correct_pairs.push(pair(a, b)); // chosen=a scores higher → correct
-                wrong_pairs.push(pair(b, a)); // chosen=b scores lower  → wrong
-            } else {
-                correct_pairs.push(pair(b, a)); // chosen=b scores higher → correct
-                wrong_pairs.push(pair(a, b)); // chosen=a scores lower  → wrong
-            }
-        }
+        let reversed: Vec<RmPreferencePair> = pairs
+            .iter()
+            .map(|p| RmPreferencePair::new(&p.prompt, &p.rejected, &p.chosen))
+            .collect();
 
-        if !correct_pairs.is_empty() {
-            let acc_all = model.pairwise_accuracy(&correct_pairs);
-            assert!(
-                (acc_all - 1.0).abs() < 1e-10,
-                "expected 1.0, got {}",
-                acc_all
-            );
-        }
-
-        if !wrong_pairs.is_empty() {
-            let acc_none = model.pairwise_accuracy(&wrong_pairs);
-            assert!(acc_none < 1e-10, "expected 0.0, got {}", acc_none);
-        }
+        assert!((model.pairwise_accuracy(&pairs) - 1.0).abs() < 1e-10);
+        assert!(
+            model.pairwise_accuracy(&reversed) < 1e-10,
+            "swapping chosen/rejected must invert the accuracy"
+        );
     }
 
     // ── Test 15: default config ────────────────────────────────────────────
@@ -1086,22 +1403,36 @@ mod tests {
         );
     }
 
-    // 35. Length bias: same content different lengths → different scores
+    // 35. A trained model separates texts by content, not by length
     #[test]
-    fn test_score_different_for_different_length_texts() {
-        let model = default_model();
-        let short = model.score("hello");
-        let long_text =
-            model.score("hello this is a much longer text that should have a different hash");
-        // The two strings should almost certainly differ (djb2 hash is sensitive to content)
-        assert!((short - long_text).abs() > 1e-10,
-            "different-length texts should produce different scores (short={short}, long={long_text})");
+    fn test_trained_model_separates_texts_by_content() {
+        let mut model = default_model();
+        model.train(&learnable_pairs(), 1.0, 200).expect("train");
+
+        // The distinguishing token dominates, whatever the surrounding length.
+        let short = model.score("helpful");
+        let long_text = model.score("harmful harmful harmful harmful harmful harmful");
+        assert!(
+            short > long_text,
+            "the learned preference must survive a length difference \
+             (helpful={short}, harmful={long_text})"
+        );
+
+        // Length alone is not a signal: repeating the same token leaves the L2-normalised
+        // embedding — and therefore the score — unchanged.
+        let once = model.score("helpful");
+        let thrice = model.score("helpful helpful helpful");
+        assert!(
+            (once - thrice).abs() < 1e-9,
+            "repetition must not inflate the reward ({once} vs {thrice})"
+        );
     }
 
-    // 36. score() always returns f64 in [-2, 2]
+    // 36. score() is always finite, for any input
     #[test]
-    fn test_score_always_in_range() {
-        let model = default_model();
+    fn test_score_is_always_finite() {
+        let mut model = default_model();
+        model.train(&learnable_pairs(), 1.0, 50).expect("train");
         let texts = [
             "",
             "a",
@@ -1114,11 +1445,10 @@ mod tests {
         ];
         for text in &texts {
             let s = model.score(text);
-            assert!(
-                (-2.0..=2.0).contains(&s),
-                "score for '{text}' = {s} should be in [-2,2]"
-            );
+            assert!(s.is_finite(), "score for '{text}' = {s} must be finite");
         }
+        // A text with no tokens has a zero embedding, so its score is exactly the bias.
+        assert!((model.score("!@#$%^&*()") - model.bias()).abs() < 1e-12);
     }
 
     // 37. BradleyTerryModel: higher T → probability closer to 0.5

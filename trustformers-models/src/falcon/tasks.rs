@@ -170,14 +170,18 @@ impl FalconForSequenceClassification {
 
 // ─── ALiBi utilities ──────────────────────────────────────────────────────────
 
-/// Compute ALiBi slope for head `i` out of `num_heads` heads.
+/// Compute the ALiBi slope for head `head_idx` out of `num_heads` heads.
 ///
 /// Reference: "Train Short, Test Long: Attention with Linear Biases" (Press et al., 2022).
 ///
-/// Returns the slope value as defined by the paper's geometric sequence.
+/// Delegates to [`crate::falcon::model::alibi_slopes`] so this helper and the
+/// slopes the attention layer actually uses cannot drift apart. Returns `0.0`
+/// when `head_idx` is out of range.
 pub fn alibi_slope(head_idx: usize, num_heads: usize) -> f32 {
-    let ratio = 2.0_f32.powf(-8.0 / num_heads as f32);
-    ratio.powf((head_idx + 1) as f32)
+    crate::falcon::model::alibi_slopes(num_heads)
+        .get(head_idx)
+        .copied()
+        .unwrap_or(0.0)
 }
 
 /// Compute the ALiBi bias matrix for a sequence of length `seq_len`.
@@ -198,6 +202,11 @@ pub fn alibi_bias_matrix(seq_len: usize, slope: f32) -> Vec<f32> {
 /// Verify that ALiBi slopes are strictly decreasing as head index grows.
 ///
 /// Returns `true` if the sequence is monotone decreasing, `false` otherwise.
+///
+/// Monotonicity holds for power-of-two head counts. For other counts the
+/// reference construction appends slopes drawn from the *next* power of two,
+/// which restart above the tail of the first block — so `false` is the correct
+/// answer there, not a defect.
 pub fn slopes_are_decreasing(num_heads: usize) -> bool {
     if num_heads < 2 {
         return true;

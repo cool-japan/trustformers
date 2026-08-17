@@ -192,10 +192,22 @@ impl TrainingUtils {
     }
 
     /// Perform detailed coverage analysis with comprehensive statistics.
+    ///
+    /// Character- and word-level coverage are computed from the tokenizer's
+    /// real vocabulary (`Tokenizer::get_vocab`), not assumed. An earlier
+    /// version of this function unconditionally counted every character and
+    /// every word as "covered" (`char_coverage_rate`/`word_coverage_rate`
+    /// were always exactly `1.0`), which — via
+    /// [`CoverageAnalysis::efficiency_score`]'s `0.6 * char_coverage_rate +
+    /// 0.4 * word_coverage_rate` term — silently prevented
+    /// [`Self::validate_tokenizer_quality`]'s efficiency-score quality gate
+    /// from ever detecting genuinely poor vocabulary coverage.
     pub fn detailed_coverage_analysis<T: trustformers_core::traits::Tokenizer>(
         tokenizer: &T,
         test_texts: &[String],
     ) -> Result<CoverageAnalysis> {
+        let vocab = tokenizer.get_vocab();
+
         let mut char_coverage = HashMap::new();
         let mut word_coverage = HashMap::new();
         let mut length_distribution = HashMap::new();
@@ -231,19 +243,27 @@ impl TrainingUtils {
                 }
             }
 
-            // Character-level coverage - simplified without direct vocab access
+            // Character-level coverage: a character is "covered" only when it
+            // (as a single-character string) is a real entry in the
+            // tokenizer's own vocabulary.
             for ch in text.chars() {
-                // For now, assume all characters are covered
-                // In a real implementation, this would require vocabulary access
-                covered_chars += 1;
+                let mut buf = [0u8; 4];
+                if vocab.contains_key(ch.encode_utf8(&mut buf)) {
+                    covered_chars += 1;
+                }
                 *char_coverage.entry(ch).or_insert(0) += 1;
             }
 
-            // Word-level coverage - simplified without direct vocab access
+            // Word-level coverage: a word is "covered" only when it is a real
+            // whole-word entry in the tokenizer's own vocabulary (a
+            // subword/BPE tokenizer that must split a word into several
+            // pieces to encode it is correctly counted as not covering that
+            // word, even though `encode` still produces a valid, if longer,
+            // token sequence for it).
             for word in words {
-                // For now, assume all words are covered
-                // In a real implementation, this would require vocabulary access
-                covered_words += 1;
+                if vocab.contains_key(word) {
+                    covered_words += 1;
+                }
                 *word_coverage.entry(word.to_string()).or_insert(0) += 1;
             }
         }
@@ -739,6 +759,59 @@ mod tests {
         assert!(report.contains("75.00%"));
         assert!(report.contains("1500"));
         assert!(report.contains("10000"));
+    }
+
+    /// Regression test for the fabricated-100%-coverage bug: an earlier
+    /// version of `detailed_coverage_analysis` unconditionally counted every
+    /// character and every word as "covered" regardless of the tokenizer's
+    /// real vocabulary, so `char_coverage_rate`/`word_coverage_rate` were
+    /// always exactly `1.0`. This tokenizer's vocabulary covers only
+    /// single-character entries for "h", "e", "l", "o", " " -- deliberately
+    /// missing "w", "r", "d" -- so a correct implementation must report
+    /// coverage strictly below `1.0` for text containing them.
+    #[test]
+    fn test_detailed_coverage_analysis_reports_real_vocabulary_coverage() {
+        use crate::char::CharTokenizer;
+        use std::collections::HashMap;
+
+        let mut vocab = HashMap::new();
+        vocab.insert("h".to_string(), 0);
+        vocab.insert("e".to_string(), 1);
+        vocab.insert("l".to_string(), 2);
+        vocab.insert("o".to_string(), 3);
+        vocab.insert(" ".to_string(), 4);
+        let tokenizer = CharTokenizer::new(vocab).with_special_tokens(
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        );
+
+        let texts = vec!["hello world".to_string()];
+        let analysis = TrainingUtils::detailed_coverage_analysis(&tokenizer, &texts)
+            .expect("Operation failed in test");
+
+        // "hello world" has 11 characters; only 'w', 'r', 'd' (3 of them)
+        // fall outside the vocabulary above, so exactly 8 are covered.
+        assert_eq!(analysis.total_chars, 11);
+        assert_eq!(analysis.covered_chars, 8);
+        assert!(
+            (analysis.char_coverage_rate - 8.0 / 11.0).abs() < 1e-9,
+            "char_coverage_rate must reflect real vocabulary membership, not a constant 1.0: \
+             got {}",
+            analysis.char_coverage_rate
+        );
+
+        // Neither "hello" nor "world" is a whole-word entry in this
+        // single-character vocabulary, so word coverage must be exactly
+        // zero -- the old code reported 1.0 (both words "covered") no
+        // matter what the vocabulary contained.
+        assert_eq!(analysis.total_words, 2);
+        assert_eq!(analysis.covered_words, 0);
+        assert_eq!(
+            analysis.word_coverage_rate, 0.0,
+            "word_coverage_rate must reflect real vocabulary membership, not a constant 1.0"
+        );
     }
 
     #[test]

@@ -133,7 +133,7 @@ fn encode_f32(values: &[f32]) -> Vec<u8> {
 
 #[inline]
 fn decode_f32(bytes: &[u8]) -> Result<Vec<f32>> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err(CollectiveError::UnalignedPayload { bytes: bytes.len() }.into());
     }
     let mut values = Vec::with_capacity(bytes.len() / 4);

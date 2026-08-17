@@ -39,8 +39,7 @@
 //! // optimizer.step(&mut parameters, &gradients)?;
 //! ```
 
-use crate::common::{OptimizerState, ParameterUpdate};
-use anyhow::{Result, Context};
+use anyhow::Result;
 use std::collections::HashMap;
 use trustformers_core::tensor::Tensor;
 
@@ -122,6 +121,12 @@ impl GENIEConfig {
         self
     }
 
+    /// Set the number of warmup steps before OSGR preconditioning engages
+    pub fn warmup_steps(mut self, steps: u64) -> Self {
+        self.warmup_steps = steps;
+        self
+    }
+
     /// Build the configuration
     pub fn build(self) -> Self {
         self
@@ -129,7 +134,7 @@ impl GENIEConfig {
 }
 
 /// GENIE (Generalization-ENhancing Iterative Equalizer) optimizer state
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GENIEState {
     /// Current step count
     pub step: u64,
@@ -170,21 +175,6 @@ impl Default for DomainStats {
     }
 }
 
-impl Default for GENIEState {
-    fn default() -> Self {
-        Self {
-            step: 0,
-            osgr: HashMap::new(),
-            osgr_ema: HashMap::new(),
-            prev_gradients: HashMap::new(),
-            prev_loss: None,
-            alignment_stats: HashMap::new(),
-            preconditioning_factors: HashMap::new(),
-            domain_stats: DomainStats::default(),
-        }
-    }
-}
-
 /// GENIE (Generalization-ENhancing Iterative Equalizer) optimizer
 ///
 /// GENIE leverages the One-Step Generalization Ratio (OSGR) to balance parameter
@@ -214,11 +204,16 @@ impl GENIE {
     }
 
     /// Compute One-Step Generalization Ratio (OSGR) for a parameter
-    fn compute_osgr(&self, param_name: &str, gradient: &Tensor, current_loss: f32) -> Result<Tensor> {
+    fn compute_osgr(
+        &self,
+        _param_name: &str,
+        gradient: &Tensor,
+        current_loss: f32,
+    ) -> Result<Tensor> {
         // OSGR = |gradient|^2 / (loss_reduction + eps)
         // where loss_reduction = prev_loss - current_loss
 
-        let gradient_norm_sq = gradient.pow(&Tensor::scalar(2.0)?)?;
+        let gradient_norm_sq = gradient.pow(2.0)?;
 
         if let Some(prev_loss) = self.state.prev_loss {
             let loss_reduction = prev_loss - current_loss;
@@ -227,10 +222,7 @@ impl GENIE {
             let osgr = gradient_norm_sq.div(&Tensor::scalar(loss_reduction)?)?;
 
             // Clamp OSGR to reasonable bounds
-            let min_osgr = Tensor::scalar(self.config.min_osgr)?;
-            let max_osgr = Tensor::scalar(self.config.max_osgr)?;
-
-            Ok(osgr.clamp(&min_osgr, &max_osgr)?)
+            Ok(osgr.clamp(self.config.min_osgr, self.config.max_osgr)?)
         } else {
             // For first step, use gradient norm as proxy
             Ok(gradient_norm_sq)
@@ -263,11 +255,21 @@ impl GENIE {
     fn compute_gradient_alignment(&self, param_name: &str, gradient: &Tensor) -> Result<f32> {
         if let Some(prev_grad) = self.state.prev_gradients.get(param_name) {
             // Cosine similarity between current and previous gradients
-            let dot_product = gradient.flatten()?.dot(&prev_grad.flatten()?)?;
-            let current_norm = gradient.flatten()?.norm()?.to_scalar::<f32>()?;
-            let prev_norm = prev_grad.flatten()?.norm()?.to_scalar::<f32>()?;
+            let current = gradient.data_f32()?;
+            let previous = prev_grad.data_f32()?;
+            if current.len() != previous.len() {
+                return Err(anyhow::anyhow!(
+                    "gradient alignment requires matching shapes for '{param_name}': {} vs {}",
+                    current.len(),
+                    previous.len()
+                ));
+            }
+            let dot_product: f32 = current.iter().zip(previous.iter()).map(|(&a, &b)| a * b).sum();
+            let current_norm = gradient.norm()?;
+            let prev_norm = prev_grad.norm()?;
 
-            let alignment = dot_product.to_scalar::<f32>()? / (current_norm * prev_norm + self.config.preconditioning_eps);
+            let alignment =
+                dot_product / (current_norm * prev_norm + self.config.preconditioning_eps);
             Ok(alignment.clamp(-1.0, 1.0))
         } else {
             Ok(0.0) // No previous gradient for comparison
@@ -280,15 +282,17 @@ impl GENIE {
             if self.config.normalize_osgr {
                 // Normalize by mean OSGR across all parameters
                 let mean_osgr = self.compute_mean_osgr()?;
-                let normalized_osgr = osgr_ema.div(&Tensor::scalar(mean_osgr + self.config.preconditioning_eps)?)?;
+                let normalized_osgr = osgr_ema.div(&Tensor::scalar(
+                    mean_osgr + self.config.preconditioning_eps,
+                )?)?;
 
                 // Invert and square root for preconditioning: 1 / sqrt(normalized_osgr)
                 let sqrt_osgr = normalized_osgr.sqrt()?;
-                sqrt_osgr.reciprocal()
+                Ok(sqrt_osgr.reciprocal()?)
             } else {
                 // Simple reciprocal square root: 1 / sqrt(osgr)
                 let sqrt_osgr = osgr_ema.sqrt()?;
-                sqrt_osgr.reciprocal()
+                Ok(sqrt_osgr.reciprocal()?)
             }
         } else {
             // Default to identity preconditioning
@@ -306,7 +310,7 @@ impl GENIE {
         let mut count = 0;
 
         for osgr_tensor in self.state.osgr_ema.values() {
-            let osgr_mean = osgr_tensor.mean()?.to_scalar::<f32>()?;
+            let osgr_mean = osgr_tensor.mean()?.to_scalar()?;
             total_osgr += osgr_mean;
             count += 1;
         }
@@ -326,8 +330,12 @@ impl GENIE {
     }
 
     /// Perform optimization step
-    pub fn step(&mut self, parameters: &mut HashMap<String, Tensor>,
-                gradients: &HashMap<String, Tensor>, current_loss: f32) -> Result<()> {
+    pub fn step(
+        &mut self,
+        parameters: &mut HashMap<String, Tensor>,
+        gradients: &HashMap<String, Tensor>,
+        current_loss: f32,
+    ) -> Result<()> {
         self.state.step += 1;
 
         // Skip OSGR computation during warmup
@@ -338,7 +346,8 @@ impl GENIE {
                 // Apply weight decay if configured
                 let mut effective_gradient = gradient.clone();
                 if self.config.weight_decay > 0.0 {
-                    let weight_decay_term = parameter.mul(&Tensor::scalar(self.config.weight_decay)?)?;
+                    let weight_decay_term =
+                        parameter.mul(&Tensor::scalar(self.config.weight_decay)?)?;
                     effective_gradient = effective_gradient.add(&weight_decay_term)?;
                 }
 
@@ -353,12 +362,15 @@ impl GENIE {
                     self.update_osgr_ema(param_name, &osgr)?;
 
                     // Compute gradient alignment
-                    let alignment = self.compute_gradient_alignment(param_name, &effective_gradient)?;
+                    let alignment =
+                        self.compute_gradient_alignment(param_name, &effective_gradient)?;
                     self.state.alignment_stats.insert(param_name.to_string(), alignment);
 
                     // Compute preconditioning factor
                     let preconditioning = self.compute_preconditioning_factor(param_name)?;
-                    self.state.preconditioning_factors.insert(param_name.to_string(), preconditioning.clone());
+                    self.state
+                        .preconditioning_factors
+                        .insert(param_name.to_string(), preconditioning.clone());
 
                     // Apply GENIE preconditioning
                     update = effective_gradient.mul(&preconditioning)?;
@@ -393,7 +405,7 @@ impl GENIE {
         let mut stats = HashMap::new();
 
         for (param_name, osgr_tensor) in &self.state.osgr_ema {
-            if let Ok(mean_osgr) = osgr_tensor.mean().and_then(|t| t.to_scalar::<f32>()) {
+            if let Ok(mean_osgr) = osgr_tensor.mean().and_then(|t| t.to_scalar()) {
                 stats.insert(param_name.clone(), mean_osgr);
             }
         }
@@ -419,8 +431,8 @@ impl GENIE {
     /// Get optimization statistics for monitoring
     pub fn get_stats(&self) -> GENIEStats {
         let mean_osgr = self.compute_mean_osgr().unwrap_or(1.0);
-        let mean_alignment = self.state.alignment_stats.values().sum::<f32>() /
-                            self.state.alignment_stats.len().max(1) as f32;
+        let mean_alignment = self.state.alignment_stats.values().sum::<f32>()
+            / self.state.alignment_stats.len().max(1) as f32;
 
         GENIEStats {
             step: self.state.step,
@@ -494,7 +506,10 @@ mod tests {
         parameters.insert("weight".to_string(), Tensor::ones(&[2, 2])?);
 
         let mut gradients = HashMap::new();
-        gradients.insert("weight".to_string(), Tensor::ones(&[2, 2])? * 0.1);
+        gradients.insert(
+            "weight".to_string(),
+            Tensor::ones(&[2, 2])?.mul_scalar(0.1)?,
+        );
 
         // Perform optimization step
         let initial_loss = 1.0;
@@ -502,10 +517,8 @@ mod tests {
 
         // Check that parameter was updated
         let updated_param = parameters.get("weight").expect("Key not found");
-        let expected_value = 1.0 - 1e-2 * 0.1; // 1.0 - lr * grad
-
         // Due to GENIE's preconditioning, the exact update may differ, but parameter should change
-        assert_ne!(updated_param.to_scalar::<f32>()?, 1.0);
+        assert_ne!(updated_param.data_f32()?[0], 1.0);
 
         Ok(())
     }
@@ -523,12 +536,11 @@ mod tests {
 
         let osgr = optimizer.compute_osgr("test", &gradient, current_loss)?;
 
-        // OSGR should be gradient_norm_sq / loss_reduction
-        // gradient_norm_sq = 4.0 (sum of ones squared)
-        // loss_reduction = 2.0 - 1.5 = 0.5
-        // Expected OSGR = 4.0 / 0.5 = 8.0
-        let expected_osgr = 4.0 / 0.5;
-        let computed_osgr = osgr.mean()?.to_scalar::<f32>()?;
+        // OSGR is computed elementwise: g_i² / loss_reduction.
+        // g_i = 1.0 so g_i² = 1.0, loss_reduction = 2.0 - 1.5 = 0.5,
+        // hence every element (and therefore the mean) is 1.0 / 0.5 = 2.0.
+        let expected_osgr = 1.0 / 0.5;
+        let computed_osgr = osgr.mean()?.to_scalar()?;
 
         assert!((computed_osgr - expected_osgr).abs() < 1e-5);
 
@@ -551,7 +563,7 @@ mod tests {
         assert!((alignment - 1.0).abs() < 1e-5);
 
         // Test with opposite gradient (negative alignment)
-        let opposite_grad = Tensor::ones(&[2, 2])? * -1.0;
+        let opposite_grad = Tensor::ones(&[2, 2])?.mul_scalar(-1.0)?;
         let alignment = optimizer.compute_gradient_alignment("test", &opposite_grad)?;
 
         assert!((alignment - (-1.0)).abs() < 1e-5);
@@ -569,7 +581,10 @@ mod tests {
         parameters.insert("weight".to_string(), Tensor::ones(&[2, 2])?);
 
         let mut gradients = HashMap::new();
-        gradients.insert("weight".to_string(), Tensor::ones(&[2, 2])? * 0.1);
+        gradients.insert(
+            "weight".to_string(),
+            Tensor::ones(&[2, 2])?.mul_scalar(0.1)?,
+        );
 
         // Perform multiple steps
         for i in 0..5 {
@@ -598,10 +613,7 @@ mod tests {
 
     #[test]
     fn test_genie_weight_decay() -> Result<()> {
-        let config = GENIEConfig::new()
-            .learning_rate(1e-2)
-            .weight_decay(1e-2)
-            .build();
+        let config = GENIEConfig::new().learning_rate(1e-2).weight_decay(1e-2).build();
         let mut optimizer = GENIE::new(config);
 
         let mut parameters = HashMap::new();
@@ -610,11 +622,11 @@ mod tests {
         let mut gradients = HashMap::new();
         gradients.insert("weight".to_string(), Tensor::zeros(&[2, 2])?);
 
-        let initial_param_value = parameters.get("weight").expect("Key not found").to_scalar::<f32>()?;
+        let initial_param_value = parameters.get("weight").expect("Key not found").data_f32()?[0];
 
         optimizer.step(&mut parameters, &gradients, 1.0)?;
 
-        let final_param_value = parameters.get("weight").expect("Key not found").to_scalar::<f32>()?;
+        let final_param_value = parameters.get("weight").expect("Key not found").data_f32()?[0];
 
         // With weight decay, parameter should decrease even with zero gradient
         assert!(final_param_value < initial_param_value);
@@ -624,17 +636,17 @@ mod tests {
 
     #[test]
     fn test_genie_warmup() -> Result<()> {
-        let config = GENIEConfig::new()
-            .learning_rate(1e-2)
-            .warmup_steps(5)
-            .build();
+        let config = GENIEConfig::new().learning_rate(1e-2).warmup_steps(5).build();
         let mut optimizer = GENIE::new(config);
 
         let mut parameters = HashMap::new();
         parameters.insert("weight".to_string(), Tensor::ones(&[2, 2])?);
 
         let mut gradients = HashMap::new();
-        gradients.insert("weight".to_string(), Tensor::ones(&[2, 2])? * 0.1);
+        gradients.insert(
+            "weight".to_string(),
+            Tensor::ones(&[2, 2])?.mul_scalar(0.1)?,
+        );
 
         // During warmup, OSGR should not be computed
         optimizer.step(&mut parameters, &gradients, 1.0)?;

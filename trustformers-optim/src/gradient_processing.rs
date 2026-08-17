@@ -13,6 +13,7 @@
 //! - **Hessian-based Preconditioning**: Uses second-order information to precondition gradients
 
 use anyhow::{anyhow, Result};
+use scirs2_core::random::thread_rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use trustformers_core::tensor::Tensor;
@@ -335,24 +336,38 @@ impl GradientProcessor {
         self.current_noise_scale =
             self.current_noise_scale.max(self.config.noise_injection.min_noise_scale);
 
+        let scale = self.current_noise_scale;
         for gradient in gradients.iter_mut() {
+            let shape = gradient.shape();
+            let numel: usize = shape.iter().product();
+
             let noise = match self.config.noise_injection.noise_type {
                 NoiseType::Gaussian => {
-                    let noise_tensor = Tensor::randn(&gradient.shape())?;
-                    noise_tensor.mul_scalar(self.current_noise_scale)?;
-                    noise_tensor
+                    // `randn` is already N(0, 1); scaling it gives N(0, scale²).
+                    Tensor::randn(&shape)?.mul_scalar(scale)?
                 },
                 NoiseType::Uniform => {
-                    let bound = self.current_noise_scale * 3.0_f32.sqrt(); // Match variance with Gaussian
-                    let noise_tensor = Tensor::randn(&gradient.shape())?;
-                    noise_tensor.mul_scalar(bound)?;
-                    noise_tensor
+                    // U(−b, b) has variance b²/3, so b = scale·√3 matches N(0, scale²).
+                    let bound = scale * 3.0_f32.sqrt();
+                    let mut rng = thread_rng();
+                    let values: Vec<f32> =
+                        (0..numel).map(|_| rng.random_range(-bound..=bound)).collect();
+                    Tensor::from_vec(values, &shape)?
                 },
                 NoiseType::Laplace => {
-                    // Approximate Laplace with scaled Gaussian (simplified)
-                    let noise_tensor = Tensor::randn(&gradient.shape())?;
-                    noise_tensor.mul_scalar(self.current_noise_scale * 2.0_f32.sqrt())?;
-                    noise_tensor
+                    // Inverse-CDF sampling: for u ~ U(−½, ½),
+                    // x = −b·sgn(u)·ln(1 − 2|u|) is Laplace(0, b) with variance 2b²,
+                    // so b = scale/√2 matches N(0, scale²).
+                    let diversity = scale / 2.0_f32.sqrt();
+                    let mut rng = thread_rng();
+                    let values: Vec<f32> = (0..numel)
+                        .map(|_| {
+                            let u: f32 = rng.random_range(-0.5_f32..0.5_f32);
+                            let magnitude = (1.0 - 2.0 * u.abs()).max(f32::MIN_POSITIVE);
+                            -diversity * u.signum() * magnitude.ln()
+                        })
+                        .collect();
+                    Tensor::from_vec(values, &shape)?
                 },
             };
 
@@ -834,5 +849,95 @@ mod tests {
             processor.config.hessian_preconditioning.approximation_type,
             HessianApproximationType::QuasiNewton
         ));
+    }
+
+    fn noise_processor(scale: f32, noise_type: NoiseType) -> GradientProcessor {
+        let config = GradientProcessingConfig {
+            enable_noise_injection: true,
+            noise_injection: NoiseInjectionConfig {
+                initial_noise_scale: scale,
+                decay_rate: 1.0,
+                min_noise_scale: 0.0,
+                noise_type,
+            },
+            ..GradientProcessingConfig::default()
+        };
+        GradientProcessor::new(config)
+    }
+
+    fn injected_noise(processor: &mut GradientProcessor, numel: usize) -> Vec<f32> {
+        let mut gradients =
+            vec![Tensor::from_vec(vec![0.0_f32; numel], &[numel]).expect("zero gradient")];
+        processor.apply_noise_injection(&mut gradients).expect("noise injection");
+        gradients[0].data_f32().expect("data")
+    }
+
+    fn sample_std(values: &[f32]) -> f32 {
+        let mean = values.iter().sum::<f32>() / values.len() as f32;
+        (values.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / values.len() as f32).sqrt()
+    }
+
+    /// Regression: the scaled tensor used to be dropped, so the injected noise was
+    /// always unit-variance regardless of `initial_noise_scale`/`decay_rate`.
+    #[test]
+    fn gaussian_noise_tracks_the_configured_scale() {
+        let mut processor = noise_processor(4.0, NoiseType::Gaussian);
+        let noise = injected_noise(&mut processor, 20_000);
+        let std = sample_std(&noise);
+        assert!(
+            (std - 4.0).abs() < 0.4,
+            "empirical std {std} must track the configured scale 4.0"
+        );
+    }
+
+    /// Two different scales must produce two different noise magnitudes.
+    #[test]
+    fn noise_scale_decay_reaches_the_output() {
+        let mut processor = noise_processor(1.0, NoiseType::Gaussian);
+        processor.config.noise_injection.decay_rate = 0.1;
+        let first = sample_std(&injected_noise(&mut processor, 20_000));
+        let second = sample_std(&injected_noise(&mut processor, 20_000));
+        assert!(
+            second < first * 0.3,
+            "decayed noise must shrink: {first} -> {second}"
+        );
+    }
+
+    /// Regression: `NoiseType::Uniform` used to call `Tensor::randn`, so it was
+    /// indistinguishable from Gaussian. Uniform noise is strictly bounded.
+    #[test]
+    fn uniform_noise_is_bounded() {
+        let scale = 1.0_f32;
+        let mut processor = noise_processor(scale, NoiseType::Uniform);
+        let noise = injected_noise(&mut processor, 20_000);
+        let bound = scale * 3.0_f32.sqrt();
+        assert!(
+            noise.iter().all(|v| v.abs() <= bound + 1e-4),
+            "uniform noise must stay inside ±{bound}"
+        );
+        let std = sample_std(&noise);
+        assert!(
+            (std - scale).abs() < 0.1,
+            "empirical std {std} must match {scale}"
+        );
+    }
+
+    /// Regression: `NoiseType::Laplace` used to be Gaussian too. A Laplace sample is
+    /// unbounded and much more heavy-tailed than a uniform one.
+    #[test]
+    fn laplace_noise_is_heavy_tailed() {
+        let scale = 1.0_f32;
+        let mut processor = noise_processor(scale, NoiseType::Laplace);
+        let noise = injected_noise(&mut processor, 20_000);
+        let max = noise.iter().fold(0.0_f32, |acc, v| acc.max(v.abs()));
+        assert!(
+            max > scale * 3.0_f32.sqrt(),
+            "Laplace noise must exceed the uniform bound, got max {max}"
+        );
+        let std = sample_std(&noise);
+        assert!(
+            (std - scale).abs() < 0.15,
+            "empirical std {std} must match {scale}"
+        );
     }
 }

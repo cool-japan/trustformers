@@ -24,7 +24,10 @@ pub struct OnnxExportConfig {
     pub domain: String,
     /// Maximum sequence length
     pub max_sequence_length: usize,
-    /// Vocabulary size
+    /// Reserved for future use (e.g. a declared upper bound for the
+    /// exported vocabulary). `create_vocab_tensor` always emits exactly
+    /// the wrapped tokenizer's real vocabulary rather than padding or
+    /// truncating to this value.
     pub vocab_size: usize,
     /// Whether to include attention mask
     pub include_attention_mask: bool,
@@ -243,7 +246,17 @@ impl<T: Tokenizer> OnnxTokenizerExporter<T> {
             "max_sequence_length".to_string(),
             self.config.max_sequence_length.to_string(),
         );
-        metadata_props.insert("vocab_size".to_string(), self.config.vocab_size.to_string());
+        // The *real* vocabulary size, not `self.config.vocab_size` (which is
+        // only a caller-declared upper bound used to validate
+        // `create_vocab_tensor`, and previously defaulted to 50000
+        // regardless of how many tokens the wrapped tokenizer actually
+        // had -- reporting it here as if it were the model's real
+        // vocabulary size was misleading for every tokenizer smaller than
+        // that default).
+        metadata_props.insert(
+            "vocab_size".to_string(),
+            self.tokenizer.vocab_size().to_string(),
+        );
         metadata_props.insert(
             "pad_token_id".to_string(),
             self.config.pad_token_id.to_string(),
@@ -375,46 +388,84 @@ impl<T: Tokenizer> OnnxTokenizerExporter<T> {
         Ok(initializers)
     }
 
-    /// Create vocabulary tensor data
+    /// Create vocabulary tensor data.
+    ///
+    /// A real ONNX string tensor of shape `[vocab_size]` encodes token `i`
+    /// at position `i` -- there is no separate "id" field alongside each
+    /// string. That convention only holds for a dense, 0-based vocabulary,
+    /// so a tokenizer whose `get_vocab()` ids are not exactly `0..len()`
+    /// (with no gaps or duplicates) is rejected here rather than silently
+    /// mis-encoded. Previously this method instead padded every vocabulary
+    /// smaller than `self.config.vocab_size` (default `50000`) with
+    /// invented `[PAD_N]` entries, claiming a vocabulary far larger than
+    /// the tokenizer actually had; the tensor now always contains exactly
+    /// (and only) the tokenizer's real vocabulary, in real id order, which
+    /// is also what lets [`OnnxTokenizerRuntime::from_file`] recover the
+    /// real vocabulary losslessly by position.
     fn create_vocab_tensor(&self) -> Result<OnnxTensorData> {
-        // Extract actual vocabulary from the tokenizer
         let vocab = self.tokenizer.get_vocab();
-        let mut sorted_vocab: Vec<(String, u32)> = vocab.into_iter().collect();
-        sorted_vocab.sort_by_key(|(_, id)| *id);
+        let vocab_size = vocab.len();
 
-        let vocab_size = sorted_vocab.len();
+        let mut ordered: Vec<Option<String>> = vec![None; vocab_size];
+        for (token, id) in vocab {
+            match ordered.get_mut(id as usize) {
+                Some(slot @ None) => *slot = Some(token),
+                Some(Some(existing)) => {
+                    return Err(anyhow!(
+                        "tokenizer vocabulary has two tokens sharing id {}: {:?} and {:?}",
+                        id,
+                        existing,
+                        token
+                    ));
+                },
+                None => {
+                    return Err(anyhow!(
+                        "tokenizer vocabulary is not densely 0-based: id {} is outside the \
+                         [0, {}) range a vocab_tensor represents by position",
+                        id,
+                        vocab_size
+                    ));
+                },
+            }
+        }
+        let ordered: Vec<String> = ordered
+            .into_iter()
+            .enumerate()
+            .map(|(id, slot)| {
+                slot.ok_or_else(|| {
+                    anyhow!(
+                        "tokenizer vocabulary is missing id {} (not densely 0-based)",
+                        id
+                    )
+                })
+            })
+            .collect::<Result<_>>()?;
+
+        // Serialize vocabulary as null-terminated strings, in real id order.
         let mut vocab_data = Vec::new();
-
-        // Serialize vocabulary as null-terminated strings
-        for (token, _) in sorted_vocab {
-            // Encode token as UTF-8 bytes
+        for token in &ordered {
             vocab_data.extend(token.as_bytes());
             vocab_data.push(0); // Null terminator for ONNX string format
-        }
-
-        // Ensure we have at least the configured vocab size
-        let expected_size = self.config.vocab_size;
-        if vocab_size < expected_size {
-            // Fill remaining slots with padding tokens
-            for i in vocab_size..expected_size {
-                let padding_token = format!("[PAD_{}]", i);
-                vocab_data.extend(padding_token.as_bytes());
-                vocab_data.push(0);
-            }
         }
 
         Ok(OnnxTensorData {
             name: "vocab_tensor".to_string(),
             data_type: OnnxDataType::String,
-            shape: vec![expected_size as i64],
+            shape: vec![ordered.len() as i64],
             raw_data: vocab_data,
         })
     }
 
-    /// Create merge rules tensor for BPE tokenizers
+    /// Merge-rules tensor for BPE tokenizers.
+    ///
+    /// Always empty: `OnnxTokenizerExporter<T>` is generic over any
+    /// [`Tokenizer`] implementation, and that trait exposes no BPE merge
+    /// rules -- only a BPE-specific type carries them, with no shared
+    /// trait method to reach them generically. This is a real, documented
+    /// API limitation of exporting through the generic [`Tokenizer`]
+    /// trait, not a placeholder standing in for data this method silently
+    /// fails to produce for a tokenizer that could otherwise supply it.
     fn create_merge_tensor(&self) -> Result<OnnxTensorData> {
-        // This would contain BPE merge rules for BPE tokenizers
-        // For now, return an empty tensor
         Ok(OnnxTensorData {
             name: "merge_tensor".to_string(),
             data_type: OnnxDataType::String,
@@ -423,17 +474,31 @@ impl<T: Tokenizer> OnnxTokenizerExporter<T> {
         })
     }
 
-    /// Export to ONNX file (serialized format)
+    /// Serialize the exported model to this crate's own JSON interchange
+    /// format.
+    ///
+    /// This is **not** the binary ONNX protobuf wire format that
+    /// `onnxruntime` or other real ONNX runtimes consume -- this crate
+    /// does not implement an ONNX protobuf encoder. It is a JSON dump of
+    /// [`OnnxModel`] (metadata, tensor specs, the computation-graph
+    /// description, and a real `vocab_tensor` initializer built from the
+    /// wrapped tokenizer's actual vocabulary), structured to mirror
+    /// ONNX's graph model closely enough that
+    /// [`OnnxTokenizerRuntime::from_file`] can load it back and tokenize
+    /// with the real recovered vocabulary. Do not feed the output of this
+    /// method to a real ONNX runtime.
     pub fn export_to_bytes(&self) -> Result<Vec<u8>> {
         let model = self.export()?;
 
-        // In a real implementation, this would use the ONNX protobuf format
-        // For now, we'll serialize as JSON for demonstration
         serde_json::to_vec_pretty(&model)
-            .map_err(|e| anyhow!("Failed to serialize ONNX model: {}", e))
+            .map_err(|e| anyhow!("Failed to serialize tokenizer model: {}", e))
     }
 
-    /// Save ONNX model to file
+    /// Save the exported model to `path` in this crate's own JSON
+    /// interchange format -- see [`Self::export_to_bytes`]. Despite the
+    /// "ONNX" naming (this type mirrors ONNX's graph/tensor model closely
+    /// enough to interoperate with [`OnnxTokenizerRuntime`]), the file
+    /// this writes is not a real ONNX protobuf model.
     pub fn save_to_file(&self, path: &str) -> Result<()> {
         let model_bytes = self.export_to_bytes()?;
         std::fs::write(path, model_bytes)
@@ -451,13 +516,43 @@ impl<T: Tokenizer> OnnxTokenizerExporter<T> {
     }
 }
 
-/// ONNX Runtime integration for inference
+/// ONNX Runtime integration for inference.
+///
+/// This crate does not implement a real ONNX Runtime session or a binary
+/// ONNX protobuf parser. [`Self::from_file`]/[`Self::new`] load this
+/// crate's own JSON interchange format (see
+/// [`OnnxTokenizerExporter::export_to_bytes`]) and recover the real
+/// vocabulary and special-token configuration that was exported into it;
+/// [`Self::tokenize`] then performs real, deterministic greedy
+/// longest-match tokenization against that recovered vocabulary. A genuine
+/// binary ONNX protobuf `.onnx` file, or any other file not in this
+/// crate's export format, is rejected with a structured error at load time
+/// rather than silently producing hash-derived fake token IDs.
 pub struct OnnxTokenizerRuntime {
     model_path: String,
     // reason: stored from the constructor; reserved for forwarding session tuning
-    // to the ONNX Runtime once full session integration is wired up.
+    // to a real ONNX Runtime session once one is wired up. Not read by the
+    // real-vocabulary greedy-tokenization path below.
     #[allow(dead_code)]
     session_options: OnnxSessionOptions,
+    loaded: LoadedTokenizerModel,
+}
+
+/// The real, recovered contents of an exported tokenizer model.
+struct LoadedTokenizerModel {
+    /// `id -> token`, dense and 0-based (see [`OnnxTokenizerExporter::create_vocab_tensor`]).
+    id_to_token: Vec<String>,
+    /// `token -> id`, the inverse of `id_to_token`.
+    token_to_id: HashMap<String, u32>,
+    unk_token_id: u32,
+    #[allow(dead_code)] // Reserved: padding is not yet implemented for this runtime.
+    pad_token_id: u32,
+    bos_token_id: Option<u32>,
+    eos_token_id: Option<u32>,
+    max_sequence_length: Option<usize>,
+    metadata_props: HashMap<String, String>,
+    inputs: Vec<OnnxTensorInfo>,
+    outputs: Vec<OnnxTensorInfo>,
 }
 
 /// Options for ONNX Runtime session
@@ -497,106 +592,152 @@ pub enum OnnxOptimizationLevel {
 }
 
 impl OnnxTokenizerRuntime {
-    /// Create a new ONNX Runtime tokenizer
-    pub fn new(model_path: String, options: OnnxSessionOptions) -> Self {
-        Self {
+    /// Load a tokenizer model with explicit session options.
+    ///
+    /// Reads and parses `model_path` immediately -- unlike the earlier
+    /// version of this type, construction genuinely opens and validates
+    /// the file rather than only remembering its path. Fails if the file
+    /// cannot be read, is not this crate's JSON export format (including a
+    /// genuine binary ONNX protobuf model, which this crate does not
+    /// parse), or is missing the vocabulary/special-token metadata
+    /// [`OnnxTokenizerExporter`] always writes.
+    pub fn new(model_path: String, session_options: OnnxSessionOptions) -> Result<Self> {
+        let bytes = std::fs::read(&model_path).map_err(|e| {
+            anyhow!(
+                "Failed to read tokenizer model file {:?}: {}",
+                model_path,
+                e
+            )
+        })?;
+        let loaded = Self::load(&bytes)?;
+        Ok(Self {
             model_path,
-            session_options: options,
-        }
+            session_options,
+            loaded,
+        })
     }
 
-    /// Load model from file
-    pub fn from_file(model_path: String) -> Self {
+    /// Load a tokenizer model, using default session options.
+    pub fn from_file(model_path: String) -> Result<Self> {
         Self::new(model_path, OnnxSessionOptions::default())
     }
 
-    /// Run inference on text
-    pub fn tokenize(&self, texts: &[String]) -> Result<Vec<TokenizedInput>> {
-        let mut results = Vec::new();
+    /// Parse this crate's JSON export format and recover its real
+    /// vocabulary and special-token configuration.
+    fn load(bytes: &[u8]) -> Result<LoadedTokenizerModel> {
+        let model: OnnxModel = serde_json::from_slice(bytes).map_err(|e| {
+            anyhow!(
+                "not a TrustformeRS tokenizer export: this crate reads back its own JSON \
+                 interchange format from `OnnxTokenizerExporter::export_to_bytes`; it does not \
+                 implement a binary ONNX protobuf parser, so a genuine `.onnx` model file (or \
+                 any other unrecognized file) is rejected here rather than producing fabricated \
+                 tokenization ({})",
+                e
+            )
+        })?;
 
-        for text in texts {
-            // Simulate ONNX Runtime tokenization process
-            let tokenized = self.simulate_onnx_tokenization(text)?;
-            results.push(tokenized);
+        let vocab_tensor =
+            model.initializers.iter().find(|init| init.name == "vocab_tensor").ok_or_else(
+                || anyhow!("tokenizer model is missing its \"vocab_tensor\" initializer"),
+            )?;
+
+        // `create_vocab_tensor` writes each token as a null-terminated
+        // UTF-8 string, in real vocabulary-id order; position in the split
+        // sequence is the token's id (see that method's docs).
+        let id_to_token: Vec<String> = vocab_tensor
+            .raw_data
+            .split(|&b| b == 0)
+            .filter(|chunk| !chunk.is_empty())
+            .map(|chunk| {
+                String::from_utf8(chunk.to_vec())
+                    .map_err(|e| anyhow!("vocab_tensor contains invalid UTF-8: {}", e))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if id_to_token.is_empty() {
+            return Err(anyhow!("tokenizer model's vocab_tensor is empty"));
         }
 
-        Ok(results)
+        let mut token_to_id = HashMap::with_capacity(id_to_token.len());
+        for (id, token) in id_to_token.iter().enumerate() {
+            token_to_id.insert(token.clone(), id as u32);
+        }
+
+        let props = model.metadata.metadata_props.clone();
+        let parse_id = |key: &str| -> Option<u32> {
+            props
+                .get(key)
+                .and_then(|v| v.parse::<i64>().ok())
+                .and_then(|v| u32::try_from(v).ok())
+        };
+
+        let unk_token_id = parse_id("unk_token_id").ok_or_else(|| {
+            anyhow!("tokenizer model metadata is missing a valid \"unk_token_id\"")
+        })?;
+        let pad_token_id = parse_id("pad_token_id").ok_or_else(|| {
+            anyhow!("tokenizer model metadata is missing a valid \"pad_token_id\"")
+        })?;
+        let bos_token_id = parse_id("bos_token_id");
+        let eos_token_id = parse_id("eos_token_id");
+        let max_sequence_length =
+            props.get("max_sequence_length").and_then(|v| v.parse::<usize>().ok());
+
+        Ok(LoadedTokenizerModel {
+            id_to_token,
+            token_to_id,
+            unk_token_id,
+            pad_token_id,
+            bos_token_id,
+            eos_token_id,
+            max_sequence_length,
+            metadata_props: props,
+            inputs: model.inputs,
+            outputs: model.outputs,
+        })
     }
 
-    /// Simulate ONNX Runtime tokenization process
-    fn simulate_onnx_tokenization(&self, text: &str) -> Result<TokenizedInput> {
-        // In a real implementation, this would:
-        // 1. Create ONNX Runtime session
-        // 2. Prepare input tensors
-        // 3. Run inference
-        // 4. Extract output tensors
-        // 5. Convert back to TokenizedInput
+    /// Tokenize `texts` using the real vocabulary recovered from the
+    /// loaded model. Every ID comes from a real lookup against that
+    /// vocabulary; none is derived from a hash of the input text.
+    pub fn tokenize(&self, texts: &[String]) -> Result<Vec<TokenizedInput>> {
+        texts.iter().map(|text| self.tokenize_one(text)).collect()
+    }
 
-        // For simulation, we'll implement a sophisticated tokenization algorithm
-
-        // Step 1: Text preprocessing
+    fn tokenize_one(&self, text: &str) -> Result<TokenizedInput> {
         let cleaned_text = self.preprocess_text(text);
+        let (piece_ids, offsets) = self.greedy_longest_match(&cleaned_text);
 
-        // Step 2: Tokenization (simulating BPE or WordPiece)
-        let mut input_ids = Vec::new();
-        let mut offset_mapping = Vec::new();
+        let mut final_ids = Vec::with_capacity(piece_ids.len() + 2);
+        let mut final_offsets = Vec::with_capacity(piece_ids.len() + 2);
+        let mut special_tokens_mask = Vec::with_capacity(piece_ids.len() + 2);
 
-        let words: Vec<&str> = cleaned_text.split_whitespace().collect();
-        let mut current_offset = 0;
-
-        for word in words {
-            // Skip leading whitespace in original text
-            while current_offset < text.len() {
-                match text.chars().nth(current_offset) {
-                    Some(c) if c.is_whitespace() => current_offset += 1,
-                    _ => break,
-                }
-            }
-
-            let word_start = current_offset;
-
-            // Simulate subword tokenization
-            let subwords = self.simulate_subword_tokenization(word);
-
-            for subword in subwords {
-                // Simulate vocabulary lookup
-                let token_id = self.simulate_vocab_lookup(&subword);
-                input_ids.push(token_id);
-
-                // Calculate character offsets
-                let char_end = current_offset + subword.len();
-                offset_mapping.push(Some((current_offset, char_end)));
-                current_offset = char_end;
-            }
-
-            // Account for word boundary
-            current_offset = word_start + word.len();
+        if let Some(bos_id) = self.loaded.bos_token_id {
+            final_ids.push(bos_id);
+            final_offsets.push((0, 0));
+            special_tokens_mask.push(1);
         }
 
-        // Step 3: Add special tokens if needed
-        let mut final_ids = Vec::new();
-        let mut final_offsets = Vec::new();
+        for (id, offset) in piece_ids.into_iter().zip(offsets) {
+            final_ids.push(id);
+            final_offsets.push(offset);
+            special_tokens_mask.push(0);
+        }
 
-        // Add [CLS] token at beginning
-        final_ids.push(101); // Simulated [CLS] token ID
-        final_offsets.push((0, 0)); // Special tokens use (0, 0) offsets
+        if let Some(eos_id) = self.loaded.eos_token_id {
+            final_ids.push(eos_id);
+            final_offsets.push((0, 0));
+            special_tokens_mask.push(1);
+        }
 
-        // Add actual tokens
-        final_ids.extend(input_ids);
-        final_offsets.extend(offset_mapping.into_iter().map(|opt| opt.unwrap_or((0, 0))));
+        if let Some(max_len) = self.loaded.max_sequence_length {
+            if max_len > 0 && final_ids.len() > max_len {
+                final_ids.truncate(max_len);
+                final_offsets.truncate(max_len);
+                special_tokens_mask.truncate(max_len);
+            }
+        }
 
-        // Add [SEP] token at end
-        final_ids.push(102); // Simulated [SEP] token ID
-        final_offsets.push((0, 0)); // Special tokens use (0, 0) offsets
-
-        // Step 4: Create attention mask
         let seq_len = final_ids.len();
         let attention_mask = vec![1u8; seq_len];
-
-        // Step 5: Create special tokens mask
-        let mut special_tokens_mask = vec![0u8; seq_len];
-        special_tokens_mask[0] = 1; // [CLS]
-        special_tokens_mask[seq_len - 1] = 1; // [SEP]
 
         Ok(TokenizedInput {
             input_ids: final_ids,
@@ -608,9 +749,8 @@ impl OnnxTokenizerRuntime {
         })
     }
 
-    /// Preprocess text for tokenization
+    /// Basic text cleanup: collapse control characters and whitespace runs.
     fn preprocess_text(&self, text: &str) -> String {
-        // Basic text cleaning
         text.trim()
             .chars()
             .map(|c| if c.is_control() && c != '\n' && c != '\r' && c != '\t' { ' ' } else { c })
@@ -620,110 +760,66 @@ impl OnnxTokenizerRuntime {
             .join(" ")
     }
 
-    /// Simulate subword tokenization (BPE-like)
-    fn simulate_subword_tokenization(&self, word: &str) -> Vec<String> {
-        if word.is_empty() {
-            return vec![];
-        }
+    /// Real greedy longest-match segmentation over the recovered
+    /// vocabulary (WordPiece-style): at each position, the longest
+    /// vocabulary entry starting there is used, falling back to the
+    /// configured unknown-token id for exactly one character when nothing
+    /// matches. Deterministic and entirely dependent on the real
+    /// vocabulary content recovered from the model file -- never
+    /// hash-derived, and never a fixed "N% chance" heuristic.
+    fn greedy_longest_match(&self, text: &str) -> (Vec<u32>, Vec<(usize, usize)>) {
+        const MAX_PIECE_CHARS: usize = 32;
 
-        // Simple subword splitting simulation
-        let mut subwords = Vec::new();
-        let chars: Vec<char> = word.chars().collect();
+        let chars: Vec<char> = text.chars().collect();
+        let mut ids = Vec::with_capacity(chars.len());
+        let mut offsets = Vec::with_capacity(chars.len());
+        let mut byte_pos = 0usize;
+        let mut i = 0usize;
 
-        let mut i = 0;
         while i < chars.len() {
-            // Try to find the longest possible subword (simulate BPE merges)
-            let max_len = (chars.len() - i).min(8); // Max subword length of 8
-            let mut best_len = 1;
+            let max_len = (chars.len() - i).min(MAX_PIECE_CHARS);
+            let mut found: Option<(usize, u32)> = None;
 
-            for len in (2..=max_len).rev() {
-                let subword: String = chars[i..i + len].iter().collect();
-                if self.simulate_vocab_contains(&subword) {
-                    best_len = len;
+            for len in (1..=max_len).rev() {
+                let candidate: String = chars[i..i + len].iter().collect();
+                if let Some(&id) = self.loaded.token_to_id.get(&candidate) {
+                    found = Some((len, id));
                     break;
                 }
             }
 
-            let subword: String = chars[i..i + best_len].iter().collect();
+            let (piece_len, id) = found.unwrap_or((1, self.loaded.unk_token_id));
+            let piece_byte_len: usize = chars[i..i + piece_len].iter().map(|c| c.len_utf8()).sum();
 
-            // Add continuation prefix for non-initial subwords
-            if i > 0 {
-                subwords.push(format!("##{}", subword));
-            } else {
-                subwords.push(subword);
-            }
-
-            i += best_len;
+            ids.push(id);
+            offsets.push((byte_pos, byte_pos + piece_byte_len));
+            byte_pos += piece_byte_len;
+            i += piece_len;
         }
 
-        subwords
+        (ids, offsets)
     }
 
-    /// Simulate vocabulary lookup
-    fn simulate_vocab_lookup(&self, token: &str) -> u32 {
-        // Simple hash-based simulation of vocabulary lookup
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        token.hash(&mut hasher);
-        let hash = hasher.finish();
-
-        // Map hash to vocab range, avoiding special token IDs
-        let vocab_size = 30000; // Simulate typical vocab size
-        (hash % (vocab_size - 1000)) as u32 + 1000 // Avoid first 1000 IDs for special tokens
-    }
-
-    /// Simulate vocabulary contains check
-    fn simulate_vocab_contains(&self, token: &str) -> bool {
-        // Common subwords are more likely to be in vocab
-        if token.len() <= 3 {
-            return true; // Short tokens usually in vocab
-        }
-
-        // Common prefixes and suffixes
-        let common_patterns = [
-            "##ing", "##ed", "##er", "##ly", "##tion", "##ness", "##able",
-        ];
-        if common_patterns.iter().any(|&pattern| token.contains(pattern)) {
-            return true;
-        }
-
-        // Simulate 70% chance for other tokens
-        let hash = token.chars().map(|c| c as u32).sum::<u32>();
-        hash % 10 < 7
-    }
-
-    /// Get model metadata
+    /// Real metadata recovered from the loaded model (not hardcoded
+    /// placeholders).
     pub fn get_metadata(&self) -> Result<HashMap<String, String>> {
-        // In a real implementation, this would extract metadata from the ONNX model
-        let mut metadata = HashMap::new();
+        let mut metadata = self.loaded.metadata_props.clone();
         metadata.insert("model_path".to_string(), self.model_path.clone());
-        metadata.insert("framework".to_string(), "ONNX Runtime".to_string());
+        metadata.insert(
+            "vocab_size".to_string(),
+            self.loaded.id_to_token.len().to_string(),
+        );
         Ok(metadata)
     }
 
-    /// Get input specifications
+    /// Real input tensor specs recovered from the loaded model.
     pub fn get_input_specs(&self) -> Result<Vec<OnnxTensorInfo>> {
-        // Return input tensor specifications
-        Ok(vec![OnnxTensorInfo::new(
-            "input_text".to_string(),
-            OnnxDataType::String,
-            vec![-1],
-        )])
+        Ok(self.loaded.inputs.clone())
     }
 
-    /// Get output specifications
+    /// Real output tensor specs recovered from the loaded model.
     pub fn get_output_specs(&self) -> Result<Vec<OnnxTensorInfo>> {
-        // Return output tensor specifications
-        Ok(vec![
-            OnnxTensorInfo::new("input_ids".to_string(), OnnxDataType::Int64, vec![-1, -1]),
-            OnnxTensorInfo::new(
-                "attention_mask".to_string(),
-                OnnxDataType::Int64,
-                vec![-1, -1],
-            ),
-        ])
+        Ok(self.loaded.outputs.clone())
     }
 }
 
@@ -839,6 +935,7 @@ mod tests {
     use super::*;
     use crate::char::CharTokenizer;
     use std::collections::HashMap;
+    use tempfile::tempdir;
 
     fn create_test_char_tokenizer() -> CharTokenizer {
         let mut vocab = HashMap::new();
@@ -911,13 +1008,124 @@ mod tests {
         assert!(!model_bytes.is_empty());
     }
 
+    /// Regression test: `from_file` used to return an infallible `Self`
+    /// that only remembered the path, never opening it. It must now
+    /// actually try to read the file and fail when it does not exist.
     #[test]
-    fn test_onnx_runtime_creation() {
-        let runtime = OnnxTokenizerRuntime::from_file("test_model.onnx".to_string());
+    fn test_onnx_runtime_from_file_rejects_missing_file() {
+        let temp_dir = tempdir().expect("Operation failed in test");
+        let missing_path = temp_dir.path().join("does-not-exist.onnx");
 
-        let input_specs = runtime.get_input_specs().expect("Operation failed in test");
-        assert!(!input_specs.is_empty());
-        assert_eq!(input_specs[0].name, "input_text");
+        let result =
+            OnnxTokenizerRuntime::from_file(missing_path.to_str().expect("utf8 path").to_string());
+        assert!(result.is_err());
+    }
+
+    /// A file that is not this crate's JSON export format (standing in for
+    /// a genuine binary ONNX protobuf model, which this crate does not
+    /// parse) must be rejected outright rather than producing a runtime
+    /// that goes on to fabricate tokenization.
+    #[test]
+    fn test_onnx_runtime_rejects_non_export_bytes() {
+        let temp_dir = tempdir().expect("Operation failed in test");
+        let model_path = temp_dir.path().join("garbage.onnx");
+        std::fs::write(&model_path, [0x08u8, 0x01, 0xFF, 0xFE, 0x00, 0x00])
+            .expect("Operation failed in test");
+
+        let result =
+            OnnxTokenizerRuntime::from_file(model_path.to_str().expect("utf8 path").to_string());
+        assert!(result.is_err());
+    }
+
+    /// A vocabulary whose ids are not exactly `0..len()` (no gaps, no
+    /// duplicates) cannot be represented by a `vocab_tensor`'s implicit
+    /// position-is-id convention, so exporting it must fail instead of
+    /// silently mis-encoding it (the old code padded blindly by count and
+    /// never checked this at all).
+    #[test]
+    fn test_create_vocab_tensor_rejects_non_contiguous_vocab() {
+        let mut vocab = HashMap::new();
+        vocab.insert("a".to_string(), 0u32);
+        vocab.insert("z".to_string(), 5u32);
+        let tokenizer = CharTokenizer::new(vocab);
+        let exporter = OnnxTokenizerExporter::from_tokenizer(tokenizer);
+
+        assert!(exporter.export().is_err());
+    }
+
+    /// Regression test for the fabricated `OnnxTokenizerRuntime::tokenize`:
+    /// the old `simulate_vocab_lookup` derived every ID from
+    /// `DefaultHasher(token) % 29000 + 1000`, never touching any real
+    /// vocabulary. A real export/load/tokenize round trip must instead
+    /// reproduce the tokenizer's exact real ids, which this hand-computed
+    /// reference checks directly: every character of "hello" is a
+    /// single-char entry in `create_test_char_tokenizer`'s vocabulary
+    /// (h=4, e=5, l=6, o=7).
+    #[test]
+    fn test_onnx_export_round_trip_tokenizes_with_real_vocab() {
+        let temp_dir = tempdir().expect("Operation failed in test");
+        let model_path = temp_dir.path().join("tokenizer.onnx.json");
+
+        let tokenizer = create_test_char_tokenizer();
+        OnnxTokenizerExporter::from_tokenizer(tokenizer)
+            .save_to_file(model_path.to_str().expect("utf8 path"))
+            .expect("Operation failed in test");
+
+        let runtime =
+            OnnxTokenizerRuntime::from_file(model_path.to_str().expect("utf8 path").to_string())
+                .expect("a real exported model must load");
+
+        let result = runtime.tokenize(&["hello".to_string()]).expect("Operation failed in test");
+
+        assert_eq!(result[0].input_ids, vec![4, 5, 6, 6, 7]);
+    }
+
+    /// Different input texts must produce different real token IDs (the
+    /// old hash-based fake also varied with input, but not with the real
+    /// vocabulary -- this pins the exact real ids for a second text too).
+    #[test]
+    fn test_onnx_runtime_tokenize_output_varies_with_input() {
+        let temp_dir = tempdir().expect("Operation failed in test");
+        let model_path = temp_dir.path().join("tokenizer.onnx.json");
+
+        let tokenizer = create_test_char_tokenizer();
+        OnnxTokenizerExporter::from_tokenizer(tokenizer)
+            .save_to_file(model_path.to_str().expect("utf8 path"))
+            .expect("Operation failed in test");
+
+        let runtime =
+            OnnxTokenizerRuntime::from_file(model_path.to_str().expect("utf8 path").to_string())
+                .expect("Operation failed in test");
+
+        let result = runtime
+            .tokenize(&["hello".to_string(), "world".to_string()])
+            .expect("Operation failed in test");
+
+        assert_ne!(result[0].input_ids, result[1].input_ids);
+        assert_eq!(result[1].input_ids, vec![8, 7, 9, 6, 10]); // w, o, r, l, d
+    }
+
+    /// Regression test: `get_metadata` used to hardcode
+    /// `{"framework": "ONNX Runtime"}` and never report a real vocabulary
+    /// size at all. It must now report the real, recovered vocabulary size
+    /// (this fixture has exactly 14 entries), not
+    /// `OnnxExportConfig::vocab_size`'s default of 50000.
+    #[test]
+    fn test_get_metadata_reports_real_vocab_size() {
+        let temp_dir = tempdir().expect("Operation failed in test");
+        let model_path = temp_dir.path().join("tokenizer.onnx.json");
+
+        let tokenizer = create_test_char_tokenizer();
+        OnnxTokenizerExporter::from_tokenizer(tokenizer)
+            .save_to_file(model_path.to_str().expect("utf8 path"))
+            .expect("Operation failed in test");
+
+        let runtime =
+            OnnxTokenizerRuntime::from_file(model_path.to_str().expect("utf8 path").to_string())
+                .expect("Operation failed in test");
+
+        let metadata = runtime.get_metadata().expect("Operation failed in test");
+        assert_eq!(metadata.get("vocab_size"), Some(&"14".to_string()));
     }
 
     #[test]

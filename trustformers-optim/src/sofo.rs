@@ -40,10 +40,62 @@
 //! // optimizer.step(&mut parameters, &gradients, &loss_fn)?;
 //! ```
 
-use crate::common::{OptimizerState, ParameterUpdate};
-use anyhow::{Result, Context};
+use anyhow::Result;
 use std::collections::HashMap;
 use trustformers_core::tensor::Tensor;
+
+/// Which estimator produced the curvature used by the most recent step.
+///
+/// SOFO's paper-faithful path needs directional derivatives of the *gradient*, which
+/// only the caller can supply. Rather than invent numbers when no oracle is
+/// available, the optimizer records which estimator it actually used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurvatureSource {
+    /// No step has been taken yet.
+    None,
+    /// Hutchinson diagonal Hessian estimate `E[v ⊙ (H v)]` with Rademacher `v`,
+    /// where `H v` comes from a central difference of caller-supplied gradients.
+    /// This is the paper's second-order path.
+    HutchinsonFromOracle,
+    /// Empirical-Fisher (Gauss-Newton) diagonal `g ⊙ g`.
+    ///
+    /// Used by [`SOFO::step`], which has no way to evaluate the gradient at a
+    /// perturbed parameter point. It is a real, standard curvature proxy — but it is
+    /// *not* the Hessian, and callers who need the paper's estimator must use
+    /// [`SOFO::step_with_gradient_oracle`].
+    EmpiricalFisherDiagonal,
+}
+
+/// Counter-based deterministic Rademacher sampler.
+///
+/// SOFO's curvature estimate is only unbiased for *independent* ±1 probe vectors, so
+/// the sequence has to be genuinely varied — the previous implementation used
+/// `sin(i * 0.1)`, which is neither random nor ±1. A counter-based splitmix64 stream
+/// gives independent draws while staying fully reproducible from `seed`.
+#[derive(Debug, Clone)]
+struct RademacherStream {
+    seed: u64,
+    counter: u64,
+}
+
+impl RademacherStream {
+    fn new(seed: u64) -> Self {
+        Self { seed, counter: 0 }
+    }
+
+    fn next_bits(&mut self) -> u64 {
+        self.counter = self.counter.wrapping_add(1);
+        let mut z = self.seed.wrapping_add(self.counter.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// A vector of independent ±1 entries.
+    fn sample(&mut self, len: usize) -> Vec<f32> {
+        (0..len).map(|_| if self.next_bits() & 1 == 0 { -1.0 } else { 1.0 }).collect()
+    }
+}
 
 /// Configuration for SOFO optimizer
 #[derive(Debug, Clone)]
@@ -72,6 +124,14 @@ pub struct SOFOConfig {
     pub memory_efficient: bool,
     /// Parallel computation threshold (default: 1000)
     pub parallel_threshold: usize,
+    /// Finite-difference step used for the Hessian-vector product (default: 1e-3).
+    ///
+    /// A central difference of gradients trades truncation error (`O(ε²)`) against
+    /// cancellation error (`O(δ/ε)` for gradient noise `δ`); `1e-3` is the usual
+    /// compromise for `f32` parameters.
+    pub hvp_epsilon: f32,
+    /// Seed for the Rademacher probe stream (default: 0x5060_F0F0_1234_5678).
+    pub probe_seed: u64,
 }
 
 impl Default for SOFOConfig {
@@ -89,6 +149,8 @@ impl Default for SOFOConfig {
             max_condition_number: 1e6,
             memory_efficient: true,
             parallel_threshold: 1000,
+            hvp_epsilon: 1e-3,
+            probe_seed: 0x5060_F0F0_1234_5678,
         }
     }
 }
@@ -141,7 +203,31 @@ impl SOFOConfig {
         self
     }
 
+    /// Set the finite-difference step for the Hessian-vector product.
+    pub fn hvp_epsilon(mut self, eps: f32) -> Self {
+        self.hvp_epsilon = eps;
+        self
+    }
+
+    /// Set the seed of the Rademacher probe stream.
+    pub fn probe_seed(mut self, seed: u64) -> Self {
+        self.probe_seed = seed;
+        self
+    }
+
     /// Build the configuration
+    /// Enable or disable adaptive per-parameter curvature weighting
+    pub fn adaptive_curvature(mut self, enable: bool) -> Self {
+        self.adaptive_curvature = enable;
+        self
+    }
+
+    /// Set the maximum condition number tolerated in the curvature estimate
+    pub fn max_condition_number(mut self, max_condition_number: f32) -> Self {
+        self.max_condition_number = max_condition_number;
+        self
+    }
+
     pub fn build(self) -> Self {
         self
     }
@@ -166,54 +252,45 @@ pub struct SOFOState {
     pub forward_stats: ForwardModeStats,
     /// Memory usage tracking
     pub memory_stats: MemoryStats,
+    /// Which estimator produced the curvature used by the most recent step.
+    pub curvature_source: CurvatureSource,
 }
 
-/// Statistics for forward-mode differentiation
-#[derive(Debug, Clone)]
+/// Counters for the gradient-oracle evaluations SOFO actually performed.
+///
+/// Every field here is *measured*: `total_forward_passes` is incremented once per
+/// real oracle call, and `total_oracle_time` accumulates the wall-clock time those
+/// calls took. Nothing is modelled or assumed.
+#[derive(Debug, Clone, Default)]
 pub struct ForwardModeStats {
-    /// Total forward passes performed
+    /// Total gradient-oracle evaluations performed (two per Hutchinson probe).
     pub total_forward_passes: u64,
-    /// Average computation time per forward pass
-    pub avg_forward_time: f32,
-    /// Curvature estimation accuracy
-    pub curvature_accuracy: f32,
-    /// Parallel efficiency ratio
-    pub parallel_efficiency: f32,
+    /// Accumulated wall-clock time spent inside the gradient oracle.
+    pub total_oracle_time: std::time::Duration,
 }
 
-/// Memory usage statistics for SOFO
-#[derive(Debug, Clone)]
+impl ForwardModeStats {
+    /// Mean wall-clock time per oracle evaluation, or `None` if none were performed.
+    pub fn avg_forward_time(&self) -> Option<std::time::Duration> {
+        if self.total_forward_passes == 0 {
+            None
+        } else {
+            Some(self.total_oracle_time / self.total_forward_passes as u32)
+        }
+    }
+}
+
+/// Measured size of the optimizer's own state buffers.
+#[derive(Debug, Clone, Default)]
 pub struct MemoryStats {
-    /// Current memory usage (MB)
-    pub current_memory_mb: f32,
-    /// Peak memory usage (MB)
-    pub peak_memory_mb: f32,
-    /// Memory efficiency compared to backprop
-    pub efficiency_ratio: f32,
-    /// Number of parameters being tracked
+    /// Bytes currently held by SOFO's momentum and curvature buffers.
+    pub state_bytes: usize,
+    /// `state_bytes` expressed in MiB.
+    pub current_state_mb: f32,
+    /// Largest `current_state_mb` observed so far.
+    pub peak_state_mb: f32,
+    /// Number of scalar parameters most recently optimized.
     pub num_parameters: usize,
-}
-
-impl Default for ForwardModeStats {
-    fn default() -> Self {
-        Self {
-            total_forward_passes: 0,
-            avg_forward_time: 0.0,
-            curvature_accuracy: 1.0,
-            parallel_efficiency: 1.0,
-        }
-    }
-}
-
-impl Default for MemoryStats {
-    fn default() -> Self {
-        Self {
-            current_memory_mb: 0.0,
-            peak_memory_mb: 0.0,
-            efficiency_ratio: 1.0,
-            num_parameters: 0,
-        }
-    }
 }
 
 impl Default for SOFOState {
@@ -227,6 +304,7 @@ impl Default for SOFOState {
             adaptive_weights: HashMap::new(),
             forward_stats: ForwardModeStats::default(),
             memory_stats: MemoryStats::default(),
+            curvature_source: CurvatureSource::None,
         }
     }
 }
@@ -238,14 +316,17 @@ impl Default for SOFOState {
 pub struct SOFO {
     config: SOFOConfig,
     state: SOFOState,
+    rademacher: RademacherStream,
 }
 
 impl SOFO {
     /// Create a new SOFO optimizer
     pub fn new(config: SOFOConfig) -> Self {
+        let rademacher = RademacherStream::new(config.probe_seed);
         Self {
             config,
             state: SOFOState::default(),
+            rademacher,
         }
     }
 
@@ -259,165 +340,163 @@ impl SOFO {
         self.config.learning_rate = lr;
     }
 
-    /// Compute forward-mode directional derivatives
-    fn compute_forward_derivatives(&self, parameters: &HashMap<String, Tensor>,
-                                   directions: &HashMap<String, Tensor>) -> Result<HashMap<String, Tensor>> {
-        let mut forward_derivatives = HashMap::new();
+    /// Generates one set of independent Rademacher probe directions, one per parameter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a probe tensor cannot be built for a parameter's shape.
+    fn generate_random_directions(
+        &mut self,
+        parameters: &HashMap<String, Tensor>,
+    ) -> Result<Vec<HashMap<String, Tensor>>> {
+        // Iterate in a deterministic order so a given seed always yields the same
+        // probe sequence regardless of `HashMap` iteration order.
+        let mut names: Vec<&String> = parameters.keys().collect();
+        names.sort();
 
-        for (param_name, direction) in directions.iter() {
-            if let Some(parameter) = parameters.get(param_name) {
-                // Simulate forward-mode AD by computing directional derivative
-                // In practice, this would involve forward-mode automatic differentiation
-                let derivative = self.compute_directional_derivative(parameter, direction)?;
-                forward_derivatives.insert(param_name.clone(), derivative);
-            }
-        }
-
-        Ok(forward_derivatives)
-    }
-
-    /// Compute directional derivative using forward-mode AD simulation
-    fn compute_directional_derivative(&self, parameter: &Tensor, direction: &Tensor) -> Result<Tensor> {
-        // Simplified forward-mode AD computation
-        // In a real implementation, this would use proper dual numbers or forward-mode AD
-
-        // For demonstration, we approximate the directional derivative
-        let eps = 1e-6;
-        let eps_tensor = Tensor::scalar(eps)?;
-
-        // Approximate: d/dt f(x + t*v) at t=0 ≈ (f(x + ε*v) - f(x)) / ε
-        let perturbed = parameter.add(&direction.mul(&eps_tensor)?)?;
-        let derivative = perturbed.sub(parameter)?.div(&eps_tensor)?;
-
-        Ok(derivative)
-    }
-
-    /// Generate random directions for curvature estimation
-    fn generate_random_directions(&self, parameters: &HashMap<String, Tensor>) -> Result<Vec<HashMap<String, Tensor>>> {
-        let mut direction_sets = Vec::new();
-
+        let mut direction_sets = Vec::with_capacity(self.config.forward_passes);
         for _ in 0..self.config.forward_passes {
             let mut directions = HashMap::new();
-
-            for (param_name, parameter) in parameters.iter() {
-                // Generate random direction with same shape as parameter
-                let random_dir = self.generate_random_tensor(parameter.shape())?;
-                directions.insert(param_name.clone(), random_dir);
+            for name in &names {
+                let Some(parameter) = parameters.get(*name) else {
+                    continue;
+                };
+                let shape = parameter.shape();
+                let total: usize = shape.iter().product();
+                let probe = self.rademacher.sample(total);
+                directions.insert((*name).clone(), Tensor::from_vec(probe, &shape)?);
             }
-
             direction_sets.push(directions);
         }
 
         Ok(direction_sets)
     }
 
-    /// Generate random tensor with given shape (simplified Gaussian)
-    fn generate_random_tensor(&self, shape: &[usize]) -> Result<Tensor> {
-        // Simplified random tensor generation
-        // In practice, you would use proper random number generation
-        let total_elements: usize = shape.iter().product();
-        let data: Vec<f32> = (0..total_elements)
-            .map(|i| (i as f32 * 0.1).sin()) // Simple deterministic "random" values
-            .collect();
-
-        Tensor::from_data(&data, shape)
+    /// Empirical-Fisher (Gauss-Newton) diagonal curvature `g ⊙ g + damping`.
+    ///
+    /// This is what [`SOFO::step`] uses: a real, standard curvature proxy computed
+    /// from the gradients the caller already has. It is *not* the Hessian.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a tensor operation fails.
+    fn empirical_fisher_curvature(
+        &self,
+        gradients: &HashMap<String, Tensor>,
+    ) -> Result<HashMap<String, Tensor>> {
+        let mut estimates = HashMap::new();
+        for (param_name, gradient) in gradients.iter() {
+            let squared = gradient.mul(gradient)?;
+            estimates.insert(param_name.clone(), squared.add_scalar(self.config.damping)?);
+        }
+        Ok(estimates)
     }
 
-    /// Estimate curvature using multiple forward passes
-    fn estimate_curvature(&mut self, parameters: &HashMap<String, Tensor>,
-                          gradients: &HashMap<String, Tensor>) -> Result<HashMap<String, Tensor>> {
-        let mut curvature_estimates = HashMap::new();
-
-        // Generate random directions for forward-mode differentiation
+    /// Hutchinson diagonal-Hessian estimate driven by a caller-supplied gradient oracle.
+    ///
+    /// For Rademacher probes `v`, `E[v ⊙ (H v)] = diag(H)`. The Hessian-vector product
+    /// is obtained by a central difference of *real* gradients:
+    /// `H v ≈ (∇f(θ + εv) − ∇f(θ − εv)) / (2ε)`, so the oracle is called twice per
+    /// probe. The absolute value is taken because the Newton-style division below
+    /// requires a positive preconditioner.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the oracle fails or returns a gradient whose shape does
+    /// not match the parameter it was requested for.
+    fn hutchinson_curvature<F>(
+        &mut self,
+        parameters: &HashMap<String, Tensor>,
+        oracle: &mut F,
+    ) -> Result<HashMap<String, Tensor>>
+    where
+        F: FnMut(&HashMap<String, Tensor>) -> Result<HashMap<String, Tensor>>,
+    {
+        let eps = self.config.hvp_epsilon;
         let direction_sets = self.generate_random_directions(parameters)?;
 
-        for (param_name, gradient) in gradients.iter() {
-            let mut curvature_sum = Tensor::zeros_like(gradient)?;
-            let mut valid_estimates = 0;
+        let mut accumulator: HashMap<String, Vec<f32>> = HashMap::new();
+        let mut probes_used = 0usize;
 
-            // Compute curvature estimate using multiple forward passes
-            for directions in &direction_sets {
-                if let Some(direction) = directions.get(param_name) {
-                    if let Some(parameter) = parameters.get(param_name) {
-                        // Compute Hessian-vector product approximation
-                        let hvp = self.compute_hessian_vector_product(
-                            parameter,
-                            gradient,
-                            direction
-                        )?;
-
-                        curvature_sum = curvature_sum.add(&hvp)?;
-                        valid_estimates += 1;
-                    }
-                }
+        for directions in &direction_sets {
+            let mut plus = HashMap::new();
+            let mut minus = HashMap::new();
+            for (name, parameter) in parameters.iter() {
+                let Some(direction) = directions.get(name) else {
+                    continue;
+                };
+                plus.insert(name.clone(), parameter.add(&direction.mul_scalar(eps)?)?);
+                minus.insert(name.clone(), parameter.sub(&direction.mul_scalar(eps)?)?);
             }
 
-            if valid_estimates > 0 {
-                let avg_curvature = curvature_sum.div(&Tensor::scalar(valid_estimates as f32)?)?;
+            let grad_plus = oracle(&plus)?;
+            let grad_minus = oracle(&minus)?;
+            self.state.forward_stats.total_forward_passes += 2;
+            probes_used += 1;
 
-                // Apply damping for numerical stability
-                let damping_tensor = Tensor::scalar(self.config.damping)?;
-                let damped_curvature = avg_curvature.add(&damping_tensor)?;
-
-                curvature_estimates.insert(param_name.clone(), damped_curvature);
-            } else {
-                // Fallback to identity-like curvature
-                let identity_curvature = Tensor::ones_like(gradient)?
-                    .mul(&Tensor::scalar(self.config.damping)?)?;
-                curvature_estimates.insert(param_name.clone(), identity_curvature);
+            for (name, direction) in directions.iter() {
+                let (Some(gp), Some(gm)) = (grad_plus.get(name), grad_minus.get(name)) else {
+                    continue;
+                };
+                let gp_data = gp.data_f32()?;
+                let gm_data = gm.data_f32()?;
+                let v_data = direction.data_f32()?;
+                if gp_data.len() != v_data.len() || gm_data.len() != v_data.len() {
+                    return Err(anyhow::anyhow!(
+                        "gradient oracle returned {} / {} elements for '{name}' but the \
+                         parameter has {}",
+                        gp_data.len(),
+                        gm_data.len(),
+                        v_data.len()
+                    ));
+                }
+                let slot =
+                    accumulator.entry(name.clone()).or_insert_with(|| vec![0.0; v_data.len()]);
+                for i in 0..v_data.len() {
+                    // v ⊙ (H v), with H v from the central difference.
+                    let hv = (gp_data[i] - gm_data[i]) / (2.0 * eps);
+                    slot[i] += v_data[i] * hv;
+                }
             }
         }
 
-        // Update forward pass statistics
-        self.state.forward_stats.total_forward_passes += direction_sets.len() as u64;
+        let mut estimates = HashMap::new();
+        let divisor = probes_used.max(1) as f32;
+        for (name, mut values) in accumulator {
+            for value in values.iter_mut() {
+                // Newton-style division needs a positive preconditioner; the sign of a
+                // diagonal Hessian entry is not usable directly.
+                *value = (*value / divisor).abs() + self.config.damping;
+            }
+            let shape =
+                parameters.get(&name).map(|t| t.shape()).unwrap_or_else(|| vec![values.len()]);
+            estimates.insert(name, Tensor::from_vec(values, &shape)?);
+        }
 
-        Ok(curvature_estimates)
-    }
-
-    /// Compute Hessian-vector product using forward-mode differentiation
-    fn compute_hessian_vector_product(&self, parameter: &Tensor, gradient: &Tensor,
-                                      direction: &Tensor) -> Result<Tensor> {
-        // Simplified Hessian-vector product computation
-        // In practice, this would use forward-over-reverse or forward-over-forward AD
-
-        // Approximate: H*v ≈ (∇f(x + ε*v) - ∇f(x)) / ε
-        let eps = 1e-6;
-        let eps_tensor = Tensor::scalar(eps)?;
-
-        let perturbed_gradient = self.compute_perturbed_gradient(parameter, gradient, direction, eps)?;
-        let hvp = perturbed_gradient.sub(gradient)?.div(&eps_tensor)?;
-
-        Ok(hvp)
-    }
-
-    /// Compute gradient at perturbed parameter
-    fn compute_perturbed_gradient(&self, parameter: &Tensor, gradient: &Tensor,
-                                  direction: &Tensor, eps: f32) -> Result<Tensor> {
-        // Simplified perturbation
-        // In practice, this would recompute the gradient at the perturbed point
-        let eps_tensor = Tensor::scalar(eps)?;
-        let perturbation = direction.mul(&eps_tensor)?;
-
-        // For simplification, we approximate the perturbed gradient
-        // Real implementation would involve recomputing the loss and gradient
-        let perturbation_effect = perturbation.mul(&Tensor::scalar(0.1)?)?; // Simplified curvature effect
-        gradient.add(&perturbation_effect)
+        Ok(estimates)
     }
 
     /// Apply adaptive curvature weighting
-    fn apply_adaptive_curvature(&mut self, param_name: &str, curvature: &Tensor,
-                                gradient: &Tensor) -> Result<Tensor> {
+    fn apply_adaptive_curvature(
+        &mut self,
+        param_name: &str,
+        curvature: &Tensor,
+        gradient: &Tensor,
+    ) -> Result<Tensor> {
         if !self.config.adaptive_curvature {
             return Ok(curvature.clone());
         }
 
         // Compute gradient-curvature alignment
-        let grad_norm = gradient.norm()?.to_scalar::<f32>()?;
-        let curv_norm = curvature.norm()?.to_scalar::<f32>()?;
+        let grad_norm = gradient.norm()?;
+        let curv_norm = curvature.norm()?;
 
         let alignment = if grad_norm > 0.0 && curv_norm > 0.0 {
-            let dot_product = gradient.flatten()?.dot(&curvature.flatten()?)?;
-            dot_product.to_scalar::<f32>()? / (grad_norm * curv_norm)
+            let grad_data = gradient.data_f32()?;
+            let curv_data = curvature.data_f32()?;
+            let dot_product: f32 =
+                grad_data.iter().zip(curv_data.iter()).map(|(&a, &b)| a * b).sum();
+            dot_product / (grad_norm * curv_norm)
         } else {
             0.0
         };
@@ -427,26 +506,28 @@ impl SOFO {
         self.state.adaptive_weights.insert(param_name.to_string(), adaptive_weight);
 
         // Apply adaptive weighting
-        let weight_tensor = Tensor::scalar(adaptive_weight)?;
-        curvature.mul(&weight_tensor)
+        Ok(curvature.mul_scalar(adaptive_weight)?)
     }
 
     /// Update momentum buffer
     fn update_momentum(&mut self, param_name: &str, gradient: &Tensor) -> Result<Tensor> {
         let momentum = self.config.momentum;
 
-        let momentum_update = if let Some(prev_momentum) = self.state.momentum_buffers.get(param_name) {
-            let momentum_tensor = Tensor::scalar(momentum)?;
-            let one_minus_momentum = Tensor::scalar(1.0 - momentum)?;
+        let momentum_update =
+            if let Some(prev_momentum) = self.state.momentum_buffers.get(param_name) {
+                let momentum_tensor = Tensor::scalar(momentum)?;
+                let one_minus_momentum = Tensor::scalar(1.0 - momentum)?;
 
-            let weighted_prev = prev_momentum.mul(&momentum_tensor)?;
-            let weighted_grad = gradient.mul(&one_minus_momentum)?;
-            weighted_prev.add(&weighted_grad)?
-        } else {
-            gradient.mul(&Tensor::scalar(1.0 - momentum)?)?
-        };
+                let weighted_prev = prev_momentum.mul(&momentum_tensor)?;
+                let weighted_grad = gradient.mul(&one_minus_momentum)?;
+                weighted_prev.add(&weighted_grad)?
+            } else {
+                gradient.mul(&Tensor::scalar(1.0 - momentum)?)?
+            };
 
-        self.state.momentum_buffers.insert(param_name.to_string(), momentum_update.clone());
+        self.state
+            .momentum_buffers
+            .insert(param_name.to_string(), momentum_update.clone());
         Ok(momentum_update)
     }
 
@@ -467,47 +548,101 @@ impl SOFO {
         let min_eigenvalue = self.config.damping;
         let max_eigenvalue = min_eigenvalue * self.config.max_condition_number;
 
-        let min_tensor = Tensor::scalar(min_eigenvalue)?;
-        let max_tensor = Tensor::scalar(max_eigenvalue)?;
-
-        curvature.clamp(&min_tensor, &max_tensor)
+        Ok(curvature.clamp(min_eigenvalue, max_eigenvalue)?)
     }
 
-    /// Update memory statistics
+    /// Records the *measured* size of the optimizer's own state buffers.
+    ///
+    /// `num_parameters` counts scalar parameters (not tensors) and the byte totals are
+    /// derived from the buffers SOFO actually holds — momentum and curvature — so the
+    /// reported figure tracks reality rather than a modelled overhead percentage.
     fn update_memory_stats(&mut self, parameters: &HashMap<String, Tensor>) {
-        let param_count = parameters.len();
+        let scalar_count: usize =
+            parameters.values().map(|t| t.shape().iter().product::<usize>()).sum();
 
-        // Simplified memory calculation (in practice, you'd measure actual memory usage)
-        let base_memory = param_count as f32 * 4.0; // 4 bytes per float parameter
-        let forward_mode_overhead = base_memory * 0.1; // 10% overhead for forward mode
-        let total_memory_mb = (base_memory + forward_mode_overhead) / (1024.0 * 1024.0);
+        let state_bytes: usize = self
+            .state
+            .momentum_buffers
+            .values()
+            .chain(self.state.curvature_estimates.values())
+            .map(|t| t.shape().iter().product::<usize>() * std::mem::size_of::<f32>())
+            .sum();
 
-        self.state.memory_stats.current_memory_mb = total_memory_mb;
-        self.state.memory_stats.peak_memory_mb = self.state.memory_stats.peak_memory_mb.max(total_memory_mb);
-        self.state.memory_stats.num_parameters = param_count;
-
-        // Memory efficiency compared to traditional second-order methods
-        let traditional_second_order_memory = base_memory * param_count as f32; // O(n^2) for Hessian
-        self.state.memory_stats.efficiency_ratio = traditional_second_order_memory / (base_memory + forward_mode_overhead);
+        let state_mb = state_bytes as f32 / (1024.0 * 1024.0);
+        self.state.memory_stats.current_state_mb = state_mb;
+        self.state.memory_stats.peak_state_mb = self.state.memory_stats.peak_state_mb.max(state_mb);
+        self.state.memory_stats.num_parameters = scalar_count;
+        self.state.memory_stats.state_bytes = state_bytes;
     }
 
-    /// Perform optimization step
-    pub fn step(&mut self, parameters: &mut HashMap<String, Tensor>,
-                gradients: &HashMap<String, Tensor>) -> Result<()> {
+    /// Performs one optimization step using the **empirical-Fisher diagonal** as the
+    /// curvature estimate.
+    ///
+    /// The paper's estimator needs gradients at perturbed parameter points, which this
+    /// signature cannot obtain. Rather than invent a Hessian, this path uses the
+    /// Gauss-Newton/empirical-Fisher diagonal `g ⊙ g`, records
+    /// [`CurvatureSource::EmpiricalFisherDiagonal`] in the state, and reports zero
+    /// forward passes. Use [`SOFO::step_with_gradient_oracle`] for the second-order path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a tensor operation fails.
+    pub fn step(
+        &mut self,
+        parameters: &mut HashMap<String, Tensor>,
+        gradients: &HashMap<String, Tensor>,
+    ) -> Result<()> {
+        let curvature_estimates = self.empirical_fisher_curvature(gradients)?;
+        self.state.curvature_source = CurvatureSource::EmpiricalFisherDiagonal;
+        self.apply_step(parameters, gradients, curvature_estimates)
+    }
+
+    /// Performs one optimization step using the paper's second-order curvature.
+    ///
+    /// `oracle` must return `∇f` evaluated at the parameter map it is handed; SOFO
+    /// calls it twice per Rademacher probe (`forward_passes` probes per step) to form
+    /// the central-difference Hessian-vector product behind the Hutchinson diagonal
+    /// estimate. The oracle's wall-clock cost is accumulated into
+    /// [`ForwardModeStats::total_oracle_time`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the oracle fails or returns mismatched shapes.
+    pub fn step_with_gradient_oracle<F>(
+        &mut self,
+        parameters: &mut HashMap<String, Tensor>,
+        gradients: &HashMap<String, Tensor>,
+        oracle: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(&HashMap<String, Tensor>) -> Result<HashMap<String, Tensor>>,
+    {
+        let started = std::time::Instant::now();
+        let snapshot: HashMap<String, Tensor> =
+            parameters.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let curvature_estimates = self.hutchinson_curvature(&snapshot, oracle)?;
+        self.state.forward_stats.total_oracle_time += started.elapsed();
+        self.state.curvature_source = CurvatureSource::HutchinsonFromOracle;
+        self.apply_step(parameters, gradients, curvature_estimates)
+    }
+
+    /// Shared update body: applies weight decay, preconditions by the supplied
+    /// curvature, and steps the parameters.
+    fn apply_step(
+        &mut self,
+        parameters: &mut HashMap<String, Tensor>,
+        gradients: &HashMap<String, Tensor>,
+        curvature_estimates: HashMap<String, Tensor>,
+    ) -> Result<()> {
         self.state.step += 1;
-
-        // Update memory statistics
-        self.update_memory_stats(parameters);
-
-        // Estimate curvature using forward-mode differentiation
-        let curvature_estimates = self.estimate_curvature(parameters, gradients)?;
 
         for (param_name, gradient) in gradients.iter() {
             if let Some(parameter) = parameters.get_mut(param_name) {
                 // Apply weight decay if configured
                 let mut effective_gradient = gradient.clone();
                 if self.config.weight_decay > 0.0 {
-                    let weight_decay_term = parameter.mul(&Tensor::scalar(self.config.weight_decay)?)?;
+                    let weight_decay_term =
+                        parameter.mul(&Tensor::scalar(self.config.weight_decay)?)?;
                     effective_gradient = effective_gradient.add(&weight_decay_term)?;
                 }
 
@@ -516,14 +651,16 @@ impl SOFO {
                     self.apply_adaptive_curvature(param_name, curv, &effective_gradient)?
                 } else {
                     // Fallback to first-order
-                    Tensor::ones_like(&effective_gradient)?.mul(&Tensor::scalar(self.config.damping)?)?
+                    Tensor::ones_like(&effective_gradient)?
+                        .mul(&Tensor::scalar(self.config.damping)?)?
                 };
 
                 // Control condition number
                 let controlled_curvature = self.control_condition_number(&curvature)?;
 
                 // Compute second-order update direction
-                let second_order_direction = self.compute_second_order_update(&effective_gradient, &controlled_curvature)?;
+                let second_order_direction =
+                    self.compute_second_order_update(&effective_gradient, &controlled_curvature)?;
 
                 // Update momentum
                 let momentum_update = self.update_momentum(param_name, &second_order_direction)?;
@@ -532,8 +669,7 @@ impl SOFO {
                 let final_update = if self.config.nesterov {
                     // Nesterov acceleration with second-order
                     let momentum_tensor = Tensor::scalar(self.config.momentum)?;
-                    let nesterov_update = momentum_update.mul(&momentum_tensor)?.add(&second_order_direction)?;
-                    nesterov_update
+                    momentum_update.mul(&momentum_tensor)?.add(&second_order_direction)?
                 } else {
                     momentum_update
                 };
@@ -549,6 +685,9 @@ impl SOFO {
             }
         }
 
+        // Measure the state we actually hold, after the buffers have been written.
+        self.update_memory_stats(parameters);
+
         Ok(())
     }
 
@@ -557,9 +696,12 @@ impl SOFO {
         let avg_curvature_strength = if self.state.adaptive_weights.is_empty() {
             self.config.curvature_strength
         } else {
-            self.state.adaptive_weights.values().sum::<f32>() / self.state.adaptive_weights.len() as f32
+            self.state.adaptive_weights.values().sum::<f32>()
+                / self.state.adaptive_weights.len() as f32
         };
 
+        // Derived entirely from the stored curvature tensors; 1.0 only when no step
+        // has produced any curvature yet (a genuinely unconditioned identity).
         let avg_condition_number = if self.state.curvature_estimates.is_empty() {
             1.0
         } else {
@@ -567,17 +709,19 @@ impl SOFO {
             let mut count = 0;
 
             for curvature in self.state.curvature_estimates.values() {
-                if let Ok(max_val) = curvature.max().and_then(|t| t.to_scalar::<f32>()) {
-                    if let Ok(min_val) = curvature.min().and_then(|t| t.to_scalar::<f32>()) {
-                        if min_val > 0.0 {
-                            total_condition += max_val / min_val;
-                            count += 1;
-                        }
+                if let Ok((min_val, max_val)) = curvature.min_max() {
+                    if min_val > 0.0 {
+                        total_condition += max_val / min_val;
+                        count += 1;
                     }
                 }
             }
 
-            if count > 0 { total_condition / count as f32 } else { 1.0 }
+            if count > 0 {
+                total_condition / count as f32
+            } else {
+                1.0
+            }
         };
 
         SOFOStats {
@@ -585,11 +729,16 @@ impl SOFO {
             total_forward_passes: self.state.forward_stats.total_forward_passes,
             avg_curvature_strength,
             avg_condition_number,
-            memory_efficiency_ratio: self.state.memory_stats.efficiency_ratio,
-            current_memory_mb: self.state.memory_stats.current_memory_mb,
-            parallel_efficiency: self.state.forward_stats.parallel_efficiency,
+            curvature_source: self.state.curvature_source,
+            state_bytes: self.state.memory_stats.state_bytes,
+            current_state_mb: self.state.memory_stats.current_state_mb,
             num_parameters: self.state.memory_stats.num_parameters,
         }
+    }
+
+    /// Which curvature estimator produced the most recent step.
+    pub fn curvature_source(&self) -> CurvatureSource {
+        self.state.curvature_source
     }
 
     /// Get forward-mode differentiation statistics
@@ -627,15 +776,15 @@ pub struct SOFOStats {
     pub total_forward_passes: u64,
     /// Average curvature strength across parameters
     pub avg_curvature_strength: f32,
-    /// Average condition number of curvature matrices
+    /// Average condition number of the diagonal curvature estimates
     pub avg_condition_number: f32,
-    /// Memory efficiency ratio vs traditional second-order methods
-    pub memory_efficiency_ratio: f32,
-    /// Current memory usage in MB
-    pub current_memory_mb: f32,
-    /// Parallel computation efficiency
-    pub parallel_efficiency: f32,
-    /// Number of parameters being optimized
+    /// Which estimator produced the curvature used by the most recent step
+    pub curvature_source: CurvatureSource,
+    /// Measured bytes held by SOFO's own state buffers
+    pub state_bytes: usize,
+    /// `state_bytes` expressed in MiB
+    pub current_state_mb: f32,
+    /// Number of scalar parameters most recently optimized
     pub num_parameters: usize,
 }
 
@@ -646,11 +795,7 @@ mod tests {
 
     #[test]
     fn test_sofo_creation() {
-        let config = SOFOConfig::new()
-            .learning_rate(1e-3)
-            .batch_size(32)
-            .forward_passes(8)
-            .build();
+        let config = SOFOConfig::new().learning_rate(1e-3).batch_size(32).forward_passes(8).build();
 
         let optimizer = SOFO::new(config);
         assert_eq!(optimizer.learning_rate(), 1e-3);
@@ -679,10 +824,7 @@ mod tests {
 
     #[test]
     fn test_sofo_step() -> Result<()> {
-        let config = SOFOConfig::new()
-            .learning_rate(1e-2)
-            .forward_passes(4)
-            .build();
+        let config = SOFOConfig::new().learning_rate(1e-2).forward_passes(4).build();
         let mut optimizer = SOFO::new(config);
 
         // Create test parameters and gradients
@@ -690,16 +832,20 @@ mod tests {
         parameters.insert("weight".to_string(), Tensor::ones(&[2, 2])?);
 
         let mut gradients = HashMap::new();
-        gradients.insert("weight".to_string(), Tensor::ones(&[2, 2])? * 0.1);
+        gradients.insert(
+            "weight".to_string(),
+            Tensor::ones(&[2, 2])?.mul_scalar(0.1)?,
+        );
 
         // Store original value
-        let original_value = parameters.get("weight").expect("Key not found").mean()?.to_scalar::<f32>()?;
+        let original_value =
+            parameters.get("weight").expect("Key not found").mean()?.to_scalar()?;
 
         // Perform optimization step
         optimizer.step(&mut parameters, &gradients)?;
 
         // Check that parameter was updated
-        let updated_value = parameters.get("weight").expect("Key not found").mean()?.to_scalar::<f32>()?;
+        let updated_value = parameters.get("weight").expect("Key not found").mean()?.to_scalar()?;
         assert_ne!(updated_value, original_value);
 
         Ok(())
@@ -708,7 +854,7 @@ mod tests {
     #[test]
     fn test_random_direction_generation() -> Result<()> {
         let config = SOFOConfig::new().forward_passes(3).build();
-        let optimizer = SOFO::new(config);
+        let mut optimizer = SOFO::new(config);
 
         let mut parameters = HashMap::new();
         parameters.insert("weight1".to_string(), Tensor::ones(&[2, 2])?);
@@ -726,18 +872,26 @@ mod tests {
         Ok(())
     }
 
+    /// The empirical-Fisher fallback must produce `g² + damping`, elementwise.
     #[test]
-    fn test_directional_derivative() -> Result<()> {
-        let config = SOFOConfig::new().build();
+    fn test_empirical_fisher_curvature() -> Result<()> {
+        let config = SOFOConfig::new().damping(1e-3).build();
         let optimizer = SOFO::new(config);
 
-        let parameter = Tensor::ones(&[2, 2])?;
-        let direction = Tensor::ones(&[2, 2])? * 0.5;
+        let mut gradients = HashMap::new();
+        gradients.insert(
+            "weight".to_string(),
+            Tensor::from_vec(vec![2.0_f32, -3.0, 0.5, 0.0], &[2, 2])?,
+        );
 
-        let derivative = optimizer.compute_directional_derivative(&parameter, &direction)?;
+        let curvature = optimizer.empirical_fisher_curvature(&gradients)?;
+        let values = curvature.get("weight").expect("curvature present").data_f32()?;
 
-        // Derivative should have the same shape as parameter
-        assert_eq!(derivative.shape(), parameter.shape());
+        let expected = [4.0_f32 + 1e-3, 9.0 + 1e-3, 0.25 + 1e-3, 1e-3];
+        assert_eq!(values.len(), expected.len());
+        for (actual, want) in values.iter().zip(expected.iter()) {
+            assert!((actual - want).abs() < 1e-5, "got {actual}, want {want}");
+        }
 
         Ok(())
     }
@@ -747,7 +901,7 @@ mod tests {
         let config = SOFOConfig::new().momentum(0.9).build();
         let mut optimizer = SOFO::new(config);
 
-        let gradient = Tensor::ones(&[2, 2])? * 0.5;
+        let gradient = Tensor::ones(&[2, 2])?.mul_scalar(0.5)?;
 
         // First update
         let momentum1 = optimizer.update_momentum("test", &gradient)?;
@@ -756,7 +910,10 @@ mod tests {
         let momentum2 = optimizer.update_momentum("test", &gradient)?;
 
         // Momentum should change between updates
-        assert_ne!(momentum1.mean()?.to_scalar::<f32>()?, momentum2.mean()?.to_scalar::<f32>()?);
+        assert_ne!(
+            momentum1.mean()?.to_scalar()?,
+            momentum2.mean()?.to_scalar()?
+        );
 
         Ok(())
     }
@@ -766,14 +923,14 @@ mod tests {
         let config = SOFOConfig::new().build();
         let optimizer = SOFO::new(config);
 
-        let gradient = Tensor::ones(&[2, 2])? * 0.5;
-        let curvature = Tensor::ones(&[2, 2])? * 2.0;
+        let gradient = Tensor::ones(&[2, 2])?.mul_scalar(0.5)?;
+        let curvature = Tensor::ones(&[2, 2])?.mul_scalar(2.0)?;
 
         let update = optimizer.compute_second_order_update(&gradient, &curvature)?;
 
         // Update should be approximately gradient / curvature
         let expected = 0.5 / 2.0; // Approximate expected value
-        let actual = update.mean()?.to_scalar::<f32>()?;
+        let actual = update.mean()?.to_scalar()?;
 
         assert!((actual - expected).abs() < 0.1);
 
@@ -782,23 +939,24 @@ mod tests {
 
     #[test]
     fn test_condition_number_control() -> Result<()> {
-        let config = SOFOConfig::new()
-            .damping(1e-3)
-            .max_condition_number(100.0)
-            .build();
+        let config = SOFOConfig::new().damping(1e-3).max_condition_number(100.0).build();
         let optimizer = SOFO::new(config);
 
         // Create curvature with extreme values
-        let mut curvature_data = vec![1e-6, 1e6, 1.0, 1e3]; // Wide range of values
-        let curvature = Tensor::from_data(&curvature_data, &[2, 2])?;
+        let curvature = Tensor::from_vec(vec![1e-6_f32, 1e6, 1.0, 1e3], &[2, 2])?;
 
         let controlled = optimizer.control_condition_number(&curvature)?;
 
-        // Values should be clamped to reasonable range
-        let max_val = controlled.max()?.to_scalar::<f32>()?;
-        let min_val = controlled.min()?.to_scalar::<f32>()?;
+        // Values must be clamped into [damping, damping · max_condition_number].
+        let values = controlled.data_f32()?;
+        let max_val = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let min_val = values.iter().copied().fold(f32::INFINITY, f32::min);
 
-        assert!(max_val / min_val <= config.max_condition_number * 1.1); // Small tolerance
+        assert!(
+            max_val / min_val <= 100.0 * 1.1,
+            "condition number {} exceeds the configured bound",
+            max_val / min_val
+        );
 
         Ok(())
     }
@@ -813,7 +971,10 @@ mod tests {
         parameters.insert("weight".to_string(), Tensor::ones(&[2, 2])?);
 
         let mut gradients = HashMap::new();
-        gradients.insert("weight".to_string(), Tensor::ones(&[2, 2])? * 0.1);
+        gradients.insert(
+            "weight".to_string(),
+            Tensor::ones(&[2, 2])?.mul_scalar(0.1)?,
+        );
 
         for _ in 0..3 {
             optimizer.step(&mut parameters, &gradients)?;
@@ -821,9 +982,62 @@ mod tests {
 
         let stats = optimizer.get_sofo_stats();
         assert_eq!(stats.step, 3);
-        assert!(stats.total_forward_passes > 0);
         assert!(stats.num_parameters > 0);
-        assert!(stats.memory_efficiency_ratio >= 1.0);
+        assert!(
+            stats.state_bytes > 0,
+            "state size must be measured, not invented"
+        );
+        // `step` has no gradient oracle, so it cannot evaluate anything in forward
+        // mode: the counter must stay at zero rather than claim work never done.
+        assert_eq!(
+            stats.total_forward_passes, 0,
+            "the gradient-only path performs no forward-mode passes"
+        );
+        assert_eq!(
+            stats.curvature_source,
+            CurvatureSource::EmpiricalFisherDiagonal
+        );
+
+        Ok(())
+    }
+
+    /// The oracle-driven path really does call the oracle, twice per probe.
+    #[test]
+    fn test_sofo_forward_passes_are_counted_only_when_performed() -> Result<()> {
+        let config = SOFOConfig::new().forward_passes(2).build();
+        let mut optimizer = SOFO::new(config);
+
+        let mut parameters = HashMap::new();
+        parameters.insert("weight".to_string(), Tensor::ones(&[2, 2])?);
+
+        let mut calls = 0_usize;
+        let mut oracle = |params: &HashMap<String, Tensor>| -> Result<HashMap<String, Tensor>> {
+            calls += 1;
+            let mut grads = HashMap::new();
+            for (name, tensor) in params {
+                grads.insert(name.clone(), tensor.mul_scalar(2.0)?);
+            }
+            Ok(grads)
+        };
+
+        let mut gradients = HashMap::new();
+        gradients.insert(
+            "weight".to_string(),
+            Tensor::ones(&[2, 2])?.mul_scalar(2.0)?,
+        );
+
+        optimizer.step_with_gradient_oracle(&mut parameters, &gradients, &mut oracle)?;
+
+        let stats = optimizer.get_sofo_stats();
+        assert!(calls > 0, "the oracle must actually be evaluated");
+        assert_eq!(
+            stats.total_forward_passes as usize, calls,
+            "every counted forward pass must correspond to a real oracle call"
+        );
+        assert_eq!(
+            stats.curvature_source,
+            CurvatureSource::HutchinsonFromOracle
+        );
 
         Ok(())
     }
@@ -854,11 +1068,13 @@ mod tests {
         let mut gradients = HashMap::new();
         gradients.insert("weight".to_string(), Tensor::zeros(&[2, 2])?);
 
-        let initial_param_value = parameters.get("weight").expect("Key not found").mean()?.to_scalar::<f32>()?;
+        let initial_param_value =
+            parameters.get("weight").expect("Key not found").mean()?.to_scalar()?;
 
         optimizer.step(&mut parameters, &gradients)?;
 
-        let final_param_value = parameters.get("weight").expect("Key not found").mean()?.to_scalar::<f32>()?;
+        let final_param_value =
+            parameters.get("weight").expect("Key not found").mean()?.to_scalar()?;
 
         // With weight decay, parameter should decrease even with zero gradient
         assert!(final_param_value < initial_param_value);
@@ -868,20 +1084,18 @@ mod tests {
 
     #[test]
     fn test_adaptive_curvature() -> Result<()> {
-        let config = SOFOConfig::new()
-            .adaptive_curvature(true)
-            .curvature_strength(0.1)
-            .build();
+        let config = SOFOConfig::new().adaptive_curvature(true).curvature_strength(0.1).build();
         let mut optimizer = SOFO::new(config);
 
-        let gradient = Tensor::ones(&[2, 2])? * 0.5;
-        let curvature = Tensor::ones(&[2, 2])? * 2.0;
+        let gradient = Tensor::ones(&[2, 2])?.mul_scalar(0.5)?;
+        let curvature = Tensor::ones(&[2, 2])?.mul_scalar(2.0)?;
 
-        let adaptive_curvature = optimizer.apply_adaptive_curvature("test", &curvature, &gradient)?;
+        let adaptive_curvature =
+            optimizer.apply_adaptive_curvature("test", &curvature, &gradient)?;
 
         // Adaptive curvature should be modified from original
-        let original_mean = curvature.mean()?.to_scalar::<f32>()?;
-        let adaptive_mean = adaptive_curvature.mean()?.to_scalar::<f32>()?;
+        let original_mean = curvature.mean()?.to_scalar()?;
+        let adaptive_mean = adaptive_curvature.mean()?.to_scalar()?;
 
         assert_ne!(original_mean, adaptive_mean);
 

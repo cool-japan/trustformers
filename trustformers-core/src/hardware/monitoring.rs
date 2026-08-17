@@ -391,26 +391,157 @@ impl HealthChecker {
         }
     }
 
-    /// Perform health check on a device
-    pub async fn check_device(&mut self, device_id: &str) -> HardwareResult<()> {
+    /// Perform a real health check on a device from its current metrics.
+    ///
+    /// `metrics` should be the device's live `HardwareMetrics` (e.g. from
+    /// `HardwareManager::get_device_metrics`). This diagnoses the real
+    /// thermal, error-rate and utilization signals already carried on
+    /// `HardwareMetrics` against fixed safety thresholds, rather than
+    /// fabricating a constant 0.95/`Healthy` verdict regardless of device
+    /// state. When no live telemetry is available for the device
+    /// (`metrics` is `None`), the honest result is `HealthStatus::Unknown`
+    /// -- a monitoring API must not report a device it cannot see as
+    /// healthy.
+    pub async fn check_device(
+        &mut self,
+        device_id: &str,
+        metrics: Option<&HardwareMetrics>,
+    ) -> HardwareResult<()> {
         let start_time = Instant::now();
 
-        // Simulate health check (in practice, this would perform actual diagnostics)
-        let health_score = 0.95; // Placeholder
-        let issues = vec![]; // Placeholder
+        let (status, health_score, issues, recommendations) = match metrics {
+            None => (
+                HealthStatus::Unknown,
+                0.0,
+                Vec::new(),
+                vec!["No telemetry available for this device".to_string()],
+            ),
+            Some(metrics) => Self::diagnose(metrics),
+        };
 
         let result = HealthCheckResult {
             device_id: device_id.to_string(),
-            status: HealthStatus::Healthy,
+            status,
             timestamp: SystemTime::now(),
             response_time: start_time.elapsed().as_millis() as f64,
             health_score,
             issues,
-            recommendations: vec!["Monitor temperature".to_string()],
+            recommendations,
         };
 
         self.results.insert(device_id.to_string(), result);
         Ok(())
+    }
+
+    /// Threshold-based diagnosis of a real `HardwareMetrics` snapshot.
+    /// Fixed, documented thresholds stand in for a device-specific policy
+    /// until `HealthCheckPolicy` grows dedicated threshold fields; they are
+    /// applied to the same real numbers `PerformanceMonitor` records, not
+    /// to invented data.
+    fn diagnose(metrics: &HardwareMetrics) -> (HealthStatus, f64, Vec<HealthIssue>, Vec<String>) {
+        const TEMP_WARNING_C: f64 = 80.0;
+        const TEMP_CRITICAL_C: f64 = 90.0;
+        const ERROR_RATE_WARNING: f64 = 0.01;
+        const ERROR_RATE_CRITICAL: f64 = 0.05;
+        const UTILIZATION_SATURATED: f64 = 95.0;
+
+        let mut issues = Vec::new();
+        let mut recommendations = Vec::new();
+        let mut score = 1.0f64;
+
+        if let Some(temp) = metrics.temperature {
+            if temp >= TEMP_CRITICAL_C {
+                score -= 0.5;
+                issues.push(HealthIssue {
+                    issue_type: HealthIssueType::HighTemperature,
+                    severity: AnomalySeverity::Critical,
+                    description: format!(
+                        "Temperature {temp:.1}\u{b0}C is at or above the critical threshold \
+                         of {TEMP_CRITICAL_C:.1}\u{b0}C"
+                    ),
+                    affected_components: vec!["thermal".to_string()],
+                    potential_causes: vec![
+                        "Inadequate cooling".to_string(),
+                        "Sustained heavy load".to_string(),
+                    ],
+                    suggested_fixes: vec![
+                        "Reduce load immediately".to_string(),
+                        "Improve cooling".to_string(),
+                    ],
+                });
+                recommendations.push("Reduce load or improve cooling immediately".to_string());
+            } else if temp >= TEMP_WARNING_C {
+                score -= 0.2;
+                issues.push(HealthIssue {
+                    issue_type: HealthIssueType::HighTemperature,
+                    severity: AnomalySeverity::Medium,
+                    description: format!(
+                        "Temperature {temp:.1}\u{b0}C is at or above the warning threshold \
+                         of {TEMP_WARNING_C:.1}\u{b0}C"
+                    ),
+                    affected_components: vec!["thermal".to_string()],
+                    potential_causes: vec!["Sustained heavy load".to_string()],
+                    suggested_fixes: vec!["Monitor temperature".to_string()],
+                });
+                recommendations.push("Monitor temperature".to_string());
+            }
+        }
+
+        if metrics.error_rate >= ERROR_RATE_CRITICAL {
+            score -= 0.5;
+            issues.push(HealthIssue {
+                issue_type: HealthIssueType::HardwareFaults,
+                severity: AnomalySeverity::Critical,
+                description: format!(
+                    "Error rate {:.4} is at or above the critical threshold of {ERROR_RATE_CRITICAL:.4}",
+                    metrics.error_rate
+                ),
+                affected_components: vec!["compute".to_string()],
+                potential_causes: vec![
+                    "Hardware fault".to_string(),
+                    "Driver instability".to_string(),
+                ],
+                suggested_fixes: vec![
+                    "Reset the device".to_string(),
+                    "Inspect driver logs".to_string(),
+                ],
+            });
+            recommendations.push("Investigate elevated error rate".to_string());
+        } else if metrics.error_rate >= ERROR_RATE_WARNING {
+            score -= 0.15;
+            issues.push(HealthIssue {
+                issue_type: HealthIssueType::HardwareFaults,
+                severity: AnomalySeverity::Medium,
+                description: format!(
+                    "Error rate {:.4} is at or above the warning threshold of {ERROR_RATE_WARNING:.4}",
+                    metrics.error_rate
+                ),
+                affected_components: vec!["compute".to_string()],
+                potential_causes: vec!["Transient faults".to_string()],
+                suggested_fixes: vec!["Continue monitoring error rate".to_string()],
+            });
+            recommendations.push("Continue monitoring error rate".to_string());
+        }
+
+        if metrics.utilization >= UTILIZATION_SATURATED {
+            recommendations
+                .push("Utilization is near saturation; consider load balancing".to_string());
+        }
+
+        let score = score.clamp(0.0, 1.0);
+        let status = if issues.iter().any(|i| i.severity == AnomalySeverity::Critical) {
+            HealthStatus::Critical
+        } else if !issues.is_empty() {
+            HealthStatus::Warning
+        } else {
+            HealthStatus::Healthy
+        };
+
+        if recommendations.is_empty() {
+            recommendations.push("No action required".to_string());
+        }
+
+        (status, score, issues, recommendations)
     }
 
     /// Get health status for a device
@@ -457,5 +588,93 @@ impl Default for AnomalyDetector {
 impl Default for HealthChecker {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn healthy_metrics() -> HardwareMetrics {
+        HardwareMetrics {
+            ops_per_second: 1_000_000.0,
+            memory_bandwidth: 10e9,
+            utilization: 20.0,
+            power_consumption: 65.0,
+            temperature: Some(45.0),
+            error_rate: 0.0,
+            latency: 1.0,
+            throughput: 1000.0,
+        }
+    }
+
+    /// Regression test: `check_device` used to always insert a hardcoded
+    /// `health_score = 0.95` / `HealthStatus::Healthy` result regardless of
+    /// device state -- a monitoring API that could never detect a fault.
+    /// With normal metrics the device really is healthy, so this alone does
+    /// not distinguish old from new behavior; the overheating/error-rate
+    /// tests below do.
+    #[tokio::test]
+    async fn test_check_device_reports_healthy_for_normal_metrics() {
+        let mut checker = HealthChecker::new();
+        checker
+            .check_device("dev0", Some(&healthy_metrics()))
+            .await
+            .expect("check failed");
+
+        let result = checker.get_all_results().get("dev0").expect("missing result");
+        assert_eq!(result.status, HealthStatus::Healthy);
+        assert!(result.issues.is_empty());
+    }
+
+    /// Regression test: an overheating device must be flagged, not silently
+    /// reported healthy with a fixed 0.95 score.
+    #[tokio::test]
+    async fn test_check_device_flags_critical_temperature() {
+        let mut checker = HealthChecker::new();
+        let mut metrics = healthy_metrics();
+        metrics.temperature = Some(95.0); // above the 90C critical threshold
+
+        checker.check_device("hot-dev", Some(&metrics)).await.expect("check failed");
+
+        let result = checker.get_all_results().get("hot-dev").expect("missing result");
+        assert_eq!(result.status, HealthStatus::Critical);
+        assert!(!result.issues.is_empty());
+        assert!(
+            result.health_score < 0.95,
+            "score must reflect the fault, not stay at 0.95"
+        );
+        assert_eq!(
+            checker.get_health_status("hot-dev"),
+            Some(HealthStatus::Critical)
+        );
+    }
+
+    /// Regression test: an elevated error rate must be flagged as a
+    /// warning, not silently reported healthy.
+    #[tokio::test]
+    async fn test_check_device_flags_elevated_error_rate() {
+        let mut checker = HealthChecker::new();
+        let mut metrics = healthy_metrics();
+        metrics.error_rate = 0.02; // above the 0.01 warning threshold
+
+        checker.check_device("flaky-dev", Some(&metrics)).await.expect("check failed");
+
+        let result = checker.get_all_results().get("flaky-dev").expect("missing result");
+        assert_eq!(result.status, HealthStatus::Warning);
+        assert!(!result.issues.is_empty());
+    }
+
+    /// Regression test: a device with no telemetry must be reported
+    /// `Unknown`, never fabricated as `Healthy`.
+    #[tokio::test]
+    async fn test_check_device_without_metrics_is_unknown() {
+        let mut checker = HealthChecker::new();
+        checker.check_device("ghost-dev", None).await.expect("check failed");
+
+        assert_eq!(
+            checker.get_health_status("ghost-dev"),
+            Some(HealthStatus::Unknown)
+        );
     }
 }

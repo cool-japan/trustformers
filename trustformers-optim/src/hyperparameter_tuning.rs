@@ -163,12 +163,53 @@ pub enum TaskType {
 pub struct PerformanceMetrics {
     pub final_loss: f32,
     pub convergence_epoch: usize,
+    /// Wall-clock time the tuner measured around the objective call.
     pub training_time: Duration,
-    pub memory_peak: usize,
+    /// Peak memory reported by the objective, if it measured any. `None` means the
+    /// objective did not report a figure — the tuner never estimates one.
+    pub memory_peak: Option<usize>,
     pub stability_score: f32,
     pub throughput: f32, // samples/second
     pub gradient_norm_variance: f32,
     pub composite_score: f32,
+}
+
+/// What a caller-supplied objective reports after really training a configuration.
+///
+/// The tuner cannot know any of these numbers: only the caller runs the model. Every
+/// field is therefore a *measurement* handed back by the objective, and the tuner adds
+/// only the wall-clock time it timed itself.
+#[derive(Debug, Clone)]
+pub struct TrialOutcome {
+    /// Validation loss at the end of the trial. Lower is better.
+    pub final_loss: f32,
+    /// Epoch at which the run converged (or the number of epochs actually run).
+    pub convergence_epoch: usize,
+    /// Training stability in `[0, 1]`; `1.0` means no divergence was observed.
+    pub stability_score: f32,
+    /// Observed throughput in samples per second.
+    pub throughput: f32,
+    /// Variance of the gradient norm observed during the trial.
+    pub gradient_norm_variance: f32,
+    /// Peak memory in bytes, if the caller measured it.
+    pub peak_memory_bytes: Option<usize>,
+}
+
+impl TrialOutcome {
+    /// Minimal outcome for objectives that only produce a loss.
+    ///
+    /// Unmeasured quantities stay neutral (`stability_score = 1.0`, zero throughput
+    /// and gradient variance, no memory figure) rather than being invented.
+    pub fn from_loss(final_loss: f32, convergence_epoch: usize) -> Self {
+        Self {
+            final_loss,
+            convergence_epoch,
+            stability_score: 1.0,
+            throughput: 0.0,
+            gradient_norm_variance: 0.0,
+            peak_memory_bytes: None,
+        }
+    }
 }
 
 /// Bayesian optimization state using Tree-structured Parzen Estimator (TPE)
@@ -477,12 +518,38 @@ impl HyperparameterTuner {
         Some(self.bayesian_opt.suggest())
     }
 
-    /// Evaluate hyperparameter configuration
-    pub fn evaluate_config(&mut self, config: HyperparameterSample) -> Result<PerformanceMetrics> {
-        let _start_time = Instant::now();
+    /// Evaluates one hyperparameter configuration by *running the caller's objective*.
+    ///
+    /// The tuner has no model and no data, so it cannot produce a score on its own:
+    /// `objective` must actually train and validate the configuration and return the
+    /// measurements it observed. The tuner contributes the wall-clock timing and the
+    /// composite score, then feeds the result to the Bayesian search.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any error the objective returns.
+    pub fn evaluate_config<F>(
+        &mut self,
+        config: HyperparameterSample,
+        objective: &mut F,
+    ) -> Result<PerformanceMetrics>
+    where
+        F: FnMut(&HyperparameterSample) -> Result<TrialOutcome>,
+    {
+        let started = Instant::now();
+        let outcome = objective(&config)?;
+        let training_time = started.elapsed();
 
-        // Simulate training with these hyperparameters
-        let metrics = self.simulate_training(&config)?;
+        let metrics = PerformanceMetrics {
+            final_loss: outcome.final_loss,
+            convergence_epoch: outcome.convergence_epoch,
+            training_time,
+            memory_peak: outcome.peak_memory_bytes,
+            stability_score: outcome.stability_score,
+            throughput: outcome.throughput,
+            gradient_norm_variance: outcome.gradient_norm_variance,
+            composite_score: Self::composite_score(&outcome),
+        };
 
         // Update optimizer with results
         if let Some(ref mut multi_opt) = self.multi_objective_opt {
@@ -492,11 +559,16 @@ impl HyperparameterTuner {
         }
 
         // Update best configuration
-        let current_best_score =
-            self.best_config.as_ref().and_then(|c| c.performance_score).unwrap_or(0.0);
+        let current_best_score = self
+            .best_config
+            .as_ref()
+            .and_then(|c| c.performance_score)
+            .unwrap_or(f32::NEG_INFINITY);
         if self.best_config.is_none() || metrics.composite_score > current_best_score {
             let mut best_config = config.clone();
             best_config.performance_score = Some(metrics.composite_score);
+            best_config.training_time = Some(training_time.as_secs_f32());
+            best_config.memory_usage = outcome.peak_memory_bytes;
             self.best_config = Some(best_config);
         }
 
@@ -504,103 +576,47 @@ impl HyperparameterTuner {
         Ok(metrics)
     }
 
-    fn simulate_training(&self, config: &HyperparameterSample) -> Result<PerformanceMetrics> {
-        // Simulate realistic training behavior based on hyperparameters
-        let mut rng = thread_rng();
+    /// Aggregates a measured [`TrialOutcome`] into a single scalar to search on.
+    ///
+    /// This is a weighting of measurements, not a model of them: every input comes
+    /// from the caller's objective.
+    fn composite_score(outcome: &TrialOutcome) -> f32 {
+        let loss_term = 1.0 / (1.0 + outcome.final_loss.max(0.0));
+        let speed_term = 1.0 / (1.0 + outcome.convergence_epoch as f32);
+        let stability_term = outcome.stability_score.clamp(0.0, 1.0);
+        let throughput_term = (outcome.throughput / 1000.0).clamp(0.0, 1.0);
 
-        // Learning rate affects convergence speed and final performance
-        let lr_factor = if config.learning_rate > 1e-2 {
-            0.7_f64 // Too high LR - poor convergence
-        } else if config.learning_rate < 1e-5 {
-            0.8_f64 // Too low LR - slow convergence
-        } else {
-            1.0_f64 // Good LR range
-        };
-
-        // Beta parameters affect stability
-        let momentum_factor = if config.beta1 > 0.95 { 0.9_f64 } else { 1.0_f64 };
-        let variance_factor = if config.beta2 < 0.99 { 0.85_f64 } else { 1.0_f64 };
-
-        // Weight decay affects generalization
-        let regularization_factor = if config.weight_decay > 1e-2 { 0.8_f64 } else { 1.0_f64 };
-
-        let base_performance = 0.8_f64;
-        let noise = rng.random_range(-0.1_f64..=0.1_f64);
-        let final_loss = (1.0_f64
-            - base_performance
-                * lr_factor
-                * momentum_factor
-                * variance_factor
-                * regularization_factor
-            + noise)
-            .max(0.01_f64);
-
-        let convergence_epoch = (50.0 / lr_factor) as usize;
-        let training_time = Duration::from_secs((convergence_epoch as f32 * 0.1) as u64);
-        let memory_peak = (config.batch_size * 1024 * 1024) + rng.random_range(0..1024 * 1024);
-
-        let stability_score = momentum_factor * variance_factor;
-        let throughput =
-            (config.batch_size as f32) / (training_time.as_secs_f32() / convergence_epoch as f32);
-        let gradient_norm_variance = rng.random_range(0.01..=0.5);
-
-        // Composite score combining multiple factors
-        let composite_score = (1.0_f64 / final_loss) * 0.4_f64
-            + (1.0_f64 / convergence_epoch as f64) * 0.3_f64
-            + stability_score * 0.2_f64
-            + (throughput as f64 / 1000.0_f64).min(1.0_f64) * 0.1_f64;
-
-        Ok(PerformanceMetrics {
-            final_loss: final_loss as f32,
-            convergence_epoch,
-            training_time,
-            memory_peak,
-            stability_score: stability_score as f32,
-            throughput,
-            gradient_norm_variance,
-            composite_score: composite_score as f32,
-        })
+        0.4 * loss_term + 0.3 * speed_term + 0.2 * stability_term + 0.1 * throughput_term
     }
 
-    /// Run complete hyperparameter optimization
-    pub fn optimize(&mut self) -> Result<HyperparameterSample> {
-        println!(
-            "🚀 Starting hyperparameter optimization for {:?}",
-            self.optimizer_type
+    /// Runs the full search, evaluating every suggested configuration with `objective`.
+    ///
+    /// # Errors
+    ///
+    /// Propagates objective errors, and reports an error when no trial completed.
+    pub fn optimize<F>(&mut self, objective: &mut F) -> Result<HyperparameterSample>
+    where
+        F: FnMut(&HyperparameterSample) -> Result<TrialOutcome>,
+    {
+        log::info!(
+            "starting hyperparameter optimization for {:?} on task '{}' ({} trials)",
+            self.optimizer_type,
+            self.task.name,
+            self.max_trials
         );
-        println!(
-            "📊 Task: {} (max {} trials)",
-            self.task.name, self.max_trials
-        );
-
-        let mut trial_results = Vec::new();
 
         while let Some(config) = self.suggest_next() {
-            println!("\n🔍 Trial {}/{}", self.current_trial, self.max_trials);
-            println!(
-                "   LR: {:.2e}, β₁: {:.3}, β₂: {:.4}, WD: {:.2e}",
-                config.learning_rate, config.beta1, config.beta2, config.weight_decay
-            );
-
-            let metrics = self.evaluate_config(config.clone())?;
-            trial_results.push((config, metrics.clone()));
-
-            println!(
-                "   📈 Score: {:.4}, Loss: {:.4}, Epochs: {}, Time: {:.1}s",
+            let metrics = self.evaluate_config(config, objective)?;
+            log::debug!(
+                "trial {}/{}: score {:.4}, loss {:.4}, epochs {}, {:.3}s",
+                self.current_trial,
+                self.max_trials,
                 metrics.composite_score,
                 metrics.final_loss,
                 metrics.convergence_epoch,
                 metrics.training_time.as_secs_f32()
             );
-
-            // Early stopping if we find excellent results
-            if metrics.composite_score > 0.95 {
-                println!("🎯 Early stopping - excellent configuration found!");
-                break;
-            }
         }
-
-        self.print_optimization_summary();
 
         self.best_config.clone().ok_or_else(|| {
             TrustformersError::new(trustformers_core::errors::ErrorKind::InvalidConfiguration {
@@ -610,40 +626,39 @@ impl HyperparameterTuner {
         })
     }
 
-    fn print_optimization_summary(&self) {
-        println!("\n📊 Hyperparameter Optimization Summary");
-        println!("=====================================");
+    /// Human-readable summary of the search, for callers that want to print one.
+    ///
+    /// Library code must not write to stdout, so this returns the text instead of
+    /// printing it.
+    pub fn optimization_summary(&self) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        let _ = writeln!(out, "Hyperparameter optimization summary");
 
         if let Some(ref best) = self.best_config {
-            println!("🏆 Best Configuration Found:");
-            println!("   Learning Rate: {:.2e}", best.learning_rate);
-            println!("   Beta1: {:.4}", best.beta1);
-            println!("   Beta2: {:.4}", best.beta2);
-            println!("   Weight Decay: {:.2e}", best.weight_decay);
-            println!("   Batch Size: {}", best.batch_size);
-            println!(
-                "   Performance Score: {:.4}",
-                best.performance_score.unwrap_or(0.0)
-            );
+            let _ = writeln!(out, "best configuration:");
+            let _ = writeln!(out, "  learning rate: {:.3e}", best.learning_rate);
+            let _ = writeln!(out, "  beta1: {:.4}", best.beta1);
+            let _ = writeln!(out, "  beta2: {:.4}", best.beta2);
+            let _ = writeln!(out, "  weight decay: {:.3e}", best.weight_decay);
+            let _ = writeln!(out, "  batch size: {}", best.batch_size);
+            if let Some(score) = best.performance_score {
+                let _ = writeln!(out, "  composite score: {score:.4}");
+            }
         }
 
-        println!("\n📈 Optimization Statistics:");
-        println!("   Total Trials: {}", self.optimization_history.len());
-
+        let _ = writeln!(out, "trials completed: {}", self.optimization_history.len());
         if !self.optimization_history.is_empty() {
             let scores: Vec<f32> =
                 self.optimization_history.iter().map(|(_, m)| m.composite_score).collect();
-            let avg_score = scores.iter().sum::<f32>() / scores.len() as f32;
-            let max_score = scores.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-            let min_score = scores.iter().fold(f32::INFINITY, |a, &b| a.min(b));
-
-            println!("   Average Score: {:.4}", avg_score);
-            println!("   Score Range: {:.4} - {:.4}", min_score, max_score);
-            println!(
-                "   Improvement: {:.1}%",
-                ((max_score - min_score) / min_score * 100.0).max(0.0)
-            );
+            let average = scores.iter().sum::<f32>() / scores.len() as f32;
+            let maximum = scores.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+            let minimum = scores.iter().fold(f32::INFINITY, |a, &b| a.min(b));
+            let _ = writeln!(out, "score average: {average:.4}");
+            let _ = writeln!(out, "score range: {minimum:.4} - {maximum:.4}");
         }
+
+        out
     }
 
     /// Get optimization history for analysis
@@ -660,7 +675,13 @@ impl HyperparameterTuner {
 /// Convenience functions for common optimization tasks
 impl HyperparameterTuner {
     /// Optimize aMacP hyperparameters for transformer training
-    pub fn optimize_amacp_for_transformers(max_trials: usize) -> Result<AMacPConfig> {
+    pub fn optimize_amacp_for_transformers<F>(
+        max_trials: usize,
+        objective: &mut F,
+    ) -> Result<AMacPConfig>
+    where
+        F: FnMut(&HyperparameterSample) -> Result<TrialOutcome>,
+    {
         let space = HyperparameterSpace::for_transformers();
         let task = OptimizationTask {
             name: "Transformer Language Modeling".to_string(),
@@ -674,7 +695,7 @@ impl HyperparameterTuner {
 
         let mut tuner = HyperparameterTuner::new(OptimizerType::AMacP, space, task, max_trials);
 
-        let best_config = tuner.optimize()?;
+        let best_config = tuner.optimize(objective)?;
 
         Ok(AMacPConfig {
             learning_rate: best_config.learning_rate,
@@ -687,7 +708,13 @@ impl HyperparameterTuner {
     }
 
     /// Optimize NovoGrad hyperparameters for large language models
-    pub fn optimize_novograd_for_llms(max_trials: usize) -> Result<NovoGradConfig> {
+    pub fn optimize_novograd_for_llms<F>(
+        max_trials: usize,
+        objective: &mut F,
+    ) -> Result<NovoGradConfig>
+    where
+        F: FnMut(&HyperparameterSample) -> Result<TrialOutcome>,
+    {
         let space = HyperparameterSpace::for_transformers();
         let task = OptimizationTask {
             name: "Large Language Model Training".to_string(),
@@ -701,7 +728,7 @@ impl HyperparameterTuner {
 
         let mut tuner = HyperparameterTuner::new(OptimizerType::NovoGrad, space, task, max_trials);
 
-        let best_config = tuner.optimize()?;
+        let best_config = tuner.optimize(objective)?;
 
         Ok(NovoGradConfig {
             learning_rate: best_config.learning_rate,
@@ -794,7 +821,7 @@ mod tests {
             final_loss: 0.1,
             convergence_epoch: 25,
             training_time: Duration::from_secs(120),
-            memory_peak: 1024 * 1024,
+            memory_peak: Some(1024 * 1024),
             stability_score: 0.9,
             throughput: 1000.0,
             gradient_norm_variance: 0.1,
@@ -805,23 +832,26 @@ mod tests {
         assert!(!optimizer.pareto_front.is_empty());
     }
 
-    #[test]
-    fn test_performance_metrics_calculation() {
-        let space = HyperparameterSpace::default();
-        let task = OptimizationTask {
-            name: "Test".to_string(),
-            model_size: 1000,
-            dataset_size: 1000,
-            max_epochs: 10,
-            convergence_threshold: 0.01,
-            target_metric: "loss".to_string(),
-            task_type: TaskType::Regression,
-        };
+    /// A deterministic analytic objective, used only to exercise the search machinery.
+    ///
+    /// It is *not* a stand-in for training: it lives behind `#[cfg(test)]` and callers
+    /// must always supply their own objective.
+    fn quadratic_objective(config: &HyperparameterSample) -> Result<TrialOutcome> {
+        // Minimised at lr = 1e-3, so the search has something real to find.
+        let distance = (config.learning_rate.log10() + 3.0).abs();
+        Ok(TrialOutcome {
+            final_loss: distance,
+            convergence_epoch: 10 + (distance * 10.0) as usize,
+            stability_score: 1.0 / (1.0 + distance),
+            throughput: 500.0,
+            gradient_norm_variance: distance * 0.1,
+            peak_memory_bytes: Some(config.batch_size * 4096),
+        })
+    }
 
-        let tuner = HyperparameterTuner::new(OptimizerType::Adam, space, task, 10);
-
-        let config = HyperparameterSample {
-            learning_rate: 1e-3,
+    fn sample_with_lr(learning_rate: f32) -> HyperparameterSample {
+        HyperparameterSample {
+            learning_rate,
             beta1: 0.9,
             beta2: 0.999,
             weight_decay: 0.0,
@@ -831,25 +861,134 @@ mod tests {
             performance_score: None,
             training_time: None,
             memory_usage: None,
+        }
+    }
+
+    fn test_tuner(max_trials: usize) -> HyperparameterTuner {
+        let task = OptimizationTask {
+            name: "Test".to_string(),
+            model_size: 1000,
+            dataset_size: 1000,
+            max_epochs: 10,
+            convergence_threshold: 0.01,
+            target_metric: "loss".to_string(),
+            task_type: TaskType::Regression,
         };
+        HyperparameterTuner::new(
+            OptimizerType::Adam,
+            HyperparameterSpace::default(),
+            task,
+            max_trials,
+        )
+    }
 
-        let metrics = tuner.simulate_training(&config);
-        assert!(metrics.is_ok());
+    /// Regression: metrics used to come from a closed-form formula plus `thread_rng`
+    /// noise, so they were a function of the formula's shape rather than of anything
+    /// the caller ran. They must now come from the caller's objective, verbatim.
+    #[test]
+    fn metrics_come_from_the_caller_objective() {
+        let mut tuner = test_tuner(10);
+        let config = sample_with_lr(1e-3);
 
-        let metrics = metrics.expect("Operation failed in test");
-        assert!(metrics.final_loss >= 0.0);
-        assert!(metrics.convergence_epoch > 0);
-        assert!(metrics.composite_score > 0.0);
+        let mut calls = 0_usize;
+        let metrics = tuner
+            .evaluate_config(config, &mut |cfg| {
+                calls += 1;
+                assert!((cfg.learning_rate - 1e-3).abs() < 1e-12);
+                Ok(TrialOutcome {
+                    final_loss: 0.125,
+                    convergence_epoch: 7,
+                    stability_score: 0.5,
+                    throughput: 250.0,
+                    gradient_norm_variance: 0.0625,
+                    peak_memory_bytes: Some(4242),
+                })
+            })
+            .expect("evaluate");
+
+        assert_eq!(calls, 1, "the objective must actually be run");
+        assert_eq!(metrics.final_loss, 0.125);
+        assert_eq!(metrics.convergence_epoch, 7);
+        assert_eq!(metrics.stability_score, 0.5);
+        assert_eq!(metrics.throughput, 250.0);
+        assert_eq!(metrics.gradient_norm_variance, 0.0625);
+        assert_eq!(metrics.memory_peak, Some(4242));
+
+        // 0.4/(1.125) + 0.3/8 + 0.2*0.5 + 0.1*0.25
+        let expected = 0.4 / 1.125 + 0.3 / 8.0 + 0.2 * 0.5 + 0.1 * 0.25;
+        assert!(
+            (metrics.composite_score - expected).abs() < 1e-5,
+            "composite {} vs {expected}",
+            metrics.composite_score
+        );
+    }
+
+    /// Repeating the same configuration must give the same score: the old
+    /// implementation added `rng.random_range(-0.1..=0.1)` to every evaluation.
+    #[test]
+    fn identical_configurations_score_identically() {
+        let mut tuner = test_tuner(10);
+        let first = tuner
+            .evaluate_config(sample_with_lr(1e-3), &mut quadratic_objective)
+            .expect("first");
+        let second = tuner
+            .evaluate_config(sample_with_lr(1e-3), &mut quadratic_objective)
+            .expect("second");
+        assert_eq!(first.composite_score, second.composite_score);
+    }
+
+    /// The reported training time must be a real measurement of the objective call.
+    #[test]
+    fn training_time_is_measured_not_modelled() {
+        let mut tuner = test_tuner(10);
+        let metrics = tuner
+            .evaluate_config(sample_with_lr(1e-3), &mut |_| {
+                std::thread::sleep(Duration::from_millis(20));
+                Ok(TrialOutcome::from_loss(1.0, 1))
+            })
+            .expect("evaluate");
+        assert!(
+            metrics.training_time >= Duration::from_millis(15),
+            "measured {:?}",
+            metrics.training_time
+        );
+    }
+
+    /// An objective that fails must fail the trial, not be replaced by a guess.
+    #[test]
+    fn objective_errors_propagate() {
+        let mut tuner = test_tuner(10);
+        let result = tuner.evaluate_config(sample_with_lr(1e-3), &mut |_| {
+            Err(TrustformersError::invalid_input("no data".to_string()))
+        });
+        assert!(result.is_err());
+    }
+
+    /// The search must actually be driven by the objective's landscape.
+    #[test]
+    fn search_finds_the_objective_optimum() {
+        let mut tuner = test_tuner(40);
+        let best = tuner.optimize(&mut quadratic_objective).expect("optimize");
+        // The analytic optimum is 1e-3; the search must land within an order of
+        // magnitude of it rather than anywhere in [1e-5, 1e-1].
+        let decades = (best.learning_rate.log10() + 3.0).abs();
+        assert!(
+            decades < 1.0,
+            "best lr {} is {decades} decades off",
+            best.learning_rate
+        );
+        assert!(!tuner.get_history().is_empty());
+        assert!(tuner.optimization_summary().contains("best configuration"));
     }
 
     #[test]
     fn test_convenience_optimization_functions() {
-        // Test that the convenience functions can be called without errors
-        // Note: In real tests, these would use mocked training functions
-        let result = HyperparameterTuner::optimize_amacp_for_transformers(5);
+        // The convenience wrappers must thread the caller's objective through.
+        let result =
+            HyperparameterTuner::optimize_amacp_for_transformers(5, &mut quadratic_objective);
         assert!(result.is_ok());
 
-        let result = HyperparameterTuner::optimize_novograd_for_llms(5);
+        let result = HyperparameterTuner::optimize_novograd_for_llms(5, &mut quadratic_objective);
         assert!(result.is_ok());
     }
 }

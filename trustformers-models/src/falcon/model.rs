@@ -10,6 +10,54 @@ use trustformers_core::{
     traits::{Config, Layer, Model},
 };
 
+/// Geometric ALiBi slopes for a **power-of-two** head count.
+///
+/// `start = 2^(-8/n)` and `slopes[i] = start^(i + 1)`, i.e. the geometric
+/// sequence from Press et al. (2022) in head order.
+fn alibi_slopes_power_of_two(num_heads: usize) -> Vec<f64> {
+    let start = 2.0_f64.powf(-8.0 / num_heads as f64);
+    let mut slopes = Vec::with_capacity(num_heads);
+    let mut value = start;
+    for _ in 0..num_heads {
+        slopes.push(value);
+        value *= start;
+    }
+    slopes
+}
+
+/// Reference ALiBi slopes for `num_heads` heads.
+///
+/// This is the construction from the ALiBi reference implementation (Press
+/// et al., 2022), which HuggingFace's Falcon and BLOOM both reproduce:
+///
+/// * a power-of-two head count uses the geometric sequence
+///   `2^(-8/n), 2^(-16/n), …, 2^(-8)`, **in head order**;
+/// * otherwise the slopes for the largest power of two below `num_heads` are
+///   used first, then extended with every other slope of the next power of two
+///   (`get_slopes(2 * closest)[0::2]`).
+///
+/// Head order matters: the slope assigned to head `h` has to be the same one the
+/// pretrained checkpoint assumed for that head, so a permutation of the correct
+/// set is still wrong.
+pub fn alibi_slopes(num_heads: usize) -> Vec<f32> {
+    fn slopes_f64(num_heads: usize) -> Vec<f64> {
+        if num_heads == 0 {
+            return Vec::new();
+        }
+        if num_heads.is_power_of_two() {
+            return alibi_slopes_power_of_two(num_heads);
+        }
+        // 2^floor(log2(num_heads)); `num_heads >= 1` so `ilog2` is defined.
+        let closest = 1usize << num_heads.ilog2();
+        let mut slopes = alibi_slopes_power_of_two(closest);
+        let extra = alibi_slopes_power_of_two(2 * closest);
+        slopes.extend(extra.iter().step_by(2).take(num_heads - closest));
+        slopes
+    }
+
+    slopes_f64(num_heads).into_iter().map(|value| value as f32).collect()
+}
+
 /// ALiBi positional encoding implementation
 /// Attention with Linear Biases (Press et al., 2022)
 pub struct ALiBi {
@@ -24,26 +72,13 @@ impl ALiBi {
     }
 
     pub fn new_with_device(num_heads: usize, device: Device) -> Result<Self> {
-        // Calculate slopes based on the geometric sequence pattern
-        let mut slopes = Vec::new();
-        let ratio = 2.0_f32.powf(-8.0 / num_heads as f32);
-
-        if num_heads.is_multiple_of(2) {
-            // Even number of heads
-            for i in 0..num_heads / 2 {
-                slopes.push(ratio.powf((2 * i + 1) as f32));
-            }
-            for i in 0..num_heads / 2 {
-                slopes.push(ratio.powf((2 * i + 2) as f32));
-            }
-        } else {
-            // Odd number of heads
-            for i in 0..num_heads {
-                slopes.push(ratio.powf((i + 1) as f32));
-            }
+        if num_heads == 0 {
+            return Err(tensor_op_error(
+                "ALiBi::new_with_device",
+                "num_heads must be at least 1".to_string(),
+            ));
         }
-
-        let slopes_tensor = Tensor::new(slopes)?;
+        let slopes_tensor = Tensor::new(alibi_slopes(num_heads))?;
 
         Ok(Self {
             slopes: slopes_tensor,
@@ -1191,6 +1226,82 @@ mod tests {
         }
     }
 
+    // ---- ALiBi slopes: reference construction ----
+
+    /// Power-of-two head counts must reproduce the geometric sequence *in head
+    /// order*. The old code emitted the odd powers first and the even powers
+    /// afterwards — the right set of slopes attached to the wrong heads.
+    #[test]
+    fn test_alibi_slopes_power_of_two_are_in_head_order() {
+        let slopes = alibi_slopes(8);
+        assert_eq!(slopes.len(), 8);
+        let start = 2.0f32.powf(-1.0); // 2^(-8/8)
+        for (i, &slope) in slopes.iter().enumerate() {
+            let expected = start.powi(i as i32 + 1);
+            assert!(
+                (slope - expected).abs() < 1e-7,
+                "slope[{i}] = {slope}, reference {expected}"
+            );
+        }
+        // Strictly decreasing, which the interleaved order was not.
+        for window in slopes.windows(2) {
+            assert!(
+                window[0] > window[1],
+                "slopes must decrease with head index: {} !> {}",
+                window[0],
+                window[1]
+            );
+        }
+    }
+
+    /// Non-power-of-two head counts follow the reference recursion: the first
+    /// `2^floor(log2 n)` slopes are exactly the power-of-two construction for
+    /// that smaller count, then every other slope of the next power of two.
+    #[test]
+    fn test_alibi_slopes_non_power_of_two_extends_the_reference() {
+        let slopes = alibi_slopes(12);
+        assert_eq!(slopes.len(), 12);
+
+        let base = alibi_slopes(8);
+        for (i, &slope) in slopes.iter().take(8).enumerate() {
+            assert!(
+                (slope - base[i]).abs() < 1e-7,
+                "head {i} must match the 8-head construction: {slope} vs {}",
+                base[i]
+            );
+        }
+
+        let next = alibi_slopes(16);
+        for (offset, &slope) in slopes.iter().skip(8).enumerate() {
+            let expected = next[offset * 2];
+            assert!(
+                (slope - expected).abs() < 1e-7,
+                "head {} must be next[{}] = {expected}, got {slope}",
+                8 + offset,
+                offset * 2
+            );
+        }
+    }
+
+    /// Falcon-7B has 71 heads — the odd branch must not panic and must stay
+    /// positive and finite for every head.
+    #[test]
+    fn test_alibi_slopes_seventy_one_heads() {
+        let slopes = alibi_slopes(71);
+        assert_eq!(slopes.len(), 71);
+        assert!(slopes.iter().all(|s| *s > 0.0 && s.is_finite()));
+        // The first 64 come from the 64-head construction.
+        let base = alibi_slopes(64);
+        for (i, &slope) in slopes.iter().take(64).enumerate() {
+            assert!((slope - base[i]).abs() < 1e-9, "head {i}");
+        }
+    }
+
+    #[test]
+    fn test_alibi_rejects_zero_heads() {
+        assert!(ALiBi::new(0).is_err(), "zero heads is not a valid ALiBi");
+    }
+
     // ---- ALiBi bias: reference math and placement ----
 
     /// Hand-computed reference for `num_heads = 2`:
@@ -1372,6 +1483,32 @@ mod tests {
                 (batched[i] - expected).abs() < 1e-5,
                 "batch element 0 diverged at {i}: {} vs {expected}",
                 batched[i]
+            );
+        }
+    }
+
+    /// The causal mask contributes `-inf` to the masked positions and ALiBi adds
+    /// a finite bias on top; the softmax must still yield finite probabilities
+    /// (a fully-masked row, or `-inf + -inf` leaking into the sum, would produce
+    /// NaN and quietly poison every downstream layer).
+    #[test]
+    fn test_falcon_attention_alibi_output_is_finite() {
+        let mut config = tiny_falcon_config();
+        config.alibi = true;
+        let attn = FalconAttention::new(&config).expect("attention");
+
+        let batch = 2;
+        let seq_len = 5;
+        let hidden = config.hidden_size;
+        let data: Vec<f32> =
+            (0..batch * seq_len * hidden).map(|i| ((i % 17) as f32 - 8.0) * 0.25).collect();
+        let input = Tensor::from_vec(data, &[batch, seq_len, hidden]).expect("input");
+        let out = attn.forward(input).expect("forward").data().expect("data");
+        assert_eq!(out.len(), batch * seq_len * hidden);
+        for (i, value) in out.iter().enumerate() {
+            assert!(
+                value.is_finite(),
+                "output[{i}] = {value} is not finite: the masked softmax produced NaN/inf"
             );
         }
     }

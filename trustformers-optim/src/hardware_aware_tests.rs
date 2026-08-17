@@ -571,4 +571,48 @@ mod tests {
         let mut gpu_adam = GPUAdam::new(cfg).expect("GPUAdam ampere");
         assert!(gpu_adam.optimize_for_gpu(8.6).is_ok());
     }
+
+    /// Regression: `to_fp16` used to return an `F32` tensor whose values were merely
+    /// clamped to ±65504, so it neither reduced precision nor saved any memory.
+    #[test]
+    fn half_compression_produces_a_real_f16_tensor() {
+        use trustformers_core::tensor::DType;
+
+        let config = mobile_config(512, 50.0);
+        let optimizer = MobileOptimizer::new(Box::new(SGD::new(1e-2, 0.0, 0.0, false)), config)
+            .expect("mobile optimizer");
+
+        let gradient = make_tensor(vec![1.0, 0.1, -2.5, 70000.0]);
+        let compressed =
+            optimizer.compress_gradients(std::slice::from_ref(&gradient)).expect("compress");
+
+        assert_eq!(
+            compressed[0].dtype(),
+            DType::F16,
+            "dtype must actually change"
+        );
+        assert!(
+            compressed[0].size_bytes() * 2 == gradient.size_bytes(),
+            "f16 storage must be half of f32: {} vs {}",
+            compressed[0].size_bytes(),
+            gradient.size_bytes()
+        );
+
+        let values: Vec<f32> = match &compressed[0] {
+            Tensor::F16(array) => array.iter().map(|v| v.to_f32()).collect(),
+            other => panic!("expected an F16 tensor, got {:?}", other.dtype()),
+        };
+        // 0.1 is not representable in binary16: the mantissa really is truncated.
+        assert!(
+            (values[1] - 0.1).abs() > 1e-6,
+            "f16 rounding must be visible, got {}",
+            values[1]
+        );
+        // 70000 overflows binary16 and must become +inf, not a silent clamp to 65504.
+        assert!(
+            values[3].is_infinite(),
+            "overflow must saturate to infinity, got {}",
+            values[3]
+        );
+    }
 }

@@ -422,26 +422,6 @@ impl RingAttentionManager {
         Ok(scaled_scores)
     }
 
-    /// Apply causal masking to attention scores
-    fn apply_causal_mask(&self, scores: Tensor, device: &RingAttentionBlock) -> CoreResult<Tensor> {
-        // Create causal mask based on sequence positions
-        let (start_pos, _) = device.sequence_chunk;
-        let seq_len = scores.shape()[1]; // Assuming [batch, seq_len, seq_len]
-
-        // For causal masking, positions can only attend to previous positions
-        let masked_scores = scores;
-
-        // Apply large negative value to future positions
-        for i in 0..seq_len {
-            for _j in (i + start_pos + 1)..seq_len {
-                // This would require tensor indexing operations
-                // masked_scores[batch][i][j] = -1e9;
-            }
-        }
-
-        Ok(masked_scores)
-    }
-
     /// Apply causal masking to attention scores for ring attention
     fn apply_causal_mask_simple(
         &self,
@@ -860,8 +840,8 @@ impl RingAttentionManager {
             )
         {
             self.communication_pattern = RingCommunicationPattern::Bidirectional;
-            println!(
-                "Switched to bidirectional ring communication (comm ratio: {:.2})",
+            log::info!(
+                "switched to bidirectional ring communication (comm ratio: {:.2})",
                 comm_ratio
             );
         }
@@ -871,8 +851,8 @@ impl RingAttentionManager {
         {
             self.config.compression_enabled = true;
             self.config.compression_ratio = 0.5;
-            println!(
-                "Enabled communication compression (volume: {} bytes)",
+            log::info!(
+                "enabled communication compression (volume: {} bytes)",
                 aggregate_stats.communication_volume
             );
         }
@@ -977,8 +957,21 @@ impl RingAttentionManager {
         Ok(())
     }
 
-    /// Advanced block-sparse attention computation for memory efficiency
-    /// Processes attention in blocks to reduce memory usage
+    /// Block-sparse (tiled) attention with an online softmax.
+    ///
+    /// This is the FlashAttention recurrence: keys/values are streamed one
+    /// `block_size` tile at a time while a running maximum `m`, a running
+    /// normaliser `l` and an accumulator are rescaled, so only one tile of
+    /// scores is ever materialised. The result is **numerically identical** to
+    /// dense scaled dot-product attention (up to floating-point rounding);
+    /// `block_size` trades peak memory for loop overhead and nothing else.
+    ///
+    /// An earlier revision summed independently-softmaxed blocks into a
+    /// discarded temporary and returned the freshly allocated zero tensor, so
+    /// every caller received zeros regardless of its inputs.
+    ///
+    /// Tensors are `[batch, sequence, features]`; with `config.causal` set,
+    /// query `i` attends only to keys `j <= i`.
     fn compute_block_sparse_attention(
         &mut self,
         queries: &Tensor,
@@ -987,63 +980,123 @@ impl RingAttentionManager {
         block_size: usize,
     ) -> CoreResult<Tensor> {
         let shape = queries.shape();
+        if shape.len() != 3 {
+            return Err(invalid_input(format!(
+                "block-sparse attention expects [batch, sequence, features] queries, got {shape:?}"
+            )));
+        }
+        if keys.shape() != shape || values.shape() != shape {
+            return Err(invalid_input(format!(
+                "block-sparse attention expects matching query/key/value shapes, got {:?}, {:?}, {:?}",
+                shape,
+                keys.shape(),
+                values.shape()
+            )));
+        }
+        let block_size = block_size.max(1);
+
         let batch_size = shape[0];
         let seq_len = shape[1];
         let hidden_dim = shape[2];
 
-        // Initialize output tensor
-        let output = Tensor::zeros(&[batch_size, seq_len, hidden_dim])?;
+        // The module scales by the configured head dimension; fall back to the
+        // tensor's own feature count when it is unset so the scale is never 1/0.
+        let scale_dim = if self.config.head_dim == 0 { hidden_dim } else { self.config.head_dim };
+        let scale = if scale_dim == 0 { 1.0 } else { 1.0 / (scale_dim as f32).sqrt() };
 
-        // Process attention in blocks to reduce memory usage
-        let num_blocks = seq_len.div_ceil(block_size);
+        let query_values = queries.to_vec_f32()?;
+        let key_values = keys.to_vec_f32()?;
+        let value_values = values.to_vec_f32()?;
 
-        for block_i in 0..num_blocks {
-            for block_j in 0..num_blocks {
-                let start_i = block_i * block_size;
-                let end_i = (start_i + block_size).min(seq_len);
-                let start_j = block_j * block_size;
-                let end_j = (start_j + block_size).min(seq_len);
+        let expected = batch_size * seq_len * hidden_dim;
+        if query_values.len() != expected {
+            return Err(tensor_op_error(
+                "block_sparse_attention",
+                format!(
+                    "expected {expected} elements in the query tensor, got {}",
+                    query_values.len()
+                ),
+            ));
+        }
 
-                // Skip blocks that violate causal constraint
-                if self.config.causal && start_j > end_i {
-                    continue;
+        let mut output = vec![0.0f32; expected];
+        let mut accumulator = vec![0.0f32; hidden_dim];
+
+        for batch in 0..batch_size {
+            let batch_offset = batch * seq_len * hidden_dim;
+
+            for query_index in 0..seq_len {
+                let query_offset = batch_offset + query_index * hidden_dim;
+                let query_row = &query_values[query_offset..query_offset + hidden_dim];
+
+                // Online-softmax state for this query row.
+                let mut running_max = f32::NEG_INFINITY;
+                let mut running_sum = 0.0f32;
+                accumulator.iter_mut().for_each(|slot| *slot = 0.0);
+
+                // Causal rows never look past their own position, so whole key
+                // tiles beyond it are skipped without being scored at all.
+                let last_key = if self.config.causal { query_index + 1 } else { seq_len };
+
+                let mut block_start = 0usize;
+                while block_start < last_key {
+                    let block_end = (block_start + block_size).min(last_key);
+
+                    // Score this tile.
+                    let mut tile_scores = Vec::with_capacity(block_end - block_start);
+                    let mut tile_max = f32::NEG_INFINITY;
+                    for key_index in block_start..block_end {
+                        let key_offset = batch_offset + key_index * hidden_dim;
+                        let key_row = &key_values[key_offset..key_offset + hidden_dim];
+                        let dot: f32 =
+                            query_row.iter().zip(key_row).map(|(q, k)| q * k).sum::<f32>() * scale;
+                        tile_max = tile_max.max(dot);
+                        tile_scores.push(dot);
+                    }
+
+                    if tile_scores.is_empty() {
+                        block_start = block_end;
+                        continue;
+                    }
+
+                    // Rescale the running state to the new maximum, then fold
+                    // the tile in. `exp(-inf) == 0`, which zeroes the untouched
+                    // initial state on the first tile.
+                    let new_max = running_max.max(tile_max);
+                    let correction = (running_max - new_max).exp();
+                    running_sum *= correction;
+                    for slot in accumulator.iter_mut() {
+                        *slot *= correction;
+                    }
+
+                    for (offset, score) in tile_scores.iter().enumerate() {
+                        let weight = (score - new_max).exp();
+                        running_sum += weight;
+                        let key_index = block_start + offset;
+                        let value_offset = batch_offset + key_index * hidden_dim;
+                        for (slot, value) in accumulator
+                            .iter_mut()
+                            .zip(&value_values[value_offset..value_offset + hidden_dim])
+                        {
+                            *slot += weight * value;
+                        }
+                    }
+
+                    running_max = new_max;
+                    block_start = block_end;
                 }
 
-                // Extract query and key blocks
-                let q_block =
-                    queries.slice_multi(&[(0, batch_size), (start_i, end_i), (0, hidden_dim)])?;
-
-                let k_block =
-                    keys.slice_multi(&[(0, batch_size), (start_j, end_j), (0, hidden_dim)])?;
-
-                let v_block =
-                    values.slice_multi(&[(0, batch_size), (start_j, end_j), (0, hidden_dim)])?;
-
-                // Compute block attention
-                let block_scores = self.compute_attention_scores_simple(&q_block, &k_block)?;
-
-                // Apply causal masking within block
-                let masked_scores = if self.config.causal {
-                    self.apply_block_causal_mask(block_scores, start_i, start_j, end_i, end_j)?
-                } else {
-                    block_scores
-                };
-
-                // Compute softmax and weighted sum
-                let block_weights = self.compute_softmax(&masked_scores)?;
-                let block_output = self.compute_weighted_sum_simple(&block_weights, &v_block)?;
-
-                // Add block output to final output (in practice, would need more sophisticated aggregation)
-                // This is a simplified version - real implementation would handle overlapping blocks properly
-                let output_slice =
-                    output.slice_multi(&[(0, batch_size), (start_i, end_i), (0, hidden_dim)])?;
-
-                let _combined = output_slice.add(&block_output)?;
-                // In a real implementation, we would update the output tensor in-place
+                if running_sum > 0.0 {
+                    for (slot, accumulated) in
+                        output[query_offset..query_offset + hidden_dim].iter_mut().zip(&accumulator)
+                    {
+                        *slot = accumulated / running_sum;
+                    }
+                }
             }
         }
 
-        Ok(output)
+        Tensor::from_vec(output, &[batch_size, seq_len, hidden_dim])
     }
 
     /// Apply causal masking within a block
@@ -1600,5 +1653,289 @@ mod tests {
         assert_eq!(config.num_devices, 16);
         assert!(config.compression_enabled); // Should enable for 2M tokens
         assert!(config.chunk_size > 0);
+    }
+
+    /// Dense scaled dot-product attention, written the obvious way, used as the
+    /// reference for the tiled implementation.
+    fn naive_attention(
+        queries: &[f32],
+        keys: &[f32],
+        values: &[f32],
+        seq_len: usize,
+        hidden: usize,
+        scale: f32,
+        causal: bool,
+    ) -> Vec<f32> {
+        let mut output = vec![0.0f32; seq_len * hidden];
+        for i in 0..seq_len {
+            let last = if causal { i + 1 } else { seq_len };
+            let mut scores = Vec::with_capacity(last);
+            for j in 0..last {
+                let dot: f32 = (0..hidden)
+                    .map(|d| queries[i * hidden + d] * keys[j * hidden + d])
+                    .sum::<f32>()
+                    * scale;
+                scores.push(dot);
+            }
+            let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let exponentials: Vec<f32> = scores.iter().map(|s| (s - max).exp()).collect();
+            let total: f32 = exponentials.iter().sum();
+            for (j, weight) in exponentials.iter().enumerate() {
+                for d in 0..hidden {
+                    output[i * hidden + d] += (weight / total) * values[j * hidden + d];
+                }
+            }
+        }
+        output
+    }
+
+    fn block_sparse_manager(causal: bool, hidden: usize) -> RingAttentionManager {
+        let config = RingAttentionConfig {
+            num_devices: 1,
+            chunk_size: 8,
+            head_dim: hidden,
+            causal,
+            ..RingAttentionConfig::default()
+        };
+        RingAttentionManager::new(config, 8).expect("manager must build in test")
+    }
+
+    /// Regression: the block-sparse path used to accumulate into a discarded
+    /// temporary and return the freshly zeroed output tensor, so it produced
+    /// all-zero attention for every input. It must now match dense attention.
+    #[test]
+    fn block_sparse_attention_matches_dense_reference() {
+        let seq_len = 8usize;
+        let hidden = 4usize;
+        let make = |seed: f32| -> Vec<f32> {
+            (0..seq_len * hidden)
+                .map(|i| ((i as f32 * 0.37 + seed).sin() * 0.9) + seed * 0.1)
+                .collect()
+        };
+        let queries = make(0.2);
+        let keys = make(1.1);
+        let values = make(2.3);
+        let scale = 1.0 / (hidden as f32).sqrt();
+
+        for causal in [false, true] {
+            let mut manager = block_sparse_manager(causal, hidden);
+            let q = Tensor::from_vec(queries.clone(), &[1, seq_len, hidden])
+                .expect("tensor must build in test");
+            let k = Tensor::from_vec(keys.clone(), &[1, seq_len, hidden])
+                .expect("tensor must build in test");
+            let v = Tensor::from_vec(values.clone(), &[1, seq_len, hidden])
+                .expect("tensor must build in test");
+
+            let expected =
+                naive_attention(&queries, &keys, &values, seq_len, hidden, scale, causal);
+
+            // Every tile size must give the same answer as the dense reference.
+            for block_size in [1usize, 3, 8, 32] {
+                let actual = manager
+                    .compute_block_sparse_attention(&q, &k, &v, block_size)
+                    .expect("block-sparse attention must succeed in test")
+                    .to_vec_f32()
+                    .expect("tensor read must succeed in test");
+
+                assert_eq!(actual.len(), expected.len());
+                assert!(
+                    actual.iter().any(|value| value.abs() > 1e-6),
+                    "output must not be all zeros (causal={causal}, block={block_size})"
+                );
+                for (index, (got, want)) in actual.iter().zip(&expected).enumerate() {
+                    assert!(
+                        (got - want).abs() < 1e-4,
+                        "causal={causal} block={block_size} index={index}: {got} != {want}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn block_sparse_attention_output_depends_on_values() {
+        let seq_len = 4usize;
+        let hidden = 2usize;
+        let mut manager = block_sparse_manager(false, hidden);
+
+        let queries: Vec<f32> = (0..seq_len * hidden).map(|i| i as f32 * 0.1).collect();
+        let keys: Vec<f32> = (0..seq_len * hidden).map(|i| (i as f32 * 0.2).cos()).collect();
+        let q = Tensor::from_vec(queries, &[1, seq_len, hidden]).expect("tensor builds in test");
+        let k = Tensor::from_vec(keys, &[1, seq_len, hidden]).expect("tensor builds in test");
+
+        let first = manager
+            .compute_block_sparse_attention(
+                &q,
+                &k,
+                &Tensor::from_vec(vec![1.0f32; seq_len * hidden], &[1, seq_len, hidden])
+                    .expect("tensor builds in test"),
+                2,
+            )
+            .expect("attention must succeed in test")
+            .to_vec_f32()
+            .expect("tensor read must succeed in test");
+
+        let second = manager
+            .compute_block_sparse_attention(
+                &q,
+                &k,
+                &Tensor::from_vec(
+                    (0..seq_len * hidden).map(|i| i as f32).collect::<Vec<f32>>(),
+                    &[1, seq_len, hidden],
+                )
+                .expect("tensor builds in test"),
+                2,
+            )
+            .expect("attention must succeed in test")
+            .to_vec_f32()
+            .expect("tensor read must succeed in test");
+
+        assert_ne!(first, second, "the output must depend on the value tensor");
+        // A constant value tensor is reproduced exactly by any convex
+        // combination of its rows.
+        for value in &first {
+            assert!((value - 1.0).abs() < 1e-5, "expected 1.0, got {value}");
+        }
+    }
+
+    #[test]
+    fn block_sparse_attention_rejects_mismatched_shapes() {
+        let mut manager = block_sparse_manager(false, 2);
+        let q = Tensor::from_vec(vec![0.0f32; 8], &[1, 4, 2]).expect("tensor builds in test");
+        let k = Tensor::from_vec(vec![0.0f32; 4], &[1, 2, 2]).expect("tensor builds in test");
+        assert!(manager.compute_block_sparse_attention(&q, &k, &q, 2).is_err());
+    }
+
+    // ── Ring KV rotation ─────────────────────────────────────────────────
+    //
+    // The previous implementation ignored every device's stored K/V and pushed
+    // a freshly synthesised `sin`/`cos` buffer around the ring. These tests
+    // pin the rotation to the real data: what arrives at device `i + 1` must be
+    // exactly what device `i` holds.
+
+    fn ring_manager(num_devices: usize, chunk: usize, head_dim: usize) -> RingAttentionManager {
+        let config = RingAttentionConfig {
+            num_devices,
+            chunk_size: chunk,
+            head_dim,
+            compression_enabled: false,
+            bidirectional: false,
+            ..Default::default()
+        };
+        RingAttentionManager::new(config, chunk * num_devices)
+            .expect("ring manager must build in test")
+    }
+
+    /// Device-specific K/V that no synthetic generator would reproduce.
+    fn device_kv(rank: usize, len: usize) -> (Vec<f32>, Vec<f32>) {
+        let keys: Vec<f32> = (0..len).map(|i| 100.0 * rank as f32 + i as f32).collect();
+        let values: Vec<f32> = (0..len).map(|i| -(100.0 * rank as f32 + i as f32)).collect();
+        (keys, values)
+    }
+
+    #[test]
+    fn rotation_delivers_each_device_s_own_kv_to_its_successor() {
+        let devices = 4;
+        let len = 6;
+        let mut manager = ring_manager(devices, 3, 2);
+        manager.communication_pattern = RingCommunicationPattern::Unidirectional;
+
+        for rank in 0..devices {
+            let (keys, values) = device_kv(rank, len);
+            manager.set_local_kv(rank, keys, values).expect("kv must load in test");
+        }
+
+        manager.rotate_kv_pairs().expect("rotation must succeed in test");
+
+        for source in 0..devices {
+            let destination = (source + 1) % devices;
+            let received = &manager.devices[destination].received_kv;
+            assert_eq!(
+                received.len(),
+                1,
+                "device {destination} must get exactly one hop"
+            );
+
+            let pair = &received[0];
+            assert_eq!(pair.source_rank, source);
+
+            let (expected_keys, expected_values) = device_kv(source, len);
+            assert_eq!(
+                pair.keys, expected_keys,
+                "device {destination} must receive device {source}'s real keys"
+            );
+            assert_eq!(pair.values, expected_values);
+            assert_eq!(
+                pair.position_range, manager.devices[source].sequence_chunk,
+                "the chunk range must travel with the data"
+            );
+        }
+    }
+
+    #[test]
+    fn rotation_without_loaded_kv_errors_instead_of_synthesising() {
+        let mut manager = ring_manager(2, 3, 2);
+        manager.communication_pattern = RingCommunicationPattern::Unidirectional;
+
+        let error =
+            manager.rotate_kv_pairs().expect_err("rotating empty devices must fail in test");
+        assert!(error.to_string().contains("set_local_kv"), "{error}");
+    }
+
+    #[test]
+    fn bidirectional_rotation_delivers_both_neighbours_real_kv() {
+        let devices = 3;
+        let len = 4;
+        let mut manager = ring_manager(devices, 2, 2);
+        manager.communication_pattern = RingCommunicationPattern::Bidirectional;
+
+        for rank in 0..devices {
+            let (keys, values) = device_kv(rank, len);
+            manager.set_local_kv(rank, keys, values).expect("kv must load in test");
+        }
+
+        manager.rotate_kv_pairs().expect("rotation must succeed in test");
+
+        for destination in 0..devices {
+            let mut sources: Vec<usize> = manager.devices[destination]
+                .received_kv
+                .iter()
+                .map(|pair| pair.source_rank)
+                .collect();
+            sources.sort_unstable();
+
+            let forward = (destination + devices - 1) % devices;
+            let backward = (destination + 1) % devices;
+            let mut expected = vec![forward, backward];
+            expected.sort_unstable();
+            assert_eq!(sources, expected, "device {destination} neighbours");
+
+            for pair in &manager.devices[destination].received_kv {
+                let (expected_keys, _) = device_kv(pair.source_rank, len);
+                assert_eq!(pair.keys, expected_keys);
+            }
+        }
+    }
+
+    #[test]
+    fn rotation_accounts_for_the_bytes_it_actually_moved() {
+        let devices = 2;
+        let len = 8;
+        let mut manager = ring_manager(devices, 4, 2);
+        manager.communication_pattern = RingCommunicationPattern::Unidirectional;
+
+        for rank in 0..devices {
+            let (keys, values) = device_kv(rank, len);
+            manager.set_local_kv(rank, keys, values).expect("kv must load in test");
+        }
+        manager.rotate_kv_pairs().expect("rotation must succeed in test");
+
+        let expected_bytes = (2 * len * std::mem::size_of::<f32>()) as u64;
+        for rank in 0..devices {
+            assert_eq!(
+                manager.devices[rank].attention_stats.communication_volume, expected_bytes,
+                "device {rank} must report the bytes it really sent"
+            );
+        }
     }
 }

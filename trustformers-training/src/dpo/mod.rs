@@ -591,7 +591,8 @@ mod tests {
             ..Default::default()
         };
 
-        let r1 = compute_dpo_loss(&[pair.clone()], &cfg_no_smooth).expect("loss 1 failed");
+        let r1 =
+            compute_dpo_loss(std::slice::from_ref(&pair), &cfg_no_smooth).expect("loss 1 failed");
         let r2 = compute_dpo_loss(&[pair], &cfg_smooth).expect("loss 2 failed");
         // Smoothed loss should be higher (harder target)
         assert!(
@@ -670,7 +671,8 @@ mod tests {
             ..Default::default()
         };
         let pair = make_pair(-1.0, -2.0, -2.0, -1.5);
-        let r1 = compute_dpo_loss(&[pair.clone()], &cfg_standard).expect("standard failed");
+        let r1 =
+            compute_dpo_loss(std::slice::from_ref(&pair), &cfg_standard).expect("standard failed");
         let r2 = compute_dpo_loss(&[pair], &cfg_shifted).expect("shifted failed");
         assert!((r1.loss - r2.loss).abs() < 1e-5);
     }
@@ -879,7 +881,7 @@ mod tests {
             label_smoothing: 0.0,
             ..Default::default()
         };
-        let r1 = compute_dpo_loss(&[pair.clone()], &cfg_no_smooth).expect("ok");
+        let r1 = compute_dpo_loss(std::slice::from_ref(&pair), &cfg_no_smooth).expect("ok");
         let r2 = compute_dpo_loss(&[pair], &cfg_smooth_zero).expect("ok");
         assert!(
             (r1.loss - r2.loss).abs() < 1e-6,
@@ -977,7 +979,8 @@ mod tests {
             beta: 10.0,
             ..Default::default()
         };
-        let r_low = compute_dpo_loss(&[pair_small_margin.clone()], &cfg_low_beta).expect("ok");
+        let r_low =
+            compute_dpo_loss(std::slice::from_ref(&pair_small_margin), &cfg_low_beta).expect("ok");
         let r_high = compute_dpo_loss(&[pair_small_margin], &cfg_high_beta).expect("ok");
         // High beta → larger scaled_h → -log_sigmoid(large) → near 0
         // Low beta → smaller scaled_h → -log_sigmoid(small) → near log(2)
@@ -1023,7 +1026,7 @@ mod tests {
 
         let mut individual_sum = 0.0_f32;
         for pair in &pairs {
-            let r = compute_dpo_loss(&[pair.clone()], &cfg).expect("individual ok");
+            let r = compute_dpo_loss(std::slice::from_ref(pair), &cfg).expect("individual ok");
             individual_sum += r.loss;
         }
         let individual_mean = individual_sum / pairs.len() as f32;
@@ -1299,7 +1302,7 @@ mod tests {
             beta: 5.0,
             ..Default::default()
         };
-        let r_low = compute_dpo_loss(&[pair.clone()], &cfg_low).expect("ok");
+        let r_low = compute_dpo_loss(std::slice::from_ref(&pair), &cfg_low).expect("ok");
         let r_high = compute_dpo_loss(&[pair], &cfg_high).expect("ok");
         assert!(
             r_high.loss < r_low.loss,

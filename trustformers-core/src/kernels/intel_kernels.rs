@@ -5,7 +5,7 @@
 
 #![allow(unused_variables)] // Placeholder implementation with reserved parameters
 
-use crate::errors::Result;
+use crate::errors::{hardware_error, Result};
 use crate::tensor::Tensor;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -181,38 +181,24 @@ impl IntelKernel {
         })
     }
 
-    /// Detect Intel GPU device
+    /// Detect Intel GPU device `device_id` by looking it up in
+    /// `IntelUtils::detect_devices`. There is no real oneAPI/Level-Zero/SYCL
+    /// binding in this build (the `intel` feature pulls in no FFI
+    /// dependency), so there is no runtime this can genuinely query, and
+    /// `detect_devices` therefore never reports one: fabricating a fixed
+    /// "Intel Arc A770" identity regardless of what hardware (if any) is
+    /// actually attached would misrepresent every machine that lacks one.
     fn detect_device(device_id: usize) -> Result<IntelDevice> {
-        // Simulate device detection
-        // In a real implementation, this would query the oneAPI runtime
-        Ok(IntelDevice {
-            id: device_id,
-            name: "Intel Arc A770".to_string(),
-            vendor: "Intel Corporation".to_string(),
-            driver_version: "31.0.101.4146".to_string(),
-            device_type: IntelDeviceType::Arc,
-            compute_units: 32,
-            max_clock_frequency: 2400,
-            local_memory_size: 65536,
-            global_memory_size: 16 * 1024 * 1024 * 1024,
-            max_workgroup_size: 1024,
-            sub_group_sizes: vec![8, 16, 32],
-            extensions: vec![
-                "cl_intel_subgroups".to_string(),
-                "cl_intel_required_subgroup_size".to_string(),
-                "cl_intel_subgroups_short".to_string(),
-                "cl_intel_media_block_io".to_string(),
-                "cl_intel_planar_yuv".to_string(),
-                "cl_intel_packed_yuv".to_string(),
-                "cl_intel_motion_estimation".to_string(),
-                "cl_intel_device_side_avc_motion_estimation".to_string(),
-                "cl_intel_advanced_motion_estimation".to_string(),
-                "cl_intel_subgroup_matrix_multiply_accumulate".to_string(),
-            ],
-            supports_fp16: true,
-            supports_dpas: true,
-            supports_systolic_arrays: true,
-        })
+        IntelUtils::detect_devices()?
+            .into_iter()
+            .find(|d| d.id == device_id)
+            .ok_or_else(|| {
+                hardware_error(
+                    format!("intel device {device_id}"),
+                    "no real Intel oneAPI/Level-Zero runtime is available in this build to detect \
+                 a device (the `intel` feature provides no FFI binding)",
+                )
+            })
     }
 
     /// Create oneAPI context
@@ -778,30 +764,18 @@ impl IntelMemoryPool {
 pub struct IntelUtils;
 
 impl IntelUtils {
-    /// Detect available Intel GPU devices
+    /// Detect available Intel GPU devices.
+    ///
+    /// There is no real oneAPI/Level-Zero/SYCL binding in this build (the
+    /// `intel` feature pulls in no FFI dependency - see the workspace
+    /// `Cargo.toml`), so there is no runtime this can genuinely enumerate.
+    /// This used to unconditionally fabricate a fixed "Intel Arc A770"
+    /// entry, so every machine - including ones with no Intel GPU at all -
+    /// saw one reported as present. Honestly report zero devices instead;
+    /// callers that need a device (`IntelKernel::new`) then fail clearly
+    /// rather than silently operating against invented hardware.
     pub fn detect_devices() -> Result<Vec<IntelDevice>> {
-        // In a real implementation, this would enumerate oneAPI devices
-        Ok(vec![IntelDevice {
-            id: 0,
-            name: "Intel Arc A770".to_string(),
-            vendor: "Intel Corporation".to_string(),
-            driver_version: "31.0.101.4146".to_string(),
-            device_type: IntelDeviceType::Arc,
-            compute_units: 32,
-            max_clock_frequency: 2400,
-            local_memory_size: 65536,
-            global_memory_size: 16 * 1024 * 1024 * 1024,
-            max_workgroup_size: 1024,
-            sub_group_sizes: vec![8, 16, 32],
-            extensions: vec![
-                "cl_intel_subgroups".to_string(),
-                "cl_intel_subgroups_short".to_string(),
-                "cl_intel_subgroup_matrix_multiply_accumulate".to_string(),
-            ],
-            supports_fp16: true,
-            supports_dpas: true,
-            supports_systolic_arrays: true,
-        }])
+        Ok(vec![])
     }
 
     /// Get optimal workgroup size for a given problem size
@@ -838,18 +812,24 @@ impl IntelUtils {
 mod tests {
     use super::*;
 
+    /// Regression test: `detect_devices` used to unconditionally fabricate
+    /// an "Intel Arc A770" entry. With no real oneAPI/Level-Zero runtime
+    /// wired up, honest detection must report zero devices.
     #[test]
-    fn test_intel_device_detection() {
+    fn test_intel_device_detection_reports_no_phantom_devices() {
         let devices = IntelUtils::detect_devices().expect("operation failed in test");
-        assert!(!devices.is_empty());
-        assert_eq!(devices[0].device_type, IntelDeviceType::Arc);
+        assert!(devices.is_empty());
     }
 
+    /// Regression test: `IntelKernel::new` used to always succeed (via the
+    /// fabricated device from `detect_device`) even with no real GPU
+    /// present. It must now honestly fail instead of reporting a phantom
+    /// "Intel Arc A770" kernel manager as ready for use.
     #[test]
-    fn test_intel_kernel_creation() {
+    fn test_intel_kernel_creation_errors_without_real_hardware() {
         let config = IntelKernelConfig::default();
-        let kernel = IntelKernel::new(config).expect("operation failed in test");
-        assert_eq!(kernel.device.device_type, IntelDeviceType::Arc);
+        let result = IntelKernel::new(config);
+        assert!(result.is_err());
     }
 
     #[test]

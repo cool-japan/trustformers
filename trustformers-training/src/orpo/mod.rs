@@ -183,7 +183,7 @@ impl SequenceLogProbs {
     /// negative numbers.
     pub fn log_odds(chosen: &SequenceLogProbs, rejected: &SequenceLogProbs) -> f64 {
         const EPS: f64 = 1e-10;
-        let clamp = |p: f64| p.max(EPS).min(1.0 - EPS);
+        let clamp = |p: f64| p.clamp(EPS, 1.0 - EPS);
 
         let pc = clamp(chosen.mean_log_prob().exp());
         let pr = clamp(rejected.mean_log_prob().exp());
@@ -226,7 +226,7 @@ pub fn compute_log_odds_ratio(
     }
 
     const EPS: f64 = 1e-10;
-    let clamp = |p: f64| p.max(EPS).min(1.0 - EPS);
+    let clamp = |p: f64| p.clamp(EPS, 1.0 - EPS);
 
     let mean_c: f64 = chosen_log_probs.iter().sum::<f64>() / chosen_log_probs.len() as f64;
     let mean_r: f64 = rejected_log_probs.iter().sum::<f64>() / rejected_log_probs.len() as f64;

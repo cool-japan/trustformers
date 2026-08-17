@@ -15,6 +15,14 @@ pub struct LAMB {
     betas: (f32, f32),
     eps: f32,
     weight_decay: f32,
+    /// Lower and upper bound of the trust ratio (`φ` in You et al.).
+    trust_clip: (f32, f32),
+    /// Parameter names excluded from layer adaptation and weight decay.
+    ///
+    /// Reference implementations exclude biases and LayerNorm parameters: their weight
+    /// norm is not comparable to a weight matrix's, so the trust ratio is meaningless
+    /// for them.
+    excluded: std::collections::HashSet<String>,
     state: OptimizerState,
     exp_avg: HashMap<String, Vec<f32>>,
     exp_avg_sq: HashMap<String, Vec<f32>>,
@@ -27,19 +35,77 @@ impl LAMB {
             betas,
             eps,
             weight_decay,
+            // You et al. define `φ(z) = min(max(z, γ_l), γ_u)`; reference
+            // implementations (NVIDIA, TF) clamp the ratio to a bounded interval so a
+            // large-norm layer paired with a tiny update cannot produce an unbounded
+            // step.
+            trust_clip: (0.0, 10.0),
+            excluded: std::collections::HashSet::new(),
             state: OptimizerState::new(),
             exp_avg: HashMap::new(),
             exp_avg_sq: HashMap::new(),
         }
     }
+
+    /// Sets the bounds `(γ_l, γ_u)` of the trust-ratio clipping function `φ`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the interval is empty or negative.
+    pub fn with_trust_clip(mut self, lower: f32, upper: f32) -> Result<Self> {
+        if !(lower >= 0.0 && upper > lower) {
+            return Err(TrustformersError::invalid_config(format!(
+                "LAMB trust-ratio bounds must satisfy 0 <= lower < upper, got ({lower}, {upper})"
+            )));
+        }
+        self.trust_clip = (lower, upper);
+        Ok(self)
+    }
+
+    /// Excludes a named parameter from layer adaptation and weight decay.
+    ///
+    /// Conventionally applied to biases and LayerNorm gains/biases.
+    pub fn exclude_from_adaptation(&mut self, name: impl Into<String>) {
+        self.excluded.insert(name.into());
+    }
+
+    /// Whether `name` was excluded via [`LAMB::exclude_from_adaptation`].
+    pub fn is_excluded(&self, name: &str) -> bool {
+        self.excluded.contains(name)
+    }
+
+    /// Updates one parameter identified by a stable caller-supplied name.
+    ///
+    /// Names are what makes the bias/LayerNorm exclusion possible, so this is the
+    /// preferred entry point. See [`crate::param_id`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsupported tensor dtypes or a state size mismatch.
+    pub fn update_named(
+        &mut self,
+        name: &str,
+        parameter: &mut Tensor,
+        grad: &Tensor,
+    ) -> Result<()> {
+        let key = self.state.params.key_for_named_tensor(name, parameter)?;
+        let adapt = !self.excluded.contains(name);
+        self.update_with_key(key, adapt, parameter, grad)
+    }
 }
 
-impl Optimizer for LAMB {
-    fn update(&mut self, parameter: &mut Tensor, grad: &Tensor) -> Result<()> {
+impl LAMB {
+    /// Shared update body given an already-resolved stable key.
+    fn update_with_key(
+        &mut self,
+        param_id: String,
+        adapt: bool,
+        parameter: &mut Tensor,
+        grad: &Tensor,
+    ) -> Result<()> {
         // LAMB optimizer with layer-wise adaptation
         match (parameter, grad) {
             (Tensor::F32(param), Tensor::F32(grad_arr)) => {
-                let param_id = self.state.param_key(param.as_ptr() as usize, param.len())?;
                 let size = grad_arr.len();
 
                 let exp_avg =
@@ -74,9 +140,13 @@ impl Optimizer for LAMB {
                     // Compute bias-corrected second raw moment estimate
                     let v_hat = *v / bias_correction2;
 
-                    // Apply weight decay to the update (L2 regularization)
-                    let decay_term =
-                        if self.weight_decay != 0.0 { self.weight_decay * *p } else { 0.0 };
+                    // Apply weight decay to the update (L2 regularization). Excluded
+                    // parameters (biases, LayerNorm) take neither decay nor adaptation.
+                    let decay_term = if self.weight_decay != 0.0 && adapt {
+                        self.weight_decay * *p
+                    } else {
+                        0.0
+                    };
 
                     // Compute the raw update step (before layer-wise adaptation)
                     let raw_update = m_hat / (v_hat.sqrt() + self.eps) + decay_term;
@@ -87,9 +157,11 @@ impl Optimizer for LAMB {
                 let weight_norm: f32 = param.iter().map(|&p| p * p).sum::<f32>().sqrt();
                 let update_norm: f32 = raw_updates.iter().map(|&u| u * u).sum::<f32>().sqrt();
 
-                // Compute the layer-wise adaptation rate
-                let trust_ratio = if update_norm > 0.0 && weight_norm > 0.0 {
-                    weight_norm / update_norm
+                // Layer-wise adaptation rate `φ(‖w‖) / ‖r + λw‖`, with `φ` the
+                // clipping function from You et al. An unbounded ratio makes a
+                // large-norm layer with a tiny update take a divergent step.
+                let trust_ratio = if update_norm > 0.0 && weight_norm > 0.0 && adapt {
+                    (weight_norm / update_norm).clamp(self.trust_clip.0, self.trust_clip.1)
                 } else {
                     1.0
                 };
@@ -109,6 +181,13 @@ impl Optimizer for LAMB {
                 "tensor type validation",
             )),
         }
+    }
+}
+
+impl Optimizer for LAMB {
+    fn update(&mut self, parameter: &mut Tensor, grad: &Tensor) -> Result<()> {
+        let key = self.state.params.key_for_tensor(parameter)?;
+        self.update_with_key(key, true, parameter, grad)
     }
 
     fn zero_grad(&mut self) {}

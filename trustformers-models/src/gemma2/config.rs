@@ -123,11 +123,10 @@ impl Config for Gemma2Config {
                 "sliding_window must be > 0".to_string(),
             ));
         }
-        if !(self.query_pre_attn_scalar > 0.0) {
+        if self.query_pre_attn_scalar.is_nan() || self.query_pre_attn_scalar <= 0.0 {
             // `query_pre_attn_scalar` is raised to the -0.5 power to obtain
-            // the attention scale; zero or negative values (including NaN,
-            // rejected by the negated `>` comparison) would produce an
-            // infinite or NaN scale.
+            // the attention scale; zero, negative, or NaN values would
+            // produce an infinite or NaN scale.
             return Err(invalid_config(
                 "config_field",
                 "query_pre_attn_scalar must be > 0".to_string(),

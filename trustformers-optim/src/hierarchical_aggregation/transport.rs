@@ -610,13 +610,10 @@ impl Transport for TcpTransport {
         }
 
         let mut outgoing = self.outgoing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !outgoing.contains_key(&peer) {
-            let stream = self.dial(peer)?;
-            outgoing.insert(peer, stream);
-        }
-        let stream = outgoing
-            .get_mut(&peer)
-            .ok_or_else(|| TransportError::InvalidPeers(format!("no stream for rank {peer}")))?;
+        let stream = match outgoing.entry(peer) {
+            std::collections::hash_map::Entry::Occupied(slot) => slot.into_mut(),
+            std::collections::hash_map::Entry::Vacant(slot) => slot.insert(self.dial(peer)?),
+        };
         write_frame(stream, self.rank, tag, payload)
     }
 

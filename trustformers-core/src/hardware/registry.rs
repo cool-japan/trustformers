@@ -257,8 +257,13 @@ pub struct HardwareRegistry {
     config: RegistryConfig,
     /// Registered backends
     backends: Arc<RwLock<HashMap<String, BackendRegistration>>>,
-    /// Backend instances
-    backend_instances: Arc<RwLock<HashMap<String, Box<dyn HardwareBackend>>>>,
+    /// Backend instances. Stored as `Arc` (not `Box`) so
+    /// `get_backend_instance`/`get_backends` can hand callers a real,
+    /// shared handle to the registered backend instead of being structurally
+    /// unable to return one (a `Box<dyn Trait>` cannot be cloned out of a
+    /// shared `HashMap` without either `Clone` on the trait object or an
+    /// `Arc`).
+    backend_instances: Arc<RwLock<HashMap<String, Arc<dyn HardwareBackend>>>>,
     /// Registered devices
     devices: Arc<RwLock<HashMap<String, DeviceRegistration>>>,
     /// Registered operations
@@ -283,7 +288,7 @@ impl std::fmt::Debug for HardwareRegistry {
             )
             .field(
                 "backend_instances",
-                &"<RwLock<HashMap<String, Box<dyn HardwareBackend>>>>",
+                &"<RwLock<HashMap<String, Arc<dyn HardwareBackend>>>>",
             )
             .field("devices", &"<RwLock<HashMap<String, DeviceRegistration>>>")
             .field(
@@ -412,7 +417,7 @@ impl HardwareRegistry {
 
         let mut backend_instances =
             self.backend_instances.write().unwrap_or_else(|poisoned| poisoned.into_inner());
-        backend_instances.insert(backend_id.clone(), backend);
+        backend_instances.insert(backend_id.clone(), Arc::from(backend));
         drop(backend_instances);
 
         // Emit event
@@ -460,13 +465,13 @@ impl HardwareRegistry {
         backends.get(backend_id).cloned()
     }
 
-    /// Get backend instance
-    pub fn get_backend_instance(&self, backend_id: &str) -> Option<Box<dyn HardwareBackend>> {
+    /// Get backend instance: a real, shared handle to the registered
+    /// backend (cheap `Arc` clone), or `None` if no backend is registered
+    /// under `backend_id`.
+    pub fn get_backend_instance(&self, backend_id: &str) -> Option<Arc<dyn HardwareBackend>> {
         let backend_instances =
             self.backend_instances.read().unwrap_or_else(|poisoned| poisoned.into_inner());
-        // This is a simplified implementation
-        // In practice, you'd need to implement proper cloning or use Arc<>
-        None
+        backend_instances.get(backend_id).cloned()
     }
 
     /// List all backends
@@ -485,13 +490,12 @@ impl HardwareRegistry {
             .collect()
     }
 
-    /// Get all backend instances
-    pub fn get_backends(&self) -> Vec<Box<dyn HardwareBackend>> {
+    /// Get all backend instances: real, shared handles (`Arc` clones) to
+    /// every currently registered backend.
+    pub fn get_backends(&self) -> Vec<Arc<dyn HardwareBackend>> {
         let backend_instances =
             self.backend_instances.read().unwrap_or_else(|poisoned| poisoned.into_inner());
-        // This is a simplified implementation
-        // In practice, you'd need to implement proper cloning or use Arc<>
-        vec![]
+        backend_instances.values().cloned().collect()
     }
 
     /// Register device
@@ -1106,5 +1110,37 @@ mod tests {
             },
             _ => panic!("Expected DeviceRegistered event"),
         }
+    }
+
+    /// Regression test: `get_backend_instance` used to always return `None`
+    /// and `get_backends` an empty `Vec`, regardless of what had been
+    /// registered - the registry was write-only. A backend registered
+    /// through `register_backend` must now be retrievable through both.
+    #[test]
+    fn test_get_backend_instance_returns_registered_backend() {
+        let registry = HardwareRegistry::new();
+        let backend = super::super::backends::CPUBackend::new();
+        let expected_name = backend.name().to_string();
+
+        let backend_id =
+            registry.register_backend(Box::new(backend)).expect("register_backend failed");
+
+        let retrieved = registry
+            .get_backend_instance(&backend_id)
+            .expect("get_backend_instance returned None for a registered backend");
+        assert_eq!(retrieved.name(), expected_name);
+
+        let all = registry.get_backends();
+        assert_eq!(
+            all.len(),
+            1,
+            "get_backends must reflect the registered backend"
+        );
+        assert_eq!(all[0].name(), expected_name);
+
+        assert!(
+            registry.get_backend_instance("no-such-backend").is_none(),
+            "an unregistered id must still return None"
+        );
     }
 }

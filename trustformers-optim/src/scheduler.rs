@@ -98,13 +98,18 @@ impl LinearScheduler {
 
 impl LRScheduler for LinearScheduler {
     fn get_lr(&self, step: usize) -> f32 {
-        if step < self.warmup_steps {
-            self.base_lr * (step as f32) / (self.warmup_steps as f32)
-        } else {
-            let progress =
-                (step - self.warmup_steps) as f32 / (self.total_steps - self.warmup_steps) as f32;
-            self.base_lr * (1.0 - progress).max(0.0)
+        if self.warmup_steps > 0 && step < self.warmup_steps {
+            return self.base_lr * (step as f32) / (self.warmup_steps as f32);
         }
+
+        // `total_steps <= warmup_steps` would underflow the usize subtraction.
+        let decay_steps = self.total_steps.saturating_sub(self.warmup_steps);
+        if decay_steps == 0 {
+            return 0.0;
+        }
+
+        let progress = (step - self.warmup_steps) as f32 / decay_steps as f32;
+        self.base_lr * (1.0 - progress).max(0.0)
     }
 
     fn step(&mut self) {
@@ -139,17 +144,26 @@ impl CosineScheduler {
 }
 
 impl LRScheduler for CosineScheduler {
+    /// Linear warmup, then cosine decay to `min_lr`.
+    ///
+    /// `progress` is clamped to `[0, 1]`: past `total_steps` the raw cosine turns back
+    /// upward and the learning rate would climb above `min_lr` again.
     fn get_lr(&self, step: usize) -> f32 {
         use std::f32::consts::PI;
 
-        if step < self.warmup_steps {
-            self.base_lr * (step as f32) / (self.warmup_steps as f32)
-        } else {
-            let progress =
-                (step - self.warmup_steps) as f32 / (self.total_steps - self.warmup_steps) as f32;
-            let cosine_decay = 0.5 * (1.0 + (PI * progress).cos());
-            self.min_lr + (self.base_lr - self.min_lr) * cosine_decay
+        if self.warmup_steps > 0 && step < self.warmup_steps {
+            return self.base_lr * (step as f32) / (self.warmup_steps as f32);
         }
+
+        // `total_steps <= warmup_steps` would underflow the usize subtraction.
+        let decay_steps = self.total_steps.saturating_sub(self.warmup_steps);
+        if decay_steps == 0 {
+            return self.min_lr;
+        }
+
+        let progress = ((step - self.warmup_steps) as f32 / decay_steps as f32).clamp(0.0, 1.0);
+        let cosine_decay = 0.5 * (1.0 + (PI * progress).cos());
+        self.min_lr + (self.base_lr - self.min_lr) * cosine_decay
     }
 
     fn step(&mut self) {
@@ -331,12 +345,22 @@ pub struct OneCycleScheduler {
 }
 
 impl OneCycleScheduler {
+    /// Creates a one-cycle schedule.
+    ///
+    /// `pct_start` is clamped to the *open* interval `(0, 1)`: the phase formulas
+    /// divide by `pct_start` and `1 − pct_start`, so the closed interval yields
+    /// `inf`/`NaN` at the endpoints.
     pub fn new(max_lr: f32, total_steps: usize, pct_start: f32, final_lr: f32) -> Self {
+        const MIN_PCT: f32 = 1e-3;
         Self {
             max_lr,
             final_lr,
             total_steps,
-            pct_start: pct_start.clamp(0.0, 1.0),
+            pct_start: if pct_start.is_finite() {
+                pct_start.clamp(MIN_PCT, 1.0 - MIN_PCT)
+            } else {
+                0.3
+            },
             current_step: 0,
         }
     }
@@ -346,6 +370,9 @@ impl LRScheduler for OneCycleScheduler {
     fn get_lr(&self, step: usize) -> f32 {
         use std::f32::consts::PI;
 
+        if self.total_steps == 0 {
+            return self.final_lr;
+        }
         let step = step.min(self.total_steps);
         let pct = step as f32 / self.total_steps as f32;
 
@@ -383,7 +410,18 @@ pub struct CosineWithRestartsScheduler {
 }
 
 impl CosineWithRestartsScheduler {
+    /// Creates an SGDR schedule.
+    ///
+    /// `t_0` is forced to at least one step and `t_mult` to at least `1.0`. A cycle
+    /// length of zero — which `t_0 == 0` or `t_mult < 1` produce — makes the
+    /// cycle-search loop in [`LRScheduler::get_lr`] subtract zero forever, hanging the
+    /// process inside a scheduler call, and then divides by zero.
+    ///
+    /// Use [`CosineWithRestartsScheduler::try_new`] to be told about an invalid
+    /// argument instead of having it silently corrected.
     pub fn new(base_lr: f32, min_lr: f32, t_0: usize, t_mult: f32) -> Self {
+        let t_0 = t_0.max(1);
+        let t_mult = if t_mult.is_finite() { t_mult.max(1.0) } else { 1.0 };
         Self {
             base_lr,
             min_lr,
@@ -394,6 +432,34 @@ impl CosineWithRestartsScheduler {
             current_t: t_0,
         }
     }
+
+    /// Fallible constructor that rejects a degenerate cycle configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `t_0 == 0` or `t_mult < 1.0` (or is not finite).
+    pub fn try_new(
+        base_lr: f32,
+        min_lr: f32,
+        t_0: usize,
+        t_mult: f32,
+    ) -> trustformers_core::errors::Result<Self> {
+        if t_0 == 0 {
+            return Err(
+                trustformers_core::errors::TrustformersError::invalid_config(
+                    "CosineWithRestartsScheduler requires t_0 >= 1".to_string(),
+                ),
+            );
+        }
+        if !t_mult.is_finite() || t_mult < 1.0 {
+            return Err(
+                trustformers_core::errors::TrustformersError::invalid_config(format!(
+                    "CosineWithRestartsScheduler requires a finite t_mult >= 1.0, got {t_mult}"
+                )),
+            );
+        }
+        Ok(Self::new(base_lr, min_lr, t_0, t_mult))
+    }
 }
 
 impl LRScheduler for CosineWithRestartsScheduler {
@@ -401,12 +467,14 @@ impl LRScheduler for CosineWithRestartsScheduler {
         use std::f32::consts::PI;
 
         let mut step_in_cycle = step;
-        let mut cycle_length = self.t_0;
+        // `new`/`try_new` guarantee `t_0 >= 1` and `t_mult >= 1`, so the cycle length
+        // can never reach zero and this loop always terminates.
+        let mut cycle_length = self.t_0.max(1);
 
         // Find which cycle we're in
         while step_in_cycle >= cycle_length {
             step_in_cycle -= cycle_length;
-            cycle_length = (cycle_length as f32 * self.t_mult) as usize;
+            cycle_length = ((cycle_length as f32 * self.t_mult) as usize).max(1);
         }
 
         let progress = step_in_cycle as f32 / cycle_length as f32;
@@ -687,6 +755,12 @@ impl AdaptiveScheduler {
     ///
     /// let scheduler = AdaptiveScheduler::new(1e-3, 0.1, 5, 1e-4, 1e-8, "min");
     /// ```
+    /// # Panics
+    ///
+    /// Panics when any argument is out of range (`factor` outside `(0, 1)`,
+    /// `patience == 0`, negative `threshold`/`min_lr`, or a `mode` other than `"min"`
+    /// or `"max"`). Prefer [`AdaptiveScheduler::try_new`], which returns an error, for
+    /// values that come from a configuration file.
     pub fn new(
         initial_lr: f32,
         factor: f32,
@@ -695,16 +769,59 @@ impl AdaptiveScheduler {
         min_lr: f32,
         mode: &str,
     ) -> Self {
-        assert!(
-            factor > 0.0 && factor < 1.0,
-            "Factor must be between 0 and 1"
-        );
-        assert!(patience > 0, "Patience must be positive");
-        assert!(threshold >= 0.0, "Threshold must be non-negative");
-        assert!(min_lr >= 0.0, "Min LR must be non-negative");
-        assert!(mode == "min" || mode == "max", "Mode must be min or max");
+        match Self::try_new(initial_lr, factor, patience, threshold, min_lr, mode) {
+            Ok(scheduler) => scheduler,
+            Err(error) => panic!("invalid AdaptiveScheduler configuration: {error}"),
+        }
+    }
 
-        Self {
+    /// Fallible constructor: every guard reports an error instead of aborting.
+    ///
+    /// The `mode` string is the most dangerous of these — a typo like `"Min"` in a
+    /// config file used to kill the training process.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidConfiguration`](trustformers_core::errors::ErrorKind)
+    /// when `factor` is not in `(0, 1)`, `patience` is zero, `threshold` or `min_lr`
+    /// is negative, or `mode` is not `"min"`/`"max"`.
+    pub fn try_new(
+        initial_lr: f32,
+        factor: f32,
+        patience: usize,
+        threshold: f32,
+        min_lr: f32,
+        mode: &str,
+    ) -> trustformers_core::errors::Result<Self> {
+        use trustformers_core::errors::TrustformersError;
+
+        if !(factor > 0.0 && factor < 1.0) {
+            return Err(TrustformersError::invalid_config(format!(
+                "AdaptiveScheduler factor must be in (0, 1), got {factor}"
+            )));
+        }
+        if patience == 0 {
+            return Err(TrustformersError::invalid_config(
+                "AdaptiveScheduler patience must be positive".to_string(),
+            ));
+        }
+        if threshold < 0.0 {
+            return Err(TrustformersError::invalid_config(format!(
+                "AdaptiveScheduler threshold must be non-negative, got {threshold}"
+            )));
+        }
+        if min_lr < 0.0 {
+            return Err(TrustformersError::invalid_config(format!(
+                "AdaptiveScheduler min_lr must be non-negative, got {min_lr}"
+            )));
+        }
+        if mode != "min" && mode != "max" {
+            return Err(TrustformersError::invalid_config(format!(
+                "AdaptiveScheduler mode must be \"min\" or \"max\", got \"{mode}\""
+            )));
+        }
+
+        Ok(Self {
             current_lr: initial_lr,
             factor,
             patience,
@@ -714,7 +831,7 @@ impl AdaptiveScheduler {
             epochs_since_improvement: 0,
             best_metric: None,
             current_step: 0,
-        }
+        })
     }
 
     /// Update the scheduler with a new metric value.
@@ -836,23 +953,49 @@ impl CompositeScheduler {
     ///     vec![1000, 10000]
     /// );
     /// ```
+    /// # Panics
+    ///
+    /// Panics when `schedulers` is empty or its length differs from
+    /// `step_boundaries`. Use [`CompositeScheduler::try_new`] for values that come
+    /// from a configuration file.
     pub fn new(schedulers: Vec<Box<dyn LRScheduler>>, step_boundaries: Vec<usize>) -> Self {
-        assert_eq!(
-            schedulers.len(),
-            step_boundaries.len(),
-            "Number of schedulers must match number of boundaries"
-        );
-        assert!(
-            !schedulers.is_empty(),
-            "Must provide at least one scheduler"
-        );
+        match Self::try_new(schedulers, step_boundaries) {
+            Ok(scheduler) => scheduler,
+            Err(error) => panic!("invalid CompositeScheduler configuration: {error}"),
+        }
+    }
 
-        Self {
+    /// Fallible constructor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `schedulers` is empty or its length differs from
+    /// `step_boundaries`.
+    pub fn try_new(
+        schedulers: Vec<Box<dyn LRScheduler>>,
+        step_boundaries: Vec<usize>,
+    ) -> trustformers_core::errors::Result<Self> {
+        use trustformers_core::errors::TrustformersError;
+
+        if schedulers.is_empty() {
+            return Err(TrustformersError::invalid_config(
+                "CompositeScheduler needs at least one scheduler".to_string(),
+            ));
+        }
+        if schedulers.len() != step_boundaries.len() {
+            return Err(TrustformersError::invalid_config(format!(
+                "CompositeScheduler has {} schedulers but {} boundaries",
+                schedulers.len(),
+                step_boundaries.len()
+            )));
+        }
+
+        Ok(Self {
             schedulers,
             step_boundaries,
             current_step: 0,
             global_step_offset: 0,
-        }
+        })
     }
 
     fn get_active_scheduler_index(&self, step: usize) -> usize {
@@ -933,15 +1076,37 @@ impl PhaseBasedScheduler {
     /// ];
     /// let scheduler = PhaseBasedScheduler::new(phases);
     /// ```
+    /// # Panics
+    ///
+    /// Panics when `phases` is empty. Use [`PhaseBasedScheduler::try_new`] for values
+    /// that come from a configuration file.
     pub fn new(phases: Vec<Phase>) -> Self {
-        assert!(!phases.is_empty(), "Must provide at least one phase");
+        match Self::try_new(phases) {
+            Ok(scheduler) => scheduler,
+            Err(error) => panic!("invalid PhaseBasedScheduler configuration: {error}"),
+        }
+    }
 
-        Self {
+    /// Fallible constructor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `phases` is empty.
+    pub fn try_new(phases: Vec<Phase>) -> trustformers_core::errors::Result<Self> {
+        if phases.is_empty() {
+            return Err(
+                trustformers_core::errors::TrustformersError::invalid_config(
+                    "PhaseBasedScheduler needs at least one phase".to_string(),
+                ),
+            );
+        }
+
+        Ok(Self {
             phases,
             current_phase: 0,
             current_step: 0,
             phase_start_step: 0,
-        }
+        })
     }
 
     /// Get the current phase name.
@@ -1195,5 +1360,98 @@ impl LRScheduler for TaskSpecificScheduler {
     fn step(&mut self) {
         self.current_step += 1;
         self.scheduler.step();
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    /// Regression: `t_mult < 1` (or `t_0 == 0`) drove the cycle length to zero, after
+    /// which `step_in_cycle -= 0` looped forever inside a scheduler call.
+    #[test]
+    fn cosine_with_restarts_never_hangs() {
+        for (t_0, t_mult) in [(0_usize, 2.0_f32), (10, 0.5), (0, 0.0), (5, f32::NAN)] {
+            let scheduler = CosineWithRestartsScheduler::new(1e-3, 1e-5, t_0, t_mult);
+            // If the guard were missing this call would never return.
+            let lr = scheduler.get_lr(1_000);
+            assert!(lr.is_finite(), "t_0={t_0}, t_mult={t_mult} produced {lr}");
+        }
+    }
+
+    /// The fallible constructor reports the degenerate cases instead of correcting them.
+    #[test]
+    fn cosine_with_restarts_try_new_validates() {
+        assert!(CosineWithRestartsScheduler::try_new(1e-3, 1e-5, 10, 2.0).is_ok());
+        assert!(CosineWithRestartsScheduler::try_new(1e-3, 1e-5, 0, 2.0).is_err());
+        assert!(CosineWithRestartsScheduler::try_new(1e-3, 1e-5, 10, 0.5).is_err());
+        assert!(CosineWithRestartsScheduler::try_new(1e-3, 1e-5, 10, f32::NAN).is_err());
+    }
+
+    /// Regression: past `total_steps` the unclamped cosine turned back upward and the
+    /// learning rate climbed above `min_lr` again.
+    #[test]
+    fn cosine_lr_never_rises_after_the_schedule_ends() {
+        let scheduler = CosineScheduler::new(1e-3, 100, 1000, 1e-5);
+
+        assert!((scheduler.get_lr(0) - 0.0).abs() < 1e-9);
+        assert!((scheduler.get_lr(100) - 1e-3).abs() < 1e-9);
+        let at_end = scheduler.get_lr(1000);
+        assert!((at_end - 1e-5).abs() < 1e-7, "at total_steps: {at_end}");
+
+        for step in [1001_usize, 1500, 2000, 10_000] {
+            let lr = scheduler.get_lr(step);
+            assert!(
+                (lr - 1e-5).abs() < 1e-7,
+                "step {step} must stay at min_lr, got {lr}"
+            );
+        }
+    }
+
+    /// `total_steps <= warmup_steps` used to underflow the usize subtraction.
+    #[test]
+    fn degenerate_step_counts_do_not_underflow() {
+        let cosine = CosineScheduler::new(1e-3, 1000, 100, 1e-5);
+        assert!(cosine.get_lr(2000).is_finite());
+
+        let linear = LinearScheduler::new(1e-3, 1000, 100);
+        assert!(linear.get_lr(2000).is_finite());
+    }
+
+    /// `pct_start` of exactly 0 or 1 used to divide by zero.
+    #[test]
+    fn one_cycle_endpoints_stay_finite() {
+        for pct_start in [0.0_f32, 1.0, -1.0, 2.0, f32::NAN] {
+            let scheduler = OneCycleScheduler::new(1e-2, 1000, pct_start, 1e-5);
+            for step in [0_usize, 1, 500, 999, 1000, 5000] {
+                let lr = scheduler.get_lr(step);
+                assert!(lr.is_finite(), "pct_start={pct_start}, step={step} -> {lr}");
+            }
+        }
+
+        // A zero-length schedule must not divide by zero either.
+        let empty = OneCycleScheduler::new(1e-2, 0, 0.3, 1e-5);
+        assert!(empty.get_lr(0).is_finite());
+    }
+
+    /// Regression: eight public constructors aborted the process on a bad argument.
+    #[test]
+    fn constructors_report_invalid_configuration() {
+        assert!(AdaptiveScheduler::try_new(1e-3, 0.1, 5, 1e-4, 1e-8, "min").is_ok());
+        assert!(AdaptiveScheduler::try_new(1e-3, 1.5, 5, 1e-4, 1e-8, "min").is_err());
+        assert!(AdaptiveScheduler::try_new(1e-3, 0.1, 0, 1e-4, 1e-8, "min").is_err());
+        assert!(AdaptiveScheduler::try_new(1e-3, 0.1, 5, -1.0, 1e-8, "min").is_err());
+        assert!(AdaptiveScheduler::try_new(1e-3, 0.1, 5, 1e-4, -1.0, "min").is_err());
+        // The stringly-typed mode is the one most likely to come from a config file.
+        assert!(AdaptiveScheduler::try_new(1e-3, 0.1, 5, 1e-4, 1e-8, "Min").is_err());
+
+        assert!(CompositeScheduler::try_new(Vec::new(), Vec::new()).is_err());
+        assert!(CompositeScheduler::try_new(
+            vec![Box::new(LinearScheduler::new(1e-3, 10, 100)) as Box<dyn LRScheduler>],
+            vec![10, 20],
+        )
+        .is_err());
+
+        assert!(PhaseBasedScheduler::try_new(Vec::new()).is_err());
     }
 }

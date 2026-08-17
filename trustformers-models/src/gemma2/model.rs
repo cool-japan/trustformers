@@ -318,7 +318,7 @@ pub struct Gemma2Attention {
 
 impl Gemma2Attention {
     pub fn new(config: &Gemma2Config, layer_idx: usize, device: Device) -> Result<Self> {
-        if !(config.query_pre_attn_scalar > 0.0) {
+        if config.query_pre_attn_scalar.is_nan() || config.query_pre_attn_scalar <= 0.0 {
             // Raised to the -0.5 power below; zero, negative, or NaN would
             // silently produce an infinite or NaN attention scale instead of
             // a clear construction-time error.
@@ -1156,6 +1156,194 @@ mod tests {
         assert_eq!(
             out_len, cfg.hidden_size,
             "f32 input must produce correct output shape"
+        );
+    }
+
+    // -- attention_scale_from_query_pre_attn_scalar / query_pre_attn_scalar --
+    //
+    // Regression coverage for `Gemma2Config::query_pre_attn_scalar` holding
+    // the raw HuggingFace `config.json` value (the denominator the scale is
+    // derived from via `^-0.5`) rather than a precomputed scale. Before this
+    // fix, `Gemma2Attention` used `config.query_pre_attn_scalar` directly as
+    // the multiplicative scale; deserializing a real Gemma-2 `config.json`
+    // (which carries `"query_pre_attn_scalar": 256` for 2B/9B) into that
+    // field would then have scaled every attention score by 256 instead of
+    // by `256^-0.5 == 1/16` -- a 4096x error with no error returned.
+
+    #[test]
+    fn test_attention_scale_matches_hf_formula_for_2b_9b() {
+        // Published HF config value for Gemma-2 2B/9B: query_pre_attn_scalar
+        // == head_dim == 256, so scale == 256^-0.5 == 1/16.
+        let scale = attention_scale_from_query_pre_attn_scalar(256.0);
+        assert!(
+            (scale - 0.0625).abs() < 1e-6,
+            "expected 0.0625, got {scale}"
+        );
+    }
+
+    #[test]
+    fn test_attention_scale_27b_diverges_from_naive_head_dim_formula() {
+        // Gemma-2-27B deliberately sets query_pre_attn_scalar=144 despite
+        // head_dim=128, so the correct scale must differ from the naive (and
+        // for 27B, wrong) `head_dim^-0.5` formula.
+        let correct = attention_scale_from_query_pre_attn_scalar(144.0);
+        let naive_head_dim_scale = 1.0_f32 / 128.0_f32.sqrt();
+        assert!(
+            (correct - naive_head_dim_scale).abs() > 1e-3,
+            "27B's scale must differ from head_dim^-0.5: correct={correct}, naive={naive_head_dim_scale}"
+        );
+        assert!(
+            (correct - 1.0 / 12.0_f32).abs() < 1e-4,
+            "144^-0.5 must equal 1/12, got {correct}"
+        );
+    }
+
+    #[test]
+    fn test_gemma2_attention_rejects_non_positive_query_pre_attn_scalar() {
+        let mut cfg = tiny_config();
+        cfg.query_pre_attn_scalar = 0.0;
+        let result = Gemma2Attention::new(&cfg, 0, Device::CPU);
+        assert!(
+            result.is_err(),
+            "query_pre_attn_scalar=0 must be rejected at construction rather than silently \
+             producing an infinite/NaN scale"
+        );
+    }
+
+    #[test]
+    fn test_gemma2_attention_scale_field_reflects_raw_hf_config_value() {
+        // Constructing with the real HF raw value (256.0, as it would
+        // appear if a real Gemma-2 `config.json` were deserialized) must
+        // derive the correct scale (1/16), not use 256.0 as the scale
+        // itself.
+        let mut cfg = tiny_config();
+        cfg.query_pre_attn_scalar = 256.0;
+        let attn = Gemma2Attention::new(&cfg, 0, Device::CPU).expect("attention must build");
+        assert!(
+            (attn.scale - 0.0625).abs() < 1e-6,
+            "derived scale must be 256^-0.5 = 0.0625, got {}",
+            attn.scale
+        );
+    }
+
+    fn scale_regression_config() -> Gemma2Config {
+        Gemma2Config {
+            vocab_size: 8,
+            hidden_size: 2,
+            num_hidden_layers: 2,
+            num_attention_heads: 1,
+            num_key_value_heads: 1,
+            intermediate_size: 4,
+            head_dim: 2,
+            max_position_embeddings: 8,
+            rope_theta: 10000.0,
+            rms_norm_eps: 1e-6,
+            sliding_window: 16,
+            attention_logit_softcapping: 1.0e6, // near-identity soft-cap for this test's small scores
+            final_logit_softcapping: 30.0,
+            query_pre_attn_scalar: 256.0, // the real HF raw value for 2B/9B
+            model_type: "gemma2-scale-test".to_string(),
+        }
+    }
+
+    /// End-to-end regression test through the public `Layer::forward` API:
+    /// with `query_pre_attn_scalar` set to the real HF raw value (256.0),
+    /// the attention output must match a hand-derived reference computed
+    /// with the CORRECT scale (`256^-0.5 == 1/16`), not the value the old
+    /// (buggy) code would have produced by using 256.0 directly as the
+    /// scale (which saturates softmax toward a one-hot distribution).
+    #[test]
+    fn test_gemma2_attention_forward_uses_derived_scale_not_raw_query_pre_attn_scalar() {
+        let cfg = scale_regression_config();
+        let mut attn = Gemma2Attention::new(&cfg, 1, Device::CPU).expect("global attention layer");
+        assert!(
+            !attn.is_local(),
+            "layer 1 must be global so a sliding window can't affect this test"
+        );
+
+        // Identity Q/K/V/O projections make Q == K == V == the raw input,
+        // so the whole computation is hand-traceable.
+        let identity =
+            Tensor::from_vec(vec![1.0_f32, 0.0, 0.0, 1.0], &[2, 2]).expect("identity tensor");
+        attn.q_proj.set_weight(identity.clone()).expect("set q_proj weight");
+        attn.k_proj.set_weight(identity.clone()).expect("set k_proj weight");
+        attn.v_proj.set_weight(identity.clone()).expect("set v_proj weight");
+        attn.o_proj.set_weight(identity).expect("set o_proj weight");
+
+        // token0 = [1, 0] at position 0, token1 = [0, 1] at position 1.
+        let input = Tensor::from_vec(vec![1.0_f32, 0.0, 0.0, 1.0], &[2, 2]).expect("input tensor");
+        let output = attn.forward(input).expect("attention forward");
+        let out_data = match output {
+            Tensor::F32(arr) => arr.as_slice().expect("contiguous").to_vec(),
+            _ => panic!("expected F32 output"),
+        };
+
+        // --- Independent reference, computed directly from the published
+        // equations (not by calling this module's internal helpers) ---
+        //
+        // RoPE with head_dim=2, theta=10000 has a single frequency of 1.0.
+        // Position 0 is an identity rotation; position 1 rotates [0,1] by
+        // angle=1.0 radian via (x1,x2) -> (x1*cos - x2*sin, x1*sin + x2*cos).
+        let angle = 1.0_f32;
+        let (sin_a, cos_a) = (angle.sin(), angle.cos());
+        let q1_rot = [0.0 * cos_a - 1.0 * sin_a, 0.0 * sin_a + 1.0 * cos_a];
+        let k0_rot = [1.0_f32, 0.0_f32];
+        let k1_rot = q1_rot; // identical input and rotation to q1
+
+        let correct_scale = attention_scale_from_query_pre_attn_scalar(cfg.query_pre_attn_scalar);
+        assert!(
+            (correct_scale - 0.0625).abs() < 1e-6,
+            "sanity: 256^-0.5 must be 1/16, got {correct_scale}"
+        );
+
+        let dot = |a: [f32; 2], b: [f32; 2]| a[0] * b[0] + a[1] * b[1];
+        let s0 = dot(q1_rot, k0_rot) * correct_scale;
+        let s1 = dot(q1_rot, k1_rot) * correct_scale;
+        let m = s0.max(s1);
+        let (e0, e1) = ((s0 - m).exp(), (s1 - m).exp());
+        let (w0, w1) = (e0 / (e0 + e1), e1 / (e0 + e1));
+        // V is never rotated: V0=[1,0], V1=[0,1] (the raw input rows).
+        let expected_row1 = [w0, w1];
+
+        // Sanity: the reference itself must not already be a saturated
+        // ~[0, 1] distribution, or this test couldn't tell the fix apart
+        // from the bug it targets.
+        assert!(
+            expected_row1[1] < 0.9,
+            "sanity: reference must not be saturated, got {expected_row1:?}"
+        );
+
+        // Row 0 attends only to itself (causal, single-key softmax): its
+        // output is exactly V[0] regardless of scale, so it only checks
+        // basic wiring, not the scale itself.
+        assert!(
+            (out_data[0] - 1.0).abs() < 1e-4,
+            "row0[0]: got {}",
+            out_data[0]
+        );
+        assert!(
+            (out_data[1] - 0.0).abs() < 1e-4,
+            "row0[1]: got {}",
+            out_data[1]
+        );
+
+        // Row 1 is the discriminating check. If `forward` used the raw
+        // `query_pre_attn_scalar` (256.0) directly as the scale instead of
+        // `256^-0.5`, the pre-softmax scores would be ~4096x larger,
+        // saturating softmax toward `[~0, ~1]` instead of matching
+        // `expected_row1`.
+        assert!(
+            (out_data[2] - expected_row1[0]).abs() < 1e-3,
+            "row1[0]: expected {}, got {}",
+            expected_row1[0],
+            out_data[2]
+        );
+        assert!(
+            (out_data[3] - expected_row1[1]).abs() < 1e-3,
+            "row1[1]: expected {}, got {} (a value near 1.0 indicates the raw \
+             query_pre_attn_scalar was used directly as the scale)",
+            expected_row1[1],
+            out_data[3]
         );
     }
 }

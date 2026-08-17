@@ -73,8 +73,6 @@ pub mod visualization;
 pub mod vocab;
 pub mod vocab_analyzer;
 pub mod wordpiece;
-// TEMPORARY-VERIFICATION-GATE: restored before this session ends.
-#[cfg(not(tokenizers_a_verification))]
 pub mod zero_copy;
 
 #[cfg(feature = "python")]
@@ -138,10 +136,9 @@ pub use custom_format::{
 pub use fairseq::{FairseqDictionaryBuilder, FairseqTokenizer};
 #[cfg(feature = "gpu")]
 pub use gpu_tokenization::{
-    BatchProcessingConfig, BenchmarkResult as GpuBenchmarkResult, GpuTokenizationBenchmark,
-    GpuTokenizationResult, GpuTokenizationStats, GpuTokenizer, GpuTokenizerConfig,
-    GpuTokenizerError, KernelOptimization, MemoryOptimization,
-    PaddingStrategy as GpuPaddingStrategy,
+    BatchProcessingConfig, BenchmarkResult as GpuBenchmarkResult, GpuBackend,
+    GpuTokenizationBenchmark, GpuTokenizationResult, GpuTokenizationStats, GpuTokenizer,
+    GpuTokenizerConfig, GpuTokenizerError, PaddingStrategy as GpuPaddingStrategy,
 };
 pub use japanese::{JapaneseMode, JapaneseTokenizer, JapaneseTokenizerConfig};
 #[cfg(feature = "jax")]
@@ -179,7 +176,10 @@ pub use onnx::{
     OnnxOptimizationLevel, OnnxSessionOptions, OnnxTensorData, OnnxTensorInfo,
     OnnxTokenizerExporter, OnnxTokenizerRuntime, OnnxUtils,
 };
-pub use parallel::{BatchTokenizer, BatchedTokenizedInput, ParallelTokenizer};
+pub use parallel::{
+    BatchTokenizer, BatchedTokenizedInput, PaddingSide as BatchPaddingSide, ParallelTokenizer,
+    TruncationStrategy as BatchTruncationStrategy,
+};
 pub use performance_profiler::{
     BenchmarkResult, ExportFormat, MemoryStats as ProfilerMemoryStats, PerformanceProfiler,
     ProfilerConfig, ProfilingReport, ProfilingSummary, ThroughputStats, TimingStats,
@@ -248,7 +248,6 @@ pub use vocab_analyzer::{
     VocabIssueType,
 };
 pub use wordpiece::WordPieceTokenizer;
-#[cfg(not(tokenizers_a_verification))]
 pub use zero_copy::{
     ZeroCopyBuilder, ZeroCopyHeader, ZeroCopyMemoryStats, ZeroCopyTokenizer, ZeroCopyUtils,
     ZeroCopyVocabEntry,

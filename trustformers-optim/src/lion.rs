@@ -11,11 +11,15 @@
 //! - Often achieves better performance on large models
 //! - More stable training with larger learning rates
 //!
-//! The Lion update rule:
+//! The Lion update rule (Chen et al., Algorithm 2 — note the *two* betas):
 //! ```text
-//! m_t = β1 * m_{t-1} + (1 - β1) * g_t
-//! θ_t = θ_{t-1} - η * (sign(m_t) + λ * θ_{t-1})
+//! u_t = β1 * m_{t-1} + (1 - β1) * g_t     // interpolated update direction
+//! θ_t = θ_{t-1} - η * (sign(u_t) + λ * θ_{t-1})
+//! m_t = β2 * m_{t-1} + (1 - β2) * g_t     // momentum memory
 //! ```
+//! β1 controls how much of the *current* gradient enters the step, β2 the memory
+//! horizon of the momentum buffer. This matches `lion-pytorch`, so PyTorch betas can
+//! be passed through unchanged.
 //!
 //! Reference: "Symbolic Discovery of Optimization Algorithms"
 //! by Chen et al. (2023) - Google Research
@@ -37,7 +41,7 @@
 //! // Create Lion optimizer
 //! let mut optimizer = Lion::new(
 //!     1e-4,           // Learning rate (typically lower than Adam)
-//!     (0.9, 0.99),    // (β1, β2) - β2 for momentum update
+//!     (0.9, 0.99),    // (β1, β2) - β1 interpolates the step, β2 the momentum
 //!     0.01,           // Weight decay coefficient
 //! );
 //! ```
@@ -50,8 +54,8 @@
 //! - Can often use larger learning rates than other optimizers
 //!
 //! ### Beta Values
-//! - β1 (momentum coefficient): 0.9 (default, robust across tasks)
-//! - β2 (momentum interpolation): 0.99 (affects momentum interpolation)
+//! - β1 (update interpolation): 0.9 (default, robust across tasks)
+//! - β2 (momentum decay): 0.99 (memory horizon of the momentum buffer)
 //! - Less sensitive to β values than Adam
 //!
 //! ### Weight Decay
@@ -208,9 +212,9 @@ impl Optimizer for Lion {
                 for ((p, &g), m) in param.iter_mut().zip(grad_arr.iter()).zip(momentum.iter_mut()) {
                     // Apply gradient clipping
                     let clipped_g = g * clip_coeff;
-                    // Compute interpolated momentum: β2 * m + (1 - β2) * clipped_g
+                    // Update direction: u = β1 * m + (1 - β1) * g   (Chen et al.)
                     let interpolated_momentum =
-                        self.config.betas.1 * *m + (1.0 - self.config.betas.1) * clipped_g;
+                        self.config.betas.0 * *m + (1.0 - self.config.betas.0) * clipped_g;
 
                     // Compute update using sign of interpolated momentum
                     let sign_update = if interpolated_momentum > 0.0 {
@@ -229,8 +233,8 @@ impl Optimizer for Lion {
                     // Apply Lion update: θ = θ - η * sign(interpolated_momentum)
                     *p -= self.config.lr * sign_update;
 
-                    // Update momentum: m = β1 * m + (1 - β1) * clipped_g
-                    *m = self.config.betas.0 * *m + (1.0 - self.config.betas.0) * clipped_g;
+                    // Momentum memory: m = β2 * m + (1 - β2) * g   (Chen et al.)
+                    *m = self.config.betas.1 * *m + (1.0 - self.config.betas.1) * clipped_g;
                 }
 
                 Ok(())
@@ -488,5 +492,63 @@ mod tests {
         optimizer.reset_state();
         assert_eq!(optimizer.state.step, 0);
         assert!(optimizer.momentum.is_empty());
+    }
+
+    /// Exact hand-computed Lion steps against the paper's Algorithm 2.
+    ///
+    /// With `lr = 0.1`, `β = (0.8, 0.5)`, `λ = 0`, `m₀ = 0` and `g = 2`:
+    ///
+    /// * step 1: `u = 0.8·0 + 0.2·2 = 0.4 → sign +1`, so `θ = 1 − 0.1 = 0.9`;
+    ///   `m = 0.5·0 + 0.5·2 = 1.0`.
+    /// * step 2 with `g = −2`: `u = 0.8·1.0 + 0.2·(−2) = 0.4 → sign +1`, so
+    ///   `θ = 0.9 − 0.1 = 0.8` — the sign of the *interpolated* direction, not of the
+    ///   gradient. Swapping the betas (the previous behaviour) gives
+    ///   `u = 0.5·1.0 + 0.5·(−2) = −0.5 → sign −1` and the opposite step.
+    #[test]
+    fn lion_uses_beta1_for_the_step_and_beta2_for_the_momentum() {
+        let mut optimizer = Lion::new(0.1, (0.8, 0.5), 0.0);
+        let mut param = Tensor::from_vec(vec![1.0_f32], &[1]).expect("tensor");
+
+        optimizer
+            .update(
+                &mut param,
+                &Tensor::from_vec(vec![2.0_f32], &[1]).expect("grad"),
+            )
+            .expect("step 1");
+        let after_one = param.data_f32().expect("data")[0];
+        assert!((after_one - 0.9).abs() < 1e-6, "got {after_one}");
+
+        optimizer
+            .update(
+                &mut param,
+                &Tensor::from_vec(vec![-2.0_f32], &[1]).expect("grad"),
+            )
+            .expect("step 2");
+        let after_two = param.data_f32().expect("data")[0];
+        assert!(
+            (after_two - 0.8).abs() < 1e-6,
+            "beta roles are swapped: expected 0.8, got {after_two}"
+        );
+    }
+
+    /// Convergence smoke test on the quadratic bowl `f(x) = Σ x²` (`∇f = 2x`).
+    #[test]
+    fn lion_descends_a_quadratic_bowl() {
+        let mut optimizer = Lion::new(0.01, (0.9, 0.99), 0.0);
+        let mut param = Tensor::from_vec(vec![3.0_f32, -4.0], &[2]).expect("tensor");
+        let initial: f32 = param.data_f32().expect("data").iter().map(|v| v * v).sum();
+
+        for _ in 0..400 {
+            let values = param.data_f32().expect("data");
+            let grad = Tensor::from_vec(values.iter().map(|v| 2.0 * v).collect::<Vec<f32>>(), &[2])
+                .expect("grad");
+            optimizer.update(&mut param, &grad).expect("step");
+        }
+
+        let final_loss: f32 = param.data_f32().expect("data").iter().map(|v| v * v).sum();
+        assert!(
+            final_loss < initial * 0.05,
+            "loss must fall: {initial} -> {final_loss}"
+        );
     }
 }

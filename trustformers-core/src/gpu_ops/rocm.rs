@@ -80,21 +80,48 @@ impl RocmBackend {
         Ok(Self { device_id })
     }
 
-    /// Check if ROCm is available on the system
+    /// Check if a real ROCm/HIP runtime is available on the system.
+    ///
+    /// ROCm ships only for Linux, and a stale install path or leftover
+    /// environment variable does not mean the runtime actually works - so
+    /// this attempts to `dlopen` the real HIP runtime library rather than
+    /// just checking that `/opt/rocm` exists or `ROCM_PATH`/`HIP_PATH` are
+    /// set (which a broken or partial install can still leave behind).
     fn is_rocm_available() -> bool {
-        // Check for ROCm installation
-        std::path::Path::new("/opt/rocm").exists()
-            || std::env::var("ROCM_PATH").is_ok()
-            || std::env::var("HIP_PATH").is_ok()
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: `Library::new` only opens the shared object to read
+            // its dynamic symbol table; it does not call into it. Any
+            // handle obtained here is immediately dropped - this call is
+            // solely a runtime availability probe, mirroring the same
+            // library names `kernels/rocm_impl.rs::HipLibrary::load` binds.
+            unsafe {
+                libloading::Library::new("libamdhip64.so")
+                    .or_else(|_| libloading::Library::new("libamdhip64.so.5"))
+                    .or_else(|_| libloading::Library::new("libamdhip64.so.6"))
+                    .is_ok()
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // ROCm has no runtime for macOS/Windows; never claim
+            // availability there regardless of stray env vars or paths.
+            false
+        }
     }
 
-    /// Perform matrix multiplication on ROCm GPU
+    /// Perform matrix multiplication.
     ///
-    /// Placeholder implementation - in a full version, this would:
-    /// 1. Compile HIP kernel (similar to CUDA)
-    /// 2. Allocate device memory
-    /// 3. Launch HIP kernel
-    /// 4. Copy result back to host
+    /// No HIP kernel is dispatched here (see the module docs: this crate
+    /// carries no real HIP GEMM binding yet). Rather than a hand-rolled,
+    /// unblocked triple loop - orders of magnitude slower than either a
+    /// real GPU or the CPU BLAS path - this routes through `Tensor::matmul`,
+    /// which uses OxiBLAS (`oxiblas_blas::level3::gemm` on macOS,
+    /// scirs2-core's SIMD GEMM elsewhere) as its CPU fallback. `new()`
+    /// already refuses to construct a `RocmBackend` unless
+    /// `is_rocm_available()` found a real HIP runtime, so reaching this
+    /// method at all only happens on a genuine (if not yet wired up here)
+    /// ROCm-capable host.
     pub fn matmul_f32(
         &self,
         a: &[f32],
@@ -103,47 +130,16 @@ impl RocmBackend {
         k: usize,
         n: usize,
     ) -> Result<Vec<f32>> {
-        // HIP kernel source (CUDA-compatible)
-        #[allow(dead_code)]
-        const HIP_KERNEL_SRC: &str = r#"
-extern "C" __global__ void matmul_kernel(
-    const float* a,
-    const float* b,
-    float* c,
-    unsigned int M,
-    unsigned int N,
-    unsigned int K
-) {
-    unsigned int row = blockIdx.y * blockDim.y + threadIdx.y;
-    unsigned int col = blockIdx.x * blockDim.x + threadIdx.x;
+        tracing::debug!(
+            "ROCm HIP kernel dispatch not yet wired up (device {}) - using the OxiBLAS-backed \
+             CPU GEMM path instead of a hand-rolled loop",
+            self.device_id
+        );
 
-    if (row >= M || col >= N) return;
-
-    float sum = 0.0f;
-    for (unsigned int i = 0; i < K; ++i) {
-        sum += a[row * K + i] * b[i * N + col];
-    }
-    c[row * N + col] = sum;
-}
-"#;
-
-        // Placeholder: Fallback to CPU implementation
-        // TODO: Implement actual HIP kernel execution when HIP bindings are available
-        tracing::debug!("ROCm GPU operations not yet implemented - using CPU fallback");
-
-        // CPU fallback
-        let mut result = vec![0.0f32; m * n];
-        for i in 0..m {
-            for j in 0..n {
-                let mut sum = 0.0f32;
-                for p in 0..k {
-                    sum += a[i * k + p] * b[p * n + j];
-                }
-                result[i * n + j] = sum;
-            }
-        }
-
-        Ok(result)
+        let a_tensor = Tensor::from_vec(a.to_vec(), &[m, k])?;
+        let b_tensor = Tensor::from_vec(b.to_vec(), &[k, n])?;
+        let result = a_tensor.matmul(&b_tensor)?;
+        result.data()
     }
 
     /// Execute GELU activation on GPU (placeholder)
@@ -213,10 +209,15 @@ extern "C" __global__ void matmul_kernel(
         Ok(result)
     }
 
-    /// Get device information
+    /// Get device information.
+    ///
+    /// Deliberately does not claim to be a GPU device: `matmul_f32` (and
+    /// friends) run on the CPU via OxiBLAS (see their docs), not on the
+    /// AMD GPU `is_rocm_available()` detected at construction time.
     pub fn device_info(&self) -> String {
         format!(
-            "ROCm Device {} (placeholder - HIP bindings required)",
+            "ROCm host {} - HIP runtime detected but kernel dispatch is not wired up yet; \
+             operations run on the CPU via OxiBLAS, not on the GPU",
             self.device_id
         )
     }
@@ -305,6 +306,18 @@ pub fn dispatch_rocm_matmul(a: &Tensor, b: &Tensor, device_id: usize) -> Result<
     }
 }
 
+#[cfg(all(test, feature = "rocm"))]
+impl RocmBackend {
+    /// Test-only constructor that bypasses `is_rocm_available()`.
+    /// `RocmBackend` holds no live device resource (just `device_id`), so
+    /// this is safe and lets `matmul_f32`/`device_info` be exercised for
+    /// correctness on hosts with no real HIP runtime (e.g. CI on macOS),
+    /// independent of whether hardware *detection* itself succeeds.
+    fn new_for_test(device_id: usize) -> Self {
+        Self { device_id }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,6 +327,61 @@ mod tests {
     fn test_rocm_availability() {
         let available = RocmBackend::is_rocm_available();
         println!("ROCm available: {}", available);
+    }
+
+    /// Regression test: before this fix, availability was based on
+    /// `/opt/rocm` existing or `ROCM_PATH`/`HIP_PATH` being set - true even
+    /// on a non-Linux host with a stray directory or leftover env var and
+    /// no real HIP runtime at all. ROCm ships only for Linux, so this must
+    /// be unconditionally false elsewhere.
+    #[test]
+    #[cfg(all(feature = "rocm", not(target_os = "linux")))]
+    fn test_is_rocm_available_false_on_non_linux() {
+        assert!(!RocmBackend::is_rocm_available());
+    }
+
+    /// Regression test: before this fix, `matmul_f32` computed via a
+    /// hand-rolled `O(m*n*k)` triple loop. This is numerically fine but is
+    /// replaced with the OxiBLAS-backed `Tensor::matmul` path; verify the
+    /// rewrite still produces correct results for a *non-square* matmul
+    /// (the shape most likely to expose a transpose/stride mix-up when
+    /// switching implementations).
+    #[test]
+    #[cfg(feature = "rocm")]
+    fn test_matmul_f32_rectangular_matches_hand_computed_reference() {
+        let backend = RocmBackend::new_for_test(0);
+        // A: 2x3, B: 3x2 -> C: 2x2
+        let a = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let b = vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
+        let result = backend.matmul_f32(&a, &b, 2, 3, 2).expect("matmul_f32 should succeed");
+
+        // row0 = [1*7+2*9+3*11, 1*8+2*10+3*12] = [58, 64]
+        // row1 = [4*7+5*9+6*11, 4*8+5*10+6*12] = [139, 154]
+        let expected = [58.0, 64.0, 139.0, 154.0];
+        for (i, (&res, &exp)) in result.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (res - exp).abs() < 1e-3,
+                "mismatch at index {}: {} vs {}",
+                i,
+                res,
+                exp
+            );
+        }
+    }
+
+    /// Regression test: before this fix, `device_info` unconditionally
+    /// read "ROCm Device N (placeholder - HIP bindings required)" - easily
+    /// misread as "a GPU is in use". It must now make clear execution
+    /// happens on the CPU.
+    #[test]
+    #[cfg(feature = "rocm")]
+    fn test_device_info_does_not_claim_gpu_execution() {
+        let backend = RocmBackend::new_for_test(0);
+        let info = backend.device_info();
+        assert!(
+            info.contains("CPU"),
+            "device_info must make clear execution is on the CPU, got: {info}"
+        );
     }
 
     #[test]

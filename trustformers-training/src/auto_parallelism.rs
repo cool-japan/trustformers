@@ -851,7 +851,7 @@ impl AutoParallelismSelector {
 
         // Deterministic seed derived from the problem definition.
         let mut rng_state = (max_devices as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            ^ (self.config.model_constraints.num_parameters as u64)
+            ^ self.config.model_constraints.num_parameters
             ^ (self.config.model_constraints.num_layers as u64).wrapping_mul(0x1000_0000_01b3);
         let mut next_unit = || -> f64 {
             rng_state = rng_state.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -1345,7 +1345,7 @@ impl AutoParallelismSelector {
         let simulated = self.evaluate_simulation_based(strategies)?;
 
         let mut blended = Vec::with_capacity(model_based.len());
-        for (analytic, sim) in model_based.into_iter().zip(simulated.into_iter()) {
+        for (analytic, sim) in model_based.into_iter().zip(simulated) {
             let analytic_secs = analytic.expected_performance.time_per_step.as_secs_f64();
             let sim_secs = sim.expected_performance.time_per_step.as_secs_f64();
             let disagreement = if analytic_secs > 0.0 {

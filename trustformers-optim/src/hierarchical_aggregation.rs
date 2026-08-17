@@ -27,7 +27,7 @@ use trustformers_core::tensor::Tensor;
 /// world size of one; any larger configuration returns
 /// [`AggregationError::NoCommunicator`] instead of aggregating against
 /// fabricated data.
-
+///
 /// Errors raised by hierarchical aggregation.
 #[derive(Debug, thiserror::Error)]
 pub enum AggregationError {

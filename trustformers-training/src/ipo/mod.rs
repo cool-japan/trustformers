@@ -523,8 +523,8 @@ mod tests {
             label_smoothing: 0.1,
         };
 
-        let result_no_smooth =
-            compute_ipo_loss(&[pair.clone()], &config_no_smooth).expect("should succeed");
+        let result_no_smooth = compute_ipo_loss(std::slice::from_ref(&pair), &config_no_smooth)
+            .expect("should succeed");
         let result_smooth = compute_ipo_loss(&[pair], &config_smooth).expect("should succeed");
 
         // target_no_smooth = 1/(2*1) = 0.5
@@ -563,8 +563,8 @@ mod tests {
             ..IpoConfig::default()
         };
 
-        let result_low =
-            compute_ipo_loss(&[pair.clone()], &config_low_beta).expect("should succeed");
+        let result_low = compute_ipo_loss(std::slice::from_ref(&pair), &config_low_beta)
+            .expect("should succeed");
         let result_high = compute_ipo_loss(&[pair], &config_high_beta).expect("should succeed");
 
         // Higher beta => smaller target (1/(2β))
@@ -707,8 +707,8 @@ mod tests {
             reference_log_prob_rejected: -2.0,
         };
 
-        trainer.step(&[pair.clone()]).expect("step 1");
-        trainer.step(&[pair.clone()]).expect("step 2");
+        trainer.step(std::slice::from_ref(&pair)).expect("step 1");
+        trainer.step(std::slice::from_ref(&pair)).expect("step 2");
         trainer.step(&[pair]).expect("step 3");
 
         assert_eq!(trainer.history().len(), 3);
@@ -736,8 +736,8 @@ mod tests {
         };
 
         // 3 identical steps → converged (all losses identical, difference = 0 < 0.01)
-        trainer.step(&[pair.clone()]).expect("step 1");
-        trainer.step(&[pair.clone()]).expect("step 2");
+        trainer.step(std::slice::from_ref(&pair)).expect("step 1");
+        trainer.step(std::slice::from_ref(&pair)).expect("step 2");
         trainer.step(&[pair]).expect("step 3");
         assert!(
             trainer.convergence_check(),
@@ -811,7 +811,7 @@ mod tests {
 
         assert!(
             matches!(
-                compute_ipo_loss(&[pair.clone()], &config_zero),
+                compute_ipo_loss(std::slice::from_ref(&pair), &config_zero),
                 Err(IpoError::InvalidBeta(_))
             ),
             "Zero beta should return InvalidBeta error"
@@ -945,7 +945,7 @@ mod extended_tests {
             beta: 2.0,
             label_smoothing: 0.0,
         };
-        let r_low = compute_ipo_loss(&[pair.clone()], &config_low).expect("ok");
+        let r_low = compute_ipo_loss(std::slice::from_ref(&pair), &config_low).expect("ok");
         let r_high = compute_ipo_loss(&[pair], &config_high).expect("ok");
         assert!(
             r_low.target > r_high.target,
@@ -1003,7 +1003,7 @@ mod extended_tests {
             beta: 1.0,
             label_smoothing: 0.2,
         };
-        let r1 = compute_ipo_loss(&[pair.clone()], &config_no_smooth).expect("ok");
+        let r1 = compute_ipo_loss(std::slice::from_ref(&pair), &config_no_smooth).expect("ok");
         let r2 = compute_ipo_loss(&[pair], &config_smooth).expect("ok");
         assert!(
             r2.target < r1.target,
@@ -1051,7 +1051,7 @@ mod extended_tests {
         let mut trainer = IpoTrainer::new(config);
         let pair = make_pair_with_h_theta(1.0);
         for _ in 0..5 {
-            trainer.step(&[pair.clone()]).expect("step failed");
+            trainer.step(std::slice::from_ref(&pair)).expect("step failed");
         }
         assert_eq!(trainer.history().len(), 5, "Should have 5 history entries");
     }

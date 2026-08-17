@@ -31,7 +31,7 @@ Python bindings.
 ✅ **HUGGINGFACE `.json` COMPATIBLE** — `TokenizerImpl` wraps the real upstream `tokenizers` crate (re-exported via `trustformers-core`), not a reimplementation
 ✅ **24 TOKENIZER TYPES + MULTIMODAL** — general-purpose, language-specific (Arabic/Chinese/Japanese/Korean/Thai), domain-specific (Chemical/Music/Math/Code/BIO/Multimodal)
 ✅ **ZERO-COPY VOCAB** — memory-mapped vocabulary access (`ZeroCopyTokenizer`, `MmapVocab`, `memmap2`)
-✅ **SIMD ACCELERATION** — AVX2 intrinsics for character classification (x86_64-only; no ARM/NEON path yet)
+✅ **SIMD ACCELERATION** — AVX2 (x86_64) and NEON (aarch64) intrinsics for character classification, with a scalar fallback elsewhere
 ✅ **ASYNC TOKENIZATION** — non-blocking encode/decode via `tokio` (`AsyncTokenizer`); CPU-parallel batches separately via `scirs2-core`
 ✅ **VOCABULARY INTELLIGENCE** — `VocabIntelligenceAnalyzer` (semantic/compression/cross-lingual/domain/evolution analysis + scoring)
 ⚠️ **PURE-RUST HYGIENE FOLLOW-UP** — the `hangul = "0.1.3"` dependency has no references anywhere in `src/` (Korean Hangul decomposition uses inline Unicode code-point arithmetic instead); candidate for removal or wiring-in
@@ -305,7 +305,7 @@ let tokenizer = trainer.train(&texts)?; // -> BPETokenizer
 ### Performance Optimization
 
 - ✅ **Parallel Tokenization** — `ParallelTokenizer`/`BatchTokenizer` parallelize batch encode/decode via `scirs2-core`'s `parallel` feature
-- ✅ **SIMD Acceleration** — AVX2 intrinsics (`std::arch::x86_64`, `#[target_feature(enable = "avx2")]`) for character scanning; **x86_64-only**, no ARM/NEON path
+- ✅ **SIMD Acceleration** — AVX2 (`std::arch::x86_64`) and NEON (`std::arch::aarch64`) intrinsics for character scanning, both `#[target_feature]`-gated with runtime detection; scalar fallback on other architectures
 - ✅ **Zero-Copy Vocabulary Access** — `memmap2`-backed `MmapVocab`/`ZeroCopyTokenizer`
 - ✅ **Async Tokenization** — `AsyncTokenizer` via `tokio` tasks/channels/timeouts (not `scirs2-core` — that crate powers the *parallel* CPU batch path instead)
 - ✅ **Vocabulary Intelligence** — see above
@@ -375,8 +375,10 @@ Reference docs live under `docs/migration/`:
 - `TokenizerImpl::from_pretrained` and `WordPieceTokenizer::from_pretrained` only resolve local cache paths / a small built-in vocabulary set — neither downloads from the Hugging Face Hub
 - `SentencePieceTokenizer::from_pretrained` probes `{path}/spiece.model`, `{path}.model`, and the bare path for a real model file before falling back to a simplified built-in vocabulary — see the SentencePiece section above
 - TikToken ships only `cl100k_base`/`r50k_base` as named presets; other encodings need `from_tiktoken_file`
-- SIMD acceleration is AVX2/x86_64-only (no ARM/NEON path)
-- `gpu`, `jax`, `tensorflow`, `pytorch`, `onnx` features are pure-Rust detection/data-structure/metadata layers — not real CUDA/ROCm/OpenCL/JAX/TensorFlow/PyTorch/ONNX-Runtime execution (each adds zero extra crate dependencies)
+- SIMD acceleration covers AVX2 (x86_64) and NEON (aarch64); other architectures use the scalar fallback
+- `jax`, `tensorflow`, `pytorch` features are pure-Rust detection/data-structure/metadata layers — not real JAX/TensorFlow/PyTorch execution (each adds zero extra crate dependencies)
+- `gpu` feature: no real CUDA/ROCm/OpenCL/Vulkan kernel dispatch is compiled in (this crate is pure Rust with no unsafe FFI GPU driver bindings) — `GpuTokenizer::tokenize_batch` always executes via the real wrapped `Tokenizer`, sequentially or chunked across CPU cores in parallel (`scirs2_core::parallel_ops`) depending on `GpuTokenizerConfig::enable_gpu`; set `require_real_gpu: true` to get a hard `BackendUnavailable` error instead of the CPU fallback
+- `onnx` feature: no real ONNX protobuf format or ONNX Runtime session — `OnnxTokenizerExporter` writes (and `OnnxTokenizerRuntime` reads back) this crate's own JSON interchange format, structured to mirror ONNX's graph/tensor model; `OnnxTokenizerRuntime::tokenize` performs real greedy longest-match tokenization against the real vocabulary recovered from that file (not hash-derived), and rejects a genuine binary `.onnx` protobuf file with a structured error rather than fabricating a vocabulary for it
 - The `hangul = "0.1.3"` dependency has no references in `src/`; Korean Hangul decomposition uses inline Unicode arithmetic instead
 - `AutoTokenizer` is Python-only; Rust callers use `TokenizerWrapper` (enum dispatch) or a concrete tokenizer type directly
 - This crate's `pyproject.toml` still targets a `maturin` extension-module build, but `Cargo.toml` no longer declares a `cdylib` target (moved to `trustformers-py`) — `maturin build` here will not currently produce a working native module
@@ -406,18 +408,13 @@ Reference docs live under `docs/migration/`:
   - Tests: the existing tests cannot detect this bug (both call from_pretrained with the same argument) — add a new test with a distinct fixture file via std::env::temp_dir().
   - Risk: interacts with the Hub-download item above — out of scope to design against it now.
 - [ ] Enhanced multilingual support (better handling of non-Latin scripts)
-- [ ] ONNX export for tokenizers (export tokenizer to ONNX for cross-framework compatibility)
-  - **Note:** Use the `oxionnx` crate per COOLJAPAN policy; current `onnx` feature only produces model/graph metadata types, no ONNX Runtime execution
+- [ ] Real binary ONNX protobuf export/import for tokenizers (export tokenizer to a file an actual ONNX runtime can load, for cross-framework compatibility)
+  - **Note:** Use the `oxionnx` crate per COOLJAPAN policy. `OnnxTokenizerExporter`/`OnnxTokenizerRuntime` (src/onnx.rs) currently read and write this crate's own JSON interchange format instead of real ONNX protobuf bytes -- `OnnxTokenizerRuntime::tokenize` does perform real greedy longest-match tokenization against the real vocabulary recovered from that JSON file (not a stub), it just is not talking to an actual ONNX Runtime session or a real `.onnx` file.
 
 ### Performance
-- [~] Port 4 AVX2 SIMD functions to ARM/NEON (planned 2026-07-05)
-  - Goal: classify_ascii_chars, find_whitespace_boundaries, validate_utf8, to_lowercase_ascii get real NEON siblings — this dev machine is Apple Silicon (ARM64), natively testable.
-  - Design: extend the existing 2-way (x86_64/scalar) #[cfg] dispatch to 3-way with #[cfg(target_arch = "aarch64")] variants. Correctness trap: _mm256_movemask_epi8 has no 1-instruction NEON equivalent — needs the standard bit-position-multiply + pairwise-narrow emulation sequence. Bonus fix in the same pass: classify_ascii_chars_avx2 is dead code dressed as SIMD today (loads into a variable it never reads, does a plain scalar loop) — port the intended vectorized behavior, not the fake one.
-  - Files: trustformers-tokenizers/src/simd.rs only.
-  - Tests: add explicit NEON-vs-scalar byte-parity tests at chunk-boundary edge cases (16-byte NEON vs 32-byte AVX2 chunking).
-  - Risk: the movemask emulation is the main correctness risk — verify with parity tests, not by inspection alone.
-- [ ] Real GPU kernel dispatch for the `gpu` feature (currently device-detection + CPU-executed fallback only)
-  - **Refinement needed:** which ops to GPU-accelerate (vocab lookup? regex? both)? Target throughput (tokens/sec)?
+- [x] Port 4 AVX2 SIMD functions to ARM/NEON (planned 2026-07-05) — **DONE (2026-08-17):** `classify_ascii_chars`, `find_whitespace_boundaries`, `validate_utf8_fast`, `to_lowercase_ascii` all got real `#[cfg(target_arch = "aarch64")]` NEON siblings in `src/simd.rs`, dispatched 3-way (x86_64 AVX2 / aarch64 NEON / scalar) with `std::arch::is_aarch64_feature_detected!("neon")` mirroring the existing `is_x86_feature_detected!("avx2")` check. `find_whitespace_boundaries_neon` avoids needing a `_mm256_movemask_epi8`-style emulation entirely by storing the NEON comparison result to a 16-byte array and scanning it directly for transitions (the comparison itself, the expensive part, is still real NEON). Also fixed in the same pass, both found by exhaustive `*_parity_with_scalar_for_every_byte` tests (all 256 byte values) added for classify/whitespace/lowercase: (1) `classify_ascii_chars_avx2` was dead code dressed as SIMD — it loaded a chunk into an AVX2 register via `_mm256_loadu_si256` and then never read it, doing a plain scalar per-byte lookup-table loop instead; replaced with real vectorized ASCII range comparisons (falling back to the scalar table only for chunks containing a non-ASCII byte). (2) `find_whitespace_boundaries_avx2` only checked space/tab/LF/CR, silently disagreeing with the scalar reference (built from real `char::is_whitespace()`) for VT (0x0B), FF (0x0C), NEL (0x85), and NBSP (0xA0) — both bugs affected the pre-existing AVX2 path too, not just the new NEON one. Verified for real on this Apple Silicon dev machine (native NEON execution, all parity tests passing) and cross-compile-checked for `x86_64-apple-darwin`; the corrected AVX2 intrinic patterns were additionally spot-verified by extracting the exact range-comparison sequence into a standalone program and running it under Rosetta 2 with `-C target-feature=+avx2` forced (`is_x86_feature_detected!` reports `false` under Rosetta, so the crate's own runtime-dispatched tests exercise the scalar fallback there, not AVX2).
+- [ ] Real GPU kernel dispatch for the `gpu` feature (currently: best-effort driver-presence detection only, informational; `GpuTokenizer::tokenize_batch` always executes via the real wrapped `Tokenizer`, parallelized across CPU cores or sequential per `enable_gpu` — see `src/gpu_tokenization.rs` module docs. An earlier version of this module simulated GPU kernel dispatch entirely — fake memory pointers, fake kernel function pointers, fake per-vendor "compute capability" numbers — and its batch tokenization path returned the hardcoded sequence `[1, 2, .., 10]` for every input regardless of content; that whole fake pipeline has been removed.)
+  - **Refinement needed:** which ops to GPU-accelerate (vocab lookup? regex? both)? Target throughput (tokens/sec)? Given the pure-Rust-without-unsafe-FFI constraint, a real implementation likely means a `wgpu` compute-shader backend (feature-gated) rather than direct CUDA/ROCm driver bindings.
 - [~] Implement real incremental/streaming tokenization (planned 2026-07-05)
   - Goal: tokenize arbitrary raw byte chunks incrementally — the existing streaming.rs doesn't solve this (buffers whole lines/whole text, not arbitrary byte boundaries).
   - Design: add IncrementalTokenizer<T: Tokenizer> with a pending: Vec<u8> field and push_bytes() using std::str::from_utf8's error_len()/valid_up_to() to distinguish "genuinely invalid" from "incomplete multi-byte tail"; plus finish() for real stream end.

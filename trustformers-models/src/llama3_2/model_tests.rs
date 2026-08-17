@@ -643,3 +643,297 @@ fn test_rms_norm_normalises_each_row() {
         );
     }
 }
+
+// ── Text self-attention: real RoPE and real SDPA ──────────────────────────
+
+/// Tiny text config: hidden 4 = 2 query heads × head_dim 2, 2 KV heads.
+fn tiny_text_config() -> Llama32Config {
+    Llama32Config {
+        hidden_size: 4,
+        num_attention_heads: 2,
+        num_key_value_heads: 2,
+        head_dim: 2,
+        rope_theta: 10000.0,
+        use_scaled_rope: false,
+        ..Llama32Config::small_test()
+    }
+}
+
+fn identity_weight(n: usize) -> Tensor {
+    Tensor::from_vec(identity_matrix(n), &[n, n]).expect("identity weight")
+}
+
+/// RoPE must rotate *every* head block. The old body cloned the input and threw
+/// the angle away, so no head moved at all.
+#[test]
+fn test_llama32_rope_rotates_every_head_and_matches_hand_computation() {
+    // head_dim = 2 → half = 1 → inv_freq = [1.0]; scaling disabled.
+    let rope = Llama32RotaryEmbedding::new(2, 32, 10000.0, 1.0, false);
+    assert_eq!(rope.half_dim(), 1);
+    assert_eq!(rope.head_dim(), 2);
+    assert_eq!(rope.max_seq_len(), 32);
+
+    let values = vec![1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0];
+    let q = Tensor::from_vec(values.clone(), &[2, 4]).expect("q");
+    let k = Tensor::from_vec(values, &[2, 4]).expect("k");
+    let (q_out, _) = rope.apply_rotary_emb(&q, &k, &[0, 1]).expect("rope");
+    let data = q_out.data().expect("data");
+
+    // Position 0 is the identity.
+    assert!((data[0] - 1.0).abs() < 1e-6);
+    assert!(data[1].abs() < 1e-6);
+
+    let (sin, cos) = (1.0f32.sin(), 1.0f32.cos());
+    // Head 0 at position 1: (1, 0) → (cos, sin).
+    assert!((data[4] - cos).abs() < 1e-6, "head 0 x: {}", data[4]);
+    assert!((data[5] - sin).abs() < 1e-6, "head 0 y: {}", data[5]);
+    // Head 1 at position 1: (0, 1) → (-sin, cos). The old code never touched it.
+    assert!((data[6] + sin).abs() < 1e-6, "head 1 x: {}", data[6]);
+    assert!((data[7] - cos).abs() < 1e-6, "head 1 y: {}", data[7]);
+}
+
+/// Scaled RoPE divides the position, so position 2 under factor 2 must land
+/// exactly where position 1 lands unscaled.
+#[test]
+fn test_llama32_scaled_rope_interpolates_positions() {
+    let scaled = Llama32RotaryEmbedding::new(2, 32, 10000.0, 2.0, true);
+    let plain = Llama32RotaryEmbedding::new(2, 32, 10000.0, 1.0, false);
+    let x = Tensor::from_vec(vec![0.3, -0.7], &[1, 2]).expect("x");
+
+    let (a, _) = scaled.apply_rotary_emb(&x, &x, &[2]).expect("scaled");
+    let (b, _) = plain.apply_rotary_emb(&x, &x, &[1]).expect("plain");
+    let (a, b) = (a.data().expect("a"), b.data().expect("b"));
+    for i in 0..2 {
+        assert!(
+            (a[i] - b[i]).abs() < 1e-6,
+            "scaled position 2 must equal plain position 1: {} vs {}",
+            a[i],
+            b[i]
+        );
+    }
+
+    // ... and it must not be the identity.
+    let (c, _) = scaled.apply_rotary_emb(&x, &x, &[0]).expect("pos 0");
+    let c = c.data().expect("c");
+    assert!(
+        (a[0] - c[0]).abs() > 1e-4 || (a[1] - c[1]).abs() > 1e-4,
+        "a non-zero position must actually rotate"
+    );
+}
+
+/// The text attention output must depend on V. With `v_proj = 0` a real SDPA
+/// returns zeros; the old code returned `o_proj(scale * Q)`, which does not.
+#[test]
+fn test_llama32_self_attention_reads_values() {
+    let cfg = tiny_text_config();
+    let mut attn = Llama32SelfAttention::new(&cfg).expect("attention");
+    attn.q_proj.set_weight(identity_weight(4)).expect("q");
+    attn.k_proj.set_weight(identity_weight(4)).expect("k");
+    attn.o_proj.set_weight(identity_weight(4)).expect("o");
+    attn.v_proj
+        .set_weight(Tensor::from_vec(vec![0.0; 16], &[4, 4]).expect("zero"))
+        .expect("v");
+
+    let input =
+        Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 4]).expect("input");
+    let out = attn.forward(input).expect("forward").data().expect("data");
+    for value in out {
+        assert!(
+            value.abs() < 1e-6,
+            "with zero values the context must be zero, got {value}"
+        );
+    }
+}
+
+/// Full independent reference: identity projections, RoPE recomputed in the
+/// test, then causal softmax attention per head.
+#[test]
+fn test_llama32_self_attention_matches_naive_reference() {
+    let cfg = tiny_text_config();
+    let mut attn = Llama32SelfAttention::new(&cfg).expect("attention");
+    attn.q_proj.set_weight(identity_weight(4)).expect("q");
+    attn.k_proj.set_weight(identity_weight(4)).expect("k");
+    attn.v_proj.set_weight(identity_weight(4)).expect("v");
+    attn.o_proj.set_weight(identity_weight(4)).expect("o");
+
+    let rows = [[1.0f32, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]];
+    let flat: Vec<f32> = rows.iter().flatten().copied().collect();
+    let got = attn
+        .forward(Tensor::from_vec(flat, &[2, 4]).expect("input"))
+        .expect("forward")
+        .data()
+        .expect("data");
+
+    let (head_dim, half, heads, seq) = (2usize, 1usize, 2usize, 2usize);
+    let inv_freq: Vec<f32> = (0..half)
+        .map(|i| 1.0 / (10000.0f32).powf(2.0 * i as f32 / head_dim as f32))
+        .collect();
+
+    let mut q_ref: Vec<Vec<f32>> = rows.iter().map(|r| r.to_vec()).collect();
+    let mut k_ref = q_ref.clone();
+    let v_ref = q_ref.clone();
+    for (pos, (q_row, k_row)) in q_ref.iter_mut().zip(k_ref.iter_mut()).enumerate() {
+        for head in 0..heads {
+            let base = head * head_dim;
+            for (i, &freq) in inv_freq.iter().enumerate() {
+                let angle = pos as f32 * freq;
+                let (sin, cos) = (angle.sin(), angle.cos());
+                for row in [&mut *q_row, &mut *k_row] {
+                    let x = row[base + i];
+                    let y = row[base + i + half];
+                    row[base + i] = x * cos - y * sin;
+                    row[base + i + half] = x * sin + y * cos;
+                }
+            }
+        }
+    }
+
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+    let mut expected = vec![0.0f32; seq * heads * head_dim];
+    for head in 0..heads {
+        let base = head * head_dim;
+        for query_pos in 0..seq {
+            let scores: Vec<f32> = (0..=query_pos)
+                .map(|key_pos| {
+                    (0..head_dim)
+                        .map(|d| q_ref[query_pos][base + d] * k_ref[key_pos][base + d])
+                        .sum::<f32>()
+                        * scale
+                })
+                .collect();
+            let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let exps: Vec<f32> = scores.iter().map(|s| (s - max).exp()).collect();
+            let sum: f32 = exps.iter().sum();
+            for (key_pos, weight) in exps.iter().enumerate() {
+                for d in 0..head_dim {
+                    expected[query_pos * heads * head_dim + base + d] +=
+                        weight / sum * v_ref[key_pos][base + d];
+                }
+            }
+        }
+    }
+
+    for (i, (actual, want)) in got.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (actual - want).abs() < 1e-5,
+            "element {i}: got {actual}, reference {want}"
+        );
+    }
+}
+
+/// Causality: a later token must not influence an earlier output.
+#[test]
+fn test_llama32_self_attention_is_causal() {
+    let cfg = tiny_text_config();
+    let attn = Llama32SelfAttention::new(&cfg).expect("attention");
+
+    let first =
+        Tensor::from_vec(vec![0.4, -0.3, 0.7, 0.1, 0.2, 0.9, -0.5, 0.3], &[2, 4]).expect("first");
+    let second =
+        Tensor::from_vec(vec![0.4, -0.3, 0.7, 0.1, -9.0, 4.0, 6.0, -2.0], &[2, 4]).expect("second");
+    let a = attn.forward(first).expect("a").data().expect("a data");
+    let b = attn.forward(second).expect("b").data().expect("b data");
+
+    for i in 0..4 {
+        assert!(
+            (a[i] - b[i]).abs() < 1e-6,
+            "token 0 must not see token 1: {} vs {}",
+            a[i],
+            b[i]
+        );
+    }
+    assert!(
+        (4..8).any(|i| (a[i] - b[i]).abs() > 1e-4),
+        "token 1 must react to its own change"
+    );
+}
+
+/// GQA with a real KV expansion: the default small config has 4 query heads and
+/// 2 KV heads, so the forward must succeed and stay input-sensitive.
+#[test]
+fn test_llama32_self_attention_grouped_query_is_input_sensitive() {
+    let cfg = small_config();
+    assert_eq!(cfg.num_attention_heads / cfg.num_key_value_heads, 2);
+    let attn = Llama32SelfAttention::new(&cfg).expect("attention");
+    assert_eq!(attn.num_heads(), cfg.num_attention_heads);
+    assert_eq!(attn.num_kv_heads(), cfg.num_key_value_heads);
+    assert_eq!(attn.head_dim(), cfg.head_dim);
+
+    let a =
+        Tensor::from_vec(lcg_data(3 * cfg.hidden_size, 4242), &[3, cfg.hidden_size]).expect("a");
+    let b = Tensor::from_vec(lcg_data(3 * cfg.hidden_size, 777), &[3, cfg.hidden_size]).expect("b");
+    let out_a = attn.forward(a).expect("forward a").data().expect("a data");
+    let out_b = attn.forward(b).expect("forward b").data().expect("b data");
+    assert_eq!(out_a.len(), 3 * cfg.hidden_size);
+    assert!(
+        out_a.iter().zip(out_b.iter()).any(|(x, y)| (x - y).abs() > 1e-5),
+        "different inputs must give different attention outputs"
+    );
+    assert!(
+        out_a.iter().any(|v| v.abs() > 1e-6),
+        "output must not be all zeros"
+    );
+}
+
+/// Batched text attention must match running each batch item on its own.
+#[test]
+fn test_llama32_self_attention_batched_matches_single() {
+    let cfg = tiny_text_config();
+    let attn = Llama32SelfAttention::new(&cfg).expect("attention");
+
+    let row_a = vec![0.1f32, -0.2, 0.3, 0.4, 0.5, 0.6, -0.7, 0.8];
+    let row_b = vec![-0.9f32, 0.2, 0.1, 0.0, 0.4, -0.4, 0.6, 0.2];
+    let mut batched = row_a.clone();
+    batched.extend_from_slice(&row_b);
+
+    let out_batched = attn
+        .forward(Tensor::from_vec(batched, &[2, 2, 4]).expect("batched"))
+        .expect("batched forward")
+        .data()
+        .expect("data");
+    let out_a = attn
+        .forward(Tensor::from_vec(row_a, &[2, 4]).expect("a"))
+        .expect("a")
+        .data()
+        .expect("a data");
+    let out_b = attn
+        .forward(Tensor::from_vec(row_b, &[2, 4]).expect("b"))
+        .expect("b")
+        .data()
+        .expect("b data");
+
+    for i in 0..8 {
+        assert!((out_batched[i] - out_a[i]).abs() < 1e-6, "batch 0 item {i}");
+        assert!(
+            (out_batched[8 + i] - out_b[i]).abs() < 1e-6,
+            "batch 1 item {i}"
+        );
+    }
+}
+
+/// LayerNorm is per token: pooling mean/variance over the whole tensor would let
+/// one patch shift another.
+#[test]
+fn test_vision_layer_norm_normalises_each_row() {
+    let norm = VisionLayerNorm::new(4, 1e-6).expect("norm");
+    let input = Tensor::from_vec(
+        vec![1.0, 2.0, 3.0, 4.0, 101.0, 102.0, 103.0, 104.0],
+        &[2, 4],
+    )
+    .expect("input");
+    let out = norm.forward(input).expect("forward").data().expect("data");
+
+    // Both rows are the same ramp shifted by 100, so per-row normalisation gives
+    // both rows identical output.
+    for i in 0..4 {
+        assert!(
+            (out[i] - out[4 + i]).abs() < 1e-4,
+            "row {i}: {} vs {}",
+            out[i],
+            out[4 + i]
+        );
+    }
+    // Each row has zero mean after normalisation.
+    let row_mean: f32 = out[..4].iter().sum::<f32>() / 4.0;
+    assert!(row_mean.abs() < 1e-5, "row mean must be 0, got {row_mean}");
+}

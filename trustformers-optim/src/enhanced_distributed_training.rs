@@ -57,7 +57,6 @@
 use crate::averaged_adam::{AveragedAdam, AveragedAdamConfig};
 use crate::multinode::{MultiNodeConfig, MultiNodeTrainer};
 use crate::traits::StatefulOptimizer;
-use scirs2_core::random::*; // SciRS2 Integration Policy
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -314,16 +313,81 @@ pub struct EnhancedDistributedTrainer<T: Optimizer + StatefulOptimizer> {
     start_time: Instant,
     gpu_contexts: Vec<Arc<GpuContext>>,
     parameter_registry: HashMap<String, ParameterInfo>,
+    /// Gradients produced by the last [`EnhancedDistributedTrainer::train_step`]
+    /// after compression, reduction and decompression, kept so the owner of the
+    /// parameter tensors can apply them (see
+    /// [`EnhancedDistributedTrainer::apply_reduced_gradients`]).
+    reduced_gradients: HashMap<String, Tensor>,
 }
 
-/// GPU context for managing device-specific operations
+/// GPU context for managing device-specific operations.
+///
+/// Every metric is `None` until a **real** sample is supplied through
+/// [`EnhancedDistributedTrainer::record_gpu_telemetry`]. The pure-Rust default
+/// build links no GPU runtime (NVML/ROCm SMI are C libraries), so this crate
+/// cannot query a device itself. An earlier revision filled these fields with
+/// `0.8 + random()` and friends, which made every downstream decision — dynamic
+/// batch sizing, bottleneck detection, auto-scaling — act on invented data.
 #[derive(Debug)]
 pub struct GpuContext {
+    /// Device index this context tracks.
     pub device_id: usize,
-    pub memory_usage: Arc<Mutex<f32>>,
-    pub utilization: Arc<Mutex<f32>>,
-    pub temperature: Arc<Mutex<f32>>,
-    pub communication_bandwidth: Arc<Mutex<f32>>,
+    /// Fraction of device memory in use, in `[0, 1]`; `None` when unknown.
+    pub memory_usage: Arc<Mutex<Option<f32>>>,
+    /// Device utilization in `[0, 1]`; `None` when unknown.
+    pub utilization: Arc<Mutex<Option<f32>>>,
+    /// Device temperature in degrees Celsius; `None` when unknown.
+    pub temperature: Arc<Mutex<Option<f32>>>,
+    /// Achieved interconnect bandwidth in MB/s; `None` when unknown.
+    pub communication_bandwidth: Arc<Mutex<Option<f32>>>,
+}
+
+/// One real telemetry reading for a single device.
+///
+/// The embedder is responsible for obtaining these numbers (NVML, ROCm SMI,
+/// `nvidia-smi`, a cluster metrics endpoint, …) and feeding them in with
+/// [`EnhancedDistributedTrainer::record_gpu_telemetry`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GpuTelemetrySample {
+    /// Device utilization as a fraction in `[0, 1]`.
+    pub utilization: f32,
+    /// Fraction of device memory in use, in `[0, 1]`.
+    pub memory_usage: f32,
+    /// Device temperature in degrees Celsius.
+    pub temperature_celsius: f32,
+    /// Achieved interconnect bandwidth in MB/s.
+    pub communication_bandwidth_mb_s: f32,
+}
+
+impl GpuTelemetrySample {
+    /// Validate the ranges a caller can get wrong silently.
+    fn validate(&self, device_id: usize) -> Result<()> {
+        for (label, value, upper) in [
+            ("utilization", self.utilization, 1.0_f32),
+            ("memory_usage", self.memory_usage, 1.0),
+        ] {
+            if !value.is_finite() || !(0.0..=upper).contains(&value) {
+                return Err(TrustformersError::invalid_input(format!(
+                    "GPU {device_id} telemetry `{label}` must be a finite fraction in [0, {upper}], got {value}"
+                )));
+            }
+        }
+        if !self.temperature_celsius.is_finite() {
+            return Err(TrustformersError::invalid_input(format!(
+                "GPU {device_id} telemetry `temperature_celsius` must be finite, got {}",
+                self.temperature_celsius
+            )));
+        }
+        if !self.communication_bandwidth_mb_s.is_finite() || self.communication_bandwidth_mb_s < 0.0
+        {
+            return Err(TrustformersError::invalid_input(format!(
+                "GPU {device_id} telemetry `communication_bandwidth_mb_s` must be finite and \
+                 non-negative, got {}",
+                self.communication_bandwidth_mb_s
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Parameter information for distributed training
@@ -336,16 +400,33 @@ pub struct ParameterInfo {
     pub is_sharded: bool,
 }
 
-/// Performance metrics for distributed training
+/// Performance metrics for distributed training.
+///
+/// # Device telemetry is opt-in
+///
+/// `gpu_utilization`, `memory_usage` and `bandwidth_utilization` are derived
+/// from samples the embedder recorded with
+/// [`EnhancedDistributedTrainer::record_gpu_telemetry`]. When a device has never
+/// been sampled there is nothing to report, and this crate does **not** invent a
+/// number: the two vectors are then left **empty** and `bandwidth_utilization`
+/// is `0.0`. Treat an empty vector as "unknown", never as "0% utilized".
 #[derive(Debug, Clone)]
 pub struct PerformanceMetrics {
-    pub throughput: f32,             // samples per second
-    pub gpu_utilization: Vec<f32>,   // per-GPU utilization
-    pub memory_usage: Vec<f32>,      // per-GPU memory usage
-    pub communication_overhead: f32, // percentage of time in communication
-    pub compression_ratio: f32,      // actual compression achieved
-    pub bandwidth_utilization: f32,  // network bandwidth utilization
-    pub step_time: Duration,         // time per training step
+    /// Samples per second, measured by the throughput tracker.
+    pub throughput: f32,
+    /// Per-GPU utilization in `[0, 1]`; empty when no telemetry was recorded.
+    pub gpu_utilization: Vec<f32>,
+    /// Per-GPU memory usage in `[0, 1]`; empty when no telemetry was recorded.
+    pub memory_usage: Vec<f32>,
+    /// Fraction of step time spent communicating.
+    pub communication_overhead: f32,
+    /// Compression ratio achieved by the gradient codec.
+    pub compression_ratio: f32,
+    /// Mean interconnect bandwidth in MB/s; `0.0` when no telemetry was
+    /// recorded.
+    pub bandwidth_utilization: f32,
+    /// Wall-clock time of the training step.
+    pub step_time: Duration,
 }
 
 /// Real-time performance monitoring
@@ -366,6 +447,35 @@ impl PerformanceMonitor {
         }
     }
 
+    /// Read one `Option<f32>` metric from every context.
+    ///
+    /// Returns `None` unless *every* device has a recorded sample: a partially
+    /// populated vector would silently misalign device indices with values.
+    fn read_metric(
+        gpu_contexts: &[Arc<GpuContext>],
+        select: impl Fn(&GpuContext) -> &Arc<Mutex<Option<f32>>>,
+        label: &str,
+    ) -> Result<Option<Vec<f32>>> {
+        let mut values = Vec::with_capacity(gpu_contexts.len());
+        for ctx in gpu_contexts {
+            let guard = select(ctx).lock().map_err(|_| {
+                TrustformersError::lock_error(format!("GPU context {label} mutex poisoned"))
+            })?;
+            match *guard {
+                Some(value) => values.push(value),
+                None => return Ok(None),
+            }
+        }
+        if values.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(values))
+    }
+
+    /// Collect one metrics sample.
+    ///
+    /// Device-derived fields are populated only from telemetry the embedder
+    /// recorded; see [`PerformanceMetrics`] for the "unknown" encoding.
     pub fn collect_metrics(
         &mut self,
         gpu_contexts: &[Arc<GpuContext>],
@@ -374,41 +484,22 @@ impl PerformanceMonitor {
         let step_time = now - self.last_collection;
         self.last_collection = now;
 
-        let gpu_utilization: Vec<f32> = gpu_contexts
-            .iter()
-            .map(|ctx| {
-                ctx.utilization.lock().map(|guard| *guard).map_err(|_| {
-                    TrustformersError::lock_error(
-                        "GPU context utilization mutex poisoned".to_string(),
-                    )
-                })
-            })
-            .collect::<Result<Vec<f32>>>()?;
+        let gpu_utilization =
+            Self::read_metric(gpu_contexts, |ctx| &ctx.utilization, "utilization")?
+                .unwrap_or_default();
 
-        let memory_usage: Vec<f32> = gpu_contexts
-            .iter()
-            .map(|ctx| {
-                ctx.memory_usage.lock().map(|guard| *guard).map_err(|_| {
-                    TrustformersError::lock_error(
-                        "GPU context memory_usage mutex poisoned".to_string(),
-                    )
-                })
-            })
-            .collect::<Result<Vec<f32>>>()?;
+        let memory_usage =
+            Self::read_metric(gpu_contexts, |ctx| &ctx.memory_usage, "memory_usage")?
+                .unwrap_or_default();
 
-        let bandwidth_utilization: f32 = gpu_contexts
-            .iter()
-            .map(|ctx| {
-                ctx.communication_bandwidth.lock().map(|guard| *guard).map_err(|_| {
-                    TrustformersError::lock_error(
-                        "GPU context communication_bandwidth mutex poisoned".to_string(),
-                    )
-                })
-            })
-            .collect::<Result<Vec<f32>>>()?
-            .iter()
-            .sum::<f32>()
-            / gpu_contexts.len() as f32;
+        let bandwidth_utilization = match Self::read_metric(
+            gpu_contexts,
+            |ctx| &ctx.communication_bandwidth,
+            "communication_bandwidth",
+        )? {
+            Some(values) => values.iter().sum::<f32>() / values.len() as f32,
+            None => 0.0,
+        };
 
         let throughput = self.throughput_tracker.calculate_throughput();
 
@@ -447,11 +538,19 @@ impl PerformanceMonitor {
         let avg_throughput =
             recent_metrics.iter().map(|m| m.throughput).sum::<f32>() / recent_metrics.len() as f32;
 
-        let avg_gpu_util = recent_metrics
-            .iter()
-            .map(|m| m.gpu_utilization.iter().sum::<f32>() / m.gpu_utilization.len() as f32)
-            .sum::<f32>()
-            / recent_metrics.len() as f32;
+        // Only samples that actually carry device telemetry contribute; an
+        // empty `gpu_utilization` means "unknown", and averaging it in as 0.0
+        // (or dividing by zero) would manufacture a utilization figure.
+        let mut util_samples = 0usize;
+        let mut util_total = 0.0f32;
+        for m in recent_metrics {
+            if m.gpu_utilization.is_empty() {
+                continue;
+            }
+            util_total += m.gpu_utilization.iter().sum::<f32>() / m.gpu_utilization.len() as f32;
+            util_samples += 1;
+        }
+        let avg_gpu_util = if util_samples == 0 { 0.0 } else { util_total / util_samples as f32 };
 
         let avg_comm_overhead =
             recent_metrics.iter().map(|m| m.communication_overhead).sum::<f32>()
@@ -478,6 +577,11 @@ impl PerformanceMonitor {
         let recent_avg = recent.iter().map(|m| m.throughput).sum::<f32>() / recent.len() as f32;
         let older_avg = older.iter().map(|m| m.throughput).sum::<f32>() / older.len() as f32;
 
+        // A zero (or non-finite) baseline carries no trend information; saying
+        // "stable" is honest, dividing by it would produce inf/NaN.
+        if !older_avg.is_finite() || older_avg.abs() < f32::EPSILON {
+            return PerformanceTrend::Stable;
+        }
         let change_ratio = (recent_avg - older_avg) / older_avg;
 
         if change_ratio > 0.05 {
@@ -491,8 +595,12 @@ impl PerformanceMonitor {
 
     fn identify_bottlenecks(&self, metrics: &[PerformanceMetrics]) -> Vec<Bottleneck> {
         let mut bottlenecks = Vec::new();
+        if metrics.is_empty() {
+            return bottlenecks;
+        }
 
-        // Check GPU utilization
+        // Check GPU utilization. Samples without recorded telemetry carry empty
+        // vectors and are therefore skipped rather than reported as "0% used".
         for m in metrics.iter() {
             for (gpu_id, &util) in m.gpu_utilization.iter().enumerate() {
                 if util < 0.7 {
@@ -651,7 +759,11 @@ impl DynamicBatcher {
         let avg_utilizations = self.calculate_average_utilizations();
         let mut adjusted = false;
 
-        for (gpu_id, &avg_util) in avg_utilizations.iter().enumerate() {
+        // The history may carry more entries than this batcher has devices (a
+        // caller can pass a longer slice); indexing beyond `current_batch_sizes`
+        // would panic, so the shorter of the two bounds the loop.
+        let tracked = avg_utilizations.len().min(self.current_batch_sizes.len());
+        for (gpu_id, &avg_util) in avg_utilizations.iter().enumerate().take(tracked) {
             let current_batch = self.current_batch_sizes[gpu_id];
             let new_batch = if avg_util < self.config.target_utilization - 0.05 {
                 // Utilization too low - increase batch size
@@ -710,12 +822,26 @@ impl DynamicBatcher {
     }
 }
 
+/// Callback that attempts to bring the job back after a node loss.
+type RecoveryPolicy = Box<dyn FnMut(usize) -> Result<bool> + Send>;
+
 /// Fault tolerance handler for robust distributed training
 pub struct FaultHandler {
     config: FaultToleranceConfig,
     failed_nodes: Vec<usize>,
     checkpoint_manager: CheckpointManager,
     heartbeat_tracker: HeartbeatTracker,
+    recovery_policy: Option<RecoveryPolicy>,
+}
+
+impl std::fmt::Debug for FaultHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FaultHandler")
+            .field("config", &self.config)
+            .field("failed_nodes", &self.failed_nodes)
+            .field("has_recovery_policy", &self.recovery_policy.is_some())
+            .finish()
+    }
 }
 
 impl FaultHandler {
@@ -728,6 +854,7 @@ impl FaultHandler {
             failed_nodes: Vec::new(),
             checkpoint_manager: CheckpointManager::new(checkpoint_frequency),
             heartbeat_tracker: HeartbeatTracker::new(heartbeat_interval),
+            recovery_policy: None,
         }
     }
 
@@ -751,17 +878,49 @@ impl FaultHandler {
         }
     }
 
-    fn recover_from_failure(&mut self, _node_id: usize) -> Result<bool> {
-        // Simplified recovery implementation
-        log::info!("attempting recovery from the latest checkpoint");
+    /// Attempt to recover from the loss of `node_id`.
+    ///
+    /// Recovery means re-forming the communicator over the surviving nodes,
+    /// restoring the latest checkpoint and redistributing the workload — none
+    /// of which this handler can do on its own: it owns neither the process
+    /// group nor the model state. It therefore either delegates to the recovery
+    /// policy the embedder installed with
+    /// [`FaultHandler::set_recovery_policy`], or reports
+    /// [`TrustformersError::not_implemented`]. Returning `Ok(true)` without
+    /// having recovered anything would tell the training loop it is safe to
+    /// continue on a broken communicator.
+    fn recover_from_failure(&mut self, node_id: usize) -> Result<bool> {
+        match self.recovery_policy.as_mut() {
+            Some(policy) => {
+                let recovered = policy(node_id)?;
+                if recovered {
+                    log::info!("recovery policy reported node {node_id} recovered");
+                } else {
+                    log::warn!("recovery policy could not recover node {node_id}");
+                }
+                Ok(recovered)
+            },
+            None => Err(TrustformersError::not_implemented(
+                "automatic node recovery: FaultHandler owns neither the process group nor the \
+                 model state, so it cannot re-form the communicator or reload a checkpoint. \
+                 Install a policy with FaultHandler::set_recovery_policy, or disable \
+                 FaultToleranceConfig::auto_replacement and handle the failure in the training \
+                 loop"
+                    .to_string(),
+            )),
+        }
+    }
 
-        // In a real implementation, this would:
-        // 1. Load latest checkpoint
-        // 2. Redistribute workload to remaining nodes
-        // 3. Update communication topology
-        // 4. Resume training
-
-        Ok(true)
+    /// Install the callback invoked when a node fails and
+    /// [`FaultToleranceConfig::auto_replacement`] is enabled.
+    ///
+    /// The callback receives the failed node id and returns whether training can
+    /// continue.
+    pub fn set_recovery_policy<F>(&mut self, policy: F)
+    where
+        F: FnMut(usize) -> Result<bool> + Send + 'static,
+    {
+        self.recovery_policy = Some(Box::new(policy));
     }
 }
 
@@ -828,10 +987,11 @@ impl<T: Optimizer + StatefulOptimizer + Clone> EnhancedDistributedTrainer<T> {
             .map(|&id| {
                 Arc::new(GpuContext {
                     device_id: id,
-                    memory_usage: Arc::new(Mutex::new(0.0)),
-                    utilization: Arc::new(Mutex::new(0.0)),
-                    temperature: Arc::new(Mutex::new(0.0)),
-                    communication_bandwidth: Arc::new(Mutex::new(0.0)),
+                    // No telemetry until the embedder records some.
+                    memory_usage: Arc::new(Mutex::new(None)),
+                    utilization: Arc::new(Mutex::new(None)),
+                    temperature: Arc::new(Mutex::new(None)),
+                    communication_bandwidth: Arc::new(Mutex::new(None)),
                 })
             })
             .collect();
@@ -867,6 +1027,7 @@ impl<T: Optimizer + StatefulOptimizer + Clone> EnhancedDistributedTrainer<T> {
             start_time: Instant::now(),
             gpu_contexts,
             parameter_registry: HashMap::new(),
+            reduced_gradients: HashMap::new(),
         })
     }
 
@@ -896,50 +1057,50 @@ impl<T: Optimizer + StatefulOptimizer + Clone> EnhancedDistributedTrainer<T> {
         Ok(())
     }
 
-    /// Perform one training step with enhanced distributed optimizations
+    /// Perform one training step with enhanced distributed optimizations.
+    ///
+    /// The step compresses `gradients` with the configured codec, reduces them
+    /// across the multi-node group when one is configured, and decompresses the
+    /// result. The reduced gradients are retained; because this trainer holds
+    /// parameter *metadata* only (see [`ParameterInfo`]), the caller — who owns
+    /// the parameter tensors — applies them with
+    /// [`EnhancedDistributedTrainer::apply_reduced_gradients`] or reads them via
+    /// [`EnhancedDistributedTrainer::take_reduced_gradients`].
+    ///
+    /// Dynamic batch sizing runs only when device telemetry has been recorded
+    /// for every device (see
+    /// [`EnhancedDistributedTrainer::record_gpu_telemetry`]); without it there
+    /// is nothing to base a resize on and the batch sizes are left alone.
     pub fn train_step(&mut self, gradients: HashMap<String, Tensor>) -> Result<TrainingStepResult> {
         let step_start = Instant::now();
-
-        // Update GPU utilization metrics (simulated)
-        self.update_gpu_metrics()?;
 
         // Compress gradients
         let compressed_gradients = self.gradient_compressor.compress_gradients(&gradients)?;
 
-        // Update dynamic batch sizes if needed
-        let gpu_utilizations: Vec<f32> = self
-            .gpu_contexts
-            .iter()
-            .map(|ctx| {
-                ctx.utilization.lock().map(|guard| *guard).map_err(|_| {
-                    TrustformersError::lock_error(
-                        "GPU context utilization mutex poisoned".to_string(),
-                    )
-                })
-            })
-            .collect::<Result<Vec<f32>>>()?;
+        // Update dynamic batch sizes when real utilization samples exist.
+        let batch_size_adjusted = match self.recorded_gpu_utilizations()? {
+            Some(utilizations) => self.dynamic_batcher.update_batch_sizes(&utilizations)?,
+            None => {
+                log::debug!(
+                    "skipping dynamic batch sizing: no GPU telemetry recorded (call \
+                     EnhancedDistributedTrainer::record_gpu_telemetry)"
+                );
+                false
+            },
+        };
 
-        let batch_size_adjusted = self.dynamic_batcher.update_batch_sizes(&gpu_utilizations)?;
-
-        // Apply gradients using multi-node trainer or local optimizer
-        if let Some(ref mut trainer) = self.multi_node_trainer {
-            // Decompress gradients for multi-node trainer
-            let mut decompressed: HashMap<String, Tensor> = HashMap::new();
-            for (name, compressed) in &compressed_gradients {
-                let decompressed_tensor = compressed.decompress()?;
-                decompressed.insert(name.clone(), decompressed_tensor);
-            }
-
-            trainer.update_gradients(decompressed)?;
-            trainer.optimizer_step()?;
-        } else {
-            // Single GPU training
-            for (_name, compressed_grad) in compressed_gradients {
-                let _grad = compressed_grad.decompress()?;
-                // Apply to optimizer (simplified)
-                // In real implementation, would update optimizer state
-            }
+        // Reduce and decompress, then keep the result for the parameter owner.
+        let mut decompressed: HashMap<String, Tensor> =
+            HashMap::with_capacity(compressed_gradients.len());
+        for (name, compressed) in &compressed_gradients {
+            decompressed.insert(name.clone(), compressed.decompress()?);
         }
+
+        if let Some(ref mut trainer) = self.multi_node_trainer {
+            trainer.update_gradients(decompressed.clone())?;
+            trainer.optimizer_step()?;
+        }
+        self.reduced_gradients = decompressed;
 
         self.step_count += 1;
 
@@ -973,44 +1134,134 @@ impl<T: Optimizer + StatefulOptimizer + Clone> EnhancedDistributedTrainer<T> {
         })
     }
 
-    /// Update GPU metrics (simulated for demonstration)
-    fn update_gpu_metrics(&mut self) -> Result<()> {
-        for ctx in &self.gpu_contexts {
-            // Simulate GPU metrics (in real implementation, would query GPU)
-            *ctx.utilization.lock().map_err(|_| {
-                TrustformersError::lock_error("GPU context utilization mutex poisoned".to_string())
-            })? = 0.8 + (random::<f32>() - 0.5) * 0.3;
-            *ctx.memory_usage.lock().map_err(|_| {
-                TrustformersError::lock_error("GPU context memory_usage mutex poisoned".to_string())
-            })? = 0.7 + (random::<f32>() - 0.5) * 0.2;
-            *ctx.temperature.lock().map_err(|_| {
-                TrustformersError::lock_error("GPU context temperature mutex poisoned".to_string())
-            })? = 75.0 + (random::<f32>() - 0.5) * 10.0;
-            *ctx.communication_bandwidth.lock().map_err(|_| {
-                TrustformersError::lock_error(
-                    "GPU context communication_bandwidth mutex poisoned".to_string(),
-                )
-            })? = 800.0 + (random::<f32>() - 0.5) * 200.0;
-        }
+    /// Record a real telemetry reading for one device.
+    ///
+    /// This crate cannot read a GPU itself: NVML and ROCm SMI are C libraries
+    /// and the default build is pure Rust. Rather than inventing plausible
+    /// numbers, every device metric stays `None` until the embedder calls this
+    /// with values it obtained from the platform. Metrics gathered here drive
+    /// dynamic batch sizing, bottleneck detection and auto-scaling, so a
+    /// fabricated sample would propagate into real training decisions.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `device_id` is not one of the configured devices or when the
+    /// sample is out of range (see [`GpuTelemetrySample`]).
+    pub fn record_gpu_telemetry(
+        &mut self,
+        device_id: usize,
+        sample: GpuTelemetrySample,
+    ) -> Result<()> {
+        sample.validate(device_id)?;
+
+        let ctx =
+            self.gpu_contexts.iter().find(|ctx| ctx.device_id == device_id).ok_or_else(|| {
+                TrustformersError::invalid_input(format!(
+                    "device {device_id} is not part of this trainer; configured devices: {:?}",
+                    self.gpu_contexts.iter().map(|ctx| ctx.device_id).collect::<Vec<_>>()
+                ))
+            })?;
+
+        let store = |slot: &Arc<Mutex<Option<f32>>>, value: f32, label: &str| -> Result<()> {
+            let mut guard = slot.lock().map_err(|_| {
+                TrustformersError::lock_error(format!("GPU context {label} mutex poisoned"))
+            })?;
+            *guard = Some(value);
+            Ok(())
+        };
+
+        store(&ctx.utilization, sample.utilization, "utilization")?;
+        store(&ctx.memory_usage, sample.memory_usage, "memory_usage")?;
+        store(&ctx.temperature, sample.temperature_celsius, "temperature")?;
+        store(
+            &ctx.communication_bandwidth,
+            sample.communication_bandwidth_mb_s,
+            "communication_bandwidth",
+        )?;
         Ok(())
     }
 
-    /// Get comprehensive training statistics
+    /// Utilization of every configured device, or `None` when at least one
+    /// device has never been sampled.
+    fn recorded_gpu_utilizations(&self) -> Result<Option<Vec<f32>>> {
+        let mut values = Vec::with_capacity(self.gpu_contexts.len());
+        for ctx in &self.gpu_contexts {
+            let guard = ctx.utilization.lock().map_err(|_| {
+                TrustformersError::lock_error("GPU context utilization mutex poisoned".to_string())
+            })?;
+            match *guard {
+                Some(value) => values.push(value),
+                None => return Ok(None),
+            }
+        }
+        Ok(if values.is_empty() { None } else { Some(values) })
+    }
+
+    /// Take the gradients produced by the last
+    /// [`EnhancedDistributedTrainer::train_step`], leaving the trainer empty.
+    pub fn take_reduced_gradients(&mut self) -> HashMap<String, Tensor> {
+        std::mem::take(&mut self.reduced_gradients)
+    }
+
+    /// Borrow the gradients produced by the last
+    /// [`EnhancedDistributedTrainer::train_step`].
+    pub fn reduced_gradients(&self) -> &HashMap<String, Tensor> {
+        &self.reduced_gradients
+    }
+
+    /// Apply the gradients from the last [`EnhancedDistributedTrainer::train_step`]
+    /// to `parameters` with this trainer's optimizer.
+    ///
+    /// Parameters are visited in sorted-name order so every rank performs the
+    /// same update sequence. Returns the number of parameters updated.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a gradient has no matching parameter — a silent skip would
+    /// leave part of the model un-trained without any signal.
+    pub fn apply_reduced_gradients(
+        &mut self,
+        parameters: &mut HashMap<String, Tensor>,
+    ) -> Result<usize> {
+        let mut names: Vec<String> = self.reduced_gradients.keys().cloned().collect();
+        names.sort();
+
+        for name in &names {
+            let gradient = self.reduced_gradients.get(name).ok_or_else(|| {
+                TrustformersError::invalid_input(format!("gradient `{name}` vanished"))
+            })?;
+            let parameter = parameters.get_mut(name).ok_or_else(|| {
+                TrustformersError::invalid_input(format!(
+                    "no parameter named `{name}` to apply its gradient to"
+                ))
+            })?;
+            self.optimizer.update(parameter, gradient)?;
+        }
+        self.optimizer.step();
+        Ok(names.len())
+    }
+
+    /// Get comprehensive training statistics.
+    ///
+    /// `gpu_utilization` and `memory_usage` are empty when no device telemetry
+    /// has been recorded; see [`EnhancedDistributedTrainer::record_gpu_telemetry`].
     pub fn get_training_stats(&self) -> DistributedTrainingStats {
         let performance_analysis = self.performance_monitor.analyze_performance_trends();
         let compression_stats = self.gradient_compressor.get_compression_stats();
 
-        let memory_usage: Vec<f32> = self
-            .gpu_contexts
-            .iter()
-            .map(|ctx| *ctx.memory_usage.lock().unwrap_or_else(|p| p.into_inner()))
-            .collect();
+        let collect_known = |select: fn(&GpuContext) -> &Arc<Mutex<Option<f32>>>| -> Vec<f32> {
+            let mut values = Vec::with_capacity(self.gpu_contexts.len());
+            for ctx in &self.gpu_contexts {
+                match *select(ctx).lock().unwrap_or_else(|poisoned| poisoned.into_inner()) {
+                    Some(value) => values.push(value),
+                    None => return Vec::new(),
+                }
+            }
+            values
+        };
 
-        let gpu_utilization: Vec<f32> = self
-            .gpu_contexts
-            .iter()
-            .map(|ctx| *ctx.utilization.lock().unwrap_or_else(|p| p.into_inner()))
-            .collect();
+        let memory_usage: Vec<f32> = collect_known(|ctx| &ctx.memory_usage);
+        let gpu_utilization: Vec<f32> = collect_known(|ctx| &ctx.utilization);
 
         DistributedTrainingStats {
             total_steps: self.step_count,
@@ -1291,15 +1542,175 @@ mod tests {
 
         let gpu_contexts = vec![Arc::new(GpuContext {
             device_id: 0,
-            memory_usage: Arc::new(Mutex::new(0.8)),
-            utilization: Arc::new(Mutex::new(0.9)),
-            temperature: Arc::new(Mutex::new(75.0)),
-            communication_bandwidth: Arc::new(Mutex::new(1000.0)),
+            memory_usage: Arc::new(Mutex::new(Some(0.8))),
+            utilization: Arc::new(Mutex::new(Some(0.9))),
+            temperature: Arc::new(Mutex::new(Some(75.0))),
+            communication_bandwidth: Arc::new(Mutex::new(Some(1000.0))),
         })];
 
         let metrics = monitor.collect_metrics(&gpu_contexts).expect("Operation failed in test");
-        assert_eq!(metrics.gpu_utilization.len(), 1);
-        assert_eq!(metrics.memory_usage.len(), 1);
+        assert_eq!(metrics.gpu_utilization, vec![0.9]);
+        assert_eq!(metrics.memory_usage, vec![0.8]);
+        assert_eq!(metrics.bandwidth_utilization, 1000.0);
+    }
+
+    /// Regression: an earlier revision filled every device metric with
+    /// `0.8 + random()` on each step, so callers received invented telemetry.
+    /// Without a recorded sample the metrics must now be *absent*, never
+    /// plausible-looking noise.
+    #[test]
+    fn unsampled_devices_report_no_telemetry() {
+        let mut monitor = PerformanceMonitor::new(MonitoringConfig::default());
+        let gpu_contexts = vec![Arc::new(GpuContext {
+            device_id: 0,
+            memory_usage: Arc::new(Mutex::new(None)),
+            utilization: Arc::new(Mutex::new(None)),
+            temperature: Arc::new(Mutex::new(None)),
+            communication_bandwidth: Arc::new(Mutex::new(None)),
+        })];
+
+        let metrics = monitor.collect_metrics(&gpu_contexts).expect("collect must succeed in test");
+        assert!(
+            metrics.gpu_utilization.is_empty(),
+            "unknown utilization must stay empty, got {:?}",
+            metrics.gpu_utilization
+        );
+        assert!(metrics.memory_usage.is_empty());
+        assert_eq!(metrics.bandwidth_utilization, 0.0);
+    }
+
+    #[test]
+    fn train_step_does_not_invent_gpu_telemetry() {
+        let config = DistributedConfig::new().with_gpus(1);
+        let optimizer = Adam::new(0.001, (0.9, 0.999), 1e-8, 0.0);
+        let mut trainer =
+            EnhancedDistributedTrainer::new(config, optimizer).expect("trainer must build in test");
+
+        let mut gradients = HashMap::new();
+        gradients.insert(
+            "w".to_string(),
+            Tensor::from_slice(&[0.1f32, -0.2, 0.3], &[3]).expect("tensor must build in test"),
+        );
+
+        let result = trainer.train_step(gradients).expect("train step must succeed in test");
+        assert!(
+            result.performance_metrics.gpu_utilization.is_empty(),
+            "no telemetry was recorded, so none may be reported: {:?}",
+            result.performance_metrics.gpu_utilization
+        );
+        assert!(!result.batch_size_adjusted);
+    }
+
+    #[test]
+    fn recorded_telemetry_is_reported_verbatim() {
+        let config = DistributedConfig::new().with_gpu_ids(vec![3]);
+        let optimizer = Adam::new(0.001, (0.9, 0.999), 1e-8, 0.0);
+        let mut trainer =
+            EnhancedDistributedTrainer::new(config, optimizer).expect("trainer must build in test");
+
+        trainer
+            .record_gpu_telemetry(
+                3,
+                GpuTelemetrySample {
+                    utilization: 0.42,
+                    memory_usage: 0.17,
+                    temperature_celsius: 61.5,
+                    communication_bandwidth_mb_s: 512.0,
+                },
+            )
+            .expect("recording telemetry must succeed in test");
+
+        let stats = trainer.get_training_stats();
+        assert_eq!(stats.gpu_utilization, vec![0.42]);
+        assert_eq!(stats.memory_usage, vec![0.17]);
+
+        // An unknown device is rejected instead of being silently created.
+        assert!(trainer
+            .record_gpu_telemetry(
+                9,
+                GpuTelemetrySample {
+                    utilization: 0.5,
+                    memory_usage: 0.5,
+                    temperature_celsius: 50.0,
+                    communication_bandwidth_mb_s: 1.0,
+                },
+            )
+            .is_err());
+
+        // Out-of-range samples are rejected.
+        assert!(trainer
+            .record_gpu_telemetry(
+                3,
+                GpuTelemetrySample {
+                    utilization: 1.5,
+                    memory_usage: 0.5,
+                    temperature_celsius: 50.0,
+                    communication_bandwidth_mb_s: 1.0,
+                },
+            )
+            .is_err());
+    }
+
+    /// Regression: the single-device branch of `train_step` used to decompress
+    /// each gradient into `_grad` and drop it, so training was a no-op.
+    #[test]
+    fn train_step_gradients_reach_the_optimizer() {
+        let config = DistributedConfig::new().with_gpus(1);
+        let optimizer = Adam::new(0.1, (0.9, 0.999), 1e-8, 0.0);
+        let mut trainer =
+            EnhancedDistributedTrainer::new(config, optimizer).expect("trainer must build in test");
+
+        let mut parameters = HashMap::new();
+        parameters.insert(
+            "w".to_string(),
+            Tensor::from_slice(&[1.0f32, 2.0, 3.0], &[3]).expect("tensor must build in test"),
+        );
+        let before = parameters["w"].to_vec_f32().expect("tensor read must succeed in test");
+
+        let mut gradients = HashMap::new();
+        gradients.insert(
+            "w".to_string(),
+            Tensor::from_slice(&[0.5f32, 0.5, 0.5], &[3]).expect("tensor must build in test"),
+        );
+
+        trainer.train_step(gradients).expect("train step must succeed in test");
+        assert_eq!(trainer.reduced_gradients().len(), 1);
+
+        let updated = trainer
+            .apply_reduced_gradients(&mut parameters)
+            .expect("applying gradients must succeed in test");
+        assert_eq!(updated, 1);
+
+        let after = parameters["w"].to_vec_f32().expect("tensor read must succeed in test");
+        assert_ne!(before, after, "a positive gradient must move the parameter");
+        for (old, new) in before.iter().zip(&after) {
+            assert!(
+                new < old,
+                "descent must decrease each weight: {old} -> {new}"
+            );
+        }
+    }
+
+    /// Regression: `recover_from_failure` used to log and return `Ok(true)`,
+    /// telling the training loop the job had recovered when nothing happened.
+    #[test]
+    fn node_recovery_requires_a_real_policy() {
+        let mut handler = FaultHandler::new(FaultToleranceConfig {
+            enabled: true,
+            checkpoint_frequency: 10,
+            max_retries: 3,
+            heartbeat_interval: Duration::from_secs(1),
+            auto_replacement: true,
+        });
+
+        assert!(
+            handler.handle_node_failure(2).is_err(),
+            "no recovery policy is installed, so recovery cannot be claimed"
+        );
+
+        handler.set_recovery_policy(|node_id| Ok(node_id != 7));
+        assert!(handler.handle_node_failure(2).expect("policy must run in test"));
+        assert!(!handler.handle_node_failure(7).expect("policy must run in test"));
     }
 
     #[test]
@@ -1339,15 +1750,12 @@ mod tests {
         let config = DistributedConfig::new().with_gpus(1);
         let optimizer = Adam::new(0.001, (0.9, 0.999), 1e-8, 0.0);
 
-        match EnhancedDistributedTrainer::new(config, optimizer) {
-            Ok(trainer) => {
-                assert_eq!(trainer.config.num_gpus, 1);
-                assert_eq!(trainer.step_count, 0);
-            },
-            Err(e) => {
-                // May fail in test environment due to GPU/MPI dependencies
-                println!("Expected error in test environment: {}", e);
-            },
-        }
+        // A single-device trainer needs no external runtime, so construction
+        // must succeed unconditionally; swallowing the error here would hide a
+        // real regression.
+        let trainer = EnhancedDistributedTrainer::new(config, optimizer)
+            .expect("single-device trainer must build in test");
+        assert_eq!(trainer.config.num_gpus, 1);
+        assert_eq!(trainer.step_count, 0);
     }
 }

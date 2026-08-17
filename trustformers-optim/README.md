@@ -69,7 +69,9 @@ defined — everything described below is always compiled in).
   point before training
 
 ### Second-Order Methods
-- **Sophia** (`Sophia` / `SophiaOptimizer`): Hutchinson's-estimator Hessian diagonal preconditioning
+- **Sophia** (`Sophia` / `SophiaOptimizer`): diagonal curvature preconditioning. The implemented estimator is
+  the Gauss-Newton / empirical-Fisher diagonal `g²` (Sophia-G without label resampling), **not** Sophia-H's
+  Hutchinson estimator, which needs a Hessian-vector product this crate cannot form
 - **L-BFGS**, **Newton-CG** (`LBFGS`, `NewtonCG`): classic quasi-Newton and Newton-CG line-search methods
 - **Self-Scaled BFGS / Broyden** (`SSBFGS`, `SSBroyden`, 2025): quasi-Newton methods with presets for
   physics-informed neural networks (PINNs) and non-convex problems

@@ -15,7 +15,94 @@
 
 use std::time::Instant;
 use trustformers_core::errors::Result;
-use trustformers_optim::{hyperparameter_tuning::*, AMacPConfig};
+use trustformers_core::tensor::Tensor;
+use trustformers_core::traits::Optimizer;
+use trustformers_optim::{hyperparameter_tuning::*, AMacPConfig, Adam};
+
+/// The demo's objective: a *real* training run, not a simulation.
+///
+/// It fits `y = 3·x₀ − 2·x₁ + 1` on a fixed synthetic dataset by minimising the mean
+/// squared error with Adam configured from the sampled hyperparameters, and reports
+/// the loss, the epoch at which it stopped improving, and the gradient-norm variance
+/// that was actually observed.
+fn train_small_regression(config: &HyperparameterSample) -> Result<TrialOutcome> {
+    // Fixed dataset: 32 points, three features (two inputs plus a bias term).
+    let rows: Vec<[f32; 3]> = (0..32)
+        .map(|i| {
+            let x0 = (i as f32) * 0.1 - 1.6;
+            let x1 = ((i * 7) % 32) as f32 * 0.05 - 0.8;
+            [x0, x1, 1.0]
+        })
+        .collect();
+    let targets: Vec<f32> = rows.iter().map(|r| 3.0 * r[0] - 2.0 * r[1] + 1.0).collect();
+
+    let mut optimizer = Adam::new(
+        config.learning_rate,
+        (config.beta1, config.beta2),
+        config.epsilon,
+        config.weight_decay,
+    );
+    let mut weights = Tensor::from_vec(vec![0.0_f32; 3], &[3])?;
+
+    let epochs = 200_usize;
+    let mut best_loss = f32::INFINITY;
+    let mut best_epoch = epochs;
+    let mut grad_norms = Vec::with_capacity(epochs);
+
+    for epoch in 0..epochs {
+        let w = weights.data_f32()?;
+        let mut gradient = vec![0.0_f32; 3];
+        let mut loss = 0.0_f32;
+
+        for (row, target) in rows.iter().zip(targets.iter()) {
+            let prediction = row[0] * w[0] + row[1] * w[1] + row[2] * w[2];
+            let residual = prediction - target;
+            loss += residual * residual;
+            for k in 0..3 {
+                gradient[k] += 2.0 * residual * row[k];
+            }
+        }
+        let n = rows.len() as f32;
+        loss /= n;
+        for g in gradient.iter_mut() {
+            *g /= n;
+        }
+
+        grad_norms.push(gradient.iter().map(|g| g * g).sum::<f32>().sqrt());
+        if loss + 1e-6 < best_loss {
+            best_loss = loss;
+            best_epoch = epoch + 1;
+        }
+        if !loss.is_finite() {
+            // A divergent configuration is a real, reportable outcome.
+            return Ok(TrialOutcome {
+                final_loss: f32::MAX,
+                convergence_epoch: epochs,
+                stability_score: 0.0,
+                throughput: 0.0,
+                gradient_norm_variance: f32::MAX,
+                peak_memory_bytes: None,
+            });
+        }
+
+        let grad_tensor = Tensor::from_vec(gradient, &[3])?;
+        optimizer.update_named("w", &mut weights, &grad_tensor)?;
+        Optimizer::step(&mut optimizer);
+    }
+
+    let mean_norm = grad_norms.iter().sum::<f32>() / grad_norms.len() as f32;
+    let norm_variance =
+        grad_norms.iter().map(|n| (n - mean_norm).powi(2)).sum::<f32>() / grad_norms.len() as f32;
+
+    Ok(TrialOutcome {
+        final_loss: best_loss,
+        convergence_epoch: best_epoch,
+        stability_score: 1.0 / (1.0 + norm_variance),
+        throughput: (rows.len() * epochs) as f32,
+        gradient_norm_variance: norm_variance,
+        peak_memory_bytes: None,
+    })
+}
 
 fn main() -> Result<()> {
     println!("🚀 TrustformeRS Hyperparameter Optimization Demo");
@@ -50,7 +137,8 @@ fn demo_single_objective_amacp() -> Result<()> {
 
     // Use the convenience function for transformer optimization
     println!("🔍 Optimizing aMacP hyperparameters for transformer training...");
-    let optimized_config = HyperparameterTuner::optimize_amacp_for_transformers(25)?;
+    let optimized_config =
+        HyperparameterTuner::optimize_amacp_for_transformers(25, &mut train_small_regression)?;
 
     println!(
         "⏱️  Optimization completed in {:.2}s",
@@ -136,7 +224,7 @@ fn demo_multi_objective_novograd() -> Result<()> {
     println!("🔍 Running multi-objective optimization for NovoGrad...");
     println!("📊 Objectives: Convergence Speed (40%), Memory Efficiency (30%), Stability (30%)");
 
-    let best_config = tuner.optimize()?;
+    let best_config = tuner.optimize(&mut train_small_regression)?;
 
     println!(
         "⏱️  Multi-objective optimization completed in {:.2}s",
@@ -214,7 +302,7 @@ fn demo_comparative_optimization() -> Result<()> {
         );
 
         println!("🚀 Optimizing {}...", name);
-        let best_config = tuner.optimize()?;
+        let best_config = tuner.optimize(&mut train_small_regression)?;
         let optimization_time = start_time.elapsed();
 
         results.push((
@@ -308,7 +396,7 @@ fn demo_task_specific_optimization() -> Result<()> {
             15, // quick optimization for demo
         );
 
-        let best_config = tuner.optimize()?;
+        let best_config = tuner.optimize(&mut train_small_regression)?;
 
         println!(
             "   🎯 Optimal LR: {:.2e}, WD: {:.2e}, Score: {:.4}",
@@ -382,7 +470,7 @@ fn demo_advanced_custom_optimization() -> Result<()> {
     );
 
     println!("🔍 Running advanced multi-objective optimization...");
-    let best_config = tuner.optimize()?;
+    let best_config = tuner.optimize(&mut train_small_regression)?;
 
     println!("🏆 Advanced Optimization Results:");
     println!("   Learning Rate: {:.2e}", best_config.learning_rate);

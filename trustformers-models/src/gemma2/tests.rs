@@ -22,7 +22,9 @@ fn tiny_config() -> Gemma2Config {
         sliding_window: 16,
         attention_logit_softcapping: 50.0,
         final_logit_softcapping: 30.0,
-        query_pre_attn_scalar: 1.0 / (head_dim as f64).sqrt(),
+        // Raw HF-style value (== head_dim, the typical convention), not a
+        // precomputed scale -- see `Gemma2Config::query_pre_attn_scalar`.
+        query_pre_attn_scalar: head_dim as f64,
         model_type: "gemma2".to_string(),
     }
 }
@@ -474,15 +476,22 @@ fn test_gemma2_generate_empty_input_error() {
 }
 
 // ── query_pre_attn_scalar formula ─────────────────────────────────────────
+//
+// `Gemma2Config::query_pre_attn_scalar` holds the raw HuggingFace
+// `config.json` value (the attention scale is derived from it as
+// `scale = query_pre_attn_scalar ^ -0.5`), not a precomputed scale -- see
+// the field's doc comment and `gemma2::model::tests::
+// test_gemma2_attention_forward_uses_derived_scale_not_raw_query_pre_attn_scalar`
+// for the end-to-end regression test covering the derivation itself.
 
 #[test]
 fn test_gemma2_query_pre_attn_scalar_formula() {
     let head_dim = 256usize;
-    let expected = 1.0 / (head_dim as f64).sqrt();
     let cfg = Gemma2Config::gemma2_9b();
     assert!(
-        (cfg.query_pre_attn_scalar - expected).abs() < 1e-9,
-        "query_pre_attn_scalar must be 1/sqrt(head_dim)"
+        (cfg.query_pre_attn_scalar - head_dim as f64).abs() < 1e-9,
+        "query_pre_attn_scalar must store the raw value (== head_dim for the 9B preset), \
+         not a precomputed scale"
     );
 }
 

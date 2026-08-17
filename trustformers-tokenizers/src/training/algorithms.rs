@@ -486,6 +486,16 @@ impl UnigramTrainer {
     }
 
     /// Prune vocabulary using EM algorithm to remove least useful tokens.
+    ///
+    /// This is a hard-EM (Viterbi) approximation of SentencePiece's unigram
+    /// pruning: an **E-step** re-segments every corpus word under the
+    /// current vocabulary via the same maximum-log-probability lattice
+    /// search a trained [`UnigramTokenizer`] performs, then an **M-step**
+    /// scores each removable piece by the *actual* total corpus
+    /// log-likelihood drop that results from re-segmenting, without it,
+    /// only the words whose current best segmentation uses it. Pieces are
+    /// removed lowest-loss-first until the vocabulary shrinks to
+    /// `target_size`.
     fn prune_vocabulary(
         &self,
         mut vocab: HashMap<String, f64>,
@@ -495,17 +505,54 @@ impl UnigramTrainer {
             return Ok(vocab);
         }
 
-        // Compute loss for each token removal
-        let mut loss_scores = Vec::new();
+        let unk_score = Self::unigram_unk_score(&vocab);
 
+        // E-step: Viterbi-segment every corpus word under the *current*
+        // vocabulary once, caching both the chosen pieces and their total
+        // log-probability, and build an inverted index (piece -> words
+        // whose current segmentation actually uses it) so the M-step only
+        // ever re-segments words a candidate piece can possibly affect.
+        let mut segmentations: HashMap<&str, (Vec<String>, f64)> =
+            HashMap::with_capacity(word_freqs.len());
+        for word in word_freqs.keys() {
+            let (pieces, score) = Self::viterbi_segment(&vocab, unk_score, None, word);
+            segmentations.insert(word.as_str(), (pieces, score));
+        }
+        // Second pass: build the inverted index from the now-stable
+        // `segmentations` map. Doing this in the same loop that inserts into
+        // `segmentations` does not borrow-check: `piece_to_words` would hold
+        // `&str` borrows into each word's local `pieces: Vec<String>` right
+        // before that same `Vec<String>` is moved into `segmentations`.
+        let mut piece_to_words: HashMap<&str, Vec<&str>> = HashMap::new();
+        for (word, (pieces, _)) in &segmentations {
+            for piece in pieces {
+                piece_to_words.entry(piece.as_str()).or_default().push(*word);
+            }
+        }
+
+        // M-step: score every removable piece by its real removal loss.
+        let mut loss_scores = Vec::with_capacity(vocab.len());
         for token in vocab.keys() {
             // Skip special tokens
             if self.config.special_tokens.contains(token) {
                 continue;
             }
+            // The base 1-character alphabet is always kept: it is the
+            // fallback that keeps every future input encodable without
+            // collapsing into `<unk>`, exactly as real SentencePiece
+            // unigram training protects the alphabet from pruning.
+            if token.chars().count() <= 1 {
+                continue;
+            }
 
-            // Calculate loss if this token is removed
-            let loss = self.calculate_removal_loss(token, &vocab, word_freqs);
+            let loss = Self::calculate_removal_loss(
+                token,
+                &vocab,
+                unk_score,
+                &segmentations,
+                &piece_to_words,
+                word_freqs,
+            );
             loss_scores.push((token.clone(), loss));
         }
 
@@ -515,7 +562,7 @@ impl UnigramTrainer {
         // Remove tokens with lowest loss
         let target_size = ((vocab.len() as f64) * self.shrinking_factor)
             .max(self.config.vocab_size as f64) as usize;
-        let tokens_to_remove = vocab.len() - target_size;
+        let tokens_to_remove = vocab.len().saturating_sub(target_size);
 
         for (token, _) in loss_scores.iter().take(tokens_to_remove) {
             vocab.remove(token);
@@ -524,26 +571,128 @@ impl UnigramTrainer {
         Ok(vocab)
     }
 
-    /// Calculate the loss incurred by removing a token from the vocabulary.
-    fn calculate_removal_loss(
-        &self,
-        token: &str,
-        vocab: &HashMap<String, f64>,
-        word_freqs: &HashMap<String, usize>,
-    ) -> f64 {
-        let mut total_loss = 0.0;
+    /// Score assigned to a single out-of-vocabulary character in the
+    /// Viterbi lattice, mirroring `UnigramTokenizer`'s own `unk_score`
+    /// (`min_score - UNK_PENALTY`). Keeping every position in the lattice
+    /// reachable via this heavily-penalized edge is what guarantees
+    /// [`Self::viterbi_segment`] always finds a genuine segmentation.
+    fn unigram_unk_score(vocab: &HashMap<String, f64>) -> f64 {
+        const UNK_PENALTY: f64 = 10.0;
+        let min_score =
+            vocab.values().copied().filter(|s| s.is_finite()).fold(f64::INFINITY, f64::min);
+        if min_score.is_finite() {
+            min_score - UNK_PENALTY
+        } else {
+            -UNK_PENALTY
+        }
+    }
 
-        for (word, freq) in word_freqs {
-            if word.contains(token) {
-                // Simplified loss calculation - in practice, this would use EM algorithm
-                // to find optimal segmentation and compute likelihood difference
-                let token_benefit = vocab.get(token).unwrap_or(&0.0) * (*freq as f64);
-                total_loss += token_benefit;
+    /// Viterbi search for the maximum-log-probability segmentation of
+    /// `word` under `vocab`, optionally pretending `exclude` is not in the
+    /// vocabulary at all (used to score a removal candidate). This is the
+    /// same lattice search [`UnigramTokenizer::encode`] performs
+    /// (reimplemented here, operating directly on the trainer's own `f64`
+    /// working scores with an `exclude` parameter, rather than
+    /// constructing a full `UnigramTokenizer` per removal candidate).
+    /// Returns the chosen piece sequence and its total log-probability.
+    fn viterbi_segment(
+        vocab: &HashMap<String, f64>,
+        unk_score: f64,
+        exclude: Option<&str>,
+        word: &str,
+    ) -> (Vec<String>, f64) {
+        let chars: Vec<char> = word.chars().collect();
+        let len = chars.len();
+        if len == 0 {
+            return (Vec::new(), 0.0);
+        }
+
+        // best[i] = (best log-prob of chars[..i], start index of its last piece)
+        let mut best = vec![(f64::NEG_INFINITY, 0usize); len + 1];
+        best[0] = (0.0, 0);
+
+        for end in 1..=len {
+            for start in 0..end {
+                if best[start].0 == f64::NEG_INFINITY {
+                    continue;
+                }
+
+                let piece: String = chars[start..end].iter().collect();
+                let excluded = exclude == Some(piece.as_str());
+                let score = if !excluded && vocab.contains_key(&piece) {
+                    vocab[&piece]
+                } else if end - start == 1 {
+                    // Unknown single character: always reachable.
+                    unk_score
+                } else {
+                    continue;
+                };
+
+                let candidate = best[start].0 + score;
+                if candidate > best[end].0 {
+                    best[end] = (candidate, start);
+                }
             }
         }
 
-        // Penalize removal of longer tokens (they're usually more useful)
-        total_loss * (1.0 / (token.len() as f64 + 1.0))
+        // Backtrack. Every position is reachable via the unknown edges, so
+        // this always terminates at `pos == 0`.
+        let mut pieces = Vec::new();
+        let mut pos = len;
+        while pos > 0 {
+            let (score_here, start) = best[pos];
+            debug_assert!(
+                score_here.is_finite(),
+                "every position is reachable via unknown edges"
+            );
+            pieces.push(chars[start..pos].iter().collect::<String>());
+            pos = start;
+        }
+        pieces.reverse();
+
+        (pieces, best[len].0)
+    }
+
+    /// Real EM-style removal loss for `token`: the corpus log-likelihood
+    /// drop from re-segmenting, without `token`, only the words whose
+    /// current Viterbi segmentation (`segmentations` / `piece_to_words`,
+    /// from the E-step) actually uses it. Words that never chose `token`
+    /// are entirely unaffected by its removal and are never re-segmented.
+    ///
+    /// Replaces the old `word.contains(token)` substring-count heuristic,
+    /// which counted a token as "used" by any word containing it as a
+    /// substring -- even words whose actual best segmentation never chose
+    /// it -- and invented a length-based penalty rather than measuring any
+    /// real likelihood change.
+    #[allow(clippy::too_many_arguments)]
+    fn calculate_removal_loss(
+        token: &str,
+        vocab: &HashMap<String, f64>,
+        unk_score: f64,
+        segmentations: &HashMap<&str, (Vec<String>, f64)>,
+        piece_to_words: &HashMap<&str, Vec<&str>>,
+        word_freqs: &HashMap<String, usize>,
+    ) -> f64 {
+        let Some(words) = piece_to_words.get(token) else {
+            // No word's current best segmentation uses this piece at all:
+            // removing it changes nothing.
+            return 0.0;
+        };
+
+        let mut total_loss = 0.0f64;
+        for &word in words {
+            let freq = *word_freqs.get(word).unwrap_or(&0) as f64;
+            if freq == 0.0 {
+                continue;
+            }
+            let (_, old_score) = &segmentations[word];
+            let (_, new_score) = Self::viterbi_segment(vocab, unk_score, Some(token), word);
+            // Removing a piece can only leave the best achievable score the
+            // same or strictly worse (the search space shrinks), so this
+            // is >= 0 up to floating-point noise.
+            total_loss += freq * (old_score - new_score);
+        }
+        total_loss
     }
 }
 

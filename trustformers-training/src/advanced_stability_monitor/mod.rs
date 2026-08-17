@@ -178,6 +178,9 @@ pub struct AdvancedStabilityMonitor {
     stability_scores: VecDeque<StabilityScore>,
     recovery_effectiveness: HashMap<PreventiveAction, f32>,
     pattern_detector: PatternDetector,
+    /// Actions the monitor decided on but cannot carry out itself, because they are
+    /// instructions to the training loop rather than edits to [`TrainerParameters`].
+    pending_signals: Vec<PreventiveAction>,
 }
 
 impl AdvancedStabilityMonitor {
@@ -193,7 +196,25 @@ impl AdvancedStabilityMonitor {
             stability_scores: VecDeque::new(),
             recovery_effectiveness: HashMap::new(),
             pattern_detector: PatternDetector::new(),
+            pending_signals: Vec::new(),
         }
+    }
+
+    /// Drain the actions that the training loop itself must carry out.
+    ///
+    /// [`PreventiveAction::TriggerEarlyCheckpoint`],
+    /// [`PreventiveAction::AdjustWarmupSchedule`] and
+    /// [`PreventiveAction::ResetAccumulatedGradients`] cannot be expressed as a change to
+    /// [`TrainerParameters`] — they are instructions to the loop. They are queued here
+    /// instead of being silently dropped; a caller that never drains this queue simply does
+    /// not act on them, but it is never told they were applied when they were not.
+    pub fn take_pending_signals(&mut self) -> Vec<PreventiveAction> {
+        std::mem::take(&mut self.pending_signals)
+    }
+
+    /// Actions currently queued for the training loop, without draining them.
+    pub fn pending_signals(&self) -> &[PreventiveAction] {
+        &self.pending_signals
     }
 
     /// Analyze current training step and predict future stability
@@ -1036,10 +1057,63 @@ impl AdvancedStabilityMonitor {
         Ok(None)
     }
 
-    fn should_apply_action(&self, _action: &PreventiveAction, _params: &TrainerParameters) -> bool {
-        true // Simplified logic
+    /// Would `action` actually change `params` in the intended direction?
+    ///
+    /// This used to be `true` unconditionally, so the monitor happily "applied" a learning
+    /// rate multiplier of `1.0`, a clipping threshold looser than the current one, or a
+    /// batch size identical to the one already in use, and reported each of them as an
+    /// applied recovery. Each arm below rejects the cases that would be a no-op or would
+    /// push a parameter out of its valid range.
+    fn should_apply_action(&self, action: &PreventiveAction, params: &TrainerParameters) -> bool {
+        match action {
+            PreventiveAction::ReduceLearningRate { factor } => {
+                factor.is_finite()
+                    && *factor > 0.0
+                    && *factor < 1.0
+                    && params.learning_rate * factor >= MIN_PREVENTIVE_LEARNING_RATE
+            },
+            // "Increase clipping" means clip harder, i.e. a *lower* threshold. A threshold
+            // of zero or below would zero every gradient.
+            PreventiveAction::IncreaseGradientClipping { new_threshold } => {
+                new_threshold.is_finite()
+                    && *new_threshold > 0.0
+                    && (params.gradient_clip_threshold <= 0.0
+                        || *new_threshold < params.gradient_clip_threshold)
+            },
+            PreventiveAction::ModifyBatchSize { new_size } => {
+                *new_size > 0
+                    && *new_size <= MAX_PREVENTIVE_BATCH_SIZE
+                    && *new_size != params.batch_size
+            },
+            PreventiveAction::AdjustOptimizer { suggested_params } => {
+                suggested_params.iter().any(|(key, value)| {
+                    value.is_finite()
+                        && params
+                            .optimizer_params
+                            .get(key)
+                            .is_none_or(|current| (current - value).abs() > OPTIMIZER_PARAM_EPSILON)
+                })
+            },
+            PreventiveAction::EnableNoise { noise_level } => {
+                noise_level.is_finite()
+                    && *noise_level > 0.0
+                    && params.optimizer_params.get(GRADIENT_NOISE_PARAM).is_none_or(|current| {
+                        (current - noise_level).abs() > OPTIMIZER_PARAM_EPSILON
+                    })
+            },
+            // Instructions to the training loop; always meaningful to raise.
+            PreventiveAction::TriggerEarlyCheckpoint
+            | PreventiveAction::AdjustWarmupSchedule
+            | PreventiveAction::ResetAccumulatedGradients => true,
+        }
     }
 
+    /// Carry out `action`.
+    ///
+    /// Actions that map onto [`TrainerParameters`] are applied here. The three that do not
+    /// are queued for [`AdvancedStabilityMonitor::take_pending_signals`] instead of falling
+    /// into a silent catch-all arm, which previously reported them as applied while doing
+    /// nothing at all.
     fn apply_preventive_action(
         &mut self,
         action: &PreventiveAction,
@@ -1047,7 +1121,8 @@ impl AdvancedStabilityMonitor {
     ) -> Result<()> {
         match action {
             PreventiveAction::ReduceLearningRate { factor } => {
-                params.learning_rate *= factor;
+                params.learning_rate =
+                    (params.learning_rate * factor).max(MIN_PREVENTIVE_LEARNING_RATE);
             },
             PreventiveAction::IncreaseGradientClipping { new_threshold } => {
                 params.gradient_clip_threshold = *new_threshold;
@@ -1055,57 +1130,42 @@ impl AdvancedStabilityMonitor {
             PreventiveAction::ModifyBatchSize { new_size } => {
                 params.batch_size = *new_size;
             },
-            _ => {
-                // Other actions would be implemented based on trainer interface
+            PreventiveAction::AdjustOptimizer { suggested_params } => {
+                for (key, value) in suggested_params {
+                    if value.is_finite() {
+                        params.optimizer_params.insert(key.clone(), *value);
+                    }
+                }
+            },
+            PreventiveAction::EnableNoise { noise_level } => {
+                params.optimizer_params.insert(GRADIENT_NOISE_PARAM.to_string(), *noise_level);
+            },
+            PreventiveAction::TriggerEarlyCheckpoint
+            | PreventiveAction::AdjustWarmupSchedule
+            | PreventiveAction::ResetAccumulatedGradients => {
+                self.pending_signals.push(action.clone());
             },
         }
         Ok(())
     }
 }
 
-/// Pattern detector for complex training dynamics
-pub struct PatternDetector {
-    pattern_library: HashMap<String, Pattern>,
-}
+/// Floor a [`PreventiveAction::ReduceLearningRate`] may not push the learning rate below.
+const MIN_PREVENTIVE_LEARNING_RATE: f32 = 1e-8;
 
-impl Default for PatternDetector {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// Ceiling for a [`PreventiveAction::ModifyBatchSize`] suggestion.
+const MAX_PREVENTIVE_BATCH_SIZE: usize = 65_536;
 
-impl PatternDetector {
-    pub fn new() -> Self {
-        Self {
-            pattern_library: HashMap::new(),
-        }
-    }
+/// Two optimizer hyper-parameters closer than this count as unchanged.
+const OPTIMIZER_PARAM_EPSILON: f32 = 1e-9;
 
-    pub fn detect_patterns(&self, _dynamics: &TrainingDynamics) -> Vec<DetectedPattern> {
-        Vec::new() // Placeholder
-    }
-}
+/// Key under which [`PreventiveAction::EnableNoise`] records its noise standard deviation in
+/// [`TrainerParameters::optimizer_params`].
+pub const GRADIENT_NOISE_PARAM: &str = "gradient_noise_std";
 
-#[derive(Debug, Clone)]
-pub struct Pattern {
-    pub name: String,
-    pub description: String,
-    pub indicators: Vec<PatternIndicator>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PatternIndicator {
-    pub metric: String,
-    pub condition: String,
-    pub threshold: f32,
-}
-
-#[derive(Debug, Clone)]
-pub struct DetectedPattern {
-    pub pattern: Pattern,
-    pub confidence: f32,
-    pub severity: RiskLevel,
-}
+/// Instability [`Pattern`]s and the detector that evaluates them.
+mod pattern;
+pub use pattern::{DetectedPattern, Pattern, PatternDetector, PatternIndicator};
 
 /// Trainer parameters that can be modified by recovery actions
 #[derive(Debug, Clone)]
@@ -1331,5 +1391,480 @@ mod tests {
         let result = monitor.analyze_step(0, f32::NAN, 0.5, 0.001, &gradients);
         // Either error or ok — just should not panic
         let _ = result;
+    }
+
+    // ── PatternDetector actually detects ─────────────────────────────────────
+
+    fn dynamics(
+        loss_trend: TrendDirection,
+        gradient_trend: TrendDirection,
+        lr_effectiveness: f32,
+        convergence_velocity: f32,
+        oscillation_frequency: f32,
+        phase_trajectory: Vec<(f32, f32)>,
+    ) -> TrainingDynamics {
+        TrainingDynamics {
+            loss_trend,
+            gradient_trend,
+            lr_effectiveness,
+            convergence_velocity,
+            oscillation_frequency,
+            phase_trajectory,
+        }
+    }
+
+    fn healthy_dynamics() -> TrainingDynamics {
+        dynamics(
+            TrendDirection::Decreasing,
+            TrendDirection::Decreasing,
+            0.9,
+            0.5,
+            0.05,
+            vec![(1.0, 1.0), (0.9, 0.95), (0.8, 0.9)],
+        )
+    }
+
+    #[test]
+    fn test_pattern_library_is_not_empty() {
+        // Regression: `pattern_library` was initialised empty and nothing ever inserted.
+        let detector = PatternDetector::new();
+        assert!(
+            detector.pattern_count() >= 7,
+            "the built-in library must be loaded, got {} patterns",
+            detector.pattern_count()
+        );
+    }
+
+    #[test]
+    fn test_detect_patterns_reports_loss_divergence() {
+        // Regression: `detect_patterns` returned `Vec::new()` for every input.
+        let detector = PatternDetector::new();
+        let diverging = dynamics(
+            TrendDirection::Diverging,
+            TrendDirection::Increasing,
+            0.05,
+            0.0,
+            0.1,
+            vec![(1.0, 10.0), (50.0, 500.0)],
+        );
+        let detected = detector.detect_patterns(&diverging);
+        assert!(
+            !detected.is_empty(),
+            "a diverging run must report at least one pattern"
+        );
+        assert!(
+            detected.iter().any(|d| d.pattern.name == "loss_divergence"),
+            "expected loss_divergence among {:?}",
+            detected.iter().map(|d| &d.pattern.name).collect::<Vec<_>>()
+        );
+        let divergence = detected
+            .iter()
+            .find(|d| d.pattern.name == "loss_divergence")
+            .expect("loss_divergence must be present");
+        assert!(
+            (divergence.confidence - 1.0).abs() < 1e-6,
+            "both indicators hold, so confidence should be 1.0, got {}",
+            divergence.confidence
+        );
+        assert!(matches!(divergence.severity, RiskLevel::Critical));
+    }
+
+    #[test]
+    fn test_detect_patterns_is_quiet_on_a_healthy_run() {
+        let detector = PatternDetector::new();
+        let detected = detector.detect_patterns(&healthy_dynamics());
+        assert!(
+            detected.is_empty(),
+            "a healthy run should trigger nothing, got {:?}",
+            detected.iter().map(|d| &d.pattern.name).collect::<Vec<_>>()
+        );
+    }
+
+    fn trainer_params() -> TrainerParameters {
+        TrainerParameters {
+            learning_rate: 1e-3,
+            gradient_clip_threshold: 5.0,
+            batch_size: 32,
+            optimizer_params: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_should_apply_action_rejects_no_ops_and_unsafe_values() {
+        // Regression: this returned `true` for everything, so a factor of 1.0 or a looser
+        // clipping threshold was "applied" and reported as a recovery.
+        let monitor = AdvancedStabilityMonitor::new(AdvancedStabilityConfig::default());
+        let params = trainer_params();
+
+        assert!(monitor.should_apply_action(
+            &PreventiveAction::ReduceLearningRate { factor: 0.5 },
+            &params
+        ));
+        for factor in [1.0f32, 1.5, 0.0, -0.5, f32::NAN] {
+            assert!(
+                !monitor
+                    .should_apply_action(&PreventiveAction::ReduceLearningRate { factor }, &params),
+                "factor {factor} is not a reduction"
+            );
+        }
+
+        assert!(monitor.should_apply_action(
+            &PreventiveAction::IncreaseGradientClipping { new_threshold: 1.0 },
+            &params
+        ));
+        for threshold in [5.0f32, 9.0, 0.0, -1.0] {
+            assert!(
+                !monitor.should_apply_action(
+                    &PreventiveAction::IncreaseGradientClipping {
+                        new_threshold: threshold
+                    },
+                    &params
+                ),
+                "threshold {threshold} does not tighten clipping from 5.0"
+            );
+        }
+
+        assert!(monitor
+            .should_apply_action(&PreventiveAction::ModifyBatchSize { new_size: 64 }, &params));
+        assert!(!monitor
+            .should_apply_action(&PreventiveAction::ModifyBatchSize { new_size: 32 }, &params));
+        assert!(!monitor
+            .should_apply_action(&PreventiveAction::ModifyBatchSize { new_size: 0 }, &params));
+    }
+
+    #[test]
+    fn test_every_preventive_action_is_carried_out_or_queued() {
+        // Regression: five of the eight variants fell into a `_ => {}` arm and were reported
+        // as applied while changing nothing.
+        let mut monitor = AdvancedStabilityMonitor::new(AdvancedStabilityConfig::default());
+        let mut params = trainer_params();
+
+        monitor
+            .apply_preventive_action(
+                &PreventiveAction::AdjustOptimizer {
+                    suggested_params: HashMap::from([("beta1".to_string(), 0.85f32)]),
+                },
+                &mut params,
+            )
+            .expect("apply");
+        assert_eq!(params.optimizer_params.get("beta1"), Some(&0.85));
+
+        monitor
+            .apply_preventive_action(
+                &PreventiveAction::EnableNoise { noise_level: 0.01 },
+                &mut params,
+            )
+            .expect("apply");
+        assert_eq!(
+            params.optimizer_params.get(GRADIENT_NOISE_PARAM),
+            Some(&0.01)
+        );
+
+        monitor
+            .apply_preventive_action(
+                &PreventiveAction::ReduceLearningRate { factor: 0.5 },
+                &mut params,
+            )
+            .expect("apply");
+        assert!((params.learning_rate - 5e-4).abs() < 1e-12);
+
+        for signal in [
+            PreventiveAction::TriggerEarlyCheckpoint,
+            PreventiveAction::AdjustWarmupSchedule,
+            PreventiveAction::ResetAccumulatedGradients,
+        ] {
+            monitor.apply_preventive_action(&signal, &mut params).expect("apply");
+        }
+        assert_eq!(monitor.pending_signals().len(), 3);
+        let drained = monitor.take_pending_signals();
+        assert_eq!(drained.len(), 3);
+        assert!(
+            monitor.pending_signals().is_empty(),
+            "draining must empty the queue"
+        );
+
+        // An already-set optimizer parameter is not re-applied.
+        assert!(!monitor.should_apply_action(
+            &PreventiveAction::AdjustOptimizer {
+                suggested_params: HashMap::from([("beta1".to_string(), 0.85f32)]),
+            },
+            &params
+        ));
+        assert!(!monitor.should_apply_action(
+            &PreventiveAction::EnableNoise { noise_level: 0.01 },
+            &params
+        ));
+    }
+
+    #[test]
+    fn test_reduce_learning_rate_respects_the_floor() {
+        let mut monitor = AdvancedStabilityMonitor::new(AdvancedStabilityConfig::default());
+        let mut params = trainer_params();
+        params.learning_rate = 1e-8;
+        // Reducing further would fall under the floor, so the action is not applicable.
+        assert!(!monitor.should_apply_action(
+            &PreventiveAction::ReduceLearningRate { factor: 0.5 },
+            &params
+        ));
+        // Applying it anyway still cannot drive the learning rate to zero.
+        monitor
+            .apply_preventive_action(
+                &PreventiveAction::ReduceLearningRate { factor: 1e-6 },
+                &mut params,
+            )
+            .expect("apply");
+        assert!(params.learning_rate >= 1e-8);
+    }
+
+    #[test]
+    fn test_builtin_patterns_are_conjunctions() {
+        // Regression: the detector used a global "half the indicators is enough" rule, so a
+        // healthy run whose gradients were merely *shrinking* satisfied one of the two
+        // `gradient_norm_collapse` indicators and the pattern fired at confidence 0.5.
+        let healthy = healthy_dynamics();
+        assert!(matches!(healthy.gradient_trend, TrendDirection::Decreasing));
+
+        let detector = PatternDetector::new();
+        for (pattern, _) in PatternDetector::builtin_patterns() {
+            assert_eq!(
+                pattern.min_indicators,
+                pattern.indicators.len(),
+                "built-in pattern '{}' must require all of its indicators",
+                pattern.name
+            );
+        }
+        assert!(
+            !detector
+                .detect_patterns(&healthy)
+                .iter()
+                .any(|d| d.pattern.name == "gradient_norm_collapse"),
+            "a decreasing gradient trend alone is not a collapse"
+        );
+
+        // The same two indicators registered as a disjunction *do* fire on that run —
+        // proving the difference comes from `min_indicators`, not from the indicators.
+        let mut permissive = PatternDetector::empty();
+        permissive
+            .register_pattern(
+                Pattern::any_of(
+                    "half_collapse",
+                    "either half of the collapse rule",
+                    vec![
+                        PatternIndicator::new("max_gradient_norm", "less_than", 1e-4),
+                        PatternIndicator::new("gradient_trend_decreasing", "greater_or_equal", 1.0),
+                    ],
+                ),
+                RiskLevel::High,
+            )
+            .expect("registration should succeed");
+        let hits = permissive.detect_patterns(&healthy);
+        assert_eq!(hits.len(), 1);
+        assert!(
+            (hits[0].confidence - 0.5).abs() < 1e-6,
+            "one of two indicators held, so confidence is 0.5, got {}",
+            hits[0].confidence
+        );
+    }
+
+    #[test]
+    fn test_detect_patterns_output_varies_with_input() {
+        // The core regression: the old detector returned the same empty vector for every
+        // possible dynamics value.
+        let detector = PatternDetector::new();
+        let healthy = detector.detect_patterns(&healthy_dynamics());
+        let spiking = detector.detect_patterns(&dynamics(
+            TrendDirection::Increasing,
+            TrendDirection::Stable,
+            0.5,
+            0.2,
+            0.1,
+            // median loss 1.0, max 20.0 → spike ratio 20 > 3
+            vec![(1.0, 1.0), (1.0, 1.0), (20.0, 1.0)],
+        ));
+        assert_ne!(
+            healthy.len(),
+            spiking.len(),
+            "detection must depend on the dynamics"
+        );
+        assert!(spiking.iter().any(|d| d.pattern.name == "loss_spike"));
+    }
+
+    #[test]
+    fn test_detect_patterns_finds_gradient_explosion_and_collapse() {
+        let detector = PatternDetector::new();
+
+        let exploding = detector.detect_patterns(&dynamics(
+            TrendDirection::Increasing,
+            TrendDirection::Increasing,
+            0.4,
+            0.1,
+            0.1,
+            vec![(1.0, 5.0), (1.2, 5000.0)],
+        ));
+        assert!(exploding.iter().any(|d| d.pattern.name == "gradient_explosion"));
+
+        let collapsed = detector.detect_patterns(&dynamics(
+            TrendDirection::Stable,
+            TrendDirection::Decreasing,
+            0.4,
+            0.5,
+            0.1,
+            vec![(1.0, 1e-7), (1.0, 1e-8)],
+        ));
+        assert!(collapsed.iter().any(|d| d.pattern.name == "gradient_norm_collapse"));
+    }
+
+    #[test]
+    fn test_detect_patterns_finds_stagnation_and_lr_divergence() {
+        let detector = PatternDetector::new();
+
+        let stalled = detector.detect_patterns(&dynamics(
+            TrendDirection::Stable,
+            TrendDirection::Stable,
+            0.5,
+            1e-6,
+            0.01,
+            vec![(0.5, 0.1), (0.5, 0.1)],
+        ));
+        assert!(stalled.iter().any(|d| d.pattern.name == "training_stagnation"));
+
+        let lr_dead = detector.detect_patterns(&dynamics(
+            TrendDirection::Increasing,
+            TrendDirection::Stable,
+            0.01,
+            0.0,
+            0.1,
+            vec![(0.5, 0.1), (0.6, 0.1)],
+        ));
+        assert!(lr_dead.iter().any(|d| d.pattern.name == "learning_rate_divergence"));
+    }
+
+    #[test]
+    fn test_detect_patterns_sorted_by_descending_confidence() {
+        let detector = PatternDetector::new();
+        let detected = detector.detect_patterns(&dynamics(
+            TrendDirection::Diverging,
+            TrendDirection::Increasing,
+            0.01,
+            0.0,
+            0.9,
+            vec![(1.0, 1.0), (1.0, 1.0), (500.0, 5000.0)],
+        ));
+        assert!(detected.len() >= 2, "expected several concurrent patterns");
+        for pair in detected.windows(2) {
+            assert!(
+                pair[0].confidence >= pair[1].confidence,
+                "results must be ordered by descending confidence"
+            );
+        }
+    }
+
+    #[test]
+    fn test_register_pattern_rejects_unknown_metric_and_condition() {
+        let mut detector = PatternDetector::empty();
+        assert_eq!(detector.pattern_count(), 0);
+
+        let bad_metric = Pattern::all_of(
+            "typo",
+            "references a metric that does not exist",
+            vec![PatternIndicator::new(
+                "loss_trend_explodingg",
+                "greater_than",
+                1.0,
+            )],
+        );
+        assert!(
+            detector.register_pattern(bad_metric, RiskLevel::High).is_err(),
+            "an unknown metric must be rejected at registration, not silently ignored"
+        );
+
+        let bad_condition = Pattern::all_of(
+            "typo2",
+            "references a condition that does not exist",
+            vec![PatternIndicator::new(
+                "lr_effectiveness",
+                "much_bigger_than",
+                1.0,
+            )],
+        );
+        assert!(detector.register_pattern(bad_condition, RiskLevel::High).is_err());
+
+        let empty = Pattern::all_of("empty", "no indicators", vec![]);
+        assert!(detector.register_pattern(empty, RiskLevel::Low).is_err());
+
+        // min_indicators must be reachable, otherwise the rule is dead on arrival.
+        let unreachable = Pattern::at_least(
+            "unreachable",
+            "asks for more indicators than it has",
+            vec![PatternIndicator::new("lr_effectiveness", "less_than", 0.5)],
+            2,
+        );
+        assert!(detector.register_pattern(unreachable, RiskLevel::High).is_err());
+
+        let never = Pattern::at_least(
+            "never",
+            "min_indicators of zero",
+            vec![PatternIndicator::new("lr_effectiveness", "less_than", 0.5)],
+            0,
+        );
+        assert!(detector.register_pattern(never, RiskLevel::High).is_err());
+        assert_eq!(detector.pattern_count(), 0);
+    }
+
+    #[test]
+    fn test_custom_pattern_is_evaluated() {
+        let mut detector = PatternDetector::empty();
+        detector
+            .register_pattern(
+                Pattern::all_of(
+                    "slow_convergence",
+                    "convergence velocity under 0.2",
+                    vec![PatternIndicator::new(
+                        "convergence_velocity",
+                        "less_than",
+                        0.2,
+                    )],
+                ),
+                RiskLevel::Medium,
+            )
+            .expect("registration should succeed for known metric/condition");
+
+        let slow = dynamics(
+            TrendDirection::Decreasing,
+            TrendDirection::Stable,
+            0.8,
+            0.05,
+            0.0,
+            vec![(1.0, 1.0)],
+        );
+        let hits = detector.detect_patterns(&slow);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].pattern.name, "slow_convergence");
+
+        let fast = dynamics(
+            TrendDirection::Decreasing,
+            TrendDirection::Stable,
+            0.8,
+            0.9,
+            0.0,
+            vec![(1.0, 1.0)],
+        );
+        assert!(detector.detect_patterns(&fast).is_empty());
+    }
+
+    #[test]
+    fn test_trajectory_stats_handle_an_empty_trajectory() {
+        let detector = PatternDetector::new();
+        let empty = dynamics(
+            TrendDirection::Stable,
+            TrendDirection::Stable,
+            0.5,
+            0.5,
+            0.0,
+            vec![],
+        );
+        // Must not panic or divide by zero; a spike ratio of 1.0 means "no spike".
+        let detected = detector.detect_patterns(&empty);
+        assert!(detected.iter().all(|d| d.pattern.name != "loss_spike"));
     }
 }

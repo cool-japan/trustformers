@@ -237,25 +237,30 @@ impl SentencePieceTokenizer {
             self.vocab.insert(token.clone(), token_id);
             self.id_to_token.insert(token_id, token.clone());
             self.scores.insert(token_id, score);
-
-            // Detect special tokens
-            if token == "<pad>" || token == "[PAD]" {
-                self.pad_token_id = Some(token_id);
-                self.special_tokens.insert(token, token_id);
-            } else if token == "<unk>" || token == "[UNK]" {
-                self.unk_token_id = Some(token_id);
-                self.special_tokens.insert(token, token_id);
-            } else if token == "<s>" || token == "[CLS]" {
-                self.bos_token_id = Some(token_id);
-                self.special_tokens.insert(token, token_id);
-            } else if token == "</s>" || token == "[SEP]" {
-                self.eos_token_id = Some(token_id);
-                self.special_tokens.insert(token, token_id);
-            }
+            self.register_special_token(&token, token_id);
         }
 
         self.refresh_stats();
         Ok(())
+    }
+
+    /// Record `token` as one of the model's special pieces when its name is a
+    /// conventional SentencePiece / BERT marker.
+    ///
+    /// Text vocabularies carry no piece-type column, so the marker names are the
+    /// only signal available. Protobuf models never go through here: they carry
+    /// an explicit `SentencePiece.Type` per piece.
+    fn register_special_token(&mut self, token: &str, token_id: u32) {
+        let slot = match token {
+            "<pad>" | "[PAD]" => &mut self.pad_token_id,
+            "<unk>" | "[UNK]" => &mut self.unk_token_id,
+            "<s>" | "[CLS]" => &mut self.bos_token_id,
+            "</s>" | "[SEP]" => &mut self.eos_token_id,
+            _ => return,
+        };
+
+        *slot = Some(token_id);
+        self.special_tokens.insert(token.to_string(), token_id);
     }
 
     /// Configure the tokenizer model type
@@ -279,6 +284,16 @@ impl SentencePieceTokenizer {
     /// Configure byte fallback
     pub fn with_byte_fallback(mut self, enable: bool) -> Self {
         self.byte_fallback = enable;
+        self
+    }
+
+    /// Put the word-boundary marker at the **end** of each word.
+    ///
+    /// This is SentencePiece's `treat_whitespace_as_suffix`. It is read from the
+    /// `.model` file when one is loaded; this builder is for vocabularies
+    /// assembled in memory.
+    pub fn with_whitespace_as_suffix(mut self, enable: bool) -> Self {
+        self.treat_whitespace_as_suffix = enable;
         self
     }
 
@@ -333,15 +348,37 @@ impl SentencePieceTokenizer {
     }
 
     /// Load a plain one-token-per-line vocabulary file into this tokenizer.
+    ///
+    /// A piece's id is its **line number**, so a blank line leaves a hole rather
+    /// than renumbering everything after it. Marker-named pieces (`<unk>`,
+    /// `<s>`, `</s>`, `<pad>` and the BERT spellings) are registered as special,
+    /// without which the loaded tokenizer would report "no `<unk>` piece" for
+    /// out-of-vocabulary text even though the file provides one. The file
+    /// carries no scores; every piece is therefore charged
+    /// [`Self::unk_score`] by the lattice.
     pub fn load_vocab_from_file(&mut self, vocab_file: &str) -> Result<()> {
         let content = std::fs::read_to_string(vocab_file)
             .map_err(|e| TrustformersError::other(format!("Failed to read vocab file: {}", e)))?;
 
+        let mut loaded = 0usize;
         for (id, line) in content.lines().enumerate() {
-            let token = line.trim().to_string();
+            let token = line.trim();
+            if token.is_empty() {
+                continue;
+            }
+
             let token_id = id as u32;
-            self.vocab.insert(token.clone(), token_id);
-            self.id_to_token.insert(token_id, token);
+            self.vocab.insert(token.to_string(), token_id);
+            self.id_to_token.insert(token_id, token.to_string());
+            self.register_special_token(token, token_id);
+            loaded += 1;
+        }
+
+        if loaded == 0 {
+            return Err(TrustformersError::invalid_input(format!(
+                "Vocabulary file {} contains no pieces",
+                vocab_file
+            )));
         }
 
         self.refresh_stats();
@@ -369,7 +406,29 @@ impl SentencePieceTokenizer {
         }
     }
 
-    /// Normalize input text according to SentencePiece standards
+    /// Normalize input text according to SentencePiece standards.
+    ///
+    /// The step order mirrors SentencePiece's `Normalizer::Normalize`:
+    /// Unicode normalization, whitespace squeezing, then the **raw space**
+    /// dummy affix, and only then whitespace escaping. Adding the affix before
+    /// escaping is what makes `escape_whitespaces = false` behave correctly (the
+    /// affix stays a plain space instead of becoming a stray `▁`).
+    ///
+    /// `treat_whitespace_as_suffix` moves the affix to the end of the text,
+    /// which is how models trained with that flag mark word boundaries.
+    ///
+    /// Relative to escaping first and then prepending the marker, this changes
+    /// exactly three input classes, in each case toward SentencePiece:
+    ///
+    /// * `escape_whitespaces = false` — the affix stays a space instead of
+    ///   becoming a `▁` the model never asked for;
+    /// * empty (or whitespace-only) input — gets no affix at all, matching
+    ///   SentencePiece's `!norm.empty()` guard, so it tokenizes to nothing
+    ///   instead of to a lone `▁`;
+    /// * text already containing a literal `▁` — that character is ordinary
+    ///   input, so it no longer suppresses the word-boundary marker.
+    ///
+    /// For every other input the two orders are identical.
     fn normalize_text(&self, text: &str) -> String {
         if !self.normalization {
             return text.to_string();
@@ -390,14 +449,18 @@ impl SentencePieceTokenizer {
             normalized = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
         }
 
+        // Dummy affix, still as a raw space (SentencePiece escapes it below).
+        if self.add_dummy_prefix && !normalized.is_empty() {
+            if self.treat_whitespace_as_suffix {
+                normalized.push(' ');
+            } else {
+                normalized.insert(0, ' ');
+            }
+        }
+
         // Escape whitespaces
         if self.escape_whitespaces {
             normalized = normalized.replace(' ', "▁");
-        }
-
-        // Add dummy prefix if needed
-        if self.add_dummy_prefix && !normalized.starts_with(WHITESPACE_MARKER) {
-            normalized = format!("{}{}", WHITESPACE_MARKER, normalized);
         }
 
         normalized
@@ -507,6 +570,19 @@ impl SentencePieceTokenizer {
     }
 
     /// BPE tokenization: repeatedly merge the highest-scoring adjacent pair.
+    ///
+    /// This mirrors SentencePiece's `BPEModel`: exactly **one** pair — the
+    /// globally highest-scoring one, leftmost on a tie — is merged per
+    /// iteration, and the candidate set is then recomputed. (This is
+    /// deliberately different from GPT-2 byte-level BPE in [`crate::bpe`], which
+    /// merges every occurrence of the winning *rank* in one pass.)
+    ///
+    /// A piece that is in the vocabulary but carries no score is charged
+    /// [`Self::unk_score`], never `0.0`: scores are log probabilities, so `0.0`
+    /// is the most likely value a piece can have and would let an unscored piece
+    /// win every merge. Vocabularies loaded by
+    /// [`Self::load_vocab_from_file`] (plain one-token-per-line files) carry no
+    /// scores at all, so this path is reachable.
     fn tokenize_bpe(&self, text: &str) -> Vec<String> {
         let mut tokens: Vec<String> = text.chars().map(|c| c.to_string()).collect();
 
@@ -518,7 +594,7 @@ impl SentencePieceTokenizer {
             for i in 0..(tokens.len().saturating_sub(1)) {
                 let merged = format!("{}{}", tokens[i], tokens[i + 1]);
                 if let Some(&token_id) = self.vocab.get(&merged) {
-                    let score = self.scores.get(&token_id).copied().unwrap_or(0.0);
+                    let score = self.scores.get(&token_id).copied().unwrap_or(self.unk_score);
                     if score > best_score {
                         best_score = score;
                         best_pair = Some(merged);
@@ -538,11 +614,21 @@ impl SentencePieceTokenizer {
         tokens
     }
 
-    /// Word-level tokenization
+    /// Word-level tokenization.
+    ///
+    /// The boundary marker is re-attached on the side the model puts it on, so a
+    /// `treat_whitespace_as_suffix` model yields `word▁` pieces rather than
+    /// `▁word` ones (which its vocabulary would not contain).
     fn tokenize_word(&self, text: &str) -> Vec<String> {
         text.split(WHITESPACE_MARKER)
-            .filter(|s| !s.is_empty())
-            .map(|s| format!("{}{}", WHITESPACE_MARKER, s))
+            .filter(|segment| !segment.is_empty())
+            .map(|segment| {
+                if self.treat_whitespace_as_suffix {
+                    format!("{}{}", segment, WHITESPACE_MARKER)
+                } else {
+                    format!("{}{}", WHITESPACE_MARKER, segment)
+                }
+            })
             .collect()
     }
 
@@ -685,12 +771,16 @@ impl SentencePieceTokenizer {
     }
 
     /// Get all tokens sorted by score
+    ///
+    /// Pieces with no recorded score are reported as [`Self::unk_score`] — the
+    /// same value the lattice charges them — rather than `0.0`, which would rank
+    /// an unscored piece above every real one.
     pub fn get_tokens_by_score(&self) -> Vec<(String, u32, f32)> {
         let mut tokens: Vec<_> = self
             .vocab
             .iter()
             .map(|(token, &id)| {
-                let score = self.scores.get(&id).copied().unwrap_or(0.0);
+                let score = self.scores.get(&id).copied().unwrap_or(self.unk_score);
                 (token.clone(), id, score)
             })
             .collect();

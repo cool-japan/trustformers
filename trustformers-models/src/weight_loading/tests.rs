@@ -10,7 +10,6 @@ use crate::weight_loading::config::{
     WeightDataType, WeightLoadingConfig,
 };
 use crate::weight_loading::huggingface::{SafeTensorsHeader, TensorInfo, TensorMetadata};
-use std::io::Write;
 use std::path::PathBuf;
 
 #[test]
@@ -212,15 +211,15 @@ fn test_quantization_config_8bit_asymmetric() {
 
 #[test]
 fn test_safetensors_file_creation_and_parsing() {
-    let temp_dir = std::env::temp_dir();
-    let test_file = temp_dir.join("test_safetensors_header.json");
-
     let json_content = r#"{"__metadata__": {"format": "pt"}, "encoder.weight": {"dtype": "F32", "shape": [128, 64], "data_offsets": [0, 32768]}, "decoder.weight": {"dtype": "F32", "shape": [64, 128], "data_offsets": [32768, 65536]}}"#;
 
-    {
-        let mut file = std::fs::File::create(&test_file).expect("Failed to create test file");
-        file.write_all(json_content.as_bytes()).expect("Failed to write test file");
-    }
+    // A fixed name under `temp_dir()` would collide between concurrent test
+    // processes; `write_temp_file` keys the name on the pid and a counter.
+    let test_file = crate::weight_loading::test_support::write_temp_file(
+        "header",
+        "json",
+        json_content.as_bytes(),
+    );
 
     let content = std::fs::read_to_string(&test_file).expect("Failed to read test file");
     let header: SafeTensorsHeader = serde_json::from_str(&content).expect("Failed to parse header");

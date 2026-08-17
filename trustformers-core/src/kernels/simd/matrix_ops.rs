@@ -6,11 +6,11 @@
 //!
 //! # Performance
 //!
-//! Uses scirs2-core's BLAS-accelerated GEMM which leverages:
-//! - Accelerate framework on macOS
-//! - Intel MKL on Intel systems
-//! - OpenBLAS as fallback
-//! - Platform-specific SIMD (AVX2/AVX-512/NEON) for smaller matrices
+//! GEMM dispatch (see `blas_sgemm` below, and the COOLJAPAN policy banning
+//! OpenBLAS/MKL/Accelerate as direct dependencies):
+//! - macOS: [`oxiblas_blas::level3::gemm`] (OxiBLAS), a pure-Rust BLAS
+//! - Elsewhere: `scirs2_core::simd_ops`'s SIMD GEMM (`f32::simd_gemm`),
+//!   which selects AVX-512/AVX2/NEON/... based on platform capabilities
 
 use super::cpu_features::CpuFeatures;
 use crate::{Result, Tensor, TrustformersError};

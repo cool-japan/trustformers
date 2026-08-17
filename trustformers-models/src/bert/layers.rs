@@ -900,4 +900,148 @@ mod tests {
             "head_size must be hidden_size / num_attention_heads"
         );
     }
+
+    // --- Linear weight orientation ---
+    //
+    // HuggingFace stores `nn.Linear.weight` as `[out_features, in_features]` and
+    // so does `trustformers_core::layers::Linear`, whose `forward` multiplies by
+    // `W^T`. `take_linear` therefore binds the checkpoint tensor without
+    // transposing it -- a claim that only a *non-square* projection can falsify,
+    // because a square weight round-trips identically either way round.
+
+    /// Config whose feed-forward block is deliberately non-square (2 -> 3 -> 2).
+    fn orientation_config() -> BertConfig {
+        BertConfig {
+            vocab_size: 4,
+            hidden_size: 2,
+            num_hidden_layers: 1,
+            num_attention_heads: 1,
+            intermediate_size: 3,
+            hidden_act: "gelu".to_string(),
+            hidden_dropout_prob: 0.0,
+            attention_probs_dropout_prob: 0.0,
+            max_position_embeddings: 4,
+            type_vocab_size: 2,
+            initializer_range: 0.02,
+            layer_norm_eps: 1e-12,
+            pad_token_id: 0,
+            position_embedding_type: Some("absolute".to_string()),
+            use_cache: Some(false),
+            classifier_dropout: None,
+        }
+    }
+
+    #[test]
+    fn feed_forward_weights_are_bound_out_by_in_and_match_a_hand_computed_reference() {
+        use crate::weight_loading::checkpoint::Checkpoint;
+        use crate::weight_loading::test_support::{build_safetensors, F32Tensor};
+        use scirs2_core::ndarray::{ArrayD, IxDyn};
+
+        let cfg = orientation_config();
+        let names = BertLayerNames::bert();
+
+        // W1 is [intermediate, hidden] = [3, 2]; W2 is [hidden, intermediate] = [2, 3].
+        let w1 = [[1.0f32, 2.0], [0.0, -1.0], [0.5, 0.5]];
+        let b1 = [0.0f32, 1.0, -1.0];
+        let w2 = [[1.0f32, 0.0, -2.0], [0.5, 1.0, 0.25]];
+        let b2 = [0.25f32, -0.5];
+
+        let bytes = build_safetensors(&[
+            F32Tensor::new(
+                &format!("encoder.layer.0.{}.weight", names.intermediate),
+                &[3, 2],
+                w1.iter().flatten().copied().collect(),
+            ),
+            F32Tensor::new(
+                &format!("encoder.layer.0.{}.bias", names.intermediate),
+                &[3],
+                b1.to_vec(),
+            ),
+            F32Tensor::new(
+                &format!("encoder.layer.0.{}.weight", names.feed_forward_output),
+                &[2, 3],
+                w2.iter().flatten().copied().collect(),
+            ),
+            F32Tensor::new(
+                &format!("encoder.layer.0.{}.bias", names.feed_forward_output),
+                &[2],
+                b2.to_vec(),
+            ),
+        ]);
+        let checkpoint = Checkpoint::from_bytes(&bytes).expect("fixture must parse");
+        let mut binder = checkpoint.binder("");
+
+        let mut layer = BertLayer::new(&cfg).expect("BertLayer::new must succeed");
+        // The attention and layer-norm parameters are absent on purpose: the
+        // binder records them as missing rather than failing, which keeps this
+        // test focused on the feed-forward block.
+        layer
+            .load_weights(&mut binder, "encoder.layer.0.", &names, &cfg)
+            .expect("binding the feed-forward block must succeed");
+
+        let x = [1.0f32, 2.0];
+        let input = Tensor::F32(
+            ArrayD::from_shape_vec(IxDyn(&[1, 2]), x.to_vec()).expect("input must build"),
+        );
+        let output = layer.intermediate.forward(input).expect("feed-forward must run");
+        let actual: Vec<f32> = match &output {
+            Tensor::F32(arr) => arr.iter().copied().collect(),
+            other => panic!("expected an F32 output, got {other:?}"),
+        };
+
+        // Reference: y = W2 * gelu(W1 * x + b1) + b2, with every weight indexed
+        // as `[out][in]`. Reading either weight as `[in][out]` gives a different
+        // vector (and, for W1, a dimension mismatch).
+        let pre: Vec<f32> =
+            (0..3).map(|o| (0..2).map(|i| w1[o][i] * x[i]).sum::<f32>() + b1[o]).collect();
+        assert_eq!(pre, vec![5.0, -1.0, 0.5]);
+        let activated = trustformers_core::ops::activations::gelu(&Tensor::F32(
+            ArrayD::from_shape_vec(IxDyn(&[1, 3]), pre).expect("activation input must build"),
+        ))
+        .expect("gelu must run");
+        let h: Vec<f32> = match &activated {
+            Tensor::F32(arr) => arr.iter().copied().collect(),
+            other => panic!("expected an F32 activation, got {other:?}"),
+        };
+        let expected: Vec<f32> =
+            (0..2).map(|o| (0..3).map(|i| w2[o][i] * h[i]).sum::<f32>() + b2[o]).collect();
+
+        assert_eq!(actual.len(), expected.len());
+        for (got, want) in actual.iter().zip(expected.iter()) {
+            assert!(
+                (got - want).abs() < 1e-5,
+                "feed-forward output {actual:?} does not match the reference {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_transposed_linear_weight_is_rejected_rather_than_silently_accepted() {
+        use crate::weight_loading::checkpoint::Checkpoint;
+        use crate::weight_loading::test_support::{build_safetensors, F32Tensor};
+
+        let cfg = orientation_config();
+        let names = BertLayerNames::bert();
+
+        // `[hidden, intermediate]` instead of `[intermediate, hidden]`: the same
+        // values, the wrong way round. A loader that transposed on the way in
+        // would accept this and quietly compute a different function.
+        let bytes = build_safetensors(&[F32Tensor::ramp(
+            &format!("encoder.layer.0.{}.weight", names.intermediate),
+            &[2, 3],
+            1.0,
+        )]);
+        let checkpoint = Checkpoint::from_bytes(&bytes).expect("fixture must parse");
+        let mut binder = checkpoint.binder("");
+
+        let mut layer = BertLayer::new(&cfg).expect("BertLayer::new must succeed");
+        let err = layer
+            .load_weights(&mut binder, "encoder.layer.0.", &names, &cfg)
+            .expect_err("a transposed weight must be a hard error");
+        let message = err.to_string();
+        assert!(
+            message.contains("[2, 3]") && message.contains("[3, 2]"),
+            "the error must name both the actual and the expected shape: {message}"
+        );
+    }
 }

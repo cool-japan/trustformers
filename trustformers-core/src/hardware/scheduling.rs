@@ -14,7 +14,7 @@ use crate::errors::TrustformersError;
 use crate::tensor::Tensor;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Default scheduler implementation with priority-based scheduling
 #[derive(Debug)]
@@ -87,6 +87,10 @@ pub struct AdvancedScheduler {
     performance_history: Arc<Mutex<HashMap<String, Vec<PerformanceRecord>>>>,
     /// Configuration
     config: AdvancedSchedulerConfig,
+    /// Round-robin cursor over `device_loads`' (sorted) keys.
+    round_robin_cursor: Arc<Mutex<usize>>,
+    /// Real, running scheduling statistics (see `record_schedule_result`).
+    statistics: Arc<Mutex<SchedulerStatistics>>,
 }
 
 /// Available scheduling algorithms
@@ -254,6 +258,49 @@ impl DefaultScheduler {
     }
 }
 
+/// Record a scheduling decision (or failure) into a shared
+/// `SchedulerStatistics`: total/per-device operation counts, a running
+/// average of scheduling latency, and per-device utilization approximated
+/// as that device's share of all operations scheduled so far. Shared by
+/// both `DefaultScheduler` and `AdvancedScheduler` so the four fields the
+/// hardcoded `statistics()` implementations used to leave frozen at their
+/// `Default` values (`operations_per_device`, `avg_scheduling_time`,
+/// `device_utilization`, `failed_operations`) are actually updated.
+fn record_schedule_result(
+    stats: &Arc<Mutex<SchedulerStatistics>>,
+    device_id: Option<&str>,
+    elapsed: Duration,
+) {
+    let Ok(mut stats) = stats.lock() else { return };
+
+    stats.total_operations += 1;
+    let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
+    let n = stats.total_operations as f64;
+    // Running mean: new_avg = old_avg + (sample - old_avg) / n
+    stats.avg_scheduling_time += (elapsed_ms - stats.avg_scheduling_time) / n;
+
+    match device_id {
+        Some(device_id) => {
+            *stats.operations_per_device.entry(device_id.to_string()).or_insert(0) += 1;
+        },
+        None => {
+            stats.failed_operations += 1;
+        },
+    }
+
+    let total_successful: u64 = stats.operations_per_device.values().sum();
+    if total_successful > 0 {
+        let shares: Vec<(String, f64)> = stats
+            .operations_per_device
+            .iter()
+            .map(|(device, count)| (device.clone(), *count as f64 / total_successful as f64))
+            .collect();
+        for (device, share) in shares {
+            stats.device_utilization.insert(device, share);
+        }
+    }
+}
+
 impl HardwareScheduler for DefaultScheduler {
     fn schedule_operation(
         &self,
@@ -261,6 +308,8 @@ impl HardwareScheduler for DefaultScheduler {
         inputs: &[Tensor],
         params: &HashMap<String, OperationParameter>,
     ) -> HardwareResult<String> {
+        let start = Instant::now();
+
         // Convert to queued operation
         let queued_op = QueuedOperation {
             id: format!(
@@ -286,14 +335,9 @@ impl HardwareScheduler for DefaultScheduler {
         };
 
         // Find best device for this operation
-        let device_id = self.find_best_device(&queued_op)?;
-
-        // Update statistics
-        if let Ok(mut stats) = self.statistics.lock() {
-            stats.total_operations += 1;
-        }
-
-        Ok(device_id)
+        let result = self.find_best_device(&queued_op);
+        record_schedule_result(&self.statistics, result.as_deref().ok(), start.elapsed());
+        result
     }
 
     fn statistics(&self) -> SchedulerStatistics {
@@ -315,7 +359,23 @@ impl AdvancedScheduler {
             device_loads: Arc::new(Mutex::new(HashMap::new())),
             performance_history: Arc::new(Mutex::new(HashMap::new())),
             config: AdvancedSchedulerConfig::default(),
+            round_robin_cursor: Arc::new(Mutex::new(0)),
+            statistics: Arc::new(Mutex::new(SchedulerStatistics::default())),
         }
+    }
+
+    /// Devices known to this scheduler: the (sorted, for determinism) key
+    /// set of `device_loads`, populated by `update_device_load`. Scheduling
+    /// must be restricted to devices the caller has actually registered,
+    /// never a hardcoded guess like `["cpu", "gpu"]` that could name a
+    /// device this scheduler (or this machine) does not have.
+    fn known_devices(&self) -> Vec<String> {
+        let Ok(loads) = self.device_loads.lock() else {
+            return Vec::new();
+        };
+        let mut devices: Vec<String> = loads.keys().cloned().collect();
+        devices.sort();
+        devices
     }
 
     /// Update device load information
@@ -426,12 +486,22 @@ impl AdvancedScheduler {
     }
 
     fn schedule_round_robin(&self, available_devices: &[String]) -> HardwareResult<String> {
-        // Implement round-robin selection
-        // This would maintain state for the next device index
-        available_devices
-            .first()
-            .ok_or_else(|| TrustformersError::model_error("No devices available".to_string()))
-            .cloned()
+        if available_devices.is_empty() {
+            return Err(TrustformersError::model_error(
+                "No devices available".to_string(),
+            ));
+        }
+
+        // Cycle through `available_devices` using a cursor carried across
+        // calls, so repeated calls actually round-robin instead of always
+        // returning the first entry.
+        let mut cursor = self
+            .round_robin_cursor
+            .lock()
+            .map_err(|_| TrustformersError::model_error("Failed to lock RR cursor".to_string()))?;
+        let idx = *cursor % available_devices.len();
+        *cursor = cursor.wrapping_add(1);
+        Ok(available_devices[idx].clone())
     }
 
     fn schedule_load_aware(&self, available_devices: &[String]) -> HardwareResult<String> {
@@ -550,6 +620,8 @@ impl HardwareScheduler for AdvancedScheduler {
         inputs: &[Tensor],
         params: &HashMap<String, OperationParameter>,
     ) -> crate::hardware::HardwareResult<String> {
+        let start = Instant::now();
+
         // Convert to queued operation for advanced scheduling
         let queued_op = QueuedOperation {
             id: format!(
@@ -574,34 +646,228 @@ impl HardwareScheduler for AdvancedScheduler {
             estimated_duration: Duration::from_millis(100), // Default estimate
         };
 
-        // Get available devices (simplified implementation)
-        let available_devices = vec!["cpu".to_string(), "gpu".to_string()];
+        // Devices actually registered via `update_device_load`, never a
+        // hardcoded guess: a machine with no GPU must not have "gpu" handed
+        // back as a schedulable target.
+        let available_devices = self.known_devices();
 
-        match self.algorithm {
-            SchedulingAlgorithm::FCFS => self.schedule_fcfs(&available_devices),
-            SchedulingAlgorithm::SJF => self.schedule_sjf(&queued_op, &available_devices),
-            SchedulingAlgorithm::Priority => self.schedule_priority(&queued_op, &available_devices),
-            SchedulingAlgorithm::RoundRobin => self.schedule_round_robin(&available_devices),
-            SchedulingAlgorithm::LoadAware => self.schedule_load_aware(&available_devices),
-            SchedulingAlgorithm::PerformanceBased => {
-                self.schedule_performance_based(&queued_op, &available_devices)
-            },
-            SchedulingAlgorithm::MLBased => self.schedule_ml_based(&queued_op, &available_devices),
-        }
+        let result = if available_devices.is_empty() {
+            Err(TrustformersError::model_error(
+                "No devices registered with this scheduler; call update_device_load first"
+                    .to_string(),
+            ))
+        } else {
+            match self.algorithm {
+                SchedulingAlgorithm::FCFS => self.schedule_fcfs(&available_devices),
+                SchedulingAlgorithm::SJF => self.schedule_sjf(&queued_op, &available_devices),
+                SchedulingAlgorithm::Priority => {
+                    self.schedule_priority(&queued_op, &available_devices)
+                },
+                SchedulingAlgorithm::RoundRobin => self.schedule_round_robin(&available_devices),
+                SchedulingAlgorithm::LoadAware => self.schedule_load_aware(&available_devices),
+                SchedulingAlgorithm::PerformanceBased => {
+                    self.schedule_performance_based(&queued_op, &available_devices)
+                },
+                SchedulingAlgorithm::MLBased => {
+                    self.schedule_ml_based(&queued_op, &available_devices)
+                },
+            }
+        };
+
+        record_schedule_result(&self.statistics, result.as_deref().ok(), start.elapsed());
+        result
     }
 
     fn statistics(&self) -> SchedulerStatistics {
-        SchedulerStatistics {
-            total_operations: 0,
-            operations_per_device: HashMap::new(),
-            avg_scheduling_time: 10.0,
-            device_utilization: HashMap::new(),
-            failed_operations: 0,
+        self.statistics.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+    }
+
+    fn update_priorities(&mut self, priorities: HashMap<String, f64>) {
+        // `AdvancedScheduler` ranks devices by `DeviceLoad::utilization`
+        // (see `schedule_load_aware`) rather than by a separate priority
+        // map, so an externally supplied priority is translated into a
+        // synthetic utilization for any device not already tracked: higher
+        // priority -> lower (better) utilization. Devices that already have
+        // real load data from `update_device_load` are left untouched
+        // rather than overwritten with a synthetic value.
+        if let Ok(mut loads) = self.device_loads.lock() {
+            for (device_id, priority) in priorities {
+                loads.entry(device_id).or_insert_with(|| DeviceLoad {
+                    utilization: (1.0 - priority.clamp(0.0, 1.0)).clamp(0.0, 1.0),
+                    ..DeviceLoad::default()
+                });
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hardware::traits::{HardwareDevice, OperationRequirements};
+
+    /// Minimal `HardwareOperation` used only to exercise the scheduler by
+    /// name; `execute`/`validate_params`/`requirements`/`estimate_cost` are
+    /// not invoked by `schedule_operation`.
+    struct NamedOp(&'static str);
+
+    #[async_trait::async_trait]
+    impl HardwareOperation for NamedOp {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        async fn execute(
+            &self,
+            _device: &mut dyn HardwareDevice,
+            _inputs: &[Tensor],
+            _outputs: &mut [Tensor],
+            _params: &HashMap<String, OperationParameter>,
+        ) -> HardwareResult<()> {
+            Ok(())
+        }
+
+        fn validate_params(
+            &self,
+            _params: &HashMap<String, OperationParameter>,
+        ) -> HardwareResult<()> {
+            Ok(())
+        }
+
+        fn requirements(&self) -> OperationRequirements {
+            OperationRequirements {
+                min_memory: 0,
+                compute_units: None,
+                data_types: vec![],
+                capabilities: vec![],
+                performance: Default::default(),
+            }
+        }
+
+        fn estimate_cost(
+            &self,
+            _inputs: &[Tensor],
+            _params: &HashMap<String, OperationParameter>,
+        ) -> f64 {
+            0.0
         }
     }
 
-    fn update_priorities(&mut self, _priorities: HashMap<String, f64>) {
-        // Implementation would update internal priority tracking
-        // For now this is a no-op as AdvancedScheduler uses different mechanisms
+    /// Regression test: `AdvancedScheduler::schedule_operation` used to
+    /// hardcode `available_devices = vec!["cpu", "gpu"]`, so it would
+    /// happily return `"gpu"` even when no GPU (or any device at all) had
+    /// ever been registered via `update_device_load`. With no devices
+    /// registered it must now error instead of naming a phantom device.
+    #[test]
+    fn test_advanced_scheduler_errors_with_no_registered_devices() {
+        let scheduler = AdvancedScheduler::new(SchedulingAlgorithm::FCFS);
+        let op = NamedOp("add");
+        let result = scheduler.schedule_operation(&op, &[], &HashMap::new());
+        assert!(
+            result.is_err(),
+            "must not schedule onto a hardcoded phantom device list"
+        );
+    }
+
+    /// Regression test: scheduling must only ever name devices that were
+    /// actually registered, never the old hardcoded "cpu"/"gpu" pair.
+    #[test]
+    fn test_advanced_scheduler_only_schedules_registered_devices() {
+        let scheduler = AdvancedScheduler::new(SchedulingAlgorithm::FCFS);
+        scheduler.update_device_load("accel_7", DeviceLoad::default());
+
+        let op = NamedOp("add");
+        let device = scheduler
+            .schedule_operation(&op, &[], &HashMap::new())
+            .expect("schedule_operation should succeed with a registered device");
+        assert_eq!(device, "accel_7");
+    }
+
+    /// Regression test: round-robin must actually cycle through devices
+    /// across repeated calls instead of always returning the first entry.
+    #[test]
+    fn test_advanced_scheduler_round_robin_cycles() {
+        let scheduler = AdvancedScheduler::new(SchedulingAlgorithm::RoundRobin);
+        scheduler.update_device_load("dev_a", DeviceLoad::default());
+        scheduler.update_device_load("dev_b", DeviceLoad::default());
+
+        let op = NamedOp("add");
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..4 {
+            let device = scheduler
+                .schedule_operation(&op, &[], &HashMap::new())
+                .expect("schedule_operation failed");
+            seen.insert(device);
+        }
+        assert_eq!(
+            seen.len(),
+            2,
+            "round-robin over two devices must eventually visit both, got {seen:?}"
+        );
+    }
+
+    /// Regression test: `statistics()` used to return a constant
+    /// `SchedulerStatistics` (10.0ms average, empty maps) regardless of how
+    /// many operations had actually been scheduled.
+    #[test]
+    fn test_advanced_scheduler_statistics_reflect_real_activity() {
+        let scheduler = AdvancedScheduler::new(SchedulingAlgorithm::FCFS);
+        scheduler.update_device_load("dev_a", DeviceLoad::default());
+
+        let op = NamedOp("add");
+        for _ in 0..3 {
+            scheduler
+                .schedule_operation(&op, &[], &HashMap::new())
+                .expect("schedule failed");
+        }
+
+        let stats = scheduler.statistics();
+        assert_eq!(stats.total_operations, 3);
+        assert_eq!(stats.operations_per_device.get("dev_a").copied(), Some(3));
+        assert_eq!(stats.device_utilization.get("dev_a").copied(), Some(1.0));
+        assert_eq!(stats.failed_operations, 0);
+    }
+
+    /// Regression test: a scheduling failure (no registered devices) must
+    /// be counted in `failed_operations`, not silently dropped.
+    #[test]
+    fn test_advanced_scheduler_statistics_count_failures() {
+        let scheduler = AdvancedScheduler::new(SchedulingAlgorithm::FCFS);
+        let op = NamedOp("add");
+
+        let _ = scheduler.schedule_operation(&op, &[], &HashMap::new());
+        let _ = scheduler.schedule_operation(&op, &[], &HashMap::new());
+
+        let stats = scheduler.statistics();
+        assert_eq!(stats.total_operations, 2);
+        assert_eq!(stats.failed_operations, 2);
+    }
+
+    /// Regression test: `DefaultScheduler::statistics` used to leave
+    /// `operations_per_device`/`device_utilization`/`failed_operations`
+    /// frozen at their `Default` (empty/zero) values forever, even as
+    /// `total_operations` incremented.
+    #[test]
+    fn test_default_scheduler_statistics_track_per_device_counts() {
+        let mut scheduler = DefaultScheduler::new();
+        let mut priorities = HashMap::new();
+        priorities.insert("dev_x".to_string(), 1.0);
+        scheduler.update_priorities(priorities);
+
+        let op = NamedOp("add");
+        scheduler
+            .schedule_operation(&op, &[], &HashMap::new())
+            .expect("schedule failed");
+        scheduler
+            .schedule_operation(&op, &[], &HashMap::new())
+            .expect("schedule failed");
+
+        let stats = scheduler.statistics();
+        assert_eq!(stats.total_operations, 2);
+        assert_eq!(stats.operations_per_device.get("dev_x").copied(), Some(2));
+        assert!(
+            stats.device_utilization.contains_key("dev_x"),
+            "device_utilization must be populated, not left empty"
+        );
     }
 }

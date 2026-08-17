@@ -326,19 +326,35 @@ impl RocmImpl {
         }
     }
 
-    /// Get device properties
+    /// Get device properties.
+    ///
+    /// `HipLibrary` (above) only dlopen's the core module/memory/
+    /// kernel-launch API - not `hipGetDeviceProperties`, whose C struct
+    /// (`hipDeviceProp_t`) is large, contains fixed-size character arrays,
+    /// and has a layout that varies across ROCm releases. Hand-writing an
+    /// FFI mirror of it here, unable to be compiled or exercised on this
+    /// (non-Linux) development host, would be an unverified ABI risk. This
+    /// used to report a fixed "AMD Radeon RX 7900 XTX" / 24GB / 96 CU for
+    /// every `device_id` regardless of what is actually attached; it now
+    /// honestly reports the properties as unqueried (all real device
+    /// identification for this instance came from `RocmImpl::new()`'s
+    /// prior, real `hip_get_device_count` dlopen call succeeding, not from
+    /// this function). The two constants kept below (`wavefront_size`,
+    /// `max_threads_per_block`) are architecture-wide HIP/RDNA values, not
+    /// per-device measurements.
     fn get_device_properties(device_id: i32) -> Result<DeviceProperties> {
-        // In a real implementation, this would query actual device properties
-        // For now, we'll return properties for a common AMD GPU
         Ok(DeviceProperties {
-            name: "AMD Radeon RX 7900 XTX".to_string(),
-            gfx_version: "gfx1100".to_string(),
-            total_memory: 24 * 1024 * 1024 * 1024,     // 24GB
-            available_memory: 22 * 1024 * 1024 * 1024, // 22GB
-            compute_units: 96,
+            name: format!(
+                "AMD ROCm device {device_id} (properties not queried: hipGetDeviceProperties is \
+                 not bound by this build)"
+            ),
+            gfx_version: "unknown".to_string(),
+            total_memory: 0,
+            available_memory: 0,
+            compute_units: 0,
             wavefront_size: 64,
             max_threads_per_block: 1024,
-            max_shared_memory: 65536,
+            max_shared_memory: 0,
         })
     }
 
@@ -412,11 +428,21 @@ impl RocmImpl {
         Ok(kernel)
     }
 
-    /// Compile HIP source code
-    fn compile_hip_source(&self, source: &str) -> Result<Vec<u8>> {
-        // In a real implementation, this would use hipcc or similar compiler
-        // For now, we'll simulate the compilation
-        Ok(vec![0; 1024]) // Placeholder code object
+    /// Compile HIP source code to a loadable code object.
+    ///
+    /// This build has no `hiprtc` (HIP Runtime Compiler) binding - only the
+    /// core module/memory/kernel-launch API is dlopen'd (see `HipLibrary`
+    /// above) - so there is no way to turn `source` into a real code
+    /// object. The previous placeholder (`vec![0; 1024]`) was fed straight
+    /// into `hip_module_load_data` by `compile_kernel`, which would reject
+    /// it as malformed anyway; failing here directly gives an immediate,
+    /// clear error instead of that confusing indirect failure.
+    fn compile_hip_source(&self, _source: &str) -> Result<Vec<u8>> {
+        Err(TrustformersError::hardware_error(
+            "HIP kernel compilation is not available: this build has no hiprtc (HIP Runtime \
+             Compiler) binding, only the core module/kernel-launch API is dlopen'd",
+            "RocmImpl::compile_hip_source",
+        ))
     }
 
     /// Allocate GPU memory

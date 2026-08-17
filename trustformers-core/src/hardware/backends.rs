@@ -470,61 +470,20 @@ impl GPUBackend {
     }
 
     fn discover_metal_devices(&self) -> HardwareResult<Vec<String>> {
-        // Enhanced Metal device discovery for Apple platforms
+        // Query the real Metal API directly (already a dependency of this
+        // exact cfg block) instead of shelling out to `system_profiler`
+        // (1-3s per call) and string-parsing its output, or falling back to
+        // a `sysctl` CPU-brand guess that has no arm for anything newer
+        // than M3. This mirrors `Device::metal_if_available` in
+        // `crate::device`, which already does it right.
         #[cfg(all(target_os = "macos", feature = "metal"))]
         {
-            use std::process::Command;
-
-            // Try to get system profiler information for GPUs on macOS
-            if let Ok(output) = Command::new("system_profiler")
-                .args(["SPDisplaysDataType", "-detailLevel", "basic"])
-                .output()
-            {
-                if output.status.success() {
-                    let profile_str = String::from_utf8_lossy(&output.stdout);
-                    let mut devices = Vec::new();
-
-                    for line in profile_str.lines() {
-                        if line.trim().starts_with("Chipset Model:") {
-                            let model = line.split(':').nth(1).unwrap_or("Unknown").trim();
-                            devices.push(format!("metal_{}", model.replace(' ', "_")));
-                        }
-                    }
-
-                    if !devices.is_empty() {
-                        return Ok(devices);
-                    }
-                }
-            }
-
-            // Alternative: Check for Apple Silicon using sysctl
-            if let Ok(output) =
-                Command::new("sysctl").args(["-n", "machdep.cpu.brand_string"]).output()
-            {
-                if output.status.success() {
-                    let cpu_brand = String::from_utf8_lossy(&output.stdout);
-                    if cpu_brand.contains("Apple") {
-                        // Apple Silicon device - has integrated GPU
-                        let device_name = if cpu_brand.contains("M1") {
-                            "metal_M1_GPU"
-                        } else if cpu_brand.contains("M2") {
-                            "metal_M2_GPU"
-                        } else if cpu_brand.contains("M3") {
-                            "metal_M3_GPU"
-                        } else {
-                            "metal_Apple_Silicon_GPU"
-                        };
-                        return Ok(vec![device_name.to_string()]);
-                    }
-                }
-            }
-
-            // Fallback: Check for Metal availability
-            if self.is_metal_available() {
-                Ok(vec!["metal_0_GPU".to_string()])
-            } else {
-                Ok(vec![])
-            }
+            let devices: Vec<String> = metal::Device::all()
+                .iter()
+                .enumerate()
+                .map(|(i, device)| format!("metal_{}_{}", i, device.name().replace(' ', "_")))
+                .collect();
+            Ok(devices)
         }
 
         #[cfg(not(all(target_os = "macos", feature = "metal")))]
@@ -658,11 +617,13 @@ impl GPUBackend {
 
     #[allow(dead_code)]
     pub(crate) fn is_metal_available(&self) -> bool {
-        // Check Metal availability with runtime detection
+        // Actually obtain a Metal device handle rather than checking that
+        // the framework bundle exists on disk (which is true on every
+        // shipping macOS install, including ones with no usable GPU, e.g.
+        // some virtualized/headless CI environments).
         #[cfg(all(target_os = "macos", feature = "metal"))]
         {
-            // Check for Metal framework
-            std::path::Path::new("/System/Library/Frameworks/Metal.framework").exists()
+            metal::Device::system_default().is_some()
         }
         #[cfg(not(all(target_os = "macos", feature = "metal")))]
         false
@@ -1114,6 +1075,40 @@ mod tests {
                     PrecisionMode::Single,
                 );
                 assert!(result.is_ok());
+            }
+        }
+    }
+
+    /// Regression test: `discover_metal_devices`/`is_metal_available` used
+    /// to shell out to `system_profiler`/`sysctl` and string-match chipset
+    /// names (with no arm past "M3"), or merely check that the Metal
+    /// framework bundle exists on disk. They must now query the real Metal
+    /// API and agree with each other: on any Mac with a default Metal
+    /// device, discovery must report at least one device.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[test]
+    fn test_metal_discovery_uses_real_metal_api() {
+        let backend = GPUBackend::new(GPUBackendType::Metal);
+        let available = backend.is_metal_available();
+        assert_eq!(
+            available,
+            metal::Device::system_default().is_some(),
+            "is_metal_available must agree with a direct Metal API probe"
+        );
+
+        if available {
+            let devices =
+                backend.discover_metal_devices().expect("metal discovery should not error");
+            assert!(
+                !devices.is_empty(),
+                "a real default Metal device exists but discovery reported none"
+            );
+            // The old sysctl-brand-string fallback only ever emitted names
+            // matching "metal_M1_GPU" / "metal_M2_GPU" / "metal_M3_GPU" /
+            // "metal_Apple_Silicon_GPU"; the real API path is not
+            // constrained to that fixed set (it echoes `device.name()`).
+            for d in &devices {
+                assert!(d.starts_with("metal_"), "unexpected device id format: {d}");
             }
         }
     }

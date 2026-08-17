@@ -1,4 +1,6 @@
 use crate::blip2::config::{Blip2Config, Blip2QFormerConfig, Blip2TextConfig, Blip2VisionConfig};
+use crate::generation_utils::GenerationUtils;
+use scirs2_core::random::{thread_rng, Rng}; // SciRS2 Integration Policy
 use trustformers_core::{
     device::Device,
     errors::TrustformersError,
@@ -374,7 +376,13 @@ impl Blip2ForConditionalGeneration {
         })
     }
 
-    /// Generate text from image
+    /// Generate text from image.
+    ///
+    /// `temperature <= 0` selects greedy decoding; otherwise the logits are
+    /// temperature-scaled and drawn from the nucleus defined by `top_p`
+    /// (`top_p >= 1` keeps the whole distribution). Sampling uses a
+    /// thread-local RNG — use [`generate_with_rng`](Self::generate_with_rng) for
+    /// a reproducible stream.
     pub fn generate(
         &self,
         pixel_values: &Tensor,
@@ -382,6 +390,27 @@ impl Blip2ForConditionalGeneration {
         max_length: usize,
         temperature: f32,
         top_p: f32,
+    ) -> Result<Tensor, Box<dyn std::error::Error>> {
+        let mut rng = thread_rng();
+        self.generate_with_rng(
+            pixel_values,
+            input_ids,
+            max_length,
+            temperature,
+            top_p,
+            &mut rng,
+        )
+    }
+
+    /// Same as [`generate`](Self::generate) with a caller-supplied RNG.
+    pub fn generate_with_rng(
+        &self,
+        pixel_values: &Tensor,
+        input_ids: Option<&Tensor>,
+        max_length: usize,
+        temperature: f32,
+        top_p: f32,
+        rng: &mut impl Rng,
     ) -> Result<Tensor, Box<dyn std::error::Error>> {
         let batch_size = pixel_values.shape()[0];
 
@@ -413,47 +442,103 @@ impl Blip2ForConditionalGeneration {
         };
 
         // Generate tokens
+        let eos_id = self.blip2_model.config.text_config.eos_token_id;
         for _ in 0..max_length {
             let outputs =
                 self.language_model.forward(&generated_ids, Some(&image_features), None, None)?;
 
-            // Apply temperature and top-p sampling
-            let next_token_logits = outputs.logits.select(1, -1)?;
-            let next_token = self.sample_token(&next_token_logits, temperature, top_p)?;
+            let next_ids = sample_next_ids(&outputs.logits, temperature, top_p, rng)?;
 
-            // Append to generated sequence
-            generated_ids = Tensor::concat(&[generated_ids, next_token.clone()], 1)?;
+            // The generated ids keep the dtype the caller started with, so the
+            // append cannot fail on a type mismatch.
+            let next_token = match &generated_ids {
+                Tensor::I64(_) => Tensor::from_vec_i64(
+                    next_ids.iter().map(|&id| id as i64).collect(),
+                    &[next_ids.len(), 1],
+                )?,
+                _ => Tensor::from_vec(
+                    next_ids.iter().map(|&id| id as f32).collect(),
+                    &[next_ids.len(), 1],
+                )?,
+            };
+            generated_ids = Tensor::concat(&[generated_ids, next_token], 1)?;
 
-            // Check for EOS token
-            if self.check_eos_token(&next_token)? {
+            // Stop once every sequence in the batch has produced EOS.
+            if next_ids.iter().all(|&id| id as i32 == eos_id) {
                 break;
             }
         }
 
         Ok(generated_ids)
     }
+}
 
-    /// Sample token with temperature and top-p
-    fn sample_token(
-        &self,
-        logits: &Tensor,
-        temperature: f32,
-        _top_p: f32,
-    ) -> Result<Tensor, Box<dyn std::error::Error>> {
-        let scaled_logits = logits.div_scalar(temperature)?;
-        let probabilities = scaled_logits.softmax(-1)?;
-
-        // Simple sampling (in practice, you'd implement proper nucleus sampling)
-        let token_id = probabilities.argmax(-1)?;
-        token_id
-            .unsqueeze_i64(-1)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+/// Draw one token id per batch row from `[batch, seq_len, vocab]` logits.
+///
+/// Only the last position of each row is decoded, which is what autoregressive
+/// generation consumes. `temperature <= 0` is greedy; otherwise the row is
+/// temperature-scaled and sampled from the top-`p` nucleus (`p >= 1` keeps the
+/// full distribution). An earlier revision ignored `top_p` entirely and returned
+/// `argmax`, so every "sampled" sequence was in fact greedy.
+fn sample_next_ids(
+    logits: &Tensor,
+    temperature: f32,
+    top_p: f32,
+    rng: &mut impl Rng,
+) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
+    let shape = logits.shape().to_vec();
+    let (batch, seq_len, vocab) = match shape.as_slice() {
+        [batch, seq_len, vocab] => (*batch, *seq_len, *vocab),
+        [seq_len, vocab] => (1, *seq_len, *vocab),
+        other => {
+            let message = format!("expected [batch, seq_len, vocab] logits, got {other:?}");
+            return Err(Box::new(TrustformersError::tensor_op_error(
+                &message,
+                "Blip2::sample_next_ids",
+            )));
+        },
+    };
+    if seq_len == 0 || vocab == 0 {
+        return Err(Box::new(TrustformersError::tensor_op_error(
+            "logits must carry at least one position and one vocabulary entry",
+            "Blip2::sample_next_ids",
+        )));
     }
 
-    /// Check if EOS token is generated
-    fn check_eos_token(&self, token: &Tensor) -> Result<bool, Box<dyn std::error::Error>> {
-        let token_id = token.item::<i32>()?;
-        Ok(token_id == self.blip2_model.config.text_config.eos_token_id)
+    let data = logits.data()?;
+    let mut ids = Vec::with_capacity(batch);
+    for b in 0..batch {
+        let start = (b * seq_len + seq_len - 1) * vocab;
+        let row = &data[start..start + vocab];
+        ids.push(sample_token_id(row, temperature, top_p, rng)?);
+    }
+    Ok(ids)
+}
+
+/// Pick one token id from a single row of logits.
+fn sample_token_id(
+    logits: &[f32],
+    temperature: f32,
+    top_p: f32,
+    rng: &mut impl Rng,
+) -> Result<u32, Box<dyn std::error::Error>> {
+    if logits.is_empty() {
+        return Err(Box::new(TrustformersError::tensor_op_error(
+            "cannot sample from an empty logit row",
+            "Blip2::sample_token_id",
+        )));
+    }
+    if temperature <= 0.0 {
+        return Ok(GenerationUtils::sample_greedy(logits));
+    }
+
+    let mut scaled = logits.to_vec();
+    GenerationUtils::apply_temperature(&mut scaled, temperature);
+    if top_p > 0.0 && top_p < 1.0 {
+        Ok(GenerationUtils::sample_top_p(&scaled, top_p, rng)?)
+    } else {
+        let probs = GenerationUtils::softmax(&scaled);
+        Ok(GenerationUtils::sample_from_probs(&probs, rng)? as u32)
     }
 }
 
@@ -1579,201 +1664,5 @@ pub struct LanguageModelOutput {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Small Q-Former config so the forward pass stays cheap in tests.
-    fn tiny_qformer_config() -> Blip2QFormerConfig {
-        Blip2QFormerConfig {
-            vocab_size: 32,
-            hidden_size: 16,
-            num_hidden_layers: 1,
-            num_attention_heads: 2,
-            intermediate_size: 32,
-            hidden_act: "gelu".to_string(),
-            hidden_dropout_prob: 0.0,
-            attention_probs_dropout_prob: 0.0,
-            max_position_embeddings: 16,
-            type_vocab_size: 2,
-            initializer_range: 0.02,
-            layer_norm_eps: 1e-12,
-            position_embedding_type: "absolute".to_string(),
-            cross_attention_frequency: 2,
-            encoder_width: 16,
-        }
-    }
-
-    /// The LM head must be a persistent layer. The old code built a fresh
-    /// `Linear::new(...)` inside `forward`, so two identical calls produced
-    /// different logits and leaked a vocab-sized allocation per call.
-    #[test]
-    fn test_qformer_lm_head_is_persistent() {
-        let config = tiny_qformer_config();
-        let model = Blip2QFormerModel::new(config).expect("qformer");
-        let input_ids = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).expect("input ids");
-
-        let first = model.forward(&input_ids, None, None, None).expect("first forward");
-        let second = model.forward(&input_ids, None, None, None).expect("second forward");
-
-        let a = first.logits.to_vec_f32().expect("logits a");
-        let b = second.logits.to_vec_f32().expect("logits b");
-        assert_eq!(a.len(), b.len(), "logits shape must be stable");
-        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
-            assert!(
-                (x - y).abs() < 1e-6,
-                "logit {i} changed between calls ({x} vs {y}) — the head is being re-randomised"
-            );
-        }
-    }
-
-    #[test]
-    fn test_qformer_lm_head_weight_is_loadable() {
-        let config = tiny_qformer_config();
-        let (vocab, hidden) = (config.vocab_size, config.hidden_size);
-        let mut model = Blip2QFormerModel::new(config).expect("qformer");
-
-        let weight = Tensor::zeros(&[vocab, hidden]).expect("zero head");
-        model.set_lm_head_weight(weight).expect("load head");
-
-        let input_ids = Tensor::from_vec(vec![1.0, 2.0], &[1, 2]).expect("input ids");
-        let out = model.forward(&input_ids, None, None, None).expect("forward");
-        for logit in out.logits.to_vec_f32().expect("logits") {
-            assert!(
-                logit.abs() < 1e-6,
-                "a zeroed head must produce zero logits, got {logit}"
-            );
-        }
-
-        // A wrongly shaped head must be rejected rather than silently accepted.
-        let bad = Tensor::zeros(&[hidden, vocab]).expect("bad head");
-        assert!(model.set_lm_head_weight(bad).is_err());
-    }
-
-    // ── Cross-entropy loss ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_shifted_cross_entropy_matches_hand_computation() {
-        // [batch=1, seq=2, vocab=3]
-        let logits =
-            Tensor::from_vec(vec![0.0, 1.0, 2.0, 3.0, 0.0, 0.0], &[1, 2, 3]).expect("logits");
-        let labels = Tensor::from_vec(vec![0.0, 2.0], &[1, 2]).expect("labels");
-        let loss = shifted_cross_entropy(&logits, &labels).expect("loss");
-        let value = loss.to_vec_f32().expect("loss data")[0];
-
-        let expected = ((0.0f32).exp() + (1.0f32).exp() + (2.0f32).exp()).ln() - 2.0;
-        assert!(
-            (value - expected).abs() < 1e-5,
-            "loss {value} != hand-computed {expected}"
-        );
-    }
-
-    /// A constant `Tensor::scalar(1.0)` placeholder would pass any smoke test;
-    /// the loss must actually depend on the labels.
-    #[test]
-    fn test_shifted_cross_entropy_depends_on_labels() {
-        let logits =
-            Tensor::from_vec(vec![0.0, 1.0, 5.0, 3.0, 0.0, 0.0], &[1, 2, 3]).expect("logits");
-        let good = Tensor::from_vec(vec![0.0, 2.0], &[1, 2]).expect("good labels");
-        let bad = Tensor::from_vec(vec![0.0, 0.0], &[1, 2]).expect("bad labels");
-        let good_loss =
-            shifted_cross_entropy(&logits, &good).expect("good").to_vec_f32().expect("data")[0];
-        let bad_loss =
-            shifted_cross_entropy(&logits, &bad).expect("bad").to_vec_f32().expect("data")[0];
-        assert!(
-            good_loss < bad_loss,
-            "predicting the high-logit token must cost less ({good_loss} vs {bad_loss})"
-        );
-        assert!(
-            (good_loss - 1.0).abs() > 1e-6 || (bad_loss - 1.0).abs() > 1e-6,
-            "the loss must not be a constant 1.0"
-        );
-    }
-
-    #[test]
-    fn test_shifted_cross_entropy_aligns_labels_to_sequence_tail() {
-        // Visual prefix of one token: labels cover only the last two positions.
-        let logits = Tensor::from_vec(
-            vec![9.0, 9.0, 9.0, 0.0, 1.0, 2.0, 3.0, 0.0, 0.0],
-            &[1, 3, 3],
-        )
-        .expect("logits");
-        let labels = Tensor::from_vec(vec![0.0, 2.0], &[1, 2]).expect("labels");
-        let value = shifted_cross_entropy(&logits, &labels)
-            .expect("loss")
-            .to_vec_f32()
-            .expect("data")[0];
-        let expected = ((0.0f32).exp() + (1.0f32).exp() + (2.0f32).exp()).ln() - 2.0;
-        assert!((value - expected).abs() < 1e-5, "{value} != {expected}");
-    }
-
-    #[test]
-    fn test_shifted_cross_entropy_rejects_impossible_inputs() {
-        let logits = Tensor::from_vec(vec![0.0, 1.0, 2.0], &[1, 1, 3]).expect("logits");
-        let labels = Tensor::from_vec(vec![1.0], &[1, 1]).expect("labels");
-        assert!(
-            shifted_cross_entropy(&logits, &labels).is_err(),
-            "a single position cannot be shifted"
-        );
-
-        let logits =
-            Tensor::from_vec(vec![0.0, 1.0, 2.0, 3.0, 0.0, 0.0], &[1, 2, 3]).expect("logits");
-        let out_of_range = Tensor::from_vec(vec![0.0, 7.0], &[1, 2]).expect("labels");
-        assert!(
-            shifted_cross_entropy(&logits, &out_of_range).is_err(),
-            "labels outside the vocabulary must be an error"
-        );
-    }
-
-    #[test]
-    #[ignore] // Heavy test - large model creation (~17s), run with --ignored
-    fn test_blip2_model_creation() {
-        let config = Blip2Config::default();
-        let model = Blip2Model::new(config);
-        assert!(model.is_ok());
-    }
-
-    #[test]
-    #[ignore] // Heavy test - vision model creation (~17s), run with --ignored
-    fn test_blip2_vision_model() {
-        let config = Blip2VisionConfig::default();
-        let model = Blip2VisionModel::new(config);
-        assert!(model.is_ok());
-    }
-
-    #[test]
-    #[ignore] // Heavy test - QFormer model creation, run with --ignored
-    fn test_blip2_qformer_model() {
-        let config = Blip2QFormerConfig::default();
-        let model = Blip2QFormerModel::new(config);
-        assert!(model.is_ok());
-    }
-
-    #[test]
-    fn test_blip2_patch_embedding() {
-        let config = Blip2VisionConfig::default();
-        let embedding = Blip2PatchEmbedding::new(&config);
-        assert!(embedding.is_ok());
-    }
-
-    #[test]
-    fn test_blip2_mlp() {
-        let mlp = Blip2MLP::new(768, 3072, "gelu");
-        assert!(mlp.is_ok());
-    }
-
-    #[test]
-    #[ignore] // Very heavy test - OPT 2.7B language model (~45s), run with --ignored
-    fn test_blip2_opt_language_model() {
-        let config = Blip2TextConfig::opt_2_7b();
-        let model = Blip2OptLanguageModel::new(config);
-        assert!(model.is_ok());
-    }
-
-    #[test]
-    #[ignore] // Very heavy test - T5 XL language model (~30s), run with --ignored
-    fn test_blip2_t5_language_model() {
-        let config = Blip2TextConfig::flan_t5_xl();
-        let model = Blip2T5LanguageModel::new(config);
-        assert!(model.is_ok());
-    }
-}
+#[path = "model_tests.rs"]
+mod tests;

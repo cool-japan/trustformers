@@ -920,7 +920,7 @@ mod tests {
         let mut trainer = TokenDpoTrainer::new(TokenDpoConfig::default());
         assert_eq!(trainer.step, 0);
         let ex = make_example(vec![-1.0], vec![-2.0], vec![-1.0], vec![-1.0]);
-        trainer.compute_batch_loss(&[ex.clone()]).expect("step 1");
+        trainer.compute_batch_loss(std::slice::from_ref(&ex)).expect("step 1");
         assert_eq!(trainer.step, 1);
         trainer.compute_batch_loss(&[ex]).expect("step 2");
         assert_eq!(trainer.step, 2);

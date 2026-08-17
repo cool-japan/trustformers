@@ -139,29 +139,34 @@ impl TensorParallelOps {
             }
         }
 
-        // Execute the all-to-all communication pattern
-        // Use a ring-based algorithm for better scalability
+        // Execute the all-to-all communication pattern using a ring
+        // algorithm: in phase `p`, rank `r` sends its chunk destined for
+        // rank `(r+p) % world_size` and receives the chunk rank
+        // `(r-p) % world_size` sends it. Every rank runs the same phase
+        // sequence, so each ordered (sender, receiver) pair appears in
+        // exactly one phase, matching up a `send` here with the peer's
+        // `recv` in that same phase - real point-to-point data movement
+        // through `self.mp_context.communicator`, not an echo of local data.
         for phase in 0..world_size {
             let send_to = (rank + phase) % world_size;
             let recv_from = (rank + world_size - phase) % world_size;
 
-            // In practice, this would use MPI_Isend/MPI_Irecv or NCCL send/recv
-            // For simulation, we perform the data exchange conceptually
             if phase == 0 {
-                // Self-exchange (no communication needed)
+                // Self-exchange: no communication needed.
                 receive_chunks[rank] = send_chunks[rank].clone();
-            } else {
-                // Simulate non-blocking send/recv
-                // In real implementation:
-                // - MPI_Isend(send_chunks[send_to], send_to, tag, comm, &send_request)
-                // - MPI_Irecv(receive_chunks[recv_from], recv_from, tag, comm, &recv_request)
-                // - MPI_Wait(&recv_request, MPI_STATUS_IGNORE)
-
-                // For now, simulate the exchange using communicator
-                let send_data = send_chunks[send_to].clone();
-                receive_chunks[recv_from] =
-                    self.simulate_point_to_point_exchange(&send_data, recv_from)?;
+                continue;
             }
+
+            // Mirrors non-blocking MPI_Isend/Irecv + Wait: post this
+            // rank's send for the phase, then block for the matching recv.
+            // Safe from deadlock in a ring because every rank posts its
+            // send before waiting on its recv, and the two sides of each
+            // pair are transported independently (see `Communicator::send`
+            // / `recv`).
+            self.mp_context.communicator.send(&send_chunks[send_to], send_to)?;
+            let expected_shape = receive_chunks[recv_from].shape();
+            receive_chunks[recv_from] =
+                self.mp_context.communicator.recv(&expected_shape, recv_from)?;
         }
 
         // Concatenate received chunks along concat_dim
@@ -194,17 +199,6 @@ impl TensorParallelOps {
         };
 
         Ok(result)
-    }
-
-    /// Simulate point-to-point data exchange (placeholder for actual MPI/NCCL implementation)
-    fn simulate_point_to_point_exchange(
-        &self,
-        data: &Tensor,
-        _target_rank: usize,
-    ) -> Result<Tensor> {
-        // In a real implementation, this would perform actual network communication
-        // For now, return the data as-is to simulate successful exchange
-        Ok(data.clone())
     }
 
     /// Concatenate tensors along specified dimension with proper error handling
@@ -648,23 +642,35 @@ impl AsyncTensorParallel {
         Self { mp_context }
     }
 
-    /// Start async all-reduce (returns handle)
-    pub async fn all_reduce_async(&self, tensor: Tensor) -> Result<AllReduceHandle> {
-        // In practice, this would start NCCL async operation
+    /// Start async all-reduce (returns handle).
+    ///
+    /// No async I/O runtime backs the communicator (see
+    /// `parallel::local_communicator`), so there is nothing to genuinely
+    /// overlap with the caller's other work; this performs the real
+    /// all-reduce eagerly through `self.mp_context` rather than returning a
+    /// handle around the tensor unreduced (the previous behavior, which
+    /// made `.wait()` hand back exactly what was passed in). The `async fn`
+    /// signature is kept for API compatibility with callers expecting a
+    /// handle they can `.await` later.
+    pub async fn all_reduce_async(&self, mut tensor: Tensor) -> Result<AllReduceHandle> {
+        self.mp_context.all_reduce(&mut tensor)?;
         Ok(AllReduceHandle {
             tensor,
-            completed: false,
+            completed: true,
         })
     }
 
-    /// Start async all-gather
+    /// Start async all-gather (returns handle). See `all_reduce_async` for
+    /// why this computes the real gather eagerly rather than returning a
+    /// handle that fabricates its result in `.wait()`.
     pub async fn all_gather_async(
         &self,
         distributed: DistributedTensor,
     ) -> Result<AllGatherHandle> {
+        let gathered = self.mp_context.all_gather(&distributed)?;
         Ok(AllGatherHandle {
-            distributed,
-            completed: false,
+            gathered,
+            completed: true,
         })
     }
 }
@@ -678,7 +684,6 @@ pub struct AllReduceHandle {
 impl AllReduceHandle {
     /// Wait for completion and get result
     pub async fn wait(mut self) -> Result<Tensor> {
-        // In practice, wait for NCCL operation
         self.completed = true;
         Ok(self.tensor)
     }
@@ -689,9 +694,14 @@ impl AllReduceHandle {
     }
 }
 
-/// Handle for async all-gather operation
+/// Handle for async all-gather operation.
+///
+/// Holds the already-gathered tensor (see `AsyncTensorParallel::all_gather_async`)
+/// rather than the pre-gather `DistributedTensor`, so `.wait()` cannot
+/// regress to returning a single rank's local shard as if it were the full
+/// gathered result.
 pub struct AllGatherHandle {
-    distributed: DistributedTensor,
+    gathered: Tensor,
     completed: bool,
 }
 
@@ -699,14 +709,19 @@ impl AllGatherHandle {
     /// Wait for completion and get result
     pub async fn wait(mut self) -> Result<Tensor> {
         self.completed = true;
-        // In practice, would gather from all ranks
-        Ok(self.distributed.local_shard.clone())
+        Ok(self.gathered)
+    }
+
+    /// Check if operation is complete (non-blocking)
+    pub fn is_complete(&self) -> bool {
+        self.completed
     }
 }
 
 #[cfg(test)]
 mod tests {
 
+    use super::super::model_parallel::{CommunicationBackend, ModelParallelConfig};
     use super::*;
 
     #[test]
@@ -960,23 +975,125 @@ mod tests {
 
     #[test]
     fn test_all_gather_handle_creation() {
-        let local = Tensor::ones(&[2]).expect("tensor creation failed");
-        let dist = DistributedTensor {
-            local_shard: local,
-            global_shape: vec![4],
-            partition: TensorPartition {
-                split_dim: 0,
-                start_idx: 0,
-                end_idx: 2,
-                num_partitions: 2,
-                partition_rank: 0,
-            },
-            device_id: 0,
-        };
+        let gathered = Tensor::ones(&[4]).expect("tensor creation failed");
         let handle = AllGatherHandle {
-            distributed: dist,
+            gathered,
             completed: false,
         };
         assert!(!handle.completed);
+    }
+
+    /// Regression test: before this fix, `AllGatherHandle::wait` always
+    /// returned `self.distributed.local_shard` - a single rank's local
+    /// shard - regardless of what was actually gathered. This asserts the
+    /// handle instead carries and returns a genuinely different (gathered)
+    /// tensor than the local shard that produced it.
+    #[tokio::test]
+    async fn test_all_gather_handle_wait_returns_gathered_not_local_shard() {
+        let local_shard = Tensor::from_vec(vec![9.0, 9.0], &[2]).expect("tensor creation failed");
+        let gathered =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[4]).expect("tensor creation failed");
+        let handle = AllGatherHandle {
+            gathered: gathered.clone(),
+            completed: false,
+        };
+
+        let waited = handle.wait().await.expect("wait should succeed");
+        assert_eq!(
+            waited.data().expect("data"),
+            gathered.data().expect("data"),
+            "wait() must return the gathered tensor"
+        );
+        assert_ne!(
+            waited.data().expect("data"),
+            local_shard.data().expect("data"),
+            "wait() must not degrade to returning a single rank's local shard"
+        );
+    }
+
+    /// Regression test: before this fix, `AsyncTensorParallel::all_reduce_async`
+    /// returned a handle wrapping the tensor completely unreduced
+    /// (`completed: false`, no communication attempted). With a real
+    /// (single-rank, in-process) communicator this must actually run the
+    /// reduction - which is the identity for `world_size == 1` but is
+    /// computed, not assumed.
+    #[tokio::test]
+    async fn test_all_reduce_async_runs_real_reduction() {
+        let mp_context = Arc::new(
+            ModelParallelContext::new(ModelParallelConfig {
+                num_devices: 1,
+                device_ids: vec![0],
+                comm_backend: CommunicationBackend::Custom,
+                ..Default::default()
+            })
+            .expect("context creation failed"),
+        );
+        let async_ops = AsyncTensorParallel::new(mp_context);
+        let tensor = Tensor::from_vec(vec![5.0, 6.0], &[2]).expect("tensor creation failed");
+
+        let handle = async_ops
+            .all_reduce_async(tensor)
+            .await
+            .expect("all_reduce_async should succeed");
+        assert!(
+            handle.is_complete(),
+            "eager all_reduce_async must report completed"
+        );
+        let result = handle.wait().await.expect("wait should succeed");
+        assert_eq!(result.data().expect("data"), vec![5.0, 6.0]);
+    }
+
+    /// Regression test: before this fix, `TensorParallelOps::all_to_all`'s
+    /// point-to-point exchange (`simulate_point_to_point_exchange`) always
+    /// returned the sender's own data, so every rank silently kept its own
+    /// chunks instead of exchanging them. Four ranks, each holding a chunk
+    /// only it could have produced, run a real all-to-all concurrently
+    /// (via `ModelParallelContext::new_local_group`, which gives them a
+    /// shared in-process communication group); each rank's result must
+    /// contain every other rank's chunk, not its own repeated.
+    #[test]
+    fn test_all_to_all_exchanges_real_data_between_ranks() {
+        let world_size = 4;
+        let config = ModelParallelConfig {
+            num_devices: world_size,
+            device_ids: (0..world_size).collect(),
+            comm_backend: CommunicationBackend::Custom,
+            ..Default::default()
+        };
+        let contexts = ModelParallelContext::new_local_group(config, world_size)
+            .expect("new_local_group should succeed");
+
+        let handles: Vec<_> = contexts
+            .into_iter()
+            .map(|ctx| {
+                std::thread::spawn(move || {
+                    let rank = ctx.rank();
+                    let ops = TensorParallelOps::new(Arc::new(ctx));
+                    // Rank r's tensor is [r*10, r*10+1, r*10+2, r*10+3]; after
+                    // splitting into `world_size` row-chunks of size 1 each and
+                    // all-to-all'ing, rank r's own chunk (row r) should show up
+                    // in every rank's output, and rank r's output row i should
+                    // be chunk r of rank i's original tensor: value i*10 + r.
+                    let data: Vec<f32> = (0..world_size).map(|c| (rank * 10 + c) as f32).collect();
+                    let tensor = Tensor::from_vec(data, &[world_size, 1]).expect("tensor");
+
+                    let result = ops.all_to_all(&tensor, 0, 0).expect("all_to_all should succeed");
+                    (rank, result.data().expect("data"))
+                })
+            })
+            .collect();
+
+        let mut results: Vec<(usize, Vec<f32>)> =
+            handles.into_iter().map(|h| h.join().expect("thread")).collect();
+        results.sort_by_key(|(rank, _)| *rank);
+
+        for (rank, data) in &results {
+            let expected: Vec<f32> = (0..world_size).map(|i| (i * 10 + rank) as f32).collect();
+            assert_eq!(
+                data, &expected,
+                "rank {rank}'s all_to_all result must contain every other rank's real chunk, \
+                 not its own data repeated"
+            );
+        }
     }
 }

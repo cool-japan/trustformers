@@ -350,18 +350,11 @@ impl InternLm2Attention {
     /// Q and K with RoPE, and computes
     /// `softmax(mask(Q Kᵀ) / sqrt(head_dim)) V` where query head `q` reads KV head
     /// `q / gqa_ratio`. The result is projected back with `o_proj`.
-    pub fn forward(&self, hidden_states: &[f32], seq_len: usize) -> Vec<f32> {
-        match self.try_forward(hidden_states, seq_len) {
-            Ok(output) => output,
-            // The public signature is infallible; a malformed input yields an
-            // all-zero block rather than a panic. `try_forward` reports the
-            // reason for callers that can handle it.
-            Err(_) => vec![0.0_f32; seq_len * self.config.hidden_size],
-        }
-    }
-
-    /// Fallible variant of [`forward`](Self::forward).
-    pub fn try_forward(
+    ///
+    /// A malformed input is reported, never papered over: an earlier revision
+    /// returned an all-zero block of the expected length, which a caller cannot
+    /// tell apart from a genuine activation.
+    pub fn forward(
         &self,
         hidden_states: &[f32],
         seq_len: usize,
@@ -537,10 +530,19 @@ impl InternLm2MLP {
     /// Accepts a flat `[seq_len * hidden_size]` input and returns the same shape.
     /// The SwiGLU is `down(silu(gate(x)) * up(x))`, matching the reference
     /// implementation.
-    pub fn forward(&self, x: &[f32]) -> Vec<f32> {
+    ///
+    /// An input that is not a whole number of tokens is reported rather than
+    /// quietly truncated.
+    pub fn forward(&self, x: &[f32]) -> Result<Vec<f32>, InternLm2Error> {
         let total = x.len();
-        if total == 0 || !total.is_multiple_of(self.hidden_size) {
-            return Vec::new();
+        if total == 0 {
+            return Ok(Vec::new());
+        }
+        if !total.is_multiple_of(self.hidden_size) {
+            return Err(InternLm2Error::InvalidInput(format!(
+                "{total} values are not a whole number of {}-wide tokens",
+                self.hidden_size
+            )));
         }
         let h = self.hidden_size;
         let mut out = Vec::with_capacity(total);
@@ -553,7 +555,7 @@ impl InternLm2MLP {
                 gate.iter().zip(up.iter()).map(|(g, u)| Self::silu(*g) * u).collect();
             out.extend_from_slice(&self.down_proj.forward_vec(&activated));
         }
-        out
+        Ok(out)
     }
 }
 
@@ -576,15 +578,22 @@ impl InternLm2DecoderLayer {
     }
 
     /// Forward pass with residual connections.
-    pub fn forward(&self, hidden_states: &[f32], seq_len: usize) -> Vec<f32> {
+    ///
+    /// Errors from the sub-blocks propagate: a residual sum against a truncated
+    /// or all-zero stand-in would silently corrupt the whole stack.
+    pub fn forward(
+        &self,
+        hidden_states: &[f32],
+        seq_len: usize,
+    ) -> Result<Vec<f32>, InternLm2Error> {
         // Self-attention with residual
-        let attn_out = self.attention.forward(hidden_states, seq_len);
+        let attn_out = self.attention.forward(hidden_states, seq_len)?;
         let after_attn: Vec<f32> =
             hidden_states.iter().zip(attn_out.iter()).map(|(h, a)| h + a).collect();
 
         // MLP with residual
-        let mlp_out = self.mlp.forward(&after_attn);
-        after_attn.iter().zip(mlp_out.iter()).map(|(h, m)| h + m).collect()
+        let mlp_out = self.mlp.forward(&after_attn)?;
+        Ok(after_attn.iter().zip(mlp_out.iter()).map(|(h, m)| h + m).collect())
     }
 
     /// Mutable access to the attention block (for weight loading).
@@ -717,7 +726,7 @@ impl InternLm2Model {
 
         // Pass through decoder layers.
         for layer in &self.layers {
-            hidden = layer.forward(&hidden, seq_len);
+            hidden = layer.forward(&hidden, seq_len)?;
         }
 
         // Final RMS norm.
@@ -888,7 +897,7 @@ mod tests {
         let cfg = tiny_internlm2_config();
         let attn = InternLm2Attention::new(cfg.clone(), 0);
         let hidden = lcg_vec(cfg.hidden_size, 80);
-        let out = attn.forward(&hidden, 1);
+        let out = attn.forward(&hidden, 1).expect("forward");
         assert_eq!(
             out.len(),
             cfg.hidden_size,
@@ -904,7 +913,7 @@ mod tests {
         let cfg = tiny_internlm2_config();
         let attn = InternLm2Attention::new(cfg.clone(), 0);
         let hidden = lcg_vec(2 * cfg.hidden_size, 81);
-        let out = attn.forward(&hidden, 2);
+        let out = attn.forward(&hidden, 2).expect("forward");
         let magnitude = out.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
         assert!(
             magnitude > 1e-6,
@@ -922,12 +931,12 @@ mod tests {
         let h = cfg.hidden_size;
         let base = lcg_vec(seq_len * h, 82);
 
-        let out_a = attn.forward(&base, seq_len);
+        let out_a = attn.forward(&base, seq_len).expect("forward base");
         let mut perturbed = base.clone();
         for value in perturbed.iter_mut().take(h) {
             *value += 1.0;
         }
-        let out_b = attn.forward(&perturbed, seq_len);
+        let out_b = attn.forward(&perturbed, seq_len).expect("forward perturbed");
 
         let last = (seq_len - 1) * h;
         let diff = out_a[last..]
@@ -948,12 +957,12 @@ mod tests {
         let h = cfg.hidden_size;
         let base = lcg_vec(seq_len * h, 83);
 
-        let out_a = attn.forward(&base, seq_len);
+        let out_a = attn.forward(&base, seq_len).expect("forward base");
         let mut perturbed = base.clone();
         for value in perturbed.iter_mut().skip((seq_len - 1) * h) {
             *value += 1.5;
         }
-        let out_b = attn.forward(&perturbed, seq_len);
+        let out_b = attn.forward(&perturbed, seq_len).expect("forward perturbed");
 
         for i in 0..(seq_len - 1) * h {
             assert!(
@@ -977,7 +986,7 @@ mod tests {
         let ratio = cfg.gqa_ratio();
         let x = lcg_vec(seq_len * h, 84);
 
-        let got = attn.try_forward(&x, seq_len).expect("forward");
+        let got = attn.forward(&x, seq_len).expect("forward");
 
         // Reference implementation.
         let normed: Vec<f32> = x
@@ -1028,7 +1037,51 @@ mod tests {
     fn test_internlm2_attention_rejects_bad_input_length() {
         let cfg = tiny_internlm2_config();
         let attn = InternLm2Attention::new(cfg, 0);
-        assert!(attn.try_forward(&[0.0, 1.0, 2.0], 2).is_err());
+        assert!(attn.forward(&[0.0, 1.0, 2.0], 2).is_err());
+    }
+
+    /// A malformed input must surface as an error. The previous infallible
+    /// wrapper returned `vec![0.0; seq_len * hidden_size]`, which a caller
+    /// cannot distinguish from a genuine (if unusual) activation.
+    #[test]
+    fn test_internlm2_attention_never_fabricates_a_zero_block() {
+        let cfg = tiny_internlm2_config();
+        let seq_len = 2;
+        let attn = InternLm2Attention::new(cfg.clone(), 0);
+        // One value short of the contract.
+        let short = vec![0.5_f32; seq_len * cfg.hidden_size - 1];
+        match attn.forward(&short, seq_len) {
+            Err(InternLm2Error::InvalidInput(message)) => {
+                assert!(
+                    message.contains(&(seq_len * cfg.hidden_size).to_string()),
+                    "the error must state the expected length, got {message}"
+                );
+            },
+            Err(other) => panic!("unexpected error variant: {other}"),
+            Ok(output) => panic!(
+                "a malformed input must not yield {} plausible values",
+                output.len()
+            ),
+        }
+    }
+
+    /// The MLP must reject a buffer that is not a whole number of tokens rather
+    /// than truncating it.
+    #[test]
+    fn test_internlm2_mlp_rejects_partial_token() {
+        let cfg = tiny_internlm2_config();
+        let mlp = InternLm2MLP::new(&cfg);
+        assert!(mlp.forward(&vec![0.25_f32; cfg.hidden_size + 1]).is_err());
+    }
+
+    /// A decoder layer must propagate the failure instead of summing a residual
+    /// against a fabricated block.
+    #[test]
+    fn test_internlm2_decoder_layer_propagates_input_errors() {
+        let cfg = tiny_internlm2_config();
+        let layer = InternLm2DecoderLayer::new(cfg.clone(), 0);
+        let short = vec![0.5_f32; 3 * cfg.hidden_size - 2];
+        assert!(layer.forward(&short, 3).is_err());
     }
 
     #[test]
@@ -1079,8 +1132,8 @@ mod tests {
     fn test_internlm2_mlp_output_is_input_dependent() {
         let cfg = tiny_internlm2_config();
         let mlp = InternLm2MLP::new(&cfg);
-        let a = mlp.forward(&lcg_vec(cfg.hidden_size, 85));
-        let b = mlp.forward(&lcg_vec(cfg.hidden_size, 86));
+        let a = mlp.forward(&lcg_vec(cfg.hidden_size, 85)).expect("mlp a");
+        let b = mlp.forward(&lcg_vec(cfg.hidden_size, 86)).expect("mlp b");
         let magnitude = a.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
         assert!(magnitude > 1e-6, "the MLP must not return all zeros");
         let diff = a.iter().zip(b.iter()).fold(0.0f32, |acc, (x, y)| acc.max((x - y).abs()));
@@ -1092,7 +1145,7 @@ mod tests {
         let cfg = tiny_internlm2_config();
         let mlp = InternLm2MLP::new(&cfg);
         let x = lcg_vec(cfg.hidden_size, 87);
-        let got = mlp.forward(&x);
+        let got = mlp.forward(&x).expect("mlp");
 
         let normed = InternLm2RmsNorm::forward(&x, &mlp.norm_weight, cfg.rms_norm_eps);
         let gate = mlp.gate_proj.forward_vec(&normed);
@@ -1152,7 +1205,7 @@ mod tests {
         let cfg = tiny_internlm2_config();
         let mlp = InternLm2MLP::new(&cfg);
         let x = lcg_vec(cfg.hidden_size, 81);
-        let out = mlp.forward(&x);
+        let out = mlp.forward(&x).expect("mlp");
         assert_eq!(
             out.len(),
             cfg.hidden_size,
@@ -1164,7 +1217,7 @@ mod tests {
     fn test_internlm2_mlp_empty_input_returns_empty() {
         let cfg = tiny_internlm2_config();
         let mlp = InternLm2MLP::new(&cfg);
-        let out = mlp.forward(&[]);
+        let out = mlp.forward(&[]).expect("mlp empty");
         assert!(
             out.is_empty(),
             "MLP with empty input must return empty output"

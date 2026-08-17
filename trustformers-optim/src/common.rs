@@ -136,12 +136,19 @@ impl OptimizerState {
     }
 
     /// Clears all state buffers to free memory.
+    ///
+    /// The parameter identity registry is cleared alongside the buffers: leaving
+    /// registrations behind while dropping their state would keep `params.len()`
+    /// reporting parameters whose buffers no longer exist, and would leave the
+    /// registry's bind cursor advanced past slots that are ready to be reused.
     pub fn clear(&mut self) {
         self.step = 0;
         self.momentum.clear();
         self.variance.clear();
         self.third_moment.clear();
         self.param_steps.clear();
+        self.velocity.clear();
+        self.params.clear();
     }
 
     /// Gets memory usage statistics.

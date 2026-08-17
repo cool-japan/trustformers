@@ -195,6 +195,14 @@ pub trait AsicDriver: Send + Sync {
     /// Transfer data from device
     async fn transfer_from_device(&self, address: u64, size: usize) -> HardwareResult<Vec<u8>>;
 
+    /// Allocate `size` bytes of device memory and return a real address
+    /// backed by this driver's own allocator (no two live allocations from
+    /// the same driver instance may alias).
+    async fn allocate(&self, size: usize) -> HardwareResult<usize>;
+
+    /// Free a block of device memory previously returned by `allocate`.
+    async fn free(&self, address: usize) -> HardwareResult<()>;
+
     /// Get device status
     async fn get_status(&self) -> HardwareResult<DeviceStatus>;
 
@@ -622,8 +630,24 @@ impl HardwareDevice for AsicDevice {
     }
 
     async fn allocate_memory(&mut self, size: usize) -> HardwareResult<DeviceMemory> {
-        // Simple memory allocation simulation
-        let address = (size.wrapping_mul(12345)) % 0x100000000; // 4GB address space
+        // There is no allocator to delegate to without a real driver: the
+        // previous `(size.wrapping_mul(12345)) % 0x100000000` formula
+        // produced identical addresses for identically-sized allocations
+        // (a guaranteed collision) and was backed by no actual memory, so a
+        // second allocation of the same size would silently alias the
+        // first. Honestly error instead.
+        let Some(driver) = self.driver.as_ref() else {
+            return Err(TrustformersError::hardware_error(
+                &format!(
+                    "AsicDevice({}) has no AsicDriver installed; ASIC memory allocation \
+                     requires a real driver (see `AsicDevice::set_driver`)",
+                    self.device_id()
+                ),
+                "allocate_memory",
+            ));
+        };
+
+        let address = driver.allocate(size).await?;
         let memory = DeviceMemory {
             address,
             size,
@@ -639,6 +663,10 @@ impl HardwareDevice for AsicDevice {
     }
 
     async fn free_memory(&mut self, memory: DeviceMemory) -> HardwareResult<()> {
+        if let Some(driver) = self.driver.as_ref() {
+            driver.free(memory.address).await?;
+        }
+
         // Remove from memory pool
         let mut pools = self.memory_pools.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(pool) = pools.get_mut("default") {
@@ -973,16 +1001,137 @@ mod tests {
         assert!(device.status().online);
     }
 
+    /// Minimal in-process test double for `AsicDriver`: a real (if trivial)
+    /// bump allocator over a fixed address space, used only to exercise the
+    /// `AsicDevice` <-> `AsicDriver` wiring. Every `allocate` call returns a
+    /// genuinely distinct address (unlike the old
+    /// `(size.wrapping_mul(12345)) % 0x100000000` formula, which collided
+    /// for any two same-sized allocations).
+    struct TestBumpAllocatorDriver {
+        next_address: std::sync::atomic::AtomicUsize,
+    }
+
+    impl TestBumpAllocatorDriver {
+        fn new() -> Self {
+            Self {
+                next_address: std::sync::atomic::AtomicUsize::new(0x1000),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AsicDriver for TestBumpAllocatorDriver {
+        async fn initialize(&mut self, _config: &AsicDeviceConfig) -> HardwareResult<()> {
+            Ok(())
+        }
+
+        async fn execute_instruction(&self, _instruction: &[u8]) -> HardwareResult<Vec<u8>> {
+            Ok(vec![])
+        }
+
+        async fn read_register(&self, _address: u64) -> HardwareResult<u64> {
+            Ok(0)
+        }
+
+        async fn write_register(&self, _address: u64, _value: u64) -> HardwareResult<()> {
+            Ok(())
+        }
+
+        async fn transfer_to_device(&self, _data: &[u8], _address: u64) -> HardwareResult<()> {
+            Ok(())
+        }
+
+        async fn transfer_from_device(
+            &self,
+            _address: u64,
+            size: usize,
+        ) -> HardwareResult<Vec<u8>> {
+            Ok(vec![0u8; size])
+        }
+
+        async fn allocate(&self, size: usize) -> HardwareResult<usize> {
+            // A real (if simplistic) bump allocator: each call carves out a
+            // fresh, non-overlapping region, so two allocations of the same
+            // size never alias.
+            Ok(self.next_address.fetch_add(size.max(1), std::sync::atomic::Ordering::SeqCst))
+        }
+
+        async fn free(&self, _address: usize) -> HardwareResult<()> {
+            Ok(())
+        }
+
+        async fn get_status(&self) -> HardwareResult<DeviceStatus> {
+            Ok(DeviceStatus::default())
+        }
+
+        async fn reset(&mut self) -> HardwareResult<()> {
+            Ok(())
+        }
+
+        async fn configure(&mut self, _config: &AsicDeviceConfig) -> HardwareResult<()> {
+            Ok(())
+        }
+
+        async fn get_metrics(&self) -> HardwareResult<HardwareMetrics> {
+            Ok(HardwareMetrics {
+                ops_per_second: 0.0,
+                memory_bandwidth: 0.0,
+                utilization: 0.0,
+                power_consumption: 0.0,
+                temperature: None,
+                error_rate: 0.0,
+                latency: 0.0,
+                throughput: 0.0,
+            })
+        }
+    }
+
     #[tokio::test]
     async fn test_asic_memory_allocation() {
         let config = AsicDeviceConfig::default();
         let mut device = AsicDevice::new(config);
+        device.set_driver(Box::new(TestBumpAllocatorDriver::new()));
 
         let memory = device.allocate_memory(1024).await.expect("async operation failed");
         assert_eq!(memory.size, 1024);
         assert_eq!(memory.memory_type, MemoryType::Local);
 
         device.free_memory(memory).await.expect("async operation failed");
+    }
+
+    /// Regression test: `allocate_memory` used to fabricate an address via
+    /// `(size.wrapping_mul(12345)) % 0x100000000` regardless of whether any
+    /// driver was installed, so two same-sized allocations collided and
+    /// `free_memory` on one would silently remove the other from the pool.
+    /// With no real driver installed there is no backing allocator, so this
+    /// must now error rather than hand back a fabricated address.
+    #[tokio::test]
+    async fn test_asic_allocate_memory_errors_without_driver() {
+        let config = AsicDeviceConfig::default();
+        let mut device = AsicDevice::new(config);
+
+        let result = device.allocate_memory(1024).await;
+        assert!(
+            result.is_err(),
+            "allocation without a real driver must error, not fabricate an address"
+        );
+    }
+
+    /// Regression test: two same-sized allocations must not collide. Under
+    /// the old `(size.wrapping_mul(12345)) % 0x100000000` formula, any two
+    /// allocations of the same size received the *identical* address.
+    #[tokio::test]
+    async fn test_asic_same_size_allocations_do_not_collide() {
+        let config = AsicDeviceConfig::default();
+        let mut device = AsicDevice::new(config);
+        device.set_driver(Box::new(TestBumpAllocatorDriver::new()));
+
+        let mem_a = device.allocate_memory(4096).await.expect("first allocation failed");
+        let mem_b = device.allocate_memory(4096).await.expect("second allocation failed");
+        assert_ne!(
+            mem_a.address, mem_b.address,
+            "two same-sized allocations must not receive the same address"
+        );
     }
 
     #[test]

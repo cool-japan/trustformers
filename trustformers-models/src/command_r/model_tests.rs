@@ -729,3 +729,38 @@ fn test_load_pretrained_rejects_foreign_checkpoint() {
         "a checkpoint for another architecture must be rejected"
     );
 }
+
+/// `load_with_lazy_loading` used to build a loader, drop it, and fall through to
+/// eager loading while telling the caller weights were resolved on demand. The
+/// honest entry point is [`CommandRForCausalLM::load_with_mmap`]; it must bind
+/// the checkpoint's real values through a memory-mapped loader.
+#[test]
+fn test_load_with_mmap_binds_real_weights() {
+    let config = CommandRConfig::tiny();
+    let bytes = build_safetensors(&checkpoint_tensors(&config, true));
+
+    let dir = std::env::temp_dir().join(format!(
+        "trustformers_command_r_mmap_{}_{}",
+        std::process::id(),
+        line!()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("model.safetensors");
+    std::fs::write(&path, &bytes).expect("write checkpoint");
+
+    let mut model = CommandRForCausalLM::new(&config).expect("model");
+    let outcome = model.load_with_mmap(&path);
+    let bound = outcome
+        .as_ref()
+        .map(|()| model.model.layers[0].self_attn.q_proj.weight().data().expect("q weights"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let q = bound.expect("memory-mapped loading must succeed");
+    assert!(
+        (q[0] - 100.0).abs() < 1e-6,
+        "q_proj[0] must come from the checkpoint, got {}",
+        q[0]
+    );
+    assert!((q[1] - 100.5).abs() < 1e-6, "q_proj[1] = {}", q[1]);
+}

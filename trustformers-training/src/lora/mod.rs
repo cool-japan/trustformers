@@ -867,10 +867,12 @@ mod tests {
     // ── 2. Standard scaling = alpha / rank ────────────────────────────────────
     #[test]
     fn test_standard_scaling() {
-        let mut cfg = LoraConfig::default();
-        cfg.rank = 16;
-        cfg.alpha = 32.0;
-        cfg.use_rslora = false;
+        let cfg = LoraConfig {
+            rank: 16,
+            alpha: 32.0,
+            use_rslora: false,
+            ..LoraConfig::default()
+        };
         // scale = 32 / 16 = 2.0
         assert!((cfg.effective_scaling() - 2.0).abs() < 1e-6);
     }
@@ -878,10 +880,12 @@ mod tests {
     // ── 3. rsLoRA scaling = alpha / sqrt(rank) ────────────────────────────────
     #[test]
     fn test_rslora_scaling() {
-        let mut cfg = LoraConfig::default();
-        cfg.rank = 16;
-        cfg.alpha = 32.0;
-        cfg.use_rslora = true;
+        let cfg = LoraConfig {
+            rank: 16,
+            alpha: 32.0,
+            use_rslora: true,
+            ..LoraConfig::default()
+        };
         // scale = 32 / sqrt(16) = 32 / 4 = 8.0
         assert!((cfg.effective_scaling() - 8.0).abs() < 1e-6);
     }
@@ -941,11 +945,13 @@ mod tests {
     // ── 7. Merge / unmerge round-trip ─────────────────────────────────────────
     #[test]
     fn test_merge_unmerge_round_trip() {
-        let mut cfg = LoraConfig::default();
-        cfg.rank = 2;
-        cfg.alpha = 4.0;
-        cfg.target_modules = vec!["linear".to_string()];
-        cfg.init_lora_weights = LoraInitMethod::Gaussian;
+        let cfg = LoraConfig {
+            rank: 2,
+            alpha: 4.0,
+            target_modules: vec!["linear".to_string()],
+            init_lora_weights: LoraInitMethod::Gaussian,
+            ..LoraConfig::default()
+        };
 
         let in_f = 4usize;
         let out_f = 4usize;
@@ -999,9 +1005,11 @@ mod tests {
     // ── 8. Trainable parameter count ──────────────────────────────────────────
     #[test]
     fn test_trainable_parameter_count() {
-        let mut cfg = LoraConfig::default();
-        cfg.rank = 4;
-        cfg.target_modules = vec!["q_proj".to_string(), "v_proj".to_string()];
+        let cfg = LoraConfig {
+            rank: 4,
+            target_modules: vec!["q_proj".to_string(), "v_proj".to_string()],
+            ..LoraConfig::default()
+        };
 
         let mut model = LoraModel::new(cfg);
         model.add_layer("q_proj".to_string(), 64, 64);
@@ -1016,8 +1024,10 @@ mod tests {
     // ── 9. Target module filtering ────────────────────────────────────────────
     #[test]
     fn test_target_module_filtering() {
-        let mut cfg = LoraConfig::default();
-        cfg.target_modules = vec!["q_proj".to_string()]; // only q_proj
+        let cfg = LoraConfig {
+            target_modules: vec!["q_proj".to_string()], // only q_proj
+            ..LoraConfig::default()
+        };
 
         let mut model = LoraModel::new(cfg);
         model.add_layer("q_proj".to_string(), 8, 8);
@@ -1089,9 +1099,11 @@ mod tests {
     // ── 12. Error: double merge ────────────────────────────────────────────────
     #[test]
     fn test_error_double_merge() {
-        let mut cfg = LoraConfig::default();
-        cfg.target_modules = vec!["w".to_string()];
-        cfg.rank = 2;
+        let cfg = LoraConfig {
+            target_modules: vec!["w".to_string()],
+            rank: 2,
+            ..LoraConfig::default()
+        };
 
         let mut model = LoraModel::new(cfg);
         model.add_layer("w".to_string(), 4, 4);
@@ -1107,9 +1119,11 @@ mod tests {
     // ── 13. Error: unmerge when not merged ────────────────────────────────────
     #[test]
     fn test_error_unmerge_not_merged() {
-        let mut cfg = LoraConfig::default();
-        cfg.target_modules = vec!["w".to_string()];
-        cfg.rank = 2;
+        let cfg = LoraConfig {
+            target_modules: vec!["w".to_string()],
+            rank: 2,
+            ..LoraConfig::default()
+        };
 
         let mut model = LoraModel::new(cfg);
         model.add_layer("w".to_string(), 4, 4);
@@ -1126,9 +1140,11 @@ mod tests {
     // ── 14. Error: shape mismatch on merge ────────────────────────────────────
     #[test]
     fn test_error_shape_mismatch_on_merge() {
-        let mut cfg = LoraConfig::default();
-        cfg.target_modules = vec!["w".to_string()];
-        cfg.rank = 2;
+        let cfg = LoraConfig {
+            target_modules: vec!["w".to_string()],
+            rank: 2,
+            ..LoraConfig::default()
+        };
 
         let mut model = LoraModel::new(cfg);
         model.add_layer("w".to_string(), 4, 4); // expects 4*4=16 elements

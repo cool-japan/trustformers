@@ -122,17 +122,27 @@ impl KernelFusionConfig {
     }
 }
 
-/// GPU memory layout optimized for kernel fusion.
+/// Interleaved (parameter, momentum, variance) layout used by the fused CPU update.
+///
+/// # This is CPU code
+///
+/// Despite the "kernel fusion" vocabulary, nothing here touches a GPU: there is no
+/// allocation, no kernel launch and no device memory. What the module really provides
+/// is a *blocked, cache-friendly, vectorizable* Adam over an interleaved layout, and
+/// the accounting below describes that layout — see
+/// [`FusedAdamState::planned_layout_bytes`].
 #[derive(Debug)]
-pub struct FusedGPUState {
+pub struct FusedAdamState {
     /// Fused parameter data (parameters, momentum, variance interleaved)
     fused_buffers: HashMap<String, FusedParameterBuffer>,
     /// Kernel fusion configuration
     config: KernelFusionConfig,
     /// Current optimization step
     step: usize,
-    /// GPU memory statistics
-    gpu_memory_used: usize,
+    /// Bytes the interleaved layout plan occupies.
+    ///
+    /// This is a *plan*, not an allocation: buffers are described, never malloc'd.
+    planned_layout_bytes: usize,
 }
 
 /// Fused parameter buffer with optimized memory layout.
@@ -142,8 +152,8 @@ struct FusedParameterBuffer {
     id: String,
     /// Number of parameter elements
     size: usize,
-    /// GPU memory pointer (simplified representation)
-    gpu_ptr: usize, // In real implementation, this would be a CUDA device pointer
+    /// Byte offset of this buffer inside the interleaved layout plan
+    layout_offset: usize, // In real implementation, this would be a CUDA device pointer
     /// Memory layout stride for coalescing
     stride: usize,
     /// Whether buffer uses mixed precision
@@ -159,7 +169,7 @@ impl FusedParameterBuffer {
         Self {
             id,
             size,
-            gpu_ptr: 0, // Would be allocated via CUDA malloc
+            layout_offset: 0, // Would be allocated via CUDA malloc
             stride,
             mixed_precision: config.mixed_precision,
         }
@@ -172,50 +182,59 @@ impl FusedParameterBuffer {
     }
 }
 
-impl FusedGPUState {
+impl FusedAdamState {
     /// Creates a new fused GPU state.
     pub fn new(config: KernelFusionConfig) -> Self {
         Self {
             fused_buffers: HashMap::new(),
             config,
             step: 0,
-            gpu_memory_used: 0,
+            planned_layout_bytes: 0,
         }
     }
 
-    /// Allocates a fused parameter buffer on GPU.
+    /// Registers a parameter in the interleaved layout plan.
+    ///
+    /// No memory is allocated: the buffer records the parameter's size, alignment and
+    /// offset so the fused update can walk it in cache-friendly blocks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the requested layout exceeds
+    /// [`FusedAdamState::MAX_LAYOUT_BYTES`].
     pub fn allocate_parameter(&mut self, id: String, size: usize) -> Result<()> {
         let buffer = FusedParameterBuffer::new(id.clone(), size, &self.config);
         let memory_required = buffer.memory_requirement();
 
-        // In real implementation, this would call cudaMalloc
-        self.simulate_gpu_allocation(memory_required)?;
+        self.check_layout_budget(memory_required)?;
 
-        self.gpu_memory_used += memory_required;
+        self.planned_layout_bytes += memory_required;
         self.fused_buffers.insert(id, buffer);
 
         Ok(())
     }
 
-    /// Simulates GPU memory allocation.
-    fn simulate_gpu_allocation(&self, size: usize) -> Result<()> {
-        // In real implementation, this would be:
-        // cudaError_t err = cudaMalloc(&ptr, size);
-        // if (err != cudaSuccess) return Err(...);
+    /// Largest layout this state will plan for, as a sanity bound on caller input.
+    pub const MAX_LAYOUT_BYTES: usize = 16 * 1024 * 1024 * 1024;
 
-        if size > 16 * 1024 * 1024 * 1024 {
-            // 16GB limit simulation
+    /// Rejects a layout request that is implausibly large.
+    fn check_layout_budget(&self, size: usize) -> Result<()> {
+        if size > Self::MAX_LAYOUT_BYTES {
             return Err(TrustformersError::tensor_op_error(
-                "GPU memory allocation failed",
-                "simulate_gpu_allocation",
+                "fused layout request exceeds the 16 GiB sanity bound",
+                "check_layout_budget",
             ));
         }
 
         Ok(())
     }
 
-    /// Launches fused Adam kernel for a parameter.
-    pub fn launch_fused_adam_kernel(
+    /// Runs the blocked, vectorizable Adam update for one parameter.
+    ///
+    /// The work is done on the CPU in `optimal_block_size`-sized blocks over the
+    /// interleaved layout; the block/grid arithmetic below mirrors the tiling a GPU
+    /// kernel would use, but no kernel is launched.
+    pub fn run_fused_adam_block(
         &mut self,
         param_id: &str,
         param: &mut [f32],
@@ -226,16 +245,13 @@ impl FusedGPUState {
         weight_decay: f32,
     ) -> Result<()> {
         let buffer = self.fused_buffers.get(param_id).ok_or_else(|| {
-            TrustformersError::tensor_op_error(
-                "Parameter buffer not found",
-                "launch_fused_adam_kernel",
-            )
+            TrustformersError::tensor_op_error("Parameter buffer not found", "run_fused_adam_block")
         })?;
 
         if param.len() != buffer.size || grad.len() != buffer.size {
             return Err(TrustformersError::tensor_op_error(
                 "Size mismatch",
-                "launch_fused_adam_kernel",
+                "run_fused_adam_block",
             ));
         }
 
@@ -245,8 +261,7 @@ impl FusedGPUState {
         let block_size = self.config.optimal_block_size(buffer.size);
         let grid_size = buffer.size.div_ceil(block_size);
 
-        // In real implementation, this would launch a CUDA kernel:
-        // fused_adam_kernel<<<grid_size, block_size>>>(...)
+        // Blocked CPU execution over the same tiling a GPU kernel would use.
         self.simulate_fused_adam_kernel(
             param,
             grad,
@@ -391,19 +406,19 @@ impl FusedGPUState {
 
         // In real implementation, this would launch a multi-parameter kernel
         for (param_id, param, grad) in params {
-            self.launch_fused_adam_kernel(param_id, param, grad, lr, betas, eps, weight_decay)?;
+            self.run_fused_adam_block(param_id, param, grad, lr, betas, eps, weight_decay)?;
         }
 
         Ok(())
     }
 
-    /// Gets GPU memory usage statistics.
-    pub fn gpu_memory_stats(&self) -> GPUMemoryStats {
+    /// Statistics about the interleaved layout plan.
+    pub fn fused_layout_stats(&self) -> FusedLayoutStats {
         let total_buffers = self.fused_buffers.len();
         let total_elements: usize = self.fused_buffers.values().map(|b| b.size).sum();
 
-        GPUMemoryStats {
-            total_gpu_memory: self.gpu_memory_used,
+        FusedLayoutStats {
+            planned_layout_bytes: self.planned_layout_bytes,
             num_parameter_buffers: total_buffers,
             total_parameter_elements: total_elements,
             memory_efficiency: self.calculate_memory_efficiency(),
@@ -411,9 +426,9 @@ impl FusedGPUState {
         }
     }
 
-    /// Calculates memory efficiency (utilization vs allocation).
+    /// Fraction of the planned layout occupied by real data (the rest is padding).
     fn calculate_memory_efficiency(&self) -> f32 {
-        if self.gpu_memory_used == 0 {
+        if self.planned_layout_bytes == 0 {
             return 1.0;
         }
 
@@ -421,15 +436,18 @@ impl FusedGPUState {
             .map(|b| b.size * std::mem::size_of::<f32>() * 3) // param + momentum + variance
             .sum();
 
-        actual_data_size as f32 / self.gpu_memory_used as f32
+        actual_data_size as f32 / self.planned_layout_bytes as f32
     }
 }
 
-/// GPU memory usage statistics for kernel fusion.
+/// Statistics about the interleaved layout used by the fused CPU update.
+///
+/// These describe a *layout plan*; nothing is allocated on a device.
 #[derive(Debug, Clone)]
-pub struct GPUMemoryStats {
+pub struct FusedLayoutStats {
     /// Total GPU memory used in bytes
-    pub total_gpu_memory: usize,
+    /// Bytes the interleaved layout plan occupies (padding included).
+    pub planned_layout_bytes: usize,
     /// Number of parameter buffers
     pub num_parameter_buffers: usize,
     /// Total parameter elements across all buffers
@@ -440,7 +458,7 @@ pub struct GPUMemoryStats {
     pub kernel_fusion_config: KernelFusionConfig,
 }
 
-impl GPUMemoryStats {
+impl FusedLayoutStats {
     /// Calculates theoretical memory bandwidth utilization.
     pub fn memory_bandwidth_utilization(&self, peak_bandwidth_gb_s: f32) -> f32 {
         // Simplified calculation based on parameter count and update frequency
@@ -491,7 +509,7 @@ pub struct KernelFusedAdam {
     /// Weight decay coefficient
     weight_decay: f32,
     /// Fused GPU state
-    gpu_state: FusedGPUState,
+    gpu_state: FusedAdamState,
     /// Stable parameter identity registry (see [`crate::param_id`]).
     ///
     /// Replaces heap-address keys, which change in every process and so made
@@ -518,7 +536,7 @@ impl KernelFusedAdam {
             betas,
             eps,
             weight_decay,
-            gpu_state: FusedGPUState::new(config),
+            gpu_state: FusedAdamState::new(config),
             params: crate::param_id::ParamRegistry::new(),
         }
     }
@@ -545,8 +563,8 @@ impl KernelFusedAdam {
     }
 
     /// Gets GPU performance statistics.
-    pub fn gpu_stats(&self) -> GPUMemoryStats {
-        self.gpu_state.gpu_memory_stats()
+    pub fn gpu_stats(&self) -> FusedLayoutStats {
+        self.gpu_state.fused_layout_stats()
     }
 }
 
@@ -561,7 +579,7 @@ impl Optimizer for KernelFusedAdam {
                     self.gpu_state.allocate_parameter(param_id.clone(), param.len())?;
                 }
 
-                self.gpu_state.launch_fused_adam_kernel(
+                self.gpu_state.run_fused_adam_block(
                     &param_id,
                     param.as_slice_mut().ok_or_else(|| {
                         TrustformersError::invalid_state(
@@ -625,14 +643,14 @@ mod tests {
     #[test]
     fn test_fused_gpu_state() {
         let config = KernelFusionConfig::default();
-        let mut state = FusedGPUState::new(config);
+        let mut state = FusedAdamState::new(config);
 
-        assert_eq!(state.gpu_memory_used, 0);
+        assert_eq!(state.planned_layout_bytes, 0);
 
         state
             .allocate_parameter("param1".to_string(), 1000)
             .expect("Operation failed in test");
-        assert!(state.gpu_memory_used > 0);
+        assert!(state.planned_layout_bytes > 0);
         assert!(state.fused_buffers.contains_key("param1"));
     }
 
@@ -648,9 +666,9 @@ mod tests {
     }
 
     #[test]
-    fn test_gpu_memory_stats() {
+    fn test_fused_layout_stats() {
         let config = KernelFusionConfig::a100();
-        let mut state = FusedGPUState::new(config);
+        let mut state = FusedAdamState::new(config);
 
         state
             .allocate_parameter("param1".to_string(), 1000)
@@ -659,7 +677,7 @@ mod tests {
             .allocate_parameter("param2".to_string(), 2000)
             .expect("Operation failed in test");
 
-        let stats = state.gpu_memory_stats();
+        let stats = state.fused_layout_stats();
         assert_eq!(stats.num_parameter_buffers, 2);
         assert_eq!(stats.total_parameter_elements, 3000);
         assert!(stats.memory_efficiency > 0.0);
@@ -685,8 +703,8 @@ mod tests {
 
     #[test]
     fn test_bandwidth_utilization() {
-        let stats = GPUMemoryStats {
-            total_gpu_memory: 1024 * 1024,
+        let stats = FusedLayoutStats {
+            planned_layout_bytes: 1024 * 1024,
             num_parameter_buffers: 10,
             total_parameter_elements: 10000,
             memory_efficiency: 0.9,

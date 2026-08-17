@@ -20,6 +20,7 @@ trustformers-core.workspace = true
 # Note: ndarray support provided by scirs2-core
 scirs2-core = { workspace = true, features = ["parallel"] }
 num-traits.workspace = true
+half.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 oxicode.workspace = true

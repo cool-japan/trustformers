@@ -68,8 +68,18 @@ fn test_mla_attention_compress_decompress() {
     let attn = DeepSeekMlaAttention::new(&cfg);
     // forward_token should run without panic and return hidden_size output
     let x = vec![0.1f32; cfg.hidden_size];
-    let out = attn.forward_token(&x);
+    let out = attn.forward_token(&x).expect("forward_token");
     assert_eq!(out.len(), cfg.hidden_size);
+}
+
+#[test]
+fn test_mla_attention_forward_token_rejects_wrong_length() {
+    let cfg = DeepSeekConfig::small_test();
+    let attn = DeepSeekMlaAttention::new(&cfg);
+    assert!(
+        attn.forward_token(&vec![0.1f32; cfg.hidden_size - 1]).is_err(),
+        "a malformed token must surface as an error, not a zero-padded answer"
+    );
 }
 
 #[test]

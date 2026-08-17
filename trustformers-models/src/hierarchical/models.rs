@@ -2,11 +2,44 @@ use super::config::{HierarchicalConfig, HierarchicalType};
 use super::layers::{HierarchicalEncoder, NestedTransformerLayer, PyramidLayer, TreeAttention};
 use super::utils::HierarchicalOutput;
 use trustformers_core::{
-    errors::{invalid_config, not_implemented, Result},
+    errors::{invalid_config, invalid_input, not_implemented, tensor_op_error, Result},
     layers::{Embedding, LayerNorm, Linear},
     tensor::Tensor,
     traits::{Layer, Model},
 };
+
+/// Embed a token sequence into a `[1, seq_len, hidden_size]` activation tensor.
+///
+/// [`Embedding`] returns a rank-2 `[seq_len, hidden_size]` lookup, but every
+/// hierarchical component — the windowed pooling in
+/// [`build_hierarchy`](super::utils::build_hierarchy), the level aggregation and
+/// `MultiHeadAttention::split_heads` — is defined on the `[batch, seq, hidden]`
+/// contract. The batch axis is therefore added exactly once, here, right after the
+/// lookup.
+///
+/// Without it `HierarchicalTransformer`, `TreeTransformer` and `NestedTransformer`
+/// failed on *every* input ("expected a 3-D [batch, seq, hidden] tensor" /
+/// "split_heads … got 2"), and `PyramidTransformer` returned a rank-2 tensor whose
+/// downstream "CLS token" selection (`select(1, 0)`) picked hidden channel 0 across
+/// the whole sequence instead of the first token's vector.
+fn embed_sequence(embeddings: &Embedding, input_ids: Vec<u32>) -> Result<Tensor> {
+    if input_ids.is_empty() {
+        return Err(invalid_input(
+            "hierarchical models require at least one input token",
+        ));
+    }
+
+    let embedded = embeddings.forward(input_ids)?;
+    let shape = embedded.shape();
+    match shape.len() {
+        2 => embedded.reshape(&[1, shape[0], shape[1]]),
+        3 => Ok(embedded),
+        _ => Err(tensor_op_error(
+            "hierarchical_embed",
+            format!("embedding lookup produced an unusable shape {shape:?}"),
+        )),
+    }
+}
 
 /// The error every hierarchical checkpoint entry point returns.
 ///
@@ -82,7 +115,7 @@ impl Model for HierarchicalTransformer {
     type Output = HierarchicalOutput;
 
     fn forward(&self, input_ids: Self::Input) -> Result<Self::Output> {
-        let embeddings = self.embeddings.forward(input_ids)?;
+        let embeddings = embed_sequence(&self.embeddings, input_ids)?;
         let encoder_output = self.encoder.forward(embeddings)?;
         let final_output = self.final_norm.forward(encoder_output.output)?;
 
@@ -174,7 +207,7 @@ impl Model for PyramidTransformer {
     type Output = HierarchicalOutput;
 
     fn forward(&self, input_ids: Self::Input) -> Result<Self::Output> {
-        let mut hidden_states = self.embeddings.forward(input_ids)?;
+        let mut hidden_states = embed_sequence(&self.embeddings, input_ids)?;
         let mut all_level_outputs = Vec::new();
 
         for layer in &self.pyramid_layers {
@@ -263,7 +296,7 @@ impl Model for TreeTransformer {
     type Output = HierarchicalOutput;
 
     fn forward(&self, input_ids: Self::Input) -> Result<Self::Output> {
-        let mut hidden_states = self.embeddings.forward(input_ids)?;
+        let mut hidden_states = embed_sequence(&self.embeddings, input_ids)?;
 
         for layer in &self.tree_layers {
             let output = layer.forward(hidden_states)?;
@@ -348,7 +381,7 @@ impl Model for NestedTransformer {
     type Output = HierarchicalOutput;
 
     fn forward(&self, input_ids: Self::Input) -> Result<Self::Output> {
-        let mut hidden_states = self.embeddings.forward(input_ids)?;
+        let mut hidden_states = embed_sequence(&self.embeddings, input_ids)?;
         let mut all_level_outputs = Vec::new();
 
         for layer in &self.nested_layers {
@@ -548,10 +581,13 @@ pub fn create_hierarchical_transformer(
             let model = NestedTransformer::new(config, vocab_size)?;
             Ok(Box::new(model))
         },
-        HierarchicalType::Hybrid => {
-            // Default to hierarchical for hybrid
-            let model = HierarchicalTransformer::new(config, vocab_size)?;
-            Ok(Box::new(model))
-        },
+        // A hybrid stack would have to interleave the pyramid, tree and nested
+        // blocks, and no such composition is defined here. A previous revision
+        // quietly built a plain `HierarchicalTransformer` instead, so the caller
+        // received a different architecture than the one it asked for.
+        HierarchicalType::Hybrid => Err(not_implemented(
+            "HierarchicalType::Hybrid: no hybrid composition of the pyramid/tree/nested blocks is \
+             defined; pick an explicit hierarchical_type",
+        )),
     }
 }
