@@ -191,6 +191,67 @@ pub struct MixtureOfDepthsPipeline {
     confidence_estimator: Arc<dyn ConfidenceEstimator>,
     depth_router: Arc<dyn DepthRouter>,
     layer_cache: Arc<RwLock<HashMap<String, LayerExecutionResult>>>,
+    /// Produces the real token embeddings the router reasons about.
+    embedder: Option<Arc<dyn TokenEmbedder>>,
+    /// Executes a real transformer layer.
+    layer_executor: Option<Arc<dyn TransformerLayerExecutor>>,
+}
+
+/// Produces per-token embeddings for the routing decision.
+///
+/// Routing on constant vectors carries no information, so the pipeline requires
+/// a real embedder rather than substituting one.
+pub trait TokenEmbedder: Send + Sync {
+    /// Embed each input token/segment.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the underlying model's embedding step can fail with.
+    fn embed(&self, inputs: &[String]) -> TrustformersResult<Vec<Vec<f32>>>;
+
+    /// Dimensionality of the produced embeddings.
+    fn embedding_dim(&self) -> usize;
+}
+
+/// Executes one transformer layer over a batch of token vectors.
+pub trait TransformerLayerExecutor: Send + Sync {
+    /// Number of layers available.
+    fn num_layers(&self) -> usize;
+
+    /// Run `layer_index` over `inputs`.
+    ///
+    /// `token_mask`, when present, marks which tokens the router selected for
+    /// this layer; unselected tokens must be passed through unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the underlying layer computation can fail with.
+    fn execute(
+        &self,
+        layer_index: usize,
+        inputs: &[Vec<f32>],
+        token_mask: Option<&[bool]>,
+    ) -> TrustformersResult<Vec<Vec<f32>>>;
+}
+
+/// Mean absolute activation of `outputs`, squashed into 0..=1.
+///
+/// A measured summary of how strongly the layer responded — used as the
+/// per-layer confidence signal instead of multiplying the previous value by a
+/// fixed factor.
+fn mean_activation_confidence(outputs: &[Vec<f32>]) -> f32 {
+    let mut sum = 0.0f32;
+    let mut count = 0usize;
+    for row in outputs {
+        for value in row {
+            sum += value.abs();
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return 0.0;
+    }
+    (sum / count as f32).tanh()
 }
 
 impl MixtureOfDepthsPipeline {
@@ -209,6 +270,8 @@ impl MixtureOfDepthsPipeline {
             token_classifier: None,
             confidence_estimator,
             depth_router,
+            embedder: None,
+            layer_executor: None,
             layer_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -326,88 +389,101 @@ impl MixtureOfDepthsPipeline {
         })
     }
 
-    /// Initialize token embeddings
-    async fn initialize_embeddings(&self, input: &[String]) -> TrustformersResult<Vec<Vec<f32>>> {
-        // Mock implementation - in practice would use actual embedding layer
-        let embedding_dim = 768; // Standard transformer dimension
-        let embeddings = input.iter().map(|_| (0..embedding_dim).map(|_| 0.1).collect()).collect();
-        Ok(embeddings)
+    /// Attach the component that produces real token embeddings.
+    pub fn with_embedder(mut self, embedder: Arc<dyn TokenEmbedder>) -> Self {
+        self.embedder = Some(embedder);
+        self
     }
 
-    /// Execute a single layer with optional token-level routing
+    /// Attach the component that executes real transformer layers.
+    pub fn with_layer_executor(mut self, executor: Arc<dyn TransformerLayerExecutor>) -> Self {
+        self.layer_executor = Some(executor);
+        self
+    }
+
+    /// Embed the input with the attached embedder.
+    ///
+    /// # Errors
+    ///
+    /// Fails when no embedder is attached: routing over constant vectors would
+    /// make every decision meaningless while still reporting efficiency gains.
+    async fn initialize_embeddings(&self, input: &[String]) -> TrustformersResult<Vec<Vec<f32>>> {
+        let embedder = self.embedder.as_ref().ok_or_else(|| {
+            TrustformersError::feature_unavailable(
+                "no token embedder is attached to the Mixture-of-Depths pipeline; routing \
+                 decisions need real embeddings. Attach one with \
+                 `MixtureOfDepthsPipeline::with_embedder`."
+                    .to_string(),
+                "mixture-of-depths",
+            )
+        })?;
+        embedder.embed(input)
+    }
+
+    /// Execute a single layer with optional token-level routing.
+    ///
+    /// The transformation is performed by the attached
+    /// [`TransformerLayerExecutor`]; the reported computation cost is the real
+    /// wall-clock time the layer took, and the token routing mask is passed
+    /// through so unselected tokens are genuinely skipped.
+    ///
+    /// # Errors
+    ///
+    /// Fails when no layer executor is attached, or when the executor rejects
+    /// the layer index or input shape.
     async fn execute_layer(
         &self,
         layer_idx: usize,
         inputs: &[Vec<f32>],
         routing_decision: &RoutingDecision,
-        token_types: Option<&[TokenType]>,
+        _token_types: Option<&[TokenType]>,
     ) -> TrustformersResult<LayerExecutionResult> {
-        // Mock layer execution - in practice would call actual transformer layer
-        let computation_cost = if routing_decision.should_execute {
+        if !routing_decision.should_execute {
+            return Ok(LayerExecutionResult {
+                layer_index: layer_idx,
+                was_executed: false,
+                output_confidence: routing_decision.confidence_score,
+                computation_cost: 0.0,
+                token_outputs: inputs.to_vec(),
+                attention_weights: None,
+            });
+        }
+
+        let executor = self.layer_executor.as_ref().ok_or_else(|| {
+            TrustformersError::feature_unavailable(
+                "no transformer layer executor is attached to the Mixture-of-Depths pipeline. \
+                 Attach one with `MixtureOfDepthsPipeline::with_layer_executor`."
+                    .to_string(),
+                "mixture-of-depths",
+            )
+        })?;
+
+        let token_mask: Option<Vec<bool>> =
             if self.config.token_level_routing && !routing_decision.token_routing.is_empty() {
-                // Token-level computation cost
-                routing_decision
-                    .token_routing
-                    .iter()
-                    .map(|&executed| if executed { 1.0 } else { 0.1 })
-                    .sum::<f32>()
+                Some(routing_decision.token_routing.clone())
             } else {
-                inputs.len() as f32 * 1.0 // Full layer cost
-            }
-        } else {
-            0.0
-        };
+                None
+            };
 
-        let output_confidence = routing_decision.confidence_score * 1.1; // Slight improvement per layer
+        let started = std::time::Instant::now();
+        let token_outputs = executor.execute(layer_idx, inputs, token_mask.as_deref())?;
+        // Measured, not synthesised from the routing flags.
+        let computation_cost = started.elapsed().as_secs_f32() * 1000.0;
 
-        // Generate mock outputs
-        let token_outputs = if routing_decision.should_execute {
-            self.apply_layer_transformation(inputs, layer_idx).await?
-        } else {
-            inputs.to_vec()
-        };
-
-        // Generate mock attention weights for analysis
-        let attention_weights = if routing_decision.should_execute {
-            Some(self.generate_mock_attention(inputs.len()).await?)
-        } else {
-            None
-        };
+        // Confidence after the layer is measured from its own output rather
+        // than scaled up by a fixed factor.
+        let output_confidence = mean_activation_confidence(&token_outputs);
 
         Ok(LayerExecutionResult {
             layer_index: layer_idx,
-            was_executed: routing_decision.should_execute,
+            was_executed: true,
             output_confidence,
             computation_cost,
             token_outputs,
-            attention_weights,
+            // The executor interface does not surface attention matrices, and a
+            // uniform stand-in would be indistinguishable from a real one.
+            attention_weights: None,
         })
-    }
-
-    /// Apply layer transformation (mock implementation)
-    async fn apply_layer_transformation(
-        &self,
-        inputs: &[Vec<f32>],
-        layer_idx: usize,
-    ) -> TrustformersResult<Vec<Vec<f32>>> {
-        // Mock transformer layer computation
-        let outputs = inputs
-            .iter()
-            .map(|input| {
-                input.iter()
-                    .map(|&x| x + 0.01 * layer_idx as f32) // Simple transformation
-                    .collect()
-            })
-            .collect();
-        Ok(outputs)
-    }
-
-    /// Generate mock attention weights
-    async fn generate_mock_attention(&self, seq_len: usize) -> TrustformersResult<Vec<Vec<f32>>> {
-        let attention_weights = (0..seq_len)
-            .map(|_| (0..seq_len).map(|_| 1.0 / seq_len as f32).collect())
-            .collect();
-        Ok(attention_weights)
     }
 
     /// Check if early exit should be triggered
@@ -753,6 +829,195 @@ pub fn create_quality_focused_mod_pipeline(
 mod tests {
     use super::*;
 
+    // -----------------------------------------------------------------------
+    // Regression: the pipeline used to embed every token as a constant 0.1
+    // vector and to "execute" layers by adding 0.01 * layer_index. Routing over
+    // identical vectors carries no information, yet efficiency scores were
+    // still reported. Both tests below fail against that implementation.
+    // -----------------------------------------------------------------------
+
+    /// A real embedder over a tiny hashing feature space.
+    struct HashingEmbedder {
+        dim: usize,
+    }
+
+    impl TokenEmbedder for HashingEmbedder {
+        fn embed(&self, inputs: &[String]) -> TrustformersResult<Vec<Vec<f32>>> {
+            Ok(inputs
+                .iter()
+                .map(|text| {
+                    let mut features = vec![0.0f32; self.dim];
+                    for (position, byte) in text.bytes().enumerate() {
+                        let slot = (byte as usize + position) % self.dim;
+                        features[slot] += 1.0;
+                    }
+                    let norm = features.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-6);
+                    features.iter().map(|v| v / norm).collect()
+                })
+                .collect())
+        }
+
+        fn embedding_dim(&self) -> usize {
+            self.dim
+        }
+    }
+
+    /// A real (if simple) layer: a per-layer scaled non-linearity that honours
+    /// the routing mask.
+    struct ScalingLayerExecutor {
+        layers: usize,
+    }
+
+    impl TransformerLayerExecutor for ScalingLayerExecutor {
+        fn num_layers(&self) -> usize {
+            self.layers
+        }
+
+        fn execute(
+            &self,
+            layer_index: usize,
+            inputs: &[Vec<f32>],
+            token_mask: Option<&[bool]>,
+        ) -> TrustformersResult<Vec<Vec<f32>>> {
+            if layer_index >= self.layers {
+                return Err(TrustformersError::invalid_input_simple(format!(
+                    "layer {layer_index} is out of range for a {}-layer model",
+                    self.layers
+                )));
+            }
+            Ok(inputs
+                .iter()
+                .enumerate()
+                .map(|(token_index, row)| {
+                    let selected = token_mask.map(|m| *m.get(token_index).unwrap_or(&true));
+                    if selected == Some(false) {
+                        return row.clone();
+                    }
+                    row.iter().map(|v| (v * (1.0 + layer_index as f32 * 0.1)).tanh()).collect()
+                })
+                .collect())
+        }
+    }
+
+    /// Attach the real test embedder and layer executor to `pipeline`.
+    fn wire_real_components(pipeline: MixtureOfDepthsPipeline) -> MixtureOfDepthsPipeline {
+        let layers = pipeline.config.total_layers.max(1);
+        pipeline
+            .with_embedder(Arc::new(HashingEmbedder { dim: 16 }))
+            .with_layer_executor(Arc::new(ScalingLayerExecutor { layers }))
+    }
+
+    #[tokio::test]
+    async fn embeddings_without_an_embedder_are_refused() {
+        let pipeline = MixtureOfDepthsPipeline::new(
+            MixtureOfDepthsConfig::default(),
+            Arc::new(MockBaseModel),
+            Arc::new(MockComplexityAnalyzer),
+            Arc::new(MockConfidenceEstimator),
+            Arc::new(MockDepthRouter),
+        );
+        let result = pipeline.initialize_embeddings(&["hello".to_string()]).await;
+        assert!(
+            result.is_err(),
+            "routing needs real embeddings; a constant vector must not be substituted"
+        );
+    }
+
+    #[tokio::test]
+    async fn real_embeddings_differ_between_inputs() {
+        let embedder = HashingEmbedder { dim: 16 };
+        let pipeline = MixtureOfDepthsPipeline::new(
+            MixtureOfDepthsConfig::default(),
+            Arc::new(MockBaseModel),
+            Arc::new(MockComplexityAnalyzer),
+            Arc::new(MockConfidenceEstimator),
+            Arc::new(MockDepthRouter),
+        )
+        .with_embedder(Arc::new(embedder));
+
+        let embeddings = pipeline
+            .initialize_embeddings(&["alpha".to_string(), "omega".to_string()])
+            .await
+            .expect("a real embedder should answer");
+        assert_eq!(embeddings.len(), 2);
+        assert!(
+            embeddings[0]
+                .iter()
+                .zip(embeddings[1].iter())
+                .any(|(a, b)| (a - b).abs() > 1e-6),
+            "distinct inputs must produce distinct embeddings"
+        );
+        assert!(
+            embeddings[0].iter().any(|v| (v - 0.1).abs() > 1e-6),
+            "the constant-0.1 embedding is gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn layer_execution_requires_an_executor() {
+        let pipeline = MixtureOfDepthsPipeline::new(
+            MixtureOfDepthsConfig::default(),
+            Arc::new(MockBaseModel),
+            Arc::new(MockComplexityAnalyzer),
+            Arc::new(MockConfidenceEstimator),
+            Arc::new(MockDepthRouter),
+        );
+        let decision = RoutingDecision {
+            layer_index: 0,
+            should_execute: true,
+            confidence_score: 0.5,
+            complexity_score: 0.5,
+            routing_reason: RoutingReason::ConfidenceThreshold,
+            token_routing: Vec::new(),
+        };
+        let inputs = vec![vec![0.5f32; 4]];
+        assert!(
+            pipeline.execute_layer(0, &inputs, &decision, None).await.is_err(),
+            "without an executor there is no layer to run"
+        );
+    }
+
+    #[tokio::test]
+    async fn executed_layer_transforms_its_input() {
+        let pipeline = MixtureOfDepthsPipeline::new(
+            MixtureOfDepthsConfig::default(),
+            Arc::new(MockBaseModel),
+            Arc::new(MockComplexityAnalyzer),
+            Arc::new(MockConfidenceEstimator),
+            Arc::new(MockDepthRouter),
+        )
+        .with_layer_executor(Arc::new(ScalingLayerExecutor { layers: 4 }));
+
+        let decision = RoutingDecision {
+            layer_index: 1,
+            should_execute: true,
+            confidence_score: 0.5,
+            complexity_score: 0.5,
+            routing_reason: RoutingReason::ConfidenceThreshold,
+            token_routing: Vec::new(),
+        };
+        let inputs = vec![vec![0.5f32, -0.25, 0.75, 0.0]];
+        let result = pipeline
+            .execute_layer(1, &inputs, &decision, None)
+            .await
+            .expect("a real executor should answer");
+
+        assert!(result.was_executed);
+        assert!(
+            result
+                .token_outputs
+                .iter()
+                .zip(inputs.iter())
+                .any(|(o, i)| o.iter().zip(i.iter()).any(|(a, b)| (a - b).abs() > 1e-6)),
+            "the layer must actually transform its input"
+        );
+        assert!(
+            result.attention_weights.is_none(),
+            "uniform stand-in attention is gone"
+        );
+        assert!(result.computation_cost >= 0.0);
+    }
+
     // Mock base model for testing
     struct MockBaseModel;
 
@@ -991,7 +1256,8 @@ mod tests {
             ..Default::default()
         };
         let mock_base_model = Arc::new(MockBaseModel);
-        let pipeline = create_mixture_of_depths_pipeline(config, mock_base_model);
+        let pipeline =
+            wire_real_components(create_mixture_of_depths_pipeline(config, mock_base_model));
         let input = PipelineInput::Text("skip all layers".to_string());
         let result = pipeline.__call__(input);
         assert!(result.is_ok(), "skipping all layers should not crash");
@@ -1003,7 +1269,10 @@ mod tests {
     fn test_efficiency_score_with_fewer_executed_layers() {
         let config = MixtureOfDepthsConfig::default();
         let mock_base_model = Arc::new(MockBaseModel);
-        let pipeline = create_mixture_of_depths_pipeline(config.clone(), mock_base_model);
+        let pipeline = wire_real_components(create_mixture_of_depths_pipeline(
+            config.clone(),
+            mock_base_model,
+        ));
         // Fewer executed layers → higher depth_efficiency
         let score_few = pipeline.calculate_efficiency_score(&[0, 1], 2.0, 0.9);
         let score_many =
@@ -1029,7 +1298,8 @@ mod tests {
     async fn test_mixture_of_depths_pipeline() {
         let config = MixtureOfDepthsConfig::default();
         let mock_base_model = Arc::new(MockBaseModel);
-        let mod_pipeline = create_mixture_of_depths_pipeline(config, mock_base_model);
+        let mod_pipeline =
+            wire_real_components(create_mixture_of_depths_pipeline(config, mock_base_model));
         let input =
             PipelineInput::Text("This is a test sentence for mixture of depths".to_string());
         let result = mod_pipeline.__call__(input);
@@ -1050,7 +1320,8 @@ mod tests {
             ..Default::default()
         };
         let mock_base_model = Arc::new(MockBaseModel);
-        let mod_pipeline = create_mixture_of_depths_pipeline(config, mock_base_model);
+        let mod_pipeline =
+            wire_real_components(create_mixture_of_depths_pipeline(config, mock_base_model));
         let input = PipelineInput::Text("Simple text".to_string());
         let result = mod_pipeline.__call__(input);
         assert!(result.is_ok());
@@ -1067,7 +1338,8 @@ mod tests {
             ..Default::default()
         };
         let mock_base_model = Arc::new(MockBaseModel);
-        let pipeline = create_mixture_of_depths_pipeline(config, mock_base_model);
+        let pipeline =
+            wire_real_components(create_mixture_of_depths_pipeline(config, mock_base_model));
         let input = PipelineInput::Text("budget test".to_string());
         let result = pipeline.__call__(input);
         assert!(result.is_ok());
@@ -1076,7 +1348,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_efficiency_optimized_factory() {
         let mock_base_model = Arc::new(MockBaseModel);
-        let pipeline = create_efficiency_optimized_mod_pipeline(mock_base_model);
+        let pipeline =
+            wire_real_components(create_efficiency_optimized_mod_pipeline(mock_base_model));
         let input = PipelineInput::Text("efficiency test".to_string());
         let result = pipeline.__call__(input);
         assert!(
@@ -1088,7 +1361,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_quality_focused_factory() {
         let mock_base_model = Arc::new(MockBaseModel);
-        let pipeline = create_quality_focused_mod_pipeline(mock_base_model);
+        let pipeline = wire_real_components(create_quality_focused_mod_pipeline(mock_base_model));
         let input = PipelineInput::Text("quality test".to_string());
         let result = pipeline.__call__(input);
         assert!(result.is_ok(), "quality-focused pipeline should succeed");
@@ -1098,7 +1371,8 @@ mod tests {
     async fn test_non_text_input_rejected() {
         let config = MixtureOfDepthsConfig::default();
         let mock_base_model = Arc::new(MockBaseModel);
-        let pipeline = create_mixture_of_depths_pipeline(config, mock_base_model);
+        let pipeline =
+            wire_real_components(create_mixture_of_depths_pipeline(config, mock_base_model));
         // BatchText is not supported by MoD pipeline
         let input = PipelineInput::BatchText(vec!["a".to_string()]);
         let result = pipeline.__call__(input);
@@ -1112,7 +1386,8 @@ mod tests {
     async fn test_confidence_progression_non_decreasing_tendency() {
         let config = MixtureOfDepthsConfig::default();
         let mock_base_model = Arc::new(MockBaseModel);
-        let pipeline = create_mixture_of_depths_pipeline(config, mock_base_model);
+        let pipeline =
+            wire_real_components(create_mixture_of_depths_pipeline(config, mock_base_model));
         let input = PipelineInput::Text("confidence progression test".to_string());
         let result = pipeline.__call__(input).expect("pipeline should succeed");
         if let PipelineOutput::MixtureOfDepths(mod_result) = result {

@@ -166,21 +166,31 @@ impl QuantizationUtils {
             let end = (start + block_size).min(num_elements);
             let block = &data[start..end];
 
-            // Calculate scale and zero point for this block
+            // Per-block affine range. `scale` is the block's span and `zero_point`
+            // its minimum, so dequantization is `min + (nf4 + 1)/2 * span`.
             let min_val = block.iter().fold(f32::INFINITY, |a, &b| a.min(b));
             let max_val = block.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
 
-            let scale = (max_val - min_val) / 15.0; // 4-bit has 16 levels (0-15)
-            let zero_point = -min_val / scale;
+            // A constant block (very common: the zero-initialised optimizer moments)
+            // has zero span. Dividing by it produced NaN for every element, which
+            // then propagated into the parameters on the first step.
+            let span = max_val - min_val;
+            let scale = if span.is_finite() && span > 0.0 { span } else { 0.0 };
 
             scales.push(scale);
-            zero_points.push(zero_point);
+            zero_points.push(min_val);
 
-            // Quantize block (simplified to store as f32)
             for &value in block {
-                let normalized = (value - min_val) / scale;
-                let quantized = Self::find_closest_nf4(normalized / 15.0);
-                quantized_data.push(quantized);
+                if scale == 0.0 {
+                    // Constant block: the NF4 code is irrelevant, `min_val` carries
+                    // the whole value.
+                    quantized_data.push(-1.0);
+                    continue;
+                }
+                // Map the block into the NF4 grid's full [-1, 1] range so all 16
+                // levels are usable; the previous mapping only ever produced [0, 1].
+                let normalized = 2.0 * (value - min_val) / scale - 1.0;
+                quantized_data.push(Self::find_closest_nf4(normalized));
             }
         }
 
@@ -211,7 +221,12 @@ impl QuantizationUtils {
         best_val
     }
 
-    /// Dequantize NF4 tensor back to f32 (simplified)
+    /// Dequantizes an NF4 tensor back to `f32`.
+    ///
+    /// Exact inverse of [`QuantizationUtils::quantize_nf4`] up to the NF4 grid's
+    /// resolution: `v = zero_point + (nf4 + 1)/2 · scale`, where `scale` is the
+    /// block's span and `zero_point` its minimum. A constant block round-trips
+    /// exactly.
     pub fn dequantize_nf4(quantized: &QuantizedTensor) -> Result<Tensor> {
         let num_elements: usize = quantized.shape.iter().product();
         let mut data = Vec::with_capacity(num_elements);
@@ -231,7 +246,8 @@ impl QuantizationUtils {
             for _ in 0..block_len {
                 if data_idx < quantized.data.len() {
                     let nf4_val = quantized.data[data_idx];
-                    let dequantized = (nf4_val * 15.0 + zero_point) * scale;
+                    // Inverse of the quantizer: t = (nf4 + 1)/2, v = min + t·span.
+                    let dequantized = zero_point + (nf4_val + 1.0) * 0.5 * scale;
                     data.push(dequantized);
                     data_idx += 1;
                 }
@@ -295,6 +311,11 @@ pub struct Adam4bitOptimizerConfig {
     pub beta2: f32,
     pub epsilon: f32,
     pub weight_decay: f32,
+    /// Apply weight decay decoupled from the adaptive step (AdamW) rather than by
+    /// adding `λ·w` to the gradient (Adam).
+    ///
+    /// `false` reproduces [`Adam4bit`]; `true` is what [`AdamW4bit`] sets.
+    pub decoupled_weight_decay: bool,
 }
 
 impl Default for Adam4bitOptimizerConfig {
@@ -305,6 +326,7 @@ impl Default for Adam4bitOptimizerConfig {
             beta2: 0.999,
             epsilon: 1e-8,
             weight_decay: 0.0,
+            decoupled_weight_decay: false,
         }
     }
 }
@@ -337,6 +359,7 @@ impl Adam4bit {
             beta2,
             epsilon,
             weight_decay,
+            decoupled_weight_decay: false,
         };
 
         Self {
@@ -368,6 +391,11 @@ impl Adam4bit {
     pub fn memory_savings(&self) -> f32 {
         // 4-bit quantization saves ~75% memory for optimizer states
         0.75
+    }
+
+    /// Switches between coupled (Adam) and decoupled (AdamW) weight decay.
+    pub fn set_decoupled_weight_decay(&mut self, decoupled: bool) {
+        self.optimizer_config.decoupled_weight_decay = decoupled;
     }
 
     /// Update gradient statistics for adaptive quantization
@@ -442,8 +470,12 @@ impl Optimizer for Adam4bit {
                 for i in 0..size {
                     let mut g = grad_arr[i];
 
-                    // Apply weight decay
-                    if self.optimizer_config.weight_decay > 0.0 {
+                    // Coupled (Adam) weight decay folds λ·w into the gradient, so it
+                    // is scaled by the adaptive denominator; decoupled (AdamW) decay is
+                    // applied straight to the parameter below instead.
+                    if self.optimizer_config.weight_decay > 0.0
+                        && !self.optimizer_config.decoupled_weight_decay
+                    {
                         g += self.optimizer_config.weight_decay * param[i];
                     }
 
@@ -463,6 +495,16 @@ impl Optimizer for Adam4bit {
                     // Update parameters
                     param[i] -= self.optimizer_config.learning_rate * m_hat
                         / (v_hat.sqrt() + self.optimizer_config.epsilon);
+
+                    // Decoupled (AdamW) weight decay: applied to the parameter, not to
+                    // the gradient, so it is untouched by the adaptive denominator.
+                    if self.optimizer_config.weight_decay > 0.0
+                        && self.optimizer_config.decoupled_weight_decay
+                    {
+                        param[i] -= self.optimizer_config.learning_rate
+                            * self.optimizer_config.weight_decay
+                            * param[i];
+                    }
                 }
 
                 // Quantize updated states
@@ -607,6 +649,107 @@ impl StatefulOptimizer for Adam4bit {
     }
 }
 
+/// 4-bit AdamW: [`Adam4bit`] with decoupled weight decay.
+///
+/// Identical quantized state (NF4 momentum and variance) and identical adaptive step;
+/// the only difference is that `λ·w` is subtracted from the parameter directly rather
+/// than folded into the gradient, which is what makes AdamW's decay independent of the
+/// gradient magnitude.
+#[derive(Debug)]
+pub struct AdamW4bit {
+    inner: Adam4bit,
+}
+
+impl AdamW4bit {
+    /// Creates a 4-bit AdamW optimizer.
+    pub fn new(
+        learning_rate: f32,
+        beta1: f32,
+        beta2: f32,
+        epsilon: f32,
+        weight_decay: f32,
+    ) -> Self {
+        let mut inner = Adam4bit::new(learning_rate, beta1, beta2, epsilon, weight_decay);
+        inner.set_decoupled_weight_decay(true);
+        Self { inner }
+    }
+
+    /// Creates a 4-bit AdamW optimizer with a custom quantization configuration.
+    pub fn with_quantization_config(
+        mut optimizer_config: Adam4bitOptimizerConfig,
+        quantization_config: AdvancedQuantizationConfig,
+    ) -> Self {
+        optimizer_config.decoupled_weight_decay = true;
+        Self {
+            inner: Adam4bit::with_quantization_config(optimizer_config, quantization_config),
+        }
+    }
+
+    /// Memory saved relative to full-precision AdamW, measured from the live buffers.
+    pub fn memory_savings(&self) -> f32 {
+        self.inner.memory_savings()
+    }
+}
+
+impl Optimizer for AdamW4bit {
+    fn update(&mut self, parameter: &mut Tensor, grad: &Tensor) -> Result<()> {
+        self.inner.update(parameter, grad)
+    }
+
+    fn zero_grad(&mut self) {
+        self.inner.zero_grad()
+    }
+
+    fn step(&mut self) {
+        self.inner.step()
+    }
+
+    fn get_lr(&self) -> f32 {
+        self.inner.get_lr()
+    }
+
+    fn set_lr(&mut self, lr: f32) {
+        self.inner.set_lr(lr)
+    }
+}
+
+impl StatefulOptimizer for AdamW4bit {
+    type Config = <Adam4bit as StatefulOptimizer>::Config;
+    type State = <Adam4bit as StatefulOptimizer>::State;
+
+    fn config(&self) -> &Self::Config {
+        self.inner.config()
+    }
+
+    fn state(&self) -> &Self::State {
+        self.inner.state()
+    }
+
+    fn state_mut(&mut self) -> &mut Self::State {
+        self.inner.state_mut()
+    }
+
+    fn state_dict(&self) -> Result<HashMap<String, Tensor>> {
+        self.inner.state_dict()
+    }
+
+    fn load_state_dict(&mut self, state: HashMap<String, Tensor>) -> Result<()> {
+        self.inner.load_state_dict(state)
+    }
+
+    fn memory_usage(&self) -> StateMemoryStats {
+        self.inner.memory_usage()
+    }
+
+    fn reset_state(&mut self) {
+        self.inner.reset_state()
+    }
+
+    fn num_parameters(&self) -> usize {
+        self.inner.num_parameters()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -652,5 +795,121 @@ mod tests {
 
         assert!(quantized.memory_usage() > 0);
         assert!(quantized.compression_ratio() >= 1.0);
+    }
+}
+
+#[cfg(test)]
+mod adamw4bit_tests {
+    use super::*;
+
+    fn tensor(values: &[f32]) -> Tensor {
+        Tensor::from_vec(values.to_vec(), &[values.len()]).expect("tensor")
+    }
+
+    /// Decoupled decay must move a parameter even when the gradient is exactly zero,
+    /// and by exactly `lr · λ · w` — untouched by the adaptive denominator.
+    #[test]
+    fn adamw4bit_applies_decoupled_weight_decay() {
+        let mut optimizer = AdamW4bit::new(0.1, 0.9, 0.999, 1e-8, 0.5);
+        let mut param = tensor(&[10.0]);
+        optimizer.update(&mut param, &tensor(&[0.0])).expect("update");
+
+        let after = param.data_f32().expect("data")[0];
+        // Δ = lr · λ · w = 0.1 · 0.5 · 10 = 0.5
+        assert!((after - 9.5).abs() < 1e-4, "expected 9.5, got {after}");
+    }
+
+    /// Coupled Adam decay leaves a zero-gradient parameter almost untouched, because
+    /// `λ·w` is divided by `sqrt(v̂)` which is itself proportional to `λ·w`.
+    #[test]
+    fn adam4bit_and_adamw4bit_differ_on_weight_decay() {
+        let mut coupled = Adam4bit::new(0.1, 0.9, 0.999, 1e-8, 0.5);
+        let mut decoupled = AdamW4bit::new(0.1, 0.9, 0.999, 1e-8, 0.5);
+
+        let mut a = tensor(&[10.0]);
+        let mut b = tensor(&[10.0]);
+        coupled.update(&mut a, &tensor(&[0.0])).expect("coupled");
+        decoupled.update(&mut b, &tensor(&[0.0])).expect("decoupled");
+
+        let coupled_value = a.data_f32().expect("data")[0];
+        let decoupled_value = b.data_f32().expect("data")[0];
+        assert!(
+            (coupled_value - decoupled_value).abs() > 1e-3,
+            "the two decay styles must differ: {coupled_value} vs {decoupled_value}"
+        );
+    }
+
+    /// Convergence smoke test on the quadratic bowl `f(x) = Σ x²` (`∇f = 2x`).
+    #[test]
+    fn adamw4bit_descends_a_quadratic_bowl() {
+        let mut optimizer = AdamW4bit::new(0.05, 0.9, 0.999, 1e-8, 0.0);
+        let mut param = tensor(&[3.0, -4.0]);
+        let initial: f32 = param.data_f32().expect("data").iter().map(|v| v * v).sum();
+
+        for _ in 0..400 {
+            let values = param.data_f32().expect("data");
+            let grad = tensor(&values.iter().map(|v| 2.0 * v).collect::<Vec<f32>>());
+            optimizer.update(&mut param, &grad).expect("step");
+            optimizer.step();
+        }
+
+        let final_loss: f32 = param.data_f32().expect("data").iter().map(|v| v * v).sum();
+        assert!(
+            final_loss < initial * 0.2,
+            "loss must fall: {initial} -> {final_loss}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod nf4_round_trip_tests {
+    use super::*;
+
+    /// Regression: a constant block has zero span, so `scale = 0`, `zero_point =
+    /// -min/0` and `(v − min)/0` were all NaN. Adam4bit initialises its moments from
+    /// an all-zeros tensor, so *every* first step produced NaN parameters.
+    #[test]
+    fn constant_block_round_trips_without_nan() {
+        for value in [0.0_f32, 1.5, -2.25] {
+            let tensor = Tensor::from_vec(vec![value; 8], &[8]).expect("tensor");
+            let quantized = QuantizationUtils::quantize_nf4(&tensor, 4).expect("quantize");
+            let restored = QuantizationUtils::dequantize_nf4(&quantized).expect("dequantize");
+
+            for restored_value in restored.data_f32().expect("data") {
+                assert!(
+                    restored_value.is_finite(),
+                    "NaN for a constant block of {value}"
+                );
+                assert!(
+                    (restored_value - value).abs() < 1e-6,
+                    "a constant block must round-trip exactly: {restored_value} vs {value}"
+                );
+            }
+        }
+    }
+
+    /// Regression: the dequantizer added `zero_point·scale` where it had to subtract
+    /// it, so a block that did not start at zero came back as `v − 2·min`.
+    #[test]
+    fn shifted_block_round_trips_close() {
+        let values: Vec<f32> = (0..16).map(|i| 10.0 + i as f32 * 0.5).collect();
+        let tensor = Tensor::from_vec(values.clone(), &[16]).expect("tensor");
+        let quantized = QuantizationUtils::quantize_nf4(&tensor, 16).expect("quantize");
+        let restored = QuantizationUtils::dequantize_nf4(&quantized).expect("dequantize");
+
+        let span = 7.5_f32; // 15 · 0.5
+        for (restored_value, original) in
+            restored.data_f32().expect("data").iter().zip(values.iter())
+        {
+            assert!(
+                (restored_value - original).abs() < span * 0.2,
+                "round trip drifted: {restored_value} vs {original}"
+            );
+        }
+
+        // The endpoints must be reproduced essentially exactly.
+        let restored_values = restored.data_f32().expect("data");
+        assert!((restored_values[0] - 10.0).abs() < 1e-4);
+        assert!((restored_values[15] - 17.5).abs() < 1e-4);
     }
 }

@@ -31,7 +31,7 @@ impl fmt::Display for SwaError {
             Self::DimensionMismatch => write!(f, "dimension mismatch in sliding-window attention"),
             Self::SeqLenTooShort { min, got } => {
                 write!(f, "sequence too short: min={min}, got={got}")
-            }
+            },
         }
     }
 }
@@ -89,11 +89,7 @@ pub fn compute_attention_span(
     causal: bool,
 ) -> (usize, usize) {
     let start = pos.saturating_sub(window);
-    let end = if causal {
-        (pos + 1).min(seq_len)
-    } else {
-        (pos + window + 1).min(seq_len)
-    };
+    let end = if causal { (pos + 1).min(seq_len) } else { (pos + window + 1).min(seq_len) };
     (start, end)
 }
 
@@ -114,7 +110,10 @@ pub struct AttentionPatternStats {
 }
 
 /// Compute attention pattern statistics for the given config and sequence length.
-pub fn compute_pattern_stats(config: &SlidingWindowConfig, seq_len: usize) -> AttentionPatternStats {
+pub fn compute_pattern_stats(
+    config: &SlidingWindowConfig,
+    seq_len: usize,
+) -> AttentionPatternStats {
     let mut total_span: usize = 0;
     let mut max_span: usize = 0;
 
@@ -123,7 +122,8 @@ pub fn compute_pattern_stats(config: &SlidingWindowConfig, seq_len: usize) -> At
             // Global token: attends to everything
             seq_len
         } else {
-            let (start, end) = compute_attention_span(pos, seq_len, config.window_size, config.causal);
+            let (start, end) =
+                compute_attention_span(pos, seq_len, config.window_size, config.causal);
             // Also count global tokens that are always visible
             let global_extra = config.include_global_tokens.min(start); // global tokens before window
             (end - start) + global_extra
@@ -135,17 +135,10 @@ pub fn compute_pattern_stats(config: &SlidingWindowConfig, seq_len: usize) -> At
         }
     }
 
-    let mean_span = if seq_len > 0 {
-        total_span as f32 / seq_len as f32
-    } else {
-        0.0
-    };
+    let mean_span = if seq_len > 0 { total_span as f32 / seq_len as f32 } else { 0.0 };
 
-    let effective_window = if config.causal {
-        config.window_size + 1
-    } else {
-        2 * config.window_size + 1
-    };
+    let effective_window =
+        if config.causal { config.window_size + 1 } else { 2 * config.window_size + 1 };
 
     let memory_reduction = if seq_len > 0 {
         (effective_window.min(seq_len) as f32) / (seq_len as f32)
@@ -286,9 +279,7 @@ mod tests {
 
     fn make_tensor(seq: usize, heads: usize, dim: usize, seed: f32) -> Vec<f32> {
         let n = seq * heads * dim;
-        (0..n)
-            .map(|i| ((i as f32 * seed * 0.1).sin() * 0.5 + 0.5) * 0.2)
-            .collect()
+        (0..n).map(|i| ((i as f32 * seed * 0.1).sin() * 0.5 + 0.5) * 0.2).collect()
     }
 
     fn assert_close(a: &[f32], b: &[f32], tol: f32, label: &str) {
@@ -303,7 +294,15 @@ mod tests {
     }
 
     // Reference full-attention for comparison (single-head or multi-head)
-    fn full_attention(q: &[f32], k: &[f32], v: &[f32], seq: usize, h: usize, d: usize, scale: f32) -> Vec<f32> {
+    fn full_attention(
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        seq: usize,
+        h: usize,
+        d: usize,
+        scale: f32,
+    ) -> Vec<f32> {
         let mut out = vec![0.0_f32; seq * h * d];
         for head in 0..h {
             for i in 0..seq {
@@ -313,8 +312,12 @@ mod tests {
                 let mut scores: Vec<f32> = (0..seq)
                     .map(|j| {
                         let k_off = j * h * d + head * d;
-                        q_vec.iter().zip(k[k_off..k_off + d].iter())
-                            .map(|(&qi, &ki)| qi * ki).sum::<f32>() * scale
+                        q_vec
+                            .iter()
+                            .zip(k[k_off..k_off + d].iter())
+                            .map(|(&qi, &ki)| qi * ki)
+                            .sum::<f32>()
+                            * scale
                     })
                     .collect();
 
@@ -331,10 +334,10 @@ mod tests {
                 }
 
                 let out_off = i * h * d + head * d;
-                for j in 0..seq {
+                for (j, score) in scores.iter().enumerate().take(seq) {
                     let v_off = j * h * d + head * d;
                     for dd in 0..d {
-                        out[out_off + dd] += scores[j] * v[v_off + dd];
+                        out[out_off + dd] += score * v[v_off + dd];
                     }
                 }
             }
@@ -378,8 +381,7 @@ mod tests {
         let mut config = SlidingWindowConfig::new(dim, heads);
         config.window_size = 3;
 
-        let out = sliding_window_attention(&q, &k, &v, &config, seq)
-            .expect("output shape test");
+        let out = sliding_window_attention(&q, &k, &v, &config, seq).expect("output shape test");
 
         assert_eq!(out.len(), seq * heads * dim);
     }
@@ -400,11 +402,16 @@ mod tests {
         config.window_size = seq; // window >= seq_len → full attention
         config.causal = false;
 
-        let swa_out = sliding_window_attention(&q, &k, &v, &config, seq)
-            .expect("large window non-causal");
+        let swa_out =
+            sliding_window_attention(&q, &k, &v, &config, seq).expect("large window non-causal");
         let full_out = full_attention(&q, &k, &v, seq, heads, dim, config.scale);
 
-        assert_close(&swa_out, &full_out, 1e-5, "large window == full (non-causal)");
+        assert_close(
+            &swa_out,
+            &full_out,
+            1e-5,
+            "large window == full (non-causal)",
+        );
     }
 
     // ── Test 5: Large window == full attention (causal) ───────────────
@@ -423,8 +430,8 @@ mod tests {
         config.window_size = seq; // window >= seq_len
         config.causal = true;
 
-        let swa_out = sliding_window_attention(&q, &k, &v, &config, seq)
-            .expect("large window causal");
+        let swa_out =
+            sliding_window_attention(&q, &k, &v, &config, seq).expect("large window causal");
 
         // Causal full attention
         let scale = config.scale;
@@ -436,18 +443,31 @@ mod tests {
                 let mut scores: Vec<f32> = (0..=i)
                     .map(|j| {
                         let k_off = j * heads * dim + head * dim;
-                        q_vec.iter().zip(k[k_off..k_off + dim].iter())
-                            .map(|(&qi, &ki)| qi * ki).sum::<f32>() * scale
+                        q_vec
+                            .iter()
+                            .zip(k[k_off..k_off + dim].iter())
+                            .map(|(&qi, &ki)| qi * ki)
+                            .sum::<f32>()
+                            * scale
                     })
                     .collect();
                 let max_s = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
                 let mut s_exp = 0.0_f32;
-                for s in scores.iter_mut() { *s = (*s - max_s).exp(); s_exp += *s; }
-                if s_exp > 0.0 { for s in scores.iter_mut() { *s /= s_exp; } }
+                for s in scores.iter_mut() {
+                    *s = (*s - max_s).exp();
+                    s_exp += *s;
+                }
+                if s_exp > 0.0 {
+                    for s in scores.iter_mut() {
+                        *s /= s_exp;
+                    }
+                }
                 let out_off = i * heads * dim + head * dim;
                 for (j, &w) in scores.iter().enumerate() {
                     let v_off = j * heads * dim + head * dim;
-                    for dd in 0..dim { full_out[out_off + dd] += w * v[v_off + dd]; }
+                    for dd in 0..dim {
+                        full_out[out_off + dd] += w * v[v_off + dd];
+                    }
                 }
             }
         }
@@ -471,8 +491,7 @@ mod tests {
         config.window_size = 1;
         config.causal = true;
 
-        let out = sliding_window_attention(&q, &k, &v, &config, seq)
-            .expect("small window causal");
+        let out = sliding_window_attention(&q, &k, &v, &config, seq).expect("small window causal");
         assert_eq!(out.len(), seq * heads * dim);
 
         // All outputs must be finite
@@ -498,8 +517,7 @@ mod tests {
         config.causal = false;
         config.include_global_tokens = 2; // first 2 tokens are global
 
-        let out = sliding_window_attention(&q, &k, &v, &config, seq)
-            .expect("global tokens");
+        let out = sliding_window_attention(&q, &k, &v, &config, seq).expect("global tokens");
         assert_eq!(out.len(), seq * heads * dim);
 
         // Global tokens (pos 0,1) should attend the full sequence:
@@ -631,6 +649,9 @@ mod tests {
             .zip(out2[mid..mid + dim].iter())
             .map(|(&a, &b)| (a - b).abs())
             .sum();
-        assert!(diff > 1e-5, "different windows should produce different outputs");
+        assert!(
+            diff > 1e-5,
+            "different windows should produce different outputs"
+        );
     }
 }

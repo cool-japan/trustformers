@@ -131,6 +131,31 @@ impl HighAvailabilityService {
         self.health_service.get_system_health().await
     }
 
+    /// Fail over to `target_node`.
+    ///
+    /// Delegates to the real failover manager: an unknown or unhealthy target is
+    /// an error, and the returned outcome names the node that was actually
+    /// active before and after the switch.
+    pub async fn trigger_failover(&self, target_node: &str) -> Result<FailoverOutcome> {
+        let previous_node = self.failover_manager.get_primary_node().await;
+        self.failover_manager.force_failover(target_node.to_string()).await?;
+        let active_node = self.failover_manager.get_primary_node().await;
+        Ok(FailoverOutcome {
+            previous_node,
+            active_node,
+        })
+    }
+
+    /// The node currently serving as primary, if one has been elected.
+    pub async fn primary_node(&self) -> Option<String> {
+        self.failover_manager.get_primary_node().await
+    }
+
+    /// Register a node with the failover manager.
+    pub async fn register_node(&self, node_id: String, endpoint: String) -> Result<()> {
+        self.failover_manager.register_node(node_id, endpoint).await
+    }
+
     /// Get HA statistics
     pub async fn get_stats(&self) -> HAStats {
         HAStats {
@@ -229,6 +254,15 @@ impl Default for HAConfig {
             shutdown_timeout: Duration::from_secs(30),
         }
     }
+}
+
+/// Result of a manual failover.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FailoverOutcome {
+    /// Node that was primary before the switch, if any.
+    pub previous_node: Option<String>,
+    /// Node that is primary after the switch.
+    pub active_node: Option<String>,
 }
 
 /// High availability statistics

@@ -85,6 +85,21 @@ toml.workspace = true
 semver.workspace = true
 sha2.workspace = true
 hex.workspace = true
+# Cryptography (RustCrypto, Pure Rust) for the encryption subsystem: real AEAD
+# (AES-GCM / ChaCha20-Poly1305), real block/stream ciphers, real KDFs, OS CSPRNG
+# and constant-time comparison. No C/C++ toolchain is involved.
+aes-gcm.workspace = true
+chacha20poly1305.workspace = true
+aes.workspace = true
+cbc.workspace = true
+salsa20.workspace = true
+poly1305.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
+pbkdf2.workspace = true
+getrandom.workspace = true
+subtle.workspace = true
+zeroize.workspace = true
 glob = "0.3"
 sysinfo = "0.39.5"
 libc.workspace = true
@@ -123,6 +138,14 @@ azure_mgmt_web = "0.21"
 # Internal dependencies
 trustformers-core.workspace = true
 trustformers-mobile.workspace = true
+# Real model implementations + safetensors/pickle checkpoint loading. Required so the
+# serving layer can run genuine forward passes and report measured weight footprints
+# instead of placeholders. `gpt2` is the decoder architecture wired into the batch
+# executor; `bert` is the worked example for the checkpoint binder.
+trustformers-models = { workspace = true, features = ["gpt2", "bert"] }
+# Real tokenization for the HTTP/gRPC text path (HuggingFace `tokenizer.json`).
+# Without it the serving layer could not turn a prompt into token ids honestly.
+trustformers-tokenizers.workspace = true
 scirs2-core = { workspace = true }
 
 [dev-dependencies]

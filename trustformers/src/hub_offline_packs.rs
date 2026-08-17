@@ -101,6 +101,117 @@ fn model_info_from_hub_json(model_id: &str, json: &serde_json::Value) -> ModelIn
     }
 }
 
+/// Build a "we don't know anything about this model" [`ModelInfo`]: every
+/// Hub-side field is `None`/empty rather than a guessed placeholder. Shared
+/// by every path that genuinely has no Hub metadata to report — `model_id`
+/// being a local directory (no Hub repo id to query at all), the `hub`
+/// feature being disabled, or a failed Hub lookup.
+fn empty_model_info(model_id: &str) -> ModelInfo {
+    ModelInfo {
+        model_id: model_id.to_string(),
+        library_name: None,
+        pipeline_tag: None,
+        tags: vec![],
+        config: HashMap::new(),
+        downloads: None,
+        likes: None,
+        created_at: None,
+        updated_at: None,
+        author: None,
+        description: None,
+        license: None,
+        task: None,
+        language: vec![],
+        dataset: vec![],
+        model_type: None,
+        architecture: None,
+    }
+}
+
+/// Resolve `model_id` to a real, on-disk directory containing that model's
+/// files, without ever fabricating one:
+///
+/// 1. If `model_id` is itself an existing local directory, use it directly —
+///    this is how a caller points at a model that was never downloaded from
+///    the Hub at all.
+/// 2. Otherwise, check the Hub's on-disk cache (the same layout
+///    [`crate::hub::download_model_enhanced`] writes to).
+/// 3. With the `hub` feature enabled and no local cache hit, download the
+///    model's essential files into that cache, then use it.
+///
+/// Returns an error — never an empty or synthetic directory — if none of the
+/// above produces a real directory containing at least one file.
+async fn resolve_model_source_dir(model_id: &str) -> Result<PathBuf> {
+    let explicit = Path::new(model_id);
+    if explicit.is_dir() {
+        return Ok(explicit.to_path_buf());
+    }
+
+    let cache_dir = crate::hub::get_cache_dir()?;
+    let cached_model_dir = cache_dir.join("models").join(model_id.replace('/', "--")).join("main");
+    if cached_model_dir.is_dir() && has_any_files(&cached_model_dir) {
+        return Ok(cached_model_dir);
+    }
+
+    #[cfg(feature = "hub")]
+    {
+        let (downloaded_dir, _stats) =
+            crate::hub::download_model_enhanced(model_id, None).await.map_err(|e| {
+                TrustformersError::io_error(format!(
+                    "Failed to download model '{model_id}' to build an offline pack: {e}"
+                ))
+            })?;
+        if has_any_files(&downloaded_dir) {
+            return Ok(downloaded_dir);
+        }
+        Err(TrustformersError::file_not_found(format!(
+            "Downloaded model directory for '{model_id}' contains no files"
+        )))
+    }
+
+    #[cfg(not(feature = "hub"))]
+    {
+        Err(TrustformersError::invalid_input_simple(format!(
+            "Cannot build an offline pack for '{model_id}': it is not a local directory, it is \
+             not present in the local cache ({}), and the `hub` feature is disabled so it cannot \
+             be downloaded. Provide a local model directory, pre-populate the cache, or rebuild \
+             with `--features hub`.",
+            cached_model_dir.display()
+        )))
+    }
+}
+
+/// Whether `dir` contains at least one regular file directly inside it.
+fn has_any_files(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.filter_map(|e| e.ok()).any(|e| e.path().is_file())
+}
+
+/// Lexically normalize a tar entry's path and confirm it cannot escape
+/// `base`, without touching the filesystem (the destination doesn't exist yet
+/// during extraction, so canonicalization isn't an option). Any `..`
+/// component or absolute-path component is rejected outright rather than
+/// "resolved" — the simplest policy that is unambiguously safe against a
+/// crafted archive with entries like `../../etc/passwd`.
+fn safe_relative_path(base: &Path, entry_name: &str) -> Option<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in Path::new(entry_name).components() {
+        match component {
+            std::path::Component::Normal(part) => normalized.push(part),
+            std::path::Component::CurDir => {},
+            std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => return None,
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        return None;
+    }
+    Some(base.join(normalized))
+}
+
 /// Offline Model Pack System for TrustformeRS
 /// Enables packaging and distribution of model collections for offline deployment
 
@@ -207,7 +318,12 @@ impl OfflineModelPackManager {
         Ok(manager)
     }
 
-    /// Create a new model pack from a list of models
+    /// Create a new model pack from a list of models.
+    ///
+    /// Model metadata comes from the real Hub API (`get_model_info`, behind
+    /// the `hub` feature) or, without it, an honestly-empty `ModelInfo` — see
+    /// [`build_pack`](Self::build_pack) for how that combines with each
+    /// model's real on-disk files.
     pub async fn create_pack(
         &mut self,
         name: String,
@@ -215,48 +331,60 @@ impl OfflineModelPackManager {
         model_ids: Vec<String>,
         config: PackCreationConfig,
     ) -> Result<String> {
+        let mut model_infos = Vec::with_capacity(model_ids.len());
+        for model_id in &model_ids {
+            let info = self.get_model_info(model_id).await?;
+            model_infos.push((model_id.clone(), info));
+        }
+        self.build_pack(name, description, model_ids, config, model_infos).await
+    }
+
+    /// Shared pack-building core used by both [`create_pack`](Self::create_pack)
+    /// and [`create_pack_from_hub`](Self::create_pack_from_hub): given each
+    /// model's already-resolved [`ModelInfo`], resolve its *real* on-disk
+    /// files via [`resolve_model_source_dir`], archive them, and compute
+    /// every size (`original_size`, `compressed_size`, `compression_ratio`)
+    /// from those real bytes — never from a hardcoded estimate.
+    async fn build_pack(
+        &mut self,
+        name: String,
+        description: String,
+        model_ids: Vec<String>,
+        config: PackCreationConfig,
+        model_infos: Vec<(String, ModelInfo)>,
+    ) -> Result<String> {
         let pack_id = Uuid::new_v4().to_string();
         let pack_path = self.base_path.join(format!("{}.tfpack", pack_id));
 
-        // Collect model information
-        let mut models = Vec::new();
-        let mut total_original_size = 0u64;
-
-        for model_id in &model_ids {
-            let model_info = self.get_model_info(model_id).await?;
-            let estimated_size = 1024 * 1024 * 512; // Estimate 512MB per model
-            total_original_size += estimated_size;
-
-            models.push(PackedModelInfo {
-                model_id: model_id.clone(),
-                name: model_info.model_id.clone(),
-                version: "latest".to_string(), // Could be made configurable
-                original_size: estimated_size,
-                compressed_size: 0, // Will be updated after compression
-                model_type: self.infer_model_type(&model_info),
-                framework: model_info
-                    .library_name
-                    .clone()
-                    .unwrap_or_else(|| "transformers".to_string()),
-                precision: PrecisionType::FP32, // Default, could be detected
-                metadata: self.extract_metadata_from_model_info(&model_info),
-            });
-        }
-
-        // Create compressed archive
-        let compressed_size =
+        // Create compressed archive from each model's real files, getting
+        // back the real (uncompressed) byte count actually packed per model.
+        let (compressed_size, per_model_original_size) =
             self.create_compressed_archive(&model_ids, &pack_path, &config).await?;
+        let total_original_size: u64 = per_model_original_size.values().sum();
 
-        // Calculate compression ratio
         let compression_ratio = if total_original_size > 0 {
             compressed_size as f64 / total_original_size as f64
         } else {
             1.0
         };
 
-        // Update compressed sizes for models (approximate distribution)
-        for model in &mut models {
-            model.compressed_size = (model.original_size as f64 * compression_ratio) as u64;
+        let mut models = Vec::with_capacity(model_infos.len());
+        for (model_id, model_info) in &model_infos {
+            let original_size = per_model_original_size.get(model_id).copied().unwrap_or(0);
+            models.push(PackedModelInfo {
+                model_id: model_id.clone(),
+                name: model_info.model_id.clone(),
+                version: "latest".to_string(), // Could be made configurable
+                original_size,
+                compressed_size: (original_size as f64 * compression_ratio) as u64,
+                model_type: self.infer_model_type(model_info),
+                framework: model_info
+                    .library_name
+                    .clone()
+                    .unwrap_or_else(|| "transformers".to_string()),
+                precision: PrecisionType::FP32, // Default, could be detected
+                metadata: self.extract_metadata_from_model_info(model_info),
+            });
         }
 
         // Generate checksum
@@ -423,6 +551,18 @@ impl OfflineModelPackManager {
 
     // Private helper methods
 
+    /// Look up a model's Hub metadata, or — when `model_id` is itself a local
+    /// directory (the same convention [`resolve_model_source_dir`] uses) —
+    /// skip the network entirely: there is no Hub repo id to query, and
+    /// sending a local filesystem path to the Hub API as a "model id" would
+    /// be both pointless and, in tests, an unwanted network call.
+    async fn get_model_info(&self, model_id: &str) -> Result<ModelInfo> {
+        if Path::new(model_id).is_dir() {
+            return Ok(empty_model_info(model_id));
+        }
+        self.get_model_info_remote(model_id).await
+    }
+
     /// Query the real Hugging Face Hub API for model metadata.
     ///
     /// Mirrors `hub.rs::get_download_stats`'s existing pattern for this exact
@@ -430,7 +570,7 @@ impl OfflineModelPackManager {
     /// `serde_json::Value`, then hand off to [`model_info_from_hub_json`] for
     /// the actual field mapping.
     #[cfg(feature = "hub")]
-    async fn get_model_info(&self, model_id: &str) -> Result<ModelInfo> {
+    async fn get_model_info_remote(&self, model_id: &str) -> Result<ModelInfo> {
         let url = format!("https://huggingface.co/api/models/{model_id}");
         let client = reqwest::Client::new();
 
@@ -475,41 +615,35 @@ impl OfflineModelPackManager {
         Ok(model_info_from_hub_json(model_id, &json))
     }
 
-    /// Mock model info used when the `hub` feature (networking) is disabled.
-    ///
-    /// Kept deterministic — mirroring `hub.rs:769-792`'s fallback pattern of
-    /// keeping default/offline builds fully functional — so pack creation
-    /// still works without any network access; only real Hub metadata
-    /// requires the `hub` feature.
+    /// Honest empty model info used when the `hub` feature (networking) is
+    /// disabled: there is no way to know a model's real Hub metadata
+    /// (downloads, likes, pipeline tag, ...) without a network call, so every
+    /// such field is `None`/empty rather than a guessed placeholder. Pack
+    /// creation itself still works without the `hub` feature — real files
+    /// are resolved via `resolve_model_source_dir`, which also checks the
+    /// local cache and an explicit local directory — only this Hub-side
+    /// metadata is genuinely unavailable.
     #[cfg(not(feature = "hub"))]
-    async fn get_model_info(&self, model_id: &str) -> Result<ModelInfo> {
-        Ok(ModelInfo {
-            model_id: model_id.to_string(),
-            pipeline_tag: Some("text-generation".to_string()),
-            library_name: Some("transformers".to_string()),
-            tags: vec![],
-            config: HashMap::new(),
-            downloads: Some(1000),
-            likes: Some(50),
-            created_at: None,
-            updated_at: None,
-            author: None,
-            description: None,
-            license: None,
-            task: None,
-            language: vec![],
-            dataset: vec![],
-            model_type: None,
-            architecture: None,
-        })
+    async fn get_model_info_remote(&self, model_id: &str) -> Result<ModelInfo> {
+        Ok(empty_model_info(model_id))
     }
 
+    /// Build the compressed pack archive from each model's *real* on-disk
+    /// files (resolved via [`resolve_model_source_dir`] — an explicit local
+    /// directory, the Hub cache, or, with the `hub` feature, a fresh
+    /// download). Fabricating a placeholder `config.json` is not an option:
+    /// a model whose files can't be resolved fails the whole pack rather
+    /// than silently producing an empty entry.
+    ///
+    /// Returns `(compressed_archive_size, per_model_original_size)` — the
+    /// latter is the real sum of bytes packed for each model, used by
+    /// [`build_pack`](Self::build_pack) instead of a hardcoded estimate.
     async fn create_compressed_archive(
         &self,
         model_ids: &[String],
         output_path: &Path,
         config: &PackCreationConfig,
-    ) -> Result<u64> {
+    ) -> Result<(u64, HashMap<String, u64>)> {
         use oxiarc_archive::tar::TarWriter;
         use oxiarc_deflate::streaming::GzipStreamEncoder;
 
@@ -536,27 +670,56 @@ impl OfflineModelPackManager {
             .add_file_with_mode("pack_metadata.json", metadata_content.as_bytes(), 0o644)
             .map_err(|e| TrustformersError::invalid_input_simple(e.to_string()))?;
 
-        // Add each model to the archive
-        let mut total_size = 0u64;
+        // Add each model's real files to the archive.
+        let mut per_model_original_size = HashMap::with_capacity(model_ids.len());
         for model_id in model_ids {
-            // In a real implementation, you would download or copy the actual model files
-            // For now, create a placeholder model structure
-            let model_config = serde_json::json!({
-                "model_id": model_id,
-                "type": "transformers",
-                "format": "safetensors",
-                "architecture": "auto-detected"
-            });
+            let source_dir = resolve_model_source_dir(model_id).await?;
 
-            let config_content = serde_json::to_string_pretty(&model_config)?;
-            let model_path = format!("models/{}/config.json", model_id);
-            let content_len = config_content.len() as u64;
+            let entries = std::fs::read_dir(&source_dir).map_err(|e| TrustformersError::Io {
+                message: format!(
+                    "Failed to read model directory '{}': {e}",
+                    source_dir.display()
+                ),
+                path: Some(source_dir.to_string_lossy().to_string()),
+                suggestion: None,
+            })?;
 
-            tar_writer
-                .add_file_with_mode(&model_path, config_content.as_bytes(), 0o644)
-                .map_err(|e| TrustformersError::invalid_input_simple(e.to_string()))?;
+            let mut model_bytes: u64 = 0;
+            let mut file_count = 0usize;
+            for entry in entries {
+                let entry = entry.map_err(|e| TrustformersError::io_error(e.to_string()))?;
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if file_name.starts_with('.') {
+                    continue; // skip hidden/lock files
+                }
 
-            total_size += content_len;
+                let content = std::fs::read(&path).map_err(|e| TrustformersError::Io {
+                    message: format!("Failed to read model file '{}': {e}", path.display()),
+                    path: Some(path.to_string_lossy().to_string()),
+                    suggestion: None,
+                })?;
+                let archive_path = format!("models/{model_id}/{file_name}");
+                tar_writer
+                    .add_file_with_mode(&archive_path, &content, 0o644)
+                    .map_err(|e| TrustformersError::invalid_input_simple(e.to_string()))?;
+
+                model_bytes += content.len() as u64;
+                file_count += 1;
+            }
+
+            if file_count == 0 {
+                return Err(TrustformersError::invalid_input_simple(format!(
+                    "Model directory '{}' for '{model_id}' contains no files to pack",
+                    source_dir.display()
+                )));
+            }
+            per_model_original_size.insert(model_id.clone(), model_bytes);
         }
 
         // Consume tar_writer, writing the trailing zero blocks and returning the encoder
@@ -569,10 +732,10 @@ impl OfflineModelPackManager {
             .finish()
             .map_err(|e| TrustformersError::invalid_input_simple(e.to_string()))?;
 
-        // Calculate final archive size
+        // Calculate final archive size from the real bytes written.
         let final_size = output_path.metadata()?.len();
 
-        Ok(final_size)
+        Ok((final_size, per_model_original_size))
     }
 
     fn calculate_file_checksum(&self, file_path: &Path) -> Result<String> {
@@ -665,9 +828,15 @@ impl OfflineModelPackManager {
             let entry_name = entry.header.name.clone();
             let typeflag = entry.header.typeflag;
 
-            // Strip leading "./" or "/" from entry names for safety
-            let sanitized = entry_name.trim_start_matches("./").trim_start_matches('/');
-            let dest = extract_path.join(sanitized);
+            // Reject any entry whose path cannot be safely joined onto
+            // `extract_path` (`..` components, absolute paths, ...) — a tar
+            // entry named e.g. `../../etc/passwd` must never be allowed to
+            // write outside the extraction directory.
+            let Some(dest) = safe_relative_path(extract_path, &entry_name) else {
+                return Err(TrustformersError::invalid_input_simple(format!(
+                    "Refusing to extract pack entry with an unsafe path: '{entry_name}'"
+                )));
+            };
 
             match typeflag {
                 TAR_DIRECTORY => {
@@ -722,11 +891,23 @@ impl OfflineModelPackManager {
         Ok(())
     }
 
+    /// Load the pack registry from disk.
+    ///
+    /// A missing registry file is fine (a fresh, empty registry). A *present
+    /// but corrupt* one is not silently discarded — that would quietly drop
+    /// every previously-tracked pack with no indication anything was wrong —
+    /// so it is a hard error instead.
     fn load_registry(&mut self) -> Result<()> {
         let registry_path = self.base_path.join("registry.json");
         if registry_path.exists() {
-            let file = File::open(registry_path)?;
-            self.registry = serde_json::from_reader(file).unwrap_or_default();
+            let file = File::open(&registry_path)?;
+            self.registry = serde_json::from_reader(file).map_err(|e| {
+                TrustformersError::invalid_input_simple(format!(
+                    "Pack registry at '{}' is corrupt and could not be parsed: {e}. Remove or \
+                     repair the file to continue.",
+                    registry_path.display()
+                ))
+            })?;
         }
         Ok(())
     }
@@ -934,8 +1115,17 @@ impl HubIntegration {
             .await
     }
 
-    /// Get model information from Hub
+    /// Get model information from Hub.
+    ///
+    /// When `model_id` is itself a local directory (the same convention
+    /// [`resolve_model_source_dir`] uses), there is no Hub repo id to look up
+    /// a model card for, so the network call is skipped entirely rather than
+    /// sending a filesystem path to `crate::hub::load_model_card_from_hub`.
     async fn get_hub_model_info(&self, model_id: &str) -> Result<ModelInfo> {
+        if Path::new(model_id).is_dir() {
+            return Ok(empty_model_info(model_id));
+        }
+
         // Try to load model card from Hub
         match crate::hub::load_model_card_from_hub(model_id, Some(self.hub_options.clone())) {
             Ok(model_card) => {
@@ -961,26 +1151,11 @@ impl HubIntegration {
                 })
             },
             Err(_) => {
-                // Fallback to mock model info if Hub access fails
-                Ok(ModelInfo {
-                    model_id: model_id.to_string(),
-                    pipeline_tag: Some("text-generation".to_string()),
-                    library_name: Some("transformers".to_string()),
-                    tags: vec![],
-                    config: HashMap::new(),
-                    downloads: Some(1000),
-                    likes: Some(50),
-                    created_at: None,
-                    updated_at: None,
-                    author: None,
-                    description: None,
-                    license: None,
-                    task: None,
-                    language: vec![],
-                    dataset: vec![],
-                    model_type: None,
-                    architecture: None,
-                })
+                // No network access (or the model card genuinely doesn't
+                // exist): we don't know anything about this model beyond its
+                // id, so every Hub-side field is honestly `None`/empty
+                // rather than a guessed placeholder.
+                Ok(empty_model_info(model_id))
             },
         }
     }
@@ -998,7 +1173,14 @@ impl OfflineModelPackManager {
         Ok((manager, hub_integration))
     }
 
-    /// Create pack from Hub models using integration
+    /// Create pack from Hub models using integration.
+    ///
+    /// Unlike [`create_pack`](Self::create_pack) (which uses the plain
+    /// `/api/models/{id}` lookup), each model's [`ModelInfo`] here comes from
+    /// `hub_integration.get_hub_model_info` (the model card). Both funnel
+    /// into the same [`build_pack`](Self::build_pack), so the real file
+    /// resolution, archiving, and size accounting are identical — only the
+    /// metadata source differs.
     pub async fn create_pack_from_hub(
         &mut self,
         hub_integration: &HubIntegration,
@@ -1007,33 +1189,12 @@ impl OfflineModelPackManager {
         model_ids: Vec<String>,
         config: PackCreationConfig,
     ) -> Result<String> {
-        // Use Hub integration to get real model info
-        let mut enhanced_models = Vec::new();
-        let mut total_original_size = 0u64;
-
+        let mut model_infos = Vec::with_capacity(model_ids.len());
         for model_id in &model_ids {
-            let model_info = hub_integration.get_hub_model_info(model_id).await?;
-            let estimated_size = 1024 * 1024 * 512; // Estimate 512MB per model
-            total_original_size += estimated_size;
-
-            enhanced_models.push(PackedModelInfo {
-                model_id: model_id.clone(),
-                name: model_info.model_id.clone(),
-                version: "latest".to_string(),
-                original_size: estimated_size,
-                compressed_size: 0, // Will be updated after compression
-                model_type: self.infer_model_type(&model_info),
-                framework: model_info
-                    .library_name
-                    .clone()
-                    .unwrap_or_else(|| "transformers".to_string()),
-                precision: PrecisionType::FP32, // Default, could be detected
-                metadata: self.extract_metadata_from_model_info(&model_info),
-            });
+            let info = hub_integration.get_hub_model_info(model_id).await?;
+            model_infos.push((model_id.clone(), info));
         }
-
-        // Use the existing create_pack implementation but with enhanced model info
-        self.create_pack(name, description, model_ids, config).await
+        self.build_pack(name, description, model_ids, config, model_infos).await
     }
 }
 
@@ -1054,6 +1215,23 @@ mod tests {
         let suffix = pid.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         path.push(format!("trustformers_test_{}", suffix));
         path
+    }
+
+    /// Build a real local "model directory" — the kind `resolve_model_source_dir`
+    /// resolves directly, without any Hub cache or network access — containing
+    /// a config, a tokenizer file, and a (fake but real, on-disk) weights file.
+    /// Returns `(dir, total_bytes_of_the_three_files)`.
+    fn make_fake_model_dir(base: &Path, name: &str) -> (PathBuf, u64) {
+        let dir = base.join(name);
+        std::fs::create_dir_all(&dir).expect("create fake model dir");
+        let config = br#"{"model_type":"bert","hidden_size":768}"#;
+        let tokenizer = br#"{"version":"1.0","vocab_size":30522}"#;
+        let weights = vec![0xABu8; 256];
+        std::fs::write(dir.join("config.json"), config).expect("write config.json");
+        std::fs::write(dir.join("tokenizer.json"), tokenizer).expect("write tokenizer.json");
+        std::fs::write(dir.join("model.safetensors"), &weights).expect("write model.safetensors");
+        let total = (config.len() + tokenizer.len() + weights.len()) as u64;
+        (dir, total)
     }
 
     // --- ModelPackMetadata tests ---
@@ -1222,12 +1400,13 @@ mod tests {
         let path = temp_dir_path();
         let mut manager = OfflineModelPackManager::new(&path)
             .expect("OfflineModelPackManager::new should succeed");
+        let (model_dir, _size) = make_fake_model_dir(&path, "src-model");
         let config = PackCreationConfig::default();
         let pack_id = manager
             .create_pack(
                 "Test Pack".to_string(),
                 "A test pack for unit testing".to_string(),
-                vec!["gpt2".to_string()],
+                vec![model_dir.to_string_lossy().to_string()],
                 config,
             )
             .await
@@ -1244,12 +1423,13 @@ mod tests {
         let path = temp_dir_path();
         let mut manager = OfflineModelPackManager::new(&path)
             .expect("OfflineModelPackManager::new should succeed");
+        let (model_dir, _size) = make_fake_model_dir(&path, "src-model");
         let config = PackCreationConfig::default();
         let pack_id = manager
             .create_pack(
                 "Listed Pack".to_string(),
                 "Pack that should appear in listing".to_string(),
-                vec!["bert-base-uncased".to_string()],
+                vec![model_dir.to_string_lossy().to_string()],
                 config,
             )
             .await
@@ -1265,12 +1445,17 @@ mod tests {
         let path = temp_dir_path();
         let mut manager = OfflineModelPackManager::new(&path)
             .expect("OfflineModelPackManager::new should succeed");
+        let (model_dir_a, _) = make_fake_model_dir(&path, "src-model-a");
+        let (model_dir_b, _) = make_fake_model_dir(&path, "src-model-b");
         let config = PackCreationConfig::default();
         let pack_id = manager
             .create_pack(
                 "Metadata Test Pack".to_string(),
                 "Testing metadata fields".to_string(),
-                vec!["gpt2".to_string(), "bert-base-uncased".to_string()],
+                vec![
+                    model_dir_a.to_string_lossy().to_string(),
+                    model_dir_b.to_string_lossy().to_string(),
+                ],
                 config,
             )
             .await
@@ -1296,12 +1481,14 @@ mod tests {
         let path = temp_dir_path();
         let mut manager = OfflineModelPackManager::new(&path)
             .expect("OfflineModelPackManager::new should succeed");
+        let (model_dir_a, _) = make_fake_model_dir(&path, "src-model-a");
+        let (model_dir_b, _) = make_fake_model_dir(&path, "src-model-b");
         let config = PackCreationConfig::default();
         let id1 = manager
             .create_pack(
                 "Pack A".to_string(),
                 "First pack".to_string(),
-                vec!["gpt2".to_string()],
+                vec![model_dir_a.to_string_lossy().to_string()],
                 config.clone(),
             )
             .await
@@ -1310,12 +1497,116 @@ mod tests {
             .create_pack(
                 "Pack B".to_string(),
                 "Second pack".to_string(),
-                vec!["bert-base-uncased".to_string()],
+                vec![model_dir_b.to_string_lossy().to_string()],
                 config,
             )
             .await
             .expect("second create_pack should succeed");
         assert_ne!(id1, id2, "each created pack should have a unique pack_id");
+        std::fs::remove_dir_all(&path).ok();
+    }
+
+    /// Regression test for the P0 bug: `create_pack` used to record a
+    /// hardcoded `1024 * 1024 * 512` (512MB) `original_size` for every model
+    /// regardless of its real content, making `compression_ratio` fiction.
+    /// With real local files, `original_size` must equal their real byte sum.
+    #[tokio::test]
+    async fn test_create_pack_uses_real_file_sizes_not_hardcoded_512mb() {
+        let path = temp_dir_path();
+        let mut manager = OfflineModelPackManager::new(&path)
+            .expect("OfflineModelPackManager::new should succeed");
+        let (model_dir, expected_size) = make_fake_model_dir(&path, "src-model");
+        // Sanity check the fixture itself is nowhere near 512MB.
+        assert!(expected_size < 1024 * 1024);
+
+        let pack_id = manager
+            .create_pack(
+                "Real Size Pack".to_string(),
+                "Pack whose size must reflect real files".to_string(),
+                vec![model_dir.to_string_lossy().to_string()],
+                PackCreationConfig::default(),
+            )
+            .await
+            .expect("create_pack should succeed");
+
+        let info = manager
+            .get_pack_info(&pack_id)
+            .expect("pack should be retrievable after creation");
+        assert_eq!(info.models.len(), 1);
+        let packed = &info.models[0];
+        assert_eq!(
+            packed.original_size, expected_size,
+            "original_size must be the real on-disk byte count, not a 512MB estimate"
+        );
+        assert_ne!(
+            packed.original_size,
+            1024 * 1024 * 512,
+            "original_size must never be the old hardcoded 512MB placeholder"
+        );
+
+        std::fs::remove_dir_all(&path).ok();
+    }
+
+    /// Regression test for the P0 bug: `create_compressed_archive` used to
+    /// write a fabricated `config.json` (`"architecture": "auto-detected"`)
+    /// for every model regardless of whether any real files existed. A
+    /// model_id that resolves to nothing real (no local dir, no cache hit,
+    /// and no `hub` feature to fall back on) must now fail outright.
+    #[cfg(not(feature = "hub"))]
+    #[tokio::test]
+    async fn test_create_pack_fails_for_unresolvable_model_without_hub_feature() {
+        let path = temp_dir_path();
+        let mut manager = OfflineModelPackManager::new(&path)
+            .expect("OfflineModelPackManager::new should succeed");
+        let result = manager
+            .create_pack(
+                "Should Fail".to_string(),
+                "No local dir, no cache, no hub feature".to_string(),
+                vec!["definitely-not-a-real-local-path-or-cached-model".to_string()],
+                PackCreationConfig::default(),
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "an unresolvable model must fail pack creation, not silently produce an empty pack"
+        );
+        std::fs::remove_dir_all(&path).ok();
+    }
+
+    /// `create_pack_from_hub` must actually use the real per-model byte sizes
+    /// (via the shared `build_pack`/`create_compressed_archive` path) rather
+    /// than computing an "enhanced_models" list it then threw away.
+    ///
+    /// Uses a local directory as the `model_id`, which both `get_hub_model_info`
+    /// and `resolve_model_source_dir` treat as "no Hub repo id here" and
+    /// resolve without any network access — so this runs identically, and
+    /// without touching the network, in both `hub`-enabled and -disabled
+    /// builds.
+    #[tokio::test]
+    async fn test_create_pack_from_hub_uses_real_file_sizes() {
+        let path = temp_dir_path();
+        let mut manager = OfflineModelPackManager::new(&path)
+            .expect("OfflineModelPackManager::new should succeed");
+        let (model_dir, expected_size) = make_fake_model_dir(&path, "src-model");
+        let hub_integration = HubIntegration::new(None);
+
+        let pack_id = manager
+            .create_pack_from_hub(
+                &hub_integration,
+                "Hub Pack".to_string(),
+                "Pack built via HubIntegration".to_string(),
+                vec![model_dir.to_string_lossy().to_string()],
+                PackCreationConfig::default(),
+            )
+            .await
+            .expect("create_pack_from_hub should succeed");
+
+        let info = manager
+            .get_pack_info(&pack_id)
+            .expect("pack should be retrievable after creation");
+        assert_eq!(info.models.len(), 1);
+        assert_eq!(info.models[0].original_size, expected_size);
+
         std::fs::remove_dir_all(&path).ok();
     }
 
@@ -1370,26 +1661,53 @@ mod tests {
 
     // --- get_model_info tests (Hub integration) ---
 
-    /// Regression test: with the `hub` feature disabled, `get_model_info`
-    /// must keep returning the same deterministic mock data it always has
-    /// (no network access is possible without the `hub` feature).
+    /// Regression test for the P0 bug: without the `hub` feature,
+    /// `get_model_info` used to fabricate `downloads: Some(1000)`,
+    /// `likes: Some(50)`, `pipeline_tag: Some("text-generation")`, and
+    /// `library_name: Some("transformers")` — plausible-looking numbers with
+    /// no basis in reality. Every one of those must now be honestly
+    /// `None`/empty: there is no way to know a model's real Hub metadata
+    /// without a network call.
     #[cfg(not(feature = "hub"))]
     #[tokio::test]
-    async fn test_get_model_info_mock_mode_is_deterministic() {
+    async fn test_get_model_info_without_hub_feature_is_honestly_empty() {
         let path = temp_dir_path();
         let manager = OfflineModelPackManager::new(&path)
             .expect("OfflineModelPackManager::new should succeed");
         let info = manager
             .get_model_info("some-arbitrary-model-id")
             .await
-            .expect("mock get_model_info should not fail without the hub feature");
+            .expect("get_model_info should not fail without the hub feature");
         assert_eq!(info.model_id, "some-arbitrary-model-id");
-        assert_eq!(info.pipeline_tag.as_deref(), Some("text-generation"));
-        assert_eq!(info.library_name.as_deref(), Some("transformers"));
-        assert_eq!(info.downloads, Some(1000));
-        assert_eq!(info.likes, Some(50));
+        assert_eq!(info.pipeline_tag, None, "must not fabricate a pipeline_tag");
+        assert_eq!(info.library_name, None, "must not fabricate a library_name");
+        assert_eq!(info.downloads, None, "must not fabricate a downloads count");
+        assert_eq!(info.likes, None, "must not fabricate a likes count");
         assert!(info.tags.is_empty());
         assert!(info.config.is_empty());
+        std::fs::remove_dir_all(&path).ok();
+    }
+
+    /// `model_id` may itself be a local model directory (no Hub repo id at
+    /// all) — `get_model_info` must recognize that and return honest empty
+    /// metadata without attempting a network call, in every feature
+    /// configuration.
+    #[tokio::test]
+    async fn test_get_model_info_local_directory_skips_network_and_is_honest() {
+        let path = temp_dir_path();
+        let manager = OfflineModelPackManager::new(&path)
+            .expect("OfflineModelPackManager::new should succeed");
+        let (model_dir, _size) = make_fake_model_dir(&path, "local-model");
+
+        let info = manager
+            .get_model_info(&model_dir.to_string_lossy())
+            .await
+            .expect("get_model_info must succeed for a local directory");
+        assert_eq!(info.model_id, model_dir.to_string_lossy());
+        assert_eq!(info.downloads, None);
+        assert_eq!(info.likes, None);
+        assert_eq!(info.pipeline_tag, None);
+
         std::fs::remove_dir_all(&path).ok();
     }
 
@@ -1473,5 +1791,219 @@ mod tests {
         });
         let info = model_info_from_hub_json("single-lang-model", &json);
         assert_eq!(info.language, vec!["en".to_string()]);
+    }
+
+    // --- safe_relative_path / extract_pack path traversal ---
+
+    /// Regression test: `extract_pack` used to only strip a leading `./` or
+    /// `/`, so a crafted pack with an entry named e.g. `../../evil.txt` would
+    /// write outside the extraction directory. `safe_relative_path` is the
+    /// guard that now rejects it.
+    #[test]
+    fn test_safe_relative_path_rejects_parent_dir_traversal() {
+        let base = temp_dir_path();
+        assert!(safe_relative_path(&base, "../../etc/passwd").is_none());
+        assert!(safe_relative_path(&base, "models/../../escape.txt").is_none());
+    }
+
+    #[test]
+    fn test_safe_relative_path_rejects_absolute_paths() {
+        let base = temp_dir_path();
+        assert!(safe_relative_path(&base, "/etc/passwd").is_none());
+    }
+
+    #[test]
+    fn test_safe_relative_path_rejects_empty_path() {
+        let base = temp_dir_path();
+        assert!(safe_relative_path(&base, "").is_none());
+        assert!(safe_relative_path(&base, "./").is_none());
+    }
+
+    #[test]
+    fn test_safe_relative_path_accepts_normal_nested_paths() {
+        let base = temp_dir_path();
+        let dest = safe_relative_path(&base, "models/bert/config.json")
+            .expect("a normal nested relative path must be accepted");
+        assert_eq!(dest, base.join("models").join("bert").join("config.json"));
+    }
+
+    #[test]
+    fn test_safe_relative_path_strips_leading_current_dir() {
+        let base = temp_dir_path();
+        let dest =
+            safe_relative_path(&base, "./pack_metadata.json").expect("./ prefix must be accepted");
+        assert_eq!(dest, base.join("pack_metadata.json"));
+    }
+
+    // --- load_registry corruption handling ---
+
+    /// Regression test: `load_registry` used to swallow a corrupt
+    /// `registry.json` with `.unwrap_or_default()`, silently resetting the
+    /// registry to empty (losing every previously-tracked pack) with no
+    /// error at all. It must now fail loudly instead.
+    #[test]
+    fn test_new_rejects_corrupt_registry_file() {
+        let path = temp_dir_path();
+        std::fs::create_dir_all(&path).expect("create base dir");
+        std::fs::write(path.join("registry.json"), b"{ this is not valid json ")
+            .expect("write corrupt registry");
+
+        let result = OfflineModelPackManager::new(&path);
+        assert!(
+            result.is_err(),
+            "a corrupt registry.json must fail construction, not silently reset to empty"
+        );
+
+        std::fs::remove_dir_all(&path).ok();
+    }
+
+    #[test]
+    fn test_new_accepts_missing_registry_file() {
+        let path = temp_dir_path();
+        // No registry.json written at all — a fresh manager should be fine.
+        let manager = OfflineModelPackManager::new(&path)
+            .expect("a missing registry.json should not be an error");
+        assert!(manager.list_packs().is_empty());
+        std::fs::remove_dir_all(&path).ok();
+    }
+
+    // --- resolve_model_source_dir ---
+
+    #[tokio::test]
+    async fn test_resolve_model_source_dir_uses_explicit_local_directory() {
+        let base = temp_dir_path();
+        let (model_dir, _size) = make_fake_model_dir(&base, "explicit-model");
+        let resolved = resolve_model_source_dir(&model_dir.to_string_lossy())
+            .await
+            .expect("an existing local directory must resolve directly");
+        assert_eq!(resolved, model_dir);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[cfg(not(feature = "hub"))]
+    #[tokio::test]
+    async fn test_resolve_model_source_dir_fails_when_unresolvable() {
+        let result =
+            resolve_model_source_dir("definitely-not-a-real-local-path-or-cached-model").await;
+        assert!(result.is_err());
+    }
+
+    // --- install_pack end-to-end (checksum-verified extraction) ---
+
+    /// Recursively collect every regular file under `dir`, keyed by filename,
+    /// so the test below doesn't need to reconstruct the exact nested archive
+    /// path (`models/{model_id}/{file}`) that `create_compressed_archive`
+    /// chose internally.
+    fn collect_files_by_name(dir: &Path, out: &mut HashMap<String, Vec<u8>>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let p = entry.path();
+            if p.is_dir() {
+                collect_files_by_name(&p, out);
+            } else if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                if let Ok(bytes) = std::fs::read(&p) {
+                    out.insert(name.to_string(), bytes);
+                }
+            }
+        }
+    }
+
+    /// End-to-end regression test for the P0 bug: a pack built from real
+    /// local model files must, once installed, extract those *exact bytes*
+    /// back out — proving the create_pack -> tar/gzip archive -> install_pack
+    /// -> extract round-trip preserves real model content rather than the
+    /// old fabricated `config.json` stub.
+    #[tokio::test]
+    async fn test_install_pack_round_trips_real_file_content() {
+        let path = temp_dir_path();
+        let mut manager = OfflineModelPackManager::new(&path)
+            .expect("OfflineModelPackManager::new should succeed");
+        let (model_dir, _size) = make_fake_model_dir(&path, "install-src-model");
+
+        let pack_id = manager
+            .create_pack(
+                "Install Round Trip".to_string(),
+                "pack for install_pack round-trip test".to_string(),
+                vec![model_dir.to_string_lossy().to_string()],
+                PackCreationConfig::default(),
+            )
+            .await
+            .expect("create_pack should succeed");
+
+        let pack_path = path.join(format!("{}.tfpack", pack_id));
+        let installed_id =
+            manager.install_pack(&pack_path).await.expect("install_pack should succeed");
+        assert_eq!(installed_id, pack_id);
+
+        let install_dir = path.join("installed").join(&pack_id);
+        let mut found: HashMap<String, Vec<u8>> = HashMap::new();
+        collect_files_by_name(&install_dir, &mut found);
+
+        assert_eq!(
+            found.get("config.json").map(|v| v.as_slice()),
+            Some(br#"{"model_type":"bert","hidden_size":768}"#.as_slice()),
+            "extracted config.json must match the real source file byte-for-byte, not a \
+             fabricated placeholder"
+        );
+        assert_eq!(
+            found.get("tokenizer.json").map(|v| v.as_slice()),
+            Some(br#"{"version":"1.0","vocab_size":30522}"#.as_slice()),
+            "extracted tokenizer.json must match the real source file byte-for-byte"
+        );
+        assert_eq!(
+            found.get("model.safetensors").map(|v| v.len()),
+            Some(256),
+            "the model weights file must round-trip through the archive at its real size"
+        );
+
+        std::fs::remove_dir_all(&path).ok();
+    }
+
+    /// Regression test: `install_pack` must refuse a `.tfpack` file whose
+    /// on-disk bytes no longer match its recorded checksum, rather than
+    /// silently extracting whatever is actually there (which could be
+    /// truncated, bit-flipped, or swapped for an unrelated pack). No files
+    /// may be extracted when the check fails.
+    #[tokio::test]
+    async fn test_install_pack_rejects_tampered_pack_file() {
+        let path = temp_dir_path();
+        let mut manager = OfflineModelPackManager::new(&path)
+            .expect("OfflineModelPackManager::new should succeed");
+        let (model_dir, _size) = make_fake_model_dir(&path, "tamper-src-model");
+
+        let pack_id = manager
+            .create_pack(
+                "Tamper Test Pack".to_string(),
+                "pack for checksum-tamper test".to_string(),
+                vec![model_dir.to_string_lossy().to_string()],
+                PackCreationConfig::default(),
+            )
+            .await
+            .expect("create_pack should succeed");
+
+        let pack_path = path.join(format!("{}.tfpack", pack_id));
+        // Flip a byte in the middle of the archive body (well past any
+        // header) without touching the separately-stored .metadata.json
+        // checksum record.
+        let mut bytes = std::fs::read(&pack_path).expect("read pack file");
+        let flip_at = bytes.len() / 2;
+        bytes[flip_at] ^= 0xFF;
+        std::fs::write(&pack_path, &bytes).expect("write tampered pack file");
+
+        let result = manager.install_pack(&pack_path).await;
+        assert!(
+            result.is_err(),
+            "install_pack must reject a pack whose bytes no longer match its recorded checksum"
+        );
+
+        let install_dir = path.join("installed").join(&pack_id);
+        assert!(
+            !install_dir.exists(),
+            "no files should be extracted onto disk when the checksum check fails"
+        );
+
+        std::fs::remove_dir_all(&path).ok();
     }
 }

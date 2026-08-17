@@ -419,87 +419,148 @@ impl MemoryPressureHandler {
         self.monitor.pattern_history.clone()
     }
 
-    /// Execute GPU cache eviction on a specific device
-    pub async fn execute_gpu_cache_eviction(&self, device_id: u32) -> u64 {
-        // Simulate GPU cache eviction
-        tracing::debug!("Executing GPU cache eviction on device {}", device_id);
-        // Return simulated memory freed (10-50 MB)
-        (10 + (device_id as u64 % 40)) * 1024 * 1024
-    }
+    /// Reclaim GPU memory on `device_id` by releasing tracked allocations whose
+    /// `allocation_type` is one of `kinds`.
+    ///
+    /// The returned figure is the sum of the sizes actually removed from the
+    /// allocation tracker — nothing is estimated.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GpuReclaimError::DeviceAbsent`] when the host has no GPU with
+    /// that id. On a CPU-only machine every call fails this way, which is the
+    /// truthful outcome; no bytes are ever reported as freed on hardware that
+    /// does not exist.
+    pub async fn reclaim_gpu_memory(
+        &self,
+        device_id: u32,
+        kinds: &[&str],
+    ) -> Result<u64, GpuReclaimError> {
+        Self::require_gpu_device(device_id).await?;
 
-    /// Execute GPU buffer compaction on a specific device
-    pub async fn execute_gpu_buffer_compaction(&self, device_id: u32) -> u64 {
-        // Simulate GPU buffer compaction
-        tracing::debug!("Executing GPU buffer compaction on device {}", device_id);
-        // Return simulated memory freed (20-60 MB)
-        (20 + (device_id as u64 % 40)) * 1024 * 1024
-    }
+        let mut allocations = self.allocations.write().await;
+        let doomed: Vec<String> = allocations
+            .iter()
+            .filter(|(_, info)| {
+                info.gpu_device_id == Some(device_id)
+                    && kinds.iter().any(|kind| info.allocation_type == *kind)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
 
-    /// Execute GPU model unloading on a specific device
-    pub async fn execute_gpu_model_unloading(&self, device_id: u32) -> u64 {
-        // Simulate GPU model unloading
-        tracing::debug!("Executing GPU model unloading on device {}", device_id);
-        // Return simulated memory freed (100-500 MB)
-        (100 + (device_id as u64 % 400)) * 1024 * 1024
-    }
+        let mut freed = 0u64;
+        for id in doomed {
+            if let Some(info) = allocations.remove(&id) {
+                freed += info.size;
+            }
+        }
+        drop(allocations);
 
-    /// Execute GPU VRAM compaction on a specific device
-    pub async fn execute_gpu_vram_compaction(&self, device_id: u32) -> u64 {
-        // Simulate GPU VRAM compaction
-        tracing::debug!("Executing GPU VRAM compaction on device {}", device_id);
-        // Return simulated memory freed (30-70 MB)
-        (30 + (device_id as u64 % 40)) * 1024 * 1024
-    }
+        if freed > 0 {
+            let mut stats = self.memory_stats.write().await;
+            stats.gpu_memory = stats.gpu_memory.saturating_sub(freed);
+        }
 
-    /// Execute GPU memory defragmentation on a specific device
-    pub async fn execute_gpu_memory_defragmentation(&self, device_id: u32) -> u64 {
-        // Simulate GPU memory defragmentation
         tracing::debug!(
-            "Executing GPU memory defragmentation on device {}",
-            device_id
+            "Reclaimed {} bytes on GPU device {} from allocation kinds {:?}",
+            freed,
+            device_id,
+            kinds
         );
-        // Return simulated memory freed (50-150 MB)
-        (50 + (device_id as u64 % 100)) * 1024 * 1024
+        Ok(freed)
     }
 
-    /// Execute GPU context switching on a specific device
-    pub async fn execute_gpu_context_switching(&self, device_id: u32) -> u64 {
-        // Simulate GPU context switching
-        tracing::debug!("Executing GPU context switching on device {}", device_id);
-        // Return simulated memory freed (15-35 MB)
-        (15 + (device_id as u64 % 20)) * 1024 * 1024
+    /// Verify that a GPU with this id is physically present.
+    async fn require_gpu_device(device_id: u32) -> Result<(), GpuReclaimError> {
+        let devices = crate::resource_management::gpu_manager::discover_gpu_devices()
+            .await
+            .map_err(|e| GpuReclaimError::DiscoveryFailed {
+                reason: e.to_string(),
+            })?;
+
+        if devices.iter().any(|d| d.device_id as u32 == device_id) {
+            Ok(())
+        } else {
+            Err(GpuReclaimError::DeviceAbsent {
+                device_id,
+                discovered: devices.len(),
+            })
+        }
     }
 
-    /// Execute GPU stream cleanup on a specific device
-    pub async fn execute_gpu_stream_cleanup(&self, device_id: u32) -> u64 {
-        // Simulate GPU stream cleanup
-        tracing::debug!("Executing GPU stream cleanup on device {}", device_id);
-        // Return simulated memory freed (10-30 MB)
-        (10 + (device_id as u64 % 20)) * 1024 * 1024
+    /// Evict cached tensors held on a GPU device.
+    pub async fn execute_gpu_cache_eviction(&self, device_id: u32) -> Result<u64, GpuReclaimError> {
+        self.reclaim_gpu_memory(device_id, &["cache", "kv_cache", "embedding_cache"])
+            .await
     }
 
-    /// Execute GPU texture cleanup on a specific device
-    pub async fn execute_gpu_texture_cleanup(&self, device_id: u32) -> u64 {
-        // Simulate GPU texture cleanup
-        tracing::debug!("Executing GPU texture cleanup on device {}", device_id);
-        // Return simulated memory freed (25-75 MB)
-        (25 + (device_id as u64 % 50)) * 1024 * 1024
+    /// Release pooled buffers held on a GPU device.
+    pub async fn execute_gpu_buffer_compaction(
+        &self,
+        device_id: u32,
+    ) -> Result<u64, GpuReclaimError> {
+        self.reclaim_gpu_memory(device_id, &["buffer", "staging_buffer"]).await
     }
 
-    /// Execute GPU memory pool reset on a specific device
-    pub async fn execute_gpu_memory_pool_reset(&self, device_id: u32) -> u64 {
-        // Simulate GPU memory pool reset
-        tracing::debug!("Executing GPU memory pool reset on device {}", device_id);
-        // Return simulated memory freed (40-100 MB)
-        (40 + (device_id as u64 % 60)) * 1024 * 1024
+    /// Unload models resident on a GPU device.
+    pub async fn execute_gpu_model_unloading(
+        &self,
+        device_id: u32,
+    ) -> Result<u64, GpuReclaimError> {
+        self.reclaim_gpu_memory(device_id, &["model", "weights", "adapter"]).await
     }
 
-    /// Execute GPU batch size reduction on a specific device
-    pub async fn execute_gpu_batch_size_reduction(&self, device_id: u32) -> u64 {
-        // Simulate GPU batch size reduction
-        tracing::debug!("Executing GPU batch size reduction on device {}", device_id);
-        // Return simulated memory freed (20-60 MB)
-        (20 + (device_id as u64 % 40)) * 1024 * 1024
+    /// Release VRAM scratch space on a GPU device.
+    pub async fn execute_gpu_vram_compaction(
+        &self,
+        device_id: u32,
+    ) -> Result<u64, GpuReclaimError> {
+        self.reclaim_gpu_memory(device_id, &["scratch", "workspace"]).await
+    }
+
+    /// Release fragmented arenas on a GPU device.
+    pub async fn execute_gpu_memory_defragmentation(
+        &self,
+        device_id: u32,
+    ) -> Result<u64, GpuReclaimError> {
+        self.reclaim_gpu_memory(device_id, &["arena", "fragment"]).await
+    }
+
+    /// Release per-context allocations on a GPU device.
+    pub async fn execute_gpu_context_switching(
+        &self,
+        device_id: u32,
+    ) -> Result<u64, GpuReclaimError> {
+        self.reclaim_gpu_memory(device_id, &["context"]).await
+    }
+
+    /// Release per-stream allocations on a GPU device.
+    pub async fn execute_gpu_stream_cleanup(&self, device_id: u32) -> Result<u64, GpuReclaimError> {
+        self.reclaim_gpu_memory(device_id, &["stream"]).await
+    }
+
+    /// Release texture allocations on a GPU device.
+    pub async fn execute_gpu_texture_cleanup(
+        &self,
+        device_id: u32,
+    ) -> Result<u64, GpuReclaimError> {
+        self.reclaim_gpu_memory(device_id, &["texture", "image"]).await
+    }
+
+    /// Reset memory pools on a GPU device.
+    pub async fn execute_gpu_memory_pool_reset(
+        &self,
+        device_id: u32,
+    ) -> Result<u64, GpuReclaimError> {
+        self.reclaim_gpu_memory(device_id, &["pool", "buffer", "scratch"]).await
+    }
+
+    /// Release batch-sized activation allocations on a GPU device.
+    pub async fn execute_gpu_batch_size_reduction(
+        &self,
+        device_id: u32,
+    ) -> Result<u64, GpuReclaimError> {
+        self.reclaim_gpu_memory(device_id, &["activation", "batch"]).await
     }
 
     // =============================================================================
@@ -877,4 +938,19 @@ mod tests {
         // Stop should succeed
         handler.stop().await.expect("timer stop should succeed");
     }
+}
+
+/// Why a GPU reclamation attempt could not be carried out.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum GpuReclaimError {
+    /// No GPU with this id is present on the host.
+    #[error(
+        "GPU device {device_id} is not present on this host ({discovered} device(s) discovered); \
+         nothing was reclaimed"
+    )]
+    DeviceAbsent { device_id: u32, discovered: usize },
+
+    /// Device enumeration itself failed.
+    #[error("GPU device discovery failed: {reason}")]
+    DiscoveryFailed { reason: String },
 }

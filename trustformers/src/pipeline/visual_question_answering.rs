@@ -1,9 +1,71 @@
+//! # Visual question answering pipeline
+//!
+//! ## What is real here
+//!
+//! * **Image preprocessing** — [`ImageProcessor`] decodes real image bytes
+//!   (Netpbm always; every format the pure-Rust `image` crate handles with the
+//!   `vision` feature), resizes with bilinear interpolation and normalises with
+//!   the configured per-channel mean/std into a `[1, 3, H, W]` tensor.
+//! * **Feature pooling** — the global average pooling and patch splitting in
+//!   [`VisualQuestionAnsweringPipeline::extract_global_features`] /
+//!   `extract_patch_features`.
+//! * **Fusion arithmetic** — [`FusionModule`]'s concatenation, element-wise and
+//!   attention-style combinations.
+//! * **Ranking** — [`VqaProcessor::score_answers`] softmaxes and sorts real
+//!   logits.
+//!
+//! ## What is not available
+//!
+//! No vision-language model (ViLT, BLIP-2, LLaVA, …) is wired into this
+//! pipeline, so every path that would produce an *answer* now returns a
+//! structured [`TrustformersError::FeatureUnavailable`]:
+//! [`VisualQuestionAnsweringPipeline::answer_question`], all four
+//! [`AnswerGenerator`] strategies, [`AttentionVisualizer::visualize_attention`],
+//! [`ReasoningEngine::generate_reasoning_chain`] and [`VqaPipeline::answer`].
+//!
+//! Previously those returned keyword-triggered answers ("what" → "An object or
+//! scene element", "how many" → "2", "is"/"are" → "Yes"), two hardcoded
+//! detected objects (a person and a red sedan), fixed attention matrices, and a
+//! reasoning chain narrating steps that never ran. None of that survives.
+//!
+//! Use [`ImageProcessor::process_image`] and [`VqaProcessor`] to prepare inputs
+//! for a real model, and [`VqaProcessor::score_answers`] to rank its logits.
+
 use crate::core::traits::{Model, Tokenizer};
 use crate::error::{Result, TrustformersError};
+use crate::pipeline::media::image_proc;
 use crate::pipeline::{BasePipeline, Pipeline};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use trustformers_core::Tensor;
+
+/// Vision-language architectures wired into this pipeline.
+///
+/// Deliberately empty — the pipeline says so rather than pretending.
+const SUPPORTED_ARCHITECTURES: &[&str] = &[];
+
+/// Build the shared "no vision-language model" error.
+fn vqa_unavailable(stage: &str) -> TrustformersError {
+    let supported = if SUPPORTED_ARCHITECTURES.is_empty() {
+        "none (no vision-language backbone is wired in yet)".to_string()
+    } else {
+        SUPPORTED_ARCHITECTURES.join(", ")
+    };
+    TrustformersError::FeatureUnavailable {
+        message: format!(
+            "{stage} requires a vision-language model; supported: {supported}. This pipeline \
+             never returns keyword-triggered answers, hardcoded detections, or narrated \
+             reasoning steps."
+        ),
+        feature: "vision-language-model".to_string(),
+        suggestion: Some(
+            "Preprocess with `ImageProcessor`/`VqaProcessor`, run your own model, and rank its \
+             logits with `VqaProcessor::score_answers`."
+                .to_string(),
+        ),
+        alternatives: Vec::new(),
+    }
+}
 
 /// Configuration for visual question answering pipeline
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -410,105 +472,36 @@ where
         let question_tensor =
             Tensor::from_vec(question_ids_f32, &[1, question_tokens.input_ids.len()])?;
 
-        // Fuse vision and text features
-        let fused_features = self.fusion_module.fuse(&image_tensor, &question_tensor)?;
+        // Fuse vision and text features (real arithmetic over the real tensors).
+        let _fused_features = self.fusion_module.fuse(&image_tensor, &question_tensor)?;
 
-        // Generate answer
-        let answer_output = self.answer_generator.generate_answer(
-            &fused_features,
-            &input.question,
-            &input.answer_candidates,
-            &self.config,
-        )?;
-
-        // Extract attention visualization if enabled
-        let attention_visualization = if self.config.enable_attention_viz {
-            self.attention_visualizer
-                .as_ref()
-                .map(|viz| {
-                    viz.visualize_attention(&fused_features, &image_tensor, &question_tensor)
-                })
-                .transpose()?
-        } else {
-            None
-        };
-
-        // Generate reasoning chain if enabled
-        let reasoning_chain = if self.config.enable_reasoning {
-            self.reasoning_engine
-                .as_ref()
-                .map(|engine| {
-                    engine.generate_reasoning_chain(
-                        &input.question,
-                        &answer_output.answer,
-                        &image_features,
-                    )
-                })
-                .transpose()?
-        } else {
-            None
-        };
-
-        let processing_time = start_time.elapsed().as_millis() as u64;
-
-        Ok(VisualQuestionAnsweringOutput {
-            answer: answer_output.answer,
-            confidence: answer_output.confidence,
-            alternative_answers: answer_output.alternatives,
-            attention_visualization,
-            reasoning_chain,
-            image_features: Some(image_features),
-            metadata: ProcessingMetadata {
-                processing_time_ms: processing_time,
-                model_name: "vqa-model".to_string(),
-                config: serde_json::to_string(&self.config).unwrap_or_default(),
-                tokens_processed: question_tokens.input_ids.len(),
-                memory_usage_mb: None,
-            },
-        })
+        // There is no vision-language model to answer with. Everything above ran
+        // for real; this is where the pipeline honestly stops.
+        let _ = start_time;
+        Err(vqa_unavailable("visual question answering"))
     }
 
-    /// Extract features from image tensor
-    fn extract_image_features(&self, image_tensor: &Tensor) -> Result<ImageFeatures> {
-        // Run image through model to get features
-        let image_output = self.base.model.forward(image_tensor.clone())?;
-        let image_data = image_output.data()?;
-
-        // Extract global features (average pooling)
-        let global_features = self.extract_global_features(&image_data);
-
-        // Extract patch features
-        let patch_features = self.extract_patch_features(&image_data);
-
-        // Simulate object detection
-        let detected_objects = self.simulate_object_detection();
-
-        // Generate scene description
-        let scene_description = Some("A scene containing various objects".to_string());
-
-        // Generate image classification
-        let image_classification = Some(vec![
-            ClassificationResult {
-                label: "indoor".to_string(),
-                confidence: 0.8,
-            },
-            ClassificationResult {
-                label: "outdoor".to_string(),
-                confidence: 0.2,
-            },
-        ]);
-
-        Ok(ImageFeatures {
-            global_features,
-            patch_features,
-            detected_objects,
-            scene_description,
-            image_classification,
-        })
+    /// Extract structured features from an image tensor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrustformersError::FeatureUnavailable`]: producing
+    /// `detected_objects`, a `scene_description` or an `image_classification`
+    /// needs a detector/captioner/classifier, none of which is wired in.
+    /// Previously this returned a fixed person-and-red-sedan detection pair, the
+    /// string "A scene containing various objects", and indoor/outdoor scores of
+    /// 0.8/0.2 for every image.
+    ///
+    /// The real pooling helpers [`Self::extract_global_features`] and
+    /// `extract_patch_features` remain available.
+    pub fn extract_image_features(&self, _image_tensor: &Tensor) -> Result<ImageFeatures> {
+        Err(vqa_unavailable("image feature extraction"))
     }
 
-    /// Extract global image features
-    fn extract_global_features(&self, image_data: &[f32]) -> Vec<f32> {
+    /// Average-pool a flat image buffer into a fixed-size global descriptor.
+    ///
+    /// Real arithmetic over the supplied data, reusable with any backbone.
+    pub fn extract_global_features(&self, image_data: &[f32]) -> Vec<f32> {
         // Simplified global feature extraction (average pooling)
         let chunk_size = 64; // Feature dimension
         let mut global_features = vec![0.0; chunk_size];
@@ -527,7 +520,10 @@ where
     }
 
     /// Extract patch-level features
-    fn extract_patch_features(&self, image_data: &[f32]) -> Vec<Vec<f32>> {
+    /// Split a flat image buffer into fixed-size patch descriptors.
+    ///
+    /// Real arithmetic over the supplied data, reusable with any backbone.
+    pub fn extract_patch_features(&self, image_data: &[f32]) -> Vec<Vec<f32>> {
         let patch_size = 64; // Feature dimension per patch
         let num_patches = self.config.image_config.num_patches.unwrap_or(196);
 
@@ -547,52 +543,6 @@ where
         }
 
         patch_features
-    }
-
-    /// Simulate object detection (placeholder)
-    fn simulate_object_detection(&self) -> Vec<DetectedObject> {
-        vec![
-            DetectedObject {
-                class: "person".to_string(),
-                confidence: 0.9,
-                bbox: BoundingBox {
-                    x: 0.2,
-                    y: 0.3,
-                    width: 0.3,
-                    height: 0.6,
-                    confidence: 0.9,
-                },
-                attributes: Some(
-                    [
-                        ("age".to_string(), "adult".to_string()),
-                        ("gender".to_string(), "unknown".to_string()),
-                    ]
-                    .iter()
-                    .cloned()
-                    .collect(),
-                ),
-            },
-            DetectedObject {
-                class: "car".to_string(),
-                confidence: 0.8,
-                bbox: BoundingBox {
-                    x: 0.6,
-                    y: 0.4,
-                    width: 0.3,
-                    height: 0.3,
-                    confidence: 0.8,
-                },
-                attributes: Some(
-                    [
-                        ("color".to_string(), "red".to_string()),
-                        ("type".to_string(), "sedan".to_string()),
-                    ]
-                    .iter()
-                    .cloned()
-                    .collect(),
-                ),
-            },
-        ]
     }
 }
 
@@ -629,60 +579,114 @@ impl ImageProcessor {
         }
     }
 
-    fn process_image_bytes(&self, _bytes: &[u8]) -> Result<Tensor> {
-        // Placeholder: decode image and preprocess
+    /// Decode and preprocess real image bytes into a `[1, 3, H, W]` tensor.
+    ///
+    /// Netpbm always; with the `vision` feature every format the pure-Rust
+    /// `image` crate handles. Resize is real bilinear interpolation; the
+    /// per-channel mean/std come from the configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrustformersError::InvalidInput`] for undecodable bytes and
+    /// [`TrustformersError::FeatureUnavailable`] when the format needs the
+    /// `vision` feature. It never substitutes a synthetic ramp.
+    pub fn process_image_bytes(&self, bytes: &[u8]) -> Result<Tensor> {
+        if bytes.is_empty() {
+            return Err(TrustformersError::invalid_input_simple(
+                "image buffer is empty".to_string(),
+            ));
+        }
+        let image = image_proc::decode_image_bytes(bytes)?;
+        self.preprocess(&image)
+    }
+
+    /// Resize and normalise a decoded image into the model's input tensor.
+    ///
+    /// # Errors
+    ///
+    /// Propagates resize/normalisation errors, and rejects a configuration
+    /// whose mean/std vectors are not three-element.
+    pub fn preprocess(&self, image: &image_proc::RgbImage) -> Result<Tensor> {
         let (width, height) = self.config.image_size;
-        let channels = 3;
-        let size = (width * height * channels) as usize;
+        let (w, h) = (width as usize, height as usize);
+        let resized = image_proc::resize_bilinear(image, h, w)?;
 
-        // Create normalized tensor
-        let data: Vec<f32> = (0..size)
-            .map(|i| {
-                (i as f32 / size as f32 - self.config.normalize_mean[i % 3])
-                    / self.config.normalize_std[i % 3]
+        let to_array = |values: &[f32], what: &str| -> Result<[f32; 3]> {
+            <[f32; 3]>::try_from(values).map_err(|_| {
+                TrustformersError::invalid_input_simple(format!(
+                    "image config `{what}` must have exactly 3 entries, got {}",
+                    values.len()
+                ))
             })
-            .collect();
+        };
+        let mean = to_array(&self.config.normalize_mean, "normalize_mean")?;
+        let std = to_array(&self.config.normalize_std, "normalize_std")?;
+        let chw = image_proc::normalize_to_chw(&resized, mean, std)?;
 
-        Tensor::from_vec(
-            data,
-            &[1, channels as usize, height as usize, width as usize],
-        )
-        .map_err(Into::into)
+        Tensor::from_vec(chw, &[1, 3, h, w]).map_err(Into::into)
     }
 
-    fn process_tensor_data(&self, tensor_data: &[f32]) -> Result<Tensor> {
+    /// Wrap already-normalised CHW float data in the model's input tensor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the buffer length does not match `3 * H * W`.
+    pub fn process_tensor_data(&self, tensor_data: &[f32]) -> Result<Tensor> {
         let (width, height) = self.config.image_size;
-        let channels = 3;
-
-        // Normalize the tensor data
-        let normalized_data: Vec<f32> = tensor_data
-            .iter()
-            .enumerate()
-            .map(|(i, &val)| {
-                (val - self.config.normalize_mean[i % 3]) / self.config.normalize_std[i % 3]
-            })
-            .collect();
-
-        Tensor::from_vec(
-            normalized_data,
-            &[1, channels, height as usize, width as usize],
-        )
-        .map_err(Into::into)
+        let (w, h) = (width as usize, height as usize);
+        let expected = 3 * h * w;
+        if tensor_data.len() != expected {
+            return Err(TrustformersError::invalid_input_simple(format!(
+                "tensor data has {} values but 3x{h}x{w} = {expected} were expected",
+                tensor_data.len()
+            )));
+        }
+        Tensor::from_vec(tensor_data.to_vec(), &[1, 3, h, w]).map_err(Into::into)
     }
 
-    fn process_image_path(&self, _path: &str) -> Result<Tensor> {
-        // Placeholder: load image from path
-        self.process_image_bytes(&[])
+    /// Decode and preprocess an image file from disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrustformersError::Io`] when the file cannot be read, and
+    /// whatever [`Self::process_image_bytes`] returns otherwise.
+    pub fn process_image_path(&self, path: &str) -> Result<Tensor> {
+        let image = image_proc::decode_image_file(path)?;
+        self.preprocess(&image)
     }
 
-    fn process_image_url(&self, _url: &str) -> Result<Tensor> {
-        // Placeholder: download and process image
-        self.process_image_bytes(&[])
+    /// Fetch and preprocess an image from a URL.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`TrustformersError::FeatureUnavailable`]: this pipeline
+    /// performs no network I/O. Download the bytes yourself and call
+    /// [`Self::process_image_bytes`].
+    pub fn process_image_url(&self, url: &str) -> Result<Tensor> {
+        Err(TrustformersError::feature_unavailable(
+            format!(
+                "the VQA image processor does not fetch URLs (`{url}`); download the bytes and \
+                 call `process_image_bytes`"
+            ),
+            "network-image-fetch",
+        ))
     }
 
-    fn process_base64_image(&self, _base64: &str) -> Result<Tensor> {
-        // Placeholder: decode base64 and process
-        self.process_image_bytes(&[])
+    /// Decode a base64 payload and preprocess it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrustformersError::InvalidInput`] for malformed base64 or
+    /// undecodable image bytes. It never substitutes a synthetic tensor.
+    pub fn process_base64_image(&self, encoded: &str) -> Result<Tensor> {
+        use base64::Engine as _;
+        let bytes =
+            base64::engine::general_purpose::STANDARD.decode(encoded.trim()).map_err(|e| {
+                TrustformersError::invalid_input_simple(format!(
+                    "failed to decode base64 image: {e}"
+                ))
+            })?;
+        self.process_image_bytes(&bytes)
     }
 }
 
@@ -835,164 +839,70 @@ impl AnswerGenerator {
         }
     }
 
+    /// Free-form answer generation.
+    ///
+    /// # Errors
+    ///
+    /// Always [`TrustformersError::FeatureUnavailable`]. Previously this
+    /// matched keywords in the question — "what" → "An object or scene
+    /// element", "how many" → "2", "is"/"are" → "Yes" — and paired them with
+    /// "Alternative answer 1"/"2" and a confidence derived from the mean of the
+    /// fused tensor.
     fn generative_answer(
         &self,
-        features: &Tensor,
-        question: &str,
-        config: &VisualQuestionAnsweringConfig,
+        _features: &Tensor,
+        _question: &str,
+        _config: &VisualQuestionAnsweringConfig,
     ) -> Result<AnswerOutput> {
-        // Simplified generative answer
-        let answer = if question.to_lowercase().contains("what") {
-            "An object or scene element"
-        } else if question.to_lowercase().contains("how many") {
-            "2"
-        } else if question.to_lowercase().contains("where") {
-            "In the center of the image"
-        } else if question.to_lowercase().contains("who") {
-            "A person"
-        } else if question.to_lowercase().contains("when") {
-            "During the day"
-        } else if question.to_lowercase().contains("why") {
-            "Due to the context of the scene"
-        } else if question.to_lowercase().contains("is") || question.to_lowercase().contains("are")
-        {
-            "Yes"
-        } else {
-            "I cannot determine the answer from the image"
-        };
-
-        let features_data = features.data()?;
-        let confidence =
-            0.7 + (features_data.iter().sum::<f32>() / features_data.len() as f32).abs() * 0.3;
-        let confidence = confidence.clamp(0.0, 1.0);
-
-        let alternatives = vec![
-            AnswerCandidate {
-                answer: "Alternative answer 1".to_string(),
-                confidence: confidence * 0.8,
-                evidence: Some("Based on visual features".to_string()),
-                bbox: None,
-            },
-            AnswerCandidate {
-                answer: "Alternative answer 2".to_string(),
-                confidence: confidence * 0.6,
-                evidence: Some("Based on question context".to_string()),
-                bbox: None,
-            },
-        ];
-
-        Ok(AnswerOutput {
-            answer: answer.to_string(),
-            confidence,
-            alternatives,
-        })
+        Err(vqa_unavailable("generative answer decoding"))
     }
 
+    /// Span/candidate extraction.
+    ///
+    /// # Errors
+    ///
+    /// Always [`TrustformersError::FeatureUnavailable`]. Previously this
+    /// returned the first candidate with a fixed 0.8 confidence, and ranked the
+    /// rest by their list position.
     fn extractive_answer(
         &self,
         _features: &Tensor,
         _question: &str,
-        candidates: &Option<Vec<String>>,
+        _candidates: &Option<Vec<String>>,
         _config: &VisualQuestionAnsweringConfig,
     ) -> Result<AnswerOutput> {
-        let default_candidates = vec![
-            "yes".to_string(),
-            "no".to_string(),
-            "person".to_string(),
-            "car".to_string(),
-            "building".to_string(),
-        ];
-        let candidates = candidates.as_ref().unwrap_or(&default_candidates);
-
-        let answer = candidates.first().unwrap_or(&"unknown".to_string()).clone();
-        let confidence = 0.8;
-
-        let alternatives = candidates
-            .iter()
-            .enumerate()
-            .map(|(i, candidate)| AnswerCandidate {
-                answer: candidate.clone(),
-                confidence: 0.9 - (i as f32 * 0.1),
-                evidence: Some("Extracted from candidates".to_string()),
-                bbox: None,
-            })
-            .collect();
-
-        Ok(AnswerOutput {
-            answer,
-            confidence,
-            alternatives,
-        })
+        Err(vqa_unavailable("extractive answer selection"))
     }
 
+    /// Fixed-vocabulary classification.
+    ///
+    /// # Errors
+    ///
+    /// Always [`TrustformersError::FeatureUnavailable`]. Previously this chose
+    /// a class list from question keywords and scored it from tensor
+    /// statistics.
     fn classification_answer(
         &self,
-        features: &Tensor,
-        question: &str,
+        _features: &Tensor,
+        _question: &str,
         _config: &VisualQuestionAnsweringConfig,
     ) -> Result<AnswerOutput> {
-        let classes = if question.to_lowercase().contains("color") {
-            vec!["red", "blue", "green", "yellow", "black", "white"]
-        } else if question.to_lowercase().contains("animal") {
-            vec!["cat", "dog", "bird", "horse", "cow", "sheep"]
-        } else {
-            vec!["yes", "no", "maybe"]
-        };
-
-        let feature_sum = features.data()?.iter().sum::<f32>();
-        let class_idx = (feature_sum.abs() as usize) % classes.len();
-        let answer = classes[class_idx].to_string();
-        let confidence = 0.8;
-
-        let alternatives = classes
-            .iter()
-            .enumerate()
-            .map(|(i, &class)| AnswerCandidate {
-                answer: class.to_string(),
-                confidence: if i == class_idx { confidence } else { confidence * 0.5 },
-                evidence: Some("Classification result".to_string()),
-                bbox: None,
-            })
-            .collect();
-
-        Ok(AnswerOutput {
-            answer,
-            confidence,
-            alternatives,
-        })
+        Err(vqa_unavailable("classification answer selection"))
     }
 
+    /// Combined generative + extractive answering.
+    ///
+    /// # Errors
+    ///
+    /// Always [`TrustformersError::FeatureUnavailable`].
     fn hybrid_answer(
         &self,
-        features: &Tensor,
-        question: &str,
-        candidates: &Option<Vec<String>>,
-        config: &VisualQuestionAnsweringConfig,
+        _features: &Tensor,
+        _question: &str,
+        _candidates: &Option<Vec<String>>,
+        _config: &VisualQuestionAnsweringConfig,
     ) -> Result<AnswerOutput> {
-        // Combine multiple strategies
-        let generative_result = self.generative_answer(features, question, config)?;
-        let classification_result = self.classification_answer(features, question, config)?;
-
-        let answer = if generative_result.confidence > classification_result.confidence {
-            generative_result.answer
-        } else {
-            classification_result.answer
-        };
-
-        let confidence = (generative_result.confidence + classification_result.confidence) / 2.0;
-
-        let mut alternatives = generative_result.alternatives;
-        alternatives.extend(classification_result.alternatives);
-        alternatives.sort_by(|a, b| {
-            b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        alternatives.truncate(config.top_k_answers);
-
-        Ok(AnswerOutput {
-            answer,
-            confidence,
-            alternatives,
-        })
+        Err(vqa_unavailable("hybrid answer generation"))
     }
 }
 
@@ -1010,48 +920,21 @@ impl AttentionVisualizer {
         Self
     }
 
+    /// Produce attention maps for a forward pass.
+    ///
+    /// # Errors
+    ///
+    /// Always [`TrustformersError::FeatureUnavailable`]: no model runs, so no
+    /// attention weights exist to report. Previously this returned three fixed
+    /// 4-wide cross-attention rows, an identity-ish self-attention matrix, a
+    /// linear ramp "heatmap" and two invented attention heads.
     pub fn visualize_attention(
         &self,
         _features: &Tensor,
         _image_tensor: &Tensor,
         _question_tensor: &Tensor,
     ) -> Result<AttentionVisualization> {
-        // Placeholder attention visualization
-        let cross_attention_weights = vec![
-            vec![0.1, 0.2, 0.3, 0.4],
-            vec![0.2, 0.3, 0.4, 0.1],
-            vec![0.3, 0.4, 0.1, 0.2],
-        ];
-
-        let question_self_attention = vec![
-            vec![0.8, 0.1, 0.1],
-            vec![0.1, 0.8, 0.1],
-            vec![0.1, 0.1, 0.8],
-        ];
-
-        let visual_attention_heatmap = (0..196).map(|i| (i as f32 / 196.0) * 0.5 + 0.5).collect();
-
-        let attention_heads = vec![
-            AttentionHead {
-                head_id: 0,
-                layer_id: 0,
-                pattern_type: "object-focused".to_string(),
-                avg_attention: 0.7,
-            },
-            AttentionHead {
-                head_id: 1,
-                layer_id: 0,
-                pattern_type: "spatial-reasoning".to_string(),
-                avg_attention: 0.6,
-            },
-        ];
-
-        Ok(AttentionVisualization {
-            cross_attention_weights,
-            question_self_attention,
-            visual_attention_heatmap,
-            attention_heads,
-        })
+        Err(vqa_unavailable("attention visualization"))
     }
 }
 
@@ -1069,71 +952,22 @@ impl ReasoningEngine {
         Self
     }
 
+    /// Produce the chain of reasoning that led to an answer.
+    ///
+    /// # Errors
+    ///
+    /// Always [`TrustformersError::FeatureUnavailable`]: no model reasons, so
+    /// there is no chain to report. Previously this emitted keyword-selected
+    /// steps ("Detecting objects in the image", "Counting detected objects")
+    /// with fixed confidences and invented grounding boxes, narrating work that
+    /// never happened.
     pub fn generate_reasoning_chain(
         &self,
-        question: &str,
-        answer: &str,
+        _question: &str,
+        _answer: &str,
         _image_features: &ImageFeatures,
     ) -> Result<Vec<ReasoningStep>> {
-        let mut reasoning_steps = Vec::new();
-
-        // Analyze question type and generate appropriate reasoning steps
-        if question.to_lowercase().contains("how many") {
-            reasoning_steps.push(ReasoningStep {
-                description: "Detecting objects in the image".to_string(),
-                step_type: ReasoningStepType::ObjectDetection,
-                confidence: 0.9,
-                evidence: Some("Multiple objects detected".to_string()),
-                grounding: Some(BoundingBox {
-                    x: 0.1,
-                    y: 0.1,
-                    width: 0.8,
-                    height: 0.8,
-                    confidence: 0.8,
-                }),
-            });
-
-            reasoning_steps.push(ReasoningStep {
-                description: "Counting detected objects".to_string(),
-                step_type: ReasoningStepType::Counting,
-                confidence: 0.8,
-                evidence: Some(format!("Counted objects to determine answer: {}", answer)),
-                grounding: None,
-            });
-        } else if question.to_lowercase().contains("where") {
-            reasoning_steps.push(ReasoningStep {
-                description: "Analyzing spatial relationships".to_string(),
-                step_type: ReasoningStepType::SpatialReasoning,
-                confidence: 0.8,
-                evidence: Some("Located object position in image".to_string()),
-                grounding: Some(BoundingBox {
-                    x: 0.3,
-                    y: 0.3,
-                    width: 0.4,
-                    height: 0.4,
-                    confidence: 0.7,
-                }),
-            });
-        } else if question.to_lowercase().contains("what") {
-            reasoning_steps.push(ReasoningStep {
-                description: "Identifying objects and attributes".to_string(),
-                step_type: ReasoningStepType::AttributeRecognition,
-                confidence: 0.9,
-                evidence: Some("Recognized object attributes".to_string()),
-                grounding: None,
-            });
-        }
-
-        // Add final inference step
-        reasoning_steps.push(ReasoningStep {
-            description: format!("Concluding that the answer is: {}", answer),
-            step_type: ReasoningStepType::LogicalInference,
-            confidence: 0.7,
-            evidence: Some("Based on visual analysis and reasoning".to_string()),
-            grounding: None,
-        });
-
-        Ok(reasoning_steps)
+        Err(vqa_unavailable("reasoning chain generation"))
     }
 }
 
@@ -1196,6 +1030,16 @@ pub enum PipelineError {
     EmptyImage,
     #[error("Empty answer vocabulary")]
     EmptyVocabulary,
+    /// No vision-language model is available to answer with.
+    #[error(
+        "no vision-language model is wired in for `{requested}`; this processor never derives \
+         answers from hashes of the question and image — encode the inputs, run your own model, \
+         and rank its logits with `score_answers`"
+    )]
+    NoModel {
+        /// The model id the caller configured.
+        requested: String,
+    },
 }
 
 /// Lightweight VQA processor (no model backend required)
@@ -1318,7 +1162,18 @@ impl VisualQaPipeline {
         results
     }
 
-    /// Answer a single VQA query (stub: uses feature hashing for deterministic answers).
+    /// Answer a single VQA query.
+    ///
+    /// # Errors
+    ///
+    /// Validation errors first, then [`PipelineError::NoModel`]: this processor
+    /// has no vision-language backbone. Previously it derived "logits" from a
+    /// djb2 hash of the question's words combined with the image's pixel mean,
+    /// and softmaxed them into confident-looking answer probabilities.
+    ///
+    /// Use [`VqaProcessor::encode_question`],
+    /// [`VqaProcessor::encode_image_features`] and
+    /// [`VqaPipeline::score_answers`] around your own model instead.
     pub fn answer(
         &self,
         input: VqaInput,
@@ -1333,26 +1188,9 @@ impl VisualQaPipeline {
         if answer_vocab.is_empty() {
             return Err(PipelineError::EmptyVocabulary);
         }
-
-        let q_tokens = self.processor.encode_question(&input.question);
-        let img_feats = VqaProcessor::encode_image_features(&input.image);
-
-        // Derive pseudo-logits from feature hashes to produce deterministic scores
-        let q_text_feats: Vec<f32> = q_tokens.iter().map(|&t| t as f32 / 30_000.0).collect();
-        let combined = VqaProcessor::combine_modalities(&q_text_feats, &img_feats);
-
-        let logits: Vec<f32> = answer_vocab
-            .iter()
-            .enumerate()
-            .map(|(i, _)| {
-                let seed = combined.get(i % combined.len().max(1)).copied().unwrap_or(0.0);
-                seed + (i as f32 * 0.01)
-            })
-            .collect();
-
-        let mut results = Self::score_answers(&logits, answer_vocab);
-        results.truncate(self.config.top_k);
-        Ok(results)
+        Err(PipelineError::NoModel {
+            requested: self.config.model_id.clone(),
+        })
     }
 
     /// Answer a batch of VQA queries.
@@ -1591,18 +1429,34 @@ mod tests {
     }
 
     #[test]
-    fn test_answer_generator() {
-        let generator = AnswerGenerator::new(AnswerGenerationStrategy::Generative)
-            .expect("operation failed in test");
+    fn test_answer_generator_reports_missing_model() {
+        // Regression: every strategy used to return a keyword-triggered answer
+        // ("What …" -> "An object or scene element") with an invented
+        // confidence and two "Alternative answer N" candidates.
+        let config = VisualQuestionAnsweringConfig::default();
         let features =
             Tensor::from_vec(vec![0.1, 0.2, 0.3], &[1, 3]).expect("tensor operation failed");
-        let config = VisualQuestionAnsweringConfig::default();
-        let result = generator.generate_answer(&features, "What is in the image?", &None, &config);
-        assert!(result.is_ok());
+        for strategy in [
+            AnswerGenerationStrategy::Generative,
+            AnswerGenerationStrategy::Extractive,
+            AnswerGenerationStrategy::Classification,
+            AnswerGenerationStrategy::Hybrid,
+        ] {
+            let generator = AnswerGenerator::new(strategy).expect("generator");
+            match generator.generate_answer(&features, "What is in the image?", &None, &config) {
+                Err(TrustformersError::FeatureUnavailable { feature, .. }) => {
+                    assert_eq!(feature, "vision-language-model");
+                },
+                other => panic!("expected FeatureUnavailable, got {other:?}"),
+            }
+        }
     }
 
     #[test]
-    fn test_reasoning_engine() {
+    fn test_reasoning_engine_reports_missing_model() {
+        // Regression: this narrated "Detecting objects in the image" and
+        // "Counting detected objects" with fixed confidences and invented
+        // grounding boxes, for work that never ran.
         let engine = ReasoningEngine::new();
         let image_features = ImageFeatures {
             global_features: vec![0.1, 0.2, 0.3],
@@ -1611,14 +1465,16 @@ mod tests {
             scene_description: None,
             image_classification: None,
         };
-        let result =
-            engine.generate_reasoning_chain("How many people are there?", "2", &image_features);
-        assert!(result.is_ok());
-        assert!(!result.expect("operation failed in test").is_empty());
+        assert!(matches!(
+            engine.generate_reasoning_chain("How many people are there?", "2", &image_features),
+            Err(TrustformersError::FeatureUnavailable { .. })
+        ));
     }
 
     #[test]
-    fn test_attention_visualizer() {
+    fn test_attention_visualizer_reports_missing_model() {
+        // Regression: this returned fixed 4-wide attention rows, a linear-ramp
+        // "heatmap" and two invented attention heads without any model running.
         let visualizer = AttentionVisualizer::new();
         let features =
             Tensor::from_vec(vec![0.1, 0.2, 0.3], &[1, 3]).expect("tensor operation failed");
@@ -1626,8 +1482,10 @@ mod tests {
             Tensor::from_vec(vec![0.5; 100], &[1, 100]).expect("tensor operation failed");
         let question_tensor =
             Tensor::from_vec(vec![0.3; 50], &[1, 50]).expect("tensor operation failed");
-        let result = visualizer.visualize_attention(&features, &image_tensor, &question_tensor);
-        assert!(result.is_ok());
+        assert!(matches!(
+            visualizer.visualize_attention(&features, &image_tensor, &question_tensor),
+            Err(TrustformersError::FeatureUnavailable { .. })
+        ));
     }
 
     #[test]
@@ -1841,16 +1699,21 @@ mod tests {
 
     // 15. answer: returns Ok with correct number of results
     #[test]
-    fn test_vqa_pipeline_answer_ok() {
+    fn test_vqa_pipeline_answer_reports_missing_model() {
+        // Regression: `answer` used to build "logits" from a djb2 hash of the
+        // question's words mixed with the image's pixel mean, and softmax them
+        // into confident answer probabilities.
         let pipeline = default_vqa_pipeline();
         let input = VqaInput {
             image: dummy_image(16, 16),
             question: "What is this?".to_string(),
         };
-        let vocab = default_vocab();
-        let results = pipeline.answer(input, &vocab).expect("answer failed");
-        assert!(!results.is_empty());
-        assert!(results.len() <= pipeline.config.top_k);
+        match pipeline.answer(input, &default_vocab()) {
+            Err(PipelineError::NoModel { requested }) => {
+                assert_eq!(requested, pipeline.config.model_id);
+            },
+            other => panic!("expected NoModel, got {other:?}"),
+        }
     }
 
     // 16. answer: empty question returns error
@@ -1895,7 +1758,7 @@ mod tests {
 
     // 19. answer_batch: returns one Vec<VqaResult> per input
     #[test]
-    fn test_vqa_pipeline_answer_batch_count() {
+    fn test_vqa_pipeline_answer_batch_reports_missing_model() {
         let pipeline = default_vqa_pipeline();
         let vocab = default_vocab();
         let inputs: Vec<VqaInput> = (0..3)
@@ -1904,11 +1767,10 @@ mod tests {
                 question: format!("Question {i}?"),
             })
             .collect();
-        let batch_results = pipeline.answer_batch(inputs, &vocab).expect("batch failed");
-        assert_eq!(batch_results.len(), 3);
-        for results in &batch_results {
-            assert!(!results.is_empty());
-        }
+        assert!(matches!(
+            pipeline.answer_batch(inputs, &vocab),
+            Err(PipelineError::NoModel { .. })
+        ));
     }
 
     // 20. score_answers: single-answer vocabulary scores to 1.0
@@ -1923,19 +1785,134 @@ mod tests {
 
     // 21. top_k config is respected
     #[test]
-    fn test_vqa_pipeline_top_k_respected() {
-        let pipeline = VisualQaPipeline::new(VqaConfig {
-            top_k: 2,
+    fn test_score_answers_ranks_real_logits() {
+        // The ranking half stays real and usable with your own model's logits.
+        let vocab = default_vocab(); // 8 entries
+        let mut logits = vec![0.0f32; vocab.len()];
+        logits[3] = 4.0;
+        let results = VisualQaPipeline::score_answers(&logits, &vocab);
+        assert_eq!(results.len(), vocab.len());
+        assert_eq!(results[0].answer_id, 3);
+        for w in results.windows(2) {
+            assert!(w[0].score >= w[1].score, "scores must be sorted descending");
+        }
+        let sum: f32 = results.iter().map(|r| r.score).sum();
+        assert!((sum - 1.0).abs() < 1e-5, "probabilities sum to {sum}");
+    }
+
+    // ---- Real image preprocessing regressions ----------------------------
+
+    /// Build a binary P6 PPM fixture with a distinctive gradient.
+    fn ppm_fixture(h: usize, w: usize, flip: bool) -> Vec<u8> {
+        let mut bytes = format!("P6\n{w} {h}\n255\n").into_bytes();
+        for y in 0..h {
+            for x in 0..w {
+                let (r, g) = if flip {
+                    ((y * 255 / h.max(1)) as u8, (x * 255 / w.max(1)) as u8)
+                } else {
+                    ((x * 255 / w.max(1)) as u8, (y * 255 / h.max(1)) as u8)
+                };
+                bytes.extend_from_slice(&[r, g, 32u8]);
+            }
+        }
+        bytes
+    }
+
+    fn small_processor() -> ImageProcessor {
+        ImageProcessor::new(ImageConfig {
+            image_size: (8, 8),
             ..Default::default()
         })
-        .expect("ok");
-        let vocab = default_vocab(); // 8 entries
-        let input = VqaInput {
-            image: dummy_image(4, 4),
-            question: "What animal?".to_string(),
-        };
-        let results = pipeline.answer(input, &vocab).expect("answer ok");
-        assert!(results.len() <= 2);
+        .expect("processor")
+    }
+
+    #[test]
+    fn test_process_image_bytes_decodes_real_pixels() {
+        // Regression: this used to ignore `bytes` entirely and build a linear
+        // ramp `(i / size - mean) / std` as the "preprocessed image".
+        let processor = small_processor();
+        let tensor = processor
+            .process_image_bytes(&ppm_fixture(16, 16, false))
+            .expect("decode + preprocess");
+        assert_eq!(tensor.shape(), vec![1, 3, 8, 8]);
+        let values = tensor.to_vec_f32().expect("values");
+        assert!(values.iter().any(|&v| v != 0.0));
+
+        let flipped = processor
+            .process_image_bytes(&ppm_fixture(16, 16, true))
+            .expect("decode + preprocess")
+            .to_vec_f32()
+            .expect("values");
+        assert_ne!(
+            values, flipped,
+            "different images must preprocess differently"
+        );
+    }
+
+    #[test]
+    fn test_process_image_bytes_rejects_garbage() {
+        let processor = small_processor();
+        assert!(processor.process_image_bytes(&[]).is_err());
+        assert!(processor.process_image_bytes(&[0u8; 64]).is_err());
+    }
+
+    #[test]
+    fn test_process_image_path_reads_a_real_file() {
+        let processor = small_processor();
+        let path = std::env::temp_dir().join("trustformers-vqa-fixture.ppm");
+        std::fs::write(&path, ppm_fixture(12, 12, false)).expect("write fixture");
+        let tensor = processor.process_image_path(&path.to_string_lossy()).expect("decode");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(tensor.shape(), vec![1, 3, 8, 8]);
+    }
+
+    #[test]
+    fn test_process_image_path_reports_missing_file() {
+        let processor = small_processor();
+        let path = std::env::temp_dir().join("trustformers-vqa-missing.ppm");
+        let _ = std::fs::remove_file(&path);
+        assert!(processor.process_image_path(&path.to_string_lossy()).is_err());
+    }
+
+    #[test]
+    fn test_process_base64_image_round_trips() {
+        use base64::Engine as _;
+        let processor = small_processor();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(ppm_fixture(10, 10, false));
+        let tensor = processor.process_base64_image(&encoded).expect("decode");
+        assert_eq!(tensor.shape(), vec![1, 3, 8, 8]);
+        assert!(processor.process_base64_image("!!!not base64!!!").is_err());
+    }
+
+    #[test]
+    fn test_process_image_url_reports_no_network() {
+        let processor = small_processor();
+        assert!(matches!(
+            processor.process_image_url("https://example.invalid/cat.png"),
+            Err(TrustformersError::FeatureUnavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn test_process_tensor_data_validates_length() {
+        let processor = small_processor();
+        assert!(processor.process_tensor_data(&vec![0.5f32; 3 * 8 * 8]).is_ok());
+        assert!(processor.process_tensor_data(&[0.5f32; 10]).is_err());
+    }
+
+    #[test]
+    fn test_extract_image_features_reports_missing_model() {
+        // Regression: this returned a hardcoded person + red sedan detection,
+        // the caption "A scene containing various objects", and indoor/outdoor
+        // scores of 0.8/0.2 for every image.
+        let model = MockModel::new();
+        let tokenizer = MockTokenizer::new();
+        let pipeline = VisualQuestionAnsweringPipeline::new(model, tokenizer).expect("pipeline");
+        let tensor = Tensor::from_vec(vec![0.5f32; 12], &[1, 3, 2, 2]).expect("tensor");
+        assert!(matches!(
+            pipeline.extract_image_features(&tensor),
+            Err(TrustformersError::FeatureUnavailable { .. })
+        ));
     }
 
     // 22. encode_image_features: larger images give proportionally larger feature vectors

@@ -1,4 +1,23 @@
-//! Pose estimation pipeline — keypoint detection for human body (COCO-style 17 keypoints)
+//! # Pose estimation pipeline
+//!
+//! ## What is real here
+//!
+//! The COCO keypoint vocabulary ([`CocoKeypoint`], its skeleton edges and
+//! names), [`Keypoint`] visibility thresholding, [`PersonPose`] scoring and
+//! bounding-box computation, and the post-processing helpers below. All of it
+//! operates on whatever keypoints you supply.
+//!
+//! ## Model support
+//!
+//! No pose backbone (ViTPose, HRNet, …) is implemented in
+//! `trustformers-models`, so [`PoseEstimationPipeline::run`] returns
+//! [`PoseEstimationError::UnsupportedModel`] instead of the canonical
+//! stick-figure it used to place inside the bounding box regardless of the
+//! image's content.
+//!
+//! Feed your own model's keypoints to
+//! [`PoseEstimationPipeline::postprocess`] to use the real filtering and
+//! scoring.
 
 use std::fmt;
 
@@ -329,7 +348,19 @@ pub enum PoseEstimationError {
     InvalidImageDimensions,
     /// The image buffer contains no data
     EmptyImage,
+    /// The requested checkpoint has no real implementation in this workspace.
+    UnsupportedModel {
+        /// The checkpoint or architecture the caller asked for.
+        requested: String,
+        /// Comma-separated list of architectures that *are* supported.
+        supported: String,
+    },
 }
+
+/// Pose architectures with a real backbone in this workspace.
+///
+/// Deliberately empty — the pipeline says so rather than pretending.
+const SUPPORTED_ARCHITECTURES: &[&str] = &[];
 
 impl fmt::Display for PoseEstimationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -340,6 +371,15 @@ impl fmt::Display for PoseEstimationError {
             PoseEstimationError::EmptyImage => {
                 write!(f, "pose estimation error: image buffer is empty")
             },
+            PoseEstimationError::UnsupportedModel {
+                requested,
+                supported,
+            } => write!(
+                f,
+                "pose estimation error: no real model is implemented for `{requested}`; \
+                 supported: {supported}. This pipeline never returns synthesised keypoints — \
+                 use `postprocess` with your own model's output."
+            ),
         }
     }
 }
@@ -369,126 +409,117 @@ impl PoseEstimationPipeline {
         }
     }
 
+    /// The error this pipeline returns when asked to run inference.
+    fn unsupported(&self) -> PoseEstimationError {
+        PoseEstimationError::UnsupportedModel {
+            requested: self.model.clone(),
+            supported: if SUPPORTED_ARCHITECTURES.is_empty() {
+                "none (no pose backbone is implemented yet)".to_string()
+            } else {
+                SUPPORTED_ARCHITECTURES.join(", ")
+            },
+        }
+    }
+
+    /// Validate an image buffer against its declared dimensions.
+    ///
+    /// # Errors
+    ///
+    /// [`PoseEstimationError::EmptyImage`] or
+    /// [`PoseEstimationError::InvalidImageDimensions`].
+    pub fn validate_image(
+        &self,
+        image: &[f32],
+        width: usize,
+        height: usize,
+    ) -> Result<(), PoseEstimationError> {
+        if image.is_empty() {
+            return Err(PoseEstimationError::EmptyImage);
+        }
+        if width == 0 || height == 0 || image.len() != width * height * 3 {
+            return Err(PoseEstimationError::InvalidImageDimensions);
+        }
+        Ok(())
+    }
+
     /// Estimate pose for all persons in the image.
     ///
     /// `image` is row-major `[H * W * 3]` f32 in `[0, 1]`.
+    ///
+    /// # Errors
+    ///
+    /// Validation errors first, then
+    /// [`PoseEstimationError::UnsupportedModel`]: no pose backbone is
+    /// implemented and this pipeline will not invent keypoints.
     pub fn run(
         &self,
         image: &[f32],
         width: usize,
         height: usize,
     ) -> Result<PoseEstimationResult, PoseEstimationError> {
-        if image.is_empty() {
-            return Err(PoseEstimationError::EmptyImage);
-        }
-        if width == 0 || height == 0 || image.len() != width * height * 3 {
-            return Err(PoseEstimationError::InvalidImageDimensions);
-        }
-
-        // Compute a simple deterministic image statistic to vary keypoint positions
-        let pixel_mean: f32 = image.iter().sum::<f32>() / image.len() as f32;
-
-        let person = self.build_mock_person(width, height, pixel_mean, 0, (0.0, 0.0, 1.0, 1.0));
-        let persons =
-            if person.pose_score >= self.min_pose_score { vec![person] } else { Vec::new() };
-
-        Ok(PoseEstimationResult {
-            persons,
-            width,
-            height,
-        })
+        self.validate_image(image, width, height)?;
+        Err(self.unsupported())
     }
 
-    /// Estimate pose using provided person bounding box hints; one `PersonPose` per box.
+    /// Estimate pose using provided person bounding box hints.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::run`].
     pub fn run_with_boxes(
         &self,
         image: &[f32],
         width: usize,
         height: usize,
-        person_boxes: &[(f32, f32, f32, f32)],
+        _person_boxes: &[(f32, f32, f32, f32)],
     ) -> Result<PoseEstimationResult, PoseEstimationError> {
-        if image.is_empty() {
-            return Err(PoseEstimationError::EmptyImage);
-        }
-        if width == 0 || height == 0 || image.len() != width * height * 3 {
+        self.validate_image(image, width, height)?;
+        Err(self.unsupported())
+    }
+
+    /// Apply the pipeline's real post-processing to keypoints from your own model.
+    ///
+    /// Each entry of `persons` is one person's 17 COCO keypoints as
+    /// `(x, y, confidence)` in normalised image coordinates. Keypoints are
+    /// marked visible using `visibility_threshold`, poses are scored by
+    /// [`PersonPose::new`], and poses below `min_pose_score` are dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PoseEstimationError::InvalidImageDimensions`] when a person
+    /// does not carry exactly 17 keypoints, or when `width`/`height` is zero.
+    pub fn postprocess(
+        &self,
+        persons: &[Vec<(f32, f32, f32)>],
+        width: usize,
+        height: usize,
+    ) -> Result<PoseEstimationResult, PoseEstimationError> {
+        if width == 0 || height == 0 {
             return Err(PoseEstimationError::InvalidImageDimensions);
         }
-
-        let pixel_mean: f32 = image.iter().sum::<f32>() / image.len() as f32;
-
-        let mut persons = Vec::with_capacity(person_boxes.len());
-        for (idx, &bbox) in person_boxes.iter().enumerate() {
-            // Each box slightly shifts the mean for deterministic variety
-            let local_mean = (pixel_mean + idx as f32 * 0.02).clamp(0.0, 1.0);
-            let person = self.build_mock_person(width, height, local_mean, idx, bbox);
-            if person.pose_score >= self.min_pose_score {
-                persons.push(person);
+        let all_types = CocoKeypoint::all();
+        let mut out = Vec::with_capacity(persons.len());
+        for (person_id, raw) in persons.iter().enumerate() {
+            if raw.len() != all_types.len() {
+                return Err(PoseEstimationError::InvalidImageDimensions);
+            }
+            let keypoints: Vec<Keypoint> = all_types
+                .iter()
+                .zip(raw.iter())
+                .map(|(kp_type, &(x, y, confidence))| {
+                    Keypoint::new(*kp_type, x, y, confidence, self.visibility_threshold)
+                })
+                .collect();
+            let pose = PersonPose::new(keypoints, person_id);
+            if pose.pose_score >= self.min_pose_score {
+                out.push(pose);
             }
         }
-
         Ok(PoseEstimationResult {
-            persons,
+            persons: out,
             width,
             height,
         })
-    }
-
-    /// Construct a deterministic mock `PersonPose` positioned within `bbox`
-    fn build_mock_person(
-        &self,
-        _width: usize,
-        _height: usize,
-        image_mean: f32,
-        person_id: usize,
-        bbox: (f32, f32, f32, f32),
-    ) -> PersonPose {
-        let (bx_min, by_min, bx_max, by_max) = bbox;
-        let bw = bx_max - bx_min;
-        let bh = by_max - by_min;
-
-        // Canonical relative keypoint positions within a unit bounding box
-        // (x_rel, y_rel) — y=0 is top of bbox
-        let canonical: [(f32, f32); 17] = [
-            (0.50, 0.08), // Nose
-            (0.42, 0.05), // LeftEye
-            (0.58, 0.05), // RightEye
-            (0.35, 0.07), // LeftEar
-            (0.65, 0.07), // RightEar
-            (0.30, 0.25), // LeftShoulder
-            (0.70, 0.25), // RightShoulder
-            (0.20, 0.45), // LeftElbow
-            (0.80, 0.45), // RightElbow
-            (0.15, 0.65), // LeftWrist
-            (0.85, 0.65), // RightWrist
-            (0.35, 0.55), // LeftHip
-            (0.65, 0.55), // RightHip
-            (0.30, 0.75), // LeftKnee
-            (0.70, 0.75), // RightKnee
-            (0.30, 0.95), // LeftAnkle
-            (0.70, 0.95), // RightAnkle
-        ];
-
-        let all_types = CocoKeypoint::all();
-        let keypoints: Vec<Keypoint> = all_types
-            .iter()
-            .zip(canonical.iter())
-            .map(|(kp_type, (rx, ry))| {
-                // Map into bbox, add tiny person-id perturbation for variety
-                let x = bx_min + rx * bw + person_id as f32 * 0.005;
-                let y = by_min + ry * bh + person_id as f32 * 0.005;
-                // Confidence varies with image_mean and keypoint index to be deterministic
-                let confidence = (image_mean * 0.5 + 0.5 + *rx * 0.1 - *ry * 0.05).clamp(0.0, 1.0);
-                Keypoint::new(
-                    *kp_type,
-                    x.clamp(0.0, 1.0),
-                    y.clamp(0.0, 1.0),
-                    confidence,
-                    self.visibility_threshold,
-                )
-            })
-            .collect();
-
-        PersonPose::new(keypoints, person_id)
     }
 }
 
@@ -891,33 +922,76 @@ mod tests {
     }
 
     #[test]
-    fn test_pose_pipeline_run() {
+    fn test_pose_pipeline_run_reports_unsupported_model() {
+        // Regression: `run` used to place a canonical stick figure inside the
+        // bounding box regardless of the image and report it as a detection.
         let pipeline = PoseEstimationPipeline::new("vitpose-b");
         let image = make_image(8, 8);
-        let result = pipeline.run(&image, 8, 8).expect("run should succeed");
-        assert_eq!(result.width, 8);
-        assert_eq!(result.height, 8);
-        // At least one person should be detected with a reasonable image
-        assert!(result.num_persons() >= 1);
-        // Each detected person should have 17 keypoints
-        for p in &result.persons {
-            assert_eq!(p.keypoints.len(), 17);
+        match pipeline.run(&image, 8, 8) {
+            Err(PoseEstimationError::UnsupportedModel {
+                requested,
+                supported,
+            }) => {
+                assert_eq!(requested, "vitpose-b");
+                assert!(supported.contains("none"), "supported: {supported}");
+            },
+            other => panic!("expected UnsupportedModel, got {other:?}"),
         }
     }
 
     #[test]
-    fn test_pose_pipeline_with_boxes() {
+    fn test_pose_pipeline_with_boxes_reports_unsupported_model() {
         let pipeline = PoseEstimationPipeline::new("vitpose-b");
         let image = make_image(8, 8);
         let boxes = vec![(0.0_f32, 0.0, 0.5, 1.0), (0.5, 0.0, 1.0, 1.0)];
+        assert!(matches!(
+            pipeline.run_with_boxes(&image, 8, 8, &boxes),
+            Err(PoseEstimationError::UnsupportedModel { .. })
+        ));
+    }
+
+    #[test]
+    fn test_pose_pipeline_validates_before_reporting_unsupported() {
+        let pipeline = PoseEstimationPipeline::new("vitpose-b");
+        assert!(matches!(
+            pipeline.run(&[], 8, 8),
+            Err(PoseEstimationError::EmptyImage)
+        ));
+        assert!(matches!(
+            pipeline.run(&[0.5; 12], 0, 4),
+            Err(PoseEstimationError::InvalidImageDimensions)
+        ));
+    }
+
+    #[test]
+    fn test_postprocess_scores_and_filters_real_keypoints() {
+        let pipeline = PoseEstimationPipeline::new("vitpose-b");
+        // One confident person, one below the pose-score threshold.
+        let confident: Vec<(f32, f32, f32)> =
+            (0..17).map(|i| (0.5, i as f32 / 17.0, 0.9)).collect();
+        let faint: Vec<(f32, f32, f32)> = (0..17).map(|i| (0.5, i as f32 / 17.0, 0.01)).collect();
         let result = pipeline
-            .run_with_boxes(&image, 8, 8, &boxes)
-            .expect("run_with_boxes should succeed");
-        // Two persons, one per box
-        assert_eq!(result.num_persons(), 2);
-        // Person IDs should correspond to box indices
+            .postprocess(&[confident, faint], 8, 8)
+            .expect("postprocess should succeed");
+        assert_eq!(result.width, 8);
+        assert_eq!(result.height, 8);
+        assert_eq!(result.num_persons(), 1, "faint person must be filtered out");
+        assert_eq!(result.persons[0].keypoints.len(), 17);
         assert_eq!(result.persons[0].person_id, 0);
-        assert_eq!(result.persons[1].person_id, 1);
+    }
+
+    #[test]
+    fn test_postprocess_rejects_wrong_keypoint_count() {
+        let pipeline = PoseEstimationPipeline::new("vitpose-b");
+        let short: Vec<(f32, f32, f32)> = vec![(0.5, 0.5, 0.9); 3];
+        assert!(matches!(
+            pipeline.postprocess(&[short], 8, 8),
+            Err(PoseEstimationError::InvalidImageDimensions)
+        ));
+        assert!(matches!(
+            pipeline.postprocess(&[], 0, 8),
+            Err(PoseEstimationError::InvalidImageDimensions)
+        ));
     }
 
     #[test]
@@ -927,6 +1001,14 @@ mod tests {
 
         let e2 = PoseEstimationError::EmptyImage;
         assert!(e2.to_string().contains("empty"));
+
+        let e3 = PoseEstimationError::UnsupportedModel {
+            requested: "hrnet-w48".to_string(),
+            supported: "none".to_string(),
+        };
+        let text = e3.to_string();
+        assert!(text.contains("hrnet-w48"), "text: {text}");
+        assert!(text.contains("never returns synthesised"), "text: {text}");
     }
 
     // -----------------------------------------------------------------------

@@ -2,7 +2,7 @@
 //!
 //! Automatic generation of model architecture scaffolding and boilerplate code.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -47,6 +47,18 @@ pub struct LayerDefinition {
     pub name: String,
     pub layer_type: String,
     pub parameters: HashMap<String, String>,
+}
+
+/// Code fragments for one generated layer.
+struct GeneratedLayer {
+    /// Import path inside `trustformers_core::layers`.
+    import: &'static str,
+    /// Rust type of the struct field.
+    field_type: &'static str,
+    /// Expression that constructs the layer.
+    constructor: String,
+    /// Statement that applies the layer in the forward pass.
+    forward: String,
 }
 
 /// Task head definition
@@ -101,7 +113,7 @@ impl ModelGenerator {
 
     /// Generate model implementation file
     fn generate_model_file(&self, output_dir: &Path) -> Result<()> {
-        let model_content = self.generate_model_code();
+        let model_content = self.generate_model_code()?;
         let model_path = output_dir.join("model.rs");
         std::fs::write(model_path, model_content)?;
         Ok(())
@@ -164,78 +176,215 @@ impl ModelGenerator {
         code
     }
 
-    /// Generate model code
-    fn generate_model_code(&self) -> String {
-        let forward_impl = self.generate_forward_implementation();
-        let layers_code = self.generate_layers_code();
+    /// Description of a layer type this generator can emit.
+    ///
+    /// Every entry maps onto a type that really exists in
+    /// [`trustformers_core::layers`]; there is no entry for layers core does not
+    /// provide, so the generator can never emit an import that will not resolve.
+    fn layer_spec(layer: &LayerDefinition) -> Result<Option<GeneratedLayer>> {
+        let parameter = |key: &str, fallback: &str| -> String {
+            layer.parameters.get(key).cloned().unwrap_or_else(|| fallback.to_string())
+        };
 
-        format!(
-            "//! {} Model Implementation\n\nuse super::config::{}Config;\nuse trustformers_core::errors::Result;\nuse trustformers_core::tensor::Tensor;\nuse trustformers_core::layers::{{\n    linear::Linear,\n    attention::MultiHeadAttention,\n    conv::{{Conv1d, Conv2d}},\n    normalization::{{BatchNorm, LayerNorm}},\n    dropout::Dropout,\n    embedding::{{Embedding, PositionalEncoding}},\n    transformer::TransformerBlock,\n    rnn::{{RNN, LSTM, GRU}},\n}};\n\n#[derive(Debug, Clone)]\npub struct {}Model {{\n    config: {}Config,{}\n}}\n\nimpl {}Model {{\n    pub fn new(config: {}Config) -> Result<Self> {{\n        Ok(Self {{\n            config,{}\n        }})\n    }}\n    \n    pub fn forward(&self, input: &Tensor) -> Result<Tensor> {{\n{}\n    }}\n}}\n",
-            self.config.model_name,
-            self.config.model_name,
-            self.config.model_name,
-            self.config.model_name,
-            layers_code.0, // layer fields
-            self.config.model_name,
-            self.config.model_name,
-            layers_code.1, // layer initialization
-            forward_impl
-        )
+        let spec = match layer.layer_type.as_str() {
+            "linear" => GeneratedLayer {
+                import: "linear::Linear",
+                field_type: "Linear",
+                // `Linear::new` is infallible.
+                constructor: format!(
+                    "Linear::new({}, {}, {})",
+                    parameter("input_size", "768"),
+                    parameter("output_size", "768"),
+                    parameter("bias", "true")
+                ),
+                forward: format!("let x = self.{}.forward(x)?;", layer.name),
+            },
+            "attention" => GeneratedLayer {
+                import: "attention::MultiHeadAttention",
+                field_type: "MultiHeadAttention",
+                constructor: format!(
+                    "MultiHeadAttention::new({}, {}, {}, {})?",
+                    parameter("hidden_size", "768"),
+                    parameter("num_heads", "12"),
+                    parameter("dropout_prob", "0.1"),
+                    parameter("bias", "true")
+                ),
+                forward: format!(
+                    "let x = self.{}.forward_self_attention(&x, None, false)?;",
+                    layer.name
+                ),
+            },
+            "conv2d" => GeneratedLayer {
+                import: "conv2d::Conv2d",
+                field_type: "Conv2d",
+                constructor: format!(
+                    "Conv2d::new({}, {}, ({k}, {k}), ({s}, {s}), ({p}, {p}), {bias})?",
+                    parameter("in_channels", "1"),
+                    parameter("out_channels", "64"),
+                    k = parameter("kernel_size", "3"),
+                    s = parameter("stride", "1"),
+                    p = parameter("padding", "0"),
+                    bias = parameter("bias", "true")
+                ),
+                forward: format!("let x = self.{}.forward(x)?;", layer.name),
+            },
+            "layernorm" => GeneratedLayer {
+                import: "layernorm::LayerNorm",
+                field_type: "LayerNorm",
+                constructor: format!(
+                    "LayerNorm::new(vec![{}], {})?",
+                    parameter("normalized_shape", "768"),
+                    parameter("eps", "1e-5")
+                ),
+                forward: format!("let x = self.{}.forward(x)?;", layer.name),
+            },
+            "rmsnorm" => GeneratedLayer {
+                import: "layernorm::RMSNorm",
+                field_type: "RMSNorm",
+                constructor: format!(
+                    "RMSNorm::new({}, {})?",
+                    parameter("hidden_size", "768"),
+                    parameter("eps", "1e-6")
+                ),
+                forward: format!("let x = self.{}.forward(x)?;", layer.name),
+            },
+            "dropout" => GeneratedLayer {
+                import: "dropout::Dropout",
+                field_type: "Dropout",
+                // `Dropout::new` is infallible.
+                constructor: format!("Dropout::new({})", parameter("p", "0.1")),
+                forward: format!("let x = self.{}.forward(x)?;", layer.name),
+            },
+            "embedding" => GeneratedLayer {
+                import: "embedding::Embedding",
+                field_type: "Embedding",
+                constructor: format!(
+                    "Embedding::new({}, {}, {})?",
+                    parameter("num_embeddings", "30522"),
+                    parameter("embedding_dim", "768"),
+                    parameter("padding_idx", "None")
+                ),
+                // `Embedding` consumes token ids, not a tensor, so it is applied
+                // to the raw input before the tensor pipeline starts.
+                forward: format!("let x = self.{}.forward(input_ids.to_vec())?;", layer.name),
+            },
+            "feedforward" => GeneratedLayer {
+                import: "feedforward::FeedForward",
+                field_type: "FeedForward",
+                constructor: format!(
+                    "FeedForward::new({}, {}, {})?",
+                    parameter("hidden_size", "768"),
+                    parameter("intermediate_size", "3072"),
+                    parameter("dropout_prob", "0.1")
+                ),
+                forward: format!("let x = self.{}.forward(x)?;", layer.name),
+            },
+            // Activations are tensor methods: no field, no import.
+            "relu" => return Ok(None),
+            "gelu" => return Ok(None),
+            "silu" => return Ok(None),
+            "tanh" => return Ok(None),
+            "sigmoid" => return Ok(None),
+            "softmax" => return Ok(None),
+            other => {
+                return Err(anyhow!(
+                    "layer type `{other}` (layer `{}`) has no implementation in \
+                     trustformers_core::layers, so no compilable code can be generated for it. \
+                     Supported types: linear, attention, conv2d, layernorm, rmsnorm, dropout, \
+                     embedding, feedforward, relu, gelu, silu, tanh, sigmoid, softmax",
+                    layer.name
+                ))
+            },
+        };
+
+        Ok(Some(spec))
+    }
+
+    /// Forward-pass expression for an activation layer type.
+    fn activation_call(layer_type: &str) -> Option<&'static str> {
+        match layer_type {
+            "relu" => Some("let x = x.relu()?;"),
+            "gelu" => Some("let x = x.gelu()?;"),
+            "silu" => Some("let x = x.silu()?;"),
+            "tanh" => Some("let x = x.tanh()?;"),
+            "sigmoid" => Some("let x = x.sigmoid()?;"),
+            "softmax" => Some("let x = x.softmax(1)?;"),
+            _ => None,
+        }
+    }
+
+    /// Generate model code
+    ///
+    /// # Errors
+    ///
+    /// Fails when the configuration requests a layer type that has no
+    /// implementation in `trustformers_core::layers`: emitting an import for a
+    /// module that does not exist would produce a file that cannot compile.
+    fn generate_model_code(&self) -> Result<String> {
+        let forward_impl = self.generate_forward_implementation()?;
+        let (layer_fields, layer_init, imports) = self.generate_layers_code()?;
+
+        let import_block = if imports.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "use trustformers_core::layers::{{{}}};\nuse trustformers_core::traits::Layer;\n",
+                imports.join(", ")
+            )
+        };
+
+        Ok(format!(
+            "//! {name} Model Implementation\n\
+             //!\n\
+             //! This file is auto-generated by `trustformers_models::developer_tools`.\n\n\
+             use super::config::{name}Config;\n\
+             use trustformers_core::errors::Result;\n\
+             use trustformers_core::tensor::Tensor;\n\
+             {imports}\n\
+             #[derive(Debug, Clone)]\n\
+             pub struct {name}Model {{\n    config: {name}Config,{fields}\n}}\n\n\
+             impl {name}Model {{\n\
+             \x20   pub fn new(config: {name}Config) -> Result<Self> {{\n\
+             \x20       Ok(Self {{\n            config,{init}\n        }})\n    }}\n\n\
+             \x20   pub fn config(&self) -> &{name}Config {{\n        &self.config\n    }}\n\n\
+             \x20   pub fn forward(&self, input: &Tensor) -> Result<Tensor> {{\n{forward}\n    }}\n\
+             }}\n",
+            name = self.config.model_name,
+            imports = import_block,
+            fields = layer_fields,
+            init = layer_init,
+            forward = forward_impl
+        ))
     }
 
     /// Generate forward pass implementation based on model type and layers
-    fn generate_forward_implementation(&self) -> String {
+    fn generate_forward_implementation(&self) -> Result<String> {
         match self.config.model_type {
             ModelType::Encoder => self.generate_encoder_forward(),
-            ModelType::Decoder => self.generate_decoder_forward(),
-            ModelType::EncoderDecoder => self.generate_encoder_decoder_forward(),
-            ModelType::Multimodal => self.generate_multimodal_forward(),
+            ModelType::Decoder => Ok(self.generate_decoder_forward()),
+            ModelType::EncoderDecoder => Ok(self.generate_encoder_decoder_forward()),
+            ModelType::Multimodal => Ok(self.generate_multimodal_forward()),
             ModelType::Custom => self.generate_custom_forward(),
         }
     }
 
     /// Generate encoder forward pass
-    fn generate_encoder_forward(&self) -> String {
-        let layer_calls = self
-            .config
-            .layers
-            .iter()
-            .map(|layer| match layer.layer_type.as_str() {
-                "linear" => format!("        let x = self.{}.forward(&x)?;", layer.name),
-                "attention" => format!(
-                    "        let x = self.{}.forward(&x, None, None)?;",
-                    layer.name
-                ),
-                "layernorm" => format!("        let x = self.{}.forward(&x)?;", layer.name),
-                "dropout" => format!("        let x = self.{}.forward(&x)?;", layer.name),
-                "conv1d" => format!("        let x = self.{}.forward(&x)?;", layer.name),
-                "conv2d" => format!("        let x = self.{}.forward(&x)?;", layer.name),
-                "batchnorm" => format!("        let x = self.{}.forward(&x)?;", layer.name),
-                "relu" => "        let x = x.relu()?;".to_string(),
-                "gelu" => "        let x = x.gelu()?;".to_string(),
-                "silu" => "        let x = x.silu()?;".to_string(),
-                "tanh" => "        let x = x.tanh()?;".to_string(),
-                "sigmoid" => "        let x = x.sigmoid()?;".to_string(),
-                "softmax" => "        let x = x.softmax(1)?;".to_string(),
-                "embedding" => format!("        let x = self.{}.forward(&x)?;", layer.name),
-                "positional_encoding" => {
-                    format!("        let x = self.{}.forward(&x)?;", layer.name)
-                },
-                "transformer_block" => format!("        let x = self.{}.forward(&x)?;", layer.name),
-                "rnn" => format!("        let x = self.{}.forward(&x)?;", layer.name),
-                "lstm" => format!("        let x = self.{}.forward(&x)?;", layer.name),
-                "gru" => format!("        let x = self.{}.forward(&x)?;", layer.name),
-                _ => format!(
-                    "        // Unsupported layer type '{}' - please implement manually",
-                    layer.layer_type
-                ),
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+    fn generate_encoder_forward(&self) -> Result<String> {
+        let mut layer_calls = Vec::with_capacity(self.config.layers.len());
+        for layer in &self.config.layers {
+            if let Some(activation) = Self::activation_call(&layer.layer_type) {
+                layer_calls.push(format!("        {activation}"));
+                continue;
+            }
+            let spec = Self::layer_spec(layer)?
+                .ok_or_else(|| anyhow!("layer `{}` produced no code to call", layer.name))?;
+            layer_calls.push(format!("        {}", spec.forward));
+        }
 
-        format!(
-            "        let mut x = input.clone();\n{}\n        \n        // Apply task heads if configured\n        for head in &self.config.task_heads {{\n            // Apply task-specific transformations\n        }}\n        \n        Ok(x)"
-        , layer_calls)
+        Ok(format!(
+            "        let x = input.clone();\n{}\n\n        Ok(x)",
+            layer_calls.join("\n")
+        ))
     }
 
     /// Generate decoder forward pass
@@ -254,186 +403,48 @@ impl ModelGenerator {
     }
 
     /// Generate custom forward pass
-    fn generate_custom_forward(&self) -> String {
+    fn generate_custom_forward(&self) -> Result<String> {
         if self.config.layers.is_empty() {
-            "        // Custom model implementation\n        // Please implement the forward pass based on your specific requirements\n        let output = input.clone();\n        \n        Ok(output)".to_string()
+            Ok("        // Custom model implementation: no layers were configured,\n        // so the generated forward pass is the identity.\n        let output = input.clone();\n\n        Ok(output)".to_string())
         } else {
             self.generate_encoder_forward() // Default to encoder-style for custom with layers
         }
     }
 
-    /// Generate layer definitions and initialization code
-    fn generate_layers_code(&self) -> (String, String) {
+    /// Generate layer field declarations, initialisation code and the exact set
+    /// of imports the generated file needs.
+    ///
+    /// Only layer types that exist in `trustformers_core::layers` are emitted;
+    /// anything else is an error rather than an import that cannot resolve.
+    fn generate_layers_code(&self) -> Result<(String, String, Vec<String>)> {
         if self.config.layers.is_empty() {
-            return (String::new(), String::new());
+            return Ok((String::new(), String::new(), Vec::new()));
         }
 
-        let layer_fields = self
-            .config
-            .layers
-            .iter()
-            .map(|layer| match layer.layer_type.as_str() {
-                "linear" => format!("\n    {}: Linear,", layer.name),
-                "attention" => format!("\n    {}: MultiHeadAttention,", layer.name),
-                "conv1d" => format!("\n    {}: Conv1d,", layer.name),
-                "conv2d" => format!("\n    {}: Conv2d,", layer.name),
-                "batchnorm" => format!("\n    {}: BatchNorm,", layer.name),
-                "layernorm" => format!("\n    {}: LayerNorm,", layer.name),
-                "dropout" => format!("\n    {}: Dropout,", layer.name),
-                "embedding" => format!("\n    {}: Embedding,", layer.name),
-                "positional_encoding" => format!("\n    {}: PositionalEncoding,", layer.name),
-                "transformer_block" => format!("\n    {}: TransformerBlock,", layer.name),
-                "rnn" => format!("\n    {}: RNN,", layer.name),
-                "lstm" => format!("\n    {}: LSTM,", layer.name),
-                "gru" => format!("\n    {}: GRU,", layer.name),
-                "relu" | "gelu" | "silu" | "tanh" | "sigmoid" | "softmax" => String::new(), // Activation functions don't need fields
-                _ => format!(
-                    "\n    // Unsupported: {}: {},",
-                    layer.name, layer.layer_type
-                ),
-            })
-            .collect::<Vec<_>>()
-            .join("");
+        let mut fields = String::new();
+        let mut init = String::new();
+        let mut imports: Vec<String> = Vec::new();
 
-        let layer_init = self
-            .config
-            .layers
-            .iter()
-            .map(|layer| match layer.layer_type.as_str() {
-                "linear" => {
-                    let default_768 = "768".to_string();
-                    let input_size = layer.parameters.get("input_size").unwrap_or(&default_768);
-                    let output_size = layer.parameters.get("output_size").unwrap_or(&default_768);
-                    format!(
-                        "\n            {}: Linear::new({}, {})?,",
-                        layer.name, input_size, output_size
-                    )
-                },
-                "attention" => {
-                    let default_768 = "768".to_string();
-                    let default_12 = "12".to_string();
-                    let hidden_size = layer.parameters.get("hidden_size").unwrap_or(&default_768);
-                    let num_heads = layer.parameters.get("num_heads").unwrap_or(&default_12);
-                    format!(
-                        "\n            {}: MultiHeadAttention::new({}, {})?,",
-                        layer.name, hidden_size, num_heads
-                    )
-                },
-                "conv1d" => {
-                    let default_1 = "1".to_string();
-                    let default_64 = "64".to_string();
-                    let default_3 = "3".to_string();
-                    let in_channels = layer.parameters.get("in_channels").unwrap_or(&default_1);
-                    let out_channels = layer.parameters.get("out_channels").unwrap_or(&default_64);
-                    let kernel_size = layer.parameters.get("kernel_size").unwrap_or(&default_3);
-                    format!(
-                        "\n            {}: Conv1d::new({}, {}, {})?,",
-                        layer.name, in_channels, out_channels, kernel_size
-                    )
-                },
-                "conv2d" => {
-                    let default_1 = "1".to_string();
-                    let default_64 = "64".to_string();
-                    let default_3 = "3".to_string();
-                    let in_channels = layer.parameters.get("in_channels").unwrap_or(&default_1);
-                    let out_channels = layer.parameters.get("out_channels").unwrap_or(&default_64);
-                    let kernel_size = layer.parameters.get("kernel_size").unwrap_or(&default_3);
-                    format!(
-                        "\n            {}: Conv2d::new({}, {}, {})?,",
-                        layer.name, in_channels, out_channels, kernel_size
-                    )
-                },
-                "batchnorm" => {
-                    let default_768 = "768".to_string();
-                    let num_features = layer.parameters.get("num_features").unwrap_or(&default_768);
-                    format!(
-                        "\n            {}: BatchNorm::new({})?,",
-                        layer.name, num_features
-                    )
-                },
-                "layernorm" => {
-                    let default_768 = "768".to_string();
-                    let normalized_shape =
-                        layer.parameters.get("normalized_shape").unwrap_or(&default_768);
-                    format!(
-                        "\n            {}: LayerNorm::new({})?,",
-                        layer.name, normalized_shape
-                    )
-                },
-                "dropout" => {
-                    let default_01 = "0.1".to_string();
-                    let p = layer.parameters.get("p").unwrap_or(&default_01);
-                    format!("\n            {}: Dropout::new({})?,", layer.name, p)
-                },
-                "embedding" => {
-                    let default_30522 = "30522".to_string();
-                    let default_768 = "768".to_string();
-                    let num_embeddings =
-                        layer.parameters.get("num_embeddings").unwrap_or(&default_30522);
-                    let embedding_dim =
-                        layer.parameters.get("embedding_dim").unwrap_or(&default_768);
-                    format!(
-                        "\n            {}: Embedding::new({}, {})?,",
-                        layer.name, num_embeddings, embedding_dim
-                    )
-                },
-                "positional_encoding" => {
-                    let default_768 = "768".to_string();
-                    let default_512 = "512".to_string();
-                    let d_model = layer.parameters.get("d_model").unwrap_or(&default_768);
-                    let max_len = layer.parameters.get("max_len").unwrap_or(&default_512);
-                    format!(
-                        "\n            {}: PositionalEncoding::new({}, {})?,",
-                        layer.name, d_model, max_len
-                    )
-                },
-                "transformer_block" => {
-                    let default_768 = "768".to_string();
-                    let default_12 = "12".to_string();
-                    let d_model = layer.parameters.get("d_model").unwrap_or(&default_768);
-                    let num_heads = layer.parameters.get("num_heads").unwrap_or(&default_12);
-                    format!(
-                        "\n            {}: TransformerBlock::new({}, {})?,",
-                        layer.name, d_model, num_heads
-                    )
-                },
-                "rnn" => {
-                    let default_768 = "768".to_string();
-                    let input_size = layer.parameters.get("input_size").unwrap_or(&default_768);
-                    let hidden_size = layer.parameters.get("hidden_size").unwrap_or(&default_768);
-                    format!(
-                        "\n            {}: RNN::new({}, {})?,",
-                        layer.name, input_size, hidden_size
-                    )
-                },
-                "lstm" => {
-                    let default_768 = "768".to_string();
-                    let input_size = layer.parameters.get("input_size").unwrap_or(&default_768);
-                    let hidden_size = layer.parameters.get("hidden_size").unwrap_or(&default_768);
-                    format!(
-                        "\n            {}: LSTM::new({}, {})?,",
-                        layer.name, input_size, hidden_size
-                    )
-                },
-                "gru" => {
-                    let default_768 = "768".to_string();
-                    let input_size = layer.parameters.get("input_size").unwrap_or(&default_768);
-                    let hidden_size = layer.parameters.get("hidden_size").unwrap_or(&default_768);
-                    format!(
-                        "\n            {}: GRU::new({}, {})?,",
-                        layer.name, input_size, hidden_size
-                    )
-                },
-                "relu" | "gelu" | "silu" | "tanh" | "sigmoid" | "softmax" => String::new(), // Activation functions don't need initialization
-                _ => format!(
-                    "\n            // Unsupported layer '{}' - please implement manually",
-                    layer.layer_type
-                ),
-            })
-            .collect::<Vec<_>>()
-            .join("");
+        for layer in &self.config.layers {
+            let Some(spec) = Self::layer_spec(layer)? else {
+                // Activation: no field, no import.
+                continue;
+            };
 
-        (layer_fields, layer_init)
+            fields.push_str(&format!("\n    {}: {},", layer.name, spec.field_type));
+            init.push_str(&format!(
+                "\n            {}: {},",
+                layer.name, spec.constructor
+            ));
+
+            let import = spec.import.to_string();
+            if !imports.contains(&import) {
+                imports.push(import);
+            }
+        }
+
+        imports.sort();
+        Ok((fields, init, imports))
     }
 
     /// Generate test code
@@ -824,5 +835,146 @@ mod tests {
         let generator = ModelGenerator::new(config);
         let test_code = generator.generate_test_code();
         assert!(test_code.contains("UniqueTestModel"));
+    }
+
+    // ------------------------------------------------------------------
+    // Regression tests: generated code must reference real core modules
+    // ------------------------------------------------------------------
+
+    fn layer(name: &str, layer_type: &str) -> LayerDefinition {
+        LayerDefinition {
+            name: name.to_string(),
+            layer_type: layer_type.to_string(),
+            parameters: HashMap::new(),
+        }
+    }
+
+    fn generator_with_layers(layers: Vec<LayerDefinition>) -> ModelGenerator {
+        ModelGenerator::new(ModelGeneratorConfig {
+            model_name: "Generated".to_string(),
+            model_type: ModelType::Encoder,
+            config_params: HashMap::new(),
+            layers,
+            task_heads: vec![],
+        })
+    }
+
+    #[test]
+    fn test_generated_imports_reference_existing_core_modules() {
+        let generator = generator_with_layers(vec![
+            layer("embed", "embedding"),
+            layer("norm", "layernorm"),
+            layer("attn", "attention"),
+            layer("proj", "linear"),
+            layer("drop", "dropout"),
+        ]);
+
+        let code = generator.generate_model_code().expect("model code generation");
+
+        // Modules that exist in trustformers_core::layers.
+        for expected in [
+            "embedding::Embedding",
+            "layernorm::LayerNorm",
+            "attention::MultiHeadAttention",
+            "linear::Linear",
+            "dropout::Dropout",
+        ] {
+            assert!(
+                code.contains(expected),
+                "generated code must import {expected}:\n{code}"
+            );
+        }
+
+        // Modules that do NOT exist and must never be emitted.
+        for forbidden in [
+            "layers::conv::",
+            "conv::{",
+            "normalization::",
+            "transformer::TransformerBlock",
+            "rnn::",
+            "PositionalEncoding",
+            "BatchNorm",
+            "Conv1d",
+            "LSTM",
+            "GRU",
+        ] {
+            assert!(
+                !code.contains(forbidden),
+                "generated code must not reference `{forbidden}`, which does not exist in \
+                 trustformers_core::layers:\n{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_generated_imports_are_limited_to_the_configured_layers() {
+        let generator = generator_with_layers(vec![layer("proj", "linear")]);
+        let code = generator.generate_model_code().expect("model code generation");
+
+        assert!(code.contains("linear::Linear"));
+        for unused in [
+            "Dropout",
+            "MultiHeadAttention",
+            "Conv2d",
+            "Embedding",
+            "FeedForward",
+            "RMSNorm",
+        ] {
+            assert!(
+                !code.contains(unused),
+                "an unused import for `{unused}` would make the generated file warn:\n{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_activation_layers_need_no_field_or_import() {
+        let generator = generator_with_layers(vec![layer("act", "gelu")]);
+        let code = generator.generate_model_code().expect("model code generation");
+
+        assert!(code.contains("x.gelu()?"), "{code}");
+        assert!(
+            !code.contains("use trustformers_core::layers::"),
+            "an activation needs no layer import:\n{code}"
+        );
+    }
+
+    #[test]
+    fn test_unsupported_layer_type_is_rejected() {
+        for unsupported in [
+            "lstm",
+            "gru",
+            "rnn",
+            "conv1d",
+            "batchnorm",
+            "transformer_block",
+        ] {
+            let generator = generator_with_layers(vec![layer("x", unsupported)]);
+            let error = generator
+                .generate_model_code()
+                .expect_err("generating code for a non-existent layer must fail");
+            assert!(
+                error.to_string().contains(unsupported),
+                "the error must name the unsupported layer type: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_generate_model_propagates_unsupported_layers() {
+        let generator = generator_with_layers(vec![layer("recurrent", "lstm")]);
+        let temp_dir = std::env::temp_dir().join("trustformers_model_generator_unsupported");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        let result = generator.generate_model(&temp_dir);
+        assert!(
+            result.is_err(),
+            "a model that cannot be generated must not be written to disk"
+        );
+        assert!(
+            !temp_dir.join("Generated").join("model.rs").exists(),
+            "no model.rs may be written for an unsupported configuration"
+        );
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

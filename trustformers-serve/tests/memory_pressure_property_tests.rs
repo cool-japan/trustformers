@@ -278,17 +278,28 @@ proptest! {
                     }
                 };
 
-                // Property: Should always free some memory
-                prop_assert!(memory_freed > 0);
-
-                // Property: Freed amount should be reasonable
-                prop_assert!(memory_freed <= 2u64 * 1024 * 1024 * 1024); // Max 2GB per operation
-
-                total_freed += memory_freed;
+                // Property: reclamation on a device that is not present must be
+                // reported as an error, never as bytes freed. Where GPUs do
+                // exist the figure is the measured sum of the allocations that
+                // were actually released.
+                match memory_freed {
+                    Ok(freed) => {
+                        prop_assert!(freed <= 2u64 * 1024 * 1024 * 1024);
+                        total_freed += freed;
+                    },
+                    Err(e) => {
+                        let message = e.to_string();
+                        prop_assert!(
+                            message.contains("not present") || message.contains("discovery"),
+                            "unexpected reclaim error: {}",
+                            message
+                        );
+                    },
+                }
             }
 
-            // Property: Total freed memory should be proportional to number of devices
-            prop_assert!(total_freed >= device_ids.len() as u64 * 10 * 1024 * 1024); // At least 10MB per device
+            // Nothing was allocated in this test, so nothing can have been freed.
+            prop_assert_eq!(total_freed, 0);
 
             Ok(())
         });
@@ -664,11 +675,22 @@ mod stress_tests {
                             GpuCleanupStrategy::GpuVramCompaction => {
                                 handler_clone.execute_gpu_vram_compaction(device_id).await
                             },
-                            _ => 0,
+                            _ => Ok(0),
                         };
 
-                        assert!(freed > 0, "GPU cleanup should always free some memory");
-                        total_freed += freed;
+                        // A device that is not present must produce an error,
+                        // never a fabricated byte count.
+                        match freed {
+                            Ok(bytes) => total_freed += bytes,
+                            Err(e) => {
+                                let message = e.to_string();
+                                assert!(
+                                    message.contains("not present")
+                                        || message.contains("discovery"),
+                                    "unexpected reclaim error: {message}"
+                                );
+                            },
+                        }
                     }
 
                     total_freed
@@ -679,13 +701,11 @@ mod stress_tests {
         let results = futures::future::join_all(tasks).await;
         let total_system_freed: u64 = results.into_iter().filter_map(|r| r.ok()).sum();
 
-        assert!(
-            total_system_freed > 0,
-            "System should free substantial memory under stress"
-        );
-        assert!(
-            total_system_freed >= 100 * 1024 * 1024,
-            "Should free at least 100MB total"
+        // Nothing was allocated against a GPU in this test, and this host may
+        // have no GPU at all, so the only honest total is zero.
+        assert_eq!(
+            total_system_freed, 0,
+            "no GPU allocation was made, so nothing can have been reclaimed"
         );
     }
 }

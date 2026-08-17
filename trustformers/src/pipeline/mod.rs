@@ -44,6 +44,7 @@ pub mod image_to_text;
 pub mod jit_compilation;
 pub mod mamba2_pipeline;
 pub mod mask_generation;
+pub mod media;
 pub mod metal_backend;
 pub mod mixture_of_depths;
 pub mod multi_doc_summarization;

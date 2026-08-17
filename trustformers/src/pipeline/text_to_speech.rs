@@ -1,8 +1,34 @@
+//! # Text-to-speech pipeline
+//!
+//! ## What is real here
+//!
+//! * **Text front-end** — whitespace normalisation, abbreviation expansion,
+//!   number-to-words for 0–20, punctuation verbalisation and a
+//!   dictionary-plus-fallback grapheme-to-phoneme converter. All of it is
+//!   plain, inspectable string processing and is exposed publicly.
+//! * **Prosody analysis** — [`ProsodyAnalyzer`] measures fundamental frequency
+//!   by autocorrelation over overlapping frames, derives the pitch range from
+//!   the per-frame F0 track, computes the speaking rate from the actual word
+//!   count and audio duration, and finds pauses and emphasis from real frame
+//!   energy. No constant is reported as a measurement.
+//!
+//! ## What is not available
+//!
+//! There is **no neural vocoder** in this workspace, so there is no way to turn
+//! a model's acoustic output into a waveform. [`TextToSpeechPipeline::synthesize`]
+//! therefore returns a structured [`TrustformersError::FeatureUnavailable`]
+//! instead of the sine-wave tone generator it used to emit as "speech". Use
+//! [`TextToSpeechPipeline::prepare`] to obtain the normalised text, phonemes and
+//! token IDs and drive your own vocoder.
+
 use crate::error::{Result, TrustformersError};
 use crate::pipeline::{BasePipeline, Pipeline};
 use serde::{Deserialize, Serialize};
 use trustformers_core::traits::{Model, Tokenizer};
 use trustformers_core::Tensor;
+
+/// Vocoder implementations available in this workspace (none yet).
+const SUPPORTED_VOCODERS: &[&str] = &[];
 
 /// Configuration for text-to-speech pipeline
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -140,8 +166,12 @@ pub struct PhonemeTimings {
     pub start_time: f64,
     /// End time in seconds
     pub end_time: f64,
-    /// Confidence score
-    pub confidence: f32,
+    /// Aligner confidence, when a forced aligner produced this timing.
+    ///
+    /// `None` means the timing came from a uniform division of the utterance
+    /// duration rather than an alignment model — the honest value, since this
+    /// crate ships no aligner.
+    pub confidence: Option<f32>,
 }
 
 /// Prosody information
@@ -280,6 +310,12 @@ where
         self
     }
 
+    /// Attach (or detach) the grapheme-to-phoneme converter.
+    pub fn with_phoneme_conversion(mut self, enable: bool) -> Self {
+        self.phoneme_converter = if enable { Some(PhonemeConverter::new()) } else { None };
+        self
+    }
+
     /// Enable prosody control
     pub fn with_prosody_control(mut self, enable: bool) -> Self {
         self.config.prosody_control = enable;
@@ -336,67 +372,118 @@ where
         ]
     }
 
-    /// Synthesize text to speech
-    pub fn synthesize(&self, input: TextToSpeechInput) -> Result<TextToSpeechOutput> {
-        // Validate input
+    /// Everything the text front-end produces for an utterance.
+    ///
+    /// This is the real, complete output of the parts of the pipeline that are
+    /// implemented; it stops short of the waveform because no vocoder exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for empty text, an unknown voice, or a tokenizer
+    /// failure.
+    pub fn prepare(&self, input: &TextToSpeechInput) -> Result<SynthesisPlan> {
         if input.text.is_empty() {
             return Err(TrustformersError::invalid_input_simple(
-                "Text input cannot be empty. Expected: non-empty text string, received: empty string".to_string()
+                "Text input cannot be empty. Expected: non-empty text string, received: empty \
+                 string"
+                    .to_string(),
             ));
         }
 
-        // Get effective configuration
-        let voice = input.voice.unwrap_or_else(|| self.config.voice.clone());
-        let speaking_rate = input.speaking_rate.unwrap_or(self.config.speaking_rate);
-        let pitch = input.pitch.unwrap_or(self.config.pitch);
-        let volume = input.volume.unwrap_or(self.config.volume);
-
-        // Validate voice
+        let voice = input.voice.clone().unwrap_or_else(|| self.config.voice.clone());
         if !self.available_voices.contains(&voice) {
-            return Err(TrustformersError::invalid_input_simple(
-                format!("Voice '{}' is not available. Parameter: voice, Expected: one of {:?}, Received: {}", voice, self.available_voices, voice)
-            ));
+            return Err(TrustformersError::invalid_input_simple(format!(
+                "Voice '{}' is not available. Parameter: voice, Expected: one of {:?}, Received: \
+                 {}",
+                voice, self.available_voices, voice
+            )));
         }
 
-        // Preprocess text
-        let processed_text = self.preprocess_text(&input.text)?;
-
-        // Tokenize text
-        let tokenized = self.base.tokenizer.encode(&processed_text)?;
-
-        // Convert to tensor (converting u32 to f32)
-        let input_ids_f32: Vec<f32> = tokenized.input_ids.iter().map(|&x| x as f32).collect();
-        let input_tensor = Tensor::from_vec(input_ids_f32, &[1, tokenized.input_ids.len()])?;
-
-        // Run model inference
-        let output = self.base.model.forward(input_tensor)?;
-
-        // Convert model output to audio
-        let audio_data = self.tensor_to_audio(&output, &voice, speaking_rate, pitch, volume)?;
-
-        // Calculate duration
-        let duration = audio_data.len() as f64 / self.config.sample_rate as f64;
-
-        // Generate phonemes if converter is available
-        let phonemes = if let Some(converter) = &self.phoneme_converter {
-            Some(converter.text_to_phonemes(&processed_text)?)
-        } else {
-            None
+        let normalized_text = self.preprocess_text(&input.text)?;
+        let tokenized = self.base.tokenizer.encode(&normalized_text)?;
+        let phonemes = match &self.phoneme_converter {
+            Some(converter) => Some(converter.text_to_phonemes(&normalized_text)?),
+            None => None,
         };
 
-        // Generate phoneme timings
-        let phoneme_timings = if let Some(phonemes) = &phonemes {
-            Some(self.generate_phoneme_timings(phonemes, duration)?)
-        } else {
-            None
+        Ok(SynthesisPlan {
+            voice,
+            normalized_text,
+            token_ids: tokenized.input_ids.clone(),
+            phonemes,
+            speaking_rate: input.speaking_rate.unwrap_or(self.config.speaking_rate),
+            pitch: input.pitch.unwrap_or(self.config.pitch),
+            volume: input.volume.unwrap_or(self.config.volume),
+            sample_rate: self.config.sample_rate,
+        })
+    }
+
+    /// Synthesize text to speech.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`TrustformersError::FeatureUnavailable`] once the input
+    /// has been validated and the text front-end has run: this workspace ships
+    /// no neural vocoder, and the pipeline will not emit a synthetic tone in
+    /// place of speech. Input-validation errors surface first.
+    ///
+    /// Use [`Self::prepare`] to get the normalised text, token IDs and phonemes
+    /// and drive an external vocoder.
+    pub fn synthesize(&self, input: TextToSpeechInput) -> Result<TextToSpeechOutput> {
+        // Run the real front-end first so callers still get input validation.
+        let plan = self.prepare(&input)?;
+
+        Err(TrustformersError::FeatureUnavailable {
+            message: format!(
+                "text-to-speech synthesis requires a neural vocoder, and none is implemented in \
+                 this workspace; the text front-end produced {} tokens and {} phonemes for voice \
+                 `{}`, but no waveform can be generated. This pipeline never emits synthesised \
+                 tones in place of speech.",
+                plan.token_ids.len(),
+                plan.phonemes.as_ref().map_or(0, Vec::len),
+                plan.voice
+            ),
+            feature: "tts-vocoder".to_string(),
+            suggestion: Some(
+                "Call `TextToSpeechPipeline::prepare` for the normalised text, token IDs and \
+                 phonemes, then run your own vocoder."
+                    .to_string(),
+            ),
+            alternatives: SUPPORTED_VOCODERS.iter().map(|s| (*s).to_string()).collect(),
+        })
+    }
+
+    /// Build a [`TextToSpeechOutput`] from externally-vocoded audio.
+    ///
+    /// Lets callers reuse the pipeline's real phoneme timing and prosody
+    /// analysis once they have a waveform from their own vocoder.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `audio_data` is empty or prosody analysis fails.
+    pub fn finish_with_audio(
+        &self,
+        plan: SynthesisPlan,
+        audio_data: Vec<f32>,
+    ) -> Result<TextToSpeechOutput> {
+        if audio_data.is_empty() {
+            return Err(TrustformersError::invalid_input_simple(
+                "finish_with_audio: the vocoded audio buffer is empty".to_string(),
+            ));
+        }
+        let duration = audio_data.len() as f64 / f64::from(plan.sample_rate);
+
+        let phoneme_timings = match &plan.phonemes {
+            Some(phonemes) => Some(self.generate_phoneme_timings(phonemes, duration)?),
+            None => None,
         };
 
-        // Analyze prosody if enabled
         let prosody_info = if self.config.prosody_control {
-            if let Some(analyzer) = &self.prosody_analyzer {
-                Some(analyzer.analyze(&processed_text, &audio_data, self.config.sample_rate)?)
-            } else {
-                None
+            match &self.prosody_analyzer {
+                Some(analyzer) => {
+                    Some(analyzer.analyze(&plan.normalized_text, &audio_data, plan.sample_rate)?)
+                },
+                None => None,
             }
         } else {
             None
@@ -404,12 +491,12 @@ where
 
         Ok(TextToSpeechOutput {
             audio_data,
-            sample_rate: self.config.sample_rate,
+            sample_rate: plan.sample_rate,
             duration,
             format: self.config.output_format.clone(),
-            voice,
-            text: processed_text,
-            phonemes,
+            voice: plan.voice,
+            text: plan.normalized_text,
+            phonemes: plan.phonemes,
             phoneme_timings,
             prosody_info,
         })
@@ -520,110 +607,65 @@ where
             .replace("'", " apostrophe ")
     }
 
-    /// Convert tensor output to audio samples
-    fn tensor_to_audio(
-        &self,
-        tensor: &Tensor,
-        voice: &str,
-        speaking_rate: f32,
-        pitch: f32,
-        volume: f32,
-    ) -> Result<Vec<f32>> {
-        // This is a placeholder implementation
-        // In a real TTS system, this would involve:
-        // 1. Mel-spectrogram generation from model output
-        // 2. Vocoder to convert mel-spectrogram to audio
-        // 3. Post-processing for voice characteristics
-
-        let tensor_data = tensor.data()?;
-        let audio_length = (tensor_data.len() as f32 * speaking_rate) as usize;
-        let mut audio_data = Vec::with_capacity(audio_length);
-
-        // Generate synthetic audio based on tensor data
-        for i in 0..audio_length {
-            let t = i as f32 / self.config.sample_rate as f32;
-            let tensor_index = (i * tensor_data.len() / audio_length).min(tensor_data.len() - 1);
-            let base_freq = 220.0 * pitch; // Base frequency modified by pitch
-            let amplitude = tensor_data[tensor_index] * volume;
-
-            // Generate a simple sine wave with some harmonics
-            let fundamental = (2.0 * std::f32::consts::PI * base_freq * t).sin();
-            let harmonic2 = 0.5 * (2.0 * std::f32::consts::PI * base_freq * 2.0 * t).sin();
-            let harmonic3 = 0.25 * (2.0 * std::f32::consts::PI * base_freq * 3.0 * t).sin();
-
-            let sample = amplitude * (fundamental + harmonic2 + harmonic3);
-            audio_data.push(sample);
-        }
-
-        // Apply voice characteristics
-        self.apply_voice_characteristics(&mut audio_data, voice);
-
-        Ok(audio_data)
-    }
-
-    /// Apply voice-specific characteristics
-    fn apply_voice_characteristics(&self, audio_data: &mut [f32], voice: &str) {
-        match voice {
-            "male-neutral" => {
-                // Lower pitch and add some resonance
-                for sample in audio_data.iter_mut() {
-                    *sample *= 0.9;
-                }
-            },
-            "female-neutral" => {
-                // Higher pitch and brighter tone
-                for sample in audio_data.iter_mut() {
-                    *sample *= 1.1;
-                }
-            },
-            "child" => {
-                // Much higher pitch and lighter tone
-                for sample in audio_data.iter_mut() {
-                    *sample *= 1.3;
-                }
-            },
-            "elderly" => {
-                // Slightly lower pitch with some tremolo
-                for (i, sample) in audio_data.iter_mut().enumerate() {
-                    let tremolo = 1.0 + 0.1 * (i as f32 * 0.01).sin();
-                    *sample *= 0.8 * tremolo;
-                }
-            },
-            "robot" => {
-                // Robotic voice with digital artifacts
-                for sample in audio_data.iter_mut() {
-                    *sample = (*sample * 10.0).round() / 10.0; // Quantize
-                }
-            },
-            _ => {
-                // Default voice - no modifications
-            },
-        }
-    }
-
-    /// Generate phoneme timings
-    fn generate_phoneme_timings(
+    /// Divide an utterance's duration uniformly across its phonemes.
+    ///
+    /// This is an explicitly *uniform* segmentation, not a forced alignment:
+    /// every phoneme gets `total_duration / n` seconds and the reported
+    /// confidence is `None`, because no aligner produced these boundaries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `phonemes` is empty.
+    pub fn generate_phoneme_timings(
         &self,
         phonemes: &[String],
         total_duration: f64,
     ) -> Result<Vec<PhonemeTimings>> {
-        let mut timings = Vec::new();
+        if phonemes.is_empty() {
+            return Err(TrustformersError::invalid_input_simple(
+                "generate_phoneme_timings: no phonemes supplied".to_string(),
+            ));
+        }
         let avg_duration = total_duration / phonemes.len() as f64;
 
-        for (i, phoneme) in phonemes.iter().enumerate() {
-            let start_time = i as f64 * avg_duration;
-            let end_time = start_time + avg_duration;
-
-            timings.push(PhonemeTimings {
-                phoneme: phoneme.clone(),
-                start_time,
-                end_time,
-                confidence: 0.8, // Placeholder confidence
-            });
-        }
-
-        Ok(timings)
+        Ok(phonemes
+            .iter()
+            .enumerate()
+            .map(|(i, phoneme)| {
+                let start_time = i as f64 * avg_duration;
+                PhonemeTimings {
+                    phoneme: phoneme.clone(),
+                    start_time,
+                    end_time: start_time + avg_duration,
+                    confidence: None,
+                }
+            })
+            .collect())
     }
+}
+
+/// The complete output of the text front-end for one utterance.
+///
+/// Produced by [`TextToSpeechPipeline::prepare`]; contains only quantities that
+/// were actually computed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SynthesisPlan {
+    /// Resolved voice identifier.
+    pub voice: String,
+    /// Text after normalisation, abbreviation expansion and verbalisation.
+    pub normalized_text: String,
+    /// Token IDs produced by the pipeline's tokenizer.
+    pub token_ids: Vec<u32>,
+    /// Phoneme sequence, when a [`PhonemeConverter`] is attached.
+    pub phonemes: Option<Vec<String>>,
+    /// Effective speaking-rate multiplier.
+    pub speaking_rate: f32,
+    /// Effective pitch multiplier.
+    pub pitch: f32,
+    /// Effective volume multiplier.
+    pub volume: f32,
+    /// Target output sample rate in Hz.
+    pub sample_rate: u32,
 }
 
 impl<M, T> Pipeline for TextToSpeechPipeline<M, T>
@@ -709,23 +751,52 @@ impl ProsodyAnalyzer {
         Self
     }
 
-    pub fn analyze(
-        &self,
-        _text: &str,
-        audio_data: &[f32],
-        sample_rate: u32,
-    ) -> Result<ProsodyInfo> {
-        // Analyze pitch
-        let avg_pitch = self.calculate_average_pitch(audio_data, sample_rate);
-        let pitch_range = self.calculate_pitch_range(audio_data, sample_rate);
+    /// Analyse the prosody of a real waveform.
+    ///
+    /// Every reported figure is measured:
+    ///
+    /// * `avg_pitch` / `pitch_range` come from an autocorrelation F0 track
+    ///   (see [`Self::pitch_track`]), restricted to the 50–500 Hz human range;
+    ///   both are `0.0` when no frame is voiced.
+    /// * `speaking_rate` is the utterance's word count divided by its duration
+    ///   in minutes.
+    /// * pauses and emphasis come from frame energy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an empty buffer or a zero sample rate.
+    pub fn analyze(&self, text: &str, audio_data: &[f32], sample_rate: u32) -> Result<ProsodyInfo> {
+        if audio_data.is_empty() {
+            return Err(TrustformersError::invalid_input_simple(
+                "prosody analysis: empty audio buffer".to_string(),
+            ));
+        }
+        if sample_rate == 0 {
+            return Err(TrustformersError::invalid_input_simple(
+                "prosody analysis: sample rate must be non-zero".to_string(),
+            ));
+        }
 
-        // Analyze speaking rate (simplified)
-        let speaking_rate = 150.0; // Words per minute (placeholder)
+        let track = self.pitch_track(audio_data, sample_rate);
+        let avg_pitch = if track.is_empty() {
+            0.0
+        } else {
+            track.iter().sum::<f32>() / track.len() as f32
+        };
+        let pitch_range = if track.is_empty() {
+            0.0
+        } else {
+            let min = track.iter().copied().fold(f32::INFINITY, f32::min);
+            let max = track.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            max - min
+        };
 
-        // Detect pauses
+        let duration_minutes = audio_data.len() as f32 / sample_rate as f32 / 60.0;
+        let word_count = text.split_whitespace().count() as f32;
+        let speaking_rate =
+            if duration_minutes > 0.0 { word_count / duration_minutes } else { 0.0 };
+
         let pauses = self.detect_pauses(audio_data, sample_rate)?;
-
-        // Detect emphasis
         let emphasis = self.detect_emphasis(audio_data, sample_rate)?;
 
         Ok(ProsodyInfo {
@@ -737,22 +808,78 @@ impl ProsodyAnalyzer {
         })
     }
 
-    fn calculate_average_pitch(&self, audio_data: &[f32], _sample_rate: u32) -> f32 {
-        // Simplified pitch calculation
-        let mut sum = 0.0;
-        for sample in audio_data {
-            sum += sample.abs();
+    /// Per-frame fundamental frequency in Hz for the voiced frames of a signal.
+    ///
+    /// Uses normalised autocorrelation over 40 ms frames with a 20 ms hop,
+    /// searching lags corresponding to 50–500 Hz. A frame is considered voiced
+    /// when its peak normalised autocorrelation exceeds `0.3`; unvoiced frames
+    /// are omitted rather than reported as some default pitch.
+    pub fn pitch_track(&self, audio_data: &[f32], sample_rate: u32) -> Vec<f32> {
+        const MIN_HZ: f32 = 50.0;
+        const MAX_HZ: f32 = 500.0;
+        const VOICING_THRESHOLD: f32 = 0.3;
+
+        if sample_rate == 0 {
+            return Vec::new();
         }
-        sum / audio_data.len() as f32 * 440.0 // Convert to Hz (placeholder)
+        let frame_len = (sample_rate as usize * 40) / 1000;
+        let hop = (sample_rate as usize * 20) / 1000;
+        if frame_len == 0 || hop == 0 || audio_data.len() < frame_len {
+            return Vec::new();
+        }
+        let min_lag = (sample_rate as f32 / MAX_HZ).floor().max(1.0) as usize;
+        let max_lag = ((sample_rate as f32 / MIN_HZ).ceil() as usize).min(frame_len - 1);
+        if min_lag >= max_lag {
+            return Vec::new();
+        }
+
+        let mut track = Vec::new();
+        let mut start = 0usize;
+        while start + frame_len <= audio_data.len() {
+            let frame = &audio_data[start..start + frame_len];
+            let energy: f32 = frame.iter().map(|s| s * s).sum();
+            if energy > 1e-8 {
+                let mut best_lag = 0usize;
+                let mut best_score = 0.0f32;
+                for lag in min_lag..=max_lag {
+                    let mut num = 0.0f32;
+                    let mut den = 0.0f32;
+                    for i in 0..(frame_len - lag) {
+                        num += frame[i] * frame[i + lag];
+                        den += frame[i + lag] * frame[i + lag];
+                    }
+                    let score = if den > 1e-12 { num / (energy.sqrt() * den.sqrt()) } else { 0.0 };
+                    if score > best_score {
+                        best_score = score;
+                        best_lag = lag;
+                    }
+                }
+                if best_lag > 0 && best_score > VOICING_THRESHOLD {
+                    track.push(sample_rate as f32 / best_lag as f32);
+                }
+            }
+            start += hop;
+        }
+        track
     }
 
-    fn calculate_pitch_range(&self, audio_data: &[f32], _sample_rate: u32) -> f32 {
-        let min_val = audio_data.iter().fold(f32::INFINITY, |a, &b| a.min(b));
-        let max_val = audio_data.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-        (max_val - min_val) * 100.0 // Convert to Hz range (placeholder)
-    }
-
-    fn detect_pauses(&self, audio_data: &[f32], sample_rate: u32) -> Result<Vec<PauseInfo>> {
+    /// Detect silent stretches longer than 100 ms.
+    ///
+    /// Pauses are classified by their measured duration: below 250 ms is a
+    /// [`PauseType::Breath`], below 500 ms a [`PauseType::Comma`], below 900 ms
+    /// a [`PauseType::Phrase`], and anything longer a [`PauseType::Sentence`].
+    /// The thresholds are a documented heuristic over a real measurement, not a
+    /// fixed label.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `sample_rate` is zero.
+    pub fn detect_pauses(&self, audio_data: &[f32], sample_rate: u32) -> Result<Vec<PauseInfo>> {
+        if sample_rate == 0 {
+            return Err(TrustformersError::invalid_input_simple(
+                "detect_pauses: sample rate must be non-zero".to_string(),
+            ));
+        }
         let mut pauses = Vec::new();
         let silence_threshold = 0.01;
         let min_pause_duration = 0.1; // 100ms
@@ -761,7 +888,7 @@ impl ProsodyAnalyzer {
         let mut pause_start = 0.0;
 
         for (i, &sample) in audio_data.iter().enumerate() {
-            let time = i as f64 / sample_rate as f64;
+            let time = i as f64 / f64::from(sample_rate);
 
             if sample.abs() < silence_threshold {
                 if !in_pause {
@@ -774,20 +901,49 @@ impl ProsodyAnalyzer {
                     pauses.push(PauseInfo {
                         start_time: pause_start,
                         duration,
-                        pause_type: PauseType::Phrase, // Simplified classification
+                        pause_type: classify_pause(duration),
                     });
                 }
                 in_pause = false;
             }
         }
 
+        // A trailing silence is still a pause.
+        if in_pause {
+            let duration = audio_data.len() as f64 / f64::from(sample_rate) - pause_start;
+            if duration >= min_pause_duration {
+                pauses.push(PauseInfo {
+                    start_time: pause_start,
+                    duration,
+                    pause_type: classify_pause(duration),
+                });
+            }
+        }
+
         Ok(pauses)
     }
 
-    fn detect_emphasis(&self, audio_data: &[f32], sample_rate: u32) -> Result<Vec<EmphasisInfo>> {
+    /// Detect 100 ms windows whose mean absolute amplitude exceeds `0.5`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `sample_rate` is zero.
+    pub fn detect_emphasis(
+        &self,
+        audio_data: &[f32],
+        sample_rate: u32,
+    ) -> Result<Vec<EmphasisInfo>> {
+        if sample_rate == 0 {
+            return Err(TrustformersError::invalid_input_simple(
+                "detect_emphasis: sample rate must be non-zero".to_string(),
+            ));
+        }
         let mut emphasis = Vec::new();
         let emphasis_threshold = 0.5;
-        let window_size = sample_rate as usize / 10; // 100ms window
+        let window_size = (sample_rate as usize / 10).max(1); // 100ms window
+        if audio_data.len() < window_size {
+            return Ok(emphasis);
+        }
 
         for (i, window) in audio_data.windows(window_size).enumerate() {
             let avg_amplitude = window.iter().map(|&x| x.abs()).sum::<f32>() / window.len() as f32;
@@ -812,6 +968,19 @@ impl ProsodyAnalyzer {
 impl Default for ProsodyAnalyzer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Classify a measured pause duration (seconds) into a [`PauseType`].
+fn classify_pause(duration: f64) -> PauseType {
+    if duration < 0.25 {
+        PauseType::Breath
+    } else if duration < 0.5 {
+        PauseType::Comma
+    } else if duration < 0.9 {
+        PauseType::Phrase
+    } else {
+        PauseType::Sentence
     }
 }
 
@@ -1043,13 +1212,201 @@ mod tests {
         assert!(!phonemes.is_empty());
     }
 
+    /// A pure tone at `freq` Hz, used to check the pitch tracker against a
+    /// known ground truth.
+    fn tone(freq: f32, sample_rate: u32, n: usize) -> Vec<f32> {
+        (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / sample_rate as f32).sin())
+            .collect()
+    }
+
     #[test]
-    fn test_prosody_analyzer() {
+    fn test_prosody_analyzer_measures_a_known_pitch() {
+        // Regression: `avg_pitch` used to be `mean|x| * 440.0`, which is not a
+        // frequency at all. A real 200 Hz tone must be measured as ~200 Hz.
         let analyzer = ProsodyAnalyzer::new();
-        let audio_data = vec![0.1, 0.2, 0.0, 0.0, 0.3, 0.4];
-        let prosody =
-            analyzer.analyze("test", &audio_data, 22050).expect("operation failed in test");
-        assert!(prosody.avg_pitch > 0.0);
+        let audio = tone(200.0, 16_000, 16_000);
+        let prosody = analyzer.analyze("one two three", &audio, 16_000).expect("prosody");
+        assert!(
+            (prosody.avg_pitch - 200.0).abs() < 10.0,
+            "expected ~200 Hz, measured {}",
+            prosody.avg_pitch
+        );
+    }
+
+    #[test]
+    fn test_prosody_analyzer_distinguishes_pitches() {
+        let analyzer = ProsodyAnalyzer::new();
+        let low = analyzer
+            .analyze("x", &tone(120.0, 16_000, 16_000), 16_000)
+            .expect("low")
+            .avg_pitch;
+        let high = analyzer
+            .analyze("x", &tone(330.0, 16_000, 16_000), 16_000)
+            .expect("high")
+            .avg_pitch;
+        assert!(
+            low < high,
+            "120 Hz ({low}) must measure below 330 Hz ({high})"
+        );
+    }
+
+    #[test]
+    fn test_prosody_analyzer_rejects_empty_audio() {
+        let analyzer = ProsodyAnalyzer::new();
+        assert!(analyzer.analyze("x", &[], 22050).is_err());
+        assert!(analyzer.analyze("x", &[0.1, 0.2], 0).is_err());
+    }
+
+    #[test]
+    fn test_prosody_speaking_rate_is_measured_not_constant() {
+        // Regression: `speaking_rate` used to be the literal 150.0.
+        let analyzer = ProsodyAnalyzer::new();
+        let audio = tone(200.0, 16_000, 16_000); // exactly 1 second
+        let four_words = analyzer
+            .analyze("one two three four", &audio, 16_000)
+            .expect("prosody")
+            .speaking_rate;
+        let two_words = analyzer.analyze("one two", &audio, 16_000).expect("prosody").speaking_rate;
+        // 4 words in 1/60 minute = 240 wpm; 2 words = 120 wpm.
+        assert!((four_words - 240.0).abs() < 1.0, "got {four_words}");
+        assert!((two_words - 120.0).abs() < 1.0, "got {two_words}");
+        assert!(four_words > two_words);
+    }
+
+    #[test]
+    fn test_pitch_track_is_empty_for_silence() {
+        let analyzer = ProsodyAnalyzer::new();
+        assert!(analyzer.pitch_track(&vec![0.0f32; 16_000], 16_000).is_empty());
+    }
+
+    #[test]
+    fn test_detect_pauses_classifies_by_measured_duration() {
+        // Regression: every pause used to be labelled `PauseType::Phrase`.
+        let analyzer = ProsodyAnalyzer::new();
+        let sample_rate = 1000u32;
+        let mut audio = vec![1.0f32; 100];
+        audio.extend(vec![0.0f32; 150]); // 150 ms → Breath
+        audio.extend(vec![1.0f32; 100]);
+        audio.extend(vec![0.0f32; 1000]); // 1 s → Sentence
+        audio.extend(vec![1.0f32; 100]);
+        let pauses = analyzer.detect_pauses(&audio, sample_rate).expect("pauses");
+        assert_eq!(pauses.len(), 2, "expected two pauses, got {pauses:?}");
+        assert!(matches!(pauses[0].pause_type, PauseType::Breath));
+        assert!(matches!(pauses[1].pause_type, PauseType::Sentence));
+    }
+
+    #[test]
+    fn test_synthesize_refuses_to_emit_a_synthetic_tone() {
+        // Regression: `synthesize` used to return a sine-wave "waveform" as
+        // speech. It must now fail loudly.
+        let model = MockModel::new();
+        let tokenizer = MockTokenizer::new();
+        let pipeline = TextToSpeechPipeline::new(model, tokenizer).expect("pipeline ok");
+        let input = TextToSpeechInput {
+            text: "Hello world".to_string(),
+            voice: None,
+            speaking_rate: None,
+            pitch: None,
+            volume: None,
+            emotion: None,
+            prosody_markers: None,
+        };
+        match pipeline.synthesize(input) {
+            Err(TrustformersError::FeatureUnavailable {
+                feature, message, ..
+            }) => {
+                assert_eq!(feature, "tts-vocoder");
+                assert!(message.contains("vocoder"), "message: {message}");
+            },
+            other => panic!("expected a vocoder FeatureUnavailable error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_synthesize_still_validates_input_first() {
+        let model = MockModel::new();
+        let tokenizer = MockTokenizer::new();
+        let pipeline = TextToSpeechPipeline::new(model, tokenizer).expect("pipeline ok");
+        let empty = TextToSpeechInput {
+            text: String::new(),
+            voice: None,
+            speaking_rate: None,
+            pitch: None,
+            volume: None,
+            emotion: None,
+            prosody_markers: None,
+        };
+        assert!(matches!(
+            pipeline.synthesize(empty),
+            Err(TrustformersError::InvalidInput { .. })
+        ));
+
+        let bad_voice = TextToSpeechInput {
+            text: "hi".to_string(),
+            voice: Some("nonexistent-voice".to_string()),
+            speaking_rate: None,
+            pitch: None,
+            volume: None,
+            emotion: None,
+            prosody_markers: None,
+        };
+        assert!(matches!(
+            pipeline.synthesize(bad_voice),
+            Err(TrustformersError::InvalidInput { .. })
+        ));
+    }
+
+    #[test]
+    fn test_prepare_returns_the_real_front_end_output() {
+        let model = MockModel::new();
+        let tokenizer = MockTokenizer::new();
+        let pipeline = TextToSpeechPipeline::new(model, tokenizer)
+            .expect("pipeline ok")
+            .with_phoneme_conversion(true);
+        let input = TextToSpeechInput {
+            text: "Dr. Smith has 5 cats.".to_string(),
+            voice: None,
+            speaking_rate: None,
+            pitch: None,
+            volume: None,
+            emotion: None,
+            prosody_markers: None,
+        };
+        let plan = pipeline.prepare(&input).expect("prepare");
+        assert!(plan.normalized_text.contains("Doctor"));
+        assert!(plan.normalized_text.contains("five"));
+        assert_eq!(plan.token_ids, vec![1, 2, 3]);
+        assert!(plan.phonemes.is_some_and(|p| !p.is_empty()));
+    }
+
+    #[test]
+    fn test_finish_with_audio_uses_caller_supplied_waveform() {
+        let model = MockModel::new();
+        let tokenizer = MockTokenizer::new();
+        let pipeline = TextToSpeechPipeline::new(model, tokenizer)
+            .expect("pipeline ok")
+            .with_config(TextToSpeechConfig {
+                sample_rate: 16_000,
+                ..Default::default()
+            });
+        let input = TextToSpeechInput {
+            text: "hello".to_string(),
+            voice: None,
+            speaking_rate: None,
+            pitch: None,
+            volume: None,
+            emotion: None,
+            prosody_markers: None,
+        };
+        let plan = pipeline.prepare(&input).expect("prepare");
+        let audio = tone(200.0, 16_000, 8_000);
+        let output = pipeline.finish_with_audio(plan, audio.clone()).expect("finish");
+        assert_eq!(output.audio_data, audio);
+        assert!((output.duration - 0.5).abs() < 1e-6);
+        assert!(pipeline
+            .finish_with_audio(pipeline.prepare(&input).expect("prepare"), Vec::new())
+            .is_err());
     }
 
     #[test]
@@ -1241,7 +1598,7 @@ mod tests {
         let analyzer = ProsodyAnalyzer::new();
         // LCG-generated samples
         let mut s = 42u64;
-        let samples: Vec<f32> = (0..100)
+        let samples: Vec<f32> = (0..22050)
             .map(|_| {
                 s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
                 (s % 1000) as f32 / 1000.0
@@ -1254,7 +1611,7 @@ mod tests {
     #[test]
     fn test_prosody_analyzer_speaking_rate_positive() {
         let analyzer = ProsodyAnalyzer::new();
-        let samples = vec![0.3_f32; 200];
+        let samples = vec![0.3_f32; 22050];
         let prosody = analyzer.analyze("test", &samples, 22050).expect("prosody should succeed");
         assert!(
             prosody.speaking_rate > 0.0,
@@ -1281,18 +1638,30 @@ mod tests {
     }
 
     #[test]
-    fn test_phoneme_timings_confidence_range() {
+    fn test_phoneme_timings_report_no_aligner_confidence() {
+        // Regression: timings used to carry a hardcoded `confidence: 0.8`
+        // despite no aligner having produced them.
         let model = MockModel::new();
         let tokenizer = MockTokenizer::new();
         let pipeline = TextToSpeechPipeline::new(model, tokenizer).expect("pipeline ok");
         let phonemes = vec!["a".to_string(), "b".to_string()];
         let timings =
             pipeline.generate_phoneme_timings(&phonemes, 1.0).expect("phoneme timings ok");
+        assert_eq!(timings.len(), 2);
         for t in &timings {
             assert!(
-                t.confidence >= 0.0 && t.confidence <= 1.0,
-                "confidence must be in [0, 1]"
+                t.confidence.is_none(),
+                "no aligner exists, so confidence must be None"
             );
         }
+        assert!((timings[0].end_time - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_phoneme_timings_rejects_empty_input() {
+        let model = MockModel::new();
+        let tokenizer = MockTokenizer::new();
+        let pipeline = TextToSpeechPipeline::new(model, tokenizer).expect("pipeline ok");
+        assert!(pipeline.generate_phoneme_timings(&[], 1.0).is_err());
     }
 }

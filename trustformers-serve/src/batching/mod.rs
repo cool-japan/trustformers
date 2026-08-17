@@ -9,6 +9,7 @@
 pub mod aggregator;
 pub mod config;
 pub mod metrics;
+pub mod model_executor;
 pub mod processor;
 pub mod scheduler;
 
@@ -19,7 +20,15 @@ pub use aggregator::{
     RequestId, SequencePackingStrategy, SequenceState,
 };
 
-pub use processor::{BatchExecutor, BatchProcessor, ProcessingError, ProcessingStats};
+pub use processor::{
+    BatchExecutor, BatchModel, BatchProcessor, DefaultBatchExecutor, ModelBatchExecutor,
+    ProcessingError, ProcessingStats, Tokenizer, NO_MODEL_CONFIGURED,
+};
+
+pub use model_executor::{
+    gpt2_text_executor, untrained_byte_gpt2_executor, ByteTokenizer, Gpt2BatchModel,
+    HuggingFaceTokenizer,
+};
 
 pub use scheduler::{
     BatchScheduler, PriorityQueue, SchedulerStats, SchedulingPolicy, TimeoutPolicy,
@@ -48,8 +57,20 @@ pub struct DynamicBatchingService {
 }
 
 impl DynamicBatchingService {
-    /// Create a new dynamic batching service
+    /// Create a new dynamic batching service without a model.
+    ///
+    /// Requests submitted to such a service are answered with an explicit
+    /// [`ProcessingOutput::Error`](aggregator::ProcessingOutput::Error); use
+    /// [`DynamicBatchingService::with_executor`] to install a real executor.
     pub fn new(config: BatchingConfig) -> Self {
+        Self::with_executor(
+            config,
+            Arc::new(processor::DefaultBatchExecutor::new()) as Arc<dyn BatchExecutor>,
+        )
+    }
+
+    /// Create a dynamic batching service backed by a caller-supplied executor.
+    pub fn with_executor(config: BatchingConfig, executor: Arc<dyn BatchExecutor>) -> Self {
         let metrics = Arc::new(MetricsCollector::new());
 
         Self {
@@ -57,11 +78,19 @@ impl DynamicBatchingService {
                 config.clone(),
                 metrics.clone(),
             ))),
-            processor: Arc::new(BatchProcessor::new(config.clone())),
+            processor: Arc::new(BatchProcessor::with_executor(config.clone(), executor)),
             scheduler: Arc::new(BatchScheduler::new(config.clone())),
             metrics,
             config,
         }
+    }
+
+    /// Whether a real model is wired into the executor.
+    ///
+    /// Serving-state probes report `NOT_SERVING` / `503` when this is `false`
+    /// rather than pretending the service can answer inference requests.
+    pub fn has_model(&self) -> bool {
+        self.processor.executor().has_model()
     }
 
     /// Start the batching service
@@ -134,17 +163,43 @@ impl DynamicBatchingService {
 
                 if let Some(batch) = batch {
                     let batch_id = batch.id;
+                    let request_ids: Vec<RequestId> =
+                        batch.requests.iter().map(|r| r.id.clone()).collect();
+
                     // Process batch
-                    if let Ok(results) = processor.process_batch(batch).await {
-                        // Send results back to waiting callers (using direct channel access)
-                        let mut channels = response_channels.lock().await;
-                        for (request_id, result) in results {
-                            if let Some(tx) = channels.remove(&request_id) {
-                                let _ = tx.send(result);
+                    match processor.process_batch(batch).await {
+                        Ok(results) => {
+                            // Send results back to waiting callers (direct channel access)
+                            let mut channels = response_channels.lock().await;
+                            for (request_id, result) in results {
+                                if let Some(tx) = channels.remove(&request_id) {
+                                    let _ = tx.send(result);
+                                }
                             }
-                        }
-                        drop(channels);
-                        tracing::debug!("Processed batch {}", batch_id);
+                            drop(channels);
+                            tracing::debug!("Processed batch {}", batch_id);
+                        },
+                        Err(e) => {
+                            // Every pending caller must be answered. Dropping the
+                            // batch here would leave them blocked until their own
+                            // timeout with no explanation.
+                            tracing::error!("Batch {} failed: {}", batch_id, e);
+                            let message = e.to_string();
+                            let mut channels = response_channels.lock().await;
+                            for request_id in request_ids {
+                                if let Some(tx) = channels.remove(&request_id) {
+                                    let _ = tx.send(ProcessingResult {
+                                        request_id: request_id.clone(),
+                                        output: aggregator::ProcessingOutput::Error(
+                                            message.clone(),
+                                        ),
+                                        latency_ms: 0,
+                                        batch_id,
+                                    });
+                                }
+                            }
+                            drop(channels);
+                        },
                     }
                 }
 

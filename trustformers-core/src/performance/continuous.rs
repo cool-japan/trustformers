@@ -76,23 +76,71 @@ impl ContinuousBenchmark {
         Ok(Self { config, history })
     }
 
-    /// Run benchmarks and check for regressions
+    /// Deprecated entry point that cannot actually re-run benchmarks.
+    ///
+    /// A `BenchmarkSuite` holds results, not the model that produced them, so
+    /// this signature has no way to execute the benchmarks `num_runs` times.
+    /// It previously duplicated the existing result set `num_runs` times, which
+    /// made every downstream variance and significance figure identically zero.
+    ///
+    /// Use [`Self::run_and_check_with`] and pass a closure that re-runs the
+    /// benchmarks.
     pub fn run_and_check(
         &mut self,
-        suite: &mut BenchmarkSuite,
+        _suite: &mut BenchmarkSuite,
     ) -> Result<Vec<PerformanceRegression>> {
-        // Run benchmarks multiple times for statistical significance
-        let mut all_results = Vec::new();
+        Err(anyhow::anyhow!(
+            "run_and_check cannot re-run benchmarks: a BenchmarkSuite carries results, not the \
+             model that produced them. Use run_and_check_with(suite, |suite| \
+             suite.benchmark_inference(&model, \"name\")) so each of the {} runs is really \
+             executed.",
+            self.config.num_runs
+        ))
+    }
+
+    /// Run the benchmarks `num_runs` times and check for regressions.
+    ///
+    /// `run_once` is invoked once per run against a freshly cleared suite, so
+    /// every run produces independent measurements. The per-benchmark samples
+    /// collected this way are what feed the regression test, giving it real
+    /// variance to work with.
+    pub fn run_and_check_with<F>(
+        &mut self,
+        suite: &mut BenchmarkSuite,
+        mut run_once: F,
+    ) -> Result<Vec<PerformanceRegression>>
+    where
+        F: FnMut(&mut BenchmarkSuite) -> Result<()>,
+    {
+        if self.config.num_runs == 0 {
+            return Err(anyhow::anyhow!(
+                "ContinuousBenchmarkConfig::num_runs must be at least 1"
+            ));
+        }
+
+        let mut all_results: Vec<BenchmarkResult> = Vec::new();
 
         for run in 0..self.config.num_runs {
-            println!(
-                "Running benchmark iteration {}/{}",
-                run + 1,
-                self.config.num_runs
+            tracing::info!(
+                run = run + 1,
+                total = self.config.num_runs,
+                "running benchmark iteration"
             );
-            // Note: In real implementation, you'd re-run the benchmarks here
-            // For now, we'll use the existing results
-            all_results.extend(suite.results().to_vec());
+
+            // Each iteration starts from an empty suite so the results really
+            // come from this run.
+            suite.clear_results();
+            run_once(suite)?;
+
+            let results = suite.results();
+            if results.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "benchmark run {} produced no results; refusing to report a regression \
+                     verdict with no measurements",
+                    run + 1
+                ));
+            }
+            all_results.extend(results.to_vec());
         }
 
         // Save results
@@ -103,13 +151,23 @@ impl ContinuousBenchmark {
         let regressions = self.check_regressions(&all_results)?;
 
         // Update history
-        self.history.add_run(run_id, all_results);
+        self.history.add_run(
+            run_id,
+            all_results,
+            self.config.commit_sha.clone(),
+            self.config.branch.clone(),
+            self.config.build_config.clone(),
+        );
         self.history.save(&self.config.results_dir)?;
 
         Ok(regressions)
     }
 
-    /// Check for performance regressions
+    /// Check for performance regressions.
+    ///
+    /// Results are grouped by benchmark name so repeated runs of the same
+    /// benchmark form a sample; the comparison against the baseline run is a
+    /// Welch t-test over those samples, not a single-point ratio.
     fn check_regressions(
         &self,
         current_results: &[BenchmarkResult],
@@ -117,53 +175,50 @@ impl ContinuousBenchmark {
         let mut regressions = Vec::new();
 
         // Get baseline results (previous run on same branch/config)
-        let baseline = self.history.get_baseline(&self.config.branch, &self.config.build_config);
+        let Some(baseline_results) =
+            self.history.get_baseline(&self.config.branch, &self.config.build_config)
+        else {
+            return Ok(regressions);
+        };
 
-        if let Some(baseline_results) = baseline {
-            for current in current_results {
-                if let Some(baseline) = baseline_results.iter().find(|b| b.name == current.name) {
-                    // Check latency regression
-                    let latency_regression = self.check_metric_regression(
-                        &current.name,
-                        "avg_latency",
-                        baseline.avg_latency_ms,
-                        current.avg_latency_ms,
-                        true, // Higher is worse for latency
-                    );
+        let current_by_name = group_by_name(current_results);
+        let baseline_by_name = group_by_name(baseline_results);
 
-                    if let Some(reg) = latency_regression {
-                        regressions.push(reg);
-                    }
+        let mut names: Vec<&String> = current_by_name.keys().collect();
+        names.sort();
 
-                    // Check throughput regression
-                    let throughput_regression = self.check_metric_regression(
-                        &current.name,
-                        "throughput",
-                        baseline.throughput_tokens_per_sec,
-                        current.throughput_tokens_per_sec,
-                        false, // Lower is worse for throughput
-                    );
+        for name in names {
+            let Some(current_group) = current_by_name.get(name) else {
+                continue;
+            };
+            let Some(baseline_group) = baseline_by_name.get(name) else {
+                continue;
+            };
 
-                    if let Some(reg) = throughput_regression {
-                        regressions.push(reg);
-                    }
+            let metrics: [(&str, MetricExtractor, bool); 3] = [
+                ("avg_latency", |r| Some(r.avg_latency_ms), true),
+                ("throughput", |r| Some(r.throughput_tokens_per_sec), false),
+                ("memory", |r| r.memory_bytes.map(|bytes| bytes as f64), true),
+            ];
 
-                    // Check memory regression
-                    if let (Some(baseline_mem), Some(current_mem)) =
-                        (baseline.memory_bytes, current.memory_bytes)
-                    {
-                        let memory_regression = self.check_metric_regression(
-                            &current.name,
-                            "memory",
-                            baseline_mem as f64,
-                            current_mem as f64,
-                            true, // Higher is worse for memory
-                        );
+            for (metric_name, extract, higher_is_worse) in metrics {
+                let current_samples: Vec<f64> =
+                    current_group.iter().filter_map(|result| extract(result)).collect();
+                let baseline_samples: Vec<f64> =
+                    baseline_group.iter().filter_map(|result| extract(result)).collect();
 
-                        if let Some(reg) = memory_regression {
-                            regressions.push(reg);
-                        }
-                    }
+                if current_samples.is_empty() || baseline_samples.is_empty() {
+                    continue;
+                }
+
+                if let Some(regression) = self.check_metric_regression(
+                    name,
+                    metric_name,
+                    &baseline_samples,
+                    &current_samples,
+                    higher_is_worse,
+                ) {
+                    regressions.push(regression);
                 }
             }
         }
@@ -171,37 +226,55 @@ impl ContinuousBenchmark {
         Ok(regressions)
     }
 
-    /// Check regression for a specific metric
+    /// Check regression for a specific metric using the observed samples.
+    ///
+    /// `confidence` is `1 - p` from a Welch t-test over the two samples, so it
+    /// reflects the measured distributions. With a single observation per side
+    /// no test is possible and `confidence` is reported as `0.0` with
+    /// `is_significant = false`, instead of a hardcoded 0.95/0.5.
     fn check_metric_regression(
         &self,
         benchmark_name: &str,
         metric_name: &str,
-        baseline_value: f64,
-        current_value: f64,
+        baseline_samples: &[f64],
+        current_samples: &[f64],
         higher_is_worse: bool,
     ) -> Option<PerformanceRegression> {
+        let baseline_value = crate::statistics::mean(baseline_samples)?;
+        let current_value = crate::statistics::mean(current_samples)?;
+
+        if baseline_value == 0.0 {
+            return None;
+        }
+
         let change_percent = if higher_is_worse {
             (current_value - baseline_value) / baseline_value * 100.0
         } else {
             (baseline_value - current_value) / baseline_value * 100.0
         };
 
-        if change_percent > self.config.regression_threshold {
-            // Simple statistical test - in real implementation, use proper statistics
-            let is_significant = change_percent > self.config.regression_threshold * 2.0;
-
-            Some(PerformanceRegression {
-                benchmark_name: benchmark_name.to_string(),
-                metric_name: metric_name.to_string(),
-                previous_value: baseline_value,
-                current_value,
-                regression_percent: change_percent,
-                is_significant,
-                confidence: if is_significant { 0.95 } else { 0.5 },
-            })
-        } else {
-            None
+        if change_percent <= self.config.regression_threshold {
+            return None;
         }
+
+        let test = crate::statistics::welch_t_test(current_samples, baseline_samples);
+        let (confidence, p_value) = match test {
+            Some(result) => (result.confidence(), result.p_value),
+            // Not enough data (or zero variance on both sides) to run a test.
+            None => (0.0, 1.0),
+        };
+        let alpha = (1.0 - self.config.confidence_level).max(f64::EPSILON);
+        let is_significant = p_value < alpha;
+
+        Some(PerformanceRegression {
+            benchmark_name: benchmark_name.to_string(),
+            metric_name: metric_name.to_string(),
+            previous_value: baseline_value,
+            current_value,
+            regression_percent: change_percent,
+            is_significant,
+            confidence,
+        })
     }
 
     /// Generate run ID
@@ -272,14 +345,21 @@ impl BenchmarkHistory {
         Ok(())
     }
 
-    /// Add a benchmark run
-    fn add_run(&mut self, run_id: String, results: Vec<BenchmarkResult>) {
+    /// Add a benchmark run, recording the real provenance of the run.
+    fn add_run(
+        &mut self,
+        run_id: String,
+        results: Vec<BenchmarkResult>,
+        commit_sha: Option<String>,
+        branch: Option<String>,
+        build_config: String,
+    ) {
         let metadata = RunMetadata {
             run_id: run_id.clone(),
             timestamp: chrono::Utc::now(),
-            commit_sha: None, // Would be set from config
-            branch: None,     // Would be set from config
-            build_config: "release".to_string(),
+            commit_sha,
+            branch,
+            build_config,
         };
 
         self.runs.insert(run_id.clone(), results);
@@ -397,6 +477,18 @@ pub struct PerformanceSummary {
     pub earliest_run: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// Pulls one comparable metric out of a benchmark result.
+type MetricExtractor = fn(&BenchmarkResult) -> Option<f64>;
+
+/// Group benchmark results by benchmark name.
+fn group_by_name(results: &[BenchmarkResult]) -> HashMap<String, Vec<&BenchmarkResult>> {
+    let mut grouped: HashMap<String, Vec<&BenchmarkResult>> = HashMap::new();
+    for result in results {
+        grouped.entry(result.name.clone()).or_default().push(result);
+    }
+    grouped
+}
+
 /// Calculate linear trend from data points
 fn calculate_trend(values: &[f64]) -> f64 {
     if values.len() < 2 {
@@ -426,23 +518,163 @@ fn calculate_trend(values: &[f64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::performance::benchmark::BenchmarkConfig;
+    use std::time::Duration;
+
+    fn test_config(name: &str) -> ContinuousBenchmarkConfig {
+        ContinuousBenchmarkConfig {
+            results_dir: std::env::temp_dir().join(format!(
+                "trustformers_continuous_{}_{}",
+                name,
+                std::process::id()
+            )),
+            ..Default::default()
+        }
+    }
+
+    fn make_result(name: &str, latency_ms: f64) -> BenchmarkResult {
+        BenchmarkResult::from_timings(
+            name.to_string(),
+            "test".to_string(),
+            vec![Duration::from_secs_f64(latency_ms / 1000.0)],
+            1,
+            1,
+            None,
+            None,
+        )
+    }
 
     #[test]
     fn test_regression_detection() {
-        let config = ContinuousBenchmarkConfig::default();
+        let config = test_config("regression");
         let benchmark = ContinuousBenchmark::new(config).expect("operation failed in test");
 
         let regression = benchmark.check_metric_regression(
             "test_benchmark",
             "latency",
-            100.0, // baseline
-            110.0, // current (10% worse)
-            true,  // higher is worse
+            &[100.0, 100.0, 100.0], // baseline
+            &[110.0, 110.0, 110.0], // current (10% worse)
+            true,                   // higher is worse
         );
 
         assert!(regression.is_some());
         let reg = regression.expect("operation failed in test");
-        assert_eq!(reg.regression_percent, 10.0);
+        assert!((reg.regression_percent - 10.0).abs() < 1e-9);
+    }
+
+    /// Regression test: `check_metric_regression` used to stamp
+    /// `confidence: 0.95` whenever the change exceeded twice the threshold and
+    /// `0.5` otherwise, regardless of the data.
+    #[test]
+    fn test_confidence_comes_from_the_observed_distribution() {
+        let benchmark =
+            ContinuousBenchmark::new(test_config("confidence")).expect("operation failed in test");
+
+        // Tight, clearly separated samples: high confidence.
+        let tight = benchmark
+            .check_metric_regression(
+                "bench",
+                "avg_latency",
+                &[100.0, 100.1, 99.9, 100.05],
+                &[120.0, 120.1, 119.9, 120.05],
+                true,
+            )
+            .expect("a 20% regression must be reported");
+        assert!(tight.is_significant);
+        assert!(
+            tight.confidence > 0.999,
+            "confidence {} should be near 1 for cleanly separated samples",
+            tight.confidence
+        );
+
+        // Same mean shift but huge overlap: the same 20% change must not carry
+        // the same confidence.
+        let noisy = benchmark
+            .check_metric_regression(
+                "bench",
+                "avg_latency",
+                &[40.0, 160.0, 60.0, 140.0],
+                &[60.0, 180.0, 80.0, 160.0],
+                true,
+            )
+            .expect("a 20% mean regression must still be reported");
+        assert!(
+            noisy.confidence < tight.confidence,
+            "noisy samples ({}) must not be as confident as tight ones ({})",
+            noisy.confidence,
+            tight.confidence
+        );
+        assert_ne!(noisy.confidence, 0.95);
+        assert_ne!(noisy.confidence, 0.5);
+        assert!(!noisy.is_significant);
+    }
+
+    /// Regression test: `run_and_check` used to copy one result set `num_runs`
+    /// times. It must now refuse, and the replacement must really re-run.
+    #[test]
+    fn test_run_and_check_refuses_to_duplicate_results() {
+        let mut benchmark =
+            ContinuousBenchmark::new(test_config("norerun")).expect("operation failed in test");
+        let mut suite = BenchmarkSuite::new(BenchmarkConfig::default());
+
+        let error = benchmark
+            .run_and_check(&mut suite)
+            .expect_err("must not fabricate repeated runs");
+        assert!(
+            error.to_string().contains("run_and_check_with"),
+            "unexpected error: {}",
+            error
+        );
+    }
+
+    #[test]
+    fn test_run_and_check_with_executes_every_run() {
+        let mut config = test_config("rerun");
+        config.num_runs = 4;
+        let results_dir = config.results_dir.clone();
+        let _ = std::fs::remove_dir_all(&results_dir);
+
+        let mut benchmark = ContinuousBenchmark::new(config).expect("operation failed in test");
+        let mut suite = BenchmarkSuite::new(BenchmarkConfig::default());
+
+        let mut invocations = 0usize;
+        let regressions = benchmark
+            .run_and_check_with(&mut suite, |suite| {
+                invocations += 1;
+                // Each run reports a different latency, so the collected
+                // samples must have non-zero variance.
+                suite.push_result(make_result("synthetic", 100.0 + invocations as f64));
+                Ok(())
+            })
+            .expect("run_and_check_with failed");
+
+        assert_eq!(invocations, 4, "every configured run must be executed");
+        // No baseline exists yet, so no regression can be reported.
+        assert!(regressions.is_empty());
+
+        let stored = benchmark.history.runs.values().next().expect("a run must have been recorded");
+        assert_eq!(stored.len(), 4, "each run contributes one result");
+        let latencies: Vec<f64> = stored.iter().map(|r| r.avg_latency_ms).collect();
+        let variance = crate::statistics::sample_variance(&latencies).expect("4 samples");
+        assert!(
+            variance > 0.0,
+            "duplicated results would give zero variance; got {:?}",
+            latencies
+        );
+
+        let _ = std::fs::remove_dir_all(&results_dir);
+    }
+
+    #[test]
+    fn test_run_and_check_with_rejects_empty_runs() {
+        let mut benchmark =
+            ContinuousBenchmark::new(test_config("empty")).expect("operation failed in test");
+        let mut suite = BenchmarkSuite::new(BenchmarkConfig::default());
+
+        let error = benchmark
+            .run_and_check_with(&mut suite, |_suite| Ok(()))
+            .expect_err("a run that measured nothing must not produce a verdict");
+        assert!(error.to_string().contains("no results"));
     }
 
     #[test]

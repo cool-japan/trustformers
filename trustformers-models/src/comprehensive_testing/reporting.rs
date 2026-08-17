@@ -72,28 +72,39 @@ pub fn generate_test_report(
             perf.overall_performance.tokens_per_second
         ));
         report.push_str(&format!(
-            "**Peak Memory**: {:.1} MB\n",
-            perf.overall_performance.peak_memory_mb
+            "**Peak Memory**: {}\n",
+            format_optional_mb(perf.overall_performance.peak_memory_mb)
         ));
         report.push_str(&format!(
-            "**Memory Efficiency**: {:.1}%\n\n",
-            perf.memory_analysis.efficiency_score
+            "**Memory Efficiency**: {}\n\n",
+            perf.memory_analysis
+                .efficiency_score
+                .map(|score| format!("{score:.1}%"))
+                .unwrap_or_else(|| "not measured".to_string())
         ));
 
-        // Layer performance breakdown
-        report.push_str("### Layer Performance\n\n");
+        // Measured forward passes
+        report.push_str("### Measured Forward Passes\n\n");
         for layer in &perf.layer_performance {
             report.push_str(&format!(
-                "- **{}** ({}): {:.2}ms, {:.1} MB\n",
+                "- **{}** ({}): {:.2}ms, {}\n",
                 layer.layer_name,
                 layer.layer_type,
-                layer.forward_time.as_millis(),
-                layer.memory_usage_mb
+                layer.forward_time.as_secs_f64() * 1000.0,
+                format_optional_mb(layer.memory_usage_mb)
             ));
         }
     }
 
     Ok(report)
+}
+
+/// Render an optional MB measurement, saying so when there is nothing to report.
+fn format_optional_mb(value: Option<f64>) -> String {
+    match value {
+        Some(mb) => format!("{mb:.1} MB"),
+        None => "not measured".to_string(),
+    }
 }
 
 /// Save test report to file

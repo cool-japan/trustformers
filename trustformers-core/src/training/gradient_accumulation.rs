@@ -11,10 +11,7 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq)]
 pub enum GradError {
     /// Number of parameter tensors does not match the buffer.
-    ShapeMismatch {
-        expected: usize,
-        got: usize,
-    },
+    ShapeMismatch { expected: usize, got: usize },
     /// A specific parameter tensor length mismatches.
     TensorLengthMismatch {
         param_idx: usize,
@@ -44,7 +41,7 @@ impl fmt::Display for GradError {
             ),
             GradError::EmptyBuffer => {
                 write!(f, "cannot finalize: no gradients have been accumulated")
-            }
+            },
         }
     }
 }
@@ -157,9 +154,7 @@ impl GradientBuffer {
             });
         }
 
-        for (idx, (buf, incoming)) in
-            self.gradients.iter_mut().zip(grads.iter()).enumerate()
-        {
+        for (idx, (buf, incoming)) in self.gradients.iter_mut().zip(grads.iter()).enumerate() {
             if buf.len() != incoming.len() {
                 return Err(GradError::TensorLengthMismatch {
                     param_idx: idx,
@@ -184,10 +179,7 @@ impl GradientBuffer {
     ///
     /// Returns the accumulated (and possibly normalized/clipped) gradients.
     /// Returns [`GradError::EmptyBuffer`] if no steps have been accumulated.
-    pub fn finalize(
-        &mut self,
-        config: &GradAccumConfig,
-    ) -> Result<Vec<Vec<f32>>, GradError> {
+    pub fn finalize(&mut self, config: &GradAccumConfig) -> Result<Vec<Vec<f32>>, GradError> {
         if self.step_count == 0 {
             return Err(GradError::EmptyBuffer);
         }
@@ -259,8 +251,7 @@ impl GradAccumStats {
         }
         // Update running mean with online (Welford-style) formula.
         let n = self.total_updates as f32;
-        self.mean_grad_norm_before_clip +=
-            (grad_norm - self.mean_grad_norm_before_clip) / n;
+        self.mean_grad_norm_before_clip += (grad_norm - self.mean_grad_norm_before_clip) / n;
         if grad_norm > self.max_grad_norm_seen {
             self.max_grad_norm_seen = grad_norm;
         }
@@ -298,21 +289,15 @@ impl GradientAccumulator {
     ///
     /// Returns `Some(accumulated_grads)` when the accumulation window is
     /// complete; returns `None` when more micro-batches are needed.
-    pub fn step(
-        &mut self,
-        grads: &[Vec<f32>],
-    ) -> Result<Option<Vec<Vec<f32>>>, GradError> {
+    pub fn step(&mut self, grads: &[Vec<f32>]) -> Result<Option<Vec<Vec<f32>>>, GradError> {
         self.buffer.accumulate(grads, &self.config)?;
         self.stats.total_micro_batches += 1;
 
         if self.buffer.is_ready {
             let norm_before = global_grad_norm(&self.buffer.gradients);
             let result = self.buffer.finalize(&self.config)?;
-            let was_clipped = self
-                .config
-                .clip_grad_norm
-                .map(|max| norm_before > max)
-                .unwrap_or(false);
+            let was_clipped =
+                self.config.clip_grad_norm.map(|max| norm_before > max).unwrap_or(false);
             // norm_before is before normalization; for stats we record the
             // normalized norm if applicable.
             let stats_norm = if self.config.normalize_by_steps {
@@ -331,19 +316,13 @@ impl GradientAccumulator {
     ///
     /// Useful at the end of an epoch when the final mini-batch is smaller than
     /// the accumulation window.  Returns `None` if the buffer is empty.
-    pub fn force_finalize(
-        &mut self,
-    ) -> Result<Option<Vec<Vec<f32>>>, GradError> {
+    pub fn force_finalize(&mut self) -> Result<Option<Vec<Vec<f32>>>, GradError> {
         if self.buffer.step_count == 0 {
             return Ok(None);
         }
         let norm_before = global_grad_norm(&self.buffer.gradients);
         let result = self.buffer.finalize(&self.config)?;
-        let was_clipped = self
-            .config
-            .clip_grad_norm
-            .map(|max| norm_before > max)
-            .unwrap_or(false);
+        let was_clipped = self.config.clip_grad_norm.map(|max| norm_before > max).unwrap_or(false);
         let stats_norm = if self.config.normalize_by_steps && self.buffer.step_count > 0 {
             // step_count was already reset; use the pre-reset value captured
             // in norm_before (un-normalised).  We normalise here by the number
@@ -484,7 +463,10 @@ mod tests {
         let mut grads = vec![vec![0.5_f32], vec![0.5_f32]];
         let original = grads.clone();
         clip_grad_norm_(&mut grads, 1.0);
-        assert_eq!(grads, original, "grads should not change when under max_norm");
+        assert_eq!(
+            grads, original,
+            "grads should not change when under max_norm"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -596,7 +578,10 @@ mod tests {
         let grads = vec![vec![1.0_f32; 3]];
         let result = buf.accumulate(&grads, &config);
         match result {
-            Err(GradError::ShapeMismatch { expected: 2, got: 1 }) => {} // correct
+            Err(GradError::ShapeMismatch {
+                expected: 2,
+                got: 1,
+            }) => {}, // correct
             other => panic!("expected ShapeMismatch, got {:?}", other),
         }
     }
@@ -634,7 +619,11 @@ mod tests {
         let grads = vec![vec![1.0_f32, 2.0]]; // length 2 instead of 3
         let result = buf.accumulate(&grads, &config);
         match result {
-            Err(GradError::TensorLengthMismatch { param_idx: 0, expected: 3, got: 2 }) => {} // correct
+            Err(GradError::TensorLengthMismatch {
+                param_idx: 0,
+                expected: 3,
+                got: 2,
+            }) => {}, // correct
             other => panic!("expected TensorLengthMismatch, got {:?}", other),
         }
     }

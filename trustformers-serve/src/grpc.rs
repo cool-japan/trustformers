@@ -2,74 +2,18 @@ use crate::batching::aggregator::{ProcessingOutput, RequestInput};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-/// Get current memory usage as a ratio (0.0 to 1.0)
-fn get_memory_usage() -> f64 {
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(contents) = std::fs::read_to_string("/proc/meminfo") {
-            let mut total_memory = 0u64;
-            let mut available_memory = 0u64;
-
-            for line in contents.lines() {
-                if line.starts_with("MemTotal:") {
-                    if let Some(value) = line.split_whitespace().nth(1) {
-                        total_memory = value.parse().unwrap_or(0);
-                    }
-                } else if line.starts_with("MemAvailable:") {
-                    if let Some(value) = line.split_whitespace().nth(1) {
-                        available_memory = value.parse().unwrap_or(0);
-                    }
-                }
-            }
-
-            if total_memory > 0 && available_memory <= total_memory {
-                return (total_memory - available_memory) as f64 / total_memory as f64;
-            }
-        }
+/// Current system memory usage as a ratio in `[0, 1]`.
+///
+/// Returns `None` when the platform does not report a total, so callers can
+/// report "unknown" instead of assuming a number.
+fn get_memory_usage() -> Option<f64> {
+    let mut system = sysinfo::System::new();
+    system.refresh_memory();
+    let total = system.total_memory();
+    if total == 0 {
+        return None;
     }
-
-    #[cfg(target_os = "macos")]
-    {
-        use std::process::Command;
-        if let Ok(output) = Command::new("vm_stat").output() {
-            if let Ok(vm_stat) = String::from_utf8(output.stdout) {
-                let mut pages_free = 0u64;
-                let mut pages_wired = 0u64;
-                let mut pages_active = 0u64;
-                let mut pages_inactive = 0u64;
-
-                for line in vm_stat.lines() {
-                    if line.contains("Pages free:") {
-                        if let Some(value) = line.split(':').nth(1) {
-                            pages_free = value.trim().trim_end_matches('.').parse().unwrap_or(0);
-                        }
-                    } else if line.contains("Pages wired down:") {
-                        if let Some(value) = line.split(':').nth(1) {
-                            pages_wired = value.trim().trim_end_matches('.').parse().unwrap_or(0);
-                        }
-                    } else if line.contains("Pages active:") {
-                        if let Some(value) = line.split(':').nth(1) {
-                            pages_active = value.trim().trim_end_matches('.').parse().unwrap_or(0);
-                        }
-                    } else if line.contains("Pages inactive:") {
-                        if let Some(value) = line.split(':').nth(1) {
-                            pages_inactive =
-                                value.trim().trim_end_matches('.').parse().unwrap_or(0);
-                        }
-                    }
-                }
-
-                let total_pages = pages_free + pages_wired + pages_active + pages_inactive;
-                if total_pages > 0 {
-                    return (pages_wired + pages_active + pages_inactive) as f64
-                        / total_pages as f64;
-                }
-            }
-        }
-    }
-
-    // Fallback: assume moderate memory usage
-    0.5
+    Some(system.used_memory() as f64 / total as f64)
 }
 
 pub mod inference {
@@ -175,23 +119,37 @@ impl InferenceService for InferenceServiceImpl {
         let batch_id = Uuid::new_v4().to_string();
         let start_time = std::time::Instant::now();
 
-        let mut responses = Vec::new();
-
         let batch_size = req.requests.len();
-        for predict_req in req.requests {
-            let internal_request = crate::batching::Request {
-                id: crate::batching::RequestId::new(),
-                input: RequestInput::Text {
-                    text: predict_req.inputs.join(" "),
-                    max_length: None,
-                },
-                priority: crate::batching::config::Priority::Normal,
-                submitted_at: std::time::Instant::now(),
-                deadline: None,
-                metadata: predict_req.parameters,
-            };
 
-            match self.batching_service.submit_request(internal_request).await {
+        // Submit every sub-request concurrently. Awaiting them one at a time
+        // would serialise the batch and guarantee the aggregator never sees a
+        // batch larger than one, defeating the endpoint.
+        let futures = req.requests.into_iter().map(|predict_req| {
+            let batching_service = self.batching_service.clone();
+            async move {
+                let internal_request = crate::batching::Request {
+                    id: crate::batching::RequestId::new(),
+                    input: RequestInput::Text {
+                        text: predict_req.inputs.join(" "),
+                        max_length: None,
+                    },
+                    priority: crate::batching::config::Priority::Normal,
+                    submitted_at: std::time::Instant::now(),
+                    deadline: None,
+                    metadata: predict_req.parameters,
+                };
+                // Each sub-request measures its own latency.
+                let submitted_at = std::time::Instant::now();
+                let result = batching_service.submit_request(internal_request).await;
+                (result, submitted_at.elapsed())
+            }
+        });
+
+        let outcomes = futures::future::join_all(futures).await;
+
+        let mut responses = Vec::with_capacity(batch_size);
+        for (result, elapsed) in outcomes {
+            match result {
                 Ok(result) => {
                     let outputs = match &result.output {
                         ProcessingOutput::Text(text) => vec![text.clone()],
@@ -215,7 +173,7 @@ impl InferenceService for InferenceServiceImpl {
                     responses.push(PredictResponse {
                         outputs,
                         metadata: Some(PredictionMetadata {
-                            latency_ms: 0, // Individual latency not tracked in batch
+                            latency_ms: elapsed.as_millis() as i64,
                             request_id: Uuid::new_v4().to_string(),
                             timestamp: std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
@@ -321,35 +279,45 @@ impl InferenceService for InferenceServiceImpl {
         let mut health_issues = Vec::new();
         let mut overall_status = HealthStatus::Serving;
 
-        // Check batching service health
-        let stats = self.batching_service.get_stats().await;
-        {
-            // Check if batching service has critical issues
-            if stats.aggregator_stats.pending_requests > 1000 {
-                health_issues.push("High pending request count".to_string());
-                overall_status = HealthStatus::NotServing;
-            }
-            if stats.processor_stats.total_requests == 0
-                && std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-                    > 300
-            // Service running for more than 5 minutes
-            {
-                health_issues.push("No requests processed recently".to_string());
-                overall_status = HealthStatus::NotServing;
-            }
+        // The decisive signal: can this process actually answer an inference
+        // request? A batching stack without a model cannot, whatever its
+        // counters say.
+        if !self.batching_service.has_model() {
+            health_issues.push("No model is configured on the batch executor".to_string());
+            overall_status = HealthStatus::NotServing;
         }
 
-        // Check system resources
-        let memory_usage = get_memory_usage();
-        if memory_usage > 0.9 {
-            // More than 90% memory usage
-            health_issues.push("High memory usage".to_string());
-            if overall_status == HealthStatus::Serving {
-                overall_status = HealthStatus::NotServing;
-            }
+        // Check batching service health. An idle server is healthy; only a
+        // saturated queue is not.
+        let stats = self.batching_service.get_stats().await;
+        if stats.aggregator_stats.pending_requests > 1000 {
+            health_issues.push(format!(
+                "High pending request count: {}",
+                stats.aggregator_stats.pending_requests
+            ));
+            overall_status = HealthStatus::NotServing;
+        }
+        if stats.processor_stats.total_batches > 0 && stats.processor_stats.success_rate < 0.5 {
+            health_issues.push(format!(
+                "Batch success rate is {:.0}%",
+                stats.processor_stats.success_rate * 100.0
+            ));
+            overall_status = HealthStatus::NotServing;
+        }
+
+        // Check system resources. An unavailable measurement is reported as
+        // such rather than being assumed healthy or unhealthy.
+        match get_memory_usage() {
+            Some(memory_usage) if memory_usage > 0.9 => {
+                health_issues.push(format!("High memory usage: {:.0}%", memory_usage * 100.0));
+                if overall_status == HealthStatus::Serving {
+                    overall_status = HealthStatus::NotServing;
+                }
+            },
+            Some(_) => {},
+            None => {
+                health_issues.push("System memory usage is unavailable".to_string());
+            },
         }
 
         // Prepare health check response
@@ -373,47 +341,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_get_memory_usage_returns_valid_ratio() {
-        let usage = get_memory_usage();
+    fn test_get_memory_usage_is_measured_or_absent() {
+        match get_memory_usage() {
+            Some(usage) => {
+                assert!(usage.is_finite(), "memory usage should be a finite number");
+                assert!(!usage.is_nan(), "memory usage should not be NaN");
+                assert!(
+                    (0.0..=1.0).contains(&usage),
+                    "memory usage should be a ratio, got {usage}"
+                );
+            },
+            None => {
+                // Platform reports no total memory; reporting "unknown" is the
+                // honest answer and is explicitly allowed.
+            },
+        }
+    }
+
+    /// Regression: the probe must not fall back to a hardcoded 0.5.
+    #[test]
+    fn test_get_memory_usage_is_not_a_constant_placeholder() {
+        let usage = get_memory_usage().expect("this platform reports total memory");
+        let mut system = sysinfo::System::new();
+        system.refresh_memory();
+        let expected = system.used_memory() as f64 / system.total_memory() as f64;
+        // Sampled a moment apart, so allow drift but not a fixed constant.
         assert!(
-            usage >= 0.0,
-            "memory usage should be non-negative, got {}",
-            usage
+            (usage - expected).abs() < 0.2,
+            "reported {usage} is unrelated to the measured {expected}"
         );
-        assert!(usage <= 1.0, "memory usage should be <= 1.0, got {}", usage);
-    }
-
-    #[test]
-    fn test_get_memory_usage_is_finite() {
-        let usage = get_memory_usage();
-        assert!(usage.is_finite(), "memory usage should be a finite number");
-    }
-
-    #[test]
-    fn test_get_memory_usage_not_nan() {
-        let usage = get_memory_usage();
-        assert!(!usage.is_nan(), "memory usage should not be NaN");
-    }
-
-    #[test]
-    fn test_get_memory_usage_not_negative() {
-        let usage = get_memory_usage();
-        assert!(usage >= 0.0);
-    }
-
-    #[test]
-    fn test_get_memory_usage_not_greater_than_one() {
-        let usage = get_memory_usage();
-        assert!(usage <= 1.0);
-    }
-
-    #[test]
-    fn test_get_memory_usage_called_twice_returns_valid() {
-        // Two calls should both return valid values
-        let u1 = get_memory_usage();
-        let u2 = get_memory_usage();
-        assert!((0.0..=1.0).contains(&u1));
-        assert!((0.0..=1.0).contains(&u2));
     }
 
     #[test]
@@ -557,5 +513,65 @@ mod tests {
         let service = InferenceServiceImpl::new(batching_service, config);
         let _server = service.into_service();
         // into_service should not panic
+    }
+
+    /// Regression: `health_check` used to compare the absolute Unix timestamp
+    /// against 300 and therefore reported `NOT_SERVING` on every call. It must
+    /// now reflect the real serving state: `NOT_SERVING` only while no model is
+    /// configured, `SERVING` once one is.
+    #[tokio::test]
+    async fn health_check_reflects_real_serving_state() {
+        use crate::batching::model_executor::{ByteTokenizer, Gpt2BatchModel};
+        use crate::batching::{DynamicBatchingService, ModelBatchExecutor};
+        use crate::ServerConfig;
+        use std::sync::Arc;
+        use trustformers_models::gpt2::Gpt2Config;
+
+        let config = ServerConfig::default();
+
+        // Without a model the service must say so.
+        let without_model = InferenceServiceImpl::new(
+            DynamicBatchingService::new(config.batching_config.clone()),
+            config.clone(),
+        );
+        let response = without_model
+            .health_check(Request::new(HealthCheckRequest::default()))
+            .await
+            .expect("health check must answer")
+            .into_inner();
+        assert_eq!(response.status, HealthStatus::NotServing as i32);
+        assert!(response.message.contains("No model is configured"));
+
+        // With a real model wired in, an idle server is healthy.
+        let gpt2_config = Gpt2Config {
+            vocab_size: ByteTokenizer::VOCAB_SIZE,
+            n_positions: 16,
+            n_embd: 8,
+            n_layer: 1,
+            n_head: 2,
+            n_inner: Some(16),
+            resid_pdrop: 0.0,
+            embd_pdrop: 0.0,
+            attn_pdrop: 0.0,
+            ..Gpt2Config::default()
+        };
+        let model = Arc::new(Gpt2BatchModel::untrained(gpt2_config).expect("model builds"));
+        let executor =
+            Arc::new(ModelBatchExecutor::new(model).with_tokenizer(Arc::new(ByteTokenizer)));
+        let with_model = InferenceServiceImpl::new(
+            DynamicBatchingService::with_executor(config.batching_config.clone(), executor),
+            config,
+        );
+        let response = with_model
+            .health_check(Request::new(HealthCheckRequest::default()))
+            .await
+            .expect("health check must answer")
+            .into_inner();
+        assert_eq!(
+            response.status,
+            HealthStatus::Serving as i32,
+            "an idle but model-backed server must report SERVING, got: {}",
+            response.message
+        );
     }
 }

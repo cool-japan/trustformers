@@ -40,7 +40,7 @@ The `trustformers` crate is the main integration crate providing high-level APIs
   - Tests: cargo build --all-features; the pre-written #[cfg(test)] modules in versioned_cache.rs/parallel_loader.rs/adapter.rs/lora.rs run for the first time.
   - Risk: low — crate already blankets #![allow(dead_code, unused_variables, unused_imports, unused_assignments)].
   - **Result (re-verified 2026-07-09):** `pub mod cache;`, `pub mod finetuning;`, `pub mod loading;` all present in `trustformers/src/lib.rs`; `cargo check -p trustformers --all-features` compiles clean (0 warnings). 61 embedded `#[test]` functions across the 4 source files (versioned_cache.rs, adapter.rs, lora.rs, parallel_loader.rs) now compile and run.
-- [ ] **MODEL SEARCH** - No `search_models`/Hub-search implementation exists anywhere in `src/`. A prior version of this document listed Hub model search as complete; that was incorrect and has been corrected here.
+- [x] **MODEL SEARCH** - see the "Model Search" section below for the current status and implementation location.
 
 ### Metrics (re-verified 2026-07-01)
 
@@ -405,7 +405,12 @@ let model_path = download_model("private-org/private-model", Some(options))?;
 
 **Search for models on Hub**
 
-- [ ] **Not implemented.** A previous revision of this document listed Hub model search (search by task/language, sort by downloads, filter by library) as complete with a `search_models()` example. No such function exists anywhere in `src/` — this was incorrect and has been corrected. Tracked as a genuine future enhancement below.
+- [x] **Implemented.** `trustformers::hub_search::search_models(&ModelSearchQuery)` queries the real
+  `GET /api/models` endpoint (search text, author, task/`filter`, `library`, `language`, and
+  `sort`/`direction` by downloads, likes, or last-modified), behind the `hub` feature. Without `hub`
+  it returns a structured `TrustformersError::Hub` instead of fabricated results. The JSON→struct
+  mapping (`model_search_result_from_json`) is unit-tested offline, mirroring
+  `hub_offline_packs.rs`'s `model_info_from_hub_json` split. File: `trustformers/src/hub_search.rs`.
 
 ---
 
@@ -465,7 +470,6 @@ A grep for `todo!()`/`unimplemented!()` across `src/` returns exactly 12 hits. A
   - Tests: cargo build/cargo test --all-features — this is the real test, since these files have never been compiled and may have drifted against sibling types.
   - Risk: explicit escape hatch — if the build surfaces non-trivial API drift in any of the 10 files, fix what's cheap; for anything that would balloon into a real redesign, `git checkout -- <that one file>` to revert just that file's wiring and leave it un-mounted for a follow-up, rather than let this one item consume the whole batch's budget. Report which (if any) files were reverted.
   - **Result (re-verified 2026-07-09):** all 10 landed — none reverted. `grep -n "^pub mod " src/pipeline/mod.rs` shows all of `audio_generation`, `document_classification`, `feature_extraction`, `image_segmentation`, `speech_recognition`, `table_question_answering`, `text_to_image`, `video_classification`, `visual_grounding`, `zero_shot_audio_classification` present, and `cargo check -p trustformers --all-features` compiles clean. However, every one of the 10 is confirmed-by-source-reading a **mock**: each returns deterministic, hash- or heuristic-derived output (e.g. `generate_mock_waveform`, `mock_embed`, `mock_score`, djb2-hash pixel/embedding synthesis) rather than running real inference. None implement the `Pipeline` trait or are reachable via the `pipeline()` factory — see README.md's Pipeline API section.
-- [ ] **Hub model search** — no `search_models` implementation exists; needs designing and implementing from scratch (see corrected "Model Search" section above)
 - [x] Re-enable 2 disabled test modules (planned 2026-07-05)
   - Goal: flip both #[cfg(test_disabled)] blocks back on.
   - Design: Module A (pipeline/conversational/config/utils.rs) — its "removed types" (PersonaConfigBuilder, ConfigurationPresets) already exist again with matching signatures; likely just flip the cfg and delete the stale comment, then fix whatever the compiler actually flags. Module B (auto/feature_extractors/mod.rs) — one-line wrong-import fix: change `use trustformers_core::errors::TrustformersError;` (a struct with no InvalidInput variant) to `use crate::error::TrustformersError;` (the local enum that has one).
@@ -520,7 +524,6 @@ A grep for `todo!()`/`unimplemented!()` across `src/` returns exactly 12 hits. A
 
 - `src/finetuning/`, `src/cache/`, and `src/loading/` (~2,754 lines) were mounted into `lib.rs` in 0.2.0 and are now part of the compiled crate and public API (see "Wire finetuning/ + cache/ + loading/ into lib.rs" above) — real, tested implementations. Remaining refinement: default LoRA rank/target-layer choices, PEFT-variant prioritization beyond LoRA/adapters, and benchmarking the parallel loader/cache against a concrete performance target (see Remaining Work).
 - **Mock pipelines:** the ten pipeline source files mounted in 0.2.0 (`audio_generation`, `document_classification`, `feature_extraction`, `image_segmentation`, `speech_recognition`, `table_question_answering`, `text_to_image`, `video_classification`, `visual_grounding`, `zero_shot_audio_classification` — see "Wire 10 orphaned pipeline drafts" above) all compile in now, but every one is a deterministic mock pending a real model backend, and none implement the `Pipeline` trait or are reachable via the `pipeline()` factory. `AutoModelForObjectDetection`/`AutoModelForImageSegmentation` (also added 0.2.0) wrap mock pipelines for the same reason, matching the pre-existing `AutoModelForImageClassification`/`AutoModelForAudioClassification`.
-- Hub model search is unimplemented (previously mis-documented as complete).
 - One example (`conversational_ai.rs.disabled`) is disabled pending an API rework (the two previously-disabled `#[cfg(test_disabled)]` test modules noted in earlier revisions of this document have since been re-enabled as ordinary `#[cfg(test)]` modules — confirmed via source, 2026-07-09).
 - Some pipelines require specific model types.
 - Hub download requires the optional `hub` feature plus an internet connection.

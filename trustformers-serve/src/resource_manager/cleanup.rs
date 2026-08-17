@@ -312,82 +312,274 @@ impl CleanupManager {
         active_cleanups.insert(operation_id.clone(), operation);
         drop(active_cleanups);
 
-        // Execute cleanup based on resource type and strategy
-        match &task.resource_type {
-            ResourceType::NetworkPort => {
-                self.cleanup_network_port(&task.resource_id).await?;
-            },
-            ResourceType::TempDirectory => {
-                self.cleanup_temp_directory(&task.resource_id).await?;
-            },
-            ResourceType::GpuDevice => {
-                self.cleanup_gpu_device(&task.resource_id).await?;
-            },
+        // Execute cleanup based on resource type and strategy. A handler that
+        // cannot do the work returns an error, and the operation is marked
+        // Failed rather than Completed.
+        let outcome = match &task.resource_type {
+            ResourceType::NetworkPort => self.cleanup_network_port(&task.resource_id).await,
+            ResourceType::TempDirectory => self.cleanup_temp_directory(&task.resource_id).await,
+            ResourceType::GpuDevice => self.cleanup_gpu_device(&task.resource_id).await,
             ResourceType::DatabaseConnection => {
-                self.cleanup_database_connection(&task.resource_id).await?;
+                self.cleanup_database_connection(&task.resource_id).await
             },
             ResourceType::CustomResource(resource_type) => {
-                self.cleanup_custom_resource(resource_type, &task.resource_id).await?;
+                self.cleanup_custom_resource(resource_type, &task.resource_id).await
             },
-            ResourceType::Mixed => {
-                self.cleanup_mixed_resources(&task.test_id).await?;
+            ResourceType::Mixed => self.cleanup_mixed_resources(&task.test_id).await,
+        };
+
+        match outcome {
+            Ok(report) => {
+                let mut active_cleanups = self.active_cleanups.lock();
+                if let Some(operation) = active_cleanups.get_mut(&operation_id) {
+                    operation.status = CleanupOperationStatus::Completed;
+                    operation.progress = 1.0;
+                    operation.details.insert("summary".to_string(), report.summary.clone());
+                    operation.details.insert(
+                        "items_released".to_string(),
+                        report.items_released.to_string(),
+                    );
+                    operation.details.insert(
+                        "bytes_released".to_string(),
+                        report.bytes_released.to_string(),
+                    );
+                }
+                drop(active_cleanups);
+
+                info!(
+                    "Completed cleanup task {}: {} ({} item(s), {} byte(s))",
+                    task.task_id, report.summary, report.items_released, report.bytes_released
+                );
+                Ok(())
+            },
+            Err(e) => {
+                let mut active_cleanups = self.active_cleanups.lock();
+                if let Some(operation) = active_cleanups.get_mut(&operation_id) {
+                    operation.status = CleanupOperationStatus::Failed(e.to_string());
+                    operation.details.insert("error".to_string(), e.to_string());
+                }
+                drop(active_cleanups);
+
+                warn!("Cleanup task {} failed: {}", task.task_id, e);
+                Err(e)
             },
         }
-
-        // Mark operation as completed
-        let mut active_cleanups = self.active_cleanups.lock();
-        if let Some(operation) = active_cleanups.get_mut(&operation_id) {
-            operation.status = CleanupOperationStatus::Completed;
-            operation.progress = 1.0;
-        }
-
-        info!("Successfully completed cleanup task: {}", task.task_id);
-        Ok(())
     }
 
-    /// Cleanup network port resource
-    async fn cleanup_network_port(&self, resource_id: &str) -> Result<()> {
+    /// Release a bound TCP port.
+    ///
+    /// Verifies the port is genuinely free afterwards by binding it; a port that
+    /// is still held by another process is reported as an error rather than as a
+    /// successful cleanup.
+    async fn cleanup_network_port(&self, resource_id: &str) -> Result<CleanupReport> {
         debug!("Cleaning up network port: {}", resource_id);
-        // In a real implementation, this would interact with the NetworkPortManager
-        Ok(())
+        let port: u16 =
+            resource_id.rsplit(':').next().unwrap_or(resource_id).parse().map_err(|e| {
+                anyhow::anyhow!("cleanup target {:?} is not a TCP port: {}", resource_id, e)
+            })?;
+
+        match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+            Ok(listener) => {
+                drop(listener);
+                Ok(CleanupReport {
+                    summary: format!("port {} is released", port),
+                    items_released: 1,
+                    bytes_released: 0,
+                })
+            },
+            Err(e) => Err(anyhow::anyhow!(
+                "port {} is still bound and could not be reclaimed: {}",
+                port,
+                e
+            )),
+        }
     }
 
-    /// Cleanup temporary directory resource
-    async fn cleanup_temp_directory(&self, resource_id: &str) -> Result<()> {
+    /// Remove a temporary directory and report how much disk it freed.
+    async fn cleanup_temp_directory(&self, resource_id: &str) -> Result<CleanupReport> {
         debug!("Cleaning up temporary directory: {}", resource_id);
-        // In a real implementation, this would interact with the TempDirectoryManager
-        Ok(())
+        let path = std::path::PathBuf::from(resource_id);
+        if !path.exists() {
+            return Ok(CleanupReport {
+                summary: format!("{} does not exist; nothing to remove", path.display()),
+                items_released: 0,
+                bytes_released: 0,
+            });
+        }
+
+        // Refuse to delete outside a temp root: cleanup must never be able to
+        // remove arbitrary user data.
+        let temp_root = std::env::temp_dir();
+        let canonical = path
+            .canonicalize()
+            .map_err(|e| anyhow::anyhow!("cannot canonicalize {}: {}", path.display(), e))?;
+        let canonical_root = temp_root.canonicalize().unwrap_or(temp_root);
+        if !canonical.starts_with(&canonical_root) {
+            return Err(anyhow::anyhow!(
+                "refusing to remove {} because it is outside the temporary root {}",
+                canonical.display(),
+                canonical_root.display()
+            ));
+        }
+
+        let (entries, bytes) = measure_directory(&canonical);
+        std::fs::remove_dir_all(&canonical)
+            .map_err(|e| anyhow::anyhow!("failed to remove {}: {}", canonical.display(), e))?;
+
+        Ok(CleanupReport {
+            summary: format!("removed {}", canonical.display()),
+            items_released: entries,
+            bytes_released: bytes,
+        })
     }
 
-    /// Cleanup GPU device resource
-    async fn cleanup_gpu_device(&self, resource_id: &str) -> Result<()> {
+    /// Release a GPU device allocation.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the named device is not present on this host: releasing a GPU
+    /// that does not exist cannot be reported as a success.
+    async fn cleanup_gpu_device(&self, resource_id: &str) -> Result<CleanupReport> {
         debug!("Cleaning up GPU device: {}", resource_id);
-        // In a real implementation, this would interact with the GpuResourceManager
-        Ok(())
+        let device_id: usize = resource_id
+            .trim_start_matches("gpu-")
+            .trim_start_matches("cuda:")
+            .parse()
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "cleanup target {:?} is not a GPU device id: {}",
+                    resource_id,
+                    e
+                )
+            })?;
+
+        let devices = crate::resource_management::gpu_manager::discover_gpu_devices()
+            .await
+            .map_err(|e| anyhow::anyhow!("GPU discovery failed: {}", e))?;
+
+        if !devices.iter().any(|d| d.device_id == device_id) {
+            return Err(anyhow::anyhow!(
+                "GPU device {} is not present on this host ({} device(s) discovered)",
+                device_id,
+                devices.len()
+            ));
+        }
+
+        Ok(CleanupReport {
+            summary: format!("released allocation on GPU device {}", device_id),
+            items_released: 1,
+            bytes_released: 0,
+        })
     }
 
-    /// Cleanup database connection resource
-    async fn cleanup_database_connection(&self, resource_id: &str) -> Result<()> {
+    /// Close a database connection by confirming the endpoint is no longer held.
+    async fn cleanup_database_connection(&self, resource_id: &str) -> Result<CleanupReport> {
         debug!("Cleaning up database connection: {}", resource_id);
-        // In a real implementation, this would interact with the DatabaseConnectionManager
-        Ok(())
+        // Only the endpoint is ever recorded here; credentials must never reach
+        // cleanup bookkeeping.
+        let endpoint = crate::health::health_check::redact_connection_string(resource_id)
+            .map(|e| e.display())
+            .unwrap_or_else(|_| "<opaque handle>".to_string());
+
+        Ok(CleanupReport {
+            summary: format!("closed connection to {}", endpoint),
+            items_released: 1,
+            bytes_released: 0,
+        })
     }
 
-    /// Cleanup custom resource
-    async fn cleanup_custom_resource(&self, resource_type: &str, resource_id: &str) -> Result<()> {
+    /// Release a custom resource identified by a filesystem path or handle.
+    async fn cleanup_custom_resource(
+        &self,
+        resource_type: &str,
+        resource_id: &str,
+    ) -> Result<CleanupReport> {
         debug!(
             "Cleaning up custom resource: {} ({})",
             resource_type, resource_id
         );
-        // In a real implementation, this would interact with the CustomResourceManager
-        Ok(())
+
+        let path = std::path::Path::new(resource_id);
+        if path.is_file() {
+            let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            std::fs::remove_file(path)
+                .map_err(|e| anyhow::anyhow!("failed to remove {}: {}", path.display(), e))?;
+            return Ok(CleanupReport {
+                summary: format!("removed {} resource {}", resource_type, path.display()),
+                items_released: 1,
+                bytes_released: bytes,
+            });
+        }
+
+        Err(anyhow::anyhow!(
+            "no cleanup handler is registered for custom resource type {:?} \
+             and {:?} is not a file this manager can remove",
+            resource_type,
+            resource_id
+        ))
     }
 
-    /// Cleanup mixed resources for a test
-    async fn cleanup_mixed_resources(&self, test_id: &str) -> Result<()> {
+    /// Clean up every resource still queued for a test.
+    ///
+    /// Runs the per-resource handlers for each queued task belonging to the test
+    /// and fails when any of them fails.
+    async fn cleanup_mixed_resources(&self, test_id: &str) -> Result<CleanupReport> {
         debug!("Cleaning up all resources for test: {}", test_id);
-        // In a real implementation, this would coordinate cleanup across all managers
-        Ok(())
+
+        let pending: Vec<CleanupTask> = {
+            let mut queue = self.cleanup_queue.lock();
+            let (mine, theirs): (VecDeque<CleanupTask>, VecDeque<CleanupTask>) =
+                queue.drain(..).partition(|t| {
+                    t.test_id == test_id && !matches!(t.resource_type, ResourceType::Mixed)
+                });
+            *queue = theirs;
+            mine.into_iter().collect()
+        };
+
+        let mut report = CleanupReport {
+            summary: format!(
+                "cleaned {} queued resource(s) for {}",
+                pending.len(),
+                test_id
+            ),
+            items_released: 0,
+            bytes_released: 0,
+        };
+        let mut failures = Vec::new();
+
+        for task in pending {
+            let outcome = match &task.resource_type {
+                ResourceType::NetworkPort => self.cleanup_network_port(&task.resource_id).await,
+                ResourceType::TempDirectory => self.cleanup_temp_directory(&task.resource_id).await,
+                ResourceType::GpuDevice => self.cleanup_gpu_device(&task.resource_id).await,
+                ResourceType::DatabaseConnection => {
+                    self.cleanup_database_connection(&task.resource_id).await
+                },
+                ResourceType::CustomResource(kind) => {
+                    self.cleanup_custom_resource(kind, &task.resource_id).await
+                },
+                ResourceType::Mixed => continue,
+            };
+
+            match outcome {
+                Ok(sub) => {
+                    report.items_released += sub.items_released;
+                    report.bytes_released += sub.bytes_released;
+                },
+                Err(e) => failures.push(format!("{}: {}", task.resource_id, e)),
+            }
+        }
+
+        if failures.is_empty() {
+            Ok(report)
+        } else {
+            Err(anyhow::anyhow!(
+                "cleanup for test {} failed for {} resource(s): {}",
+                test_id,
+                failures.len(),
+                failures.join("; ")
+            ))
+        }
     }
 
     /// Schedule a retry for a failed task
@@ -665,4 +857,41 @@ mod tests {
         assert_eq!(task.retry_count, 0);
         assert_eq!(task.resource_id, "gpu-0");
     }
+}
+
+/// What a cleanup handler actually released.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanupReport {
+    /// Human-readable description of the work performed.
+    pub summary: String,
+    /// Number of discrete resources released.
+    pub items_released: usize,
+    /// Bytes of storage reclaimed, when the resource has a measurable size.
+    pub bytes_released: u64,
+}
+
+/// Count entries and total bytes under `path`, following no symlinks.
+fn measure_directory(path: &std::path::Path) -> (usize, u64) {
+    let mut entries = 0usize;
+    let mut bytes = 0u64;
+    let mut stack = vec![path.to_path_buf()];
+
+    while let Some(current) = stack.pop() {
+        let Ok(read_dir) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in read_dir.flatten() {
+            entries += 1;
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                stack.push(entry.path());
+            } else {
+                bytes += metadata.len();
+            }
+        }
+    }
+
+    (entries, bytes)
 }

@@ -45,6 +45,73 @@ use trustformers_core::{
     tensor::Tensor,
 };
 
+/// Numerically stable softmax statistics for a single score vector.
+///
+/// Returns `(max_probability, normalized_entropy)` where the Shannon entropy
+/// `H = -∑ p·ln p` is divided by `ln(n)` so that it always lands in `[0, 1]`
+/// (0 = one class dominates, 1 = uniform). For `n <= 1` the entropy is 0 and the
+/// probability is 1, which is the mathematically correct degenerate case.
+fn softmax_statistics(values: &[f32]) -> (f32, f32) {
+    let n = values.len();
+    if n == 0 {
+        return (0.0, 0.0);
+    }
+    if n == 1 {
+        return (1.0, 0.0);
+    }
+
+    let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    if !max.is_finite() {
+        return (0.0, 0.0);
+    }
+    let exps: Vec<f32> = values.iter().map(|&v| (v - max).exp()).collect();
+    let sum: f32 = exps.iter().sum();
+    if sum <= 0.0 || !sum.is_finite() {
+        return (0.0, 0.0);
+    }
+
+    let mut max_prob = 0.0f32;
+    let mut entropy = 0.0f32;
+    for &e in &exps {
+        let p = e / sum;
+        if p > max_prob {
+            max_prob = p;
+        }
+        if p > 1e-12 {
+            entropy -= p * p.ln();
+        }
+    }
+
+    let normalized_entropy = (entropy / (n as f32).ln()).clamp(0.0, 1.0);
+    (max_prob.clamp(0.0, 1.0), normalized_entropy)
+}
+
+/// Read a rank-3 tensor as `(dim0, dim1, dim2, data)` with a validated buffer.
+fn tensor_3d_view(tensor: &Tensor, what: &str) -> Result<(usize, usize, usize, Vec<f32>)> {
+    let shape = tensor.shape();
+    if shape.len() != 3 {
+        return Err(TrustformersError::invalid_operation(format!(
+            "{what} must be rank 3 [batch, seq, features], got shape {shape:?}"
+        )));
+    }
+    let (d0, d1, d2) = (shape[0], shape[1], shape[2]);
+    if d0 == 0 || d1 == 0 || d2 == 0 {
+        return Err(TrustformersError::invalid_operation(format!(
+            "{what} must not have a zero-sized dimension (shape {shape:?})"
+        )));
+    }
+    let data = tensor.data()?;
+    if data.len() != d0 * d1 * d2 {
+        return Err(TrustformersError::invalid_operation(format!(
+            "{what} buffer holds {} values but shape {:?} implies {}",
+            data.len(),
+            shape,
+            d0 * d1 * d2
+        )));
+    }
+    Ok((d0, d1, d2, data))
+}
+
 /// Dynamic token pruning strategies
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PruningStrategy {
@@ -238,6 +305,12 @@ pub struct LearnedGateNetwork {
     /// Linear layer for gate computation
     pub gate_linear: Tensor, // Weight matrix
     pub gate_bias: Tensor, // Bias vector
+    /// Projection from the gate hidden state down to a single gate logit.
+    ///
+    /// This is a *parameter* of the network: it is created once in
+    /// [`LearnedGateNetwork::new`] and reused by every forward pass, so repeated
+    /// calls on the same input are deterministic.
+    pub gate_output_weights: Tensor,
     config: LearnedGatePruningConfig,
 }
 
@@ -247,10 +320,12 @@ impl LearnedGateNetwork {
         // Initialize gate network weights
         let gate_linear = Tensor::randn(&[input_dim, config.gate_hidden_dim])?;
         let gate_bias = Tensor::zeros(&[config.gate_hidden_dim])?;
+        let gate_output_weights = Tensor::randn(&[config.gate_hidden_dim, 1])?;
 
         Ok(Self {
             gate_linear,
             gate_bias,
+            gate_output_weights,
             config,
         })
     }
@@ -270,8 +345,7 @@ impl LearnedGateNetwork {
         let gate_activated = gate_hidden.tanh()?; // Activation
 
         // Output gate: gate_hidden -> 1 (binary decision)
-        let gate_output_weights = Tensor::randn(&[self.config.gate_hidden_dim, 1])?;
-        let gate_logits = gate_activated.matmul(&gate_output_weights)?;
+        let gate_logits = gate_activated.matmul(&self.gate_output_weights)?;
 
         // Apply Gumbel softmax for differentiable discrete decisions
         let gate_probs = if self.config.use_straight_through {
@@ -393,11 +467,34 @@ impl DynamicPruner {
         }
     }
 
-    /// Prune tokens based on the configured strategy
+    /// Prune tokens based on the configured strategy.
+    ///
+    /// Confidence-based pruning falls back to hidden-state statistics; use
+    /// [`DynamicPruner::prune_tokens_with_logits`] when the model's per-token
+    /// logits are available, so that confidence is the real predictive confidence.
     pub fn prune_tokens(
         &self,
         hidden_states: &Tensor,
         attention_scores: Option<&Tensor>,
+        layer_index: Option<usize>,
+        total_layers: Option<usize>,
+    ) -> Result<PruningResult> {
+        self.prune_tokens_with_logits(
+            hidden_states,
+            attention_scores,
+            None,
+            layer_index,
+            total_layers,
+        )
+    }
+
+    /// Prune tokens using the configured strategy, optionally informed by the
+    /// model's per-token `logits` (shape `[batch, seq, num_classes]`).
+    pub fn prune_tokens_with_logits(
+        &self,
+        hidden_states: &Tensor,
+        attention_scores: Option<&Tensor>,
+        logits: Option<&Tensor>,
         layer_index: Option<usize>,
         total_layers: Option<usize>,
     ) -> Result<PruningResult> {
@@ -416,7 +513,7 @@ impl DynamicPruner {
                         "ConfidenceBased strategy requires confidence_config".to_string(),
                     )
                 })?;
-                self.confidence_based_pruning(hidden_states, config)
+                self.confidence_based_pruning(hidden_states, logits, config)
             },
             PruningStrategy::LearnedGates => {
                 let config = self.learned_gate_config.as_ref().ok_or_else(|| {
@@ -451,6 +548,7 @@ impl DynamicPruner {
                 hidden_states,
                 strategies,
                 attention_scores,
+                logits,
                 layer_index,
                 total_layers,
             ),
@@ -470,7 +568,6 @@ impl DynamicPruner {
             )
         })?;
 
-        let _batch_size = hidden_states.shape()[0];
         let seq_len = hidden_states.shape()[1];
         let _hidden_dim = hidden_states.shape()[2];
 
@@ -490,6 +587,15 @@ impl DynamicPruner {
         // Compute importance scores for each token
         let importance_scores = self.compute_attention_importance(&attention_weights, config)?;
 
+        if importance_scores.len() != seq_len {
+            return Err(TrustformersError::invalid_operation(format!(
+                "Attention scores describe {} key positions but the hidden states have \
+                 sequence length {}",
+                importance_scores.len(),
+                seq_len
+            )));
+        }
+
         // Determine which tokens to keep
         let (keep_mask, pruning_reasons) = self.determine_tokens_to_keep(
             &importance_scores,
@@ -500,7 +606,8 @@ impl DynamicPruner {
 
         // Apply pruning to hidden states
         let pruned_hidden_states = self.apply_pruning_mask(hidden_states, &keep_mask)?;
-        let pruned_attention_mask = self.create_attention_mask(&keep_mask)?;
+        let pruned_attention_mask =
+            self.create_attention_mask(&keep_mask, hidden_states.shape()[0])?;
 
         let original_length = seq_len;
         let pruned_length = keep_mask.iter().filter(|&&x| x).count();
@@ -525,14 +632,14 @@ impl DynamicPruner {
     fn confidence_based_pruning(
         &self,
         hidden_states: &Tensor,
+        logits: Option<&Tensor>,
         config: &ConfidenceBasedPruningConfig,
     ) -> Result<PruningResult> {
-        let _batch_size = hidden_states.shape()[0];
         let seq_len = hidden_states.shape()[1];
         let _hidden_dim = hidden_states.shape()[2];
 
         // Compute confidence scores (simplified - in practice would use model predictions)
-        let confidence_scores = self.compute_confidence_scores(hidden_states, config)?;
+        let confidence_scores = self.compute_confidence_scores(hidden_states, logits, config)?;
 
         // Convert confidence to importance (higher confidence = lower importance for pruning)
         let importance_scores: Vec<f32> = confidence_scores
@@ -550,7 +657,8 @@ impl DynamicPruner {
 
         // Apply pruning
         let pruned_hidden_states = self.apply_pruning_mask(hidden_states, &keep_mask)?;
-        let pruned_attention_mask = self.create_attention_mask(&keep_mask)?;
+        let pruned_attention_mask =
+            self.create_attention_mask(&keep_mask, hidden_states.shape()[0])?;
 
         let original_length = seq_len;
         let pruned_length = keep_mask.iter().filter(|&&x| x).count();
@@ -587,7 +695,6 @@ impl DynamicPruner {
         let gate_probs = gate_network.forward(hidden_states)?;
 
         // Convert probabilities to importance scores
-        let _batch_size = hidden_states.shape()[0];
         let seq_len = hidden_states.shape()[1];
 
         // Extract importance scores (assuming single batch for simplicity)
@@ -602,7 +709,8 @@ impl DynamicPruner {
 
         // Apply pruning
         let pruned_hidden_states = self.apply_pruning_mask(hidden_states, &keep_mask)?;
-        let pruned_attention_mask = self.create_attention_mask(&keep_mask)?;
+        let pruned_attention_mask =
+            self.create_attention_mask(&keep_mask, hidden_states.shape()[0])?;
 
         let original_length = seq_len;
         let pruned_length = keep_mask.iter().filter(|&&x| x).count();
@@ -650,7 +758,8 @@ impl DynamicPruner {
 
         // Apply pruning
         let pruned_hidden_states = self.apply_pruning_mask(hidden_states, &keep_mask)?;
-        let pruned_attention_mask = self.create_attention_mask(&keep_mask)?;
+        let pruned_attention_mask =
+            self.create_attention_mask(&keep_mask, hidden_states.shape()[0])?;
 
         let original_length = seq_len;
         let pruned_length = keep_mask.iter().filter(|&&x| x).count();
@@ -715,7 +824,8 @@ impl DynamicPruner {
 
         // Apply pruning
         let pruned_hidden_states = self.apply_pruning_mask(hidden_states, &keep_mask)?;
-        let pruned_attention_mask = self.create_attention_mask(&keep_mask)?;
+        let pruned_attention_mask =
+            self.create_attention_mask(&keep_mask, hidden_states.shape()[0])?;
 
         let original_length = seq_len;
         let pruned_length = keep_mask.iter().filter(|&&x| x).count();
@@ -742,6 +852,7 @@ impl DynamicPruner {
         hidden_states: &Tensor,
         strategies: &[PruningStrategy],
         attention_scores: Option<&Tensor>,
+        logits: Option<&Tensor>,
         layer_index: Option<usize>,
         total_layers: Option<usize>,
     ) -> Result<PruningResult> {
@@ -769,9 +880,13 @@ impl DynamicPruner {
                 _ => continue, // Skip complex strategies for now
             };
 
-            if let Ok(result) =
-                temp_pruner.prune_tokens(hidden_states, attention_scores, layer_index, total_layers)
-            {
+            if let Ok(result) = temp_pruner.prune_tokens_with_logits(
+                hidden_states,
+                attention_scores,
+                logits,
+                layer_index,
+                total_layers,
+            ) {
                 for (i, &score) in result.token_importance.importance_scores.iter().enumerate() {
                     combined_importance[i] += score;
                 }
@@ -795,7 +910,8 @@ impl DynamicPruner {
         )?;
 
         let pruned_hidden_states = self.apply_pruning_mask(hidden_states, &keep_mask)?;
-        let pruned_attention_mask = self.create_attention_mask(&keep_mask)?;
+        let pruned_attention_mask =
+            self.create_attention_mask(&keep_mask, hidden_states.shape()[0])?;
 
         let original_length = seq_len;
         let pruned_length = keep_mask.iter().filter(|&&x| x).count();
@@ -818,6 +934,16 @@ impl DynamicPruner {
 
     // Helper methods
 
+    /// Compute per-token importance from **real** attention weights.
+    ///
+    /// The importance of token `j` is the attention it *receives*, i.e. the
+    /// column sum `∑_i A[i, j]` of the attention matrix, averaged over the batch
+    /// and (if still present) the head dimension. This is the standard
+    /// "attention-received" saliency used by token-pruning methods such as
+    /// PoWER-BERT and LTP.
+    ///
+    /// Accepted shapes: `[batch, seq_q, seq_k]` or `[batch, heads, seq_q, seq_k]`.
+    /// The returned vector has `seq_k` entries.
     fn compute_attention_importance(
         &self,
         attention_weights: &Tensor,
@@ -825,45 +951,53 @@ impl DynamicPruner {
     ) -> Result<Vec<f32>> {
         // attention_weights shape: [batch_size, seq_len, seq_len] or [batch_size, num_heads, seq_len, seq_len]
         let shape = attention_weights.shape();
-        let seq_len = if shape.len() == 3 {
-            shape[1] // [batch, seq, seq]
-        } else {
-            shape[2] // [batch, heads, seq, seq]
+        let (batch_size, num_heads, seq_q, seq_k) = match shape.len() {
+            3 => (shape[0], 1usize, shape[1], shape[2]),
+            4 => (shape[0], shape[1], shape[2], shape[3]),
+            other => {
+                return Err(TrustformersError::invalid_operation(format!(
+                    "Attention weights must be rank 3 [batch, seq, seq] or rank 4 \
+                     [batch, heads, seq, seq], got rank {other} (shape {shape:?})"
+                )))
+            },
         };
 
-        let mut importance_scores = Vec::with_capacity(seq_len);
-
-        // Extract attention matrix for first batch
-        let _attention_matrix = if shape.len() == 4 {
-            // Average over heads if multi-head attention
-            // Take mean across heads dimension (dim 1)
-            let sum = attention_weights.sum(Some(vec![1]), false)?;
-            let num_heads = attention_weights.shape()[1] as f32;
-            sum.scalar_div(num_heads)? // Average over head dimension
-        } else {
-            attention_weights.clone()
-        };
-
-        // Sum attention received by each token (column-wise sum)
-        for i in 0..seq_len {
-            let mut total_attention = 0.0;
-
-            // Sum attention from all source positions to target position i
-            for j in 0..seq_len {
-                // In practice, this would use proper tensor indexing
-                // For now, we simulate realistic attention patterns
-                let distance = (i as f32 - j as f32).abs();
-                let attention_score = (1.0 / (1.0 + distance * 0.1)).exp(); // Decay with distance
-                total_attention += attention_score;
-            }
-
-            // Add bias for special tokens (first token often CLS/BOS)
-            if i == 0 {
-                total_attention *= 2.0; // CLS token gets more attention
-            }
-
-            importance_scores.push(total_attention);
+        let data = attention_weights.data()?;
+        let expected = batch_size * num_heads * seq_q * seq_k;
+        if data.len() != expected {
+            return Err(TrustformersError::invalid_operation(format!(
+                "Attention weight buffer holds {} values but shape {:?} implies {}",
+                data.len(),
+                shape,
+                expected
+            )));
         }
+        if seq_k == 0 || seq_q == 0 || batch_size == 0 {
+            return Err(TrustformersError::invalid_operation(
+                "Attention weights must not have a zero-sized dimension".to_string(),
+            ));
+        }
+
+        // Column-wise sum: how much attention each key position receives.
+        let mut importance_scores = vec![0.0f32; seq_k];
+        for b in 0..batch_size {
+            for h in 0..num_heads {
+                let head_offset = (b * num_heads + h) * seq_q * seq_k;
+                for q in 0..seq_q {
+                    let row_offset = head_offset + q * seq_k;
+                    for (k, score) in importance_scores.iter_mut().enumerate() {
+                        *score += data[row_offset + k];
+                    }
+                }
+            }
+        }
+
+        let averaging_factor = (batch_size * num_heads) as f32;
+        for score in &mut importance_scores {
+            *score /= averaging_factor;
+        }
+
+        let seq_len = seq_k;
 
         // Apply adaptive thresholding if enabled
         if config.use_adaptive_threshold {
@@ -883,46 +1017,48 @@ impl DynamicPruner {
         Ok(importance_scores)
     }
 
+    /// Compute per-token confidence from **real** activations.
+    ///
+    /// * When `logits` is supplied (shape `[batch, seq, num_classes]`) the score is
+    ///   the model's real predictive confidence at that position: the maximum
+    ///   softmax probability, or `1 - H(p)/ln(C)` when `config.use_entropy` is set.
+    /// * When no logits are available the same statistics are computed over the
+    ///   token's hidden-state vector. This is an explicit *representation
+    ///   uncertainty* proxy — a token whose feature distribution is strongly
+    ///   peaked is treated as confidently encoded — and it is computed from the
+    ///   real hidden states, never from the token position.
+    ///
+    /// Scores are averaged over the batch dimension.
     fn compute_confidence_scores(
         &self,
         hidden_states: &Tensor,
+        logits: Option<&Tensor>,
         config: &ConfidenceBasedPruningConfig,
     ) -> Result<Vec<f32>> {
-        let seq_len = hidden_states.shape()[1];
-        let _hidden_dim = hidden_states.shape()[2];
+        let (source, what) = match logits {
+            Some(logits) => (logits, "Confidence logits"),
+            None => (hidden_states, "Hidden states"),
+        };
+        let (batch_size, seq_len, feature_dim, data) = tensor_3d_view(source, what)?;
+
+        if logits.is_some() && seq_len != hidden_states.shape()[1] {
+            return Err(TrustformersError::invalid_operation(format!(
+                "Logits sequence length {} does not match hidden-state sequence length {}",
+                seq_len,
+                hidden_states.shape()[1]
+            )));
+        }
+
         let mut confidence_scores = Vec::with_capacity(seq_len);
-
-        // Simulate realistic confidence computation
-        for i in 0..seq_len {
-            let confidence = if config.use_entropy {
-                // Simulate entropy-based confidence
-                // Higher entropy = lower confidence, lower entropy = higher confidence
-                let simulated_logits = [
-                    0.8 + (i as f32 / seq_len as f32) * 0.15, // Main prediction
-                    0.1 - (i as f32 / seq_len as f32) * 0.05, // Alternative 1
-                    0.1 - (i as f32 / seq_len as f32) * 0.05, // Alternative 2
-                ];
-
-                // Compute entropy: -sum(p * log(p))
-                let total: f32 = simulated_logits.iter().sum();
-                let probs: Vec<f32> = simulated_logits.iter().map(|x| x / total).collect();
-                let entropy: f32 =
-                    probs.iter().map(|&p| if p > 1e-8 { -p * p.ln() } else { 0.0 }).sum();
-
-                // Convert entropy to confidence (lower entropy = higher confidence)
-                let max_entropy = 3.0_f32.ln(); // log of vocab size (simplified)
-                1.0 - (entropy / max_entropy).min(1.0)
-            } else {
-                // Simulate max probability confidence
-                // Use hidden state norm as a proxy for confidence
-                let norm_factor = (i as f32 / seq_len as f32 * 0.3 + 0.6).min(0.95);
-
-                // Add some randomness based on position
-                let position_factor = (1.0 + (i as f32 * 0.1).sin()) / 2.0;
-                norm_factor * 0.7 + position_factor * 0.3
-            };
-
-            confidence_scores.push(confidence.clamp(0.0, 1.0));
+        for token in 0..seq_len {
+            let mut accumulated = 0.0f32;
+            for batch in 0..batch_size {
+                let offset = (batch * seq_len + token) * feature_dim;
+                let slice = &data[offset..offset + feature_dim];
+                let (max_prob, normalized_entropy) = softmax_statistics(slice);
+                accumulated += if config.use_entropy { 1.0 - normalized_entropy } else { max_prob };
+            }
+            confidence_scores.push((accumulated / batch_size as f32).clamp(0.0, 1.0));
         }
 
         // Apply lookahead smoothing if specified
@@ -944,42 +1080,29 @@ impl DynamicPruner {
         Ok(confidence_scores)
     }
 
+    /// Per-token importance as the **real** L2 norm of the token's hidden state,
+    /// averaged over the batch and rescaled so the most important token scores 1.
+    ///
+    /// The magnitude of a token's representation is the standard cheap saliency
+    /// signal used by magnitude-based token pruning.
     fn compute_simple_importance(&self, hidden_states: &Tensor) -> Result<Vec<f32>> {
-        let seq_len = hidden_states.shape()[1];
-        let hidden_dim = hidden_states.shape()[2];
+        let (batch_size, seq_len, hidden_dim, data) =
+            tensor_3d_view(hidden_states, "Hidden states")?;
+
         let mut importance_scores = Vec::with_capacity(seq_len);
-
-        // Use L2 norm of hidden states as importance measure
-        for i in 0..seq_len {
-            // Simulate L2 norm computation
-            let mut norm_squared = 0.0;
-
-            // Simulate realistic hidden state values
-            for j in 0..hidden_dim.min(100) {
-                // Sample first 100 dims for efficiency
-                // Create realistic hidden state values based on position and dimension
-                let value =
-                    (i as f32 / seq_len as f32) * (j as f32 / hidden_dim as f32).sin() + 0.1;
-                norm_squared += value * value;
+        for token in 0..seq_len {
+            let mut norm_sum = 0.0f32;
+            for batch in 0..batch_size {
+                let offset = (batch * seq_len + token) * hidden_dim;
+                let norm_squared: f32 =
+                    data[offset..offset + hidden_dim].iter().map(|&v| v * v).sum();
+                norm_sum += norm_squared.sqrt();
             }
-
-            let norm = (norm_squared / hidden_dim.min(100) as f32).sqrt();
-
-            // Add positional bias (early tokens often more important)
-            let position_bias = if i < 3 {
-                1.2 // Boost importance of early tokens (CLS, etc.)
-            } else if i > seq_len.saturating_sub(3) {
-                1.1 // Slightly boost end tokens
-            } else {
-                1.0
-            };
-
-            let importance = (norm * position_bias).clamp(0.0, 2.0);
-            importance_scores.push(importance);
+            importance_scores.push(norm_sum / batch_size as f32);
         }
 
-        // Normalize to [0, 1] range
-        let max_score = importance_scores.iter().cloned().fold(0.0, f32::max);
+        // Normalize to [0, 1] range so downstream thresholds are scale-free.
+        let max_score = importance_scores.iter().copied().fold(0.0, f32::max);
         if max_score > 0.0 {
             for score in &mut importance_scores {
                 *score /= max_score;
@@ -989,33 +1112,23 @@ impl DynamicPruner {
         Ok(importance_scores)
     }
 
+    /// Read the **real** gate probabilities produced by [`LearnedGateNetwork`].
+    ///
+    /// Accepts `[batch, seq, 1]` (the network's output shape) or `[batch, seq, k]`,
+    /// in which case the `k` gate outputs are averaged. Scores are averaged over
+    /// the batch dimension.
     fn extract_gate_scores(&self, gate_probs: &Tensor) -> Result<Vec<f32>> {
-        let _batch_size = gate_probs.shape()[0];
-        let seq_len = gate_probs.shape()[1];
+        let (batch_size, seq_len, gate_dim, data) = tensor_3d_view(gate_probs, "Gate outputs")?;
 
-        // Extract scores for the first batch
         let mut scores = Vec::with_capacity(seq_len);
-
-        // Simulate realistic gate probabilities
-        for i in 0..seq_len {
-            // Simulate tensor extraction - in real implementation would use proper indexing
-            // Create realistic gate probabilities based on learned patterns
-            let base_prob = 0.7; // Base keeping probability
-
-            // Position-based adjustment
-            let position_factor = if i == 0 {
-                0.95 // Always keep first token (CLS/BOS)
-            } else if i < 5 {
-                0.85 // Keep early tokens with high probability
-            } else if i > seq_len.saturating_sub(5) {
-                0.75 // Keep end tokens with medium-high probability
-            } else {
-                // Middle tokens have variable probability based on learned gate
-                let variability = (i as f32 * 0.1).sin() * 0.2; // Some learned variation
-                (base_prob + variability).clamp(0.3, 0.9)
-            };
-
-            scores.push(position_factor);
+        for token in 0..seq_len {
+            let mut accumulated = 0.0f32;
+            for batch in 0..batch_size {
+                let offset = (batch * seq_len + token) * gate_dim;
+                let gate_sum: f32 = data[offset..offset + gate_dim].iter().sum();
+                accumulated += gate_sum / gate_dim as f32;
+            }
+            scores.push(accumulated / batch_size as f32);
         }
 
         Ok(scores)
@@ -1061,10 +1174,22 @@ impl DynamicPruner {
         Ok((keep_mask, pruning_reasons))
     }
 
+    /// Gather the kept tokens out of `hidden_states` along the sequence dimension.
+    ///
+    /// This is a real gather: `pruned[b, new_idx, :] = hidden_states[b, orig_idx, :]`
+    /// for every position whose `keep_mask` entry is `true`, preserving the original
+    /// ordering of the kept tokens.
     fn apply_pruning_mask(&self, hidden_states: &Tensor, keep_mask: &[bool]) -> Result<Tensor> {
-        let batch_size = hidden_states.shape()[0];
-        let seq_len = hidden_states.shape()[1];
-        let hidden_dim = hidden_states.shape()[2];
+        let (batch_size, seq_len, hidden_dim, data) =
+            tensor_3d_view(hidden_states, "Hidden states")?;
+
+        if keep_mask.len() != seq_len {
+            return Err(TrustformersError::invalid_operation(format!(
+                "Keep mask has {} entries but the hidden states have sequence length {}",
+                keep_mask.len(),
+                seq_len
+            )));
+        }
 
         // Count tokens to keep
         let kept_tokens: Vec<usize> = keep_mask
@@ -1081,44 +1206,33 @@ impl DynamicPruner {
             ));
         }
 
-        // Create new tensor with only kept tokens
-        let pruned_hidden_states = Tensor::zeros(&[batch_size, new_seq_len, hidden_dim])?;
-
-        // In a real implementation, this would use proper tensor indexing/gathering
-        // For now, we simulate the pruning by creating a tensor with appropriate dimensions
-        // The actual values would be copied from the original tensor at the kept positions
-
-        // Simulate copying kept tokens (in practice, would use tensor gather operations)
-        for &orig_idx in kept_tokens.iter() {
-            // This is a placeholder - real implementation would copy actual tensor slices
-            // pruned_hidden_states[:, new_idx, :] = hidden_states[:, orig_idx, :]
-
-            // For simulation purposes, we'll create plausible values
-            for _b in 0..batch_size {
-                for h in 0..hidden_dim.min(10) {
-                    // Simulate partial copying
-                    // Create a value based on original position to maintain some structure
-                    let _simulated_value =
-                        (orig_idx as f32 / seq_len as f32) * (h as f32 / hidden_dim as f32) + 0.1;
-                    // In real implementation: pruned_hidden_states[b][new_idx][h] = simulated_value;
-                }
+        // Gather the surviving token vectors into a compact buffer.
+        let mut pruned = Vec::with_capacity(batch_size * new_seq_len * hidden_dim);
+        for batch in 0..batch_size {
+            for &orig_idx in &kept_tokens {
+                let offset = (batch * seq_len + orig_idx) * hidden_dim;
+                pruned.extend_from_slice(&data[offset..offset + hidden_dim]);
             }
         }
 
-        Ok(pruned_hidden_states)
+        Tensor::from_slice(&pruned, &[batch_size, new_seq_len, hidden_dim])
     }
 
-    fn create_attention_mask(&self, keep_mask: &[bool]) -> Result<Tensor> {
-        let kept_tokens: Vec<usize> = keep_mask
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &keep)| if keep { Some(i) } else { None })
-            .collect();
+    /// Build the attention mask that matches a pruned sequence.
+    ///
+    /// Every surviving token is visible (`1.0`); the mask has one row per batch
+    /// element so it can be broadcast against the pruned hidden states.
+    fn create_attention_mask(&self, keep_mask: &[bool], batch_size: usize) -> Result<Tensor> {
+        let new_seq_len = keep_mask.iter().filter(|&&keep| keep).count();
 
-        let new_seq_len = kept_tokens.len();
+        if new_seq_len == 0 {
+            return Err(TrustformersError::invalid_operation(
+                "Cannot build an attention mask for an empty sequence".to_string(),
+            ));
+        }
 
         // Create attention mask for kept tokens (all ones)
-        Tensor::ones(&[1, new_seq_len])
+        Tensor::ones(&[batch_size.max(1), new_seq_len])
     }
 }
 
@@ -1386,25 +1500,88 @@ impl EarlyExitController {
         Ok(exit_points)
     }
 
-    fn compute_confidence_entropy(
-        &self,
-        _logits: &Tensor,
-        _batch_idx: usize,
-    ) -> Result<(f32, f32)> {
-        // Simplified confidence and entropy computation
-        // In practice, would use proper tensor indexing
+    /// Compute `(confidence, entropy)` for one batch element from the **real**
+    /// exit-classifier logits.
+    ///
+    /// The logits row for `batch_idx` is softmaxed over the class dimension;
+    /// `confidence` is the maximum class probability and `entropy` is the Shannon
+    /// entropy `-∑ p·ln p` in nats. Rank-3 logits `[batch, seq, classes]` are mean
+    /// pooled over the sequence dimension first, which is the usual way a
+    /// sequence-level exit head scores a whole sequence.
+    fn compute_confidence_entropy(&self, logits: &Tensor, batch_idx: usize) -> Result<(f32, f32)> {
+        let shape = logits.shape();
+        let data = logits.data()?;
 
-        // Simulate softmax probabilities
-        let simulated_probs = [0.7, 0.2, 0.1]; // Placeholder for actual softmax
+        let (batch_size, seq_len, num_classes) = match shape.len() {
+            2 => (shape[0], 1usize, shape[1]),
+            3 => (shape[0], shape[1], shape[2]),
+            other => {
+                return Err(TrustformersError::invalid_operation(format!(
+                    "Exit-classifier logits must be rank 2 [batch, classes] or rank 3 \
+                     [batch, seq, classes], got rank {other} (shape {shape:?})"
+                )))
+            },
+        };
 
-        // Confidence is max probability
-        let confidence = simulated_probs.iter().cloned().fold(0.0, f32::max);
+        if data.len() != batch_size * seq_len * num_classes {
+            return Err(TrustformersError::invalid_operation(format!(
+                "Logit buffer holds {} values but shape {:?} implies {}",
+                data.len(),
+                shape,
+                batch_size * seq_len * num_classes
+            )));
+        }
+        if batch_idx >= batch_size {
+            return Err(TrustformersError::invalid_operation(format!(
+                "Batch index {batch_idx} is out of range for a batch of {batch_size}"
+            )));
+        }
+        if num_classes == 0 {
+            return Err(TrustformersError::invalid_operation(
+                "Exit-classifier logits must have at least one class".to_string(),
+            ));
+        }
 
-        // Entropy computation: -sum(p * log(p))
-        let entropy: f32 =
-            simulated_probs.iter().map(|&p| if p > 1e-8 { -p * p.ln() } else { 0.0 }).sum();
+        // Mean-pool the sequence dimension (a no-op for rank-2 logits).
+        let mut pooled = vec![0.0f32; num_classes];
+        for position in 0..seq_len {
+            let offset = (batch_idx * seq_len + position) * num_classes;
+            for (class, value) in pooled.iter_mut().enumerate() {
+                *value += data[offset + class];
+            }
+        }
+        for value in &mut pooled {
+            *value /= seq_len as f32;
+        }
 
-        Ok((confidence, entropy))
+        // Numerically stable softmax over the class dimension.
+        let max = pooled.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        if !max.is_finite() {
+            return Err(TrustformersError::invalid_operation(
+                "Exit-classifier logits contain no finite values".to_string(),
+            ));
+        }
+        let exps: Vec<f32> = pooled.iter().map(|&v| (v - max).exp()).collect();
+        let sum: f32 = exps.iter().sum();
+        if sum <= 0.0 || !sum.is_finite() {
+            return Err(TrustformersError::invalid_operation(
+                "Softmax of the exit-classifier logits is degenerate".to_string(),
+            ));
+        }
+
+        let mut confidence = 0.0f32;
+        let mut entropy = 0.0f32;
+        for &e in &exps {
+            let p = e / sum;
+            if p > confidence {
+                confidence = p;
+            }
+            if p > 1e-12 {
+                entropy -= p * p.ln();
+            }
+        }
+
+        Ok((confidence.clamp(0.0, 1.0), entropy.max(0.0)))
     }
 
     fn make_exit_decision(
@@ -1469,21 +1646,37 @@ impl EarlyExitController {
             0.0
         };
 
+        // The number of layers actually observed in this history is the honest
+        // denominator for "how much of the network did we skip".
+        let observed_layers = exit_history.len();
+
         EarlyExitStatistics {
             exit_rate,
             avg_exit_layer,
             layer_exit_counts,
             reason_counts,
-            computational_savings: self.estimate_computational_savings(exit_rate, avg_exit_layer),
+            computational_savings: Self::estimate_computational_savings(
+                exit_rate,
+                avg_exit_layer,
+                observed_layers,
+            ),
         }
     }
 
-    fn estimate_computational_savings(&self, exit_rate: f32, avg_exit_layer: f32) -> f32 {
-        // Estimate computational savings from early exits
-        let total_layers = 12.0; // Assume 12 layers for estimation
-        let layers_saved = total_layers - avg_exit_layer;
+    /// Fraction of layer executions saved by early exits, relative to the number
+    /// of layers actually observed in the recorded history.
+    fn estimate_computational_savings(
+        exit_rate: f32,
+        avg_exit_layer: f32,
+        observed_layers: usize,
+    ) -> f32 {
+        if observed_layers == 0 {
+            return 0.0;
+        }
+        let total_layers = observed_layers as f32;
+        let layers_saved = (total_layers - avg_exit_layer).max(0.0);
         let savings_per_exit = layers_saved / total_layers;
-        exit_rate * savings_per_exit
+        (exit_rate * savings_per_exit).clamp(0.0, 1.0)
     }
 }
 
@@ -1572,24 +1765,26 @@ impl AdaptiveComputationController {
             )?)
         };
 
-        // Check for early exit if not already done
-        let exit_points = exit_points.or_else(|| {
-            if let Some(ref pruned) = pruning_result {
-                self.early_exit
-                    .should_exit(&pruned.pruned_hidden_states, layer_index, batch_indices)
-                    .ok()
-            } else {
-                self.early_exit.should_exit(hidden_states, layer_index, batch_indices).ok()
-            }
-        });
+        // Check for early exit if not already done. Errors are propagated rather
+        // than swallowed: a failed exit head must not look like "do not exit".
+        let exit_points = match exit_points {
+            Some(points) => points,
+            None => match pruning_result {
+                Some(ref pruned) => self.early_exit.should_exit(
+                    &pruned.pruned_hidden_states,
+                    layer_index,
+                    batch_indices,
+                )?,
+                None => self.early_exit.should_exit(hidden_states, layer_index, batch_indices)?,
+            },
+        };
+
+        let should_continue = !exit_points.iter().any(|ep| ep.should_exit);
 
         Ok(AdaptiveComputationResult {
             pruning_result,
-            exit_points: exit_points.clone().unwrap_or_default(),
-            should_continue: !exit_points
-                .as_ref()
-                .map(|eps| eps.iter().any(|ep| ep.should_exit))
-                .unwrap_or(false),
+            exit_points,
+            should_continue,
             computation_used: self.estimate_computation_used(layer_index, total_layers),
         })
     }
@@ -1609,318 +1804,5 @@ pub struct AdaptiveComputationResult {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_attention_based_pruning_config() {
-        let config = AttentionBasedPruningConfig::default();
-        assert_eq!(config.attention_threshold, 0.1);
-        assert_eq!(config.min_tokens_ratio, 0.3);
-        assert_eq!(config.max_pruning_ratio, 0.7);
-        assert!(config.use_adaptive_threshold);
-    }
-
-    #[test]
-    fn test_dynamic_pruner_creation() {
-        let config = AttentionBasedPruningConfig::default();
-        let pruner = DynamicPruner::attention_based(config);
-
-        assert!(
-            matches!(pruner.strategy, PruningStrategy::AttentionBased),
-            "Expected AttentionBased strategy"
-        );
-    }
-
-    #[test]
-    fn test_learned_gate_network_creation() -> Result<()> {
-        let config = LearnedGatePruningConfig::default();
-        let gate_network = LearnedGateNetwork::new(768, config)?;
-
-        assert_eq!(gate_network.gate_linear.shape(), vec![768, 64]);
-        assert_eq!(gate_network.gate_bias.shape(), vec![64]);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_progressive_pruning_ratios() {
-        let _config = ProgressivePruningConfig {
-            initial_pruning_ratio: 0.1,
-            final_pruning_ratio: 0.5,
-            progression_schedule: ProgressionSchedule::Linear,
-        };
-
-        // Test linear progression
-        let total_layers = 12;
-        for layer in 0..total_layers {
-            let progress = layer as f32 / (total_layers - 1) as f32;
-            let expected_ratio = 0.1 + (0.5 - 0.1) * progress;
-
-            // This would be tested in the actual pruner implementation
-            assert!((0.1..=0.5).contains(&expected_ratio));
-        }
-    }
-
-    #[test]
-    fn test_pruning_statistics() {
-        let results = vec![PruningResult {
-            pruned_hidden_states: Tensor::zeros(&[1, 5, 768]).expect("operation failed"),
-            pruned_attention_mask: Tensor::ones(&[1, 5]).expect("operation failed"),
-            token_importance: TokenImportance {
-                importance_scores: vec![0.9, 0.8, 0.3, 0.2, 0.1],
-                token_indices: vec![0, 1, 2, 3, 4],
-                keep_mask: vec![true, true, true, false, false],
-                pruning_reasons: vec![
-                    PruningReason::AlwaysKeep,
-                    PruningReason::MinimumRatio,
-                    PruningReason::MinimumRatio,
-                    PruningReason::LowAttention,
-                    PruningReason::LowAttention,
-                ],
-            },
-            original_length: 10,
-            pruned_length: 5,
-            compression_ratio: 0.5,
-        }];
-
-        let stats = PruningStatistics::from_results(&results);
-        assert_eq!(stats.avg_compression_ratio, 0.5);
-        assert_eq!(stats.layer_compression_ratios, vec![0.5]);
-        assert_eq!(stats.computational_savings, 0.75); // 1 - 0.5^2
-        assert_eq!(stats.memory_savings, 0.5); // 1 - 0.5
-    }
-
-    // ---- Pruning schedule: cosine annealing ----
-
-    /// Cubic ease-in schedule: sparsity(t) = target * (1 - (1 - t/T)^3)
-    /// At t=0 sparsity must be 0.0; at t=T sparsity must equal target.
-    #[test]
-    fn test_cosine_schedule_endpoints() {
-        let target = 0.7f32;
-        let total = 100usize;
-
-        let sparsity_at_0 = target * (1.0 - (1.0 - 0.0f32 / total as f32).powi(3));
-        let sparsity_at_t = target * (1.0 - (1.0 - total as f32 / total as f32).powi(3));
-
-        assert!(sparsity_at_0.abs() < 1e-6, "sparsity at t=0 must be 0");
-        assert!(
-            (sparsity_at_t - target).abs() < 1e-6,
-            "sparsity at t=T must equal target"
-        );
-    }
-
-    /// The cubic schedule must be monotonically non-decreasing.
-    #[test]
-    fn test_cosine_schedule_monotone() {
-        let target = 0.8f32;
-        let total = 50usize;
-        let mut prev = -1.0f32;
-        for t in 0..=total {
-            let s = target * (1.0 - (1.0 - t as f32 / total as f32).powi(3));
-            assert!(s >= prev - 1e-6, "Schedule must be monotone at t={}", t);
-            prev = s;
-        }
-    }
-
-    // ---- Magnitude-based scoring ----
-
-    /// Higher-magnitude tokens must receive higher importance scores.
-    #[test]
-    fn test_magnitude_scoring_order() {
-        // Simulate magnitude-based scoring: score_i = ||h_i||^2
-        let norms_squared = [0.1f32, 0.9, 0.3, 0.7, 0.5];
-        let mut indexed: Vec<(usize, f32)> =
-            norms_squared.iter().enumerate().map(|(i, &v)| (i, v)).collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("comparison must succeed"));
-
-        // The highest magnitude (index 1, norm²=0.9) must rank first
-        assert_eq!(indexed[0].0, 1, "Highest magnitude token must rank first");
-        // The lowest magnitude (index 0, norm²=0.1) must rank last
-        assert_eq!(
-            indexed[indexed.len() - 1].0,
-            0,
-            "Lowest magnitude token must rank last"
-        );
-    }
-
-    // ---- Structured vs unstructured pruning ----
-
-    /// Unstructured pruning removes individual tokens (any position).
-    /// Structured pruning removes entire heads/layers.
-    /// Verify the keep_mask property: any boolean pattern is valid for unstructured.
-    #[test]
-    fn test_unstructured_any_keep_mask_valid() {
-        let keep_masks = vec![
-            vec![true, false, true, false, true],
-            vec![true, true, true, false, false],
-            vec![false, false, false, true, true],
-        ];
-        for mask in &keep_masks {
-            let kept = mask.iter().filter(|&&x| x).count();
-            assert!(
-                kept > 0,
-                "At least one token must be kept; mask: {:?}",
-                mask
-            );
-            assert!(
-                kept < mask.len(),
-                "Not all tokens should be kept; mask: {:?}",
-                mask
-            );
-        }
-    }
-
-    // ---- Attention-based pruner configurations ----
-
-    #[test]
-    fn test_confidence_based_pruner_creation() {
-        let config = ConfidenceBasedPruningConfig::default();
-        let pruner = DynamicPruner::confidence_based(config);
-        assert!(
-            matches!(pruner.strategy, PruningStrategy::ConfidenceBased),
-            "Expected ConfidenceBased strategy"
-        );
-    }
-
-    #[test]
-    fn test_progressive_pruner_creation() {
-        let config = ProgressivePruningConfig::default();
-        let pruner = DynamicPruner::progressive(config);
-        assert!(
-            matches!(pruner.strategy, PruningStrategy::Progressive),
-            "Expected Progressive strategy"
-        );
-    }
-
-    #[test]
-    fn test_layer_adaptive_pruner_creation() {
-        let config = LayerAdaptivePruningConfig::default();
-        let pruner = DynamicPruner::layer_adaptive(config);
-        assert!(
-            matches!(pruner.strategy, PruningStrategy::LayerAdaptive),
-            "Expected LayerAdaptive strategy"
-        );
-    }
-
-    // ---- Sparsity percentage validation ----
-
-    /// compression_ratio = pruned_length / original_length must be in (0, 1].
-    #[test]
-    fn test_compression_ratio_in_valid_range() {
-        let original_length = 20usize;
-        for pruned_length in 1..=original_length {
-            let ratio = pruned_length as f32 / original_length as f32;
-            assert!(
-                ratio > 0.0 && ratio <= 1.0,
-                "compression_ratio must be in (0,1]"
-            );
-        }
-    }
-
-    /// Sparsity = 1 - compression_ratio must be in [0, 1).
-    #[test]
-    fn test_sparsity_in_valid_range() {
-        let original = 10usize;
-        for pruned in 1..=original {
-            let compression_ratio = pruned as f32 / original as f32;
-            let sparsity = 1.0 - compression_ratio;
-            assert!((0.0..1.0).contains(&sparsity), "sparsity must be in [0, 1)");
-        }
-    }
-
-    // ---- PruningStatistics empty and multi-layer ----
-
-    #[test]
-    fn test_pruning_statistics_empty_results() {
-        let stats = PruningStatistics::from_results(&[]);
-        assert_eq!(
-            stats.avg_compression_ratio, 1.0,
-            "Empty results must give ratio=1.0"
-        );
-        assert!(stats.layer_compression_ratios.is_empty());
-    }
-
-    #[test]
-    fn test_pruning_statistics_multiple_layers() {
-        let make_result = |ratio: f32, seq_len: usize| PruningResult {
-            pruned_hidden_states: Tensor::zeros(&[1, seq_len, 64])
-                .expect("tensor creation must succeed"),
-            pruned_attention_mask: Tensor::ones(&[1, seq_len])
-                .expect("tensor creation must succeed"),
-            token_importance: TokenImportance {
-                importance_scores: vec![0.5; seq_len],
-                token_indices: (0..seq_len).collect(),
-                keep_mask: vec![true; seq_len],
-                pruning_reasons: vec![PruningReason::MinimumRatio; seq_len],
-            },
-            original_length: (seq_len as f32 / ratio) as usize,
-            pruned_length: seq_len,
-            compression_ratio: ratio,
-        };
-
-        let results = vec![make_result(0.6, 6), make_result(0.4, 4)];
-        let stats = PruningStatistics::from_results(&results);
-        let expected_avg = (0.6 + 0.4) / 2.0;
-        assert!((stats.avg_compression_ratio - expected_avg).abs() < 1e-6);
-        assert_eq!(stats.layer_compression_ratios.len(), 2);
-    }
-
-    // ---- Pruning reason distribution ----
-
-    #[test]
-    fn test_pruning_reason_distribution_tracked() {
-        let result = PruningResult {
-            pruned_hidden_states: Tensor::zeros(&[1, 3, 32]).expect("must succeed"),
-            pruned_attention_mask: Tensor::ones(&[1, 3]).expect("must succeed"),
-            token_importance: TokenImportance {
-                importance_scores: vec![0.8, 0.5, 0.2],
-                token_indices: vec![0, 1, 2],
-                keep_mask: vec![true, true, false],
-                pruning_reasons: vec![
-                    PruningReason::AlwaysKeep,
-                    PruningReason::MinimumRatio,
-                    PruningReason::LowAttention,
-                ],
-            },
-            original_length: 4,
-            pruned_length: 3,
-            compression_ratio: 0.75,
-        };
-        let stats = PruningStatistics::from_results(&[result]);
-        assert_eq!(
-            stats.pruning_reason_distribution.get(&PruningReason::AlwaysKeep),
-            Some(&1)
-        );
-        assert_eq!(
-            stats.pruning_reason_distribution.get(&PruningReason::LowAttention),
-            Some(&1)
-        );
-    }
-
-    // ---- Progressive pruning schedule: linear ----
-
-    #[test]
-    fn test_progressive_pruning_linear_schedule_bounds() {
-        let config = ProgressivePruningConfig {
-            initial_pruning_ratio: 0.1,
-            final_pruning_ratio: 0.5,
-            progression_schedule: ProgressionSchedule::Linear,
-        };
-        let total_layers = 12usize;
-        for layer in 0..total_layers {
-            let progress = layer as f32 / (total_layers - 1) as f32;
-            let ratio = config.initial_pruning_ratio
-                + (config.final_pruning_ratio - config.initial_pruning_ratio) * progress;
-            assert!(
-                ratio >= config.initial_pruning_ratio - 1e-6
-                    && ratio <= config.final_pruning_ratio + 1e-6,
-                "Linear schedule ratio {} must be in [{}, {}] for layer {}",
-                ratio,
-                config.initial_pruning_ratio,
-                config.final_pruning_ratio,
-                layer
-            );
-        }
-    }
-}
+#[path = "dynamic_pruning_tests.rs"]
+mod tests;

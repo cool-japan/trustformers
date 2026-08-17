@@ -51,6 +51,12 @@ pub struct LayerGradientStats {
     pub distribution_stats: Option<GradientDistributionStats>,
     pub flow_health: GradientFlowHealth,
     pub update_count: u64,
+    /// Number of gradient elements recorded for this layer, i.e. the real
+    /// parameter count of the tensor that was analysed.
+    pub parameter_count: usize,
+    /// Number of those elements whose gradient is effectively zero
+    /// (`|g| < 1e-12`).
+    pub zero_gradient_count: usize,
 }
 
 /// Gradient magnitude statistics
@@ -99,9 +105,15 @@ pub struct GradientSnapshot {
 /// Global gradient statistics across all layers
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlobalGradientStats {
+    /// Total gradient elements seen across all recorded layers. Summed from the
+    /// tensors that were actually analysed.
     pub total_parameters: usize,
+    /// Elements with a non-zero gradient.
     pub parameters_with_gradients: usize,
-    pub dead_parameters: usize, // Parameters with zero gradients
+    /// Elements whose gradient is effectively zero (`|g| < 1e-12`).
+    pub dead_parameters: usize,
+    /// Layers whose whole gradient L2 norm is below the vanishing threshold.
+    pub dead_layers: usize,
     pub avg_gradient_norm: f32,
     pub max_layer_norm: f32,
     pub min_layer_norm: f32,
@@ -142,6 +154,11 @@ impl GradientFlowAnalyzer {
         // Assess gradient flow health
         let flow_health = self.assess_flow_health(&magnitude_stats);
 
+        // Record the real element counts so the global statistics do not have
+        // to guess at a parameter count.
+        let parameter_count = grad_data.len();
+        let zero_gradient_count = grad_data.iter().filter(|value| value.abs() < 1e-12).count();
+
         // Update layer statistics
         let layer_stats = LayerGradientStats {
             layer_name: layer_name.to_string(),
@@ -149,6 +166,8 @@ impl GradientFlowAnalyzer {
             distribution_stats,
             flow_health,
             update_count: self.layer_stats.get(layer_name).map(|s| s.update_count + 1).unwrap_or(1),
+            parameter_count,
+            zero_gradient_count,
         };
 
         self.layer_stats.insert(layer_name.to_string(), layer_stats);
@@ -412,6 +431,7 @@ impl GradientFlowAnalyzer {
                 total_parameters: 0,
                 parameters_with_gradients: 0,
                 dead_parameters: 0,
+                dead_layers: 0,
                 avg_gradient_norm: 0.0,
                 max_layer_norm: 0.0,
                 min_layer_norm: 0.0,
@@ -431,17 +451,22 @@ impl GradientFlowAnalyzer {
             layer_norms.iter().map(|&norm| (norm - avg_gradient_norm).powi(2)).sum::<f32>()
                 / layer_norms.len() as f32;
 
-        // Count dead parameters (simplified - would need actual parameter counts)
-        let dead_parameters = self
+        // Real element counts, summed from the recorded layers.
+        let total_parameters: usize =
+            self.layer_stats.values().map(|stats| stats.parameter_count).sum();
+        let dead_parameters: usize =
+            self.layer_stats.values().map(|stats| stats.zero_gradient_count).sum();
+        let dead_layers = self
             .layer_stats
             .values()
             .filter(|stats| stats.magnitude_stats.l2_norm < 1e-8)
             .count();
 
         GlobalGradientStats {
-            total_parameters: total_layers * 1000, // Placeholder
-            parameters_with_gradients: total_layers * 1000 - dead_parameters * 1000,
-            dead_parameters: dead_parameters * 1000,
+            total_parameters,
+            parameters_with_gradients: total_parameters.saturating_sub(dead_parameters),
+            dead_parameters,
+            dead_layers,
             avg_gradient_norm,
             max_layer_norm,
             min_layer_norm,
@@ -649,6 +674,60 @@ pub struct GradientFlowReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test: `GlobalGradientStats` used to report
+    /// `total_parameters: total_layers * 1000` and `dead_parameters` as a
+    /// *layer* count multiplied by 1000. All three fields must now be real
+    /// element counts.
+    #[test]
+    fn test_global_stats_report_real_element_counts() -> Result<()> {
+        let mut analyzer = GradientFlowAnalyzer::new(GradientFlowConfig::default());
+
+        // 6 elements, 2 of them exactly zero.
+        let a = Tensor::from_vec(vec![0.5, 0.0, -0.25, 0.0, 1.0, 2.0], &[2, 3])?;
+        // 4 elements, none zero.
+        let b = Tensor::from_vec(vec![0.1, 0.2, 0.3, 0.4], &[4])?;
+
+        analyzer.analyze_layer_gradients("layer.a", &a)?;
+        analyzer.analyze_layer_gradients("layer.b", &b)?;
+        analyzer.create_snapshot()?;
+
+        let snapshot = analyzer.get_latest_snapshot().expect("a snapshot was created");
+        let stats = &snapshot.global_stats;
+
+        assert_eq!(stats.total_parameters, 10, "6 + 4 real gradient elements");
+        assert_eq!(stats.dead_parameters, 2, "two exactly-zero gradients");
+        assert_eq!(stats.parameters_with_gradients, 8);
+        // The old implementation would have produced 2000 / 0 / 2000 here.
+        assert_ne!(stats.total_parameters, 2000);
+        assert_ne!(stats.dead_parameters, 0);
+
+        // Per-layer counts must also be real.
+        let layer_a = analyzer.get_layer_stats("layer.a").expect("layer.a recorded");
+        assert_eq!(layer_a.parameter_count, 6);
+        assert_eq!(layer_a.zero_gradient_count, 2);
+
+        Ok(())
+    }
+
+    /// A layer whose whole gradient vanished is counted as a dead *layer*,
+    /// separately from dead elements.
+    #[test]
+    fn test_dead_layers_are_counted_separately_from_dead_elements() -> Result<()> {
+        let mut analyzer = GradientFlowAnalyzer::new(GradientFlowConfig::default());
+        let alive = Tensor::from_vec(vec![1.0, 1.0, 1.0], &[3])?;
+        let dead = Tensor::from_vec(vec![0.0, 0.0, 0.0], &[3])?;
+
+        analyzer.analyze_layer_gradients("alive", &alive)?;
+        analyzer.analyze_layer_gradients("dead", &dead)?;
+        analyzer.create_snapshot()?;
+
+        let stats = &analyzer.get_latest_snapshot().expect("snapshot").global_stats;
+        assert_eq!(stats.dead_layers, 1);
+        assert_eq!(stats.dead_parameters, 3);
+        assert_eq!(stats.total_parameters, 6);
+        Ok(())
+    }
 
     #[test]
     fn test_gradient_flow_analyzer_creation() {

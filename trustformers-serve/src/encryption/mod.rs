@@ -4,9 +4,11 @@
 //! sub-modules for better maintainability and clarity.
 
 // Core modules
+pub mod cipher;
 pub mod errors;
 pub mod service;
 pub mod types;
+pub mod weight_encryption;
 
 // Re-export core types and errors for convenience
 pub use errors::{EncryptionError, EncryptionResult, ErrorCategory};

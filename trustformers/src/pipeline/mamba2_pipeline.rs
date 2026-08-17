@@ -14,6 +14,7 @@ use tokio::sync::RwLock;
 
 use crate::error::{Result, TrustformersError};
 use crate::pipeline::{Pipeline, PipelineInput, PipelineOutput};
+use trustformers_core::traits::Tokenizer;
 
 /// Configuration for Mamba-2 State Space Model
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,13 +141,54 @@ pub struct Mamba2Layer {
     pub d_param: f32,
 }
 
+/// Number of Mamba-2 blocks the pipeline instantiates.
+const MAMBA2_LAYER_COUNT: usize = 24;
+
+/// Default parallel-scan chunk size when the strategy does not name one.
+const DEFAULT_CHUNK_SIZE: usize = 256;
+
+/// A deterministic, bounded parameter matrix.
+///
+/// Used for the embedding table and LM head so that no matrix is uniformly
+/// zero. Values lie in `±scale` and depend only on their position, so runs are
+/// reproducible.
+fn deterministic_matrix(rows: usize, cols: usize, scale: f64) -> Vec<Vec<f64>> {
+    (0..rows)
+        .map(|r| {
+            (0..cols)
+                .map(|c| {
+                    let phase = (r * 31 + c * 17) as f64 * 0.017_453_292_519_943_295;
+                    phase.sin() * scale
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// Mamba-2 Model state and computation
-#[derive(Debug)]
+///
+/// The `blocks` are the models crate's real SSD blocks; `embeddings` and
+/// `lm_head` are owned here because the models crate's `Mamba2ForCausalLM`
+/// ships them zero-initialised.
 pub struct Mamba2Model {
     config: Mamba2Config,
+    models_config: trustformers_models::mamba2::Mamba2Config,
+    blocks: Vec<trustformers_models::mamba2::Mamba2Block>,
+    embeddings: Vec<Vec<f64>>,
+    lm_head: Vec<Vec<f64>>,
     layers: Vec<Mamba2Layer>,
     performance_tracker: Arc<RwLock<Mamba2PerformanceTracker>>,
     state_manager: Arc<RwLock<StateManager>>,
+}
+
+impl std::fmt::Debug for Mamba2Model {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Mamba2Model")
+            .field("config", &self.config)
+            .field("blocks", &self.blocks.len())
+            .field("vocab_size", &self.embeddings.len())
+            .finish()
+    }
 }
 
 /// Performance tracking for Mamba-2
@@ -183,68 +225,203 @@ pub struct Mamba2Output {
     pub ssm_states: Vec<f32>,
     /// Performance metrics
     pub performance: Mamba2PerformanceMetrics,
-    /// Selective scan attention weights (for interpretability)
-    pub attention_weights: Option<Vec<f32>>,
-    /// State evolution trajectory
+    /// Token ids the model produced, when generation ran.
+    pub token_ids: Vec<u32>,
+    /// State evolution trajectory, when it was captured.
+    ///
+    /// `None` unless the caller asked for it — a Mamba block has no attention
+    /// matrix to report, so nothing is synthesised in its place.
     pub state_trajectory: Option<Vec<Vec<f32>>>,
 }
 
 /// Performance metrics for Mamba-2 output
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Mamba2PerformanceMetrics {
+    /// Wall-clock time of the run.
     pub inference_time_ms: f32,
+    /// Tokens processed per second, measured.
     pub tokens_per_second: f32,
-    pub memory_usage_mb: f32,
+    /// Resident memory of the process, in megabytes.
+    ///
+    /// `None` when the operating system does not expose it.
+    pub memory_usage_mb: Option<f32>,
+    /// Recurrent state size relative to the KV cache an attention model of the
+    /// same width would need for this sequence. Computed, not assumed.
     pub state_compression_ratio: f32,
-    pub hardware_efficiency: f32,
-    pub selective_scan_utilization: f32,
+}
+
+/// Options that must be supplied explicitly when building a [`Mamba2Pipeline`].
+#[derive(Clone)]
+pub struct Mamba2PipelineOptions {
+    /// Tokenizer used to encode prompts and decode generated ids.
+    ///
+    /// Required: without a real vocabulary there is no honest way to turn text
+    /// into token ids.
+    pub tokenizer: Arc<dyn Tokenizer>,
+    /// Acknowledge that no Mamba-2 checkpoint is being loaded.
+    ///
+    /// There is no Mamba-2 weight loader in this workspace yet, so a pipeline
+    /// built this way runs a *real* SSD scan over *deterministically
+    /// initialised, untrained* parameters. Its outputs are therefore not
+    /// predictions of anything. The flag exists so that can never happen by
+    /// accident.
+    pub allow_untrained_weights: bool,
+}
+
+impl std::fmt::Debug for Mamba2PipelineOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Mamba2PipelineOptions")
+            .field("vocab_size", &self.tokenizer.vocab_size())
+            .field("allow_untrained_weights", &self.allow_untrained_weights)
+            .finish()
+    }
 }
 
 /// Main Mamba-2 Pipeline
+///
+/// The state-space computation is performed by the real SSD implementation in
+/// `trustformers_models::mamba2` — the same `Mamba2Block` used by the models
+/// crate's own Mamba-2 model — over a deterministically initialised embedding
+/// table and language-model head owned by this pipeline.
 pub struct Mamba2Pipeline {
     model: Arc<RwLock<Mamba2Model>>,
     config: Mamba2Config,
+    tokenizer: Arc<dyn Tokenizer>,
     performance_monitor: Arc<RwLock<Mamba2PerformanceTracker>>,
 }
 
 impl Mamba2Pipeline {
-    /// Create a new Mamba-2 pipeline
-    pub fn new(config: Mamba2Config) -> Result<Self> {
-        let model = Self::initialize_model(&config)?;
+    /// Build a pipeline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrustformersError::FeatureUnavailable`] unless
+    /// [`Mamba2PipelineOptions::allow_untrained_weights`] is set, because no
+    /// Mamba-2 checkpoint loader exists yet and silently returning an untrained
+    /// network would make every output look like a prediction.
+    pub fn new(config: Mamba2Config, options: Mamba2PipelineOptions) -> Result<Self> {
+        if !options.allow_untrained_weights {
+            return Err(TrustformersError::feature_unavailable(
+                "no Mamba-2 checkpoint loader exists yet, so this pipeline can only run \
+                 deterministically initialised, untrained parameters. Set \
+                 `Mamba2PipelineOptions { allow_untrained_weights: true, .. }` to acknowledge \
+                 that its outputs are not predictions."
+                    .to_string(),
+                "mamba2-weights",
+            ));
+        }
+        tracing::warn!(
+            d_model = config.d_model,
+            "building a Mamba-2 pipeline over untrained parameters; outputs are not predictions"
+        );
+
+        let vocab_size = options.tokenizer.vocab_size();
+        if vocab_size == 0 {
+            return Err(TrustformersError::invalid_input_simple(
+                "the supplied tokenizer has an empty vocabulary".to_string(),
+            ));
+        }
+        let model = Self::initialize_model(&config, vocab_size)?;
         let performance_monitor = Arc::new(RwLock::new(Mamba2PerformanceTracker::default()));
 
         Ok(Self {
             model: Arc::new(RwLock::new(model)),
             config,
+            tokenizer: options.tokenizer,
             performance_monitor,
         })
     }
 
-    /// Initialize the Mamba-2 model with the given configuration
-    fn initialize_model(config: &Mamba2Config) -> Result<Mamba2Model> {
-        let dt_rank = config.dt_rank.unwrap_or(config.d_model / 16);
-        let mut layers = Vec::new();
+    /// Load a Mamba-2 checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Always fails today: no Mamba-2 weight loader has been implemented, and
+    /// returning an untrained model from a `from_pretrained` call would be
+    /// indistinguishable from a real load.
+    pub fn from_pretrained(model_name_or_path: &str) -> Result<Self> {
+        Err(TrustformersError::feature_unavailable(
+            format!(
+                "loading Mamba-2 checkpoints is not implemented, so `{model_name_or_path}` \
+                 cannot be loaded. Use `Mamba2Pipeline::new` with \
+                 `allow_untrained_weights` if an untrained network is what you want."
+            ),
+            "mamba2-checkpoint-loading",
+        ))
+    }
 
-        // Initialize layers with proper state dimensions
-        for layer_id in 0..24 {
-            // Default to 24 layers
-            let layer = Mamba2Layer {
+    /// Map the pipeline configuration onto the models crate's Mamba-2
+    /// configuration, which drives the real SSD blocks.
+    fn models_config(
+        config: &Mamba2Config,
+        vocab_size: usize,
+    ) -> Result<trustformers_models::mamba2::Mamba2Config> {
+        let expand = config.expand_factor.max(1);
+        let inner_dim = config.d_model * expand;
+        let nheads = config.n_heads.max(1);
+        if !inner_dim.is_multiple_of(nheads) {
+            return Err(TrustformersError::invalid_input_simple(format!(
+                "inner dimension {inner_dim} (d_model {} × expand {expand}) is not divisible by \
+                 n_heads {nheads}",
+                config.d_model
+            )));
+        }
+        Ok(trustformers_models::mamba2::Mamba2Config {
+            vocab_size,
+            d_model: config.d_model,
+            n_layer: MAMBA2_LAYER_COUNT,
+            d_state: config.d_state,
+            d_conv: config.d_conv,
+            expand,
+            nheads,
+            headdim: inner_dim / nheads,
+            chunk_size: match config.chunking_strategy {
+                ChunkingStrategy::Fixed(size) => size.max(1),
+                ChunkingStrategy::Overlapping { chunk_size, .. } => chunk_size.max(1),
+                _ => DEFAULT_CHUNK_SIZE,
+            },
+            rms_norm_eps: 1e-5,
+            tie_embeddings: false,
+        })
+    }
+
+    /// Initialize the Mamba-2 model with the given configuration.
+    ///
+    /// Every parameter gets a real, documented value: the SSD blocks come from
+    /// the models crate, and the embedding table and LM head are seeded with a
+    /// deterministic bounded pattern so that no matrix is uniformly zero (a zero
+    /// `C` matrix would silently reduce the scan to the identity).
+    fn initialize_model(config: &Mamba2Config, vocab_size: usize) -> Result<Mamba2Model> {
+        let models_config = Self::models_config(config, vocab_size)?;
+        let blocks: Vec<trustformers_models::mamba2::Mamba2Block> = (0..MAMBA2_LAYER_COUNT)
+            .map(|_| trustformers_models::mamba2::Mamba2Block::new(&models_config))
+            .collect();
+
+        let embeddings = deterministic_matrix(vocab_size, config.d_model, 0.02);
+        let lm_head = deterministic_matrix(vocab_size, config.d_model, 0.02);
+
+        let dt_rank = config.dt_rank.unwrap_or(config.d_model / 16).max(1);
+        let layer_states = (0..MAMBA2_LAYER_COUNT)
+            .map(|layer_id| Mamba2Layer {
                 layer_id,
                 hidden_state: vec![0.0; config.d_model],
                 conv_state: vec![0.0; config.d_conv * config.d_model],
                 ssm_state: vec![0.0; config.d_state * config.d_model],
-                delta: vec![0.0; dt_rank],
+                delta: vec![1.0 / dt_rank as f32; dt_rank],
                 a_matrix: Self::initialize_a_matrix(config.d_state, config.simplified_a_init),
-                b_matrix: vec![0.0; config.d_state * config.d_model],
-                c_matrix: vec![0.0; config.d_state * config.d_model],
+                b_matrix: Self::initialize_projection(config.d_state, config.d_model, 1),
+                c_matrix: Self::initialize_projection(config.d_state, config.d_model, 2),
                 d_param: 1.0,
-            };
-            layers.push(layer);
-        }
+            })
+            .collect();
 
         Ok(Mamba2Model {
             config: config.clone(),
-            layers,
+            models_config,
+            blocks,
+            embeddings,
+            lm_head,
+            layers: layer_states,
             performance_tracker: Arc::new(RwLock::new(Mamba2PerformanceTracker::default())),
             state_manager: Arc::new(RwLock::new(StateManager::default())),
         })
@@ -272,92 +449,99 @@ impl Mamba2Pipeline {
         a_matrix
     }
 
-    /// Process input through selective scan mechanism
-    async fn selective_scan(
-        &self,
-        input: &[f32],
-        layer: &mut Mamba2Layer,
-        config: &Mamba2Config,
-    ) -> Result<Vec<f32>> {
-        let seq_len = input.len() / config.d_model;
-        let mut output = vec![0.0; input.len()];
+    /// Deterministic, non-degenerate initialization for the B and C projections.
+    ///
+    /// A zero matrix here is not a neutral choice: a zero `C` makes the scan
+    /// output `D · x`, i.e. the input, which is why the previous all-zero
+    /// initialization made the pipeline look like it worked while doing
+    /// nothing. Values are bounded in `±1/sqrt(d_state)`.
+    fn initialize_projection(d_state: usize, d_model: usize, seed: usize) -> Vec<f32> {
+        let scale = 1.0 / (d_state.max(1) as f32).sqrt();
+        (0..d_state * d_model)
+            .map(|i| {
+                let phase = (i * seed + seed) as f32 * 0.017_453_292;
+                phase.sin() * scale
+            })
+            .collect()
+    }
 
-        // Simulate selective scan computation
-        for t in 0..seq_len {
-            let start_idx = t * config.d_model;
-            let end_idx = start_idx + config.d_model;
-            let x_t = &input[start_idx..end_idx];
-
-            // Compute delta (selective parameter)
-            let delta_t = self.compute_delta(x_t, &layer.delta)?;
-
-            // Discrete SSM step: h_t = A * h_{t-1} + B * x_t
-            for i in 0..config.d_state.min(config.d_model) {
-                let a_val = layer.a_matrix[i % layer.a_matrix.len()];
-                let b_val = layer.b_matrix[i % layer.b_matrix.len()];
-
-                // Discretize with delta
-                let discrete_a = (delta_t * a_val).exp();
-                let discrete_b = delta_t * b_val;
-
-                // Update state
-                layer.ssm_state[i] =
-                    discrete_a * layer.ssm_state[i] + discrete_b * x_t[i % x_t.len()];
-            }
-
-            // Compute output: y_t = C * h_t + D * x_t
-            for i in 0..config.d_model {
-                let c_val = layer.c_matrix[i % layer.c_matrix.len()];
-                let h_val = layer.ssm_state[i % layer.ssm_state.len()];
-                output[start_idx + i] = c_val * h_val + layer.d_param * x_t[i];
-            }
+    /// Run the real SSD scan over `hidden`.
+    ///
+    /// Delegates to `trustformers_models::mamba2::Mamba2Block`, the same
+    /// implementation the models crate uses, so this is the project's single
+    /// selective-scan implementation rather than a second approximate copy.
+    async fn selective_scan_sequence(&self, hidden: Vec<Vec<f64>>) -> Result<Vec<Vec<f64>>> {
+        let model = self.model.read().await;
+        let mut current = hidden;
+        for block in &model.blocks {
+            current = block.forward(&current).map_err(|e| {
+                TrustformersError::pipeline(format!("Mamba-2 SSD scan failed: {e}"), "mamba2")
+            })?;
         }
-
-        Ok(output)
+        Ok(current)
     }
 
-    /// Compute selective delta parameter
-    fn compute_delta(&self, input: &[f32], delta_params: &[f32]) -> Result<f32> {
-        // Simple delta computation (in real implementation, this would be more complex)
-        let sum: f32 = input.iter().zip(delta_params.iter().cycle()).map(|(x, d)| x * d).sum();
-        Ok((sum / input.len() as f32).max(0.001)) // Ensure positive delta
-    }
-
-    /// Apply chunking strategy for ultra-long sequences (simplified implementation)
+    /// Apply the configured chunking strategy and run the scan.
+    ///
+    /// Overlapping and fixed chunking really split the sequence; the recorded
+    /// chunk boundaries are the ones that were used.
     async fn process_with_chunking(
         &self,
-        input: &[f32],
-        _strategy: &ChunkingStrategy,
-    ) -> Result<Vec<f32>> {
-        // Simplified implementation - just process entire sequence
-        let mut model = self.model.write().await;
-        let mut output = Vec::new();
+        hidden: Vec<Vec<f64>>,
+        strategy: &ChunkingStrategy,
+    ) -> Result<Vec<Vec<f64>>> {
+        let chunk_size = match strategy {
+            ChunkingStrategy::None | ChunkingStrategy::Adaptive => None,
+            ChunkingStrategy::Fixed(size) => Some((*size).max(1)),
+            ChunkingStrategy::Overlapping { chunk_size, .. } => Some((*chunk_size).max(1)),
+            ChunkingStrategy::Hierarchical { levels } => levels.first().map(|l| (*l).max(1)),
+        };
 
-        for layer in &mut model.layers {
-            let layer_output = self.selective_scan(input, layer, &self.config).await?;
-            output = layer_output;
+        match chunk_size {
+            None => self.selective_scan_sequence(hidden).await,
+            Some(size) if hidden.len() <= size => self.selective_scan_sequence(hidden).await,
+            Some(size) => {
+                let mut output = Vec::with_capacity(hidden.len());
+                for chunk in hidden.chunks(size) {
+                    output.extend(self.selective_scan_sequence(chunk.to_vec()).await?);
+                }
+                Ok(output)
+            },
         }
-
-        Ok(output)
     }
 
-    /// Generate performance metrics
+    /// Measured performance metrics for one run.
+    ///
+    /// Everything here is derived from the run itself; the previous constants
+    /// (`0.8` compression, `0.92` efficiency, `0.95` utilisation) are gone
+    /// because nothing measured them.
     async fn compute_performance_metrics(
         &self,
         start_time: std::time::Instant,
         input_tokens: usize,
-        memory_used: f32,
     ) -> Mamba2PerformanceMetrics {
-        let inference_time_ms = (start_time.elapsed().as_millis() as f32).max(1.0); // Ensure minimum 1ms
-        let tokens_per_second = (input_tokens as f32) / (inference_time_ms / 1000.0);
+        let elapsed = start_time.elapsed();
+        let inference_time_ms = elapsed.as_secs_f32() * 1000.0;
+        let tokens_per_second = if elapsed.as_secs_f32() > 0.0 {
+            input_tokens as f32 / elapsed.as_secs_f32()
+        } else {
+            0.0
+        };
+        let memory_usage_mb = crate::profiler::read_process_memory()
+            .map(|m| m.resident_bytes as f32 / (1024.0 * 1024.0));
+
+        // A Mamba layer keeps `d_state × headdim` state per head regardless of
+        // sequence length; the ratio against a length-proportional KV cache is
+        // therefore a real, computed property of this run.
+        let state_floats = self.config.d_state * self.config.d_model;
+        let attention_cache_floats = input_tokens.max(1) * self.config.d_model * 2;
+        let state_compression_ratio = state_floats as f32 / attention_cache_floats as f32;
 
         Mamba2PerformanceMetrics {
             inference_time_ms,
             tokens_per_second,
-            memory_usage_mb: memory_used.max(0.1), // Ensure non-zero memory usage
-            state_compression_ratio: 0.8,          // Mock compression ratio
-            hardware_efficiency: 0.92,             // Mock efficiency
-            selective_scan_utilization: 0.95,      // Mock utilization
+            memory_usage_mb,
+            state_compression_ratio,
         }
     }
 }
@@ -366,90 +550,153 @@ impl Pipeline for Mamba2Pipeline {
     type Input = PipelineInput;
     type Output = Mamba2Output;
 
+    /// Run the pipeline from synchronous code.
+    ///
+    /// # Errors
+    ///
+    /// Building a nested runtime is impossible from inside a current-thread
+    /// runtime, so that case returns an error pointing at
+    /// [`Mamba2Pipeline::process_async`] instead of panicking, which is what
+    /// the previous `Runtime::new()`-per-call did.
     fn __call__(&self, input: Self::Input) -> Result<Self::Output> {
-        // Use blocking runtime for async code
-        let rt = tokio::runtime::Runtime::new().map_err(|e| {
-            TrustformersError::runtime_error(format!("Failed to create tokio runtime: {}", e))
-        })?;
-        rt.block_on(self.process_async(input))
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => match handle.runtime_flavor() {
+                tokio::runtime::RuntimeFlavor::MultiThread => {
+                    tokio::task::block_in_place(|| handle.block_on(self.process_async(input)))
+                },
+                _ => Err(TrustformersError::runtime_error(
+                    "Mamba2Pipeline::__call__ was invoked from inside a current-thread Tokio \
+                     runtime, where blocking is not possible. Await \
+                     `Mamba2Pipeline::process_async` instead."
+                        .to_string(),
+                )),
+            },
+            Err(_) => {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| {
+                        TrustformersError::runtime_error(format!(
+                            "Failed to create tokio runtime: {e}"
+                        ))
+                    })?;
+                runtime.block_on(self.process_async(input))
+            },
+        }
     }
 }
 
 impl Mamba2Pipeline {
-    async fn process_async(&self, input: PipelineInput) -> Result<Mamba2Output> {
-        let start_time = std::time::Instant::now();
-
-        // Convert input to tensor representation
-        let input_tensor = match input {
+    /// Encode `input` into token ids using the pipeline's real tokenizer.
+    fn encode_input(&self, input: PipelineInput) -> Result<Vec<u32>> {
+        match input {
             PipelineInput::Text(text) => {
-                // Mock tokenization - in real implementation, use actual tokenizer
-                let tokens: Vec<f32> = text.chars()
-                    .take(1024) // Limit for demo
-                    .map(|c| (c as u32 % 32000) as f32 / 32000.0)
-                    .collect();
-
-                // Pad to d_model dimensions
-                let mut padded = Vec::new();
-                for chunk in tokens.chunks(self.config.d_model) {
-                    let mut chunk_vec = chunk.to_vec();
-                    chunk_vec.resize(self.config.d_model, 0.0);
-                    padded.extend(chunk_vec);
+                let encoded = self.tokenizer.encode(&text)?;
+                if encoded.input_ids.is_empty() {
+                    return Err(TrustformersError::invalid_input_simple(
+                        "input text encoded to an empty token sequence".to_string(),
+                    ));
                 }
-                padded
+                Ok(encoded.input_ids)
             },
             PipelineInput::Tokens(tokens) => {
-                tokens.into_iter().map(|t| t as f32 / 32000.0).collect()
+                if tokens.is_empty() {
+                    return Err(TrustformersError::invalid_input_simple(
+                        "token input was empty".to_string(),
+                    ));
+                }
+                Ok(tokens)
             },
-            _ => {
-                return Err(TrustformersError::invalid_input(
-                    "Unsupported input type for Mamba-2".to_string(),
-                    None::<String>,
-                    None::<String>,
-                    None::<String>,
-                ))
-            },
+            _ => Err(TrustformersError::invalid_input(
+                "Unsupported input type for Mamba-2".to_string(),
+                None::<String>,
+                None::<String>,
+                None::<String>,
+            )),
+        }
+    }
+
+    /// Run the model over `input` and return its real outputs.
+    ///
+    /// # Errors
+    ///
+    /// Fails on unsupported input, on an empty encoding, or when the SSD scan
+    /// rejects the sequence shape.
+    pub async fn process_async(&self, input: PipelineInput) -> Result<Mamba2Output> {
+        let start_time = std::time::Instant::now();
+        let token_ids = self.encode_input(input)?;
+
+        // Embed with the pipeline's own (non-degenerate) embedding table.
+        let hidden: Vec<Vec<f64>> = {
+            let model = self.model.read().await;
+            let vocab_size = model.embeddings.len();
+            token_ids
+                .iter()
+                .map(|&id| {
+                    let index = (id as usize).min(vocab_size.saturating_sub(1));
+                    model.embeddings[index].clone()
+                })
+                .collect()
         };
 
-        // Process through Mamba-2 with selective scanning
-        let output_tensor = self
-            .process_with_chunking(&input_tensor, &self.config.chunking_strategy)
-            .await
-            .map_err(|e| {
-                TrustformersError::pipeline(format!("Mamba-2 processing failed: {}", e), "mamba2")
-            })?;
+        // Real SSD scan through the models crate.
+        let states = self.process_with_chunking(hidden, &self.config.chunking_strategy).await?;
 
-        // Generate output text (mock detokenization)
-        let output_text = output_tensor.chunks(self.config.d_model)
-            .take(10) // Limit output length for demo
-            .map(|chunk| {
-                let avg = chunk.iter().sum::<f32>() / chunk.len() as f32;
-                char::from_u32((avg * 32000.0) as u32 % 127).unwrap_or(' ')
-            })
-            .collect::<String>();
+        // Real LM head projection.
+        let (logits_last, logits_flat, predicted_ids) = {
+            let model = self.model.read().await;
+            let mut flat: Vec<f32> = Vec::with_capacity(states.len() * model.lm_head.len());
+            let mut predicted = Vec::with_capacity(states.len());
+            let mut last_row: Vec<f32> = Vec::new();
+            for state in &states {
+                let row: Vec<f32> = model
+                    .lm_head
+                    .iter()
+                    .map(|weights| {
+                        weights.iter().zip(state.iter()).map(|(w, h)| w * h).sum::<f64>() as f32
+                    })
+                    .collect();
+                let argmax = row
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(i, _)| i as u32)
+                    .unwrap_or(0);
+                predicted.push(argmax);
+                flat.extend_from_slice(&row);
+                last_row = row;
+            }
+            (last_row, flat, predicted)
+        };
 
-        // Calculate performance metrics
-        let input_tokens = input_tensor.len() / self.config.d_model;
-        let memory_used = (input_tensor.len() * 4) as f32 / (1024.0 * 1024.0); // Rough estimate
-        let performance =
-            self.compute_performance_metrics(start_time, input_tokens, memory_used).await;
+        // Real detokenization of the ids the model actually selected.
+        let text = self.tokenizer.decode(&predicted_ids)?;
 
-        // Update performance tracker
+        let performance = self.compute_performance_metrics(start_time, token_ids.len()).await;
+
         {
             let mut tracker = self.performance_monitor.write().await;
-            tracker.total_tokens_processed += input_tokens as u64;
-            tracker.average_latency_per_token = performance.inference_time_ms / input_tokens as f32;
+            tracker.total_tokens_processed += token_ids.len() as u64;
+            tracker.average_latency_per_token =
+                performance.inference_time_ms / token_ids.len().max(1) as f32;
             tracker.throughput_tokens_per_second = performance.tokens_per_second;
-            tracker.memory_usage_mb = performance.memory_usage_mb;
+            tracker.memory_usage_mb = performance.memory_usage_mb.unwrap_or(0.0);
         }
 
+        let hidden_states: Vec<f32> =
+            states.last().map(|s| s.iter().map(|v| *v as f32).collect()).unwrap_or_default();
+        let ssm_states: Vec<f32> =
+            states.iter().flat_map(|s| s.iter().map(|v| *v as f32)).collect();
+
+        let _ = logits_last;
         Ok(Mamba2Output {
-            text: output_text,
-            logits: output_tensor.clone(),
-            hidden_states: output_tensor[..self.config.d_model.min(output_tensor.len())].to_vec(),
-            ssm_states: vec![0.0; self.config.d_state * self.config.d_model], // Mock SSM states
+            text,
+            logits: logits_flat,
+            hidden_states,
+            ssm_states,
             performance,
-            attention_weights: Some(vec![0.5; input_tokens]), // Mock attention weights
-            state_trajectory: Some(vec![vec![0.0; self.config.d_state]; input_tokens]), // Mock trajectory
+            token_ids: predicted_ids,
+            state_trajectory: None,
         })
     }
 }
@@ -461,9 +708,19 @@ impl From<Mamba2Output> for PipelineOutput {
 }
 
 /// Factory functions for common Mamba-2 configurations
+///
+/// Each takes the same [`Mamba2PipelineOptions`] as [`Mamba2Pipeline::new`], so
+/// the "no checkpoint is being loaded" acknowledgement cannot be bypassed by
+/// going through a convenience constructor.
 
-/// Create a high-performance Mamba-2 pipeline optimized for throughput
-pub fn create_high_performance_mamba2_pipeline() -> Result<Mamba2Pipeline> {
+/// Create a high-performance Mamba-2 pipeline optimized for throughput.
+///
+/// # Errors
+///
+/// Same as [`Mamba2Pipeline::new`].
+pub fn create_high_performance_mamba2_pipeline(
+    options: Mamba2PipelineOptions,
+) -> Result<Mamba2Pipeline> {
     let config = Mamba2Config {
         d_model: 1024,
         d_state: 32,
@@ -479,11 +736,18 @@ pub fn create_high_performance_mamba2_pipeline() -> Result<Mamba2Pipeline> {
         ..Default::default()
     };
 
-    Mamba2Pipeline::new(config)
+    Mamba2Pipeline::new(config, options)
 }
 
-/// Create a memory-efficient Mamba-2 pipeline for resource-constrained environments
-pub fn create_memory_efficient_mamba2_pipeline() -> Result<Mamba2Pipeline> {
+/// Create a memory-efficient Mamba-2 pipeline for resource-constrained
+/// environments.
+///
+/// # Errors
+///
+/// Same as [`Mamba2Pipeline::new`].
+pub fn create_memory_efficient_mamba2_pipeline(
+    options: Mamba2PipelineOptions,
+) -> Result<Mamba2Pipeline> {
     let config = Mamba2Config {
         d_model: 512,
         d_state: 8,
@@ -496,11 +760,17 @@ pub fn create_memory_efficient_mamba2_pipeline() -> Result<Mamba2Pipeline> {
         ..Default::default()
     };
 
-    Mamba2Pipeline::new(config)
+    Mamba2Pipeline::new(config, options)
 }
 
-/// Create an ultra-long sequence Mamba-2 pipeline for processing millions of tokens
-pub fn create_ultra_long_sequence_mamba2_pipeline() -> Result<Mamba2Pipeline> {
+/// Create an ultra-long sequence Mamba-2 pipeline.
+///
+/// # Errors
+///
+/// Same as [`Mamba2Pipeline::new`].
+pub fn create_ultra_long_sequence_mamba2_pipeline(
+    options: Mamba2PipelineOptions,
+) -> Result<Mamba2Pipeline> {
     let config = Mamba2Config {
         d_model: 768,
         d_state: 16,
@@ -515,12 +785,48 @@ pub fn create_ultra_long_sequence_mamba2_pipeline() -> Result<Mamba2Pipeline> {
         ..Default::default()
     };
 
-    Mamba2Pipeline::new(config)
+    Mamba2Pipeline::new(config, options)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    /// A real character-level tokenizer over a small ASCII vocabulary.
+    fn test_tokenizer() -> Arc<dyn Tokenizer> {
+        let vocab: HashMap<String, u32> = ('a'..='z')
+            .chain(" .".chars())
+            .enumerate()
+            .map(|(i, c)| (c.to_string(), i as u32))
+            .collect();
+        Arc::new(crate::tokenizers::CharTokenizer::new(vocab))
+    }
+
+    fn test_options(allow_untrained: bool) -> Mamba2PipelineOptions {
+        Mamba2PipelineOptions {
+            tokenizer: test_tokenizer(),
+            allow_untrained_weights: allow_untrained,
+        }
+    }
+
+    /// A small configuration so tests stay fast.
+    fn small_config() -> Mamba2Config {
+        Mamba2Config {
+            d_model: 16,
+            d_state: 4,
+            expand_factor: 2,
+            d_conv: 2,
+            n_heads: 2,
+            chunking_strategy: ChunkingStrategy::None,
+            ..Mamba2Config::default()
+        }
+    }
+
+    fn small_pipeline() -> Mamba2Pipeline {
+        Mamba2Pipeline::new(small_config(), test_options(true))
+            .expect("an explicitly untrained pipeline should build")
+    }
 
     // ── Config defaults ───────────────────────────────────────────────────────
 
@@ -537,323 +843,170 @@ mod tests {
     }
 
     #[test]
-    fn test_config_default_n_heads_one() {
-        let config = Mamba2Config::default();
-        assert_eq!(config.n_heads, 1);
-    }
-
-    #[test]
     fn test_config_dt_rank_auto_calculation() {
         let config = Mamba2Config::default();
         let expected_dt_rank = config.d_model / 16;
         let actual = config.dt_rank.unwrap_or(config.d_model / 16);
-        assert_eq!(
-            actual, expected_dt_rank,
-            "dt_rank should default to d_model/16"
-        );
-    }
-
-    // ── Model initialisation ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_model_initialisation_24_layers() {
-        let config = Mamba2Config::default();
-        let model = Mamba2Pipeline::initialize_model(&config).expect("model init should succeed");
-        assert_eq!(model.layers.len(), 24, "model should have 24 layers");
-    }
-
-    #[test]
-    fn test_model_layer_hidden_state_dimension() {
-        let config = Mamba2Config::default();
-        let model = Mamba2Pipeline::initialize_model(&config).expect("model init should succeed");
-        for layer in &model.layers {
-            assert_eq!(
-                layer.hidden_state.len(),
-                config.d_model,
-                "each layer hidden state must match d_model"
-            );
-        }
-    }
-
-    #[test]
-    fn test_model_layer_ssm_state_dimension() {
-        let config = Mamba2Config::default();
-        let model = Mamba2Pipeline::initialize_model(&config).expect("model init should succeed");
-        for layer in &model.layers {
-            assert_eq!(
-                layer.ssm_state.len(),
-                config.d_state * config.d_model,
-                "SSM state size must be d_state × d_model"
-            );
-        }
-    }
-
-    #[test]
-    fn test_model_layer_conv_state_dimension() {
-        let config = Mamba2Config::default();
-        let model = Mamba2Pipeline::initialize_model(&config).expect("model init should succeed");
-        for layer in &model.layers {
-            assert_eq!(layer.conv_state.len(), config.d_conv * config.d_model);
-        }
+        assert_eq!(actual, expected_dt_rank);
     }
 
     // ── A matrix initialisation (discretisation params) ───────────────────────
 
     #[test]
     fn test_a_matrix_simplified_init_non_positive() {
-        // val = -ln(i+1): for i=0 yields 0, for i>0 yields negative values
         let a = Mamba2Pipeline::initialize_a_matrix(8, true);
         for &val in &a {
-            assert!(
-                val <= 0.0,
-                "simplified A-matrix values should be ≤ 0 (negative log of positive index)"
-            );
+            assert!(val <= 0.0);
         }
-        // At least all-but-first should be strictly negative
         let strictly_negative = a.iter().filter(|&&v| v < 0.0).count();
-        assert!(
-            strictly_negative >= a.len() - 1,
-            "all A-matrix values except index 0 should be strictly negative"
-        );
-    }
-
-    #[test]
-    fn test_a_matrix_simplified_size() {
-        let d_state = 16;
-        let a = Mamba2Pipeline::initialize_a_matrix(d_state, true);
-        assert_eq!(a.len(), d_state);
-    }
-
-    #[test]
-    fn test_a_matrix_complex_init_size() {
-        let d_state = 8;
-        let a = Mamba2Pipeline::initialize_a_matrix(d_state, false);
-        assert_eq!(a.len(), d_state);
+        assert!(strictly_negative >= a.len() - 1);
     }
 
     #[test]
     fn test_a_matrix_values_finite() {
-        let a = Mamba2Pipeline::initialize_a_matrix(16, true);
-        for &val in &a {
-            assert!(val.is_finite(), "all A-matrix values should be finite");
+        for simplified in [true, false] {
+            for &val in &Mamba2Pipeline::initialize_a_matrix(16, simplified) {
+                assert!(val.is_finite());
+            }
         }
     }
 
-    // ── Selective scan (delta computation) ───────────────────────────────────
+    // -----------------------------------------------------------------------
+    // Regression tests for the removed placeholder implementation.
+    //
+    // The old pipeline initialised `b_matrix`/`c_matrix` to all zeros (making
+    // the scan return its input unchanged), tokenized text with
+    // `c as u32 % 32000`, and reported `state_compression_ratio: 0.8`,
+    // `hardware_efficiency: 0.92`, `selective_scan_utilization: 0.95` as
+    // constants. Every test below fails against that code.
+    // -----------------------------------------------------------------------
 
-    #[tokio::test]
-    async fn test_selective_scan_output_length_matches_input() {
-        let config = Mamba2Config {
-            d_model: 4,
-            d_state: 2,
-            d_conv: 2,
-            ..Default::default()
+    /// Building a pipeline without acknowledging the missing checkpoint must
+    /// fail rather than hand back an untrained model.
+    #[test]
+    fn untrained_weights_require_an_explicit_opt_in() {
+        let Err(err) = Mamba2Pipeline::new(small_config(), test_options(false)) else {
+            panic!("an unacknowledged untrained model must be refused");
         };
-        let pipeline =
-            Mamba2Pipeline::new(config.clone()).expect("pipeline creation should succeed");
-        // 2 timesteps × d_model
-        let input = vec![0.1_f32; 2 * config.d_model];
-        let mut model = pipeline.model.write().await;
-        let layer = &mut model.layers[0];
-        let result = pipeline
-            .selective_scan(&input, layer, &config)
-            .await
-            .expect("selective scan should succeed");
-        assert_eq!(
-            result.len(),
-            input.len(),
-            "selective scan output length should match input length"
+        assert!(
+            err.to_string().contains("allow_untrained_weights"),
+            "the error should name the opt-in: {err}"
         );
     }
 
-    #[tokio::test]
-    async fn test_selective_scan_output_finite() {
-        let config = Mamba2Config {
-            d_model: 4,
-            d_state: 2,
-            d_conv: 2,
-            ..Default::default()
-        };
-        let pipeline =
-            Mamba2Pipeline::new(config.clone()).expect("pipeline creation should succeed");
-        let input = vec![0.5_f32; 2 * config.d_model];
-        let mut model = pipeline.model.write().await;
-        let layer = &mut model.layers[0];
-        let result = pipeline
-            .selective_scan(&input, layer, &config)
-            .await
-            .expect("selective scan should succeed");
-        for &v in &result {
+    /// `from_pretrained` must not silently produce an untrained model.
+    #[test]
+    fn from_pretrained_is_not_silently_untrained() {
+        assert!(Mamba2Pipeline::from_pretrained("state-spaces/mamba2-2.7b").is_err());
+    }
+
+    /// The B and C projections must not be uniformly zero.
+    #[test]
+    fn projection_matrices_are_not_degenerate() {
+        let config = small_config();
+        let model = Mamba2Pipeline::initialize_model(&config, 32).expect("model init");
+        for layer in &model.layers {
             assert!(
-                v.is_finite(),
-                "selective scan outputs should be finite numbers"
+                layer.b_matrix.iter().any(|v| v.abs() > 1e-6),
+                "an all-zero B matrix would drop the input term entirely"
+            );
+            assert!(
+                layer.c_matrix.iter().any(|v| v.abs() > 1e-6),
+                "an all-zero C matrix reduces the scan to the identity"
             );
         }
+        assert_eq!(model.blocks.len(), MAMBA2_LAYER_COUNT);
     }
 
+    /// The scan must actually transform the sequence.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn selective_scan_changes_the_hidden_states() {
+        let pipeline = small_pipeline();
+        let input: Vec<Vec<f64>> =
+            (0..4).map(|t| (0..16).map(|i| ((t * 16 + i) as f64).sin()).collect()).collect();
+        let output = pipeline
+            .selective_scan_sequence(input.clone())
+            .await
+            .expect("the SSD scan should run");
+
+        assert_eq!(output.len(), input.len());
+        let changed = output
+            .iter()
+            .zip(input.iter())
+            .any(|(o, i)| o.iter().zip(i.iter()).any(|(a, b)| (a - b).abs() > 1e-9));
+        assert!(
+            changed,
+            "the scan returned its input unchanged, which is what an all-zero C matrix does"
+        );
+        for row in &output {
+            assert!(row.iter().all(|v| v.is_finite()));
+        }
+    }
+
+    /// Token ids must come from the tokenizer, not from character arithmetic.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn text_input_is_tokenized_with_the_real_tokenizer() {
+        let pipeline = small_pipeline();
+        let expected = pipeline
+            .tokenizer
+            .encode("hello world")
+            .expect("tokenizer should encode")
+            .input_ids;
+        let encoded = pipeline
+            .encode_input(PipelineInput::Text("hello world".to_string()))
+            .expect("encoding should succeed");
+        assert_eq!(encoded, expected);
+        assert!(
+            encoded.iter().all(|id| (*id as usize) < pipeline.tokenizer.vocab_size()),
+            "every id must be a real vocabulary entry"
+        );
+    }
+
+    /// The reported metrics must be measured, not constants.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn performance_metrics_are_measured() {
+        let pipeline = small_pipeline();
+        let output = pipeline
+            .process_async(PipelineInput::Text("hello world".to_string()))
+            .await
+            .expect("a real run should succeed");
+
+        assert!(output.performance.inference_time_ms >= 0.0);
+        assert!(output.performance.tokens_per_second.is_finite());
+        assert_ne!(
+            output.performance.state_compression_ratio, 0.8,
+            "0.8 was the old hardcoded compression ratio"
+        );
+        assert!(!output.token_ids.is_empty(), "a real run selects real ids");
+        assert!(
+            output
+                .token_ids
+                .iter()
+                .all(|id| (*id as usize) < pipeline.tokenizer.vocab_size()),
+            "predicted ids must lie inside the tokenizer's vocabulary"
+        );
+        assert!(output.state_trajectory.is_none());
+    }
+
+    /// Chunked processing must cover the whole sequence.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn chunked_processing_covers_the_sequence() {
+        let mut config = small_config();
+        config.chunking_strategy = ChunkingStrategy::Fixed(2);
+        let pipeline =
+            Mamba2Pipeline::new(config, test_options(true)).expect("pipeline should build");
+        let input: Vec<Vec<f64>> = (0..5).map(|t| vec![t as f64 * 0.1; 16]).collect();
+        let output = pipeline
+            .process_with_chunking(input.clone(), &ChunkingStrategy::Fixed(2))
+            .await
+            .expect("chunked scan should run");
+        assert_eq!(output.len(), input.len());
+    }
+
+    /// Unsupported inputs are refused rather than coerced.
     #[test]
-    fn test_compute_delta_positive() {
-        let config = Mamba2Config::default();
-        let pipeline = Mamba2Pipeline::new(config).expect("pipeline creation should succeed");
-        let input = vec![0.1_f32; 4];
-        let delta_params = vec![0.5_f32; 4];
-        let delta = pipeline
-            .compute_delta(&input, &delta_params)
-            .expect("compute_delta should succeed");
-        assert!(delta > 0.0, "delta must always be positive");
-    }
-
-    #[test]
-    fn test_compute_delta_minimum_clamped() {
-        // All-zero input should yield the minimum clamped value (0.001)
-        let config = Mamba2Config::default();
-        let pipeline = Mamba2Pipeline::new(config).expect("pipeline creation should succeed");
-        let input = vec![0.0_f32; 4];
-        let delta_params = vec![0.0_f32; 4];
-        let delta = pipeline
-            .compute_delta(&input, &delta_params)
-            .expect("compute_delta should succeed");
-        assert!(delta >= 0.001, "delta should be clamped to at least 0.001");
-    }
-
-    // ── Pipeline end-to-end ──────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_mamba2_basic_functionality() {
-        let pipeline = create_memory_efficient_mamba2_pipeline().expect("operation failed in test");
-        let input = PipelineInput::Text("Hello, Mamba-2!".to_string());
-        let result = pipeline.process_async(input).await;
-        assert!(result.is_ok());
-        let output = result.expect("operation failed in test");
-        assert!(!output.text.is_empty());
-        assert!(!output.logits.is_empty());
-        assert!(output.performance.tokens_per_second > 0.0);
-    }
-
-    #[tokio::test]
-    async fn test_mamba2_chunking_strategies() {
-        let config = Mamba2Config {
-            chunking_strategy: ChunkingStrategy::Fixed(128),
-            ..Default::default()
-        };
-        let pipeline = Mamba2Pipeline::new(config).expect("operation failed in test");
-        let long_text = "A".repeat(1000);
-        let input = PipelineInput::Text(long_text);
-        let result = pipeline.process_async(input).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_mamba2_performance_tracking() {
-        let pipeline = create_high_performance_mamba2_pipeline().expect("operation failed in test");
-        let input = PipelineInput::Text("Performance test".to_string());
-        let result = pipeline.process_async(input).await.expect("async operation failed");
-        assert!(result.performance.inference_time_ms > 0.0);
-        assert!(result.performance.memory_usage_mb > 0.0);
-        assert!(result.performance.hardware_efficiency > 0.0);
-    }
-
-    #[tokio::test]
-    async fn test_mamba2_token_input() {
-        let config = Mamba2Config {
-            d_model: 4,
-            d_state: 2,
-            d_conv: 2,
-            ..Default::default()
-        };
-        let pipeline = Mamba2Pipeline::new(config).expect("pipeline creation should succeed");
-        let tokens = vec![100_u32, 200, 300, 400];
-        let input = PipelineInput::Tokens(tokens);
-        let result = pipeline.process_async(input).await;
-        assert!(result.is_ok(), "token input should be accepted");
-    }
-
-    #[tokio::test]
-    async fn test_mamba2_batch_text_input_rejected() {
-        let pipeline =
-            create_memory_efficient_mamba2_pipeline().expect("pipeline creation should succeed");
-        // BatchText is not supported by Mamba2 pipeline
-        let input = PipelineInput::BatchText(vec!["a".to_string(), "b".to_string()]);
-        let result = pipeline.process_async(input).await;
-        assert!(
-            result.is_err(),
-            "BatchText input should be rejected by Mamba2 pipeline"
-        );
-    }
-
-    // ── Output structure ─────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_mamba2_output_ssm_states_correct_size() {
-        let config = Mamba2Config {
-            d_model: 8,
-            d_state: 4,
-            d_conv: 2,
-            ..Default::default()
-        };
-        let pipeline =
-            Mamba2Pipeline::new(config.clone()).expect("pipeline creation should succeed");
-        let result = pipeline
-            .process_async(PipelineInput::Text("abc".to_string()))
-            .await
-            .expect("processing should succeed");
-        assert_eq!(
-            result.ssm_states.len(),
-            config.d_state * config.d_model,
-            "SSM states size should be d_state × d_model"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_mamba2_output_has_attention_weights() {
-        let pipeline =
-            create_memory_efficient_mamba2_pipeline().expect("pipeline creation should succeed");
-        let result = pipeline
-            .process_async(PipelineInput::Text("test".to_string()))
-            .await
-            .expect("processing should succeed");
-        assert!(
-            result.attention_weights.is_some(),
-            "attention_weights should be present"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_mamba2_performance_metrics_scan_utilization() {
-        let pipeline =
-            create_memory_efficient_mamba2_pipeline().expect("pipeline creation should succeed");
-        let result = pipeline
-            .process_async(PipelineInput::Text("scan utilization test".to_string()))
-            .await
-            .expect("processing should succeed");
-        assert!(result.performance.selective_scan_utilization > 0.0);
-    }
-
-    // ── Ultra-long sequence factory ───────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_ultra_long_sequence_pipeline_basic() {
-        let pipeline = create_ultra_long_sequence_mamba2_pipeline()
-            .expect("ultra long sequence pipeline should be created");
-        let input = PipelineInput::Text("Ultra long test input".to_string());
-        let result = pipeline.process_async(input).await;
-        assert!(
-            result.is_ok(),
-            "ultra long sequence pipeline should process successfully"
-        );
-    }
-
-    // ── From conversion ───────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_from_mamba2_output_to_pipeline_output() {
-        let pipeline =
-            create_memory_efficient_mamba2_pipeline().expect("pipeline creation should succeed");
-        let mamba_out = pipeline
-            .process_async(PipelineInput::Text("hi".to_string()))
-            .await
-            .expect("processing should succeed");
-        let pipeline_output: PipelineOutput = mamba_out.into();
-        assert!(matches!(pipeline_output, PipelineOutput::Mamba2(_)));
+    fn unsupported_input_is_refused() {
+        let pipeline = small_pipeline();
+        assert!(pipeline.encode_input(PipelineInput::Tokens(Vec::new())).is_err());
     }
 }

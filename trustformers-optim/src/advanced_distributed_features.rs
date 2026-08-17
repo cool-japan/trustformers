@@ -200,7 +200,7 @@ impl AutoScaler {
             ScalingStrategy::CostOptimized => {
                 self.cost_optimized_scaling(avg_utilization, metrics)?
             },
-            ScalingStrategy::Custom(_) => self.custom_scaling(metrics)?,
+            ScalingStrategy::Custom(name) => self.custom_scaling(name, metrics)?,
         };
 
         // Execute scaling decision
@@ -272,22 +272,38 @@ impl AutoScaler {
         // Update workload predictor
         self.workload_predictor.update_metrics(metrics);
 
+        // Without enough history there is no prediction to make. Falling back
+        // to the *measured* utilization keeps the decision grounded in real
+        // data; inventing a "conservative 0.75" would fabricate the input the
+        // whole branch is about to act on.
+        if !self.workload_predictor.can_predict() {
+            return self.performance_based_scaling(
+                metrics.gpu_utilization.iter().sum::<f32>() / metrics.gpu_utilization.len() as f32,
+            );
+        }
+
         // Get prediction for next 10 minutes
         let predicted_load = self.workload_predictor.predict_workload(Duration::from_secs(600))?;
+
+        // Utilization the cluster is sized for. Both branches solve the same
+        // equation — `nodes * target = load * current_nodes` — so the sizing is
+        // derived from the configuration rather than from magic constants.
+        let target = self.config.scale_up_threshold.clamp(0.05, 1.0);
 
         // Make scaling decision based on prediction
         if predicted_load > self.config.scale_up_threshold * 1.1 && // Add 10% buffer
            self.current_nodes < self.config.max_nodes
         {
-            let nodes_to_add =
-                ((predicted_load - 0.75) * self.current_nodes as f32).ceil() as usize;
+            let required = (predicted_load / target * self.current_nodes as f32).ceil() as usize;
+            let nodes_to_add = required.saturating_sub(self.current_nodes).max(1);
             Ok(ScalingDecision::ScaleUp(
                 nodes_to_add.min(self.config.max_nodes - self.current_nodes),
             ))
         } else if predicted_load < self.config.scale_down_threshold * 0.9 && // Add 10% buffer
                   self.current_nodes > self.config.min_nodes
         {
-            let target_nodes = (predicted_load / 0.8 * self.current_nodes as f32).ceil() as usize;
+            let target_nodes =
+                ((predicted_load / target * self.current_nodes as f32).ceil() as usize).max(1);
             let nodes_to_remove = self.current_nodes.saturating_sub(target_nodes);
             if nodes_to_remove > 0 {
                 Ok(ScalingDecision::ScaleDown(
@@ -340,9 +356,20 @@ impl AutoScaler {
         }
     }
 
-    fn custom_scaling(&self, _metrics: &PerformanceMetrics) -> Result<ScalingDecision> {
-        // Placeholder for custom scaling logic
-        Ok(ScalingDecision::NoAction)
+    /// Dispatch a caller-named scaling strategy.
+    ///
+    /// # Errors
+    ///
+    /// Always. [`ScalingStrategy::Custom`] names a policy this crate does not
+    /// implement and has no callback for; answering
+    /// [`ScalingDecision::NoAction`] would be indistinguishable from a policy
+    /// that ran and decided to do nothing.
+    fn custom_scaling(&self, name: &str, _metrics: &PerformanceMetrics) -> Result<ScalingDecision> {
+        Err(TrustformersError::not_implemented(format!(
+            "custom scaling strategy `{name}` has no implementation registered; select one of \
+             ScalingStrategy::{{Performance, QueueBased, Predictive, CostOptimized}} or drive the \
+             scaling decision yourself"
+        )))
     }
 
     fn execute_scale_up(&mut self, nodes: usize) -> Result<()> {
@@ -451,24 +478,51 @@ impl WorkloadPredictor {
         }
     }
 
+    /// Samples required before a prediction is meaningful.
+    pub const MIN_SAMPLES: usize = 10;
+
     pub fn update_metrics(&mut self, metrics: &PerformanceMetrics) {
+        if metrics.gpu_utilization.is_empty() {
+            // No telemetry was recorded; there is nothing to learn from.
+            return;
+        }
         let avg_utilization =
             metrics.gpu_utilization.iter().sum::<f32>() / metrics.gpu_utilization.len() as f32;
-        let now = Instant::now();
 
-        self.historical_data.push_back((now, avg_utilization));
+        self.historical_data.push_back((Instant::now(), avg_utilization));
         if self.historical_data.len() > 10000 {
             self.historical_data.pop_front();
         }
 
         self.trend_analyzer.update(avg_utilization);
-        self.seasonal_analyzer.update(now, avg_utilization);
+        self.seasonal_analyzer.update(SystemTime::now(), avg_utilization);
     }
 
+    /// Number of utilization samples observed so far.
+    pub fn sample_count(&self) -> usize {
+        self.historical_data.len()
+    }
+
+    /// Whether enough history has accumulated for
+    /// [`WorkloadPredictor::predict_workload`] to answer.
+    pub fn can_predict(&self) -> bool {
+        self.historical_data.len() >= Self::MIN_SAMPLES
+    }
+
+    /// Predict mean GPU utilization `horizon` from now.
+    ///
+    /// # Errors
+    ///
+    /// When fewer than [`WorkloadPredictor::MIN_SAMPLES`] samples have been
+    /// recorded. Earlier revisions returned a hard-coded `0.75` here, which the
+    /// auto-scaler then acted on as though it were a measurement.
     pub fn predict_workload(&self, horizon: Duration) -> Result<f32> {
-        if self.historical_data.len() < 10 {
-            // Not enough data for prediction
-            return Ok(0.75); // Default conservative estimate
+        if !self.can_predict() {
+            return Err(TrustformersError::invalid_state(format!(
+                "workload prediction needs at least {} utilization samples, have {}",
+                Self::MIN_SAMPLES,
+                self.historical_data.len()
+            )));
         }
 
         // Simple prediction combining trend and seasonal components
@@ -536,10 +590,15 @@ impl TrendAnalyzer {
     }
 }
 
-/// Simple seasonal analyzer
+/// Utilization aggregated by UTC hour-of-day.
+///
+/// Samples are bucketed by the wall-clock hour they were observed at, so a
+/// prediction for a future time reads the bucket that time falls in. An earlier
+/// revision derived the bucket from `Instant::elapsed()`, which measures the
+/// *age* of the sample and therefore put every observation in bucket 0.
 pub struct SeasonalAnalyzer {
-    hourly_patterns: HashMap<u32, Vec<f32>>, // hour -> values
-    last_update: Option<Instant>,
+    hourly_patterns: HashMap<u32, Vec<f32>>, // UTC hour-of-day -> values
+    last_update: Option<SystemTime>,
 }
 
 impl Default for SeasonalAnalyzer {
@@ -556,36 +615,76 @@ impl SeasonalAnalyzer {
         }
     }
 
-    pub fn update(&mut self, timestamp: Instant, value: f32) {
-        // Simplified: use milliseconds modulo as hour approximation
-        let pseudo_hour = (timestamp.elapsed().as_secs() / 3600) % 24;
+    /// UTC hour-of-day (`0..24`) that `at` falls in.
+    ///
+    /// Times before the Unix epoch are clamped to hour 0; this crate carries no
+    /// calendar dependency, and hour-of-day needs none.
+    pub fn hour_of_day(at: SystemTime) -> u32 {
+        let seconds = at
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or(0);
+        ((seconds / 3600) % 24) as u32
+    }
 
-        self.hourly_patterns.entry(pseudo_hour as u32).or_default().push(value);
+    /// Record `value` in the bucket for the UTC hour `at` falls in.
+    pub fn update(&mut self, at: SystemTime, value: f32) {
+        let hour = Self::hour_of_day(at);
+        let bucket = self.hourly_patterns.entry(hour).or_default();
+        bucket.push(value);
+        // Bounded history: keep the most recent 100 samples for this hour.
+        if bucket.len() > 100 {
+            let excess = bucket.len() - 100;
+            bucket.drain(0..excess);
+        }
 
-        // Keep only recent values (last 100 per hour)
-        for values in self.hourly_patterns.values_mut() {
-            if values.len() > 100 {
-                values.drain(0..50); // Remove oldest 50
+        self.last_update = Some(at);
+    }
+
+    /// Predicted utilization `horizon` from now.
+    ///
+    /// Reads the bucket for the UTC hour that `now + horizon` falls in. When
+    /// that hour has no samples yet the mean over every recorded hour is
+    /// returned instead — still a measurement, just a coarser one.
+    ///
+    /// # Errors
+    ///
+    /// When nothing has been recorded at all. There is no honest number to
+    /// return in that case.
+    pub fn predict(&self, horizon: Duration) -> Result<f32> {
+        self.predict_at(SystemTime::now() + horizon)
+    }
+
+    /// Predicted utilization for the UTC hour that `at` falls in.
+    ///
+    /// The absolute-time form of [`SeasonalAnalyzer::predict`]; taking the
+    /// instant explicitly makes the bucket selection reproducible.
+    pub fn predict_at(&self, at: SystemTime) -> Result<f32> {
+        if self.hourly_patterns.is_empty() {
+            return Err(TrustformersError::invalid_state(
+                "seasonal prediction requires at least one recorded sample".to_string(),
+            ));
+        }
+
+        let target_hour = Self::hour_of_day(at);
+        if let Some(values) = self.hourly_patterns.get(&target_hour) {
+            if !values.is_empty() {
+                return Ok(values.iter().sum::<f32>() / values.len() as f32);
             }
         }
 
-        self.last_update = Some(timestamp);
-    }
-
-    pub fn predict(&self, _horizon: Duration) -> Result<f32> {
-        if self.hourly_patterns.is_empty() {
-            return Ok(0.75); // Default
+        let mut total = 0.0f32;
+        let mut count = 0usize;
+        for values in self.hourly_patterns.values() {
+            total += values.iter().sum::<f32>();
+            count += values.len();
         }
-
-        // Simple average of all patterns
-        let all_values: Vec<f32> =
-            self.hourly_patterns.values().flat_map(|v| v.iter()).cloned().collect();
-
-        if all_values.is_empty() {
-            Ok(0.75)
-        } else {
-            Ok(all_values.iter().sum::<f32>() / all_values.len() as f32)
+        if count == 0 {
+            return Err(TrustformersError::invalid_state(
+                "seasonal prediction requires at least one recorded sample".to_string(),
+            ));
         }
+        Ok(total / count as f32)
     }
 }
 
@@ -1185,22 +1284,29 @@ impl PerformanceMLOptimizer {
             // Less than a 10% change is not worth disturbing the schedule for.
             return Ok(None);
         }
-        config.dynamic_batching.initial_batch_size = predicted_optimal_batch as usize;
+
+        // The batch size is an integer; derive the prediction from the value
+        // that is actually written, not from the un-truncated estimate.
+        let applied_batch = predicted_optimal_batch as usize;
+        if applied_batch == 0 {
+            return Ok(None);
+        }
+        config.dynamic_batching.initial_batch_size = applied_batch;
+        let applied = applied_batch as f32;
 
         // A larger batch amortizes the fixed per-step collective over more
         // samples, so it removes `1 - current/new` of the communication phase.
         // A *smaller* batch is chosen to relieve memory pressure and predicts no
         // step-time saving at all — reporting the raw size delta as a
         // "performance improvement" would invert the sign of a slowdown.
-        let predicted = if predicted_optimal_batch > current_batch {
-            (metrics.communication_overhead * (1.0 - current_batch / predicted_optimal_batch))
-                .clamp(0.0, 1.0)
+        let predicted = if applied > current_batch {
+            (metrics.communication_overhead * (1.0 - current_batch / applied)).clamp(0.0, 1.0)
         } else {
             0.0
         };
 
         let mut params_changed = HashMap::new();
-        params_changed.insert("batch_size".to_string(), predicted_optimal_batch);
+        params_changed.insert("batch_size".to_string(), applied);
 
         Ok(Some(OptimizationResult {
             timestamp: SystemTime::now(),
@@ -1404,432 +1510,4 @@ impl MLPerformanceModel {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn scratch_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "trustformers-ckpt-{label}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        dir
-    }
-
-    fn model_state(scale: f32) -> HashMap<String, Tensor> {
-        let mut state = HashMap::new();
-        state.insert(
-            "encoder.weight".to_string(),
-            Tensor::from_slice(
-                &[0.11 * scale, -0.25 * scale, 0.5 * scale, -0.75 * scale],
-                &[2, 2],
-            )
-            .expect("tensor must build in test"),
-        );
-        state.insert(
-            "encoder.bias".to_string(),
-            Tensor::from_slice(&[-0.03 * scale, 0.07 * scale], &[2])
-                .expect("tensor must build in test"),
-        );
-        state
-    }
-
-    fn assert_states_equal(actual: &HashMap<String, Tensor>, expected: &HashMap<String, Tensor>) {
-        assert_eq!(actual.len(), expected.len(), "parameter count");
-        for (name, tensor) in expected {
-            let restored =
-                actual.get(name).unwrap_or_else(|| panic!("parameter `{name}` was lost"));
-            assert_eq!(restored.shape(), tensor.shape(), "`{name}` shape");
-            assert_eq!(
-                restored.to_vec_f32().expect("read"),
-                tensor.to_vec_f32().expect("read"),
-                "`{name}` values must be bit-identical"
-            );
-        }
-    }
-
-    #[test]
-    fn checkpoint_save_load_round_trip_is_bit_identical() {
-        let dir = scratch_dir("full");
-        let config = CheckpointConfig {
-            differential: false,
-            compression: false,
-            ..CheckpointConfig::default()
-        };
-        let mut manager =
-            SmartCheckpointManager::new(config, dir.clone()).expect("manager must build in test");
-
-        let state = model_state(1.0);
-        let info = manager.create_checkpoint(10, &state).expect("checkpoint in test");
-        assert!(info.validation_passed, "a real checkpoint must validate");
-        assert!(!info.is_differential);
-
-        let restored = manager.load_checkpoint(10).expect("load in test");
-        assert_states_equal(&restored, &state);
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn checkpoint_does_not_zero_sub_unit_weights() {
-        // Regression: the previous serializer wrote `tensor.to_vec_u8()`,
-        // which casts f32 values to u8 and mapped every weight in (-1, 1) to 0.
-        let dir = scratch_dir("subunit");
-        let config = CheckpointConfig {
-            differential: false,
-            compression: true,
-            ..CheckpointConfig::default()
-        };
-        let mut manager =
-            SmartCheckpointManager::new(config, dir.clone()).expect("manager must build in test");
-
-        let mut state = HashMap::new();
-        state.insert(
-            "w".to_string(),
-            Tensor::from_slice(&[0.004, -0.9, 0.5, 0.125], &[4])
-                .expect("tensor must build in test"),
-        );
-
-        manager.create_checkpoint(1, &state).expect("checkpoint in test");
-        let restored = manager.load_checkpoint(1).expect("load in test");
-        let values = restored.get("w").expect("parameter must survive").to_vec_f32().expect("read");
-
-        assert_eq!(values, vec![0.004f32, -0.9, 0.5, 0.125]);
-        assert!(values.iter().all(|value| *value != 0.0));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn differential_checkpoints_replay_onto_the_base() {
-        let dir = scratch_dir("diff");
-        let config = CheckpointConfig {
-            differential: true,
-            compression: true,
-            retention_count: 10,
-            ..CheckpointConfig::default()
-        };
-        let mut manager =
-            SmartCheckpointManager::new(config, dir.clone()).expect("manager must build in test");
-
-        let first = model_state(1.0);
-        let second = model_state(2.0);
-        let third = model_state(3.0);
-
-        let full = manager.create_checkpoint(1, &first).expect("checkpoint in test");
-        assert!(!full.is_differential);
-        let diff_one = manager.create_checkpoint(2, &second).expect("checkpoint in test");
-        assert!(diff_one.is_differential);
-        let diff_two = manager.create_checkpoint(3, &third).expect("checkpoint in test");
-        assert!(diff_two.is_differential);
-        assert!(diff_two.validation_passed);
-
-        assert_states_equal(&manager.load_checkpoint(1).expect("load in test"), &first);
-        assert_states_equal(&manager.load_checkpoint(2).expect("load in test"), &second);
-        assert_states_equal(&manager.load_checkpoint(3).expect("load in test"), &third);
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn differential_checkpoint_is_smaller_than_a_full_one() {
-        let dir = scratch_dir("size");
-        let config = CheckpointConfig {
-            differential: true,
-            compression: false,
-            retention_count: 10,
-            ..CheckpointConfig::default()
-        };
-        let mut manager =
-            SmartCheckpointManager::new(config, dir.clone()).expect("manager must build in test");
-
-        let mut state = HashMap::new();
-        state.insert(
-            "w".to_string(),
-            Tensor::from_slice(&[0.5f32; 256], &[256]).expect("tensor must build in test"),
-        );
-        let full = manager.create_checkpoint(1, &state).expect("checkpoint in test");
-
-        // Change a single element.
-        let mut changed: Vec<f32> = vec![0.5f32; 256];
-        changed[7] = -1.25;
-        state.insert(
-            "w".to_string(),
-            Tensor::from_slice(&changed, &[256]).expect("tensor must build in test"),
-        );
-        let diff = manager.create_checkpoint(2, &state).expect("checkpoint in test");
-
-        assert!(
-            diff.file_size < full.file_size,
-            "a one-element delta must be smaller than the full state ({} vs {})",
-            diff.file_size,
-            full.file_size
-        );
-        assert_states_equal(&manager.load_checkpoint(2).expect("load in test"), &state);
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn loading_an_unknown_step_errors() {
-        let dir = scratch_dir("missing");
-        let manager = SmartCheckpointManager::new(CheckpointConfig::default(), dir.clone())
-            .expect("manager must build in test");
-        assert!(manager.load_checkpoint(42).is_err());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn test_auto_scaler_config() {
-        let config = AutoScalerConfig {
-            min_nodes: 2,
-            max_nodes: 32,
-            ..AutoScalerConfig::default()
-        };
-
-        // Validate the modified configuration
-        assert_eq!(config.min_nodes, 2);
-        assert_eq!(config.max_nodes, 32);
-    }
-
-    #[test]
-    fn test_auto_scaler_creation() {
-        let config = AutoScalerConfig::default();
-        let auto_scaler = AutoScaler::new(config)
-            .with_min_nodes(2)
-            .with_max_nodes(16)
-            .with_scaling_strategy(ScalingStrategy::Performance);
-
-        assert_eq!(auto_scaler.get_current_nodes(), 2);
-        assert!(matches!(
-            auto_scaler.config.strategy,
-            ScalingStrategy::Performance
-        ));
-    }
-
-    #[test]
-    fn test_workload_predictor() {
-        let mut predictor = WorkloadPredictor::new();
-
-        // Add some test data
-        let metrics = PerformanceMetrics {
-            throughput: 1000.0,
-            gpu_utilization: vec![0.8, 0.7, 0.9],
-            memory_usage: vec![0.6, 0.7, 0.5],
-            communication_overhead: 0.2,
-            compression_ratio: 0.1,
-            bandwidth_utilization: 0.8,
-            step_time: Duration::from_millis(100),
-        };
-
-        predictor.update_metrics(&metrics);
-
-        let prediction = predictor
-            .predict_workload(Duration::from_secs(600))
-            .expect("Operation failed in test");
-        assert!((0.0..=1.0).contains(&prediction));
-    }
-
-    #[test]
-    fn test_checkpoint_manager() {
-        let config = CheckpointConfig::default();
-        let temp_dir = std::env::temp_dir().join("test_checkpoints");
-
-        if temp_dir.exists() {
-            std::fs::remove_dir_all(&temp_dir).ok();
-        }
-
-        let manager = SmartCheckpointManager::new(config, temp_dir).expect("Construction failed");
-
-        let metrics = PerformanceMetrics {
-            throughput: 1000.0,
-            gpu_utilization: vec![0.8],
-            memory_usage: vec![0.6],
-            communication_overhead: 0.2,
-            compression_ratio: 0.1,
-            bandwidth_utilization: 0.8,
-            step_time: Duration::from_millis(100),
-        };
-
-        assert!(manager.should_checkpoint(1000, &metrics));
-        assert!(!manager.should_checkpoint(999, &metrics));
-    }
-
-    #[test]
-    fn test_ml_optimizer() {
-        let config = MLOptimizerConfig::default();
-        let optimizer = PerformanceMLOptimizer::new(config)
-            .with_prediction_horizon(50)
-            .with_optimization_frequency(25);
-
-        assert_eq!(optimizer.config.prediction_horizon, 50);
-        assert_eq!(optimizer.config.optimization_frequency, 25);
-
-        assert!(optimizer.should_optimize(25));
-        assert!(!optimizer.should_optimize(24));
-    }
-
-    #[test]
-    fn test_trend_analyzer() {
-        let mut analyzer = TrendAnalyzer::new();
-
-        // Add increasing trend
-        for i in 0..20 {
-            analyzer.update(i as f32 * 0.1);
-        }
-
-        let prediction =
-            analyzer.predict(Duration::from_secs(60)).expect("Operation failed in test");
-        assert!(prediction > 1.0); // Should predict increasing trend
-    }
-
-    // ── ML optimizer: predictions must be derived, never constants ────────
-    //
-    // The previous implementation returned `performance_improvement: 0.15` for
-    // every compression change and `0.08` for every "communication" change —
-    // the latter without touching the configuration at all. These tests fail
-    // against that code because they vary the measured metrics and require the
-    // reported prediction to move with them.
-
-    fn metrics(communication_overhead: f32, bandwidth_mbps: f32) -> PerformanceMetrics {
-        PerformanceMetrics {
-            throughput: 100.0,
-            gpu_utilization: vec![0.75],
-            memory_usage: vec![0.6],
-            communication_overhead,
-            compression_ratio: 1.0,
-            bandwidth_utilization: bandwidth_mbps,
-            step_time: Duration::from_millis(100),
-        }
-    }
-
-    #[test]
-    fn compression_prediction_tracks_the_measured_communication_overhead() {
-        let optimizer = PerformanceMLOptimizer::new(MLOptimizerConfig::default());
-
-        let mut light = DistributedConfig::new();
-        light.compression.target_ratio = 0.5;
-        let light_result = optimizer
-            .optimize_compression(&metrics(0.4, 1000.0), &mut light)
-            .expect("optimization must succeed in test")
-            .expect("high communication overhead must trigger a change in test");
-
-        let mut heavy = DistributedConfig::new();
-        heavy.compression.target_ratio = 0.5;
-        let heavy_result = optimizer
-            .optimize_compression(&metrics(0.8, 1000.0), &mut heavy)
-            .expect("optimization must succeed in test")
-            .expect("high communication overhead must trigger a change in test");
-
-        assert!(
-            heavy_result.performance_improvement > light_result.performance_improvement,
-            "a heavier communication phase must predict a larger saving: {} vs {}",
-            heavy_result.performance_improvement,
-            light_result.performance_improvement
-        );
-
-        // 20% fewer bytes out of a phase that is 80% of the step.
-        assert!((heavy_result.performance_improvement - 0.8 * 0.2).abs() < 1e-5);
-
-        // And the configuration really changed.
-        assert!((heavy.compression.target_ratio - 0.4).abs() < 1e-6);
-    }
-
-    #[test]
-    fn compression_at_the_floor_reports_no_optimization() {
-        let optimizer = PerformanceMLOptimizer::new(MLOptimizerConfig::default());
-        let mut config = DistributedConfig::new();
-        config.compression.target_ratio = 0.05;
-
-        assert!(optimizer
-            .optimize_compression(&metrics(0.9, 1000.0), &mut config)
-            .expect("optimization must succeed in test")
-            .is_none());
-        assert!((config.compression.target_ratio - 0.05).abs() < 1e-6);
-    }
-
-    #[test]
-    fn communication_optimization_applies_a_real_change_or_reports_none() {
-        let optimizer = PerformanceMLOptimizer::new(MLOptimizerConfig::default());
-
-        // Fast link: nothing to do.
-        let mut fast = DistributedConfig::new();
-        assert!(optimizer
-            .optimize_communication(&metrics(0.5, 10_000.0), &mut fast)
-            .expect("optimization must succeed in test")
-            .is_none());
-        assert!(!fast.compression.enabled);
-
-        // Slow link with compression off: the knob is really turned.
-        let mut slow = DistributedConfig::new();
-        slow.compression.enabled = false;
-        slow.compression.target_ratio = 0.25;
-        let result = optimizer
-            .optimize_communication(&metrics(0.5, 10.0), &mut slow)
-            .expect("optimization must succeed in test")
-            .expect("a slow interconnect must enable compression in test");
-        assert!(slow.compression.enabled, "the config must actually change");
-        assert!((result.performance_improvement - 0.5 * 0.75).abs() < 1e-5);
-
-        // Already enabled: no further knob exists, so nothing is claimed.
-        assert!(optimizer
-            .optimize_communication(&metrics(0.5, 10.0), &mut slow)
-            .expect("optimization must succeed in test")
-            .is_none());
-    }
-
-    #[test]
-    fn shrinking_the_batch_never_reports_a_speedup() {
-        let optimizer = PerformanceMLOptimizer::new(MLOptimizerConfig::default());
-
-        // High utilization and high memory pressure => the model shrinks the
-        // batch. The old code reported the negative size delta as an
-        // "improvement".
-        let mut config = DistributedConfig::new();
-        config.dynamic_batching.initial_batch_size = 128;
-        let pressured = PerformanceMetrics {
-            gpu_utilization: vec![0.95],
-            memory_usage: vec![0.95],
-            ..metrics(0.5, 1000.0)
-        };
-
-        let result = optimizer
-            .optimize_batch_sizes(&pressured, &mut config)
-            .expect("optimization must succeed in test")
-            .expect("a >10% size change must be reported in test");
-
-        assert!(config.dynamic_batching.initial_batch_size < 128);
-        assert_eq!(
-            result.performance_improvement, 0.0,
-            "a batch reduction taken for memory headroom predicts no speedup"
-        );
-    }
-
-    #[test]
-    fn growing_the_batch_predicts_amortised_communication() {
-        let optimizer = PerformanceMLOptimizer::new(MLOptimizerConfig::default());
-
-        let mut config = DistributedConfig::new();
-        config.dynamic_batching.initial_batch_size = 8;
-        let idle = PerformanceMetrics {
-            gpu_utilization: vec![0.5],
-            memory_usage: vec![0.3],
-            ..metrics(0.5, 1000.0)
-        };
-
-        let result = optimizer
-            .optimize_batch_sizes(&idle, &mut config)
-            .expect("optimization must succeed in test")
-            .expect("an idle GPU must grow the batch in test");
-
-        let new_batch = config.dynamic_batching.initial_batch_size as f32;
-        assert!(new_batch > 8.0);
-        let expected = 0.5 * (1.0 - 8.0 / new_batch);
-        assert!(
-            (result.performance_improvement - expected).abs() < 1e-4,
-            "predicted {} but the derivation gives {expected}",
-            result.performance_improvement
-        );
-    }
-}
+mod tests;

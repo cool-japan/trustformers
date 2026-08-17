@@ -1,21 +1,23 @@
 //! # Text-to-Image Pipeline
 //!
-//! Stable Diffusion / DALL-E compatible text-to-image generation.
+//! ## What is real here
 //!
-//! ## Supported model families
-//! - **Stable Diffusion XL** (stabilityai/stable-diffusion-xl-base-1.0)
-//! - **DALL-E** compatible inference
+//! The diffusion *maths* in [`TextToImageProcessor`] — forward noising
+//! (`x_t = √ᾱ_t·x_0 + √(1-ᾱ_t)·ε`) and classifier-free guidance
+//! (`u + s·(c - u)`) — plus the [`NoiseScheduler`] variants and the
+//! [`GeneratedImage`] container. These are exact formulas and work on any
+//! latents you supply.
 //!
-//! ## Example
+//! ## Model support
 //!
-//! ```rust,ignore
-//! use trustformers::pipeline::text_to_image::{TextToImageConfig, TextToImagePipeline};
+//! No diffusion U-Net, VAE or text encoder is implemented in
+//! `trustformers-models`, so [`TextToImagePipeline::generate`] returns
+//! [`ImageGenError::UnsupportedModel`] instead of the djb2-hash-coloured
+//! gradient it used to return as a generated image.
 //!
-//! let config = TextToImageConfig::default();
-//! let pipeline = TextToImagePipeline::new(config)?;
-//! let images = pipeline.generate("a photo of an astronaut riding a horse")?;
-//! println!("Generated {} image(s)", images.len());
-//! ```
+//! Note that [`TextToImageProcessor::encode_prompt_to_tokens`] is a
+//! **whitespace hash tokeniser**, not a trained vocabulary — it is documented
+//! as such and is only useful as a deterministic placeholder id source.
 
 use thiserror::Error;
 
@@ -34,7 +36,23 @@ pub enum ImageGenError {
     InvalidPixelData { expected: usize, got: usize },
     #[error("Model error: {0}")]
     ModelError(String),
+    /// The requested checkpoint has no real implementation in this workspace.
+    #[error(
+        "no real text-to-image model is implemented for `{requested}`; supported: {supported}. \
+         This pipeline never returns synthesised pixels as a generated image."
+    )]
+    UnsupportedModel {
+        /// The checkpoint or architecture the caller asked for.
+        requested: String,
+        /// Comma-separated list of architectures that *are* supported.
+        supported: String,
+    },
 }
+
+/// Diffusion architectures with a real implementation in this workspace.
+///
+/// Deliberately empty — the pipeline says so rather than pretending.
+const SUPPORTED_ARCHITECTURES: &[&str] = &[];
 
 // ---------------------------------------------------------------------------
 // Scheduler type
@@ -316,32 +334,30 @@ impl TextToImagePipeline {
         if prompt.trim().is_empty() {
             return Err(ImageGenError::EmptyPrompt);
         }
-        let seed = self.config.seed.unwrap_or(0);
-        let hash_val = djb2_hash(prompt) ^ seed;
-        self.build_images(hash_val)
+        Err(self.unsupported())
     }
 
     /// Generate images conditioned on both `prompt` and `negative_prompt`.
     ///
-    /// The negative prompt modifies the hash so that different images are
-    /// produced compared to calling [`Self::generate`] without a negative prompt.
+    /// # Errors
+    ///
+    /// See [`Self::generate`].
     pub fn generate_with_negative(
         &self,
         prompt: &str,
-        negative_prompt: &str,
+        _negative_prompt: &str,
     ) -> Result<Vec<GeneratedImage>, ImageGenError> {
         if prompt.trim().is_empty() {
             return Err(ImageGenError::EmptyPrompt);
         }
-        let seed = self.config.seed.unwrap_or(0);
-        // XOR with negative prompt hash to differentiate outputs.
-        let hash_val = djb2_hash(prompt) ^ djb2_hash(negative_prompt) ^ seed;
-        self.build_images(hash_val)
+        Err(self.unsupported())
     }
 
     /// Generate images for each prompt in `prompts`.
     ///
-    /// Returns one `Vec<GeneratedImage>` (of length `num_images_per_prompt`) per prompt.
+    /// # Errors
+    ///
+    /// See [`Self::generate`].
     pub fn batch_generate(
         &self,
         prompts: &[&str],
@@ -349,37 +365,21 @@ impl TextToImagePipeline {
         prompts.iter().map(|p| self.generate(p)).collect()
     }
 
+    /// The error this pipeline returns when asked to run inference.
+    fn unsupported(&self) -> ImageGenError {
+        ImageGenError::UnsupportedModel {
+            requested: self.config.model_name.clone(),
+            supported: if SUPPORTED_ARCHITECTURES.is_empty() {
+                "none (no diffusion model is implemented yet)".to_string()
+            } else {
+                SUPPORTED_ARCHITECTURES.join(", ")
+            },
+        }
+    }
+
     // ------------------------------------------------------------------
     // Internal helpers
     // ------------------------------------------------------------------
-
-    fn build_images(&self, hash_val: u64) -> Result<Vec<GeneratedImage>, ImageGenError> {
-        let h = self.config.height;
-        let w = self.config.width;
-        let n = self.config.num_images_per_prompt;
-
-        let mut images = Vec::with_capacity(n);
-        for img_idx in 0..n {
-            let mut pixels = Vec::with_capacity(h * w * 3);
-            for row in 0..h {
-                for col in 0..w {
-                    let r = ((hash_val + row as u64) % 256) as u8;
-                    let g = ((hash_val + col as u64) % 256) as u8;
-                    let b = ((hash_val + img_idx as u64) % 256) as u8;
-                    pixels.push(r);
-                    pixels.push(g);
-                    pixels.push(b);
-                }
-            }
-            images.push(GeneratedImage {
-                pixels,
-                height: h,
-                width: w,
-                nsfw_detected: false,
-            });
-        }
-        Ok(images)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -527,8 +527,12 @@ impl Default for DiffusionConfig {
 pub struct TextToImageProcessor;
 
 impl TextToImageProcessor {
-    /// Simple whitespace tokeniser: splits `prompt` on whitespace and maps each
-    /// token to a deterministic `u32` id via djb2 hashing.
+    /// Whitespace tokeniser that maps each token to a deterministic `u32` via
+    /// djb2 hashing.
+    ///
+    /// **This is not a trained vocabulary.** The ids carry no semantics and are
+    /// only useful as reproducible placeholders; a real pipeline must use the
+    /// text encoder's own tokenizer.
     pub fn encode_prompt_to_tokens(prompt: &str) -> Vec<u32> {
         prompt
             .split_whitespace()
@@ -581,15 +585,6 @@ impl TextToImageProcessor {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-/// DJB2 hash — deterministic, no external crates needed.
-fn djb2_hash(s: &str) -> u64 {
-    let mut hash: u64 = 5381;
-    for byte in s.bytes() {
-        hash = hash.wrapping_mul(33).wrapping_add(byte as u64);
-    }
-    hash
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -674,15 +669,10 @@ mod tests {
 
     #[test]
     fn test_resize_dimensions() {
-        let config = TextToImageConfig {
-            height: 8,
-            width: 8,
-            num_images_per_prompt: 1,
-            ..Default::default()
-        };
-        let pipeline = TextToImagePipeline::new(config).expect("ok");
-        let images = pipeline.generate("test resize").expect("ok");
-        let resized = images[0].resize(4, 4);
+        // `GeneratedImage::resize` is real geometry and works on any image.
+        let pixels: Vec<u8> = (0..8 * 8 * 3).map(|i| (i % 256) as u8).collect();
+        let img = GeneratedImage::new(pixels, 8, 8).expect("ok");
+        let resized = img.resize(4, 4);
         assert_eq!(resized.height, 4);
         assert_eq!(resized.width, 4);
         assert_eq!(resized.pixels.len(), 4 * 4 * 3);
@@ -691,50 +681,47 @@ mod tests {
     // --- TextToImagePipeline::generate ---
 
     #[test]
-    fn test_generate_returns_correct_num_images() {
+    fn test_generate_reports_unsupported_model() {
+        // Regression: `generate` used to return an image whose pixels were
+        // `(djb2(prompt) + row) % 256` etc. — a coloured gradient presented as
+        // a generated picture.
         let config = TextToImageConfig {
             num_images_per_prompt: 3,
             height: 16,
             width: 16,
+            model_name: "stabilityai/stable-diffusion-xl-base-1.0".to_string(),
             ..Default::default()
         };
         let pipeline = TextToImagePipeline::new(config).expect("ok");
-        let images = pipeline.generate("sunset over mountains").expect("ok");
-        assert_eq!(images.len(), 3);
-    }
-
-    #[test]
-    fn test_generate_pixel_count() {
-        let h = 32;
-        let w = 32;
-        let config = TextToImageConfig {
-            height: h,
-            width: w,
-            num_images_per_prompt: 1,
-            ..Default::default()
-        };
-        let pipeline = TextToImagePipeline::new(config).expect("ok");
-        let images = pipeline.generate("a cat").expect("ok");
-        assert_eq!(images[0].pixels.len(), h * w * 3);
-    }
-
-    // --- TextToImagePipeline::batch_generate ---
-
-    #[test]
-    fn test_batch_generate_correct_batch_size() {
-        let config = TextToImageConfig {
-            height: 8,
-            width: 8,
-            num_images_per_prompt: 1,
-            ..Default::default()
-        };
-        let pipeline = TextToImagePipeline::new(config).expect("ok");
-        let prompts = vec!["cat", "dog", "bird"];
-        let results = pipeline.batch_generate(&prompts).expect("ok");
-        assert_eq!(results.len(), 3);
-        for r in &results {
-            assert_eq!(r.len(), 1);
+        match pipeline.generate("sunset over mountains") {
+            Err(ImageGenError::UnsupportedModel {
+                requested,
+                supported,
+            }) => {
+                assert_eq!(requested, "stabilityai/stable-diffusion-xl-base-1.0");
+                assert!(supported.contains("none"), "supported: {supported}");
+            },
+            other => panic!("expected UnsupportedModel, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_generate_with_negative_reports_unsupported_model() {
+        let pipeline = TextToImagePipeline::new(TextToImageConfig::default()).expect("ok");
+        assert!(matches!(
+            pipeline.generate_with_negative("a bright sunny day", "rain clouds"),
+            Err(ImageGenError::UnsupportedModel { .. })
+        ));
+    }
+
+    #[test]
+    fn test_batch_generate_reports_unsupported_model() {
+        let pipeline = TextToImagePipeline::new(TextToImageConfig::default()).expect("ok");
+        let prompts = vec!["cat", "dog", "bird"];
+        assert!(matches!(
+            pipeline.batch_generate(&prompts),
+            Err(ImageGenError::UnsupportedModel { .. })
+        ));
     }
 
     // --- Empty prompt error ---
@@ -753,27 +740,6 @@ mod tests {
         let pipeline = TextToImagePipeline::new(config).expect("ok");
         let err = pipeline.generate("   ").unwrap_err();
         assert!(matches!(err, ImageGenError::EmptyPrompt));
-    }
-
-    // --- Negative prompt differs from base ---
-
-    #[test]
-    fn test_negative_prompt_produces_different_output() {
-        let config = TextToImageConfig {
-            height: 16,
-            width: 16,
-            num_images_per_prompt: 1,
-            ..Default::default()
-        };
-        let pipeline = TextToImagePipeline::new(config).expect("ok");
-        let base = pipeline.generate("a bright sunny day").expect("ok");
-        let with_neg = pipeline
-            .generate_with_negative("a bright sunny day", "rain clouds")
-            .expect("ok");
-        assert_ne!(
-            base[0].pixels, with_neg[0].pixels,
-            "negative prompt should change pixels"
-        );
     }
 
     // --- DdimScheduler ---

@@ -43,6 +43,7 @@ impl super::profiler::MemoryProfiler {
             .lock()
             .map_err(|e| anyhow::anyhow!("Failed to lock patterns: {}", e))?
             .clone();
+        let allocation_stats = self.allocation_stats()?;
 
         // Calculate summary statistics
         let summary = if !metrics_history.is_empty() {
@@ -68,15 +69,13 @@ impl super::profiler::MemoryProfiler {
                 peak_memory_mb: peak_memory,
                 average_memory_mb: avg_memory,
                 memory_efficiency_score: efficiency_score,
-                total_allocations: allocations.len() as u64,
-                total_deallocations: allocations.len() as u64, // Simplified
+                total_allocations: allocation_stats.allocated_objects,
+                total_deallocations: allocation_stats.deallocated_objects,
                 leaked_allocations: allocations.values().filter(|a| a.is_leaked).count() as u64,
                 fragmentation_events: metrics_history
                     .iter()
                     .filter(|m| m.memory_fragmentation_ratio > 0.3)
                     .count() as u64,
-                gc_pressure_events: metrics_history.iter().filter(|m| m.gc_time_ms > 200.0).count()
-                    as u64,
                 alert_count_by_severity: alert_counts,
             }
         } else {
@@ -85,17 +84,16 @@ impl super::profiler::MemoryProfiler {
                 peak_memory_mb: 0.0,
                 average_memory_mb: 0.0,
                 memory_efficiency_score: 0.0,
-                total_allocations: 0,
-                total_deallocations: 0,
+                total_allocations: allocation_stats.allocated_objects,
+                total_deallocations: allocation_stats.deallocated_objects,
                 leaked_allocations: 0,
                 fragmentation_events: 0,
-                gc_pressure_events: 0,
                 alert_count_by_severity: HashMap::new(),
             }
         };
 
         let recommendations = self.generate_recommendations(&alerts, &patterns);
-        let system_info = self.get_system_info();
+        let system_info = self.get_system_info()?;
 
         Ok(MemoryDashboardReport {
             timestamp: std::time::SystemTime::now(),
@@ -258,7 +256,7 @@ impl super::profiler::MemoryProfiler {
         writeln!(
             &mut html,
             "<tr><td>Rust Version</td><td>{}</td></tr>",
-            report.system_info.rust_version
+            report.system_info.rust_version.as_deref().unwrap_or("unknown")
         )?;
         writeln!(&mut html, "</table>")?;
 
@@ -442,12 +440,7 @@ impl super::profiler::MemoryProfiler {
         let fragmentation_score = 1.0 - avg_fragmentation.min(1.0);
         efficiency_factors.push(fragmentation_score);
 
-        // Factor 3: GC efficiency
-        let avg_gc_time = metrics.iter().map(|m| m.gc_time_ms).sum::<f64>() / metrics.len() as f64;
-        let gc_score = 1.0 / (1.0 + avg_gc_time / 100.0); // Normalize around 100ms
-        efficiency_factors.push(gc_score);
-
-        // Factor 4: Allocation efficiency
+        // Factor 3: Allocation efficiency
         let total_allocations: u64 = metrics.iter().map(|m| m.allocated_objects).sum();
         let total_deallocations: u64 = metrics.iter().map(|m| m.deallocated_objects).sum();
         let allocation_ratio = if total_allocations > 0 {
@@ -461,14 +454,22 @@ impl super::profiler::MemoryProfiler {
         efficiency_factors.iter().sum::<f64>() / efficiency_factors.len() as f64
     }
 
-    /// Get system information for the report
-    fn get_system_info(&self) -> SystemInfo {
-        SystemInfo {
-            total_system_memory_gb: 16.0,    // Mock value
-            available_system_memory_gb: 8.0, // Mock value
+    /// Get system information for the report.
+    ///
+    /// The memory figures are real readings; if the platform cannot report them
+    /// the error is propagated rather than replaced with a placeholder.
+    fn get_system_info(&self) -> Result<SystemInfo> {
+        const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;
+        let memory = Self::get_system_memory_info()?;
+
+        Ok(SystemInfo {
+            total_system_memory_gb: memory.total_memory as f64 / BYTES_PER_GB,
+            available_system_memory_gb: memory.available_memory as f64 / BYTES_PER_GB,
             cpu_count: num_cpus::get(),
             os_info: std::env::consts::OS.to_string(),
-            rust_version: env!("CARGO_PKG_VERSION").to_string(),
-        }
+            // `CARGO_PKG_VERSION` is the *crate* version, not the toolchain, so it
+            // must never be reported here. CI stamps the real value in.
+            rust_version: option_env!("TRUSTFORMERS_RUSTC_VERSION").map(str::to_string),
+        })
     }
 }

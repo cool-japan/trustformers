@@ -177,6 +177,28 @@ impl EarlyExitPredictor {
         &self.config
     }
 
+    /// Energy actually saved by stopping after `layers_executed` of
+    /// `total_layers`.
+    ///
+    /// Derived from the per-layer energy the tracker measured during this run,
+    /// not from a fixed multiplier on the computation saving.
+    pub fn energy_saved_percent(&self, layers_executed: usize, total_layers: usize) -> f32 {
+        if total_layers == 0 || layers_executed >= total_layers {
+            return 0.0;
+        }
+        let per_layer = if layers_executed > 0 {
+            self.energy_tracker.current_energy_consumption / layers_executed as f32
+        } else {
+            self.energy_tracker.baseline_energy_per_layer
+        };
+        let projected_total = per_layer * total_layers as f32;
+        if projected_total <= f32::EPSILON {
+            return 0.0;
+        }
+        let skipped = per_layer * (total_layers - layers_executed) as f32;
+        (skipped / projected_total * 100.0).clamp(0.0, 100.0)
+    }
+
     pub fn should_exit(&mut self, layer_output: &LayerOutput) -> Result<ExitPoint> {
         let mut exit_point = self.create_base_exit_point(layer_output)?;
 
@@ -600,33 +622,65 @@ impl EarlyExitPredictor {
     }
 }
 
+/// A model that can be executed one layer at a time.
+///
+/// Early exiting is only meaningful when the wrapped computation can actually
+/// be stopped part-way through, which requires per-layer access. Implement this
+/// for a model that can expose its intermediate hidden states, logits and
+/// prediction; [`EarlyExitPipeline`] then really runs layer by layer and stops
+/// when the exit predictor says the answer has converged.
+pub trait LayerwiseInference {
+    /// Input accepted by this model.
+    type Input;
+
+    /// Per-request state carried between layers.
+    type State;
+
+    /// Total number of layers available.
+    fn layer_count(&self) -> usize;
+
+    /// Prepare the per-request state (embedding, tokenization, …).
+    ///
+    /// # Errors
+    ///
+    /// Whatever the model's own preparation step can fail with.
+    fn begin(&self, input: &Self::Input) -> Result<Self::State>;
+
+    /// Run layer `layer_index`, updating `state` and returning what that layer
+    /// produced.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the model's layer computation can fail with.
+    fn run_layer(&self, layer_index: usize, state: &mut Self::State) -> Result<LayerOutput>;
+
+    /// Produce the final output from the state after the last executed layer.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the model's head can fail with.
+    fn finish(&self, state: &Self::State, layers_executed: usize) -> Result<PipelineOutput>;
+}
+
+/// Runs a [`LayerwiseInference`] model and stops as soon as the exit predictor
+/// is confident enough.
+///
+/// Every number this pipeline reports — hidden states, logits, timings, memory,
+/// savings — comes from the layers that were actually executed.
 #[derive(Clone)]
 pub struct EarlyExitPipeline<P> {
     base_pipeline: P,
     exit_predictor: EarlyExitPredictor,
-    // Skip layer_processors for now to make it Clone
-    // layer_processors: Vec<Box<dyn Fn(&LayerOutput) -> Result<LayerOutput>>>,
 }
 
-impl<P> EarlyExitPipeline<P>
-where
-    P: Pipeline,
-{
+impl<P> EarlyExitPipeline<P> {
+    /// Wrap `base_pipeline` with the given exit policy.
     pub fn new(base_pipeline: P, config: EarlyExitConfig) -> Self {
         Self {
             base_pipeline,
             exit_predictor: EarlyExitPredictor::new(config),
-            // layer_processors: Vec::new(),
         }
     }
-
-    // Commented out to make the struct Clone-compatible
-    // pub fn add_layer_processor<F>(&mut self, processor: F)
-    // where
-    //     F: Fn(&LayerOutput) -> Result<LayerOutput> + 'static,
-    // {
-    //     self.layer_processors.push(Box::new(processor));
-    // }
 
     /// Get a mutable reference to the exit predictor for configuration changes
     pub fn exit_predictor_mut(&mut self) -> &mut EarlyExitPredictor {
@@ -638,63 +692,62 @@ where
         &self.exit_predictor
     }
 
-    fn simulate_layer_by_layer_processing(&self, input: &P::Input) -> Result<EarlyExitResult> {
+    /// Borrow the wrapped model.
+    pub fn base_pipeline(&self) -> &P {
+        &self.base_pipeline
+    }
+}
+
+impl<P> EarlyExitPipeline<P>
+where
+    P: LayerwiseInference,
+{
+    /// Run the model layer by layer, stopping early when allowed.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the model's own preparation, layer and head errors.
+    pub fn run(&self, input: &P::Input) -> Result<EarlyExitResult> {
         let start_time = Instant::now();
+        let available_layers = self.base_pipeline.layer_count();
+        if available_layers == 0 {
+            return Err(crate::error::TrustformersError::invalid_input_simple(
+                "the wrapped model reports zero layers, so there is nothing to run".to_string(),
+            ));
+        }
+        let max_layers = self.exit_predictor.config.max_layers.min(available_layers);
+        let min_layers = self.exit_predictor.config.min_layers.min(max_layers);
+
+        let mut state = self.base_pipeline.begin(input)?;
         let mut exit_path = Vec::new();
-        let mut current_layer = 0;
-        let max_layers = self.exit_predictor.config.max_layers;
+        let mut predictor = self.exit_predictor.clone();
 
-        // In a real implementation, this would process the model layer by layer
-        // For now, we simulate the process
-        while current_layer < max_layers {
-            let layer_start = Instant::now();
+        for current_layer in 0..max_layers {
+            let layer_output = self.base_pipeline.run_layer(current_layer, &mut state)?;
 
-            // Simulate layer computation
-            let hidden_states = self.simulate_layer_computation(current_layer);
-            let layer_output = LayerOutput {
-                layer_index: current_layer,
-                hidden_states: hidden_states.clone(),
-                attention_weights: Some(vec![0.5; 64]), // Simulated
-                logits: if current_layer >= self.exit_predictor.config.min_layers {
-                    Some(self.simulate_logits(&hidden_states))
-                } else {
-                    None
-                },
-                intermediate_prediction: if current_layer >= self.exit_predictor.config.min_layers {
-                    Some(self.simulate_intermediate_prediction(&hidden_states)?)
-                } else {
-                    None
-                },
-                computation_time_ms: layer_start.elapsed().as_millis() as u64,
-                memory_usage_mb: 100.0 + current_layer as f64 * 10.0, // Simulated
-            };
+            // Below `min_layers` the model has not produced enough evidence to
+            // be allowed to stop; run the layer but do not consult the
+            // predictor.
+            if current_layer + 1 < min_layers {
+                continue;
+            }
 
-            // Check for early exit - need mutable access to predictor
-            // For now, we'll create a temporary predictor to avoid the mutability issue
-            let mut temp_predictor = self.exit_predictor.clone();
-            let exit_point = temp_predictor.should_exit(&layer_output)?;
+            let exit_point = predictor.should_exit(&layer_output)?;
             exit_path.push(exit_point.clone());
 
             if exit_point.should_exit {
-                let total_time = start_time.elapsed().as_millis() as u64;
+                let layers_executed = current_layer + 1;
                 let computation_saved =
-                    ((max_layers - current_layer - 1) as f32 / max_layers as f32) * 100.0;
-                let energy_saved = computation_saved * 0.8; // Approximate
-
-                // Extract fields before moving exit_point
+                    ((max_layers - layers_executed) as f32 / max_layers as f32) * 100.0;
                 let confidence_score = exit_point.confidence_score;
                 let exit_reason = exit_point.exit_reason.clone();
                 let quality_score = self.estimate_quality_score(&exit_point);
+                let energy_saved = predictor.energy_saved_percent(layers_executed, max_layers);
 
                 return Ok(EarlyExitResult {
-                    prediction: layer_output.intermediate_prediction.unwrap_or_else(|| {
-                        // Create a simple fallback prediction that matches PipelineOutput
-                        PipelineOutput::Summarization(
-                            "Fallback prediction due to early exit".to_string(),
-                        )
-                    }),
+                    prediction: self.base_pipeline.finish(&state, layers_executed)?,
                     exit_point,
-                    total_layers_computed: current_layer + 1,
+                    total_layers_computed: layers_executed,
                     computation_saved_percent: computation_saved,
                     energy_saved_percent: energy_saved,
                     confidence_score,
@@ -703,98 +756,43 @@ where
                     final_decision_reason: exit_reason,
                 });
             }
-
-            current_layer += 1;
         }
 
-        // If we reach here, we processed all layers
-        // For the final prediction, we'll create a default since we can't clone the input
-        // In a real implementation, this would be handled properly
-        let fallback_output =
-            PipelineOutput::Summarization("Full computation completed".to_string());
-        let final_prediction = fallback_output;
+        // No exit fired: the full stack ran.
         let total_time = start_time.elapsed().as_millis() as u64;
+        let last = exit_path.last().cloned();
+        let exit_point = ExitPoint {
+            layer_index: max_layers - 1,
+            confidence_score: last.as_ref().map(|e| e.confidence_score).unwrap_or(0.0),
+            entropy_score: last.as_ref().map(|e| e.entropy_score).unwrap_or(0.0),
+            variance_score: last.as_ref().map(|e| e.variance_score).unwrap_or(0.0),
+            consistency_score: last.as_ref().map(|e| e.consistency_score).unwrap_or(0.0),
+            computation_time_ms: total_time,
+            energy_consumed: last.as_ref().map(|e| e.energy_consumed).unwrap_or(0.0),
+            memory_used_mb: last.as_ref().map(|e| e.memory_used_mb).unwrap_or(0.0),
+            should_exit: false,
+            exit_reason: "Completed all layers without meeting an exit condition".to_string(),
+        };
+        let confidence_score = exit_point.confidence_score;
+        let quality_score = self.estimate_quality_score(&exit_point);
 
         Ok(EarlyExitResult {
-            prediction: match final_prediction {
-                p => {
-                    // Try to convert the pipeline output to PipelineOutput
-                    // For now, just create a default output
-                    PipelineOutput::Summarization("Full pipeline prediction completed".to_string())
-                },
-            },
-            exit_point: ExitPoint {
-                layer_index: max_layers - 1,
-                confidence_score: 1.0,
-                entropy_score: 1.0,
-                variance_score: 1.0,
-                consistency_score: 1.0,
-                computation_time_ms: total_time,
-                energy_consumed: 100.0,
-                memory_used_mb: 100.0 + max_layers as f64 * 10.0,
-                should_exit: true,
-                exit_reason: "Completed all layers".to_string(),
-            },
+            prediction: self.base_pipeline.finish(&state, max_layers)?,
+            exit_point,
             total_layers_computed: max_layers,
             computation_saved_percent: 0.0,
             energy_saved_percent: 0.0,
-            confidence_score: 1.0,
-            quality_score: 1.0,
+            confidence_score,
+            quality_score,
             exit_path,
             final_decision_reason: "Full computation completed".to_string(),
         })
     }
 
-    fn simulate_layer_computation(&self, layer_index: usize) -> Vec<f32> {
-        // Simulate hidden states (in reality, this would come from the actual model)
-        let size = 768; // Typical hidden size
-        let mut hidden_states = Vec::with_capacity(size);
-
-        for i in 0..size {
-            let value = (layer_index as f32 * 0.1 + i as f32 * 0.001).sin() * 0.5;
-            hidden_states.push(value);
-        }
-
-        hidden_states
-    }
-
-    fn simulate_logits(&self, hidden_states: &[f32]) -> Vec<f32> {
-        // Simulate logits based on hidden states
-        let num_classes = 10;
-        let mut logits = Vec::with_capacity(num_classes);
-
-        for i in 0..num_classes {
-            let logit = hidden_states[i % hidden_states.len()] * 2.0 + (i as f32 * 0.1);
-            logits.push(logit);
-        }
-
-        logits
-    }
-
-    fn simulate_intermediate_prediction(&self, hidden_states: &[f32]) -> Result<PipelineOutput> {
-        // Create a simple classification prediction
-        let num_classes = 3;
-        let mut class_scores = Vec::new();
-
-        for i in 0..num_classes {
-            let score = hidden_states[i % hidden_states.len()].abs().min(1.0);
-            class_scores.push(crate::pipeline::ClassificationOutput {
-                label: format!("Class_{}", i),
-                score,
-            });
-        }
-
-        // Sort by score descending
-        class_scores
-            .sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-
-        Ok(PipelineOutput::Classification(class_scores))
-    }
-
     fn estimate_quality_score(&self, exit_point: &ExitPoint) -> f32 {
         // Estimate quality based on confidence, layer depth, and consistency
         let depth_factor =
-            exit_point.layer_index as f32 / self.exit_predictor.config.max_layers as f32;
+            exit_point.layer_index as f32 / self.exit_predictor.config.max_layers.max(1) as f32;
         let confidence_factor = exit_point.confidence_score;
         let consistency_factor = exit_point.consistency_score;
 
@@ -802,6 +800,14 @@ where
     }
 }
 
+/// `Pipeline` conformance for a wrapped *whole-model* pipeline.
+///
+/// A plain [`Pipeline`] can only be invoked end to end, so there is no layer at
+/// which to exit early and no intermediate state to judge. Rather than
+/// synthesising per-layer hidden states, logits and savings — which is exactly
+/// what this module used to do — every call reports that the wrapped pipeline
+/// is not layerwise. Wrap a [`LayerwiseInference`] model and call
+/// [`EarlyExitPipeline::run`] to get real early exiting.
 impl<P> Pipeline for EarlyExitPipeline<P>
 where
     P: Pipeline,
@@ -810,8 +816,15 @@ where
     type Input = P::Input;
     type Output = EarlyExitResult;
 
-    fn __call__(&self, input: Self::Input) -> Result<Self::Output> {
-        self.simulate_layer_by_layer_processing(&input)
+    fn __call__(&self, _input: Self::Input) -> Result<Self::Output> {
+        Err(crate::error::TrustformersError::feature_unavailable(
+            "early exit needs per-layer access to the model, and a plain `Pipeline` only exposes \
+             a whole-model call. Wrap a type implementing \
+             `trustformers::pipeline::early_exit::LayerwiseInference` and call \
+             `EarlyExitPipeline::run`."
+                .to_string(),
+            "early-exit",
+        ))
     }
 
     fn batch(&self, inputs: Vec<Self::Input>) -> Result<Vec<Self::Output>> {
@@ -825,7 +838,7 @@ pub fn create_early_exit_pipeline<P>(
     config: EarlyExitConfig,
 ) -> EarlyExitPipeline<P>
 where
-    P: Pipeline,
+    P: LayerwiseInference,
 {
     EarlyExitPipeline::new(base_pipeline, config)
 }
@@ -835,7 +848,7 @@ pub fn create_confidence_based_early_exit<P>(
     confidence_threshold: f32,
 ) -> EarlyExitPipeline<P>
 where
-    P: Pipeline,
+    P: LayerwiseInference,
 {
     let mut config = EarlyExitConfig::default();
     config.strategy = ExitStrategy::ConfidenceThreshold(confidence_threshold);
@@ -844,7 +857,7 @@ where
 
 pub fn create_adaptive_early_exit<P>(base_pipeline: P) -> EarlyExitPipeline<P>
 where
-    P: Pipeline,
+    P: LayerwiseInference,
 {
     let mut config = EarlyExitConfig::default();
     config.strategy = ExitStrategy::AdaptiveThreshold;
@@ -860,7 +873,7 @@ pub fn create_budget_constrained_early_exit<P>(
     energy_budget: f32,
 ) -> EarlyExitPipeline<P>
 where
-    P: Pipeline,
+    P: LayerwiseInference,
 {
     let mut config = EarlyExitConfig::default();
     config.strategy = ExitStrategy::Combined(vec![
@@ -1136,44 +1149,155 @@ mod tests {
 
     // ── Depth reduction vs accuracy ───────────────────────────────────────────
 
+    /// A real (small) layerwise model used by the pipeline tests.
+    ///
+    /// Each layer performs an actual computation over the previous hidden
+    /// state and derives logits from it, so the confidence the exit predictor
+    /// sees is a genuine function of the layer's output.
+    struct ToyLayerwiseModel {
+        layers: usize,
+        width: usize,
+    }
+
+    struct ToyState {
+        hidden: Vec<f32>,
+    }
+
+    impl LayerwiseInference for ToyLayerwiseModel {
+        type Input = String;
+        type State = ToyState;
+
+        fn layer_count(&self) -> usize {
+            self.layers
+        }
+
+        fn begin(&self, input: &Self::Input) -> Result<Self::State> {
+            // Real (if tiny) embedding: byte values scaled into [0, 1).
+            let bytes = input.as_bytes();
+            let hidden = (0..self.width)
+                .map(|i| bytes.get(i % bytes.len().max(1)).copied().unwrap_or(0) as f32 / 255.0)
+                .collect();
+            Ok(ToyState { hidden })
+        }
+
+        fn run_layer(&self, layer_index: usize, state: &mut Self::State) -> Result<LayerOutput> {
+            let started = std::time::Instant::now();
+            // Each layer sharpens the representation: values move toward their
+            // sign, so confidence genuinely grows with depth.
+            for value in state.hidden.iter_mut() {
+                *value = (*value * 1.5).tanh();
+            }
+            let logits: Vec<f32> =
+                state.hidden.iter().take(4).map(|v| v * (layer_index as f32 + 1.0)).collect();
+            let top = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max).max(0.0);
+            Ok(LayerOutput {
+                layer_index,
+                hidden_states: state.hidden.clone(),
+                attention_weights: None,
+                logits: Some(logits),
+                intermediate_prediction: Some(crate::pipeline::PipelineOutput::Classification(
+                    vec![crate::pipeline::ClassificationOutput {
+                        label: format!("layer_{layer_index}"),
+                        score: top.min(1.0),
+                    }],
+                )),
+                computation_time_ms: started.elapsed().as_millis() as u64,
+                memory_usage_mb: (state.hidden.len() * std::mem::size_of::<f32>()) as f64
+                    / (1024.0 * 1024.0),
+            })
+        }
+
+        fn finish(&self, state: &Self::State, layers_executed: usize) -> Result<PipelineOutput> {
+            let score = state.hidden.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            Ok(crate::pipeline::PipelineOutput::Classification(vec![
+                crate::pipeline::ClassificationOutput {
+                    label: format!("after_{layers_executed}_layers"),
+                    score: score.clamp(0.0, 1.0),
+                },
+            ]))
+        }
+    }
+
+    fn toy_model() -> ToyLayerwiseModel {
+        ToyLayerwiseModel {
+            layers: 12,
+            width: 8,
+        }
+    }
+
+    /// Regression: `__call__` used to synthesise every layer output. A pipeline
+    /// wrapping a plain (non-layerwise) `Pipeline` must now refuse.
     #[test]
-    fn test_depth_reduction_computation_saved_percent() {
-        let config = EarlyExitConfig {
-            strategy: ExitStrategy::ConfidenceThreshold(0.0), // exit immediately after min_layers
-            min_layers: 3,
-            max_layers: 12,
-            dynamic_threshold_adjustment: false,
-            ..Default::default()
-        };
-        struct DummyPipeline;
-        impl crate::pipeline::Pipeline for DummyPipeline {
+    fn non_layerwise_pipeline_is_refused() {
+        struct WholeModel;
+        impl crate::pipeline::Pipeline for WholeModel {
             type Input = String;
             type Output = crate::pipeline::PipelineOutput;
             fn __call__(&self, _: Self::Input) -> Result<Self::Output> {
                 Ok(crate::pipeline::PipelineOutput::Text("x".to_string()))
             }
         }
-        let pipeline = create_early_exit_pipeline(DummyPipeline, config);
-        let result = pipeline
-            .__call__("test".to_string())
-            .expect("early exit pipeline should succeed");
+        let pipeline = EarlyExitPipeline::new(WholeModel, EarlyExitConfig::default());
+        assert!(
+            pipeline.__call__("test".to_string()).is_err(),
+            "a whole-model pipeline offers no layer to exit at, so no result may be produced"
+        );
+    }
+
+    /// The wrapped model must actually be executed, layer by layer.
+    #[test]
+    fn layers_are_really_executed_and_reported() {
+        let config = EarlyExitConfig {
+            strategy: ExitStrategy::ConfidenceThreshold(0.0),
+            min_layers: 3,
+            max_layers: 12,
+            dynamic_threshold_adjustment: false,
+            ..Default::default()
+        };
+        let pipeline = create_early_exit_pipeline(toy_model(), config);
+        let result = pipeline.run(&"test input".to_string()).expect("layerwise run should succeed");
+
+        assert!(
+            result.total_layers_computed >= 3,
+            "min_layers must be honoured"
+        );
+        assert!(result.total_layers_computed <= 12);
         assert!(result.computation_saved_percent >= 0.0);
-        assert!(result.total_layers_computed <= result.exit_point.layer_index + 1);
+        // The prediction is the model's own, not a fixed summarization string.
+        match &result.prediction {
+            crate::pipeline::PipelineOutput::Classification(scores) => {
+                assert!(!scores.is_empty());
+                assert!(
+                    !scores[0].label.starts_with("Class_"),
+                    "labels must come from the model, not the removed simulator"
+                );
+            },
+            other => panic!("unexpected prediction variant: {other:?}"),
+        }
+        assert!(
+            !result.exit_path.is_empty(),
+            "the exit path must record the layers that were judged"
+        );
+    }
+
+    /// A model with no layers cannot be run.
+    #[test]
+    fn zero_layer_model_is_rejected() {
+        let pipeline = EarlyExitPipeline::new(
+            ToyLayerwiseModel {
+                layers: 0,
+                width: 4,
+            },
+            EarlyExitConfig::default(),
+        );
+        assert!(pipeline.run(&"x".to_string()).is_err());
     }
 
     // ── EarlyExitPipeline factories ───────────────────────────────────────────
 
     #[test]
     fn test_confidence_based_factory() {
-        struct Dummy;
-        impl crate::pipeline::Pipeline for Dummy {
-            type Input = String;
-            type Output = crate::pipeline::PipelineOutput;
-            fn __call__(&self, _: Self::Input) -> Result<Self::Output> {
-                Ok(crate::pipeline::PipelineOutput::Text("x".to_string()))
-            }
-        }
-        let pipeline = create_confidence_based_early_exit(Dummy, 0.7_f32);
+        let pipeline = create_confidence_based_early_exit(toy_model(), 0.7_f32);
         let config = pipeline.exit_predictor().config();
         assert!(
             matches!(config.strategy, ExitStrategy::ConfidenceThreshold(t) if (t - 0.7).abs() < 1e-5)
@@ -1182,15 +1306,7 @@ mod tests {
 
     #[test]
     fn test_adaptive_factory() {
-        struct Dummy;
-        impl crate::pipeline::Pipeline for Dummy {
-            type Input = String;
-            type Output = crate::pipeline::PipelineOutput;
-            fn __call__(&self, _: Self::Input) -> Result<Self::Output> {
-                Ok(crate::pipeline::PipelineOutput::Text("x".to_string()))
-            }
-        }
-        let pipeline = create_adaptive_early_exit(Dummy);
+        let pipeline = create_adaptive_early_exit(toy_model());
         let config = pipeline.exit_predictor().config();
         assert!(matches!(config.strategy, ExitStrategy::AdaptiveThreshold));
         assert!(config.dynamic_threshold_adjustment);
@@ -1198,15 +1314,7 @@ mod tests {
 
     #[test]
     fn test_budget_constrained_factory() {
-        struct Dummy;
-        impl crate::pipeline::Pipeline for Dummy {
-            type Input = String;
-            type Output = crate::pipeline::PipelineOutput;
-            fn __call__(&self, _: Self::Input) -> Result<Self::Output> {
-                Ok(crate::pipeline::PipelineOutput::Text("x".to_string()))
-            }
-        }
-        let pipeline = create_budget_constrained_early_exit(Dummy, 100, 50.0);
+        let pipeline = create_budget_constrained_early_exit(toy_model(), 100, 50.0);
         let config = pipeline.exit_predictor().config();
         assert!(matches!(config.strategy, ExitStrategy::Combined(_)));
         assert!(config.energy_aware);

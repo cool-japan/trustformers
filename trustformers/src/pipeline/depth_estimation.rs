@@ -1,10 +1,22 @@
 //! # Depth Estimation Pipeline
 //!
-//! DPT/MiDaS-compatible monocular depth estimation from images.
+//! ## What is real here
 //!
-//! ## Supported model families
-//! - **DPT-Large** (Intel/dpt-large) — Vision Transformer backbone for dense prediction
-//! - **MiDaS** — Multi-scale depth estimation
+//! Monocular depth *post-processing*: [`DepthMap`] statistics, min/max
+//! normalisation, inversion to disparity, bilinear rescaling and the 2-D/flat
+//! conversions in [`DepthEstimationResult`]. Preprocessing (resizing an input
+//! image to the model's input resolution) is real too.
+//!
+//! ## Model support
+//!
+//! No monocular depth backbone (DPT, MiDaS, …) is implemented in
+//! `trustformers-models`, so [`DepthEstimationPipeline::predict`] returns
+//! [`PipelineError::UnsupportedModel`] instead of the radial gradient it used
+//! to synthesise from the image dimensions — a "depth map" that depended only
+//! on the picture's size, not its content.
+//!
+//! Run your own model and hand its raw output to
+//! [`DepthEstimationPipeline::postprocess`] to use the real post-processing.
 //!
 //! ## Example
 //!
@@ -15,8 +27,8 @@
 //!
 //! let config = DepthEstimationConfig::default();
 //! let pipeline = DepthEstimationPipeline::new(config)?;
-//! let image = vec![0.5f32; 384 * 384 * 3];
-//! let depth_map = pipeline.predict(&image, 384, 384)?;
+//! // Real post-processing over a depth map produced elsewhere:
+//! let depth_map = pipeline.postprocess(my_model_output)?;
 //! println!("Depth map: {}x{}", depth_map.width, depth_map.height);
 //! # Ok::<(), depth_estimation::PipelineError>(())
 //! ```
@@ -36,7 +48,24 @@ pub enum PipelineError {
     EmptyInput,
     #[error("Model error: {0}")]
     ModelError(String),
+    /// The requested checkpoint has no real implementation in this workspace.
+    #[error(
+        "no real depth estimation model is implemented for `{requested}`; supported: \
+         {supported}. This pipeline never returns synthesised depth — use `postprocess` with \
+         your own model's output."
+    )]
+    UnsupportedModel {
+        /// The checkpoint or architecture the caller asked for.
+        requested: String,
+        /// Comma-separated list of architectures that *are* supported.
+        supported: String,
+    },
 }
+
+/// Depth architectures with a real backbone in this workspace.
+///
+/// Deliberately empty — the pipeline says so rather than pretending.
+const SUPPORTED_ARCHITECTURES: &[&str] = &[];
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -454,15 +483,68 @@ impl DepthEstimationPipeline {
             ));
         }
 
-        // Preprocessing: resize to model input size by sampling the input.
+        Err(PipelineError::UnsupportedModel {
+            requested: self.config.model_name.clone(),
+            supported: if SUPPORTED_ARCHITECTURES.is_empty() {
+                "none (no depth backbone is implemented yet)".to_string()
+            } else {
+                SUPPORTED_ARCHITECTURES.join(", ")
+            },
+        })
+    }
+
+    /// Resize an image to the model's configured input resolution.
+    ///
+    /// Real nearest-source sampling into a single-channel buffer; exposed
+    /// because it is the pipeline's genuine, reusable front-end.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PipelineError::EmptyInput`] or
+    /// [`PipelineError::InvalidDimensions`] for degenerate inputs.
+    pub fn preprocess(
+        &self,
+        image_data: &[f32],
+        height: usize,
+        width: usize,
+    ) -> Result<Vec<f32>, PipelineError> {
+        if image_data.is_empty() {
+            return Err(PipelineError::EmptyInput);
+        }
+        if height == 0 || width == 0 {
+            return Err(PipelineError::InvalidDimensions(
+                "height and width must be > 0".to_string(),
+            ));
+        }
+        Ok(preprocess_image(
+            image_data,
+            height,
+            width,
+            self.config.input_height,
+            self.config.input_width,
+        ))
+    }
+
+    /// Apply the pipeline's real post-processing to a model's raw depth output.
+    ///
+    /// `depth_values` must contain `input_height * input_width` values in the
+    /// model's own depth units. Normalisation and inversion follow the config.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PipelineError::InvalidDimensions`] when the buffer length does
+    /// not match the configured input resolution.
+    pub fn postprocess(&self, depth_values: Vec<f32>) -> Result<DepthMap, PipelineError> {
         let in_h = self.config.input_height;
         let in_w = self.config.input_width;
-        let _resized = preprocess_image(image_data, height, width, in_h, in_w);
+        if depth_values.len() != in_h * in_w {
+            return Err(PipelineError::InvalidDimensions(format!(
+                "depth buffer has {} values but {in_h}x{in_w} = {} were expected",
+                depth_values.len(),
+                in_h * in_w
+            )));
+        }
 
-        // Mock inference: synthetic radial depth gradient (center near, edges far).
-        let depth_values = mock_depth_inference(in_h, in_w);
-
-        // Postprocessing.
         let mut depth_map = DepthMap::new(depth_values, in_h, in_w);
 
         if self.config.output_normalized {
@@ -540,29 +622,6 @@ fn preprocess_image(
         }
     }
     out
-}
-
-/// Generate a synthetic depth map: center pixels are near (low depth value),
-/// edge pixels are far (high depth value). Values in `[0, 1]`.
-fn mock_depth_inference(h: usize, w: usize) -> Vec<f32> {
-    let cy = h as f32 / 2.0;
-    let cx = w as f32 / 2.0;
-    let max_dist = (cy * cy + cx * cx).sqrt();
-
-    (0..h)
-        .flat_map(|row| {
-            (0..w).map(move |col| {
-                let dy = row as f32 - cy;
-                let dx = col as f32 - cx;
-                let dist = (dy * dy + dx * dx).sqrt();
-                if max_dist > 0.0 {
-                    dist / max_dist
-                } else {
-                    0.0
-                }
-            })
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -689,7 +748,9 @@ mod tests {
     // ---- 8. predict basic ----
 
     #[test]
-    fn test_predict_basic() {
+    fn test_predict_reports_unsupported_model() {
+        // Regression: `predict` used to return a radial gradient computed from
+        // the output resolution alone — a "depth map" independent of the image.
         let config = DepthEstimationConfig {
             input_height: 16,
             input_width: 16,
@@ -697,14 +758,67 @@ mod tests {
         };
         let pipeline = DepthEstimationPipeline::new(config).expect("pipeline creation failed");
         let image = make_image(32, 32);
-        let dm = pipeline.predict(&image, 32, 32).expect("predict failed");
-        assert_eq!(dm.height, 16);
-        assert_eq!(dm.width, 16);
-        assert_eq!(dm.values.len(), 256);
-        // normalized → values in [0, 1]
-        for v in &dm.values {
-            assert!(*v >= 0.0 && *v <= 1.0 + 1e-6);
+        match pipeline.predict(&image, 32, 32) {
+            Err(PipelineError::UnsupportedModel {
+                requested,
+                supported,
+            }) => {
+                assert_eq!(requested, "Intel/dpt-large");
+                assert!(supported.contains("none"), "supported: {supported}");
+            },
+            other => panic!("expected UnsupportedModel, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_preprocess_resizes_and_tracks_content() {
+        let config = DepthEstimationConfig {
+            input_height: 8,
+            input_width: 8,
+            ..Default::default()
+        };
+        let pipeline = DepthEstimationPipeline::new(config).expect("ok");
+        let a = pipeline.preprocess(&make_image(16, 16), 16, 16).expect("a");
+        assert_eq!(a.len(), 64);
+        let mut flipped = make_image(16, 16);
+        flipped.reverse();
+        let b = pipeline.preprocess(&flipped, 16, 16).expect("b");
+        assert_ne!(a, b, "preprocessing must depend on pixel content");
+        assert!(pipeline.preprocess(&[], 16, 16).is_err());
+        assert!(pipeline.preprocess(&[0.1; 4], 0, 4).is_err());
+    }
+
+    #[test]
+    fn test_postprocess_normalizes_real_model_output() {
+        let config = DepthEstimationConfig {
+            input_height: 2,
+            input_width: 2,
+            output_normalized: true,
+            invert_depth: false,
+            ..Default::default()
+        };
+        let pipeline = DepthEstimationPipeline::new(config).expect("ok");
+        let dm = pipeline.postprocess(vec![1.0, 2.0, 3.0, 5.0]).expect("postprocess");
+        assert_eq!(dm.values.len(), 4);
+        // (x - 1) / 4 → 0, 0.25, 0.5, 1
+        let expected = [0.0f32, 0.25, 0.5, 1.0];
+        for (got, want) in dm.values.iter().zip(expected.iter()) {
+            assert!((got - want).abs() < 1e-6, "got {got}, want {want}");
+        }
+    }
+
+    #[test]
+    fn test_postprocess_rejects_length_mismatch() {
+        let config = DepthEstimationConfig {
+            input_height: 4,
+            input_width: 4,
+            ..Default::default()
+        };
+        let pipeline = DepthEstimationPipeline::new(config).expect("ok");
+        assert!(matches!(
+            pipeline.postprocess(vec![0.0; 3]),
+            Err(PipelineError::InvalidDimensions(_))
+        ));
     }
 
     // ---- 9. predict empty input error ----
@@ -728,7 +842,7 @@ mod tests {
     // ---- 11. predict_batch ----
 
     #[test]
-    fn test_predict_batch() {
+    fn test_predict_batch_reports_unsupported_model() {
         let config = DepthEstimationConfig {
             input_height: 8,
             input_width: 8,
@@ -739,37 +853,39 @@ mod tests {
         let img2 = make_image(24, 24);
         let batch: Vec<(&[f32], usize, usize)> =
             vec![(img1.as_slice(), 16, 16), (img2.as_slice(), 24, 24)];
-        let results = pipeline.predict_batch(&batch).expect("batch predict failed");
-        assert_eq!(results.len(), 2);
-        for dm in &results {
-            assert_eq!(dm.height, 8);
-            assert_eq!(dm.width, 8);
-        }
+        assert!(matches!(
+            pipeline.predict_batch(&batch),
+            Err(PipelineError::UnsupportedModel { .. })
+        ));
+        assert!(matches!(
+            pipeline.predict_batch(&[]),
+            Err(PipelineError::EmptyInput)
+        ));
     }
 
     // ---- 12. invert_depth ----
 
     #[test]
     fn test_invert_depth() {
-        let config_normal = DepthEstimationConfig {
-            input_height: 8,
-            input_width: 8,
+        let base = DepthEstimationConfig {
+            input_height: 2,
+            input_width: 2,
             output_normalized: true,
+            ..Default::default()
+        };
+        let pl_normal = DepthEstimationPipeline::new(DepthEstimationConfig {
             invert_depth: false,
-            ..Default::default()
-        };
-        let config_inv = DepthEstimationConfig {
-            input_height: 8,
-            input_width: 8,
-            output_normalized: true,
+            ..base.clone()
+        })
+        .expect("ok");
+        let pl_inv = DepthEstimationPipeline::new(DepthEstimationConfig {
             invert_depth: true,
-            ..Default::default()
-        };
-        let pl_normal = DepthEstimationPipeline::new(config_normal).expect("ok");
-        let pl_inv = DepthEstimationPipeline::new(config_inv).expect("ok");
-        let image = make_image(16, 16);
-        let dm_normal = pl_normal.predict(&image, 16, 16).expect("ok");
-        let dm_inv = pl_inv.predict(&image, 16, 16).expect("ok");
+            ..base
+        })
+        .expect("ok");
+        let model_output = vec![1.0f32, 2.0, 3.0, 9.0];
+        let dm_normal = pl_normal.postprocess(model_output.clone()).expect("ok");
+        let dm_inv = pl_inv.postprocess(model_output).expect("ok");
         // The argmax/argmin positions should be swapped.
         let normal_max_idx = dm_normal
             .values
@@ -906,7 +1022,7 @@ mod tests {
     }
 
     #[test]
-    fn test_estimate_returns_2d_map() {
+    fn test_estimate_reports_unsupported_model() {
         let config = DepthEstimationConfig {
             input_height: 4,
             input_width: 4,
@@ -914,12 +1030,20 @@ mod tests {
         };
         let pipeline = DepthEstimationPipeline::new(config).expect("ok");
         let image = make_image(8, 8);
-        let result = pipeline.estimate(&image, 8, 8).expect("estimate ok");
-        assert_eq!(result.height, 4);
-        assert_eq!(result.width, 4);
-        assert_eq!(result.depth_map.len(), 4, "depth_map should have 4 rows");
+        assert!(matches!(
+            pipeline.estimate(&image, 8, 8),
+            Err(PipelineError::UnsupportedModel { .. })
+        ));
+    }
+
+    #[test]
+    fn test_result_from_flat_builds_2d_map() {
+        let result = DepthEstimationResult::from_flat(vec![1.0, 2.0, 3.0, 4.0], 2, 2);
+        assert_eq!(result.height, 2);
+        assert_eq!(result.width, 2);
+        assert_eq!(result.depth_map.len(), 2);
         for row in &result.depth_map {
-            assert_eq!(row.len(), 4, "each row should have 4 columns");
+            assert_eq!(row.len(), 2);
         }
     }
 }

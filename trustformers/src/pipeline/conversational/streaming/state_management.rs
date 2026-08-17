@@ -406,6 +406,33 @@ pub struct ErrorRecoveryManager {
     recovery_attempts: Arc<RwLock<HashMap<StreamErrorType, usize>>>,
     /// Maximum recovery attempts
     max_attempts: usize,
+    /// Component that performs the state transitions the strategies name.
+    ///
+    /// `None` means the manager can only apply the strategies it owns outright
+    /// (backoff); everything else reports that it is unavailable rather than
+    /// sleeping and claiming success.
+    actuator: Option<Arc<dyn RecoveryActuator>>,
+}
+
+/// Performs the state transitions that a [`RecoveryStrategy`] names.
+///
+/// The recovery manager tracks attempts and chooses strategies; it owns no
+/// connection, buffer, quality setting or session, so the streaming system
+/// supplies this to actually carry them out.
+#[async_trait::async_trait]
+pub trait RecoveryActuator: Send + Sync + std::fmt::Debug {
+    /// Re-establish the transport connection.
+    async fn reconnect(&self) -> Result<()>;
+    /// Resize buffers in response to pressure.
+    async fn adjust_buffers(&self) -> Result<()>;
+    /// Step the streaming quality down one level.
+    async fn reduce_quality(&self) -> Result<()>;
+    /// Switch to the fallback delivery path.
+    async fn switch_to_fallback(&self) -> Result<()>;
+    /// Restart the streaming session.
+    async fn restart_session(&self) -> Result<()>;
+    /// Shut the stream down cleanly.
+    async fn graceful_shutdown(&self) -> Result<()>;
 }
 
 impl ErrorRecoveryManager {
@@ -489,6 +516,7 @@ impl ErrorRecoveryManager {
             strategies,
             recovery_attempts: Arc::new(RwLock::new(HashMap::new())),
             max_attempts: 3,
+            actuator: None,
         }
     }
 
@@ -512,7 +540,7 @@ impl ErrorRecoveryManager {
         if let Some(strategies) = self.strategies.get(error_type) {
             if let Some(strategy) = strategies.get(current_attempts) {
                 // Execute recovery strategy
-                self.execute_recovery_strategy(strategy.clone(), error).await?;
+                self.execute_recovery_strategy(strategy.clone(), current_attempts).await?;
 
                 // Update attempt count
                 attempts.insert(error_type.clone(), current_attempts + 1);
@@ -522,45 +550,77 @@ impl ErrorRecoveryManager {
         Ok(())
     }
 
-    /// Execute a specific recovery strategy
+    /// Execute a specific recovery strategy.
+    ///
+    /// `attempt` is the zero-based retry counter for this error type; it drives
+    /// the backoff. Strategies that change connection, buffer, quality or
+    /// session state are delegated to the attached [`RecoveryActuator`]; with
+    /// no actuator they report that they are unavailable rather than sleeping
+    /// and returning `Ok(())`, which would record a recovery that never
+    /// happened.
+    ///
+    /// # Errors
+    ///
+    /// Propagates actuator failures, and reports
+    /// [`TrustformersError::FeatureUnavailable`] when a state transition is
+    /// requested with no actuator attached.
     async fn execute_recovery_strategy(
         &self,
         strategy: RecoveryStrategy,
-        error: &StreamError,
+        attempt: usize,
     ) -> Result<()> {
+        let Some(actuator) = self.actuator.as_ref() else {
+            return match strategy {
+                RecoveryStrategy::Retry => {
+                    sleep(Self::backoff_delay(attempt)).await;
+                    Ok(())
+                },
+                other => Err(TrustformersError::feature_unavailable(
+                    format!(
+                        "recovery strategy {other:?} changes stream state, but no \
+                         `RecoveryActuator` is attached to this ErrorRecoveryManager. Attach one \
+                         with `with_actuator` so the transition can actually be performed."
+                    ),
+                    "stream-recovery",
+                )),
+            };
+        };
+
         match strategy {
             RecoveryStrategy::Retry => {
-                // Simple retry with exponential backoff
-                let delay = Duration::from_millis(100 * (2_u64.pow(error.context.len() as u32)));
-                sleep(delay).await;
+                sleep(Self::backoff_delay(attempt)).await;
+                Ok(())
             },
-            RecoveryStrategy::Reconnect => {
-                // Attempt to reconnect (placeholder implementation)
-                sleep(Duration::from_millis(500)).await;
-            },
-            RecoveryStrategy::BufferAdjustment => {
-                // Adjust buffer sizes (placeholder implementation)
-                sleep(Duration::from_millis(100)).await;
-            },
-            RecoveryStrategy::QualityReduction => {
-                // Reduce streaming quality (placeholder implementation)
-                sleep(Duration::from_millis(50)).await;
-            },
-            RecoveryStrategy::Fallback => {
-                // Switch to fallback mode (placeholder implementation)
-                sleep(Duration::from_millis(200)).await;
-            },
-            RecoveryStrategy::Restart => {
-                // Restart streaming session (placeholder implementation)
-                sleep(Duration::from_millis(1000)).await;
-            },
-            RecoveryStrategy::GracefulShutdown => {
-                // Gracefully shutdown (placeholder implementation)
-                sleep(Duration::from_millis(100)).await;
-            },
+            RecoveryStrategy::Reconnect => actuator.reconnect().await,
+            RecoveryStrategy::BufferAdjustment => actuator.adjust_buffers().await,
+            RecoveryStrategy::QualityReduction => actuator.reduce_quality().await,
+            RecoveryStrategy::Fallback => actuator.switch_to_fallback().await,
+            RecoveryStrategy::Restart => actuator.restart_session().await,
+            RecoveryStrategy::GracefulShutdown => actuator.graceful_shutdown().await,
         }
+    }
 
-        Ok(())
+    /// Exponential backoff for retry attempt `attempt`, capped at 30 seconds.
+    ///
+    /// Keyed on the attempt counter, not on the length of an error's context
+    /// string: the previous `2^context.len()` shift overflowed for contexts
+    /// longer than 63 entries.
+    fn backoff_delay(attempt: usize) -> Duration {
+        const BASE_MS: u64 = 100;
+        const MAX_MS: u64 = 30_000;
+        let shift = attempt.min(8) as u32;
+        Duration::from_millis((BASE_MS.saturating_mul(1u64 << shift)).min(MAX_MS))
+    }
+
+    /// Attach the component that performs the state transitions.
+    pub fn with_actuator(mut self, actuator: Arc<dyn RecoveryActuator>) -> Self {
+        self.actuator = Some(actuator);
+        self
+    }
+
+    /// Whether a [`RecoveryActuator`] is attached.
+    pub fn has_actuator(&self) -> bool {
+        self.actuator.is_some()
     }
 
     /// Reset recovery attempts for an error type
@@ -751,6 +811,41 @@ impl StreamError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // Regression: every recovery strategy used to be a `sleep` that returned
+    // `Ok(())`, so callers recorded successful recoveries that never happened,
+    // and the retry backoff shifted by `error.context.len()` (overflowing past
+    // 63 entries).
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn state_changing_recovery_without_an_actuator_is_refused() {
+        let manager = ErrorRecoveryManager::new();
+        assert!(!manager.has_actuator());
+        let result = manager.execute_recovery_strategy(RecoveryStrategy::Reconnect, 0).await;
+        assert!(
+            result.is_err(),
+            "sleeping and returning Ok would record a reconnection that never happened"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_backoff_is_keyed_on_the_attempt_counter() {
+        // The old formula was `100 * 2^context.len()`, which overflows the
+        // shift for long contexts; this one is bounded and monotonic.
+        assert_eq!(
+            ErrorRecoveryManager::backoff_delay(0),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            ErrorRecoveryManager::backoff_delay(3),
+            Duration::from_millis(800)
+        );
+        // Far beyond any shift the old code could survive.
+        let huge = ErrorRecoveryManager::backoff_delay(1_000);
+        assert!(huge <= Duration::from_secs(30), "backoff must stay bounded");
+    }
 
     fn default_config() -> AdvancedStreamingConfig {
         AdvancedStreamingConfig::default()

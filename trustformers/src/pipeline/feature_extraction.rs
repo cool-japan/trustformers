@@ -21,7 +21,10 @@
 //! println!("dim={}, norm={:.4}", embedding.dim, embedding.norm);
 //! ```
 
+use crate::{AutoModel, AutoTokenizer};
+use std::sync::Arc;
 use thiserror::Error;
+use trustformers_core::traits::Tokenizer;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -193,30 +196,157 @@ pub struct ClusteringResult {
 // ---------------------------------------------------------------------------
 
 /// Pipeline for extracting dense vector embeddings from text.
+///
+/// Every embedding is a pooled slice of the encoder's real per-token hidden
+/// states; there is no fallback path that synthesises vectors.
 pub struct FeatureExtractionPipeline {
     config: FeatureExtractionConfig,
+    model: Arc<AutoModel>,
+    tokenizer: Arc<AutoTokenizer>,
 }
 
 impl FeatureExtractionPipeline {
-    /// Create a new pipeline with the given configuration.
+    /// Load the encoder named by `config.model_name` and build a pipeline over
+    /// it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint or its tokenizer cannot be loaded, or when the
+    /// configured `embedding_dim` disagrees with the model's hidden size.
     pub fn new(config: FeatureExtractionConfig) -> Result<Self, ExtractionError> {
+        let model = AutoModel::from_pretrained(&config.model_name)
+            .map_err(|e| ExtractionError::ModelError(e.to_string()))?;
+        let tokenizer = AutoTokenizer::from_pretrained(&config.model_name)
+            .map_err(|e| ExtractionError::ModelError(e.to_string()))?;
+        Self::from_model(model, tokenizer, config)
+    }
+
+    /// Build a pipeline over an already-loaded encoder and tokenizer.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `config.embedding_dim` is zero or does not match the model's
+    /// hidden size — a mismatch would silently truncate or pad real model
+    /// output.
+    pub fn from_model(
+        model: AutoModel,
+        tokenizer: AutoTokenizer,
+        config: FeatureExtractionConfig,
+    ) -> Result<Self, ExtractionError> {
         if config.embedding_dim == 0 {
             return Err(ExtractionError::ModelError(
                 "embedding_dim must be > 0".to_string(),
             ));
         }
-        Ok(Self { config })
+        let hidden_size = model.hidden_size();
+        if config.embedding_dim != hidden_size {
+            return Err(ExtractionError::ModelError(format!(
+                "configured embedding_dim {} does not match the model's hidden size {}",
+                config.embedding_dim, hidden_size
+            )));
+        }
+        Ok(Self {
+            config,
+            model: Arc::new(model),
+            tokenizer: Arc::new(tokenizer),
+        })
+    }
+
+    /// Borrow the configuration this pipeline was built with.
+    pub fn config(&self) -> &FeatureExtractionConfig {
+        &self.config
     }
 
     /// Extract a single embedding for `text`.
     ///
-    /// Uses a deterministic mock: `embedding[i] = sin(hash * (i+1) * 0.01)`.
+    /// Runs the encoder, pools its real per-token hidden states with the
+    /// configured [`PoolingStrategy`], and optionally L2-normalises the result.
+    ///
+    /// # Errors
+    ///
+    /// Fails on empty input, on tokenizer/model errors, and when the model
+    /// exposes logits instead of hidden states.
     pub fn extract(&self, text: &str) -> Result<Embedding, ExtractionError> {
         if text.is_empty() {
             return Err(ExtractionError::EmptyText);
         }
-        let embedding = self.mock_embed(text);
-        Ok(embedding)
+        self.embed(text)
+    }
+
+    /// Run the encoder and pool its output into one embedding.
+    fn embed(&self, text: &str) -> Result<Embedding, ExtractionError> {
+        let mut tokenized = self
+            .tokenizer
+            .encode(text)
+            .map_err(|e| ExtractionError::ModelError(e.to_string()))?;
+
+        // Respect the configured window; the encoder cannot see past it.
+        if tokenized.input_ids.len() > self.config.max_length {
+            tokenized.input_ids.truncate(self.config.max_length);
+            tokenized.attention_mask.truncate(self.config.max_length);
+            if let Some(type_ids) = tokenized.token_type_ids.as_mut() {
+                type_ids.truncate(self.config.max_length);
+            }
+        }
+        if tokenized.input_ids.is_empty() {
+            return Err(ExtractionError::EmptyText);
+        }
+
+        let attention_mask: Vec<u32> = tokenized.attention_mask.iter().map(|&m| m as u32).collect();
+
+        let hidden = self
+            .model
+            .hidden_states(tokenized)
+            .map_err(|e| ExtractionError::ModelError(e.to_string()))?;
+        let token_embeddings = Self::hidden_states_to_tokens(&hidden, self.config.embedding_dim)?;
+
+        let pooled = match self.config.pooling_strategy {
+            PoolingStrategy::Cls => EmbeddingNormalizer::cls_pooling(&token_embeddings),
+            PoolingStrategy::MeanPooling => {
+                EmbeddingNormalizer::mean_pooling(&token_embeddings, &attention_mask)
+            },
+            PoolingStrategy::MaxPooling => EmbeddingNormalizer::max_pooling(&token_embeddings),
+            PoolingStrategy::WeightedMean => {
+                // Weight each token by its attention mask: padding contributes
+                // nothing, real tokens contribute equally. This is a measured
+                // weighting, not an invented one.
+                let weights: Vec<f32> = attention_mask.iter().map(|&m| m as f32).collect();
+                EmbeddingNormalizer::weighted_mean_pooling(&token_embeddings, &weights)
+            },
+        };
+
+        let embedding = Embedding::new(pooled);
+        Ok(if self.config.normalize { embedding.normalize() } else { embedding })
+    }
+
+    /// Split a `[batch, seq, hidden]` (or `[seq, hidden]`) tensor into per-token
+    /// vectors for batch index 0.
+    fn hidden_states_to_tokens(
+        hidden: &crate::Tensor,
+        expected_dim: usize,
+    ) -> Result<Vec<Vec<f32>>, ExtractionError> {
+        let shape = hidden.shape();
+        let hidden_dim = *shape.last().ok_or_else(|| {
+            ExtractionError::ModelError("encoder returned a rank-0 tensor".to_string())
+        })?;
+        if hidden_dim != expected_dim {
+            return Err(ExtractionError::ModelError(format!(
+                "encoder produced {hidden_dim}-dimensional states but the pipeline expects \
+                 {expected_dim}"
+            )));
+        }
+        let seq_len = if shape.len() >= 2 { shape[shape.len() - 2] } else { 1 };
+        let data = hidden.data().map_err(|e| ExtractionError::ModelError(e.to_string()))?;
+        if data.len() < seq_len * hidden_dim {
+            return Err(ExtractionError::ModelError(format!(
+                "encoder returned {} values, expected at least {}",
+                data.len(),
+                seq_len * hidden_dim
+            )));
+        }
+        Ok((0..seq_len)
+            .map(|t| data[t * hidden_dim..(t + 1) * hidden_dim].to_vec())
+            .collect())
     }
 
     /// Extract embeddings for a batch of texts.
@@ -244,15 +374,15 @@ impl FeatureExtractionPipeline {
             .iter()
             .enumerate()
             .map(|(idx, text)| {
-                let emb = self.mock_embed(text);
+                let emb = self.embed(text)?;
                 let score = query_emb.cosine_similarity(&emb);
-                SearchResult {
+                Ok(SearchResult {
                     text: text.to_string(),
                     index: idx,
                     score,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<SearchResult>, ExtractionError>>()?;
 
         scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(top_k);
@@ -270,7 +400,10 @@ impl FeatureExtractionPipeline {
             return Err(ExtractionError::InvalidClusters(num_clusters));
         }
 
-        let embeddings: Vec<Embedding> = texts.iter().map(|t| self.mock_embed(t)).collect();
+        let embeddings: Vec<Embedding> = texts
+            .iter()
+            .map(|t| self.embed(t))
+            .collect::<Result<Vec<Embedding>, ExtractionError>>()?;
         let dim = self.config.embedding_dim;
 
         // Initialise centroids from first `num_clusters` embeddings.
@@ -351,25 +484,6 @@ impl FeatureExtractionPipeline {
             inertia,
             iterations: actual_iters,
         })
-    }
-
-    // -----------------------------------------------------------------------
-    // Internal helpers
-    // -----------------------------------------------------------------------
-
-    /// Generate a deterministic embedding from `text` using a hash-based formula.
-    fn mock_embed(&self, text: &str) -> Embedding {
-        let hash_val = simple_hash(text);
-        let dim = self.config.embedding_dim;
-        let raw: Vec<f32> = (0..dim)
-            .map(|i| (hash_val as f64 * (i as f64 + 1.0) * 0.01).sin() as f32)
-            .collect();
-
-        if self.config.normalize {
-            Embedding::new(raw).normalize()
-        } else {
-            Embedding::new(raw)
-        }
     }
 }
 
@@ -526,15 +640,6 @@ impl SimilarityMetrics {
 // Private helpers
 // ---------------------------------------------------------------------------
 
-/// Simple djb2-style hash for deterministic mock embeddings.
-fn simple_hash(text: &str) -> u64 {
-    let mut h: u64 = 5381;
-    for byte in text.bytes() {
-        h = h.wrapping_mul(33).wrapping_add(byte as u64);
-    }
-    h
-}
-
 /// Compute the L2 (Euclidean) norm of a float slice.
 fn compute_l2_norm(values: &[f32]) -> f32 {
     values.iter().map(|v| v * v).sum::<f32>().sqrt()
@@ -548,8 +653,64 @@ fn compute_l2_norm(values: &[f32]) -> f32 {
 mod tests {
     use super::*;
 
+    /// A real (small) BERT encoder plus a real WordPiece tokenizer.
+    ///
+    /// The weights are freshly initialised — that is an explicit, local choice
+    /// of this test, not a silent fallback inside the pipeline — but every
+    /// embedding below is produced by a genuine forward pass through this
+    /// encoder and genuine pooling of its hidden states.
+    #[cfg(feature = "bert")]
+    fn tiny_encoder_pipeline(
+        pooling: PoolingStrategy,
+        normalize: bool,
+    ) -> FeatureExtractionPipeline {
+        use crate::models::bert::BertConfig;
+        use std::collections::HashMap;
+
+        let vocab_words = [
+            "[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "hello", "world", "apple", "banana",
+            "dog", "cat", "machine", "learning", "neural", "network", "foo", "bar", "baz", "qux",
+            "quux", "corge", "alpha", "beta", "gamma", "delta", "one", "two", "three", "four",
+            "query", "a", "b", "c", "d", "e",
+        ];
+        let vocab: HashMap<String, u32> = vocab_words
+            .iter()
+            .enumerate()
+            .map(|(i, w)| ((*w).to_string(), i as u32))
+            .collect();
+        let tokenizer =
+            AutoTokenizer::WordPiece(crate::tokenizers::WordPieceTokenizer::new(vocab, true));
+
+        let bert_config = BertConfig {
+            vocab_size: vocab_words.len(),
+            hidden_size: TINY_HIDDEN_SIZE,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            intermediate_size: 32,
+            max_position_embeddings: 64,
+            ..BertConfig::default()
+        };
+        let model = AutoModel::from_config(crate::AutoConfig::Bert(bert_config))
+            .expect("tiny BERT config should build");
+
+        let config = FeatureExtractionConfig {
+            model_name: "tiny-test-encoder".to_string(),
+            embedding_dim: TINY_HIDDEN_SIZE,
+            pooling_strategy: pooling,
+            normalize,
+            max_length: 32,
+            batch_size: 32,
+        };
+        FeatureExtractionPipeline::from_model(model, tokenizer, config)
+            .expect("pipeline should accept a matching hidden size")
+    }
+
+    /// Hidden size of the encoder used across the pipeline tests.
+    const TINY_HIDDEN_SIZE: usize = 8;
+
+    #[cfg(feature = "bert")]
     fn default_pipeline() -> FeatureExtractionPipeline {
-        FeatureExtractionPipeline::new(FeatureExtractionConfig::default()).unwrap()
+        tiny_encoder_pipeline(PoolingStrategy::MeanPooling, true)
     }
 
     // 1. Embedding::new populates dim and norm correctly.
@@ -602,15 +763,17 @@ mod tests {
     }
 
     // 7. Basic extraction succeeds and returns correct dim.
+    #[cfg(feature = "bert")]
     #[test]
     fn extract_basic() {
         let pipe = default_pipeline();
-        let emb = pipe.extract("Hello world").unwrap();
-        assert_eq!(emb.dim, 384);
+        let emb = pipe.extract("hello world").unwrap();
+        assert_eq!(emb.dim, TINY_HIDDEN_SIZE);
         assert!(emb.norm > 0.0);
     }
 
     // 8. Empty text returns ExtractionError::EmptyText.
+    #[cfg(feature = "bert")]
     #[test]
     fn extract_empty_error() {
         let pipe = default_pipeline();
@@ -619,6 +782,7 @@ mod tests {
     }
 
     // 9. extract_batch returns one embedding per text.
+    #[cfg(feature = "bert")]
     #[test]
     fn extract_batch_count() {
         let pipe = default_pipeline();
@@ -628,6 +792,7 @@ mod tests {
     }
 
     // 10. semantic_search returns results in descending score order.
+    #[cfg(feature = "bert")]
     #[test]
     fn semantic_search_ordering() {
         let pipe = default_pipeline();
@@ -645,6 +810,7 @@ mod tests {
     }
 
     // 11. semantic_search top_k respects the limit even when corpus is larger.
+    #[cfg(feature = "bert")]
     #[test]
     fn semantic_search_top_k_limit() {
         let pipe = default_pipeline();
@@ -654,6 +820,7 @@ mod tests {
     }
 
     // 12. cluster returns one assignment per text.
+    #[cfg(feature = "bert")]
     #[test]
     fn cluster_assignment_count() {
         let pipe = default_pipeline();
@@ -663,6 +830,7 @@ mod tests {
     }
 
     // 13. cluster returns one centroid per cluster.
+    #[cfg(feature = "bert")]
     #[test]
     fn cluster_centroids_count() {
         let pipe = default_pipeline();
@@ -672,6 +840,7 @@ mod tests {
     }
 
     // 14. Inertia is finite (not NaN or infinity).
+    #[cfg(feature = "bert")]
     #[test]
     fn cluster_inertia_finite() {
         let pipe = default_pipeline();
@@ -698,16 +867,124 @@ mod tests {
     }
 
     // 16. normalize flag: when false, norm is not necessarily 1.0.
+    #[cfg(feature = "bert")]
     #[test]
     fn normalize_flag_false() {
-        let config = FeatureExtractionConfig {
-            normalize: false,
-            ..FeatureExtractionConfig::default()
-        };
-        let pipe = FeatureExtractionPipeline::new(config).unwrap();
-        let emb = pipe.extract("test text").unwrap();
+        let pipe = tiny_encoder_pipeline(PoolingStrategy::MeanPooling, false);
+        let emb = pipe.extract("hello world").unwrap();
         // Norm should be > 0 but not constrained to 1.0.
         assert!(emb.norm > 0.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression tests for the removed hash-based mock embedder.
+    //
+    // The old implementation computed `embedding[i] = sin(djb2(text) * (i+1) *
+    // 0.01)` with no model involved. Each test below fails against that
+    // implementation.
+    // -----------------------------------------------------------------------
+
+    /// The pooling strategy must change the embedding.
+    ///
+    /// The hash mock ignored `pooling_strategy` entirely, so CLS and max
+    /// pooling produced byte-identical vectors; a real encoder cannot.
+    #[cfg(feature = "bert")]
+    #[test]
+    fn pooling_strategy_changes_the_embedding() {
+        let cls = tiny_encoder_pipeline(PoolingStrategy::Cls, false)
+            .extract("hello world dog cat")
+            .unwrap();
+        let max = tiny_encoder_pipeline(PoolingStrategy::MaxPooling, false)
+            .extract("hello world dog cat")
+            .unwrap();
+        assert_eq!(cls.dim, max.dim);
+        let differs = cls.values.iter().zip(max.values.iter()).any(|(a, b)| (a - b).abs() > 1e-6);
+        assert!(
+            differs,
+            "CLS and max pooling of real hidden states must differ; identical output means the \
+             embedding did not come from the model"
+        );
+    }
+
+    /// Embedding width follows the model's hidden size, not a config constant.
+    ///
+    /// The hash mock emitted exactly `config.embedding_dim` values whatever the
+    /// model was, so a mismatched dim was silently accepted.
+    #[cfg(feature = "bert")]
+    #[test]
+    fn embedding_dim_must_match_model_hidden_size() {
+        use crate::models::bert::BertConfig;
+        use std::collections::HashMap;
+
+        let vocab: HashMap<String, u32> = [("[PAD]", 0u32), ("[UNK]", 1), ("hello", 2)]
+            .into_iter()
+            .map(|(w, i)| (w.to_string(), i))
+            .collect();
+        let tokenizer =
+            AutoTokenizer::WordPiece(crate::tokenizers::WordPieceTokenizer::new(vocab, true));
+        let model = AutoModel::from_config(crate::AutoConfig::Bert(BertConfig {
+            vocab_size: 3,
+            hidden_size: TINY_HIDDEN_SIZE,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            intermediate_size: 16,
+            max_position_embeddings: 32,
+            ..BertConfig::default()
+        }))
+        .unwrap();
+
+        let mismatched = FeatureExtractionConfig {
+            embedding_dim: TINY_HIDDEN_SIZE + 1,
+            ..FeatureExtractionConfig::default()
+        };
+        let result = FeatureExtractionPipeline::from_model(model, tokenizer, mismatched);
+        assert!(
+            matches!(result, Err(ExtractionError::ModelError(_))),
+            "a dim that disagrees with the encoder must be rejected, not silently honoured"
+        );
+    }
+
+    /// A checkpoint with a task head cannot produce embeddings.
+    ///
+    /// The mock happily "embedded" anything, including models that only emit
+    /// logits.
+    #[cfg(feature = "bert")]
+    #[test]
+    fn task_head_checkpoint_is_rejected() {
+        use crate::models::bert::BertConfig;
+        use crate::models::bert::BertForMaskedLM;
+        use std::collections::HashMap;
+
+        let vocab: HashMap<String, u32> = [("[PAD]", 0u32), ("[UNK]", 1), ("hello", 2)]
+            .into_iter()
+            .map(|(w, i)| (w.to_string(), i))
+            .collect();
+        let tokenizer =
+            AutoTokenizer::WordPiece(crate::tokenizers::WordPieceTokenizer::new(vocab, true));
+        let bert_config = BertConfig {
+            vocab_size: 3,
+            hidden_size: TINY_HIDDEN_SIZE,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            intermediate_size: 16,
+            max_position_embeddings: 32,
+            ..BertConfig::default()
+        };
+        let model = AutoModel::from_parts(
+            crate::AutoConfig::Bert(bert_config.clone()),
+            crate::automodel::AutoModelType::BertForMaskedLM(
+                BertForMaskedLM::new(bert_config).unwrap(),
+            ),
+        );
+        let config = FeatureExtractionConfig {
+            embedding_dim: TINY_HIDDEN_SIZE,
+            ..FeatureExtractionConfig::default()
+        };
+        let pipe = FeatureExtractionPipeline::from_model(model, tokenizer, config).unwrap();
+        assert!(
+            matches!(pipe.extract("hello"), Err(ExtractionError::ModelError(_))),
+            "a masked-LM head exposes logits, not hidden states, and must be refused"
+        );
     }
 
     // -----------------------------------------------------------------------

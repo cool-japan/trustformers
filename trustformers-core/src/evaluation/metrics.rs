@@ -418,28 +418,140 @@ impl Perplexity {
 }
 
 impl Metric for Perplexity {
+    /// Perplexity cannot be computed from decoded strings.
+    ///
+    /// It is `exp(-mean log p(target))`, which needs the model's per-token
+    /// log-probabilities. The string-based [`Metric`] interface carries none,
+    /// so this reports the mismatch instead of returning `1 / accuracy` under
+    /// the name "perplexity". Use [`Perplexity::compute_from_logits`].
     fn compute(&self, predictions: &[String], targets: &[String]) -> Result<f64> {
-        // For string-based interface, this is a simplified version
-        // In practice, perplexity needs access to actual logits
         if predictions.len() != targets.len() {
             return Err(anyhow::anyhow!(
                 "Predictions and targets must have the same length"
             ));
         }
 
-        // Simplified: compute based on token-level accuracy
-        let accuracy = Accuracy.compute(predictions, targets)?;
-
-        // Rough approximation: perplexity inversely related to accuracy
-        if accuracy > 0.0 {
-            Ok(1.0 / accuracy)
-        } else {
-            Ok(f64::INFINITY)
-        }
+        Err(anyhow::anyhow!(
+            "perplexity cannot be derived from decoded strings: it needs per-token \
+             log-probabilities. Call Perplexity::compute_from_logits(logits, targets) instead of \
+             adding Perplexity to a string-based MetricCollection."
+        ))
     }
 
     fn name(&self) -> &str {
         "perplexity"
+    }
+}
+
+/// Pearson product-moment correlation between numeric predictions and targets.
+///
+/// Both sides are parsed as `f64`; pairs where either side does not parse are
+/// skipped. Used by regression benchmarks such as GLUE STS-B.
+pub struct PearsonCorrelation;
+
+/// Spearman rank correlation between numeric predictions and targets.
+///
+/// Ranks are averaged over ties, then Pearson correlation is taken over the
+/// ranks. Used by regression benchmarks such as GLUE STS-B.
+pub struct SpearmanCorrelation;
+
+/// Parse the numeric pairs a correlation metric can use.
+fn numeric_pairs(predictions: &[String], targets: &[String]) -> Result<(Vec<f64>, Vec<f64>)> {
+    if predictions.len() != targets.len() {
+        return Err(anyhow::anyhow!(
+            "Predictions and targets must have the same length"
+        ));
+    }
+
+    let mut xs = Vec::with_capacity(predictions.len());
+    let mut ys = Vec::with_capacity(targets.len());
+    for (prediction, target) in predictions.iter().zip(targets.iter()) {
+        if let (Ok(x), Ok(y)) = (
+            prediction.trim().parse::<f64>(),
+            target.trim().parse::<f64>(),
+        ) {
+            xs.push(x);
+            ys.push(y);
+        }
+    }
+
+    if xs.len() < 2 {
+        return Err(anyhow::anyhow!(
+            "correlation needs at least two numeric prediction/target pairs; got {}",
+            xs.len()
+        ));
+    }
+
+    Ok((xs, ys))
+}
+
+/// Pearson correlation of two equal-length samples.
+fn pearson(xs: &[f64], ys: &[f64]) -> Result<f64> {
+    let n = xs.len() as f64;
+    let mean_x = xs.iter().sum::<f64>() / n;
+    let mean_y = ys.iter().sum::<f64>() / n;
+
+    let mut covariance = 0.0;
+    let mut variance_x = 0.0;
+    let mut variance_y = 0.0;
+    for (x, y) in xs.iter().zip(ys.iter()) {
+        let dx = x - mean_x;
+        let dy = y - mean_y;
+        covariance += dx * dy;
+        variance_x += dx * dx;
+        variance_y += dy * dy;
+    }
+
+    let denominator = (variance_x * variance_y).sqrt();
+    if denominator <= 0.0 {
+        return Err(anyhow::anyhow!(
+            "correlation is undefined when a sample has zero variance"
+        ));
+    }
+    Ok(covariance / denominator)
+}
+
+/// Fractional ranks with ties averaged.
+fn average_ranks(values: &[f64]) -> Vec<f64> {
+    let mut order: Vec<usize> = (0..values.len()).collect();
+    order.sort_by(|a, b| values[*a].partial_cmp(&values[*b]).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut ranks = vec![0.0; values.len()];
+    let mut index = 0;
+    while index < order.len() {
+        let mut end = index + 1;
+        while end < order.len() && values[order[end]] == values[order[index]] {
+            end += 1;
+        }
+        // Ranks are 1-based; average over the tied block.
+        let average = ((index + 1) as f64 + end as f64) / 2.0;
+        for slot in &order[index..end] {
+            ranks[*slot] = average;
+        }
+        index = end;
+    }
+    ranks
+}
+
+impl Metric for PearsonCorrelation {
+    fn compute(&self, predictions: &[String], targets: &[String]) -> Result<f64> {
+        let (xs, ys) = numeric_pairs(predictions, targets)?;
+        pearson(&xs, &ys)
+    }
+
+    fn name(&self) -> &str {
+        "pearson"
+    }
+}
+
+impl Metric for SpearmanCorrelation {
+    fn compute(&self, predictions: &[String], targets: &[String]) -> Result<f64> {
+        let (xs, ys) = numeric_pairs(predictions, targets)?;
+        pearson(&average_ranks(&xs), &average_ranks(&ys))
+    }
+
+    fn name(&self) -> &str {
+        "spearman"
     }
 }
 
@@ -482,8 +594,28 @@ impl MetricCollection {
         self.add_metric(Box::new(BLEU::new(n_grams)))
     }
 
+    /// Add perplexity to a string-based collection.
+    ///
+    /// Perplexity needs logits, which this interface does not carry, so the
+    /// resulting collection fails at `compute_all` time rather than reporting
+    /// something else under the name "perplexity". Prefer
+    /// [`Perplexity::compute_from_logits`].
+    #[deprecated(
+        since = "0.2.1",
+        note = "perplexity needs logits; use Perplexity::compute_from_logits"
+    )]
     pub fn add_perplexity(self) -> Self {
         self.add_metric(Box::new(Perplexity))
+    }
+
+    /// Add Pearson correlation (for regression tasks such as GLUE STS-B).
+    pub fn add_pearson(self) -> Self {
+        self.add_metric(Box::new(PearsonCorrelation))
+    }
+
+    /// Add Spearman rank correlation (for regression tasks such as GLUE STS-B).
+    pub fn add_spearman(self) -> Self {
+        self.add_metric(Box::new(SpearmanCorrelation))
     }
 
     pub fn compute_all(
@@ -505,6 +637,111 @@ impl MetricCollection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test: `Perplexity`'s string-based `Metric::compute` used to
+    /// return `1 / accuracy` under the name "perplexity".
+    #[test]
+    fn test_perplexity_refuses_the_string_interface() {
+        let predictions = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let targets = vec!["a".to_string(), "b".to_string(), "d".to_string()];
+
+        // Accuracy here is 2/3, so the old code returned 1.5.
+        let error = Perplexity
+            .compute(&predictions, &targets)
+            .expect_err("perplexity cannot come from decoded strings");
+        assert!(
+            error.to_string().contains("compute_from_logits"),
+            "unexpected error: {error}"
+        );
+
+        // The logits-based path is the real one and still works: a model that
+        // is certain and right has perplexity ~1.
+        let logits = vec![vec![10.0, 0.0], vec![10.0, 0.0]];
+        let perplexity =
+            Perplexity.compute_from_logits(&logits, &[0, 0]).expect("logits perplexity");
+        assert!(
+            (perplexity - 1.0).abs() < 1e-3,
+            "confident correct predictions should give perplexity ~1, got {perplexity}"
+        );
+
+        // A uniform two-way distribution has perplexity 2.
+        let uniform = vec![vec![0.0, 0.0], vec![0.0, 0.0]];
+        let perplexity =
+            Perplexity.compute_from_logits(&uniform, &[0, 1]).expect("logits perplexity");
+        assert!(
+            (perplexity - 2.0).abs() < 1e-6,
+            "a uniform binary distribution has perplexity 2, got {perplexity}"
+        );
+    }
+
+    /// Regression test: STS-B used to be scored with accuracy because no
+    /// correlation metric existed.
+    #[test]
+    fn test_correlation_metrics_known_values() {
+        let strings = |values: &[f64]| -> Vec<String> {
+            values.iter().map(|value| value.to_string()).collect()
+        };
+
+        // Perfect positive linear relationship.
+        let x = strings(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        let y = strings(&[2.0, 4.0, 6.0, 8.0, 10.0]);
+        let pearson = PearsonCorrelation.compute(&x, &y).expect("pearson");
+        assert!((pearson - 1.0).abs() < 1e-9, "got {pearson}");
+        let spearman = SpearmanCorrelation.compute(&x, &y).expect("spearman");
+        assert!((spearman - 1.0).abs() < 1e-9, "got {spearman}");
+
+        // Perfect anti-correlation.
+        let reversed = strings(&[10.0, 8.0, 6.0, 4.0, 2.0]);
+        let pearson = PearsonCorrelation.compute(&x, &reversed).expect("pearson");
+        assert!((pearson + 1.0).abs() < 1e-9, "got {pearson}");
+        let spearman = SpearmanCorrelation.compute(&x, &reversed).expect("spearman");
+        assert!((spearman + 1.0).abs() < 1e-9, "got {spearman}");
+
+        // Monotone but non-linear: Spearman is 1.0 while Pearson is not, which
+        // is exactly why both are reported for STS-B.
+        let exponential = strings(&[1.0, 2.0, 8.0, 64.0, 1024.0]);
+        let spearman = SpearmanCorrelation.compute(&x, &exponential).expect("spearman");
+        assert!((spearman - 1.0).abs() < 1e-9, "got {spearman}");
+        let pearson = PearsonCorrelation.compute(&x, &exponential).expect("pearson");
+        assert!(
+            pearson < 0.95,
+            "Pearson must not equal Spearman here: {pearson}"
+        );
+
+        assert_eq!(PearsonCorrelation.name(), "pearson");
+        assert_eq!(SpearmanCorrelation.name(), "spearman");
+    }
+
+    /// Tied ranks are averaged, so a tied sample still yields a finite
+    /// Spearman value rather than a rank-ordering artefact.
+    #[test]
+    fn test_spearman_averages_tied_ranks() {
+        let predictions: Vec<String> =
+            ["1", "2", "2", "3"].iter().map(|value| value.to_string()).collect();
+        let targets: Vec<String> =
+            ["1", "2", "2", "3"].iter().map(|value| value.to_string()).collect();
+        let spearman = SpearmanCorrelation.compute(&predictions, &targets).expect("spearman");
+        assert!(
+            (spearman - 1.0).abs() < 1e-9,
+            "identical tied samples must give 1.0"
+        );
+    }
+
+    /// Correlation is undefined for a constant sample and for fewer than two
+    /// numeric pairs; both must be errors, not zeros.
+    #[test]
+    fn test_correlation_rejects_degenerate_input() {
+        let constant: Vec<String> = vec!["1".to_string(); 4];
+        let varied: Vec<String> =
+            ["1", "2", "3", "4"].iter().map(|value| value.to_string()).collect();
+        assert!(PearsonCorrelation.compute(&constant, &varied).is_err());
+
+        let single = vec!["1".to_string()];
+        assert!(PearsonCorrelation.compute(&single, &single).is_err());
+
+        let non_numeric = vec!["a".to_string(), "b".to_string()];
+        assert!(SpearmanCorrelation.compute(&non_numeric, &non_numeric).is_err());
+    }
 
     #[test]
     fn test_accuracy() {

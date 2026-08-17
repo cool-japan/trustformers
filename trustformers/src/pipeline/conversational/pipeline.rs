@@ -709,7 +709,13 @@ where
     pub async fn generate_streaming_response(
         &self,
         input: ConversationalInput,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send + '_>>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send + '_>>>
+    where
+        // The model's own incremental decoder is driven on a blocking worker,
+        // which is what keeps the returned `Stream` `Send`.
+        M: 'static,
+        T: 'static,
+    {
         let conversation_id =
             input.conversation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
@@ -722,68 +728,109 @@ where
         let config = input.config_override.as_ref().unwrap_or(&self.config).clone();
         let context = self.build_enhanced_context(&state, &config, &input.message)?;
 
-        // Create a stream that generates response chunks
-        let tokenizer = self.base.tokenizer.clone();
-        let model = self.base.model.clone();
-        let chunk_size = config.streaming_config.chunk_size;
+        // Validate that the context encodes before spending a forward pass.
+        (*self.base.tokenizer).encode(&context)?;
+
+        let mut gen_config = config.generation_config.clone();
+        gen_config.strategy = GenerationStrategy::Sampling {
+            temperature: config.temperature,
+        };
+        gen_config.max_length = Some(config.max_response_tokens);
+        gen_config.do_sample = true;
+
+        let models_config = ModelsGenerationConfig {
+            max_new_tokens: gen_config.max_length.unwrap_or(512),
+            temperature: match gen_config.strategy {
+                GenerationStrategy::Sampling { temperature } => temperature,
+                GenerationStrategy::TopK { temperature, .. } => temperature,
+                GenerationStrategy::TopP { temperature, .. } => temperature,
+                _ => 1.0,
+            },
+            top_p: match gen_config.strategy {
+                GenerationStrategy::TopP { p, .. } => p,
+                _ => 0.9,
+            },
+            top_k: match gen_config.strategy {
+                GenerationStrategy::TopK { k, .. } => Some(k),
+                _ => None,
+            },
+            repetition_penalty: gen_config.repetition_penalty,
+            length_penalty: gen_config.length_penalty,
+            do_sample: gen_config.do_sample,
+            early_stopping: gen_config.early_stopping,
+            ..ModelsGenerationConfig::default()
+        };
+
+        let chunk_size = config.streaming_config.chunk_size.max(1);
         let typing_delay = config.streaming_config.typing_delay_ms;
 
+        // Real token-level streaming. `GenerativeModel::generate_stream` yields
+        // one decoding step at a time, so the first chunk is available after a
+        // single forward pass instead of after the whole response. The iterator
+        // is driven on a blocking worker and its deltas are piped over a
+        // channel, which is what makes the resulting `Stream` `Send`.
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<Result<String>>(
+            config.streaming_config.buffer_size.max(1),
+        );
+        let model = self.base.model.clone();
+        let prompt = context.clone();
+        tokio::task::spawn_blocking(move || {
+            let steps = match model.generate_stream(&prompt, &models_config) {
+                Ok(steps) => steps,
+                Err(e) => {
+                    let _ =
+                        sender.blocking_send(Err(crate::error::TrustformersError::runtime_error(
+                            format!("Generation failed: {e}"),
+                        )));
+                    return;
+                },
+            };
+            for step in steps {
+                let message = step.map_err(|e| {
+                    crate::error::TrustformersError::runtime_error(format!(
+                        "Generation failed: {e}"
+                    ))
+                });
+                let failed = message.is_err();
+                if sender.blocking_send(message).is_err() || failed {
+                    break;
+                }
+            }
+        });
+
         let stream = async_stream::stream! {
-            // Tokenize context and generate
-            let tokenized = match (*tokenizer).encode(&context) {
-                Ok(t) => t,
-                Err(e) => {
-                    yield Err(crate::error::TrustformersError::from(e));
-                    return;
+            let mut pending = String::new();
+            let mut pending_tokens = 0usize;
+
+            while let Some(item) = receiver.recv().await {
+                match item {
+                    Ok(delta) => {
+                        pending.push_str(&delta);
+                        pending_tokens += 1;
+                        // `chunk_size` is a token budget per emitted chunk.
+                        if pending_tokens >= chunk_size {
+                            yield Ok(std::mem::take(&mut pending));
+                            pending_tokens = 0;
+                            if typing_delay > 0 {
+                                // Opt-in pacing for UIs that want a typing
+                                // cadence; the default is 0, so raw throughput
+                                // is never deliberately slowed.
+                                tokio::time::sleep(
+                                    tokio::time::Duration::from_millis(typing_delay),
+                                )
+                                .await;
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        yield Err(e);
+                        return;
+                    },
                 }
-            };
+            }
 
-            let mut gen_config = config.generation_config.clone();
-            gen_config.strategy = GenerationStrategy::Sampling { temperature: config.temperature };
-            gen_config.max_length = Some(config.max_response_tokens);
-            gen_config.do_sample = true;
-
-            // In a real implementation, this would stream from the model
-            // For now, simulate streaming by chunking a generated response
-            let models_config = ModelsGenerationConfig {
-                max_new_tokens: gen_config.max_length.unwrap_or(512),
-                temperature: match gen_config.strategy {
-                    GenerationStrategy::Sampling { temperature } => temperature,
-                    GenerationStrategy::TopK { temperature, .. } => temperature,
-                    GenerationStrategy::TopP { temperature, .. } => temperature,
-                    _ => 1.0,
-                },
-                top_p: match gen_config.strategy {
-                    GenerationStrategy::TopP { p, .. } => p,
-                    _ => 0.9,
-                },
-                top_k: match gen_config.strategy {
-                    GenerationStrategy::TopK { k, .. } => Some(k),
-                    _ => None,
-                },
-                repetition_penalty: gen_config.repetition_penalty,
-                length_penalty: gen_config.length_penalty,
-                do_sample: gen_config.do_sample,
-                early_stopping: gen_config.early_stopping,
-                ..ModelsGenerationConfig::default()
-            };
-
-            let full_response = match (*model).generate(&context, &models_config) {
-                Ok(response) => response,
-                Err(e) => {
-                    yield Err(crate::error::TrustformersError::from(e));
-                    return;
-                }
-            };
-
-            // Stream response in chunks
-            let words: Vec<&str> = full_response.split_whitespace().collect();
-            for chunk in words.chunks(chunk_size) {
-                let chunk_text = chunk.join(" ") + " ";
-                yield Ok(chunk_text);
-
-                // Simulate typing delay
-                tokio::time::sleep(tokio::time::Duration::from_millis(typing_delay)).await;
+            if !pending.is_empty() {
+                yield Ok(pending);
             }
         };
 

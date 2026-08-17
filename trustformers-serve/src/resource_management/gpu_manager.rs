@@ -640,3 +640,28 @@ mod tests {
         assert_eq!(report.recommended_max_concurrent, 2);
     }
 }
+
+/// Live telemetry sample read from the GPU driver.
+///
+/// Every field is a value the driver reported. Sensors the driver marks as
+/// unavailable are represented as `None` (fan) or `NaN` (temperature, power)
+/// rather than as a plausible number.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct GpuTelemetrySample {
+    pub device_id: usize,
+    pub utilization_percent: f32,
+    pub temperature_celsius: f32,
+    pub power_watts: f32,
+    pub sm_clock_mhz: u32,
+    pub memory_clock_mhz: u32,
+    pub memory_used_mb: u64,
+    pub fan_percent: Option<f32>,
+}
+
+/// Enumerate the real GPU devices present on this host.
+///
+/// Returns an empty list when the host has no discoverable GPU. No device is
+/// ever invented, so a CPU-only machine reports exactly zero devices.
+pub async fn discover_gpu_devices() -> types::GpuResult<Vec<types::GpuDeviceInfo>> {
+    manager::GpuResourceManager::enumerate_devices(&types::GpuPoolConfig::default()).await
+}

@@ -206,6 +206,9 @@ pub struct MessageQueueManager {
     consumer: Arc<dyn MessageQueueConsumer>,
     stats: Arc<RwLock<MessageQueueStats>>,
     event_handlers: Arc<RwLock<HashMap<String, EventHandler>>>,
+    /// Timestamp of the last message this manager produced or consumed.
+    /// `None` until a message really passes through.
+    last_message_at: Arc<RwLock<Option<DateTime<Utc>>>>,
 }
 
 pub type EventHandler = Box<dyn Fn(MessageQueueEvent) + Send + Sync>;
@@ -234,6 +237,7 @@ impl MessageQueueManager {
             consumer,
             stats: Arc::new(RwLock::new(MessageQueueStats::default())),
             event_handlers: Arc::new(RwLock::new(HashMap::new())),
+            last_message_at: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -301,7 +305,13 @@ impl MessageQueueManager {
     }
 
     pub async fn send_message(&self, message: Message) -> Result<MessageResult> {
-        let result = self.producer.send_message(message).await?;
+        let result = match self.producer.send_message(message).await {
+            Ok(result) => result,
+            Err(e) => {
+                self.record_error(&e).await;
+                return Err(e);
+            },
+        };
         self.update_stats_produced(&result).await;
         self.emit_event(MessageQueueEvent::MessageProduced(result.clone())).await;
         Ok(result)
@@ -315,7 +325,13 @@ impl MessageQueueManager {
     }
 
     pub async fn consume_messages(&self, timeout_ms: u64) -> Result<Vec<Message>> {
-        let messages = self.consumer.poll(timeout_ms).await?;
+        let messages = match self.consumer.poll(timeout_ms).await {
+            Ok(messages) => messages,
+            Err(e) => {
+                self.record_error(&e).await;
+                return Err(e);
+            },
+        };
         for message in &messages {
             self.update_stats_consumed(message).await;
             self.emit_event(MessageQueueEvent::MessageConsumed(message.clone())).await;
@@ -351,6 +367,12 @@ impl MessageQueueManager {
         self.producer.abort_transaction(transaction_id).await
     }
 
+    /// Count a real failure and surface it to registered event handlers.
+    async fn record_error(&self, error: &anyhow::Error) {
+        self.stats.write().await.errors += 1;
+        self.emit_event(MessageQueueEvent::Error(error.to_string())).await;
+    }
+
     async fn emit_event(&self, event: MessageQueueEvent) {
         let handlers = self.event_handlers.read().await;
         for handler in handlers.values() {
@@ -359,9 +381,12 @@ impl MessageQueueManager {
     }
 
     async fn update_stats_produced(&self, result: &MessageResult) {
-        let mut stats = self.stats.write().await;
-        stats.messages_produced += 1;
-        stats.bytes_produced += result.size as u64;
+        {
+            let mut stats = self.stats.write().await;
+            stats.messages_produced += 1;
+            stats.bytes_produced += result.size as u64;
+        }
+        *self.last_message_at.write().await = Some(result.timestamp);
     }
 
     async fn update_stats_batch_produced(&self, result: &BatchResult) {
@@ -371,23 +396,49 @@ impl MessageQueueManager {
     }
 
     async fn update_stats_consumed(&self, message: &Message) {
-        let mut stats = self.stats.write().await;
-        stats.messages_consumed += 1;
-        stats.bytes_consumed += message.payload.len() as u64;
+        {
+            let mut stats = self.stats.write().await;
+            stats.messages_consumed += 1;
+            stats.bytes_consumed += message.payload.len() as u64;
+        }
+        *self.last_message_at.write().await = Some(message.timestamp);
     }
 
     pub async fn get_stats(&self) -> MessageQueueStats {
         self.stats.read().await.clone()
     }
 
+    /// Report the manager's observed state.
+    ///
+    /// Every field is derived from what this manager has actually seen: the
+    /// backlog is produced-minus-consumed, the error count comes from the
+    /// counters, and `last_message_timestamp` is `None` until a message really
+    /// passes through. Nothing is asserted about broker-side health that this
+    /// process has not observed.
+    ///
+    /// # Errors
+    ///
+    /// This call does not fail; the signature is kept for API stability.
     pub async fn health_check(&self) -> Result<MessageQueueHealth> {
+        let stats = self.stats.read().await.clone();
+        let last_message_timestamp = *self.last_message_at.read().await;
+
+        let status = if stats.errors == 0 {
+            HealthStatus::Healthy
+        } else if stats.messages_produced > 0 || stats.messages_consumed > 0 {
+            HealthStatus::Degraded
+        } else {
+            HealthStatus::Unhealthy
+        };
+
         Ok(MessageQueueHealth {
             backend: self.config.backend.clone(),
-            status: HealthStatus::Healthy,
-            connection_count: self.config.performance.connection_pool_size as u32,
-            message_queue_size: 0,
-            last_message_timestamp: Some(Utc::now()),
-            error_count: 0,
+            status,
+            // One producer client and one consumer client are held open.
+            connection_count: 2,
+            message_queue_size: stats.messages_produced.saturating_sub(stats.messages_consumed),
+            last_message_timestamp,
+            error_count: stats.errors,
         })
     }
 
@@ -719,132 +770,20 @@ impl MessageQueueConsumer for KafkaConsumer {
     }
 }
 
-// Placeholder implementations for other backends
-struct RabbitMQProducer;
-struct RabbitMQConsumer;
-struct RedisProducer;
-struct RedisConsumer;
-struct NatsProducer;
-struct NatsConsumer;
-struct SqsProducer;
-struct SqsConsumer;
-struct InMemoryProducer;
-struct InMemoryConsumer;
+// Real backend implementations. Each lives in its own file under
+// `message_queue/` and performs genuine broker I/O; none of them fabricates a
+// send result or polls an empty vector unconditionally.
+pub mod inmemory;
+pub mod nats;
+pub mod rabbitmq;
+pub mod redis_streams;
+pub mod sqs;
 
-macro_rules! impl_placeholder_backend {
-    ($producer:ident, $consumer:ident) => {
-        impl $producer {
-            async fn new(_config: &MessageQueueConfig) -> Result<Self> {
-                Ok(Self)
-            }
-        }
-
-        impl $consumer {
-            async fn new(_config: &MessageQueueConfig) -> Result<Self> {
-                Ok(Self)
-            }
-        }
-
-        #[async_trait]
-        impl MessageQueueProducer for $producer {
-            async fn send_message(&self, message: Message) -> Result<MessageResult> {
-                Ok(MessageResult {
-                    message_id: message.id,
-                    topic: message.topic,
-                    partition: 0,
-                    offset: 0,
-                    timestamp: Utc::now(),
-                    size: message.payload.len(),
-                })
-            }
-
-            async fn send_batch(&self, batch: MessageBatch) -> Result<BatchResult> {
-                Ok(BatchResult {
-                    batch_id: batch.batch_id,
-                    results: vec![],
-                    success_count: batch.messages.len(),
-                    failure_count: 0,
-                    total_size: batch.messages.iter().map(|m| m.payload.len()).sum(),
-                })
-            }
-
-            async fn send_with_callback(
-                &self,
-                message: Message,
-                callback: ProducerCallback,
-            ) -> Result<()> {
-                let result = self.send_message(message).await;
-                callback(result);
-                Ok(())
-            }
-
-            async fn begin_transaction(&self) -> Result<TransactionId> {
-                Ok(Uuid::new_v4().to_string())
-            }
-
-            async fn commit_transaction(&self, _transaction_id: TransactionId) -> Result<()> {
-                Ok(())
-            }
-
-            async fn abort_transaction(&self, _transaction_id: TransactionId) -> Result<()> {
-                Ok(())
-            }
-
-            async fn flush(&self) -> Result<()> {
-                Ok(())
-            }
-
-            async fn close(&self) -> Result<()> {
-                Ok(())
-            }
-        }
-
-        #[async_trait]
-        impl MessageQueueConsumer for $consumer {
-            async fn subscribe(&self, _topics: &[String]) -> Result<()> {
-                Ok(())
-            }
-
-            async fn unsubscribe(&self, _topics: &[String]) -> Result<()> {
-                Ok(())
-            }
-
-            async fn poll(&self, _timeout_ms: u64) -> Result<Vec<Message>> {
-                Ok(vec![])
-            }
-
-            async fn commit(&self, _message: &Message) -> Result<()> {
-                Ok(())
-            }
-
-            async fn commit_batch(&self, _messages: &[Message]) -> Result<()> {
-                Ok(())
-            }
-
-            async fn seek(&self, _topic: &str, _partition: u32, _offset: u64) -> Result<()> {
-                Ok(())
-            }
-
-            async fn pause(&self, _topics: &[String]) -> Result<()> {
-                Ok(())
-            }
-
-            async fn resume(&self, _topics: &[String]) -> Result<()> {
-                Ok(())
-            }
-
-            async fn close(&self) -> Result<()> {
-                Ok(())
-            }
-        }
-    };
-}
-
-impl_placeholder_backend!(RabbitMQProducer, RabbitMQConsumer);
-impl_placeholder_backend!(RedisProducer, RedisConsumer);
-impl_placeholder_backend!(NatsProducer, NatsConsumer);
-impl_placeholder_backend!(SqsProducer, SqsConsumer);
-impl_placeholder_backend!(InMemoryProducer, InMemoryConsumer);
+pub use inmemory::{InMemoryBroker, InMemoryConsumer, InMemoryProducer};
+pub use nats::{NatsConsumer, NatsProducer};
+pub use rabbitmq::{RabbitMQConsumer, RabbitMQProducer};
+pub use redis_streams::{RedisConsumer, RedisProducer};
+pub use sqs::{SqsConsumer, SqsProducer};
 
 #[cfg(test)]
 mod tests {
@@ -1241,5 +1180,300 @@ mod tests {
             .await;
 
         // No panic means the handler was registered successfully
+    }
+    /// A config bound to a broker nobody else in the test suite uses.
+    fn isolated_config(label: &str) -> MessageQueueConfig {
+        MessageQueueConfig {
+            backend: MessageQueueBackend::InMemory,
+            connection_string: format!("inmemory://{label}/{}", Uuid::new_v4()),
+            topics: vec!["t1".to_string()],
+            consumer_group: Some("g1".to_string()),
+            batch_size: 10,
+            ..Default::default()
+        }
+    }
+
+    /// Regression test: the InMemory producer used to fabricate a
+    /// `MessageResult` without storing anything, and the consumer always polled
+    /// an empty vector, so every message was silently discarded.
+    #[tokio::test]
+    async fn test_inmemory_roundtrip_delivers_the_message() {
+        let config = isolated_config("roundtrip");
+        let manager = MessageQueueManager::new(config).await.expect("manager");
+
+        let sent = make_test_message("t1", b"real payload");
+        let sent_id = sent.id;
+        let result = manager.send_message(sent).await.expect("send");
+        assert_eq!(result.offset, 0, "the first message must get offset 0");
+
+        let received = manager.consume_messages(500).await.expect("consume");
+        assert_eq!(received.len(), 1, "the produced message must come back");
+        assert_eq!(received[0].id, sent_id);
+        assert_eq!(received[0].payload, b"real payload");
+        assert_eq!(received[0].offset, Some(0));
+        assert_eq!(received[0].topic, "t1");
+    }
+
+    #[tokio::test]
+    async fn test_inmemory_preserves_order_and_offsets() {
+        let config = isolated_config("order");
+        let manager = MessageQueueManager::new(config).await.expect("manager");
+
+        for i in 0..5u8 {
+            manager.send_message(make_test_message("t1", &[i])).await.expect("send");
+        }
+        let received = manager.consume_messages(500).await.expect("consume");
+        assert_eq!(received.len(), 5);
+        for (index, message) in received.iter().enumerate() {
+            assert_eq!(message.payload, vec![index as u8]);
+            assert_eq!(message.offset, Some(index as u64));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_inmemory_consumer_group_offset_advances_only_once() {
+        let config = isolated_config("offsets");
+        let manager = MessageQueueManager::new(config).await.expect("manager");
+
+        manager.send_message(make_test_message("t1", b"a")).await.expect("send");
+        let first = manager.consume_messages(200).await.expect("consume");
+        assert_eq!(first.len(), 1);
+        // Nothing new was produced, so a second poll returns nothing.
+        let second = manager.consume_messages(50).await.expect("consume");
+        assert!(second.is_empty(), "a consumed offset must not be replayed");
+    }
+
+    #[tokio::test]
+    async fn test_inmemory_unacknowledged_message_is_redelivered() {
+        let config = isolated_config("redelivery");
+        let producer = inmemory::InMemoryProducer::new(&config).await.expect("producer");
+        let consumer = inmemory::InMemoryConsumer::new(&config)
+            .await
+            .expect("consumer")
+            .with_visibility_timeout(std::time::Duration::from_millis(50));
+
+        producer
+            .send_message(make_test_message("t1", b"needs-ack"))
+            .await
+            .expect("send");
+
+        let first = consumer.poll(200).await.expect("poll");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].delivery_count, 1);
+
+        // Do not acknowledge; after the visibility timeout the message must
+        // come back rather than being lost.
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        let redelivered = consumer.poll(200).await.expect("poll");
+        assert_eq!(
+            redelivered.len(),
+            1,
+            "an unacked message must be redelivered"
+        );
+        assert_eq!(redelivered[0].id, first[0].id);
+        assert_eq!(redelivered[0].delivery_count, 2);
+
+        consumer.commit(&redelivered[0]).await.expect("commit");
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        let after_ack = consumer.poll(100).await.expect("poll");
+        assert!(
+            after_ack.is_empty(),
+            "an acknowledged message must not return"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inmemory_commit_of_undelivered_message_errors() {
+        let config = isolated_config("bad-ack");
+        let consumer = inmemory::InMemoryConsumer::new(&config).await.expect("consumer");
+        let stranger = make_test_message("t1", b"never delivered");
+        assert!(
+            consumer.commit(&stranger).await.is_err(),
+            "acknowledging a message that was never delivered must fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inmemory_seek_replays_from_an_offset() {
+        let config = isolated_config("seek");
+        let producer = inmemory::InMemoryProducer::new(&config).await.expect("producer");
+        let consumer = inmemory::InMemoryConsumer::new(&config).await.expect("consumer");
+
+        for i in 0..3u8 {
+            producer.send_message(make_test_message("t1", &[i])).await.expect("send");
+        }
+        let first = consumer.poll(200).await.expect("poll");
+        assert_eq!(first.len(), 3);
+        for message in &first {
+            consumer.commit(message).await.expect("commit");
+        }
+
+        consumer.seek("t1", 0, 1).await.expect("seek");
+        let replayed = consumer.poll(200).await.expect("poll");
+        assert_eq!(
+            replayed.len(),
+            2,
+            "seeking to offset 1 must replay the tail"
+        );
+        assert_eq!(replayed[0].payload, vec![1u8]);
+    }
+
+    #[tokio::test]
+    async fn test_inmemory_pause_stops_delivery_and_resume_restores_it() {
+        let config = isolated_config("pause");
+        let producer = inmemory::InMemoryProducer::new(&config).await.expect("producer");
+        let consumer = inmemory::InMemoryConsumer::new(&config).await.expect("consumer");
+
+        producer.send_message(make_test_message("t1", b"x")).await.expect("send");
+        consumer.pause(&["t1".to_string()]).await.expect("pause");
+        assert!(consumer.poll(50).await.expect("poll").is_empty());
+
+        consumer.resume(&["t1".to_string()]).await.expect("resume");
+        assert_eq!(consumer.poll(200).await.expect("poll").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_inmemory_transaction_is_invisible_until_commit() {
+        let config = isolated_config("txn");
+        let producer = inmemory::InMemoryProducer::new(&config).await.expect("producer");
+        let consumer = inmemory::InMemoryConsumer::new(&config).await.expect("consumer");
+
+        let transaction = producer.begin_transaction().await.expect("begin");
+        producer
+            .send_message(make_test_message("t1", b"transactional"))
+            .await
+            .expect("send");
+        assert!(
+            consumer.poll(50).await.expect("poll").is_empty(),
+            "uncommitted messages must not be visible"
+        );
+
+        producer.commit_transaction(transaction).await.expect("commit");
+        let delivered = consumer.poll(200).await.expect("poll");
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].payload, b"transactional");
+    }
+
+    #[tokio::test]
+    async fn test_inmemory_aborted_transaction_discards_messages() {
+        let config = isolated_config("abort");
+        let producer = inmemory::InMemoryProducer::new(&config).await.expect("producer");
+        let consumer = inmemory::InMemoryConsumer::new(&config).await.expect("consumer");
+
+        let transaction = producer.begin_transaction().await.expect("begin");
+        producer.send_message(make_test_message("t1", b"dropped")).await.expect("send");
+        producer.abort_transaction(transaction).await.expect("abort");
+
+        assert!(consumer.poll(100).await.expect("poll").is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_inmemory_batch_send_is_really_stored() {
+        let config = isolated_config("batch");
+        let manager = MessageQueueManager::new(config).await.expect("manager");
+
+        let batch = make_test_batch(
+            "t1",
+            vec![
+                make_test_message("t1", b"one"),
+                make_test_message("t1", b"two"),
+            ],
+        );
+        let result = manager.send_batch(batch).await.expect("batch");
+        assert_eq!(result.success_count, 2);
+        assert_eq!(
+            result.results.len(),
+            2,
+            "a batch result must carry one entry per stored message"
+        );
+
+        let received = manager.consume_messages(500).await.expect("consume");
+        assert_eq!(received.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_producer_and_consumer_share_the_broker_by_connection_string() {
+        let config = isolated_config("shared");
+        // Two independently-created clients, as the manager builds them.
+        let producer = inmemory::InMemoryProducer::new(&config).await.expect("producer");
+        let consumer = inmemory::InMemoryConsumer::new(&config).await.expect("consumer");
+
+        producer.send_message(make_test_message("t1", b"shared")).await.expect("send");
+        let received = consumer.poll(300).await.expect("poll");
+        assert_eq!(
+            received.len(),
+            1,
+            "independently built clients must share state"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_different_connection_strings_are_isolated() {
+        let config_a = isolated_config("iso-a");
+        let config_b = isolated_config("iso-b");
+        let producer = inmemory::InMemoryProducer::new(&config_a).await.expect("producer");
+        let consumer = inmemory::InMemoryConsumer::new(&config_b).await.expect("consumer");
+
+        producer.send_message(make_test_message("t1", b"a")).await.expect("send");
+        assert!(
+            consumer.poll(100).await.expect("poll").is_empty(),
+            "brokers with different connection strings must not share topics"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_health_check_reports_the_real_backlog() {
+        let config = isolated_config("health");
+        let manager = MessageQueueManager::new(config).await.expect("manager");
+
+        let health = manager.health_check().await.expect("health");
+        assert!(
+            health.last_message_timestamp.is_none(),
+            "no message has passed through yet"
+        );
+        assert_eq!(health.message_queue_size, 0);
+
+        manager.send_message(make_test_message("t1", b"x")).await.expect("send");
+        let health = manager.health_check().await.expect("health");
+        assert_eq!(health.message_queue_size, 1, "one produced, none consumed");
+        assert!(health.last_message_timestamp.is_some());
+
+        manager.consume_messages(300).await.expect("consume");
+        let health = manager.health_check().await.expect("health");
+        assert_eq!(health.message_queue_size, 0);
+        assert_eq!(health.error_count, 0);
+    }
+
+    /// Every non-InMemory backend connects eagerly: pointing it at a closed
+    /// port must fail loudly instead of yielding a client that drops messages.
+    #[tokio::test]
+    async fn test_broker_backends_fail_when_the_broker_is_unreachable() {
+        // Bind and immediately drop a listener to obtain a port nothing serves.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        drop(listener);
+
+        for backend in [
+            MessageQueueBackend::RabbitMQ,
+            MessageQueueBackend::RedisStreams,
+            MessageQueueBackend::Nats,
+        ] {
+            let config = MessageQueueConfig {
+                backend: backend.clone(),
+                connection_string: format!("{}:{}", addr.ip(), addr.port()),
+                topics: vec!["t1".to_string()],
+                ..Default::default()
+            };
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                MessageQueueManager::new(config),
+            )
+            .await
+            .expect("connection attempt must not hang");
+            assert!(
+                result.is_err(),
+                "{backend:?} must not report success against a closed port"
+            );
+        }
     }
 }

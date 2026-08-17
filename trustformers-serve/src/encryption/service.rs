@@ -3,6 +3,7 @@
 
 //! Core Encryption Service Implementation
 
+use super::cipher;
 use super::errors::*;
 use super::types::*;
 use std::collections::HashMap;
@@ -206,6 +207,81 @@ impl EncryptionService {
         Ok(key)
     }
 
+    /// Derive a key from input keying material using HKDF-SHA256 (RFC 5869)
+    /// and register it in the key store.
+    ///
+    /// This is the supported way to obtain a reproducible key from a shared
+    /// secret; it is *not* a password KDF — use
+    /// [`Self::derive_key_from_password`] for human-chosen secrets.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EncryptionError::KeyDerivationFailed`] if HKDF rejects the
+    /// requested output length.
+    pub async fn derive_key(
+        &self,
+        input_key_material: &[u8],
+        salt: &[u8],
+        info: &[u8],
+        algorithm: Option<EncryptionAlgorithm>,
+    ) -> EncryptionResult<EncryptionKey> {
+        let algorithm = algorithm.unwrap_or(self.config.default_algorithm.clone());
+        let key_material =
+            cipher::hkdf_sha256(input_key_material, salt, info, algorithm.key_size())?;
+        self.store_key(key_material, algorithm).await
+    }
+
+    /// Derive a key from a password using PBKDF2-HMAC-SHA256 and register it in
+    /// the key store.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EncryptionError::KeyDerivationFailed`] if `iterations` is zero.
+    pub async fn derive_key_from_password(
+        &self,
+        password: &str,
+        salt: &[u8],
+        iterations: u32,
+        algorithm: Option<EncryptionAlgorithm>,
+    ) -> EncryptionResult<EncryptionKey> {
+        let algorithm = algorithm.unwrap_or(self.config.default_algorithm.clone());
+        let key_material =
+            cipher::pbkdf2_sha256(password.as_bytes(), salt, iterations, algorithm.key_size())?;
+        self.store_key(key_material, algorithm).await
+    }
+
+    /// Compare two secrets in constant time.
+    ///
+    /// Exposed so callers verifying derived keys or MACs do not reach for `==`,
+    /// which short-circuits on the first differing byte.
+    pub fn verify_secret(expected: &[u8], actual: &[u8]) -> bool {
+        cipher::constant_time_eq(expected, actual)
+    }
+
+    async fn store_key(
+        &self,
+        key_material: Vec<u8>,
+        algorithm: EncryptionAlgorithm,
+    ) -> EncryptionResult<EncryptionKey> {
+        let key_id = Uuid::new_v4().to_string();
+        let key = EncryptionKey {
+            key_id: key_id.clone(),
+            key_material,
+            algorithm,
+            status: KeyStatus::Active,
+            created_at: SystemTime::now(),
+            expires_at: None,
+            usage_count: AtomicU64::new(0),
+            metadata: HashMap::new(),
+        };
+        {
+            let mut store = self.key_store.write().await;
+            store.insert(key_id, key.clone());
+        }
+        self.stats.total_key_operations.fetch_add(1, Ordering::Relaxed);
+        Ok(key)
+    }
+
     pub fn get_stats(&self) -> EncryptionStats {
         EncryptionStats {
             total_encryptions: AtomicU64::new(self.stats.total_encryptions.load(Ordering::Relaxed)),
@@ -239,55 +315,27 @@ impl EncryptionService {
         self.generate_key(None).await
     }
 
+    /// Draw a fresh nonce/IV of the algorithm's required size from the OS CSPRNG.
+    ///
+    /// GCM and ChaCha20-Poly1305 lose all confidentiality guarantees if a nonce
+    /// repeats under the same key, so this must never be derived from a clock
+    /// reading or any other low-entropy source.
     fn generate_iv(&self, algorithm: &EncryptionAlgorithm) -> EncryptionResult<Vec<u8>> {
-        let size = algorithm.nonce_size();
-        let mut iv = vec![0u8; size];
-
-        // Simplified IV generation for demo
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-            .hash(&mut hasher);
-
-        let hash = hasher.finish();
-        let hash_bytes = hash.to_le_bytes();
-
-        for (i, byte) in hash_bytes.iter().cycle().take(size).enumerate() {
-            iv[i] = *byte;
-        }
-
-        Ok(iv)
+        cipher::random_bytes(algorithm.nonce_size())
     }
 
+    /// Draw fresh key material of the algorithm's key size from the OS CSPRNG.
     fn generate_key_material(&self, algorithm: &EncryptionAlgorithm) -> EncryptionResult<Vec<u8>> {
-        let size = algorithm.key_size();
-        let mut key_material = vec![0u8; size];
+        cipher::random_bytes(algorithm.key_size())
+    }
 
-        // Simplified key generation for demo
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        (SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-            + 12345)
-            .hash(&mut hasher);
-
-        let hash = hasher.finish();
-        let hash_bytes = hash.to_le_bytes();
-
-        for (i, byte) in hash_bytes.iter().cycle().take(size).enumerate() {
-            key_material[i] = *byte ^ (i as u8);
-        }
-
-        Ok(key_material)
+    /// The additional authenticated data bound to every ciphertext.
+    ///
+    /// Binding the key id means a ciphertext produced under one key cannot be
+    /// replayed as if it had been produced under another, even if an attacker
+    /// controls the stored key id.
+    fn associated_data(key_id: &str) -> Vec<u8> {
+        key_id.as_bytes().to_vec()
     }
 
     async fn encrypt_with_key(
@@ -296,24 +344,12 @@ impl EncryptionService {
         key: &EncryptionKey,
         iv: &[u8],
     ) -> EncryptionResult<(Vec<u8>, Option<Vec<u8>>)> {
-        // Simplified encryption for demo
-        let mut ciphertext = Vec::with_capacity(data.len());
-        for (i, &byte) in data.iter().enumerate() {
-            let key_byte = key.key_material[i % key.key_material.len()];
-            let iv_byte = iv[i % iv.len()];
-            ciphertext.push(byte ^ key_byte ^ iv_byte);
+        let aad = Self::associated_data(&key.key_id);
+        let result = cipher::seal(&key.algorithm, &key.key_material, iv, &aad, data);
+        if result.is_err() {
+            self.stats.failed_operations.fetch_add(1, Ordering::Relaxed);
         }
-
-        let tag = if key.algorithm.is_authenticated() {
-            let mut tag = vec![0u8; 16];
-            for (i, &byte) in ciphertext.iter().take(16).enumerate() {
-                tag[i] = byte ^ key.key_material[i % key.key_material.len()];
-            }
-            Some(tag)
-        } else {
-            None
-        };
-
+        let (ciphertext, tag) = result?;
         key.usage_count.fetch_add(1, Ordering::Relaxed);
         Ok((ciphertext, tag))
     }
@@ -325,18 +361,12 @@ impl EncryptionService {
         iv: &[u8],
         tag: Option<&[u8]>,
     ) -> EncryptionResult<Vec<u8>> {
-        if key.algorithm.is_authenticated() && tag.is_none() {
-            return Err(EncryptionError::AuthenticationFailed);
+        let aad = Self::associated_data(&key.key_id);
+        let result = cipher::open(&key.algorithm, &key.key_material, iv, &aad, ciphertext, tag);
+        if result.is_err() {
+            self.stats.failed_operations.fetch_add(1, Ordering::Relaxed);
         }
-
-        // Simplified decryption for demo
-        let mut plaintext = Vec::with_capacity(ciphertext.len());
-        for (i, &byte) in ciphertext.iter().enumerate() {
-            let key_byte = key.key_material[i % key.key_material.len()];
-            let iv_byte = iv[i % iv.len()];
-            plaintext.push(byte ^ key_byte ^ iv_byte);
-        }
-
+        let plaintext = result?;
         key.usage_count.fetch_add(1, Ordering::Relaxed);
         Ok(plaintext)
     }
@@ -475,13 +505,247 @@ mod tests {
         let svc = make_service();
         let plaintext = b"sensitive data that should be transformed";
         let result = svc.encrypt(plaintext, None).await.expect("encrypt should succeed");
-        // XOR-based encryption changes at least some bytes
-        let unchanged =
-            plaintext.iter().zip(result.ciphertext.iter()).filter(|(a, b)| a == b).count();
-        assert!(
-            unchanged < plaintext.len(),
-            "encryption should transform data"
+        assert_ne!(
+            result.ciphertext.as_slice(),
+            plaintext.as_slice(),
+            "encryption must transform data"
         );
+    }
+
+    /// Regression test for the XOR "demo" cipher: a repeating-key XOR leaks the
+    /// plaintext structure, so two identical plaintext blocks produce two
+    /// identical ciphertext blocks whenever the block offset is a multiple of
+    /// the key length. A real AEAD does not.
+    #[tokio::test]
+    async fn test_repeating_plaintext_does_not_produce_repeating_ciphertext() {
+        let svc = make_service();
+        let key = svc.generate_key(Some(EncryptionAlgorithm::AES256GCM)).await.expect("key");
+        // 32-byte key => the old XOR cipher repeated its keystream every 32 bytes
+        // (and the IV every 12), so lcm(32, 12) = 96 bytes apart the keystream
+        // repeated exactly.
+        let plaintext = vec![0x41u8; 192];
+        let encrypted = svc.encrypt(&plaintext, Some(&key.key_id)).await.expect("encrypt");
+        assert_ne!(
+            &encrypted.ciphertext[0..96],
+            &encrypted.ciphertext[96..192],
+            "ciphertext must not repeat for repeating plaintext"
+        );
+    }
+
+    /// Regression test: the previous implementation derived keys from a
+    /// `DefaultHasher` over the current nanosecond timestamp, so two keys
+    /// generated back to back shared most of their bytes.
+    #[tokio::test]
+    async fn test_generated_keys_are_independent() {
+        let svc = make_service();
+        let a = svc.generate_key(Some(EncryptionAlgorithm::AES256GCM)).await.expect("key a");
+        let b = svc.generate_key(Some(EncryptionAlgorithm::AES256GCM)).await.expect("key b");
+        assert_ne!(a.key_material, b.key_material);
+        let shared =
+            a.key_material.iter().zip(b.key_material.iter()).filter(|(x, y)| x == y).count();
+        assert!(
+            shared < 16,
+            "two independent 32-byte keys shared {shared} bytes; key generation is not random"
+        );
+    }
+
+    /// Regression test: nonces must never repeat under the same key.
+    #[tokio::test]
+    async fn test_ivs_are_unique_across_encryptions() {
+        let svc = make_service();
+        let key = svc.generate_key(Some(EncryptionAlgorithm::AES256GCM)).await.expect("key");
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..64 {
+            let out = svc.encrypt(b"same plaintext", Some(&key.key_id)).await.expect("encrypt");
+            assert!(
+                seen.insert(out.iv.clone()),
+                "IV reuse detected: {:?}",
+                out.iv
+            );
+        }
+    }
+
+    /// Regression test for the fabricated tag: the old implementation computed
+    /// `tag[i] = ciphertext[i] ^ key[i]` and never verified it, so any tampered
+    /// ciphertext decrypted "successfully".
+    #[tokio::test]
+    async fn test_tampered_ciphertext_fails_authentication() {
+        let svc = make_service();
+        let key = svc.generate_key(Some(EncryptionAlgorithm::AES256GCM)).await.expect("key");
+        let encrypted = svc.encrypt(b"transfer 10 USD", Some(&key.key_id)).await.expect("encrypt");
+        let mut tampered = encrypted.ciphertext.clone();
+        tampered[0] ^= 0x01;
+        let err = svc
+            .decrypt(
+                &tampered,
+                &encrypted.iv,
+                encrypted.tag.as_deref(),
+                &encrypted.key_id,
+            )
+            .await
+            .expect_err("tampered ciphertext must not decrypt");
+        assert!(matches!(err, EncryptionError::AuthenticationFailed));
+    }
+
+    #[tokio::test]
+    async fn test_tampered_tag_fails_authentication() {
+        let svc = make_service();
+        let key = svc.generate_key(Some(EncryptionAlgorithm::AES256GCM)).await.expect("key");
+        let encrypted = svc.encrypt(b"transfer 10 USD", Some(&key.key_id)).await.expect("encrypt");
+        let mut tag = encrypted.tag.clone().expect("authenticated algorithm must emit a tag");
+        tag[0] ^= 0x01;
+        let err = svc
+            .decrypt(
+                &encrypted.ciphertext,
+                &encrypted.iv,
+                Some(&tag),
+                &encrypted.key_id,
+            )
+            .await
+            .expect_err("tampered tag must not verify");
+        assert!(matches!(err, EncryptionError::AuthenticationFailed));
+    }
+
+    #[tokio::test]
+    async fn test_tampered_iv_fails_authentication() {
+        let svc = make_service();
+        let key = svc.generate_key(Some(EncryptionAlgorithm::AES256GCM)).await.expect("key");
+        let encrypted = svc.encrypt(b"transfer 10 USD", Some(&key.key_id)).await.expect("encrypt");
+        let mut iv = encrypted.iv.clone();
+        iv[0] ^= 0x01;
+        let err = svc
+            .decrypt(
+                &encrypted.ciphertext,
+                &iv,
+                encrypted.tag.as_deref(),
+                &encrypted.key_id,
+            )
+            .await
+            .expect_err("tampered IV must not verify");
+        assert!(matches!(err, EncryptionError::AuthenticationFailed));
+    }
+
+    #[tokio::test]
+    async fn test_authenticated_roundtrip_for_every_aead_algorithm() {
+        for algorithm in [
+            EncryptionAlgorithm::AES256GCM,
+            EncryptionAlgorithm::AES128GCM,
+            EncryptionAlgorithm::ChaCha20Poly1305,
+            EncryptionAlgorithm::XChaCha20Poly1305,
+        ] {
+            let svc = make_service_with_algo(algorithm.clone());
+            let key = svc.generate_key(Some(algorithm.clone())).await.expect("key");
+            let plaintext = b"authenticated payload";
+            let encrypted = svc.encrypt(plaintext, Some(&key.key_id)).await.expect("encrypt");
+            assert_eq!(encrypted.ciphertext.len(), plaintext.len());
+            let decrypted = svc
+                .decrypt(
+                    &encrypted.ciphertext,
+                    &encrypted.iv,
+                    encrypted.tag.as_deref(),
+                    &encrypted.key_id,
+                )
+                .await
+                .expect("decrypt");
+            assert_eq!(decrypted.plaintext, plaintext.to_vec(), "{algorithm:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_derive_key_is_reproducible_and_usable() {
+        let svc = make_service();
+        let a = svc
+            .derive_key(b"shared-secret", b"salt", b"context", None)
+            .await
+            .expect("derive a");
+        let b = svc
+            .derive_key(b"shared-secret", b"salt", b"context", None)
+            .await
+            .expect("derive b");
+        assert_eq!(
+            a.key_material, b.key_material,
+            "HKDF must be deterministic for identical inputs"
+        );
+        let c = svc
+            .derive_key(b"shared-secret", b"other-salt", b"context", None)
+            .await
+            .expect("derive c");
+        assert_ne!(
+            a.key_material, c.key_material,
+            "salt must change the output"
+        );
+
+        let encrypted = svc.encrypt(b"derived-key payload", Some(&a.key_id)).await.expect("enc");
+        let decrypted = svc
+            .decrypt(
+                &encrypted.ciphertext,
+                &encrypted.iv,
+                encrypted.tag.as_deref(),
+                &encrypted.key_id,
+            )
+            .await
+            .expect("dec");
+        assert_eq!(decrypted.plaintext, b"derived-key payload".to_vec());
+    }
+
+    #[tokio::test]
+    async fn test_derive_key_from_password_rejects_zero_iterations() {
+        let svc = make_service();
+        let err = svc
+            .derive_key_from_password("hunter2", b"salt", 0, None)
+            .await
+            .expect_err("zero iterations must be rejected");
+        assert!(matches!(err, EncryptionError::KeyDerivationFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_derive_key_from_password_is_reproducible() {
+        let svc = make_service();
+        let a = svc
+            .derive_key_from_password("hunter2", b"salt", 1000, None)
+            .await
+            .expect("derive a");
+        let b = svc
+            .derive_key_from_password("hunter2", b"salt", 1000, None)
+            .await
+            .expect("derive b");
+        assert_eq!(a.key_material, b.key_material);
+        assert!(EncryptionService::verify_secret(
+            &a.key_material,
+            &b.key_material
+        ));
+        let c = svc
+            .derive_key_from_password("hunter3", b"salt", 1000, None)
+            .await
+            .expect("derive c");
+        assert!(!EncryptionService::verify_secret(
+            &a.key_material,
+            &c.key_material
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_ciphertext_is_bound_to_its_key_id() {
+        let svc = make_service();
+        let key_a = svc.generate_key(Some(EncryptionAlgorithm::AES256GCM)).await.expect("key a");
+        let encrypted = svc.encrypt(b"bound payload", Some(&key_a.key_id)).await.expect("encrypt");
+
+        // Register a second key that holds *the same* key material under a
+        // different id; the AAD binding must still make decryption fail.
+        let cloned = svc
+            .store_key(key_a.key_material.clone(), EncryptionAlgorithm::AES256GCM)
+            .await
+            .expect("store cloned key");
+        let err = svc
+            .decrypt(
+                &encrypted.ciphertext,
+                &encrypted.iv,
+                encrypted.tag.as_deref(),
+                &cloned.key_id,
+            )
+            .await
+            .expect_err("key-id rebinding must fail authentication");
+        assert!(matches!(err, EncryptionError::AuthenticationFailed));
     }
 
     #[tokio::test]
@@ -591,7 +855,27 @@ mod tests {
         let svc = make_service_with_algo(EncryptionAlgorithm::AES256CBC);
         let key = svc.generate_key(Some(EncryptionAlgorithm::AES256CBC)).await.expect("key");
         let result = svc.encrypt(b"", Some(&key.key_id)).await.expect("encrypt empty");
+        // Real AES-256-CBC pads with PKCS#7, so an empty message becomes exactly
+        // one full block of padding — it is never a zero-length ciphertext.
+        assert_eq!(result.ciphertext.len(), 16);
+        let decrypted = svc
+            .decrypt(&result.ciphertext, &result.iv, None, &result.key_id)
+            .await
+            .expect("decrypt empty");
+        assert!(decrypted.plaintext.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_encrypt_empty_data_authenticated() {
+        let svc = make_service();
+        let key = svc.generate_key(Some(EncryptionAlgorithm::AES256GCM)).await.expect("key");
+        let result = svc.encrypt(b"", Some(&key.key_id)).await.expect("encrypt empty");
         assert_eq!(result.ciphertext.len(), 0);
+        assert_eq!(
+            result.tag.as_ref().map(|t| t.len()),
+            Some(16),
+            "GCM must still authenticate an empty message"
+        );
     }
 
     #[tokio::test]
@@ -676,7 +960,14 @@ mod tests {
         let mut large_data = vec![0u8; 4096];
         lcg.fill_bytes(&mut large_data);
         let result = svc.encrypt(&large_data, Some(&key.key_id)).await.expect("encrypt large");
-        assert_eq!(result.ciphertext.len(), large_data.len());
+        // 4096 bytes is an exact multiple of the 16-byte block size, so PKCS#7
+        // appends one whole extra block.
+        assert_eq!(result.ciphertext.len(), large_data.len() + 16);
+        let decrypted = svc
+            .decrypt(&result.ciphertext, &result.iv, None, &result.key_id)
+            .await
+            .expect("decrypt large");
+        assert_eq!(decrypted.plaintext, large_data);
     }
 
     #[tokio::test]

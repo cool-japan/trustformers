@@ -307,22 +307,57 @@ impl GpuHealthMonitor {
         device: &GpuDeviceInfo,
         config: &Arc<RwLock<GpuHealthConfig>>,
     ) -> GpuHealthStatus {
+        // Read live sensor values from the driver. A sensor the driver does not
+        // expose is reported as "unknown", never as a plausible number: an
+        // overheating GPU must be able to trip this check, and a GPU whose
+        // temperature cannot be read must not silently read as cool.
+        let telemetry =
+            super::super::manager::GpuResourceManager::device_telemetry(device.device_id)
+                .await
+                .unwrap_or(None);
+
         let config = config.read();
         let mut issues = Vec::new();
         let mut health_score: f64 = 1.0;
-        let simulated_temp = 45.0 + (device.utilization_percent * 0.5);
-        let memory_usage_ratio = (device.total_memory_mb - device.available_memory_mb) as f32
-            / device.total_memory_mb as f32
-            * 100.0;
-        let power_consumption = 150.0 + (device.utilization_percent * 2.0);
-        let temperature_ok = simulated_temp < config.temperature_threshold;
-        if !temperature_ok {
-            issues.push(format!(
-                "High temperature: {:.1}°C (threshold: {:.1}°C)",
-                simulated_temp, config.temperature_threshold
-            ));
-            health_score -= 0.3;
-        }
+
+        let measured_temp =
+            telemetry.as_ref().map(|t| t.temperature_celsius).filter(|t| t.is_finite());
+        let measured_power = telemetry.as_ref().map(|t| t.power_watts).filter(|p| p.is_finite());
+        let measured_utilization = telemetry
+            .as_ref()
+            .map(|t| t.utilization_percent)
+            .unwrap_or(device.utilization_percent);
+
+        let memory_usage_ratio = if device.total_memory_mb == 0 {
+            0.0
+        } else {
+            (device.total_memory_mb - device.available_memory_mb) as f32
+                / device.total_memory_mb as f32
+                * 100.0
+        };
+
+        // `f32::NAN` marks an unread sensor on the public status struct.
+        let current_temperature = measured_temp.unwrap_or(f32::NAN);
+        let power_consumption = measured_power.unwrap_or(f32::NAN);
+
+        let temperature_ok = match measured_temp {
+            Some(temp) => {
+                let ok = temp < config.temperature_threshold;
+                if !ok {
+                    issues.push(format!(
+                        "High temperature: {:.1}°C (threshold: {:.1}°C)",
+                        temp, config.temperature_threshold
+                    ));
+                    health_score -= 0.3;
+                }
+                ok
+            },
+            None => {
+                issues.push("Temperature sensor is unavailable".to_string());
+                health_score -= 0.1;
+                false
+            },
+        };
         let memory_ok = memory_usage_ratio < config.memory_threshold;
         if !memory_ok {
             issues.push(format!(
@@ -331,22 +366,32 @@ impl GpuHealthMonitor {
             ));
             health_score -= 0.2;
         }
-        let performance_ok = device.utilization_percent < config.utilization_threshold;
+        let performance_ok = measured_utilization < config.utilization_threshold;
         if !performance_ok {
             issues.push(format!(
                 "Extremely high utilization: {:.1}% (threshold: {:.1}%)",
-                device.utilization_percent, config.utilization_threshold
+                measured_utilization, config.utilization_threshold
             ));
             health_score -= 0.2;
         }
-        let power_ok = power_consumption < config.power_threshold;
-        if !power_ok {
-            issues.push(format!(
-                "High power consumption: {:.1}W (threshold: {:.1}W)",
-                power_consumption, config.power_threshold
-            ));
-            health_score -= 0.15;
-        }
+        let power_ok = match measured_power {
+            Some(power) => {
+                let ok = power < config.power_threshold;
+                if !ok {
+                    issues.push(format!(
+                        "High power consumption: {:.1}W (threshold: {:.1}W)",
+                        power, config.power_threshold
+                    ));
+                    health_score -= 0.15;
+                }
+                ok
+            },
+            None => {
+                issues.push("Power sensor is unavailable".to_string());
+                health_score -= 0.05;
+                false
+            },
+        };
         let hardware_ok = matches!(
             device.status,
             GpuDeviceStatus::Available | GpuDeviceStatus::Busy
@@ -355,7 +400,12 @@ impl GpuHealthMonitor {
             issues.push(format!("Device status: {:?}", device.status));
             health_score -= 0.4;
         }
-        let driver_ok = true;
+        // The driver is "ok" only when it actually answered a telemetry query.
+        let driver_ok = telemetry.is_some();
+        if !driver_ok {
+            issues.push("GPU driver did not answer a telemetry query".to_string());
+            health_score -= 0.1;
+        }
         health_score = health_score.max(0.0_f64);
         let is_healthy = health_score >= config.health_score_threshold as f64 && issues.is_empty();
         GpuHealthStatus {
@@ -371,9 +421,9 @@ impl GpuHealthMonitor {
             driver_ok,
             hardware_ok,
             health_trend: HealthTrend::Unknown,
-            current_temperature: simulated_temp,
+            current_temperature,
             current_memory_usage: memory_usage_ratio,
-            current_utilization: device.utilization_percent,
+            current_utilization: measured_utilization,
             current_power: power_consumption,
             consecutive_healthy_checks: 0,
             consecutive_unhealthy_checks: 0,

@@ -99,8 +99,8 @@ pub fn init_conversational_pipeline<M, T>(
     tokenizer: T,
 ) -> Result<ConversationalPipeline<M, T>>
 where
-    M: Model + Send + Sync + GenerativeModel + 'static,
-    T: Tokenizer + Send + Sync + 'static,
+    M: Model + Send + Sync + GenerativeModel,
+    T: Tokenizer + Send + Sync,
 {
     ConversationalPipeline::new(model, tokenizer)
 }
@@ -112,8 +112,8 @@ pub fn init_conversational_pipeline_with_config<M, T>(
     config: ConversationalConfig,
 ) -> Result<ConversationalPipeline<M, T>>
 where
-    M: Model + Send + Sync + GenerativeModel + 'static,
-    T: Tokenizer + Send + Sync + 'static,
+    M: Model + Send + Sync + GenerativeModel,
+    T: Tokenizer + Send + Sync,
 {
     Ok(ConversationalPipeline::new(model, tokenizer)?.with_config(config))
 }
@@ -126,8 +126,8 @@ pub fn validate_conversational_config(config: &ConversationalConfig) -> Result<(
 /// Create a conversational pipeline optimized for chat
 pub fn create_chat_pipeline<M, T>(model: M, tokenizer: T) -> Result<ConversationalPipeline<M, T>>
 where
-    M: Model + Send + Sync + GenerativeModel + 'static,
-    T: Tokenizer + Send + Sync + 'static,
+    M: Model + Send + Sync + GenerativeModel,
+    T: Tokenizer + Send + Sync,
 {
     let config = config::ConfigurationPresets::chat_config();
     Ok(ConversationalPipeline::new(model, tokenizer)?.with_config(config))
@@ -139,8 +139,8 @@ pub fn create_assistant_pipeline<M, T>(
     tokenizer: T,
 ) -> Result<ConversationalPipeline<M, T>>
 where
-    M: Model + Send + Sync + GenerativeModel + 'static,
-    T: Tokenizer + Send + Sync + 'static,
+    M: Model + Send + Sync + GenerativeModel,
+    T: Tokenizer + Send + Sync,
 {
     let config = config::ConfigurationPresets::assistant_config();
     Ok(ConversationalPipeline::new(model, tokenizer)?.with_config(config))
@@ -152,8 +152,8 @@ pub fn create_educational_pipeline<M, T>(
     tokenizer: T,
 ) -> Result<ConversationalPipeline<M, T>>
 where
-    M: Model + Send + Sync + GenerativeModel + 'static,
-    T: Tokenizer + Send + Sync + 'static,
+    M: Model + Send + Sync + GenerativeModel,
+    T: Tokenizer + Send + Sync,
 {
     let config = config::ConfigurationPresets::educational_config();
     Ok(ConversationalPipeline::new(model, tokenizer)?.with_config(config))
@@ -166,8 +166,8 @@ pub fn create_persona_pipeline<M, T>(
     persona: PersonaConfig,
 ) -> Result<ConversationalPipeline<M, T>>
 where
-    M: Model + Send + Sync + GenerativeModel + 'static,
-    T: Tokenizer + Send + Sync + 'static,
+    M: Model + Send + Sync + GenerativeModel,
+    T: Tokenizer + Send + Sync,
 {
     let mut config = ConversationalConfig::default();
     config.conversation_mode = ConversationMode::RolePlay;
@@ -181,8 +181,8 @@ pub fn create_streaming_pipeline<M, T>(
     tokenizer: T,
 ) -> Result<ConversationalPipeline<M, T>>
 where
-    M: Model + Send + Sync + GenerativeModel + 'static,
-    T: Tokenizer + Send + Sync + 'static,
+    M: Model + Send + Sync + GenerativeModel,
+    T: Tokenizer + Send + Sync,
 {
     let config = config::ConfigurationPresets::streaming_optimized_config();
     Ok(ConversationalPipeline::new(model, tokenizer)?.with_config(config))
@@ -267,8 +267,8 @@ pub async fn start_smart_conversation<M, T>(
     mode: ConversationMode,
 ) -> Result<ConversationalPipeline<M, T>>
 where
-    M: Model + Send + Sync + GenerativeModel + 'static,
-    T: Tokenizer + Send + Sync + 'static,
+    M: Model + Send + Sync + GenerativeModel,
+    T: Tokenizer + Send + Sync,
 {
     let config = match mode {
         ConversationMode::Chat => config::ConfigurationPresets::chat_config(),

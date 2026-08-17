@@ -220,9 +220,10 @@ impl BenchmarkSuite {
             position_ids: None,
         };
 
-        // Get initial memory snapshot
+        // Initial RSS. `None` when memory measurement is off, or when the host
+        // does not report this process: either way no memory figure is derived.
         let initial_memory =
-            if self.config.measure_memory { Some(self.get_memory_usage()) } else { None };
+            if self.config.measure_memory { self.get_memory_usage() } else { None };
 
         // Warmup
         for _ in 0..self.config.warmup_iterations {
@@ -240,19 +241,23 @@ impl BenchmarkSuite {
             timings.push(duration);
 
             if self.config.measure_memory {
-                let current_memory = self.get_memory_usage();
-                if let (Some(peak), current) = (peak_memory.as_mut(), current_memory) {
+                if let (Some(peak), Some(current)) = (peak_memory.as_mut(), self.get_memory_usage())
+                {
                     *peak = (*peak).max(current);
                 }
             }
         }
 
-        // Calculate memory usage
-        let memory_usage = if self.config.measure_memory {
-            let final_memory = self.get_memory_usage();
-            initial_memory.map(|initial| final_memory - initial)
-        } else {
-            None
+        // Memory growth over the run, only when both readings are real.
+        let memory_usage = match (self.config.measure_memory, initial_memory) {
+            (true, Some(initial)) => {
+                self.get_memory_usage().map(|final_rss| final_rss.saturating_sub(initial))
+            },
+            _ => None,
+        };
+        let peak_growth = match (peak_memory, initial_memory) {
+            (Some(peak), Some(initial)) => Some(peak.saturating_sub(initial)),
+            _ => None,
         };
 
         Ok(BenchmarkResult::from_timings(
@@ -262,76 +267,27 @@ impl BenchmarkSuite {
             batch_size,
             seq_len,
             memory_usage,
-            peak_memory.map(|p| p - initial_memory.unwrap_or(0)),
+            peak_growth,
         ))
     }
 
-    /// Get current memory usage
-    fn get_memory_usage(&self) -> usize {
-        // Platform-specific memory usage tracking
-        #[cfg(target_os = "linux")]
-        {
-            if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
-                for line in status.lines() {
-                    if line.starts_with("VmRSS:") {
-                        if let Some(value_str) = line.split_whitespace().nth(1) {
-                            if let Ok(kb) = value_str.parse::<usize>() {
-                                return kb * 1024; // Convert KB to bytes
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    /// Resident set size of this process, in bytes, from `sysinfo`.
+    ///
+    /// Returns `None` when the host does not report the process (in which case
+    /// the benchmark records no memory figure at all, rather than an estimate:
+    /// this value feeds the regression statistics in
+    /// [`crate::performance::ContinuousBenchmark`]).
+    fn get_memory_usage(&self) -> Option<usize> {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
-        #[cfg(target_os = "macos")]
-        {
-            use std::process::Command;
-            if let Ok(output) = Command::new("ps")
-                .args(["-o", "rss=", "-p"])
-                .arg(std::process::id().to_string())
-                .output()
-            {
-                if let Ok(rss_str) = String::from_utf8(output.stdout) {
-                    if let Ok(kb) = rss_str.trim().parse::<usize>() {
-                        return kb * 1024; // Convert KB to bytes
-                    }
-                }
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            use std::process::Command;
-            if let Ok(output) = Command::new("wmic")
-                .args([
-                    "process",
-                    "where",
-                    &format!("ProcessId={}", std::process::id()),
-                    "get",
-                    "WorkingSetSize",
-                    "/value",
-                ])
-                .output()
-            {
-                if let Ok(output_str) = String::from_utf8(output.stdout) {
-                    for line in output_str.lines() {
-                        if line.starts_with("WorkingSetSize=") {
-                            if let Some(value_str) = line.split('=').nth(1) {
-                                if let Ok(bytes) = value_str.parse::<usize>() {
-                                    return bytes;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Fallback: estimate based on heap allocations and typical overhead
-        let estimated_tensor_memory = self.results.len() * 1024 * 1024 * 50; // 50MB per benchmark result
-        let base_memory = 100 * 1024 * 1024; // 100MB base overhead
-        estimated_tensor_memory + base_memory
+        let mut system = System::new();
+        let pid = sysinfo::Pid::from_u32(std::process::id());
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing().with_memory(),
+        );
+        system.process(pid).map(|process| process.memory() as usize)
     }
 
     /// Print benchmark summary
@@ -398,6 +354,19 @@ impl BenchmarkSuite {
     }
 
     /// Get results
+    /// Record a benchmark result produced outside the built-in runners.
+    pub fn push_result(&mut self, result: BenchmarkResult) {
+        self.results.push(result);
+    }
+
+    /// Drop all recorded results so the suite can be re-run from a clean state.
+    ///
+    /// Used by [`crate::performance::ContinuousBenchmark::run_and_check_with`]
+    /// to make each of the N runs independent.
+    pub fn clear_results(&mut self) {
+        self.results.clear();
+    }
+
     pub fn results(&self) -> &[BenchmarkResult] {
         &self.results
     }
@@ -447,6 +416,35 @@ pub struct ComparisonSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test: `get_memory_usage` shelled out to `ps` on macOS and
+    /// otherwise fell back to `results.len() * 50MB + 100MB` — a fabricated
+    /// figure that feeds `BenchmarkResult::memory_bytes` and, from there, the
+    /// regression statistics in `ContinuousBenchmark`.
+    #[test]
+    fn test_memory_usage_is_a_real_rss_reading() {
+        let suite = BenchmarkSuite::new(BenchmarkConfig::default());
+        let rss = suite.get_memory_usage().expect("sysinfo reports this process");
+
+        assert!(rss > 0, "resident set size must be positive");
+        // The old fallback for an empty suite was exactly 100 MiB.
+        assert_ne!(
+            rss,
+            100 * 1024 * 1024,
+            "the fabricated fallback must be gone"
+        );
+        // A test process is far below 4 GiB resident.
+        assert!(rss < 4 * 1024 * 1024 * 1024, "implausible RSS: {rss}");
+
+        // Two readings of the same process must be in the same ballpark: a
+        // synthetic value derived from `results.len()` would jump.
+        let second = suite.get_memory_usage().expect("second reading");
+        let ratio = rss.max(second) as f64 / rss.min(second).max(1) as f64;
+        assert!(
+            ratio < 4.0,
+            "readings {rss} and {second} are not the same process"
+        );
+    }
 
     #[test]
     fn test_benchmark_result_from_timings() {

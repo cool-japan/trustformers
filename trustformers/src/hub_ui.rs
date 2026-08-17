@@ -550,19 +550,39 @@ impl ModelRepository {
         })
     }
 
+    /// Compute what changed between two versions.
+    ///
+    /// `ModelVersion` tracks one aggregate checksum/size per version, not a
+    /// per-file manifest (unlike a real Hub repo's git tree), so this can
+    /// only ever detect "the model's contents changed as a whole" — never
+    /// attribute that to a specific file. An earlier revision fabricated a
+    /// hardcoded `"model.safetensors"` path regardless of what (if
+    /// anything) actually changed, which claimed a specificity this data
+    /// model doesn't have. `path` here is honestly a whole-model marker,
+    /// never a guessed filename, and `description` explains what evidence
+    /// (checksum vs. size) triggered the entry.
     fn compute_changes(&self, from: &ModelVersion, to: &ModelVersion) -> Vec<FileChange> {
-        // Simplified change computation
         let mut changes = Vec::new();
 
-        // In a real implementation, this would compare file lists and contents
-        if from.checksum != to.checksum {
+        let checksum_changed = from.checksum != to.checksum;
+        let size_changed = from.size_bytes != to.size_bytes;
+        if checksum_changed || size_changed {
+            let description = match (from.checksum.as_deref(), to.checksum.as_deref()) {
+                (None, Some(_)) => "Integrity checksum added".to_string(),
+                (Some(_), None) => "Integrity checksum removed".to_string(),
+                (Some(old), Some(new)) if old != new => {
+                    "Model contents changed (checksum differs)".to_string()
+                },
+                _ if size_changed => "Model size changed".to_string(),
+                _ => "Model version updated".to_string(),
+            };
             changes.push(FileChange {
-                path: "model.safetensors".to_string(),
+                path: "(entire model)".to_string(),
                 change_type: ChangeType::Modified,
                 old_size: Some(from.size_bytes),
                 new_size: to.size_bytes,
                 checksum: to.checksum.clone(),
-                description: Some("Model weights updated".to_string()),
+                description: Some(description),
             });
         }
 
@@ -1571,19 +1591,34 @@ fn generate_css(theme: &ThemeConfig) -> String {
     )
 }
 
+/// Render a Unix timestamp (seconds) as a human-readable relative time using
+/// `chrono`. The previous implementation subtracted `timestamp` from "now" as
+/// plain `u64`s, which underflows (panics in debug builds) for any
+/// `timestamp` in the future — a real possibility from clock skew or test
+/// fixtures, not just a hypothetical. This handles both directions.
 fn format_timestamp(timestamp: u64) -> String {
-    // Simple timestamp formatting - in production would use proper date formatting
-    let duration =
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() - timestamp;
+    let Ok(timestamp_i64) = i64::try_from(timestamp) else {
+        return "unknown time".to_string();
+    };
+    let Some(then) = chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp_i64, 0) else {
+        return "unknown time".to_string();
+    };
 
-    if duration < 60 {
-        "Just now".to_string()
-    } else if duration < 3600 {
-        format!("{} minutes ago", duration / 60)
-    } else if duration < 86400 {
-        format!("{} hours ago", duration / 3600)
+    let delta = chrono::Utc::now().signed_duration_since(then);
+    let secs = delta.num_seconds();
+    let (abs_secs, suffix) = if secs >= 0 { (secs, "ago") } else { (-secs, "from now") };
+
+    if abs_secs < 60 {
+        "just now".to_string()
+    } else if abs_secs < 3600 {
+        let mins = abs_secs / 60;
+        format!("{mins} minute{} {suffix}", if mins == 1 { "" } else { "s" })
+    } else if abs_secs < 86400 {
+        let hours = abs_secs / 3600;
+        format!("{hours} hour{} {suffix}", if hours == 1 { "" } else { "s" })
     } else {
-        format!("{} days ago", duration / 86400)
+        let days = abs_secs / 86400;
+        format!("{days} day{} {suffix}", if days == 1 { "" } else { "s" })
     }
 }
 
@@ -1765,5 +1800,124 @@ mod tests {
             (comparison.performance_diff.loss_diff.expect("operation failed in test") + 0.05).abs()
                 < 1e-10
         );
+    }
+
+    fn make_version(version: &str, checksum: Option<&str>, size_bytes: u64) -> ModelVersion {
+        ModelVersion {
+            version: version.to_string(),
+            name: None,
+            description: None,
+            created_at: 0,
+            modified_at: 0,
+            author: None,
+            tags: Vec::new(),
+            metrics: None,
+            changes: Vec::new(),
+            parent_version: None,
+            download_stats: None,
+            size_bytes,
+            checksum: checksum.map(str::to_string),
+            status: VersionStatus::Stable,
+            compatibility: CompatibilityInfo {
+                framework_version: None,
+                python_version: None,
+                cuda_version: None,
+                hardware_requirements: Vec::new(),
+                breaking_changes: Vec::new(),
+                migration_notes: None,
+            },
+        }
+    }
+
+    fn repo_for_changes_tests() -> ModelRepository {
+        ModelRepository::new("test/model".to_string(), "test_user".to_string())
+    }
+
+    #[test]
+    fn test_compute_changes_no_change_when_checksum_and_size_identical() {
+        let repo = repo_for_changes_tests();
+        let from = make_version("v1", Some("abc"), 1000);
+        let to = make_version("v2", Some("abc"), 1000);
+        assert!(repo.compute_changes(&from, &to).is_empty());
+    }
+
+    /// Regression test for the P2 bug: the old implementation always
+    /// reported a hardcoded `"model.safetensors"` path — a fabricated,
+    /// plausible-looking filename with no basis in what actually changed.
+    /// It must never appear now; the reported path must clearly signal
+    /// "whole model", not a specific (guessed) file.
+    #[test]
+    fn test_compute_changes_never_fabricates_a_specific_filename() {
+        let repo = repo_for_changes_tests();
+        let from = make_version("v1", Some("abc"), 1000);
+        let to = make_version("v2", Some("def"), 1200);
+
+        let changes = repo.compute_changes(&from, &to);
+        assert_eq!(changes.len(), 1);
+        assert_ne!(
+            changes[0].path, "model.safetensors",
+            "must not fabricate a specific filename that was never actually inspected"
+        );
+        assert_eq!(changes[0].old_size, Some(1000));
+        assert_eq!(changes[0].new_size, 1200);
+        assert!(changes[0].description.as_deref().unwrap_or_default().contains("checksum"));
+    }
+
+    #[test]
+    fn test_compute_changes_detects_size_only_change() {
+        let repo = repo_for_changes_tests();
+        let from = make_version("v1", Some("abc"), 1000);
+        let to = make_version("v2", Some("abc"), 2000);
+
+        let changes = repo.compute_changes(&from, &to);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].new_size, 2000);
+    }
+
+    #[test]
+    fn test_compute_changes_detects_checksum_added() {
+        let repo = repo_for_changes_tests();
+        let from = make_version("v1", None, 1000);
+        let to = make_version("v2", Some("abc"), 1000);
+
+        let changes = repo.compute_changes(&from, &to);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            changes[0].description.as_deref(),
+            Some("Integrity checksum added")
+        );
+    }
+
+    // --- format_timestamp ---
+
+    #[test]
+    fn test_format_timestamp_just_now() {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).expect("after epoch").as_secs();
+        assert_eq!(format_timestamp(now), "just now");
+    }
+
+    #[test]
+    fn test_format_timestamp_hours_ago() {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).expect("after epoch").as_secs();
+        let three_hours_ago = now - 3 * 3600;
+        let result = format_timestamp(three_hours_ago);
+        assert!(result.contains("hour"), "{result}");
+        assert!(result.ends_with("ago"), "{result}");
+    }
+
+    /// Regression test for the underflow bug: the old implementation
+    /// computed `now - timestamp` as plain `u64` subtraction, which panics
+    /// for any `timestamp` in the future. This must return a normal string
+    /// instead.
+    #[test]
+    fn test_format_timestamp_future_does_not_panic() {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).expect("after epoch").as_secs();
+        // Comfortably past the minute/hour boundary so the few milliseconds
+        // between computing `now` here and inside `format_timestamp` can
+        // never flip which unit gets chosen.
+        let two_hours_from_now = now + 2 * 3600 + 120;
+        let result = format_timestamp(two_hours_from_now);
+        assert!(result.contains("hour"), "{result}");
+        assert!(result.ends_with("from now"), "{result}");
     }
 }

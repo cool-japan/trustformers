@@ -73,7 +73,11 @@ impl MqaConfig {
     /// Build an [`MqaConfig`] with the default scale `1/√head_dim`.
     pub fn new(num_heads: usize, head_dim: usize) -> Self {
         let scale = 1.0 / (head_dim as f32).sqrt();
-        Self { num_heads, head_dim, scale }
+        Self {
+            num_heads,
+            head_dim,
+            scale,
+        }
     }
 }
 
@@ -208,14 +212,19 @@ impl GqaConfig {
         num_kv_heads: usize,
         head_dim: usize,
     ) -> Result<Self, AttentionError> {
-        if num_kv_heads == 0 || num_query_heads % num_kv_heads != 0 {
+        if num_kv_heads == 0 || !num_query_heads.is_multiple_of(num_kv_heads) {
             return Err(AttentionError::InvalidHeads {
                 dm: num_query_heads,
                 nh: num_kv_heads,
             });
         }
         let scale = 1.0 / (head_dim as f32).sqrt();
-        Ok(Self { num_query_heads, num_kv_heads, head_dim, scale })
+        Ok(Self {
+            num_query_heads,
+            num_kv_heads,
+            head_dim,
+            scale,
+        })
     }
 
     /// Number of query heads per KV head group.
@@ -383,7 +392,10 @@ pub struct AliBiConfig {
 impl AliBiConfig {
     /// Create an [`AliBiConfig`].
     pub fn new(num_heads: usize, max_seq_len: usize) -> Self {
-        Self { num_heads, max_seq_len }
+        Self {
+            num_heads,
+            max_seq_len,
+        }
     }
 }
 
@@ -497,7 +509,7 @@ pub fn alibi_attention(
     // total = seq * h * d — we need to know d.
     // The caller must have set up tensors with consistent shape; we derive
     // seq*d from total/h but need at least one element per position.
-    if total % h != 0 {
+    if !total.is_multiple_of(h) {
         return Err(AttentionError::InvalidHeads { dm: total, nh: h });
     }
     let seq_times_d = total / h;
@@ -552,7 +564,11 @@ impl AliBiFullConfig {
     /// Create with default scale.
     pub fn new(num_heads: usize, head_dim: usize) -> Self {
         let scale = 1.0 / (head_dim as f32).sqrt();
-        Self { num_heads, head_dim, scale }
+        Self {
+            num_heads,
+            head_dim,
+            scale,
+        }
     }
 }
 
@@ -597,8 +613,7 @@ pub fn alibi_attention_full(
     let mut output = vec![0.0_f32; expected];
 
     // Layout: [seq, num_heads, head_dim]
-    for head in 0..h {
-        let slope = slopes[head];
+    for (head, &slope) in slopes.iter().enumerate().take(h) {
         for q_pos in 0..seq_len {
             let q_offset = q_pos * h * d + head * d;
             let q_vec = &query[q_offset..q_offset + d];
@@ -732,7 +747,11 @@ pub fn cross_attention(
     }
     if key_value.len() != expected_kv {
         return Err(AttentionError::QKShapeMismatch {
-            q: format!("key_value len={}, expected={}", key_value.len(), expected_kv),
+            q: format!(
+                "key_value len={}, expected={}",
+                key_value.len(),
+                expected_kv
+            ),
             k: String::new(),
         });
     }
@@ -805,7 +824,13 @@ mod tests {
     }
 
     fn assert_close_f32(a: &[f32], b: &[f32], tol: f32, label: &str) {
-        assert_eq!(a.len(), b.len(), "{label}: length mismatch {} vs {}", a.len(), b.len());
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "{label}: length mismatch {} vs {}",
+            a.len(),
+            b.len()
+        );
         for (i, (&x, &y)) in a.iter().zip(b.iter()).enumerate() {
             assert!(
                 (x - y).abs() < tol,
@@ -822,7 +847,10 @@ mod tests {
         let mut v = vec![1.0_f32, 2.0, 3.0, 4.0];
         softmax_inplace(&mut v);
         let sum: f32 = v.iter().sum();
-        assert!((sum - 1.0).abs() < 1e-6, "softmax should sum to 1, got {sum}");
+        assert!(
+            (sum - 1.0).abs() < 1e-6,
+            "softmax should sum to 1, got {sum}"
+        );
     }
 
     #[test]
@@ -830,7 +858,10 @@ mod tests {
         let mut v = vec![1.0_f32; 4];
         softmax_inplace(&mut v);
         for &x in &v {
-            assert!((x - 0.25).abs() < 1e-6, "uniform softmax should be 0.25, got {x}");
+            assert!(
+                (x - 0.25).abs() < 1e-6,
+                "uniform softmax should be 0.25, got {x}"
+            );
         }
     }
 
@@ -856,7 +887,10 @@ mod tests {
             assert!(
                 slopes[i] < slopes[i - 1],
                 "slopes should be decreasing: s[{}]={} >= s[{}]={}",
-                i, slopes[i], i - 1, slopes[i - 1]
+                i,
+                slopes[i],
+                i - 1,
+                slopes[i - 1]
             );
         }
     }
@@ -869,7 +903,8 @@ mod tests {
         let expected = 2.0_f32.powf(-8.0);
         assert!(
             (slopes[0] - expected).abs() < 1e-6,
-            "single head slope: expected {expected}, got {}", slopes[0]
+            "single head slope: expected {expected}, got {}",
+            slopes[0]
         );
     }
 
@@ -967,8 +1002,8 @@ mod tests {
         let q = make_tensor(total, 1.0);
         let k = make_tensor(total, 2.0);
         let v = make_tensor(total, 3.0);
-        let out = alibi_attention_full(&q, &k, &v, &config, seq)
-            .expect("alibi_attention_full shape");
+        let out =
+            alibi_attention_full(&q, &k, &v, &config, seq).expect("alibi_attention_full shape");
         assert_eq!(out.len(), total, "output shape mismatch");
     }
 
@@ -982,8 +1017,7 @@ mod tests {
         let q = make_tensor(total, 1.1);
         let k = make_tensor(total, 2.2);
         let v = make_tensor(total, 3.3);
-        let out = alibi_attention_full(&q, &k, &v, &config, seq)
-            .expect("alibi output finite");
+        let out = alibi_attention_full(&q, &k, &v, &config, seq).expect("alibi output finite");
         for (i, &val) in out.iter().enumerate() {
             assert!(val.is_finite(), "output[{i}] = {val} is not finite");
         }
@@ -1002,8 +1036,7 @@ mod tests {
         let k = make_tensor(total, 2.5);
         let v = make_tensor(total, 3.5);
 
-        let alibi_out = alibi_attention_full(&q, &k, &v, &config, seq)
-            .expect("alibi");
+        let alibi_out = alibi_attention_full(&q, &k, &v, &config, seq).expect("alibi");
 
         // Standard SDPA (zero bias) — compute directly.
         let scale = config.scale;
@@ -1029,7 +1062,10 @@ mod tests {
         }
 
         let diff: f32 = alibi_out.iter().zip(std_out.iter()).map(|(a, b)| (a - b).abs()).sum();
-        assert!(diff > 1e-4, "ALiBi should differ from standard SDPA, diff={diff}");
+        assert!(
+            diff > 1e-4,
+            "ALiBi should differ from standard SDPA, diff={diff}"
+        );
     }
 
     #[test]
@@ -1051,8 +1087,7 @@ mod tests {
         let q = make_tensor(batch * seq * h * d, 1.0);
         let k = make_tensor(batch * seq * d, 2.0);
         let v = make_tensor(batch * seq * d, 3.0);
-        let out = multi_query_attention(&q, &k, &v, None, &config, batch, seq)
-            .expect("mqa shape");
+        let out = multi_query_attention(&q, &k, &v, None, &config, batch, seq).expect("mqa shape");
         assert_eq!(out.len(), batch * seq * h * d);
     }
 
@@ -1069,8 +1104,8 @@ mod tests {
         let q = make_tensor(total_q, 1.2);
         let k = make_tensor(total_kv, 2.3);
         let v = make_tensor(total_kv, 3.4);
-        let out = multi_query_attention(&q, &k, &v, None, &config, batch, seq)
-            .expect("mqa single head");
+        let out =
+            multi_query_attention(&q, &k, &v, None, &config, batch, seq).expect("mqa single head");
         assert_eq!(out.len(), total_q);
         for &val in &out {
             assert!(val.is_finite(), "output must be finite");
@@ -1087,8 +1122,7 @@ mod tests {
         let q = make_tensor(batch * seq * h * d, 1.7);
         let k = make_tensor(batch * seq * d, 2.1);
         let v = make_tensor(batch * seq * d, 0.9);
-        let out = multi_query_attention(&q, &k, &v, None, &config, batch, seq)
-            .expect("mqa finite");
+        let out = multi_query_attention(&q, &k, &v, None, &config, batch, seq).expect("mqa finite");
         for (i, &val) in out.iter().enumerate() {
             assert!(val.is_finite(), "mqa out[{i}] = {val} not finite");
         }
@@ -1099,8 +1133,8 @@ mod tests {
         let config = MqaConfig::new(4, 8);
         // Intentionally wrong query size.
         let q = vec![0.0_f32; 3]; // wrong
-        let k = make_tensor(1 * 6 * 8, 1.0);
-        let v = make_tensor(1 * 6 * 8, 1.0);
+        let k = make_tensor(6 * 8, 1.0);
+        let v = make_tensor(6 * 8, 1.0);
         let result = multi_query_attention(&q, &k, &v, None, &config, 1, 6);
         assert!(result.is_err(), "should error on wrong query shape");
     }
@@ -1127,8 +1161,8 @@ mod tests {
         for q_pos in 0..seq {
             mask[q_pos * seq + (seq - 1)] = 0.0; // unmask last key
         }
-        let out = multi_query_attention(&q, &k, &v, Some(&mask), &config, batch, seq)
-            .expect("mqa mask");
+        let out =
+            multi_query_attention(&q, &k, &v, Some(&mask), &config, batch, seq).expect("mqa mask");
         // Each output position should be ~1.0 (attending only to last V = 1.0)
         for (i, &val) in out.iter().enumerate() {
             assert!(
@@ -1215,8 +1249,8 @@ mod tests {
         let q = make_tensor(batch * seq * nq * d, 1.0);
         let k = make_tensor(batch * seq * nkv * d, 2.0);
         let v = make_tensor(batch * seq * nkv * d, 3.0);
-        let out = grouped_query_attention(&q, &k, &v, None, &config, batch, seq)
-            .expect("gqa shape");
+        let out =
+            grouped_query_attention(&q, &k, &v, None, &config, batch, seq).expect("gqa shape");
         assert_eq!(out.len(), batch * seq * nq * d);
     }
 
@@ -1231,8 +1265,8 @@ mod tests {
         let q = make_tensor(batch * seq * nq * d, 1.3);
         let k = make_tensor(batch * seq * nkv * d, 0.7);
         let v = make_tensor(batch * seq * nkv * d, 1.9);
-        let out = grouped_query_attention(&q, &k, &v, None, &config, batch, seq)
-            .expect("gqa finite");
+        let out =
+            grouped_query_attention(&q, &k, &v, None, &config, batch, seq).expect("gqa finite");
         for (i, &val) in out.iter().enumerate() {
             assert!(val.is_finite(), "gqa out[{i}] = {val} not finite");
         }
@@ -1247,17 +1281,21 @@ mod tests {
         let seq = 5;
 
         let gqa_config = GqaConfig::new(nq, 1, d).expect("gqa config");
-        let mqa_config = MqaConfig { num_heads: nq, head_dim: d, scale: gqa_config.scale };
+        let mqa_config = MqaConfig {
+            num_heads: nq,
+            head_dim: d,
+            scale: gqa_config.scale,
+        };
 
         let q = make_tensor(batch * seq * nq * d, 1.0);
         // For MQA, kv is [batch, seq, d]. For GQA with nkv=1, kv is [batch, seq, 1*d].
         let k = make_tensor(batch * seq * d, 2.0);
         let v = make_tensor(batch * seq * d, 3.0);
 
-        let mqa_out = multi_query_attention(&q, &k, &v, None, &mqa_config, batch, seq)
-            .expect("mqa");
-        let gqa_out = grouped_query_attention(&q, &k, &v, None, &gqa_config, batch, seq)
-            .expect("gqa");
+        let mqa_out =
+            multi_query_attention(&q, &k, &v, None, &mqa_config, batch, seq).expect("mqa");
+        let gqa_out =
+            grouped_query_attention(&q, &k, &v, None, &gqa_config, batch, seq).expect("gqa");
 
         assert_close_f32(&mqa_out, &gqa_out, 1e-5, "GQA(nkv=1) should equal MQA");
     }
@@ -1278,8 +1316,8 @@ mod tests {
         let k = make_tensor(batch * seq * nq * d, 2.0);
         let v = make_tensor(batch * seq * nq * d, 3.0);
 
-        let out = grouped_query_attention(&q, &k, &v, None, &gqa_config, batch, seq)
-            .expect("gqa mha");
+        let out =
+            grouped_query_attention(&q, &k, &v, None, &gqa_config, batch, seq).expect("gqa mha");
         assert_eq!(out.len(), batch * seq * nq * d);
         for &val in &out {
             assert!(val.is_finite());
@@ -1295,8 +1333,7 @@ mod tests {
         let decoder_seq = 6;
         let encoder_seq = 10;
         let hidden = h * d;
-        let config = CrossAttentionConfig::new(h, d, hidden, hidden)
-            .expect("cross attn config");
+        let config = CrossAttentionConfig::new(h, d, hidden, hidden).expect("cross attn config");
         let q = make_tensor(decoder_seq * hidden, 1.0);
         let kv = make_tensor(encoder_seq * hidden, 2.0);
         let out = cross_attention(&q, &kv, None, &config, decoder_seq, encoder_seq)
@@ -1311,8 +1348,7 @@ mod tests {
         let decoder_seq = 8;
         let encoder_seq = 12;
         let hidden = h * d;
-        let config = CrossAttentionConfig::new(h, d, hidden, hidden)
-            .expect("cross attn config");
+        let config = CrossAttentionConfig::new(h, d, hidden, hidden).expect("cross attn config");
         let q = make_tensor(decoder_seq * hidden, 1.5);
         let kv = make_tensor(encoder_seq * hidden, 2.5);
         let out = cross_attention(&q, &kv, None, &config, decoder_seq, encoder_seq)
@@ -1330,8 +1366,7 @@ mod tests {
         let decoder_seq = 3;
         let encoder_seq = 4;
         let hidden = h * d;
-        let config = CrossAttentionConfig::new(h, d, hidden, hidden)
-            .expect("cross config");
+        let config = CrossAttentionConfig::new(h, d, hidden, hidden).expect("cross config");
         let q = vec![1.0_f32; decoder_seq * hidden];
         let k = vec![1.0_f32; encoder_seq * hidden];
         // V: only position 2 is non-zero.
@@ -1386,7 +1421,10 @@ mod tests {
     fn test_cross_attention_config_validation() {
         // encoder_hidden_size mismatch.
         let result = CrossAttentionConfig::new(4, 8, 24, 32); // 24 != 4*8=32
-        assert!(result.is_err(), "mismatched encoder_hidden_size should fail");
+        assert!(
+            result.is_err(),
+            "mismatched encoder_hidden_size should fail"
+        );
     }
 
     #[test]
@@ -1397,8 +1435,7 @@ mod tests {
         let decoder_seq = 20;
         let encoder_seq = 5;
         let hidden = h * d;
-        let config = CrossAttentionConfig::new(h, d, hidden, hidden)
-            .expect("cross config");
+        let config = CrossAttentionConfig::new(h, d, hidden, hidden).expect("cross config");
         let q = make_tensor(decoder_seq * hidden, 1.0);
         let kv = make_tensor(encoder_seq * hidden, 2.0);
         let out = cross_attention(&q, &kv, None, &config, decoder_seq, encoder_seq)
@@ -1411,8 +1448,7 @@ mod tests {
         let h = 2;
         let d = 4;
         let hidden = h * d;
-        let config = CrossAttentionConfig::new(h, d, hidden, hidden)
-            .expect("cross config");
+        let config = CrossAttentionConfig::new(h, d, hidden, hidden).expect("cross config");
         let q = make_tensor(5 * hidden, 1.0);
         let kv = vec![0.0_f32; 3]; // wrong
         let result = cross_attention(&q, &kv, None, &config, 5, 8);
@@ -1427,12 +1463,10 @@ mod tests {
         let d = 4;
         let seq = 6;
         let hidden = h * d;
-        let config = CrossAttentionConfig::new(h, d, hidden, hidden)
-            .expect("cross config");
+        let config = CrossAttentionConfig::new(h, d, hidden, hidden).expect("cross config");
         let qkv = make_tensor(seq * hidden, 1.3);
 
-        let cross_out = cross_attention(&qkv, &qkv, None, &config, seq, seq)
-            .expect("cross self");
+        let cross_out = cross_attention(&qkv, &qkv, None, &config, seq, seq).expect("cross self");
 
         // Reference self-attention.
         let scale = config.scale;
@@ -1457,6 +1491,11 @@ mod tests {
             }
         }
 
-        assert_close_f32(&cross_out, &ref_out, 1e-5, "cross self-attention equivalence");
+        assert_close_f32(
+            &cross_out,
+            &ref_out,
+            1e-5,
+            "cross self-attention equivalence",
+        );
     }
 }

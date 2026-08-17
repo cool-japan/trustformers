@@ -101,8 +101,40 @@ pub struct Artifact {
     pub content: Vec<u8>,
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
-    /// Optional metadata
+    /// Optional metadata.
+    ///
+    /// The key `version_id` associates the artifact with a model version and is
+    /// what [`ModelStorage::list_artifacts`] filters on. Set it with
+    /// [`Artifact::assign_version`]; an artifact without it belongs to no
+    /// version and is never returned by a version query (and therefore never
+    /// deleted by [`ModelStorage::delete_version`]).
     pub metadata: HashMap<String, serde_json::Value>,
+}
+
+/// Metadata key associating an artifact with a model version.
+pub const ARTIFACT_VERSION_KEY: &str = "version_id";
+
+impl Artifact {
+    /// Associate this artifact with a model version.
+    pub fn assign_version(&mut self, version_id: Uuid) {
+        self.metadata.insert(
+            ARTIFACT_VERSION_KEY.to_string(),
+            serde_json::Value::String(version_id.to_string()),
+        );
+    }
+
+    /// The model version this artifact belongs to, if any.
+    pub fn version_id(&self) -> Option<Uuid> {
+        self.metadata
+            .get(ARTIFACT_VERSION_KEY)
+            .and_then(|value| value.as_str())
+            .and_then(|text| Uuid::parse_str(text).ok())
+    }
+
+    /// Whether this artifact belongs to `version_id`.
+    pub fn belongs_to(&self, version_id: Uuid) -> bool {
+        self.version_id() == Some(version_id)
+    }
 }
 
 impl Artifact {
@@ -235,6 +267,44 @@ impl FileSystemStorage {
         Ok(())
     }
 
+    /// Read every `.meta` file under the artifact directory.
+    ///
+    /// Content bytes are deliberately not loaded: callers of `list_artifacts`
+    /// want the index, not every blob.
+    async fn scan_stored_metadata(&self) -> Result<Vec<Artifact>> {
+        let root = self.base_path.join("artifacts");
+        let mut artifacts = Vec::new();
+
+        let mut prefixes = match fs::read_dir(&root).await {
+            Ok(entries) => entries,
+            // No artifact directory yet: nothing is stored.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(artifacts),
+            Err(error) => return Err(error.into()),
+        };
+
+        while let Some(prefix_entry) = prefixes.next_entry().await? {
+            if !prefix_entry.file_type().await?.is_dir() {
+                continue;
+            }
+            let mut files = fs::read_dir(prefix_entry.path()).await?;
+            while let Some(file_entry) = files.next_entry().await? {
+                let path = file_entry.path();
+                if path.extension().and_then(|extension| extension.to_str()) != Some("meta") {
+                    continue;
+                }
+                let contents = fs::read_to_string(&path).await?;
+                match serde_json::from_str::<Artifact>(&contents) {
+                    Ok(artifact) => artifacts.push(artifact),
+                    Err(error) => {
+                        tracing::warn!(path = %path.display(), "skipping unreadable artifact metadata: {error}");
+                    },
+                }
+            }
+        }
+
+        Ok(artifacts)
+    }
+
     /// Load artifact metadata
     async fn load_metadata(&self, artifact_id: Uuid) -> Result<Option<Artifact>> {
         // Check cache first
@@ -348,11 +418,31 @@ impl ModelStorage for FileSystemStorage {
         Ok(())
     }
 
-    async fn list_artifacts(&self, _version_id: Uuid) -> Result<Vec<Artifact>> {
-        // This would normally query a database or index
-        // For now, return artifacts from cache
-        let cache = self.metadata_cache.read().await;
-        Ok(cache.values().cloned().collect())
+    /// List the artifacts belonging to `version_id`.
+    ///
+    /// The on-disk metadata directory is scanned, not just the warm cache, so a
+    /// cold process sees the same set a warm one does. Artifacts that carry no
+    /// `version_id` metadata belong to no version and are never returned — this
+    /// is what stops [`Self::delete_version`] from deleting unrelated
+    /// artifacts, which the previous cache dump did.
+    async fn list_artifacts(&self, version_id: Uuid) -> Result<Vec<Artifact>> {
+        let mut found: HashMap<Uuid, Artifact> = HashMap::new();
+
+        for artifact in self.metadata_cache.read().await.values() {
+            if artifact.belongs_to(version_id) {
+                found.insert(artifact.id, artifact.clone());
+            }
+        }
+
+        for artifact in self.scan_stored_metadata().await? {
+            if artifact.belongs_to(version_id) {
+                found.entry(artifact.id).or_insert(artifact);
+            }
+        }
+
+        let mut artifacts: Vec<Artifact> = found.into_values().collect();
+        artifacts.sort_by_key(|artifact| artifact.created_at);
+        Ok(artifacts)
     }
 }
 
@@ -419,9 +509,20 @@ impl ModelStorage for InMemoryStorage {
         self.delete_artifacts(&artifact_ids).await
     }
 
-    async fn list_artifacts(&self, _version_id: Uuid) -> Result<Vec<Artifact>> {
+    /// List the artifacts belonging to `version_id`.
+    ///
+    /// Filters on the artifact's `version_id` metadata, exactly like the
+    /// filesystem backend; returning every stored artifact regardless of
+    /// version would make `delete_version` delete everything.
+    async fn list_artifacts(&self, version_id: Uuid) -> Result<Vec<Artifact>> {
         let storage = self.artifacts.read().await;
-        Ok(storage.values().cloned().collect())
+        let mut artifacts: Vec<Artifact> = storage
+            .values()
+            .filter(|artifact| artifact.belongs_to(version_id))
+            .cloned()
+            .collect();
+        artifacts.sort_by_key(|artifact| artifact.created_at);
+        Ok(artifacts)
     }
 }
 
@@ -434,6 +535,83 @@ impl Default for InMemoryStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test: `list_artifacts` ignored `version_id` and returned the
+    /// whole cache, so `delete_version` deleted every artifact it could see.
+    #[tokio::test]
+    async fn test_list_artifacts_filters_by_version() {
+        let storage = InMemoryStorage::new();
+        let version_a = Uuid::new_v4();
+        let version_b = Uuid::new_v4();
+
+        let mut artifact_a = sample_artifact("a");
+        artifact_a.assign_version(version_a);
+        let mut artifact_b = sample_artifact("b");
+        artifact_b.assign_version(version_b);
+        // An artifact that belongs to no version at all.
+        let orphan = sample_artifact("orphan");
+
+        storage
+            .store_artifacts(&[artifact_a.clone(), artifact_b.clone(), orphan.clone()])
+            .await
+            .expect("store failed");
+
+        let listed = storage.list_artifacts(version_a).await.expect("list failed");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, artifact_a.id);
+
+        // Deleting version A must leave B and the orphan alone.
+        storage.delete_version(version_a).await.expect("delete failed");
+        assert!(storage.get_artifact(artifact_a.id).await.expect("get").is_none());
+        assert!(storage.get_artifact(artifact_b.id).await.expect("get").is_some());
+        assert!(storage.get_artifact(orphan.id).await.expect("get").is_some());
+    }
+
+    /// The filesystem backend must see artifacts written by another process,
+    /// not only whatever happens to be in its own cache.
+    #[tokio::test]
+    async fn test_filesystem_list_artifacts_reads_from_disk() {
+        let root = std::env::temp_dir().join(format!(
+            "trustformers_storage_{}_{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        let version = Uuid::new_v4();
+
+        {
+            let storage = FileSystemStorage::new(root.clone());
+            storage.initialize().await.expect("initialize failed");
+            let mut artifact = sample_artifact("on-disk");
+            artifact.assign_version(version);
+            storage.store_artifacts(&[artifact]).await.expect("store failed");
+        }
+
+        // A brand new backend has a cold cache.
+        let cold = FileSystemStorage::new(root.clone());
+        let listed = cold.list_artifacts(version).await.expect("list failed");
+        assert_eq!(
+            listed.len(),
+            1,
+            "a cold cache must still find stored artifacts"
+        );
+        assert!(cold.list_artifacts(Uuid::new_v4()).await.expect("list failed").is_empty());
+
+        tokio::fs::remove_dir_all(&root).await.ok();
+    }
+
+    fn sample_artifact(name: &str) -> Artifact {
+        Artifact {
+            id: Uuid::new_v4(),
+            artifact_type: ArtifactType::Config,
+            file_path: PathBuf::from(name),
+            size_bytes: 3,
+            content_hash: "deadbeef".to_string(),
+            mime_type: "application/octet-stream".to_string(),
+            content: vec![1, 2, 3],
+            created_at: Utc::now(),
+            metadata: HashMap::new(),
+        }
+    }
     use tempfile::TempDir;
 
     #[tokio::test]

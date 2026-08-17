@@ -36,12 +36,119 @@
 //! # }
 //! ```
 
-use anyhow::{Error, Result};
+use anyhow::{anyhow, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
+use tracing::{debug, warn};
+use trustformers_core::traits::Model;
 use uuid::Uuid;
+
+/// Key under which a [`ModelCheckpoint`] stores the serialised parameter set.
+///
+/// The payload is a real safetensors buffer, so a checkpoint can be handed to
+/// [`crate::weight_loading::checkpoint::Checkpoint`] — the same reader used for
+/// on-disk model files — without any conversion.
+pub const CHECKPOINT_STATE_KEY: &str = "model.safetensors";
+
+/// Hooks that perform the actual recovery work.
+///
+/// [`ErrorRecoveryManager`] owns no model, optimizer or device, so it cannot
+/// clean up memory or restore weights by itself. Register a handler to give it
+/// the ability to do so; without one, every strategy that needs a handler
+/// reports **failure** rather than pretending to have recovered.
+///
+/// Every method defaults to "this handler does not implement that action", which
+/// is reported as a failed recovery — never as success.
+pub trait RecoveryHandler: Send + Sync {
+    /// Release cached memory (tensor caches, intermediate buffers, ...).
+    fn cleanup_memory(&mut self) -> Result<()> {
+        Err(anyhow!(
+            "this RecoveryHandler does not implement memory cleanup"
+        ))
+    }
+
+    /// Reduce resource usage (batch size, precision, concurrency) by `factor`.
+    fn reduce_resources(&mut self, factor: f64) -> Result<()> {
+        let _ = factor;
+        Err(anyhow!(
+            "this RecoveryHandler does not implement resource reduction"
+        ))
+    }
+
+    /// Switch to a fallback implementation (for example CPU instead of GPU).
+    fn switch_to_fallback(&mut self, implementation: &str) -> Result<()> {
+        let _ = implementation;
+        Err(anyhow!(
+            "this RecoveryHandler does not implement fallback switching"
+        ))
+    }
+
+    /// Restart a component, clearing its state.
+    fn restart_component(&mut self, component: &str) -> Result<()> {
+        let _ = component;
+        Err(anyhow!(
+            "this RecoveryHandler does not implement component restart"
+        ))
+    }
+
+    /// Enter a degraded operating mode.
+    fn enable_degraded_mode(&mut self, mode: &str) -> Result<()> {
+        let _ = mode;
+        Err(anyhow!(
+            "this RecoveryHandler does not implement degraded mode"
+        ))
+    }
+
+    /// Write the checkpointed state back into the live model / optimizer.
+    fn restore_checkpoint(&mut self, checkpoint: &ModelCheckpoint) -> Result<()> {
+        let _ = checkpoint;
+        Err(anyhow!(
+            "this RecoveryHandler does not implement checkpoint restore"
+        ))
+    }
+}
+
+/// A [`RecoveryHandler`] that restores a [`Model`]'s parameters from a checkpoint.
+///
+/// This is the reference implementation of checkpoint recovery: it decodes the
+/// checkpoint's safetensors payload with the production checkpoint reader and
+/// copies every tensor back into the live model through
+/// [`Model::named_tensors_mut`].
+pub struct ModelStateRestorer<'a, M: Model> {
+    model: &'a mut M,
+}
+
+impl<'a, M: Model> ModelStateRestorer<'a, M> {
+    /// Wrap a model so its parameters can be restored from checkpoints.
+    pub fn new(model: &'a mut M) -> Self {
+        Self { model }
+    }
+}
+
+impl<M: Model> RecoveryHandler for ModelStateRestorer<'_, M> {
+    fn restore_checkpoint(&mut self, checkpoint: &ModelCheckpoint) -> Result<()> {
+        let report = checkpoint.restore_into(self.model)?;
+        debug!(
+            restored = report.restored_tensors,
+            checkpoint = %checkpoint.checkpoint_id,
+            "restored model parameters from checkpoint"
+        );
+        Ok(())
+    }
+}
+
+/// Outcome of restoring a checkpoint into a model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreReport {
+    /// Number of parameter tensors written back into the model.
+    pub restored_tensors: usize,
+    /// Names present in the model but missing from the checkpoint.
+    pub missing_from_checkpoint: Vec<String>,
+    /// Names present in the checkpoint but not in the model.
+    pub unused_in_model: Vec<String>,
+}
 
 /// Configuration for error recovery behavior
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -252,6 +359,125 @@ impl ModelCheckpoint {
             size_bytes,
         }
     }
+
+    /// Capture a model's live parameters into a checkpoint.
+    ///
+    /// The parameters are serialised with the real **safetensors** format under
+    /// [`CHECKPOINT_STATE_KEY`], so the payload can be written straight to disk or
+    /// parsed with the production checkpoint reader.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the model exposes no named tensors — capturing an
+    /// empty checkpoint and calling it a backup would guarantee a silent failure
+    /// at restore time.
+    pub fn from_model<M: Model>(model: &M, metadata: HashMap<String, String>) -> Result<Self> {
+        let named = model.named_tensors();
+        if named.is_empty() {
+            return Err(anyhow!(
+                "cannot checkpoint a model that exposes no named tensors: implement                  Model::named_tensors so the parameters can actually be saved"
+            ));
+        }
+
+        // Materialise every parameter as little-endian f32 bytes.
+        let mut buffers: Vec<(String, Vec<usize>, Vec<u8>)> = Vec::with_capacity(named.len());
+        for (name, tensor) in named {
+            let shape = tensor.shape();
+            let values =
+                tensor.data().map_err(|e| anyhow!("failed to read parameter {name}: {e}"))?;
+            let mut bytes = Vec::with_capacity(values.len() * 4);
+            for value in &values {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            buffers.push((name, shape, bytes));
+        }
+
+        let views: Vec<(String, safetensors::tensor::TensorView<'_>)> = buffers
+            .iter()
+            .map(|(name, shape, bytes)| {
+                safetensors::tensor::TensorView::new(
+                    safetensors::Dtype::F32,
+                    shape.clone(),
+                    bytes.as_slice(),
+                )
+                .map(|view| (name.clone(), view))
+                .map_err(|e| anyhow!("failed to describe parameter {name}: {e}"))
+            })
+            .collect::<Result<_>>()?;
+
+        let serialized = safetensors::tensor::serialize(views, None)
+            .map_err(|e| anyhow!("failed to serialise the model state: {e}"))?;
+
+        let mut model_state = HashMap::new();
+        model_state.insert(CHECKPOINT_STATE_KEY.to_string(), serialized);
+
+        Ok(Self::new(model_state, metadata))
+    }
+
+    /// Write this checkpoint's parameters back into a live model.
+    ///
+    /// Tensors are matched by name against [`Model::named_tensors_mut`]; shapes
+    /// must agree exactly. Returns a report describing what was written and what
+    /// was left over on either side.
+    pub fn restore_into<M: Model>(&self, model: &mut M) -> Result<RestoreReport> {
+        let payload = self.model_state.get(CHECKPOINT_STATE_KEY).ok_or_else(|| {
+            anyhow!(
+                "checkpoint {} carries no `{CHECKPOINT_STATE_KEY}` payload, so there is no                  model state to restore",
+                self.checkpoint_id
+            )
+        })?;
+
+        let checkpoint = crate::weight_loading::checkpoint::Checkpoint::from_bytes(payload)
+            .map_err(|e| anyhow!("failed to parse the checkpoint payload: {e}"))?;
+
+        let mut targets = model.named_tensors_mut();
+        if targets.is_empty() {
+            return Err(anyhow!(
+                "cannot restore into a model that exposes no named tensors: implement                  Model::named_tensors_mut so the weights can actually be written back"
+            ));
+        }
+
+        let mut restored = 0usize;
+        let mut missing = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for (name, target) in targets.iter_mut() {
+            match checkpoint.get(name) {
+                Some(source) => {
+                    if source.shape() != target.shape() {
+                        return Err(anyhow!(
+                            "checkpoint tensor {name} has shape {:?} but the model expects {:?}",
+                            source.shape(),
+                            target.shape()
+                        ));
+                    }
+                    **target = source.clone();
+                    restored += 1;
+                    seen.insert(name.clone());
+                },
+                None => missing.push(name.clone()),
+            }
+        }
+
+        if restored == 0 {
+            return Err(anyhow!(
+                "checkpoint {} shares no parameter names with the model; nothing was restored",
+                self.checkpoint_id
+            ));
+        }
+
+        let unused = checkpoint
+            .names()
+            .into_iter()
+            .filter(|name| !seen.contains(name))
+            .collect::<Vec<_>>();
+
+        Ok(RestoreReport {
+            restored_tensors: restored,
+            missing_from_checkpoint: missing,
+            unused_in_model: unused,
+        })
+    }
 }
 
 /// Recovery performance metrics
@@ -273,12 +499,21 @@ pub struct ErrorRecoveryManager {
     error_history: VecDeque<RecoveryAttempt>,
     circuit_breakers: HashMap<String, CircuitBreaker>,
     checkpoints: HashMap<String, ModelCheckpoint>,
+    /// Checkpoint ids in creation order, oldest first (used for eviction).
+    checkpoint_order: VecDeque<String>,
+    /// Id of the most recently created checkpoint, resolved by the `"latest"` alias.
+    latest_checkpoint_id: Option<String>,
     recovery_strategies: HashMap<ErrorCategory, Vec<RecoveryStrategy>>,
+    /// Caller-supplied hooks that perform the actual recovery work.
+    handler: Option<Box<dyn RecoveryHandler>>,
     metrics: Arc<Mutex<RecoveryMetrics>>,
     start_time: Instant,
 }
 
 impl ErrorRecoveryManager {
+    /// Maximum number of checkpoints retained; the oldest are evicted first.
+    pub const MAX_CHECKPOINTS: usize = 10;
+
     /// Create a new error recovery manager
     pub fn new(config: RecoveryConfig) -> Self {
         let mut recovery_strategies = HashMap::new();
@@ -372,6 +607,9 @@ impl ErrorRecoveryManager {
             error_history: VecDeque::new(),
             circuit_breakers: HashMap::new(),
             checkpoints: HashMap::new(),
+            checkpoint_order: VecDeque::new(),
+            latest_checkpoint_id: None,
+            handler: None,
             recovery_strategies,
             metrics: Arc::new(Mutex::new(RecoveryMetrics {
                 total_errors: 0,
@@ -535,13 +773,14 @@ impl ErrorRecoveryManager {
             },
 
             RecoveryStrategy::MemoryCleanup => {
-                self.perform_memory_cleanup()?;
-                Ok(true)
+                Ok(self.run_handler_action("memory cleanup", |handler| handler.cleanup_memory()))
             },
 
             RecoveryStrategy::ResourceReduction { reduction_factor } => {
-                self.reduce_resource_usage(*reduction_factor)?;
-                Ok(true)
+                let factor = *reduction_factor;
+                Ok(self.run_handler_action("resource reduction", |handler| {
+                    handler.reduce_resources(factor)
+                }))
             },
 
             RecoveryStrategy::CheckpointRestore { checkpoint_id } => {
@@ -551,107 +790,115 @@ impl ErrorRecoveryManager {
             RecoveryStrategy::Fallback {
                 fallback_implementation,
             } => {
-                self.switch_to_fallback(fallback_implementation)?;
-                Ok(true)
+                let implementation = fallback_implementation.clone();
+                Ok(self.run_handler_action("fallback switch", |handler| {
+                    handler.switch_to_fallback(&implementation)
+                }))
             },
 
             RecoveryStrategy::Restart { component } => {
-                self.restart_component(component)?;
-                Ok(true)
+                let component = component.clone();
+                Ok(self.run_handler_action("component restart", |handler| {
+                    handler.restart_component(&component)
+                }))
             },
 
             RecoveryStrategy::Degrade { degraded_mode } => {
-                self.enable_degraded_mode(degraded_mode)?;
-                Ok(true)
+                let mode = degraded_mode.clone();
+                Ok(self.run_handler_action("degraded mode", |handler| {
+                    handler.enable_degraded_mode(&mode)
+                }))
             },
 
             RecoveryStrategy::NoRecovery => Ok(false),
         }
     }
 
-    /// Perform memory cleanup
-    fn perform_memory_cleanup(&self) -> Result<()> {
-        // Force garbage collection if available
-        // Clear caches
-        // Compact memory
-        println!("[INFO] Performing memory cleanup");
+    /// Run a recovery action through the registered handler.
+    ///
+    /// Returns `true` only when a handler is registered **and** it reported
+    /// success. With no handler there is nothing that could have recovered, so
+    /// the answer is `false` — never a fabricated success.
+    fn run_handler_action<F>(&mut self, action: &str, run: F) -> bool
+    where
+        F: FnOnce(&mut dyn RecoveryHandler) -> Result<()>,
+    {
+        let Some(handler) = self.handler.as_deref_mut() else {
+            warn!(
+                action,
+                "no RecoveryHandler is registered; the recovery action cannot be performed"
+            );
+            return false;
+        };
 
-        // In a real implementation, this would:
-        // - Clear tensor caches
-        // - Force garbage collection
-        // - Compact memory allocations
-        // - Clear intermediate computations
-
-        Ok(())
-    }
-
-    /// Reduce resource usage
-    fn reduce_resource_usage(&self, reduction_factor: f64) -> Result<()> {
-        println!(
-            "[INFO] Reducing resource usage by factor: {}",
-            reduction_factor
-        );
-
-        // In a real implementation, this would:
-        // - Reduce batch sizes
-        // - Decrease model precision
-        // - Limit concurrent operations
-        // - Reduce cache sizes
-
-        Ok(())
-    }
-
-    /// Switch to fallback implementation
-    fn switch_to_fallback(&self, fallback: &str) -> Result<()> {
-        println!("[INFO] Switching to fallback implementation: {}", fallback);
-
-        // In a real implementation, this would:
-        // - Switch to CPU from GPU
-        // - Use simpler model architecture
-        // - Use alternative algorithms
-
-        Ok(())
-    }
-
-    /// Restart a component
-    fn restart_component(&self, component: &str) -> Result<()> {
-        println!("[INFO] Restarting component: {}", component);
-
-        // In a real implementation, this would:
-        // - Reinitialize the specified component
-        // - Clear component state
-        // - Reload configurations
-
-        Ok(())
-    }
-
-    /// Enable degraded mode
-    fn enable_degraded_mode(&self, mode: &str) -> Result<()> {
-        println!("[INFO] Enabling degraded mode: {}", mode);
-
-        // In a real implementation, this would:
-        // - Reduce functionality
-        // - Use simpler algorithms
-        // - Lower quality outputs
-
-        Ok(())
-    }
-
-    /// Restore from checkpoint
-    fn restore_from_checkpoint(&self, checkpoint_id: &str) -> Result<bool> {
-        if let Some(_checkpoint) = self.checkpoints.get(checkpoint_id) {
-            println!("[INFO] Restoring from checkpoint: {}", checkpoint_id);
-
-            // In a real implementation, this would:
-            // - Restore model weights from checkpoint
-            // - Restore optimizer state
-            // - Restore training state
-
-            Ok(true)
-        } else {
-            println!("[WARN] Checkpoint not found: {}", checkpoint_id);
-            Ok(false)
+        match run(handler) {
+            Ok(()) => {
+                debug!(action, "recovery action completed");
+                true
+            },
+            Err(error) => {
+                warn!(action, %error, "recovery action failed");
+                false
+            },
         }
+    }
+
+    /// Register the hooks that perform the actual recovery work.
+    ///
+    /// Without a handler the manager can still classify errors, retry and record
+    /// metrics, but every strategy that needs to touch the model or the runtime
+    /// reports failure.
+    pub fn set_handler(&mut self, handler: Box<dyn RecoveryHandler>) {
+        self.handler = Some(handler);
+    }
+
+    /// Drop the registered recovery handler.
+    pub fn clear_handler(&mut self) -> Option<Box<dyn RecoveryHandler>> {
+        self.handler.take()
+    }
+
+    /// Whether a recovery handler is registered.
+    pub fn has_handler(&self) -> bool {
+        self.handler.is_some()
+    }
+
+    /// Resolve a checkpoint id, mapping the `"latest"` alias onto the most
+    /// recently created checkpoint.
+    fn resolve_checkpoint_id(&self, checkpoint_id: &str) -> Option<String> {
+        if checkpoint_id == "latest" {
+            self.latest_checkpoint_id.clone()
+        } else if self.checkpoints.contains_key(checkpoint_id) {
+            Some(checkpoint_id.to_string())
+        } else {
+            None
+        }
+    }
+
+    /// Look up a stored checkpoint (`"latest"` resolves to the newest one).
+    pub fn get_checkpoint(&self, checkpoint_id: &str) -> Option<&ModelCheckpoint> {
+        self.resolve_checkpoint_id(checkpoint_id)
+            .and_then(|id| self.checkpoints.get(&id))
+    }
+
+    /// Restore state from a checkpoint through the registered handler.
+    ///
+    /// Returns `Ok(false)` when the checkpoint does not exist or when no handler
+    /// is registered to write the state back: reporting a restored model that was
+    /// never restored would make the recovery metrics fiction.
+    fn restore_from_checkpoint(&mut self, checkpoint_id: &str) -> Result<bool> {
+        let Some(resolved) = self.resolve_checkpoint_id(checkpoint_id) else {
+            warn!(checkpoint_id, "checkpoint not found; cannot restore");
+            return Ok(false);
+        };
+
+        let Some(checkpoint) = self.checkpoints.get(&resolved).cloned() else {
+            warn!(checkpoint_id = %resolved, "checkpoint disappeared before it could be restored");
+            return Ok(false);
+        };
+
+        Ok(self.run_handler_action("checkpoint restore", |handler| {
+            handler.restore_checkpoint(&checkpoint)
+        }))
     }
 
     /// Create a model checkpoint
@@ -660,30 +907,44 @@ impl ErrorRecoveryManager {
         model_state: HashMap<String, Vec<u8>>,
         metadata: HashMap<String, String>,
     ) -> String {
-        let checkpoint = ModelCheckpoint::new(model_state, metadata);
+        self.store_checkpoint(ModelCheckpoint::new(model_state, metadata))
+    }
+
+    /// Capture a live model's parameters as a checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the error from [`ModelCheckpoint::from_model`] when the model
+    /// exposes no named tensors.
+    pub fn checkpoint_model<M: Model>(
+        &mut self,
+        model: &M,
+        metadata: HashMap<String, String>,
+    ) -> Result<String> {
+        Ok(self.store_checkpoint(ModelCheckpoint::from_model(model, metadata)?))
+    }
+
+    /// Store a checkpoint, evicting the **oldest** ones once the limit is hit.
+    fn store_checkpoint(&mut self, checkpoint: ModelCheckpoint) -> String {
         let checkpoint_id = checkpoint.checkpoint_id.clone();
 
         self.checkpoints.insert(checkpoint_id.clone(), checkpoint);
-        self.checkpoints.insert(
-            "latest".to_string(),
-            self.checkpoints[&checkpoint_id].clone(),
-        );
+        self.checkpoint_order.push_back(checkpoint_id.clone());
+        self.latest_checkpoint_id = Some(checkpoint_id.clone());
 
-        // Limit number of checkpoints
-        if self.checkpoints.len() > 10 {
-            // Remove oldest checkpoints (simplified)
-            let keys_to_remove: Vec<String> = self.checkpoints.keys()
-                .filter(|k| *k != "latest")
-                .skip(9) // Keep 9 + "latest"
-                .cloned()
-                .collect();
-
-            for key in keys_to_remove {
-                self.checkpoints.remove(&key);
+        // Evict oldest-first, in creation order, keeping the newest
+        // `max_checkpoints` (the "latest" alias is a pointer, not a copy, so it
+        // never occupies a slot of its own).
+        while self.checkpoint_order.len() > Self::MAX_CHECKPOINTS {
+            if let Some(oldest) = self.checkpoint_order.pop_front() {
+                self.checkpoints.remove(&oldest);
+                if self.latest_checkpoint_id.as_deref() == Some(oldest.as_str()) {
+                    self.latest_checkpoint_id = None;
+                }
             }
         }
 
-        println!("[INFO] Created checkpoint: {}", checkpoint_id);
+        debug!(checkpoint = %checkpoint_id, "created checkpoint");
         checkpoint_id
     }
 
@@ -994,5 +1255,342 @@ mod tests {
         assert_eq!(config.max_retries, 5);
         assert!(!config.enable_fallback);
         assert_eq!(config.memory_pressure_threshold_mb, 2048.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression tests: recovery must do real work or report failure
+    // -----------------------------------------------------------------------
+
+    use serde::{Deserialize, Serialize};
+    use std::io::Read;
+    use trustformers_core::tensor::Tensor;
+    use trustformers_core::traits::Config;
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct TinyConfig;
+
+    impl Config for TinyConfig {
+        fn architecture(&self) -> &'static str {
+            "tiny"
+        }
+    }
+
+    /// A minimal model that really exposes its parameters.
+    struct TinyModel {
+        config: TinyConfig,
+        weight: Tensor,
+        bias: Tensor,
+    }
+
+    impl TinyModel {
+        fn new(weight: &[f32], bias: &[f32]) -> Self {
+            Self {
+                config: TinyConfig,
+                weight: Tensor::from_slice(weight, &[2, 2]).expect("weight"),
+                bias: Tensor::from_slice(bias, &[2]).expect("bias"),
+            }
+        }
+    }
+
+    impl Model for TinyModel {
+        type Config = TinyConfig;
+        type Input = Tensor;
+        type Output = Tensor;
+
+        fn forward(&self, input: Tensor) -> trustformers_core::Result<Tensor> {
+            input.matmul(&self.weight)?.add(&self.bias)
+        }
+
+        fn load_pretrained(&mut self, _reader: &mut dyn Read) -> trustformers_core::Result<()> {
+            Ok(())
+        }
+
+        fn get_config(&self) -> &TinyConfig {
+            &self.config
+        }
+
+        fn num_parameters(&self) -> usize {
+            6
+        }
+
+        fn named_tensors(&self) -> Vec<(String, &Tensor)> {
+            vec![
+                ("weight".to_string(), &self.weight),
+                ("bias".to_string(), &self.bias),
+            ]
+        }
+
+        fn named_tensors_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+            vec![
+                ("weight".to_string(), &mut self.weight),
+                ("bias".to_string(), &mut self.bias),
+            ]
+        }
+    }
+
+    /// A model that never exposes its parameters (the trait default).
+    struct OpaqueModel {
+        config: TinyConfig,
+    }
+
+    impl Model for OpaqueModel {
+        type Config = TinyConfig;
+        type Input = Tensor;
+        type Output = Tensor;
+
+        fn forward(&self, input: Tensor) -> trustformers_core::Result<Tensor> {
+            Ok(input)
+        }
+
+        fn load_pretrained(&mut self, _reader: &mut dyn Read) -> trustformers_core::Result<()> {
+            Ok(())
+        }
+
+        fn get_config(&self) -> &TinyConfig {
+            &self.config
+        }
+
+        fn num_parameters(&self) -> usize {
+            0
+        }
+    }
+
+    #[test]
+    fn test_checkpoint_round_trip_restores_real_weights() {
+        let original = TinyModel::new(&[1.0, 2.0, 3.0, 4.0], &[0.5, -0.5]);
+        let checkpoint =
+            ModelCheckpoint::from_model(&original, HashMap::new()).expect("checkpoint capture");
+
+        // The payload is a real safetensors buffer.
+        let payload = checkpoint
+            .model_state
+            .get(CHECKPOINT_STATE_KEY)
+            .expect("checkpoint payload must exist");
+        assert!(checkpoint.size_bytes >= 6 * 4);
+        assert!(
+            crate::weight_loading::checkpoint::detect_format(payload).is_ok(),
+            "the checkpoint payload must be readable by the production checkpoint reader"
+        );
+
+        // A model with different weights gets the checkpointed values back.
+        let mut restored = TinyModel::new(&[0.0, 0.0, 0.0, 0.0], &[0.0, 0.0]);
+        let report = checkpoint.restore_into(&mut restored).expect("restore");
+        assert_eq!(report.restored_tensors, 2);
+        assert!(report.missing_from_checkpoint.is_empty());
+        assert!(report.unused_in_model.is_empty());
+
+        assert_eq!(
+            restored.weight.data().expect("weights"),
+            vec![1.0, 2.0, 3.0, 4.0]
+        );
+        assert_eq!(restored.bias.data().expect("bias"), vec![0.5, -0.5]);
+
+        // ... and the restored model computes what the original computed.
+        let input = Tensor::from_slice(&[1.0, 1.0], &[1, 2]).expect("input");
+        let expected = original.forward(input.clone()).expect("forward").data().expect("data");
+        let actual = restored.forward(input).expect("forward").data().expect("data");
+        assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn test_checkpoint_refuses_models_without_named_tensors() {
+        let opaque = OpaqueModel { config: TinyConfig };
+        let error = ModelCheckpoint::from_model(&opaque, HashMap::new())
+            .expect_err("a model with no named tensors cannot be checkpointed");
+        assert!(error.to_string().contains("named tensors"), "{error}");
+
+        let good = TinyModel::new(&[1.0, 2.0, 3.0, 4.0], &[0.0, 0.0]);
+        let checkpoint = ModelCheckpoint::from_model(&good, HashMap::new()).expect("capture");
+        let mut opaque = OpaqueModel { config: TinyConfig };
+        let error = checkpoint
+            .restore_into(&mut opaque)
+            .expect_err("a model with no named tensors cannot be restored into");
+        assert!(error.to_string().contains("named tensors"), "{error}");
+    }
+
+    #[test]
+    fn test_restore_rejects_shape_mismatch() {
+        let source = TinyModel::new(&[1.0, 2.0, 3.0, 4.0], &[0.0, 0.0]);
+        let checkpoint = ModelCheckpoint::from_model(&source, HashMap::new()).expect("capture");
+
+        struct WrongShape {
+            config: TinyConfig,
+            weight: Tensor,
+        }
+        impl Model for WrongShape {
+            type Config = TinyConfig;
+            type Input = Tensor;
+            type Output = Tensor;
+            fn forward(&self, input: Tensor) -> trustformers_core::Result<Tensor> {
+                Ok(input)
+            }
+            fn load_pretrained(&mut self, _reader: &mut dyn Read) -> trustformers_core::Result<()> {
+                Ok(())
+            }
+            fn get_config(&self) -> &TinyConfig {
+                &self.config
+            }
+            fn num_parameters(&self) -> usize {
+                3
+            }
+            fn named_tensors_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+                vec![("weight".to_string(), &mut self.weight)]
+            }
+        }
+
+        let mut target = WrongShape {
+            config: TinyConfig,
+            weight: Tensor::zeros(&[3, 1]).expect("weight"),
+        };
+        let error = checkpoint.restore_into(&mut target).expect_err("shape mismatch must fail");
+        assert!(error.to_string().contains("shape"), "{error}");
+    }
+
+    #[test]
+    fn test_checkpoint_restore_strategy_without_handler_reports_failure() {
+        let mut manager = ErrorRecoveryManager::new(RecoveryConfig::default());
+        let model = TinyModel::new(&[1.0, 2.0, 3.0, 4.0], &[0.0, 0.0]);
+        let id = manager.checkpoint_model(&model, HashMap::new()).expect("checkpoint");
+
+        let error = anyhow::anyhow!("out of memory");
+        let recovered = manager
+            .execute_recovery_strategy(
+                &RecoveryStrategy::CheckpointRestore {
+                    checkpoint_id: id.clone(),
+                },
+                &error,
+                &ErrorCategory::Memory,
+            )
+            .expect("strategy execution");
+        assert!(
+            !recovered,
+            "with no handler registered nothing was restored, so recovery must report failure"
+        );
+
+        // The same is true for every other handler-backed strategy.
+        for strategy in [
+            RecoveryStrategy::MemoryCleanup,
+            RecoveryStrategy::ResourceReduction {
+                reduction_factor: 0.5,
+            },
+            RecoveryStrategy::Fallback {
+                fallback_implementation: "cpu".to_string(),
+            },
+            RecoveryStrategy::Restart {
+                component: "device".to_string(),
+            },
+            RecoveryStrategy::Degrade {
+                degraded_mode: "low".to_string(),
+            },
+        ] {
+            let recovered = manager
+                .execute_recovery_strategy(&strategy, &error, &ErrorCategory::Memory)
+                .expect("strategy execution");
+            assert!(
+                !recovered,
+                "{strategy:?} must not report success without a handler"
+            );
+        }
+    }
+
+    #[test]
+    fn test_checkpoint_restore_strategy_with_handler_restores_state() {
+        /// Handler that records the restored weights.
+        struct RecordingHandler {
+            restored: Arc<Mutex<Vec<f32>>>,
+        }
+
+        impl RecoveryHandler for RecordingHandler {
+            fn restore_checkpoint(&mut self, checkpoint: &ModelCheckpoint) -> Result<()> {
+                let mut model = TinyModel::new(&[0.0, 0.0, 0.0, 0.0], &[0.0, 0.0]);
+                checkpoint.restore_into(&mut model)?;
+                let mut slot =
+                    self.restored.lock().map_err(|_| anyhow!("recording mutex poisoned"))?;
+                *slot = model.weight.data()?;
+                Ok(())
+            }
+        }
+
+        let restored = Arc::new(Mutex::new(Vec::new()));
+        let mut manager = ErrorRecoveryManager::new(RecoveryConfig::default());
+        manager.set_handler(Box::new(RecordingHandler {
+            restored: restored.clone(),
+        }));
+
+        let model = TinyModel::new(&[9.0, 8.0, 7.0, 6.0], &[0.0, 0.0]);
+        manager.checkpoint_model(&model, HashMap::new()).expect("checkpoint");
+
+        let recovered = manager
+            .execute_recovery_strategy(
+                &RecoveryStrategy::CheckpointRestore {
+                    checkpoint_id: "latest".to_string(),
+                },
+                &anyhow::anyhow!("out of memory"),
+                &ErrorCategory::Memory,
+            )
+            .expect("strategy execution");
+
+        assert!(
+            recovered,
+            "a registered handler that succeeds means real recovery"
+        );
+        assert_eq!(
+            *restored.lock().expect("recording mutex"),
+            vec![9.0, 8.0, 7.0, 6.0]
+        );
+    }
+
+    #[test]
+    fn test_failing_handler_is_not_reported_as_recovery() {
+        struct FailingHandler;
+        impl RecoveryHandler for FailingHandler {
+            fn cleanup_memory(&mut self) -> Result<()> {
+                Err(anyhow!("device is wedged"))
+            }
+        }
+
+        let mut manager = ErrorRecoveryManager::new(RecoveryConfig::default());
+        manager.set_handler(Box::new(FailingHandler));
+
+        let recovered = manager
+            .execute_recovery_strategy(
+                &RecoveryStrategy::MemoryCleanup,
+                &anyhow::anyhow!("out of memory"),
+                &ErrorCategory::Memory,
+            )
+            .expect("strategy execution");
+        assert!(!recovered);
+    }
+
+    #[test]
+    fn test_checkpoint_eviction_is_oldest_first() {
+        let mut manager = ErrorRecoveryManager::new(RecoveryConfig::default());
+
+        let mut ids = Vec::new();
+        for i in 0..(ErrorRecoveryManager::MAX_CHECKPOINTS + 3) {
+            let mut metadata = HashMap::new();
+            metadata.insert("index".to_string(), i.to_string());
+            ids.push(manager.create_checkpoint(HashMap::new(), metadata));
+        }
+
+        // The three oldest checkpoints are gone; every newer one survives.
+        for old in ids.iter().take(3) {
+            assert!(
+                manager.get_checkpoint(old).is_none(),
+                "the oldest checkpoints must be evicted first"
+            );
+        }
+        for kept in ids.iter().skip(3) {
+            assert!(
+                manager.get_checkpoint(kept).is_some(),
+                "newer checkpoints must survive eviction"
+            );
+        }
+
+        // "latest" resolves to the newest checkpoint, not to a stale copy.
+        let latest = manager.get_checkpoint("latest").expect("latest checkpoint");
+        let newest_id = ids.last().expect("at least one checkpoint");
+        assert_eq!(&latest.checkpoint_id, newest_id);
+        assert_eq!(latest.metadata.get("index").map(String::as_str), Some("12"));
     }
 }

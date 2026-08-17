@@ -242,18 +242,43 @@ impl ServerlessOrchestrator {
         }
         Ok(())
     }
-    pub async fn collect_metrics(&self) -> Result<()> {
+    /// Refresh the cached metrics for every deployment.
+    ///
+    /// Provider failures are reported in the returned
+    /// [`MetricsCollectionReport`] rather than silently dropped, so a caller can
+    /// tell "no metrics because nothing ran" apart from "no metrics because
+    /// every CloudWatch call failed".
+    ///
+    /// # Errors
+    ///
+    /// This call itself does not fail; individual provider failures are
+    /// collected into the report.
+    pub async fn collect_metrics(&self) -> Result<MetricsCollectionReport> {
         let deployments = self.deployments.read().await;
         let providers = self.providers.read().await;
+        let mut report = MetricsCollectionReport::default();
         for (deployment_id, deployment) in deployments.iter() {
-            if let Some(provider) = providers.get(&deployment.config.provider) {
-                if let Ok(metrics) = provider.get_metrics(&deployment.config).await {
+            let Some(provider) = providers.get(&deployment.config.provider) else {
+                report.failed += 1;
+                report.errors.push(format!(
+                    "deployment {deployment_id}: provider {:?} is not registered",
+                    deployment.config.provider
+                ));
+                continue;
+            };
+            match provider.get_metrics(&deployment.config).await {
+                Ok(metrics) => {
                     let mut metrics_map = self.metrics.write().await;
                     metrics_map.insert(*deployment_id, metrics);
-                }
+                    report.collected += 1;
+                },
+                Err(e) => {
+                    report.failed += 1;
+                    report.errors.push(format!("deployment {deployment_id}: {e}"));
+                },
             }
         }
-        Ok(())
+        Ok(report)
     }
     pub async fn optimize_cold_starts(&self, deployment_id: Uuid) -> Result<()> {
         let deployment = {
@@ -504,24 +529,55 @@ pub struct OptimizationRecommendation {
     pub impact: String,
     pub effort: RecommendationEffort,
 }
+/// AWS Lambda provider.
+///
+/// Without SDK clients every operation returns
+/// [`ServerlessError::MissingCredentials`](crate::serverless::ServerlessError::MissingCredentials)
+/// rather than a synthesized ARN or an echoed payload — see
+/// [`awslambdaprovider_traits`](crate::serverless::awslambdaprovider_traits).
 pub struct AwsLambdaProvider {
     pub(super) lambda_client: Option<aws_sdk_lambda::Client>,
-    _cloudwatch_client: Option<aws_sdk_cloudwatch::Client>,
-    _region: String,
+    pub(super) cloudwatch_client: Option<aws_sdk_cloudwatch::Client>,
+    pub(super) region: String,
+    /// IAM execution role ARN required by `CreateFunction`.
+    pub(super) execution_role_arn: Option<String>,
+    /// Window, in seconds, that `get_metrics` queries CloudWatch over.
+    pub(super) metrics_window_secs: i64,
 }
 impl AwsLambdaProvider {
+    /// Create an unconfigured provider for `region`.
+    ///
+    /// The provider holds no SDK clients, so every API-backed operation will
+    /// fail with
+    /// [`ServerlessError::MissingCredentials`](crate::serverless::ServerlessError::MissingCredentials)
+    /// until [`Self::with_aws_config`] or [`Self::with_clients`] is used.
     pub fn new(region: String) -> Self {
         Self {
             lambda_client: None,
-            _cloudwatch_client: None,
-            _region: region,
+            cloudwatch_client: None,
+            region,
+            execution_role_arn: None,
+            metrics_window_secs: 3600,
         }
     }
+
+    /// Build Lambda and CloudWatch clients from the ambient AWS configuration.
+    ///
+    /// # Errors
+    ///
+    /// This never fails today, but returns `Result` so credential resolution
+    /// can surface errors in future SDK versions without a breaking change.
     pub async fn with_aws_config(mut self) -> Result<Self> {
         let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
         self.lambda_client = Some(aws_sdk_lambda::Client::new(&config));
+        self.cloudwatch_client = Some(aws_sdk_cloudwatch::Client::new(&config));
         Ok(self)
     }
+
+    /// Build a provider from pre-constructed SDK clients.
+    ///
+    /// This is the constructor tests use, pointing the clients at a local mock
+    /// endpoint via `aws_sdk_lambda::Config::builder().endpoint_url(..)`.
     pub fn with_clients(
         lambda_client: aws_sdk_lambda::Client,
         cloudwatch_client: Option<aws_sdk_cloudwatch::Client>,
@@ -529,9 +585,30 @@ impl AwsLambdaProvider {
     ) -> Self {
         Self {
             lambda_client: Some(lambda_client),
-            _cloudwatch_client: cloudwatch_client,
-            _region: region,
+            cloudwatch_client,
+            region,
+            execution_role_arn: None,
+            metrics_window_secs: 3600,
         }
+    }
+
+    /// Set the IAM execution role ARN passed to `CreateFunction`.
+    #[must_use]
+    pub fn with_execution_role(mut self, role_arn: impl Into<String>) -> Self {
+        self.execution_role_arn = Some(role_arn.into());
+        self
+    }
+
+    /// Set the CloudWatch lookback window used by `get_metrics`, in seconds.
+    #[must_use]
+    pub fn with_metrics_window_secs(mut self, seconds: i64) -> Self {
+        self.metrics_window_secs = seconds.max(60);
+        self
+    }
+
+    /// The region this provider was built for.
+    pub fn region(&self) -> &str {
+        &self.region
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -581,6 +658,52 @@ pub struct ServerlessMetrics {
     pub provisioned_concurrency_spillover: u64,
     pub dead_letter_errors: u64,
     pub iterator_age_ms: Option<f64>,
+    /// Names of the fields above that the provider's monitoring API does not
+    /// publish, and which are therefore left at their zero value.
+    ///
+    /// A field listed here carries **no measurement**: treating its zero as a
+    /// real reading would be wrong. For AWS Lambda, `cold_starts`,
+    /// `init_duration_ms`, `max_memory_used_mb`, `billed_duration_ms`,
+    /// `memory_utilization` and `cost_usd` are only derivable from CloudWatch
+    /// *Logs* (via `REPORT` lines), not from the CloudWatch *metric*
+    /// namespace that [`ServerlessProviderTrait::get_metrics`] queries.
+    ///
+    /// [`ServerlessProviderTrait::get_metrics`]: crate::serverless::functions::ServerlessProviderTrait::get_metrics
+    pub unavailable_fields: Vec<String>,
+}
+
+impl ServerlessMetrics {
+    /// An all-zero snapshot in which *every* field is explicitly marked as
+    /// unmeasured. Providers fill in the fields they actually queried.
+    pub fn unmeasured() -> Self {
+        Self {
+            invocations: 0,
+            duration_ms: 0.0,
+            errors: 0,
+            throttles: 0,
+            concurrent_executions: 0,
+            memory_utilization: 0.0,
+            cold_starts: 0,
+            billed_duration_ms: 0.0,
+            cost_usd: 0.0,
+            init_duration_ms: 0.0,
+            max_memory_used_mb: 0,
+            p99_duration_ms: 0.0,
+            p95_duration_ms: 0.0,
+            p50_duration_ms: 0.0,
+            success_rate: 0.0,
+            provisioned_concurrency_invocations: 0,
+            provisioned_concurrency_spillover: 0,
+            dead_letter_errors: 0,
+            iterator_age_ms: None,
+            unavailable_fields: Vec::new(),
+        }
+    }
+
+    /// Whether `field` carries a real measurement.
+    pub fn is_measured(&self, field: &str) -> bool {
+        !self.unavailable_fields.iter().any(|name| name == field)
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetailedMetrics {
@@ -714,6 +837,11 @@ impl GoogleCloudFunctionsProvider {
     pub fn new(project_id: String) -> Self {
         Self { project_id }
     }
+
+    /// The GCP project this provider targets.
+    pub fn project_id(&self) -> &str {
+        &self.project_id
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RecommendationPriority {
@@ -733,11 +861,32 @@ impl AzureFunctionsProvider {
             resource_group,
         }
     }
+
+    /// The Azure subscription this provider targets.
+    pub fn subscription_id(&self) -> &str {
+        &self.subscription_id
+    }
+
+    /// The Azure resource group this provider targets.
+    pub fn resource_group(&self) -> &str {
+        &self.resource_group
+    }
 }
 #[derive(Debug, Clone)]
 pub struct DeploymentResult {
     pub function_arn: Option<String>,
     pub function_url: Option<String>,
+}
+
+/// Outcome of [`ServerlessOrchestrator::collect_metrics`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MetricsCollectionReport {
+    /// Deployments whose metrics were refreshed from the provider.
+    pub collected: usize,
+    /// Deployments whose metrics could not be refreshed.
+    pub failed: usize,
+    /// One message per failure, in deployment order.
+    pub errors: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RecommendationEffort {

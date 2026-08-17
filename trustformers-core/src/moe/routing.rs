@@ -27,19 +27,16 @@ impl fmt::Display for MoeRoutingError {
         match self {
             MoeRoutingError::EmptyInput => {
                 write!(f, "empty input: no tokens or hidden states provided")
-            }
+            },
             MoeRoutingError::InvalidNumExperts(msg) => {
                 write!(f, "invalid num_experts: {msg}")
-            }
+            },
             MoeRoutingError::InvalidCapacityFactor(msg) => {
                 write!(f, "invalid capacity_factor: {msg}")
-            }
+            },
             MoeRoutingError::DimensionMismatch { expected, got } => {
-                write!(
-                    f,
-                    "dimension mismatch: expected {expected}, got {got}"
-                )
-            }
+                write!(f, "dimension mismatch: expected {expected}, got {got}")
+            },
         }
     }
 }
@@ -204,9 +201,8 @@ impl ExpertChoiceRouter {
         // Deterministic weight initialisation: scaled sin wave so each
         // (hidden, expert) pair has a distinct non-zero value.
         let total = hidden_size * num_experts;
-        let router_weights: Vec<f32> = (0..total)
-            .map(|i| ((i as f32 + 1.0) / total as f32).sin() * 0.1)
-            .collect();
+        let router_weights: Vec<f32> =
+            (0..total).map(|i| ((i as f32 + 1.0) / total as f32).sin() * 0.1).collect();
 
         Self {
             num_experts,
@@ -259,9 +255,9 @@ impl ExpertChoiceRouter {
         }
 
         // capacity = max(1, floor(capacity_factor * seq_len / num_experts))
-        let capacity =
-            ((self.capacity_factor * seq_len as f32 / self.num_experts as f32).floor() as usize)
-                .max(1);
+        let capacity = ((self.capacity_factor * seq_len as f32 / self.num_experts as f32).floor()
+            as usize)
+            .max(1);
 
         // Compute raw affinity [seq_len × num_experts]
         let raw_affinity = Self::compute_affinity(
@@ -273,17 +269,15 @@ impl ExpertChoiceRouter {
         );
 
         // Column-wise softmax so each expert's scores are normalised over tokens
-        let soft_affinity =
-            column_softmax(&raw_affinity, seq_len, self.num_experts);
+        let soft_affinity = column_softmax(&raw_affinity, seq_len, self.num_experts);
 
         let mut expert_token_idx = Vec::with_capacity(self.num_experts);
         let mut expert_weights_out = Vec::with_capacity(self.num_experts);
 
         for e in 0..self.num_experts {
             // Collect column `e` of the affinity matrix
-            let col: Vec<f32> = (0..seq_len)
-                .map(|t| soft_affinity[t * self.num_experts + e])
-                .collect();
+            let col: Vec<f32> =
+                (0..seq_len).map(|t| soft_affinity[t * self.num_experts + e]).collect();
 
             // Each expert picks its top-`capacity` tokens
             let top_tokens = top_k_desc(&col, capacity);
@@ -336,10 +330,7 @@ impl HashRouter {
 
     /// Route a batch of token IDs, returning an expert index for each.
     pub fn route_batch(&self, token_ids: &[u32]) -> Vec<usize> {
-        token_ids
-            .iter()
-            .map(|&id| Self::route_token(id, self.num_experts))
-            .collect()
+        token_ids.iter().map(|&id| Self::route_token(id, self.num_experts)).collect()
     }
 }
 
@@ -442,7 +433,13 @@ impl SwitchTransformerRouter {
             .max(1);
 
         // Compute logits [seq_len × num_experts]
-        let logits = matmul(hidden, &self.router_weights, seq_len, hidden_size, self.num_experts);
+        let logits = matmul(
+            hidden,
+            &self.router_weights,
+            seq_len,
+            hidden_size,
+            self.num_experts,
+        );
 
         // Row-wise softmax to get routing probabilities
         let probs = row_softmax(&logits, seq_len, self.num_experts);
@@ -511,16 +508,9 @@ impl SwitchTransformerRouter {
                 prob_sums[e] += router_probs[t * num_experts + e];
             }
         }
-        let mean_probs: Vec<f32> = prob_sums
-            .iter()
-            .map(|&s| s / seq_len as f32)
-            .collect();
+        let mean_probs: Vec<f32> = prob_sums.iter().map(|&s| s / seq_len as f32).collect();
 
-        let dot: f32 = fractions
-            .iter()
-            .zip(mean_probs.iter())
-            .map(|(&f, &p)| f * p)
-            .sum();
+        let dot: f32 = fractions.iter().zip(mean_probs.iter()).map(|(&f, &p)| f * p).sum();
 
         num_experts as f32 * dot
     }
@@ -545,13 +535,9 @@ mod tests {
         let capacity_factor = 1.0_f32;
 
         let router = ExpertChoiceRouter::new(num_experts, hidden_size, capacity_factor);
-        let hidden: Vec<f32> = (0..seq_len * hidden_size)
-            .map(|i| (i as f32) * 0.01)
-            .collect();
+        let hidden: Vec<f32> = (0..seq_len * hidden_size).map(|i| (i as f32) * 0.01).collect();
 
-        let assignment = router
-            .route(&hidden, seq_len, hidden_size)
-            .expect("route should succeed");
+        let assignment = router.route(&hidden, seq_len, hidden_size).expect("route should succeed");
 
         let expected_capacity =
             ((capacity_factor * seq_len as f32 / num_experts as f32).floor() as usize).max(1);
@@ -576,13 +562,14 @@ mod tests {
         let router = ExpertChoiceRouter::new(num_experts, hidden_size, 1.0);
         let hidden: Vec<f32> = (0..seq_len * hidden_size).map(|i| i as f32 * 0.1).collect();
 
-        let assignment = router
-            .route(&hidden, seq_len, hidden_size)
-            .expect("route ok");
+        let assignment = router.route(&hidden, seq_len, hidden_size).expect("route ok");
 
         // All expert slots are filled — none is empty.
         for tokens in &assignment.expert_token_idx {
-            assert!(!tokens.is_empty(), "each expert must have at least one token");
+            assert!(
+                !tokens.is_empty(),
+                "each expert must have at least one token"
+            );
         }
     }
 
@@ -594,9 +581,7 @@ mod tests {
         let router = ExpertChoiceRouter::new(num_experts, hidden_size, 1.0);
         let hidden: Vec<f32> = (0..seq_len * hidden_size).map(|i| i as f32 * 0.05).collect();
 
-        let assignment = router
-            .route(&hidden, seq_len, hidden_size)
-            .expect("route ok");
+        let assignment = router.route(&hidden, seq_len, hidden_size).expect("route ok");
 
         for tokens in &assignment.expert_token_idx {
             for &t in tokens {
@@ -652,6 +637,7 @@ mod tests {
     fn test_hash_router_consistency() {
         // Same token id must always map to the same expert.
         let router = HashRouter::new(8);
+        assert_eq!(router.route_batch(&[42])[0], HashRouter::route_token(42, 8));
         let token_id: u32 = 42;
         let first = HashRouter::route_token(token_id, 8);
         for _ in 0..100 {
@@ -715,9 +701,7 @@ mod tests {
         let router = SwitchTransformerRouter::new(num_experts, hidden_size, num_experts as f32);
 
         let hidden: Vec<f32> = (0..seq_len * hidden_size).map(|i| i as f32 * 0.01).collect();
-        let assignment = router
-            .route(&hidden, seq_len, hidden_size)
-            .expect("route ok");
+        let assignment = router.route(&hidden, seq_len, hidden_size).expect("route ok");
 
         assert_eq!(
             assignment.drop_rate(),
@@ -736,9 +720,7 @@ mod tests {
         let router = SwitchTransformerRouter::new(num_experts, hidden_size, 0.5);
 
         let hidden: Vec<f32> = (0..seq_len * hidden_size).map(|i| i as f32 * 0.05).collect();
-        let assignment = router
-            .route(&hidden, seq_len, hidden_size)
-            .expect("route ok");
+        let assignment = router.route(&hidden, seq_len, hidden_size).expect("route ok");
 
         // Total tokens = seq_len; total capacity = num_experts * 1 = 8 < 16 → some dropped
         let total_capacity: usize = assignment.expert_load.iter().sum();
@@ -765,10 +747,7 @@ mod tests {
 
         // f = [0.5, 0.5], P = [0.5, 0.5]
         // loss = 2 * (0.5*0.5 + 0.5*0.5) = 2 * 0.5 = 1.0
-        assert!(
-            (loss - 1.0).abs() < 1e-5,
-            "expected loss ≈ 1.0, got {loss}"
-        );
+        assert!((loss - 1.0).abs() < 1e-5, "expected loss ≈ 1.0, got {loss}");
     }
 
     #[test]
@@ -779,10 +758,7 @@ mod tests {
             expert_load: vec![2, 1],
         };
         let dr = assignment.drop_rate();
-        assert!(
-            (dr - 0.4).abs() < 1e-5,
-            "expected drop rate 0.4, got {dr}"
-        );
+        assert!((dr - 0.4).abs() < 1e-5, "expected drop rate 0.4, got {dr}");
     }
 
     // ── MoeRoutingError Display ─────────────────────────────────────────────

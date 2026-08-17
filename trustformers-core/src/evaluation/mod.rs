@@ -1,10 +1,14 @@
 // Evaluation framework for transformer models
 pub mod benchmarks;
+/// Reading real benchmark datasets (GLUE TSV, SuperGLUE/HellaSwag/HumanEval
+/// JSONL, MMLU CSV) from disk.
+pub mod dataset_files;
 pub mod datasets;
 pub mod harness;
 pub mod metrics;
 
 pub use benchmarks::*;
+pub use dataset_files::{DatasetSchema, LabelledExample};
 pub use datasets::*;
 pub use harness::*;
 pub use metrics::*;
@@ -121,6 +125,13 @@ pub struct EvaluationConfig {
     pub output_predictions: bool,
     pub save_results: bool,
     pub output_dir: Option<String>,
+    /// Root directory holding the benchmark data files.
+    ///
+    /// Required by every standard-benchmark evaluator: a GLUE, SuperGLUE, MMLU,
+    /// HellaSwag or HumanEval score is only meaningful when it was measured on
+    /// that benchmark's own data, so the evaluators error out when this is
+    /// `None` rather than scoring the model on generated text.
+    pub dataset_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for EvaluationConfig {
@@ -133,7 +144,30 @@ impl Default for EvaluationConfig {
             output_predictions: false,
             save_results: false,
             output_dir: None,
+            dataset_dir: None,
         }
+    }
+}
+
+impl EvaluationConfig {
+    /// Point the standard-benchmark evaluators at a dataset root.
+    pub fn with_dataset_dir(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.dataset_dir = Some(path.into());
+        self
+    }
+
+    /// The configured dataset root, or an error explaining that benchmark data
+    /// is required.
+    pub fn require_dataset_dir(&self, benchmark: &str) -> Result<&std::path::Path> {
+        self.dataset_dir.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} evaluation requires real benchmark data: set \
+                 EvaluationConfig::dataset_dir to the directory holding the {} files. No score \
+                 is produced from synthetic inputs.",
+                benchmark,
+                benchmark
+            )
+        })
     }
 }
 

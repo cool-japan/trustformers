@@ -1,17 +1,33 @@
-//! Upload models and datasets to HuggingFace Hub.
+//! Upload models and datasets to the HuggingFace Hub.
 //!
-//! This module provides functionality for uploading model files, datasets,
-//! and entire directories to the HuggingFace Hub API.
+//! `HubUploader` speaks the real Hub upload protocol (repo existence check,
+//! repo creation, and the NDJSON commit API) via `reqwest`, behind the
+//! `hub` feature — see [`api`] for the wire-level detail. Without a token,
+//! every operation fails fast with [`HubError::MissingCredentials`] /
+//! [`TrustformersError::Hub`] instead of proceeding. Without the `hub`
+//! feature (no networking compiled in), every operation fails with
+//! [`HubError::FeatureUnavailable`] instead of a fabricated success.
+//!
+//! An earlier revision of this module never contacted the Hub at all: every
+//! upload/create/delete method validated its inputs, logged
+//! `"(simulated)"`, and returned a synthetic [`UploadResult`] with a
+//! commit URL built from the all-zeros SHA `"0000...0000"` — indistinguishable
+//! from a real success to a caller that didn't read the log line. If a dry
+//! run — validate everything, touch no network — is what's wanted, set
+//! [`UploadConfig::dry_run`] explicitly; [`UploadResult::dry_run`] on the
+//! returned value says which one happened.
+
+mod api;
 
 use crate::error::{Result, TrustformersError};
+use api::{CommitFile, LFS_INLINE_THRESHOLD_BYTES};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
 const HF_HUB_URL: &str = "https://huggingface.co";
-const HF_API_URL: &str = "https://huggingface.co/api";
 
 /// Repository type on HuggingFace Hub
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RepoType {
     /// A model repository (default)
     #[default]
@@ -50,6 +66,14 @@ pub struct UploadConfig {
     pub create_if_missing: bool,
     /// Whether the repository should be private
     pub private: bool,
+    /// Base API endpoint. Defaults to the real Hugging Face Hub
+    /// (`https://huggingface.co`); override to point at a local mock server
+    /// in tests.
+    pub base_url: String,
+    /// When `true`, validate the token/repo id/files and report what *would*
+    /// be uploaded without making any network request.
+    /// [`UploadResult::dry_run`] is `true` on the result this produces.
+    pub dry_run: bool,
 }
 
 impl Default for UploadConfig {
@@ -62,6 +86,8 @@ impl Default for UploadConfig {
             commit_message: "Upload via TrustformeRS".to_string(),
             create_if_missing: true,
             private: false,
+            base_url: HF_HUB_URL.to_string(),
+            dry_run: false,
         }
     }
 }
@@ -85,33 +111,23 @@ impl UploadFile {
     }
 }
 
-/// Result of a successful upload operation
-#[derive(Debug, Clone)]
+/// Result of an upload operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UploadResult {
-    /// Repository ID where files were uploaded
+    /// Repository ID where files were (or, in a dry run, would be) uploaded
     pub repo_id: String,
-    /// Revision/branch that was updated
+    /// Revision/branch that was (or would be) updated
     pub revision: String,
-    /// URL to the commit on the Hub
-    pub commit_url: String,
-    /// List of repo paths that were uploaded
+    /// URL to the commit on the Hub. `None` in a dry run, or if the server's
+    /// response didn't include one.
+    pub commit_url: Option<String>,
+    /// Commit SHA, when the server returned one.
+    pub commit_oid: Option<String>,
+    /// List of repo paths that were (or, in a dry run, would be) uploaded
     pub files_uploaded: Vec<String>,
-}
-
-impl UploadResult {
-    /// Construct a simulated result (used in test environments and dry runs)
-    fn simulated(config: &UploadConfig, files: &[String]) -> Self {
-        let commit_url = format!(
-            "{}/{}/commit/{}",
-            HF_HUB_URL, config.repo_id, "0000000000000000000000000000000000000000"
-        );
-        Self {
-            repo_id: config.repo_id.clone(),
-            revision: config.revision.clone(),
-            commit_url,
-            files_uploaded: files.to_vec(),
-        }
-    }
+    /// `true` if this result came from [`UploadConfig::dry_run`] rather than
+    /// an actual upload.
+    pub dry_run: bool,
 }
 
 /// Upload client for HuggingFace Hub
@@ -125,16 +141,15 @@ impl HubUploader {
         Self { config }
     }
 
-    /// Validate the upload configuration
+    /// Validate the upload configuration.
+    ///
+    /// An empty token is a [`TrustformersError::Hub`] "missing credentials"
+    /// error, not a generic `InvalidInput` — callers can distinguish "you
+    /// never gave me a token" from "the server rejected your token" (the
+    /// latter surfaces as a `Hub` error from the network call itself).
     pub fn validate(&self) -> Result<()> {
         if self.config.token.is_empty() {
-            return Err(TrustformersError::InvalidInput {
-                message: "Hub API token cannot be empty".to_string(),
-                parameter: Some("token".to_string()),
-                expected: None,
-                received: None,
-                suggestion: None,
-            });
+            return Err(missing_credentials_error(&self.config.repo_id));
         }
         if self.config.repo_id.is_empty() {
             return Err(TrustformersError::InvalidInput {
@@ -166,86 +181,58 @@ impl HubUploader {
         Ok(())
     }
 
-    /// Check if the repository exists on the Hub.
-    ///
-    /// In test environments or when the network is unavailable, returns `Ok(false)`.
+    /// Check whether the repository exists on the Hub
+    /// (`GET /api/{repo_type}s/{repo_id}`).
     pub fn repo_exists(&self) -> Result<bool> {
         self.validate()?;
-        // In production, this would call the HF API:
-        // GET /api/{repo_type}s/{repo_id}
-        // For now we simulate: assume repo does not exist for dry-run safety
-        debug!(
-            repo_id = %self.config.repo_id,
-            repo_type = %self.config.repo_type.as_str(),
-            "Checking if repo exists (simulated)"
-        );
-        Ok(false)
+        if self.config.dry_run {
+            debug!(repo_id = %self.config.repo_id, "repo_exists: dry run, skipping network call");
+            return Ok(false);
+        }
+        api::run_blocking(api::repo_exists(
+            &self.config.base_url,
+            self.config.repo_type,
+            &self.config.repo_id,
+            &self.config.token,
+        ))
+        .map_err(|e| hub_error_to_trustformers(e, &self.config.repo_id))
     }
 
-    /// Create a repository on the Hub.
+    /// Create a repository on the Hub (`POST /api/repos/create`).
     ///
-    /// Returns the repository URL. In test/dry-run mode, returns a simulated URL.
+    /// Returns the repository URL.
     pub fn create_repo(&self) -> Result<String> {
         self.validate()?;
-        let repo_url = format!("{}/{}", HF_HUB_URL, self.config.repo_id);
-        info!(
-            repo_id = %self.config.repo_id,
-            repo_type = %self.config.repo_type.as_str(),
-            private = self.config.private,
-            "Creating repository (simulated)"
-        );
-        // In production: POST /api/repos/create with JSON body
-        Ok(repo_url)
+        if self.config.dry_run {
+            let url = format!("{}/{}", self.config.base_url, self.config.repo_id);
+            info!(repo_id = %self.config.repo_id, "create_repo: dry run, not contacting the Hub");
+            return Ok(url);
+        }
+        api::run_blocking(api::create_repo(
+            &self.config.base_url,
+            self.config.repo_type,
+            &self.config.repo_id,
+            self.config.private,
+            &self.config.token,
+        ))
+        .map_err(|e| hub_error_to_trustformers(e, &self.config.repo_id))
     }
 
-    /// Upload a single file to the Hub.
-    ///
-    /// In test environments, this validates the file exists and simulates the upload.
+    /// Upload a single file to the Hub as a one-file commit.
     pub fn upload_file(&self, file: &UploadFile) -> Result<UploadResult> {
-        self.validate()?;
-
-        if !file.local_path.exists() {
-            return Err(TrustformersError::Io {
-                message: format!("File not found: {}", file.local_path.display()),
-                path: Some(file.local_path.display().to_string()),
-                suggestion: Some("Ensure the file exists before uploading".to_string()),
-            });
-        }
-
-        if file.repo_path.is_empty() {
-            return Err(TrustformersError::InvalidInput {
-                message: "Repository path cannot be empty".to_string(),
-                parameter: Some("repo_path".to_string()),
-                expected: None,
-                received: None,
-                suggestion: None,
-            });
-        }
-
-        let file_size = file
-            .local_path
-            .metadata()
-            .map_err(|e| TrustformersError::Io {
-                message: format!("Cannot read file metadata: {e}"),
-                path: Some(file.local_path.display().to_string()),
-                suggestion: None,
-            })?
-            .len();
-
-        info!(
-            local_path = %file.local_path.display(),
-            repo_path = %file.repo_path,
-            file_size_bytes = file_size,
-            "Uploading file to Hub (simulated)"
-        );
-
-        Ok(UploadResult::simulated(
-            &self.config,
-            std::slice::from_ref(&file.repo_path),
-        ))
+        self.upload_files(std::slice::from_ref(file))
     }
 
     /// Upload multiple files in a single commit.
+    ///
+    /// Creates the repository first if [`UploadConfig::create_if_missing`]
+    /// is set and it doesn't already exist. Any file at or above
+    /// [`api::LFS_INLINE_THRESHOLD_BYTES`] is refused *before* any network
+    /// request — this module doesn't implement the real Git-LFS object
+    /// upload (a separate preupload + batch-upload exchange), so silently
+    /// either truncating it, inlining a huge base64 blob, or fabricating an
+    /// `lfsFile` pointer to bytes that were never actually sent anywhere are
+    /// all worse than a clear, immediate error.
     pub fn upload_files(&self, files: &[UploadFile]) -> Result<UploadResult> {
         self.validate()?;
 
@@ -260,7 +247,7 @@ impl HubUploader {
         }
 
         let mut repo_paths = Vec::with_capacity(files.len());
-        let mut total_bytes: u64 = 0;
+        let mut commit_files = Vec::with_capacity(files.len());
 
         for file in files {
             if !file.local_path.exists() {
@@ -279,26 +266,77 @@ impl HubUploader {
                     suggestion: None,
                 });
             }
-            let size = file
-                .local_path
-                .metadata()
-                .map_err(|e| TrustformersError::Io {
-                    message: format!("Cannot read file metadata: {e}"),
-                    path: Some(file.local_path.display().to_string()),
-                    suggestion: None,
-                })?
-                .len();
-            total_bytes += size;
+
+            let content = std::fs::read(&file.local_path).map_err(|e| TrustformersError::Io {
+                message: format!("Cannot read file: {e}"),
+                path: Some(file.local_path.display().to_string()),
+                suggestion: None,
+            })?;
+            if content.len() as u64 >= LFS_INLINE_THRESHOLD_BYTES {
+                return Err(hub_error_to_trustformers(
+                    HubError::LfsRequired {
+                        path: file.repo_path.clone(),
+                        size: content.len() as u64,
+                    },
+                    &self.config.repo_id,
+                ));
+            }
+
             repo_paths.push(file.repo_path.clone());
+            commit_files.push(CommitFile {
+                repo_path: file.repo_path.clone(),
+                content,
+            });
         }
+
+        if self.config.dry_run {
+            info!(
+                file_count = files.len(),
+                repo_id = %self.config.repo_id,
+                "upload_files: dry run, not contacting the Hub"
+            );
+            return Ok(UploadResult {
+                repo_id: self.config.repo_id.clone(),
+                revision: self.config.revision.clone(),
+                commit_url: None,
+                commit_oid: None,
+                files_uploaded: repo_paths,
+                dry_run: true,
+            });
+        }
+
+        if self.config.create_if_missing && !self.repo_exists()? {
+            info!(repo_id = %self.config.repo_id, "Repository does not exist yet; creating it");
+            self.create_repo()?;
+        }
+
+        let outcome = api::run_blocking(api::commit(
+            &self.config.base_url,
+            self.config.repo_type,
+            &self.config.repo_id,
+            &self.config.revision,
+            &self.config.commit_message,
+            &commit_files,
+            &[],
+            &self.config.token,
+        ))
+        .map_err(|e| hub_error_to_trustformers(e, &self.config.repo_id))?;
 
         info!(
             file_count = files.len(),
-            total_bytes = total_bytes,
-            "Uploading files to Hub (simulated)"
+            repo_id = %self.config.repo_id,
+            commit_url = ?outcome.commit_url,
+            "Uploaded files to Hub"
         );
 
-        Ok(UploadResult::simulated(&self.config, &repo_paths))
+        Ok(UploadResult {
+            repo_id: self.config.repo_id.clone(),
+            revision: self.config.revision.clone(),
+            commit_url: outcome.commit_url,
+            commit_oid: outcome.commit_oid,
+            files_uploaded: repo_paths,
+            dry_run: false,
+        })
     }
 
     /// Upload an entire directory to the Hub.
@@ -323,15 +361,20 @@ impl HubUploader {
                 dir = %local_dir.display(),
                 "Directory is empty; nothing to upload"
             );
-            return Ok(UploadResult::simulated(&self.config, &[]));
+            return Ok(UploadResult {
+                repo_id: self.config.repo_id.clone(),
+                revision: self.config.revision.clone(),
+                commit_url: None,
+                commit_oid: None,
+                files_uploaded: vec![],
+                dry_run: self.config.dry_run,
+            });
         }
 
         self.upload_files(&files)
     }
 
-    /// Delete a file from the repository.
-    ///
-    /// In test/dry-run mode, logs the intent without making an API call.
+    /// Delete a file from the repository (a commit with one `deletedFile` op).
     pub fn delete_file(&self, repo_path: &str) -> Result<()> {
         self.validate()?;
 
@@ -345,11 +388,24 @@ impl HubUploader {
             });
         }
 
-        info!(
-            repo_path = %repo_path,
-            repo_id = %self.config.repo_id,
-            "Deleting file from Hub (simulated)"
-        );
+        if self.config.dry_run {
+            info!(repo_path = %repo_path, repo_id = %self.config.repo_id, "delete_file: dry run, not contacting the Hub");
+            return Ok(());
+        }
+
+        api::run_blocking(api::commit(
+            &self.config.base_url,
+            self.config.repo_type,
+            &self.config.repo_id,
+            &self.config.revision,
+            &format!("Delete {repo_path}"),
+            &[],
+            std::slice::from_ref(&repo_path.to_string()),
+            &self.config.token,
+        ))
+        .map_err(|e| hub_error_to_trustformers(e, &self.config.repo_id))?;
+
+        info!(repo_path = %repo_path, repo_id = %self.config.repo_id, "Deleted file from Hub");
         Ok(())
     }
 }
@@ -414,9 +470,11 @@ pub struct HubUploaderBuilder {
 impl HubUploaderBuilder {
     /// Start building with required fields: token and repo_id
     pub fn new(token: impl Into<String>, repo_id: impl Into<String>) -> Self {
-        let mut config = UploadConfig::default();
-        config.token = token.into();
-        config.repo_id = repo_id.into();
+        let config = UploadConfig {
+            token: token.into(),
+            repo_id: repo_id.into(),
+            ..Default::default()
+        };
         Self { config }
     }
 
@@ -450,6 +508,18 @@ impl HubUploaderBuilder {
         self
     }
 
+    /// Override the base API endpoint (for pointing at a local mock server).
+    pub fn base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.config.base_url = base_url.into();
+        self
+    }
+
+    /// Set dry-run mode: validate everything, touch no network.
+    pub fn dry_run(mut self, dry_run: bool) -> Self {
+        self.config.dry_run = dry_run;
+        self
+    }
+
     /// Build the `HubUploader`, validating the configuration first
     pub fn build(self) -> Result<HubUploader> {
         let uploader = HubUploader::new(self.config);
@@ -463,8 +533,11 @@ impl HubUploaderBuilder {
 /// Dedicated error type for Hub upload/download operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HubError {
-    /// The API token is missing or invalid.
+    /// The Hub rejected the credentials that were sent (HTTP 401/403).
     Unauthorized { message: String },
+    /// No API token was supplied at all — distinct from `Unauthorized`
+    /// (which means a token *was* sent and the server rejected it).
+    MissingCredentials { message: String },
     /// A requested resource was not found on the Hub.
     NotFound {
         repo_id: String,
@@ -481,12 +554,18 @@ pub enum HubError {
     InvalidInput { message: String },
     /// Network connectivity issue.
     Network { message: String },
+    /// The `hub` feature (networking) is not compiled in.
+    FeatureUnavailable { message: String },
+    /// A file is too large to inline as base64 in a commit and would need
+    /// real Git-LFS object storage, which this module does not implement.
+    LfsRequired { path: String, size: u64 },
 }
 
 impl std::fmt::Display for HubError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             HubError::Unauthorized { message } => write!(f, "Unauthorized: {message}"),
+            HubError::MissingCredentials { message } => write!(f, "Missing credentials: {message}"),
             HubError::NotFound { repo_id, path } => {
                 if let Some(p) = path {
                     write!(f, "Not found: {repo_id}/{p}")
@@ -509,6 +588,15 @@ impl std::fmt::Display for HubError {
             },
             HubError::InvalidInput { message } => write!(f, "Invalid input: {message}"),
             HubError::Network { message } => write!(f, "Network error: {message}"),
+            HubError::FeatureUnavailable { message } => write!(f, "Feature unavailable: {message}"),
+            HubError::LfsRequired { path, size } => {
+                write!(
+                    f,
+                    "'{path}' is {size} bytes, at or above the {}-byte inline-upload threshold, \
+                     and would require real Git-LFS object storage, which is not implemented",
+                    LFS_INLINE_THRESHOLD_BYTES
+                )
+            },
         }
     }
 }
@@ -521,6 +609,83 @@ impl From<TrustformersError> for HubError {
             status_code: 0,
             message: e.to_string(),
         }
+    }
+}
+
+/// Map a [`HubError`] to the crate-wide [`TrustformersError`], carrying
+/// `repo_id`/`model_id` context along for the `Hub` variants.
+fn hub_error_to_trustformers(error: HubError, repo_id: &str) -> TrustformersError {
+    match error {
+        HubError::MissingCredentials { .. } => missing_credentials_error(repo_id),
+        HubError::Unauthorized { message } => TrustformersError::Hub {
+            message,
+            model_id: repo_id.to_string(),
+            endpoint: None,
+            suggestion: Some("Check that the API token is valid and has write access".to_string()),
+            recovery_actions: vec![],
+        },
+        HubError::FeatureUnavailable { message } => TrustformersError::Hub {
+            message,
+            model_id: repo_id.to_string(),
+            endpoint: None,
+            suggestion: Some("Rebuild with `--features hub`".to_string()),
+            recovery_actions: vec![],
+        },
+        HubError::LfsRequired { path, size } => TrustformersError::Hub {
+            message: format!(
+                "'{path}' is {size} bytes and would require real Git-LFS object storage, which \
+                 is not implemented"
+            ),
+            model_id: repo_id.to_string(),
+            endpoint: None,
+            suggestion: Some("Upload large files through the Hub web UI or the CLI's `huggingface-cli upload-large-folder` until LFS object upload is implemented here".to_string()),
+            recovery_actions: vec![],
+        },
+        HubError::NotFound { repo_id, path } => TrustformersError::Hub {
+            message: format!("Not found: {repo_id}{}", path.map(|p| format!("/{p}")).unwrap_or_default()),
+            model_id: repo_id,
+            endpoint: None,
+            suggestion: None,
+            recovery_actions: vec![],
+        },
+        HubError::RequestFailed { status_code, message } => TrustformersError::Hub {
+            message: format!("HTTP {status_code}: {message}"),
+            model_id: repo_id.to_string(),
+            endpoint: None,
+            suggestion: None,
+            recovery_actions: vec![],
+        },
+        HubError::Network { message } => TrustformersError::Hub {
+            message,
+            model_id: repo_id.to_string(),
+            endpoint: None,
+            suggestion: Some("Check network connectivity".to_string()),
+            recovery_actions: vec![],
+        },
+        HubError::Io { message, path } => TrustformersError::Io {
+            message,
+            path,
+            suggestion: None,
+        },
+        HubError::InvalidInput { message } => TrustformersError::InvalidInput {
+            message,
+            parameter: None,
+            expected: None,
+            received: None,
+            suggestion: None,
+        },
+    }
+}
+
+fn missing_credentials_error(repo_id: &str) -> TrustformersError {
+    TrustformersError::Hub {
+        message: "Missing credentials: a Hub API token is required to upload".to_string(),
+        model_id: repo_id.to_string(),
+        endpoint: None,
+        suggestion: Some(
+            "Set `UploadConfig::token` (e.g. from the `HF_TOKEN` environment variable)".to_string(),
+        ),
+        recovery_actions: vec![],
     }
 }
 
@@ -539,6 +704,10 @@ pub struct HubUploadConfig {
     pub private: bool,
     /// Branch/revision to upload to. `None` defaults to "main".
     pub revision: Option<String>,
+    /// Base API endpoint override (for tests).
+    pub base_url: Option<String>,
+    /// Dry-run mode (see [`UploadConfig::dry_run`]).
+    pub dry_run: bool,
 }
 
 impl HubUploadConfig {
@@ -554,6 +723,8 @@ impl HubUploadConfig {
             commit_message: commit_message.into(),
             private: false,
             revision: None,
+            base_url: None,
+            dry_run: false,
         }
     }
 
@@ -569,6 +740,18 @@ impl HubUploadConfig {
         self
     }
 
+    /// Override the base API endpoint (for pointing at a local mock server).
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = Some(base_url.into());
+        self
+    }
+
+    /// Enable dry-run mode.
+    pub fn with_dry_run(mut self, dry_run: bool) -> Self {
+        self.dry_run = dry_run;
+        self
+    }
+
     /// Effective revision (defaults to "main").
     pub fn effective_revision(&self) -> &str {
         self.revision.as_deref().unwrap_or("main")
@@ -576,7 +759,7 @@ impl HubUploadConfig {
 
     fn validate(&self) -> std::result::Result<(), HubError> {
         if self.token.is_empty() {
-            return Err(HubError::Unauthorized {
+            return Err(HubError::MissingCredentials {
                 message: "API token cannot be empty".to_string(),
             });
         }
@@ -674,8 +857,10 @@ pub fn sha256_file(path: &Path) -> std::result::Result<String, HubError> {
 pub struct SingleFileUploadResult {
     /// Remote URL where the file can be accessed.
     pub remote_url: String,
-    /// Commit URL on the Hub.
-    pub commit_url: String,
+    /// Commit URL on the Hub, when the server returned one.
+    pub commit_url: Option<String>,
+    /// Commit SHA, when the server returned one.
+    pub commit_oid: Option<String>,
     /// Size of the uploaded file in bytes.
     pub file_size: u64,
     /// SHA-256 hash of the file content.
@@ -697,6 +882,8 @@ impl HubUploader {
             commit_message: cfg.commit_message,
             create_if_missing: true,
             private: cfg.private,
+            base_url: cfg.base_url.unwrap_or_else(|| HF_HUB_URL.to_string()),
+            dry_run: cfg.dry_run,
         };
         Ok(Self::new(upload_config))
     }
@@ -727,18 +914,18 @@ impl HubUploader {
         let file_size = metadata.len();
         let sha256 = sha256_file(path)?;
 
+        let result =
+            self.upload_file(&UploadFile::new(path, remote_path)).map_err(HubError::from)?;
+
         let remote_url = format!(
             "{}/{}/blob/{}/{}",
-            HF_HUB_URL, self.config.repo_id, self.config.revision, remote_path
-        );
-        let commit_url = format!(
-            "{}/{}/commit/{}",
-            HF_HUB_URL, self.config.repo_id, "0000000000000000000000000000000000000000"
+            self.config.base_url, self.config.repo_id, self.config.revision, remote_path
         );
 
         Ok(SingleFileUploadResult {
             remote_url,
-            commit_url,
+            commit_url: result.commit_url,
+            commit_oid: result.commit_oid,
             file_size,
             sha256,
         })
@@ -805,20 +992,12 @@ impl HubUploader {
         let mut cfg = self.config.clone();
         cfg.repo_type = repo_type;
         let tmp = HubUploader::new(cfg);
-        tmp.validate().map_err(|e| HubError::RequestFailed {
-            status_code: 0,
-            message: e.to_string(),
-        })?;
-        let url = format!("{}/{}", HF_HUB_URL, self.config.repo_id);
-        Ok(url)
+        tmp.create_repo().map_err(HubError::from)
     }
 
     /// Delete a file from the Hub repository.
     pub fn delete_remote_file(&self, remote_path: &str) -> std::result::Result<(), HubError> {
-        self.delete_file(remote_path).map_err(|e| HubError::RequestFailed {
-            status_code: 0,
-            message: e.to_string(),
-        })
+        self.delete_file(remote_path).map_err(HubError::from)
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────────
@@ -880,515 +1059,4 @@ fn collect_files_recursive_hub(
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-
-    fn temp_dir() -> PathBuf {
-        std::env::temp_dir()
-    }
-
-    fn make_test_file(dir: &Path, name: &str, content: &str) -> PathBuf {
-        let path = dir.join(name);
-        fs::write(&path, content).expect("Failed to write test file");
-        path
-    }
-
-    fn valid_config() -> UploadConfig {
-        UploadConfig {
-            token: "hf_test_token".to_string(),
-            repo_id: "testuser/test-model".to_string(),
-            repo_type: RepoType::Model,
-            revision: "main".to_string(),
-            commit_message: "Test upload".to_string(),
-            create_if_missing: true,
-            private: false,
-        }
-    }
-
-    #[test]
-    fn test_repo_type_as_str() {
-        assert_eq!(RepoType::Model.as_str(), "model");
-        assert_eq!(RepoType::Dataset.as_str(), "dataset");
-        assert_eq!(RepoType::Space.as_str(), "space");
-    }
-
-    #[test]
-    fn test_upload_config_default() {
-        let config = UploadConfig::default();
-        assert_eq!(config.revision, "main");
-        assert!(!config.private);
-        assert!(config.create_if_missing);
-        assert_eq!(config.repo_type, RepoType::Model);
-    }
-
-    #[test]
-    fn test_validate_empty_token() {
-        let mut config = valid_config();
-        config.token = String::new();
-        let uploader = HubUploader::new(config);
-        assert!(uploader.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_empty_repo_id() {
-        let mut config = valid_config();
-        config.repo_id = String::new();
-        let uploader = HubUploader::new(config);
-        assert!(uploader.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_repo_id_missing_slash() {
-        let mut config = valid_config();
-        config.repo_id = "no-slash-repo".to_string();
-        let uploader = HubUploader::new(config);
-        assert!(uploader.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_empty_revision() {
-        let mut config = valid_config();
-        config.revision = String::new();
-        let uploader = HubUploader::new(config);
-        assert!(uploader.validate().is_err());
-    }
-
-    #[test]
-    fn test_upload_file_not_found() {
-        let uploader = HubUploader::new(valid_config());
-        let file = UploadFile::new("/nonexistent/path/model.bin", "model.bin");
-        assert!(uploader.upload_file(&file).is_err());
-    }
-
-    #[test]
-    fn test_upload_file_success() {
-        let dir = temp_dir().join("trustformers_upload_test_file");
-        fs::create_dir_all(&dir).unwrap();
-        let path = make_test_file(&dir, "config.json", r#"{"model": "test"}"#);
-
-        let uploader = HubUploader::new(valid_config());
-        let file = UploadFile::new(path, "config.json");
-        let result = uploader.upload_file(&file).unwrap();
-
-        assert_eq!(result.repo_id, "testuser/test-model");
-        assert_eq!(result.revision, "main");
-        assert_eq!(result.files_uploaded, vec!["config.json"]);
-        assert!(result.commit_url.contains("testuser/test-model"));
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn test_upload_files_empty_list() {
-        let uploader = HubUploader::new(valid_config());
-        assert!(uploader.upload_files(&[]).is_err());
-    }
-
-    #[test]
-    fn test_upload_files_multiple() {
-        let dir = temp_dir().join("trustformers_upload_test_multi");
-        fs::create_dir_all(&dir).unwrap();
-        let path1 = make_test_file(&dir, "config.json", "{}");
-        let path2 = make_test_file(&dir, "model.safetensors", "weights");
-
-        let uploader = HubUploader::new(valid_config());
-        let files = vec![
-            UploadFile::new(path1, "config.json"),
-            UploadFile::new(path2, "model.safetensors"),
-        ];
-        let result = uploader.upload_files(&files).unwrap();
-
-        assert_eq!(result.files_uploaded.len(), 2);
-        assert!(result.files_uploaded.contains(&"config.json".to_string()));
-        assert!(result.files_uploaded.contains(&"model.safetensors".to_string()));
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn test_upload_directory() {
-        let base = temp_dir().join("trustformers_upload_test_dir");
-        fs::create_dir_all(&base).unwrap();
-        make_test_file(&base, "config.json", "{}");
-        make_test_file(&base, "tokenizer.json", "{}");
-
-        let uploader = HubUploader::new(valid_config());
-        let result = uploader.upload_directory(&base, "").unwrap();
-
-        assert_eq!(result.files_uploaded.len(), 2);
-
-        fs::remove_dir_all(&base).ok();
-    }
-
-    #[test]
-    fn test_upload_directory_with_prefix() {
-        let base = temp_dir().join("trustformers_upload_test_prefix");
-        fs::create_dir_all(&base).unwrap();
-        make_test_file(&base, "weights.bin", "binary");
-
-        let uploader = HubUploader::new(valid_config());
-        let result = uploader.upload_directory(&base, "models/v1").unwrap();
-
-        assert!(result.files_uploaded[0].starts_with("models/v1/"));
-
-        fs::remove_dir_all(&base).ok();
-    }
-
-    #[test]
-    fn test_upload_directory_not_a_dir() {
-        let dir = temp_dir().join("trustformers_upload_test_notdir");
-        fs::create_dir_all(&dir).unwrap();
-        let file = make_test_file(&dir, "file.txt", "content");
-
-        let uploader = HubUploader::new(valid_config());
-        assert!(uploader.upload_directory(&file, "").is_err());
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn test_delete_file_empty_path() {
-        let uploader = HubUploader::new(valid_config());
-        assert!(uploader.delete_file("").is_err());
-    }
-
-    #[test]
-    fn test_delete_file_success() {
-        let uploader = HubUploader::new(valid_config());
-        assert!(uploader.delete_file("model.bin").is_ok());
-    }
-
-    #[test]
-    fn test_repo_exists_simulated() {
-        let uploader = HubUploader::new(valid_config());
-        // Simulated: always returns false
-        assert!(!uploader.repo_exists().unwrap());
-    }
-
-    #[test]
-    fn test_create_repo_returns_url() {
-        let uploader = HubUploader::new(valid_config());
-        let url = uploader.create_repo().unwrap();
-        assert!(url.contains("testuser/test-model"));
-    }
-
-    #[test]
-    fn test_builder_missing_slash_in_repo_id() {
-        let result = HubUploaderBuilder::new("token", "noslash").build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_builder_success() {
-        let uploader = HubUploaderBuilder::new("hf_token", "user/repo")
-            .repo_type(RepoType::Dataset)
-            .commit_message("Initial upload")
-            .private(true)
-            .create_if_missing(false)
-            .revision("v1")
-            .build()
-            .unwrap();
-
-        assert_eq!(uploader.config.repo_type, RepoType::Dataset);
-        assert!(uploader.config.private);
-        assert!(!uploader.config.create_if_missing);
-        assert_eq!(uploader.config.revision, "v1");
-    }
-
-    #[test]
-    fn test_upload_file_empty_repo_path() {
-        let dir = temp_dir().join("trustformers_upload_empty_rpath");
-        fs::create_dir_all(&dir).unwrap();
-        let path = make_test_file(&dir, "x.bin", "data");
-
-        let uploader = HubUploader::new(valid_config());
-        let file = UploadFile::new(path, "");
-        assert!(uploader.upload_file(&file).is_err());
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn test_upload_result_simulated_structure() {
-        let config = valid_config();
-        let files = vec!["a.bin".to_string(), "b.json".to_string()];
-        let result = UploadResult::simulated(&config, &files);
-
-        assert_eq!(result.repo_id, "testuser/test-model");
-        assert_eq!(result.revision, "main");
-        assert!(result.commit_url.starts_with("https://huggingface.co/"));
-        assert_eq!(result.files_uploaded.len(), 2);
-    }
-
-    // ── New tests for HubError, HubUploadConfig, HubUploadProgress, sha256 ──
-
-    #[test]
-    fn test_hub_error_display_unauthorized() {
-        let e = HubError::Unauthorized {
-            message: "bad token".to_string(),
-        };
-        assert!(e.to_string().contains("Unauthorized"));
-        assert!(e.to_string().contains("bad token"));
-    }
-
-    #[test]
-    fn test_hub_error_display_not_found_with_path() {
-        let e = HubError::NotFound {
-            repo_id: "user/repo".to_string(),
-            path: Some("model.bin".to_string()),
-        };
-        assert!(e.to_string().contains("user/repo"));
-        assert!(e.to_string().contains("model.bin"));
-    }
-
-    #[test]
-    fn test_hub_error_display_not_found_without_path() {
-        let e = HubError::NotFound {
-            repo_id: "user/repo".to_string(),
-            path: None,
-        };
-        assert!(e.to_string().contains("user/repo"));
-    }
-
-    #[test]
-    fn test_hub_error_display_request_failed() {
-        let e = HubError::RequestFailed {
-            status_code: 403,
-            message: "forbidden".to_string(),
-        };
-        assert!(e.to_string().contains("403"));
-        assert!(e.to_string().contains("forbidden"));
-    }
-
-    #[test]
-    fn test_hub_upload_config_new() {
-        let cfg = HubUploadConfig::new("user/model", "tok", "init commit");
-        assert_eq!(cfg.repo_id, "user/model");
-        assert_eq!(cfg.token, "tok");
-        assert_eq!(cfg.commit_message, "init commit");
-        assert!(!cfg.private);
-        assert!(cfg.revision.is_none());
-        assert_eq!(cfg.effective_revision(), "main");
-    }
-
-    #[test]
-    fn test_hub_upload_config_with_revision() {
-        let cfg = HubUploadConfig::new("user/model", "tok", "msg").with_revision("v2");
-        assert_eq!(cfg.effective_revision(), "v2");
-    }
-
-    #[test]
-    fn test_hub_upload_config_validate_ok() {
-        let cfg = HubUploadConfig::new("user/model", "hf_token", "msg");
-        assert!(cfg.validate().is_ok());
-    }
-
-    #[test]
-    fn test_hub_upload_config_validate_empty_token() {
-        let cfg = HubUploadConfig::new("user/model", "", "msg");
-        let err = cfg.validate().unwrap_err();
-        assert!(matches!(err, HubError::Unauthorized { .. }));
-    }
-
-    #[test]
-    fn test_hub_upload_config_validate_missing_slash() {
-        let cfg = HubUploadConfig::new("noslash", "tok", "msg");
-        let err = cfg.validate().unwrap_err();
-        assert!(matches!(err, HubError::InvalidInput { .. }));
-    }
-
-    #[test]
-    fn test_hub_upload_progress_tracking() {
-        let mut progress = HubUploadProgress::new(3, 300);
-        assert_eq!(progress.fraction(), 0.0);
-        assert!(!progress.is_complete());
-
-        progress.record_file(100);
-        progress.record_file(100);
-        progress.record_file(100);
-
-        assert!((progress.fraction() - 1.0).abs() < 1e-9);
-        assert!(progress.is_complete());
-    }
-
-    #[test]
-    fn test_hub_upload_progress_zero_bytes() {
-        let progress = HubUploadProgress::new(0, 0);
-        assert_eq!(progress.fraction(), 1.0);
-    }
-
-    #[test]
-    fn test_hub_upload_progress_files_only() {
-        let mut progress = HubUploadProgress::new(2, 0);
-        progress.record_file(0);
-        assert!((progress.fraction() - 0.5).abs() < 1e-9);
-        assert!(!progress.is_complete());
-        progress.record_file(0);
-        assert!(progress.is_complete());
-    }
-
-    #[test]
-    fn test_sha256_deterministic() {
-        let data = b"hello, trustformers!";
-        let h1 = sha256(data);
-        let h2 = sha256(data);
-        assert_eq!(h1, h2);
-        // Real SHA-256 = 32 bytes = 64 hex chars.
-        assert_eq!(h1.len(), 64);
-        // Should be all hex characters.
-        assert!(h1.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn test_sha256_different_inputs() {
-        let h1 = sha256(b"foo");
-        let h2 = sha256(b"bar");
-        assert_ne!(h1, h2);
-    }
-
-    #[test]
-    fn test_sha256_known_vectors() {
-        // SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-        assert_eq!(
-            sha256(b""),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-        // SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
-        assert_eq!(
-            sha256(b"abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-        // Output is always 64 hex chars.
-        assert_eq!(sha256(b"hello").len(), 64);
-    }
-
-    #[test]
-    fn test_sha256_file() {
-        let dir = temp_dir().join("trustformers_sha256_test");
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("data.bin");
-        fs::write(&path, b"test file content for hashing").unwrap();
-
-        let hash = sha256_file(&path).unwrap();
-        assert_eq!(hash.len(), 64);
-        // Must be deterministic.
-        let hash2 = sha256_file(&path).unwrap();
-        assert_eq!(hash, hash2);
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn test_upload_file_path_success() {
-        let dir = temp_dir().join("trustformers_upload_path_test");
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("weights.bin");
-        fs::write(&path, b"fake weights data").unwrap();
-
-        let uploader = HubUploader::new(valid_config());
-        let result = uploader.upload_file_path(path.to_str().unwrap(), "weights.bin").unwrap();
-
-        assert_eq!(result.file_size, 17);
-        assert!(result.remote_url.contains("testuser/test-model"));
-        assert!(result.commit_url.contains("testuser/test-model"));
-        assert_eq!(result.sha256.len(), 64);
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn test_upload_file_path_not_found() {
-        let uploader = HubUploader::new(valid_config());
-        let err = uploader.upload_file_path("/nonexistent/path.bin", "path.bin").unwrap_err();
-        assert!(matches!(err, HubError::Io { .. }));
-    }
-
-    #[test]
-    fn test_upload_file_path_empty_remote() {
-        let dir = temp_dir().join("trustformers_upload_empty_remote");
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("x.bin");
-        fs::write(&path, b"x").unwrap();
-
-        let uploader = HubUploader::new(valid_config());
-        let err = uploader.upload_file_path(path.to_str().unwrap(), "").unwrap_err();
-        assert!(matches!(err, HubError::InvalidInput { .. }));
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn test_upload_model_directory() {
-        let dir = temp_dir().join("trustformers_upload_model_dir");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("config.json"), "{}").unwrap();
-        fs::write(dir.join("model.safetensors"), "weights").unwrap();
-        fs::write(dir.join("tokenizer.json"), "{}").unwrap();
-        // This should NOT be included in model upload.
-        fs::write(dir.join("notes.txt"), "ignore me").unwrap();
-
-        let uploader = HubUploader::new(valid_config());
-        let results = uploader.upload_model(dir.to_str().unwrap()).unwrap();
-
-        // config.json, model.safetensors, and tokenizer.json (ends in .json) should be included.
-        let names: Vec<_> = results.iter().map(|r| r.remote_url.clone()).collect();
-        assert!(results.iter().any(|r| r.remote_url.contains("config.json")));
-        assert!(results.iter().any(|r| r.remote_url.contains("model.safetensors")));
-        // notes.txt should not appear.
-        assert!(!names.iter().any(|u| u.contains("notes.txt")));
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn test_upload_tokenizer_directory() {
-        let dir = temp_dir().join("trustformers_upload_tok_dir");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("tokenizer.json"), "{}").unwrap();
-        fs::write(dir.join("tokenizer_config.json"), "{}").unwrap();
-        fs::write(dir.join("vocab.txt"), "hello\nworld").unwrap();
-        // This should NOT be included.
-        fs::write(dir.join("model.safetensors"), "weights").unwrap();
-
-        let uploader = HubUploader::new(valid_config());
-        let results = uploader.upload_tokenizer(dir.to_str().unwrap()).unwrap();
-
-        assert!(results.iter().any(|r| r.remote_url.contains("tokenizer.json")));
-        assert!(results.iter().any(|r| r.remote_url.contains("vocab.txt")));
-        // model.safetensors should NOT be uploaded by upload_tokenizer.
-        assert!(!results.iter().any(|r| r.remote_url.contains("model.safetensors")));
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn test_create_repo_typed() {
-        let uploader = HubUploader::new(valid_config());
-        let url = uploader.create_repo_typed(RepoType::Dataset).unwrap();
-        assert!(url.contains("testuser/test-model"));
-    }
-
-    #[test]
-    fn test_delete_remote_file() {
-        let uploader = HubUploader::new(valid_config());
-        assert!(uploader.delete_remote_file("model.bin").is_ok());
-    }
-
-    #[test]
-    fn test_from_hub_config() {
-        let cfg = HubUploadConfig::new("user/my-model", "hf_tok", "first upload")
-            .with_private(true)
-            .with_revision("dev");
-        let uploader = HubUploader::from_hub_config(cfg).unwrap();
-        assert_eq!(uploader.config.repo_id, "user/my-model");
-        assert!(uploader.config.private);
-        assert_eq!(uploader.config.revision, "dev");
-    }
-
-    #[test]
-    fn test_from_hub_config_validation_fail() {
-        let cfg = HubUploadConfig::new("no-slash", "tok", "msg");
-        assert!(HubUploader::from_hub_config(cfg).is_err());
-    }
-}
+mod tests;

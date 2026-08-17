@@ -1,7 +1,14 @@
 //! Parallel model weight loading for faster startup.
 //!
-//! Loads model weight chunks concurrently using a thread pool,
-//! reducing loading time by 2-4x for large models with many shards.
+//! Loads model weight chunks concurrently using a thread pool, reducing
+//! loading time for large models with many shards. Each shard is parsed for
+//! real: `.safetensors` headers are read and every tensor is sliced out of
+//! its own `data_offsets` range (memory-mapped for files at or above
+//! [`MMAP_THRESHOLD_BYTES`] when [`ParallelLoaderConfig::use_mmap`] is set);
+//! `.gguf` files go through `trustformers-models`' real `GGUFLoader`; legacy
+//! `.bin`/`.pt`/`.pth` PyTorch checkpoints go through `trustformers-core`'s
+//! real ZIP + pickle `PyTorchReader`. A file that doesn't parse as a real
+//! checkpoint in its format is a [`std::io::Error`], never a fabricated chunk.
 //!
 //! # Example
 //!
@@ -17,10 +24,14 @@
 use crate::error::TrustformersError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tracing::{debug, info, warn};
+use trustformers_core::traits::WeightReader as _;
+use trustformers_core::utils::weight_loading::PyTorchReader;
+use trustformers_models::{GGUFLoader, WeightLoader as _};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -417,6 +428,7 @@ impl ParallelWeightLoader {
         })?;
 
         let mut safetensor_files: Vec<PathBuf> = Vec::new();
+        let mut gguf_files: Vec<PathBuf> = Vec::new();
         let mut bin_files: Vec<PathBuf> = Vec::new();
 
         for entry in read_dir {
@@ -427,16 +439,23 @@ impl ParallelWeightLoader {
             })?;
             let path = entry.path();
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                match ext {
+                match ext.to_ascii_lowercase().as_str() {
                     "safetensors" => safetensor_files.push(path),
-                    "bin" => bin_files.push(path),
+                    "gguf" => gguf_files.push(path),
+                    "bin" | "pt" | "pth" => bin_files.push(path),
                     _ => {},
                 }
             }
         }
 
-        // Prefer safetensors; fall back to bin
-        let mut files = if !safetensor_files.is_empty() { safetensor_files } else { bin_files };
+        // Prefer safetensors, then GGUF, then legacy PyTorch checkpoints.
+        let mut files = if !safetensor_files.is_empty() {
+            safetensor_files
+        } else if !gguf_files.is_empty() {
+            gguf_files
+        } else {
+            bin_files
+        };
 
         // Sort for deterministic ordering
         files.sort();
@@ -449,49 +468,349 @@ impl ParallelWeightLoader {
 // File-level loading helper
 // ---------------------------------------------------------------------------
 
-/// Load a single weight file into a [`WeightChunk`].
-///
-/// Currently this is a stub that reads raw file bytes and associates them with
-/// a synthetic tensor name. A full implementation would parse the safetensors
-/// header to populate `dtype_map` and `shape_map`.
+/// Threshold above which `use_mmap` switches a safetensors file from a plain
+/// `std::fs::read` to a memory-mapped read, matching [`ParallelLoaderConfig::use_mmap`]'s
+/// documented "large files (>= 256 MiB)" behavior.
+const MMAP_THRESHOLD_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Owned or memory-mapped file bytes, so the safetensors header/tensor parsing
+/// below can work against a single `&[u8]` view regardless of which backing
+/// storage was used to read the file.
+enum FileBytes {
+    Mapped(memmap2::Mmap),
+    Owned(Vec<u8>),
+}
+
+impl std::ops::Deref for FileBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            FileBytes::Mapped(mapping) => &mapping[..],
+            FileBytes::Owned(bytes) => &bytes[..],
+        }
+    }
+}
+
+/// Read a file's bytes, memory-mapping it when `use_mmap` is set and the file
+/// is at least [`MMAP_THRESHOLD_BYTES`] large.
+fn read_file_bytes(path: &Path, use_mmap: bool) -> io::Result<FileBytes> {
+    let file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+
+    if use_mmap && len >= MMAP_THRESHOLD_BYTES {
+        // SAFETY: mirrors the same pattern used by
+        // `trustformers-models`' `MemoryMappedLoader` — the file is a
+        // checkpoint on local disk that is not expected to be mutated by
+        // another process while it is being loaded. The kernel guarantees the
+        // mapping stays valid for `file`'s lifetime; we drop `file` only after
+        // the mapping outlives the need for the raw handle.
+        let mapping = unsafe { memmap2::Mmap::map(&file) }
+            .map_err(|e| io::Error::new(e.kind(), format!("failed to mmap the file: {e}")))?;
+        Ok(FileBytes::Mapped(mapping))
+    } else {
+        drop(file);
+        Ok(FileBytes::Owned(std::fs::read(path)?))
+    }
+}
+
+fn invalid_data(path: &Path, message: impl std::fmt::Display) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("'{}': {message}", path.display()),
+    )
+}
+
+/// Load a single weight file into a [`WeightChunk`], dispatching on extension
+/// to a real parser for each supported format. Every tensor's `dtype_map` and
+/// `shape_map` entry reflects what was actually parsed from the file — never a
+/// placeholder — and `tensors` holds exactly that tensor's bytes, not the
+/// whole file.
 fn load_file_as_chunk(
     chunk_id: usize,
     path: &Path,
-    _use_mmap: bool,
-) -> Result<WeightChunk, std::io::Error> {
-    let bytes = std::fs::read(path)?;
-    let tensor_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string();
+    use_mmap: bool,
+) -> Result<WeightChunk, io::Error> {
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    match extension.as_str() {
+        "safetensors" => load_safetensors_chunk(chunk_id, path, use_mmap),
+        "gguf" => load_gguf_chunk(chunk_id, path),
+        "bin" | "pt" | "pth" => load_pytorch_chunk(chunk_id, path),
+        other => Err(invalid_data(
+            path,
+            format!(
+                "unsupported weight file extension '{other}'; expected .safetensors, .gguf, \
+                 .bin, .pt, or .pth"
+            ),
+        )),
+    }
+}
 
-    let mut tensors = HashMap::new();
-    let mut dtype_map = HashMap::new();
-    let mut shape_map = HashMap::new();
+/// One tensor's metadata as declared by a safetensors header, with `start`/`end`
+/// byte offsets relative to the start of the tensor-data section (i.e. as the
+/// header itself expresses `data_offsets`).
+struct SafetensorsEntry {
+    dtype: String,
+    shape: Vec<usize>,
+    start: usize,
+    end: usize,
+}
 
-    // Parse a minimal safetensors header if present to extract tensor metadata.
-    // Safetensors format: 8-byte little-endian header length, then JSON header.
-    if bytes.len() >= 8 {
-        if let Some(header_len) = parse_safetensors_header_len(&bytes) {
-            if let Some(names) = extract_safetensor_tensor_names(&bytes, header_len) {
-                for name in names {
-                    dtype_map.insert(name.clone(), "float32".to_string());
-                    shape_map.insert(name.clone(), vec![]);
-                    tensors.insert(name, bytes.clone());
-                }
-            } else {
-                // Fallback: store whole file under file name
-                dtype_map.insert(tensor_name.clone(), "unknown".to_string());
-                shape_map.insert(tensor_name.clone(), vec![]);
-                tensors.insert(tensor_name, bytes);
-            }
-        } else {
-            dtype_map.insert(tensor_name.clone(), "unknown".to_string());
-            shape_map.insert(tensor_name.clone(), vec![]);
-            tensors.insert(tensor_name, bytes);
+/// Byte size of one element of a safetensors dtype token, when known.
+///
+/// Returns `None` for unrecognized tokens so callers can skip the size
+/// cross-check rather than reject a file using a dtype newer than this list.
+fn safetensors_dtype_size(dtype: &str) -> Option<usize> {
+    match dtype {
+        "BOOL" | "U8" | "I8" | "F8_E5M2" | "F8_E4M3" => Some(1),
+        "I16" | "U16" | "F16" | "BF16" => Some(2),
+        "I32" | "U32" | "F32" => Some(4),
+        "I64" | "U64" | "F64" => Some(8),
+        _ => None,
+    }
+}
+
+/// Parse a safetensors file's header into `(data_start, entries)`, validating
+/// every tensor's declared byte range as it goes:
+///
+/// * `data_offsets` must be in-bounds for the file and `start <= end`;
+/// * when the dtype is recognized, `end - start` must equal
+///   `product(shape) * dtype_size` — a mismatch means the header is
+///   internally inconsistent (corrupt or hand-edited), not just unusual;
+/// * no two tensors may claim overlapping byte ranges.
+///
+/// Any violation is a parse error, never a truncated or best-effort chunk.
+fn parse_safetensors_entries(
+    bytes: &[u8],
+) -> Result<(usize, HashMap<String, SafetensorsEntry>), String> {
+    let header_len =
+        parse_safetensors_header_len(bytes).ok_or("missing or malformed safetensors header")?;
+    let data_start = 8 + header_len;
+    let data_len = bytes.len().saturating_sub(data_start);
+
+    let json_bytes = &bytes[8..data_start];
+    let json_str = std::str::from_utf8(json_bytes)
+        .map_err(|e| format!("safetensors header is not valid UTF-8: {e}"))?;
+    let value: serde_json::Value = serde_json::from_str(json_str)
+        .map_err(|e| format!("safetensors header is not valid JSON: {e}"))?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| "safetensors header is not a JSON object".to_string())?;
+
+    let mut entries = HashMap::with_capacity(obj.len());
+    for (name, entry) in obj {
+        if name == "__metadata__" {
+            continue;
         }
-    } else {
-        // File too small to have a safetensors header
-        dtype_map.insert(tensor_name.clone(), "unknown".to_string());
-        shape_map.insert(tensor_name.clone(), vec![]);
-        tensors.insert(tensor_name, bytes);
+        let entry_obj = entry
+            .as_object()
+            .ok_or_else(|| format!("tensor '{name}' header entry is not a JSON object"))?;
+
+        let dtype = entry_obj
+            .get("dtype")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("tensor '{name}' is missing a string 'dtype' field"))?
+            .to_string();
+
+        let shape_values = entry_obj
+            .get("shape")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| format!("tensor '{name}' is missing an array 'shape' field"))?;
+        let mut shape = Vec::with_capacity(shape_values.len());
+        for v in shape_values {
+            let dim = v
+                .as_u64()
+                .ok_or_else(|| format!("tensor '{name}' has a non-integer shape entry"))?;
+            shape.push(dim as usize);
+        }
+
+        let offsets = entry_obj
+            .get("data_offsets")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| format!("tensor '{name}' is missing a 'data_offsets' field"))?;
+        if offsets.len() != 2 {
+            return Err(format!(
+                "tensor '{name}' has a 'data_offsets' field with {} elements, expected 2",
+                offsets.len()
+            ));
+        }
+        let start = offsets[0]
+            .as_u64()
+            .ok_or_else(|| format!("tensor '{name}' has a non-integer data_offsets[0]"))?
+            as usize;
+        let end = offsets[1]
+            .as_u64()
+            .ok_or_else(|| format!("tensor '{name}' has a non-integer data_offsets[1]"))?
+            as usize;
+
+        if start > end {
+            return Err(format!(
+                "tensor '{name}' has data_offsets start ({start}) after end ({end})"
+            ));
+        }
+        if end > data_len {
+            return Err(format!(
+                "tensor '{name}' data_offsets end ({end}) exceeds the tensor data region \
+                 ({data_len} bytes)"
+            ));
+        }
+
+        if let Some(dtype_size) = safetensors_dtype_size(&dtype) {
+            let element_count: usize = shape.iter().product();
+            let expected_bytes = element_count * dtype_size;
+            let actual_bytes = end - start;
+            if expected_bytes != actual_bytes {
+                return Err(format!(
+                    "tensor '{name}' declares shape {shape:?} and dtype {dtype} \
+                     ({expected_bytes} bytes) but data_offsets span {actual_bytes} bytes"
+                ));
+            }
+        }
+
+        entries.insert(
+            name.clone(),
+            SafetensorsEntry {
+                dtype,
+                shape,
+                start,
+                end,
+            },
+        );
+    }
+
+    // Reject overlapping tensor regions: a well-formed writer never emits
+    // these, so an overlap means the header was corrupted or tampered with.
+    let mut spans: Vec<(usize, usize, &str)> =
+        entries.iter().map(|(n, e)| (e.start, e.end, n.as_str())).collect();
+    spans.sort_by_key(|(start, _, _)| *start);
+    for pair in spans.windows(2) {
+        let (_, prev_end, prev_name) = pair[0];
+        let (next_start, _, next_name) = pair[1];
+        if next_start < prev_end {
+            return Err(format!(
+                "tensors '{prev_name}' and '{next_name}' have overlapping data_offsets"
+            ));
+        }
+    }
+
+    Ok((data_start, entries))
+}
+
+/// Load a `.safetensors` file, slicing each tensor's own byte range out of the
+/// (possibly memory-mapped) file rather than cloning the whole file per tensor.
+fn load_safetensors_chunk(
+    chunk_id: usize,
+    path: &Path,
+    use_mmap: bool,
+) -> Result<WeightChunk, io::Error> {
+    let file_bytes = read_file_bytes(path, use_mmap)?;
+    let bytes: &[u8] = &file_bytes;
+
+    let (data_start, entries) =
+        parse_safetensors_entries(bytes).map_err(|msg| invalid_data(path, msg))?;
+    if entries.is_empty() {
+        return Err(invalid_data(path, "file contains no tensors"));
+    }
+
+    let mut tensors = HashMap::with_capacity(entries.len());
+    let mut dtype_map = HashMap::with_capacity(entries.len());
+    let mut shape_map = HashMap::with_capacity(entries.len());
+    for (name, entry) in entries {
+        let slice = &bytes[data_start + entry.start..data_start + entry.end];
+        tensors.insert(name.clone(), slice.to_vec());
+        dtype_map.insert(name.clone(), entry.dtype);
+        shape_map.insert(name, entry.shape);
+    }
+
+    Ok(WeightChunk {
+        chunk_id,
+        tensors,
+        dtype_map,
+        shape_map,
+    })
+}
+
+/// Pack an f32 tensor's values into little-endian raw bytes.
+fn f32_values_to_le_bytes(values: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(values.len() * 4);
+    for v in values {
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    bytes
+}
+
+/// Load a `.gguf` file via `trustformers-models`' real `GGUFLoader`, which
+/// parses the actual header/tensor-info table and dequantizes each tensor
+/// (F32, F16, or a ggml k-quant format) to f32. `dtype_map` records "F32"
+/// because that dequantized representation — not the on-disk quantization —
+/// is what ends up in `tensors`.
+fn load_gguf_chunk(chunk_id: usize, path: &Path) -> Result<WeightChunk, io::Error> {
+    let mut loader = GGUFLoader::new(path)
+        .map_err(|e| invalid_data(path, format!("failed to open GGUF file: {e}")))?;
+    let names = loader
+        .list_tensors()
+        .map_err(|e| invalid_data(path, format!("failed to list GGUF tensors: {e}")))?;
+    if names.is_empty() {
+        return Err(invalid_data(path, "file contains no tensors"));
+    }
+
+    let mut tensors = HashMap::with_capacity(names.len());
+    let mut dtype_map = HashMap::with_capacity(names.len());
+    let mut shape_map = HashMap::with_capacity(names.len());
+    for name in names {
+        let tensor = loader.load_tensor(&name).map_err(|e| {
+            invalid_data(path, format!("failed to dequantize tensor '{name}': {e}"))
+        })?;
+        let shape = tensor.shape();
+        let values = tensor.to_vec_f32().map_err(|e| {
+            invalid_data(
+                path,
+                format!("tensor '{name}' could not be read as f32: {e}"),
+            )
+        })?;
+        tensors.insert(name.clone(), f32_values_to_le_bytes(&values));
+        dtype_map.insert(name.clone(), "F32".to_string());
+        shape_map.insert(name, shape);
+    }
+
+    Ok(WeightChunk {
+        chunk_id,
+        tensors,
+        dtype_map,
+        shape_map,
+    })
+}
+
+/// Load a legacy PyTorch checkpoint (`.bin`, `.pt`, `.pth`) via
+/// `trustformers-core`'s real ZIP + pickle `PyTorchReader`. A file that is not
+/// an actual PyTorch checkpoint (e.g. an arbitrary blob with a `.bin`
+/// extension) is rejected with a structured error rather than being wrapped
+/// up as a fabricated single-tensor chunk.
+fn load_pytorch_chunk(chunk_id: usize, path: &Path) -> Result<WeightChunk, io::Error> {
+    let mut reader = PyTorchReader::from_file(path)
+        .map_err(|e| invalid_data(path, format!("failed to parse PyTorch checkpoint: {e}")))?;
+    let names = reader.list_tensors();
+    if names.is_empty() {
+        return Err(invalid_data(path, "checkpoint contains no tensors"));
+    }
+
+    let mut tensors = HashMap::with_capacity(names.len());
+    let mut dtype_map = HashMap::with_capacity(names.len());
+    let mut shape_map = HashMap::with_capacity(names.len());
+    for name in names {
+        let tensor = reader
+            .read_tensor(&name)
+            .map_err(|e| invalid_data(path, format!("failed to read tensor '{name}': {e}")))?;
+        let shape = tensor.shape();
+        let values = tensor.to_vec_f32().map_err(|e| {
+            invalid_data(
+                path,
+                format!("tensor '{name}' could not be read as f32: {e}"),
+            )
+        })?;
+        tensors.insert(name.clone(), f32_values_to_le_bytes(&values));
+        dtype_map.insert(name.clone(), "F32".to_string());
+        shape_map.insert(name, shape);
     }
 
     Ok(WeightChunk {
@@ -515,20 +834,6 @@ fn parse_safetensors_header_len(bytes: &[u8]) -> Option<usize> {
         Some(len)
     } else {
         None
-    }
-}
-
-/// Extract tensor names from a safetensors JSON header.
-fn extract_safetensor_tensor_names(bytes: &[u8], header_len: usize) -> Option<Vec<String>> {
-    let json_bytes = bytes.get(8..8 + header_len)?;
-    let json_str = std::str::from_utf8(json_bytes).ok()?;
-    let value: serde_json::Value = serde_json::from_str(json_str).ok()?;
-    let obj = value.as_object()?;
-    let names = obj.keys().filter(|k| k.as_str() != "__metadata__").cloned().collect::<Vec<_>>();
-    if names.is_empty() {
-        None
-    } else {
-        Some(names)
     }
 }
 
@@ -583,13 +888,84 @@ mod tests {
         path
     }
 
-    /// Minimal valid safetensors payload with an empty object header.
+    /// Little-endian byte encoding of a slice of f32 values.
+    fn f32_le(values: &[f32]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
+    /// Build a real safetensors payload (8-byte header length + JSON header +
+    /// tensor data) from `(name, dtype, shape, raw_le_bytes)` entries, laying
+    /// each tensor's bytes back to back and recording the resulting
+    /// `data_offsets` — i.e. exactly what a real safetensors writer produces.
+    fn build_safetensors_payload(entries: &[(&str, &str, &[usize], &[u8])]) -> Vec<u8> {
+        let mut header = serde_json::Map::new();
+        let mut data = Vec::new();
+        for &(name, dtype, shape, bytes) in entries {
+            let start = data.len();
+            data.extend_from_slice(bytes);
+            let end = data.len();
+            header.insert(
+                name.to_string(),
+                serde_json::json!({
+                    "dtype": dtype,
+                    "shape": shape,
+                    "data_offsets": [start, end],
+                }),
+            );
+        }
+        let header_bytes =
+            serde_json::to_vec(&serde_json::Value::Object(header)).expect("serialize header");
+        let mut out = (header_bytes.len() as u64).to_le_bytes().to_vec();
+        out.extend_from_slice(&header_bytes);
+        out.extend_from_slice(&data);
+        out
+    }
+
+    /// Valid, non-empty single-tensor safetensors payload: one F32 tensor
+    /// named "weight" with shape `[2]` and values `[1.0, 2.0]`.
     fn minimal_safetensors_payload() -> Vec<u8> {
-        let header = b"{}";
-        let header_len = header.len() as u64;
-        let mut bytes = header_len.to_le_bytes().to_vec();
-        bytes.extend_from_slice(header);
-        bytes
+        let bytes = f32_le(&[1.0, 2.0]);
+        build_safetensors_payload(&[("weight", "F32", &[2], &bytes)])
+    }
+
+    /// Build a real, minimal GGUF file (magic, header, tensor-info table, then
+    /// an alignment-padded tensor-data section) with the given
+    /// `(name, shape, f32 values)` tensors, all stored as ggml type 0 (F32) so
+    /// no dequantization arithmetic is needed to predict the expected output.
+    /// Byte layout mirrors `GGUFLoader::{read_header,read_tensor_info}` in
+    /// `trustformers-models` exactly (see that module for the reader side).
+    fn build_minimal_gguf(tensors: &[(&str, &[usize], &[f32])]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"GGUF");
+        out.extend_from_slice(&3u32.to_le_bytes()); // version
+        out.extend_from_slice(&(tensors.len() as u64).to_le_bytes()); // tensor_count
+        out.extend_from_slice(&0u64.to_le_bytes()); // metadata_kv_count (0 => default 32-byte alignment)
+
+        let mut running_offset: u64 = 0;
+        let mut data_section = Vec::new();
+        for &(name, shape, values) in tensors {
+            let name_bytes = name.as_bytes();
+            out.extend_from_slice(&(name_bytes.len() as u64).to_le_bytes());
+            out.extend_from_slice(name_bytes);
+            out.extend_from_slice(&(shape.len() as u32).to_le_bytes()); // n_dims
+            for dim in shape {
+                out.extend_from_slice(&(*dim as u64).to_le_bytes());
+            }
+            out.extend_from_slice(&0u32.to_le_bytes()); // ggml_type = 0 (F32)
+            out.extend_from_slice(&running_offset.to_le_bytes()); // offset into data section
+
+            let value_bytes = f32_le(values);
+            running_offset += value_bytes.len() as u64;
+            data_section.extend_from_slice(&value_bytes);
+        }
+
+        // Tensor data starts at the next 32-byte boundary after the info table.
+        let info_end = out.len() as u64;
+        let alignment: u64 = 32;
+        let data_start = info_end.div_ceil(alignment) * alignment;
+        out.resize(data_start as usize, 0u8);
+        out.extend_from_slice(&data_section);
+        out
     }
 
     #[test]
@@ -630,13 +1006,17 @@ mod tests {
     fn test_load_single_file() {
         let tmp = std::env::temp_dir().join("tf_parallel_test_single");
         std::fs::create_dir_all(&tmp).unwrap();
-        let path = write_temp_file(&tmp, "model.bin", b"fake weights data here");
+        let path = write_temp_file(&tmp, "model.safetensors", &minimal_safetensors_payload());
 
         let loader = ParallelWeightLoader::new(ParallelLoaderConfig::default());
         let chunk = loader.load_single_file(&path).expect("load_single_file");
         assert_eq!(chunk.chunk_id, 0);
         assert!(!chunk.tensors.is_empty());
         assert_eq!(chunk.tensor_count(), chunk.tensors.len());
+        // Real shape/dtype from the header, not the empty/hardcoded placeholders
+        // the old implementation always produced.
+        assert_eq!(chunk.shape_map.get("weight"), Some(&vec![2usize]));
+        assert_eq!(chunk.dtype_map.get("weight"), Some(&"F32".to_string()));
 
         std::fs::remove_dir_all(&tmp).ok();
     }
@@ -647,7 +1027,11 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
 
         let paths: Vec<PathBuf> = (0..3)
-            .map(|i| write_temp_file(&tmp, &format!("shard_{i}.bin"), b"weights chunk"))
+            .map(|i| {
+                let bytes = f32_le(&[i as f32]);
+                let payload = build_safetensors_payload(&[("w", "F32", &[1], &bytes)]);
+                write_temp_file(&tmp, &format!("shard_{i}.safetensors"), &payload)
+            })
             .collect();
 
         let loader = ParallelWeightLoader::new(ParallelLoaderConfig {
@@ -657,9 +1041,12 @@ mod tests {
 
         let chunks = loader.load_files(&paths).expect("load_files");
         assert_eq!(chunks.len(), 3);
-        // Chunks should be in order
+        // Chunks should be in order, and each should carry its own file's
+        // tensor value rather than a shared whole-file clone.
         for (i, chunk) in chunks.iter().enumerate() {
             assert_eq!(chunk.chunk_id, i);
+            let bytes = chunk.tensors.get("w").expect("tensor 'w'");
+            assert_eq!(bytes, &f32_le(&[i as f32]));
         }
 
         std::fs::remove_dir_all(&tmp).ok();
@@ -710,8 +1097,13 @@ mod tests {
         let tmp = std::env::temp_dir().join("tf_parallel_test_progress");
         std::fs::create_dir_all(&tmp).unwrap();
 
-        let paths: Vec<PathBuf> =
-            (0..4).map(|i| write_temp_file(&tmp, &format!("s{i}.bin"), b"data")).collect();
+        let paths: Vec<PathBuf> = (0..4)
+            .map(|i| {
+                let bytes = f32_le(&[i as f32]);
+                let payload = build_safetensors_payload(&[("w", "F32", &[1], &bytes)]);
+                write_temp_file(&tmp, &format!("s{i}.safetensors"), &payload)
+            })
+            .collect();
 
         let call_count = Arc::new(Mutex::new(0usize));
         let cc = Arc::clone(&call_count);
@@ -742,7 +1134,11 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
 
         let paths: Vec<PathBuf> = (0..2)
-            .map(|i| write_temp_file(&tmp, &format!("w{i}.bin"), b"some bytes"))
+            .map(|i| {
+                let bytes = f32_le(&[i as f32, i as f32 + 1.0]);
+                let payload = build_safetensors_payload(&[("w", "F32", &[2], &bytes)]);
+                write_temp_file(&tmp, &format!("w{i}.safetensors"), &payload)
+            })
             .collect();
 
         let loader = ParallelWeightLoader::new(ParallelLoaderConfig::default());
@@ -792,6 +1188,224 @@ mod tests {
 
         let result = load_model_parallel(&tmp, None).expect("load_model_parallel");
         assert_eq!(result.len(), 1);
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression tests: real per-tensor slicing, shapes and dtypes.
+    //
+    // The old `load_file_as_chunk` cloned the *entire file* into every tensor
+    // name it found, always reported dtype "float32", and always reported an
+    // empty shape. These tests would all have failed against that code: the
+    // shape/dtype assertions because they were always `vec![]`/"float32", and
+    // the "distinct tensors" / "shorter than the file" assertions because
+    // every tensor's bytes were byte-identical to the whole file.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_safetensors_multi_tensor_real_shapes_dtypes_and_slices() {
+        let tmp = std::env::temp_dir().join("tf_parallel_test_multi_tensor_real");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let a_bytes = f32_le(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]); // F32, shape [2, 3] -> 24 bytes
+                                                               // IEEE-754 half-precision bit patterns for 1.0 and -2.0, little-endian.
+        let b_bytes: Vec<u8> = vec![0x00, 0x3C, 0x00, 0xC0]; // F16, shape [2] -> 4 bytes
+        let payload = build_safetensors_payload(&[
+            ("a", "F32", &[2, 3], &a_bytes),
+            ("b", "F16", &[2], &b_bytes),
+        ]);
+        let path = write_temp_file(&tmp, "multi.safetensors", &payload);
+
+        let loader = ParallelWeightLoader::new(ParallelLoaderConfig::default());
+        let chunk = loader.load_single_file(&path).expect("load_single_file");
+
+        assert_eq!(chunk.shape_map.get("a"), Some(&vec![2usize, 3usize]));
+        assert_eq!(chunk.dtype_map.get("a"), Some(&"F32".to_string()));
+        assert_eq!(chunk.tensors.get("a"), Some(&a_bytes));
+
+        assert_eq!(chunk.shape_map.get("b"), Some(&vec![2usize]));
+        assert_eq!(chunk.dtype_map.get("b"), Some(&"F16".to_string()));
+        assert_eq!(chunk.tensors.get("b"), Some(&b_bytes));
+
+        // The old implementation cloned the *whole file* for every tensor
+        // name, so "a" and "b" would have been byte-identical and each as
+        // long as the file itself.
+        assert_ne!(chunk.tensors["a"], chunk.tensors["b"]);
+        assert_eq!(chunk.tensors["a"].len(), 24);
+        assert_eq!(chunk.tensors["b"].len(), 4);
+        let file_len = std::fs::metadata(&path).expect("metadata").len() as usize;
+        assert!(chunk.tensors["a"].len() < file_len);
+        assert!(chunk.tensors["b"].len() < file_len);
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_safetensors_rejects_shape_dtype_size_mismatch() {
+        let tmp = std::env::temp_dir().join("tf_parallel_test_size_mismatch");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Declares shape [4] (16 bytes of F32) but the data section only holds
+        // the 8 bytes actually written below.
+        let bytes = f32_le(&[1.0, 2.0]);
+        let payload = build_safetensors_payload(&[("bad", "F32", &[4], &bytes)]);
+        let path = write_temp_file(&tmp, "bad.safetensors", &payload);
+
+        let loader = ParallelWeightLoader::new(ParallelLoaderConfig::default());
+        let err = loader.load_single_file(&path).expect_err("size mismatch must be rejected");
+        assert!(err.to_string().contains("bad"), "{err}");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_safetensors_rejects_out_of_bounds_offsets() {
+        let tmp = std::env::temp_dir().join("tf_parallel_test_oob");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let bytes = f32_le(&[1.0, 2.0]);
+        let mut payload = build_safetensors_payload(&[("t", "F32", &[2], &bytes)]);
+        // Truncate the data section after building a structurally valid file,
+        // so the header's data_offsets point past the end of the file.
+        let new_len = payload.len() - 4;
+        payload.truncate(new_len);
+        let path = write_temp_file(&tmp, "oob.safetensors", &payload);
+
+        let loader = ParallelWeightLoader::new(ParallelLoaderConfig::default());
+        let err = loader
+            .load_single_file(&path)
+            .expect_err("out-of-bounds offsets must be rejected");
+        assert!(err.to_string().contains("exceeds"), "{err}");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_safetensors_rejects_overlapping_offsets() {
+        let tmp = std::env::temp_dir().join("tf_parallel_test_overlap");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let data = f32_le(&[1.0, 2.0, 3.0, 4.0]); // 16 bytes total
+                                                  // Two tensors both individually size-consistent (8 bytes each for a
+                                                  // 2-element F32 tensor), but claiming overlapping byte ranges: [0,8)
+                                                  // and [4,12).
+        let header = serde_json::json!({
+            "x": {"dtype": "F32", "shape": [2], "data_offsets": [0, 8]},
+            "y": {"dtype": "F32", "shape": [2], "data_offsets": [4, 12]},
+        });
+        let header_bytes = serde_json::to_vec(&header).expect("serialize header");
+        let mut payload = (header_bytes.len() as u64).to_le_bytes().to_vec();
+        payload.extend_from_slice(&header_bytes);
+        payload.extend_from_slice(&data);
+        let path = write_temp_file(&tmp, "overlap.safetensors", &payload);
+
+        let loader = ParallelWeightLoader::new(ParallelLoaderConfig::default());
+        let err = loader
+            .load_single_file(&path)
+            .expect_err("overlapping offsets must be rejected");
+        assert!(err.to_string().contains("overlap"), "{err}");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_safetensors_rejects_empty_header() {
+        let tmp = std::env::temp_dir().join("tf_parallel_test_empty_header");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let header = b"{}";
+        let mut payload = (header.len() as u64).to_le_bytes().to_vec();
+        payload.extend_from_slice(header);
+        let path = write_temp_file(&tmp, "empty.safetensors", &payload);
+
+        let loader = ParallelWeightLoader::new(ParallelLoaderConfig::default());
+        let err = loader
+            .load_single_file(&path)
+            .expect_err("a header with no tensors must be rejected");
+        assert!(err.to_string().contains("no tensors"), "{err}");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// Regression test: the old implementation treated *any* readable file as
+    /// a weight file, wrapping arbitrary bytes up as a fabricated single
+    /// "unknown"-dtype, empty-shape tensor and reporting success. A `.bin`
+    /// file that is not really a PyTorch checkpoint must now fail with a
+    /// structured error instead of a silently-invented chunk.
+    #[test]
+    fn test_bin_garbage_content_is_rejected_not_fabricated() {
+        let tmp = std::env::temp_dir().join("tf_parallel_test_bin_garbage");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = write_temp_file(&tmp, "model.bin", b"this is not a pytorch checkpoint");
+
+        let loader = ParallelWeightLoader::new(ParallelLoaderConfig::default());
+        let err = loader
+            .load_single_file(&path)
+            .expect_err("garbage .bin content must not be silently accepted");
+        assert!(err.to_string().contains("PyTorch"), "{err}");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_unsupported_extension_is_rejected() {
+        let tmp = std::env::temp_dir().join("tf_parallel_test_unsupported_ext");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = write_temp_file(&tmp, "model.weights", b"whatever");
+
+        let loader = ParallelWeightLoader::new(ParallelLoaderConfig::default());
+        let err = loader
+            .load_single_file(&path)
+            .expect_err("unrecognized extension must be rejected");
+        assert!(err.to_string().contains("unsupported"), "{err}");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_gguf_real_tensor_round_trip() {
+        let tmp = std::env::temp_dir().join("tf_parallel_test_gguf");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let payload = build_minimal_gguf(&[
+            ("alpha", &[3], &[1.0, 2.0, 3.0]),
+            ("beta", &[2], &[-4.5, 8.25]),
+        ]);
+        let path = write_temp_file(&tmp, "model.gguf", &payload);
+
+        let loader = ParallelWeightLoader::new(ParallelLoaderConfig::default());
+        let chunk = loader.load_single_file(&path).expect("load_single_file (gguf)");
+
+        assert_eq!(chunk.shape_map.get("alpha"), Some(&vec![3usize]));
+        assert_eq!(chunk.dtype_map.get("alpha"), Some(&"F32".to_string()));
+        assert_eq!(chunk.tensors.get("alpha"), Some(&f32_le(&[1.0, 2.0, 3.0])));
+
+        assert_eq!(chunk.shape_map.get("beta"), Some(&vec![2usize]));
+        assert_eq!(chunk.tensors.get("beta"), Some(&f32_le(&[-4.5, 8.25])));
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_collect_weight_files_prefers_safetensors_over_gguf_and_bin() {
+        let tmp = std::env::temp_dir().join("tf_parallel_test_format_priority");
+        std::fs::create_dir_all(&tmp).unwrap();
+        write_temp_file(&tmp, "model.safetensors", &minimal_safetensors_payload());
+        write_temp_file(
+            &tmp,
+            "model.gguf",
+            &build_minimal_gguf(&[("t", &[1], &[1.0])]),
+        );
+        write_temp_file(&tmp, "model.bin", b"irrelevant");
+
+        let loader = ParallelWeightLoader::new(ParallelLoaderConfig::default());
+        let files = loader.collect_weight_files(&tmp).expect("collect_weight_files");
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            files[0].extension().and_then(|e| e.to_str()),
+            Some("safetensors")
+        );
 
         std::fs::remove_dir_all(&tmp).ok();
     }

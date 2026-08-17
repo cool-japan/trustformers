@@ -11,6 +11,8 @@
 
 pub mod cross_framework;
 pub mod memory_leak_detector;
+/// Minimal dependency-free XML reader used to parse Valgrind's `--xml` output.
+pub mod mini_xml;
 pub mod naming_conventions;
 pub mod precision_tracker;
 

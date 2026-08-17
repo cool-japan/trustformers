@@ -1,10 +1,21 @@
 //! # Object Detection Pipeline
 //!
-//! DETR-compatible object detection returning bounding boxes with labels and confidence scores.
+//! ## What is real here
 //!
-//! ## Supported model families
-//! - **DETR** (Detection Transformer) — end-to-end transformer-based detection
-//! - **YOLO** — classic one-stage detection baselines
+//! The post-processing half of a detection pipeline is fully implemented and
+//! independently useful: [`BoundingBox`] geometry (area, IoU, clipping,
+//! centre), greedy [`nms`], Gaussian [`soft_nms`], confidence filtering,
+//! label filtering and top-k selection. All of it is unit-tested against
+//! hand-computed values.
+//!
+//! ## Model support
+//!
+//! No detection backbone (DETR, YOLO, …) has a real implementation in
+//! `trustformers-models`, so [`ObjectDetectionPipeline::detect`] returns
+//! [`DetectionError::UnsupportedModel`] instead of the boxes it used to
+//! synthesise from the input buffer's length. Feed your own model's raw
+//! detections to [`ObjectDetectionPipeline::postprocess`] to use the real
+//! post-processing chain.
 //!
 //! ## Example
 //!
@@ -15,8 +26,8 @@
 //!
 //! let config = ObjectDetectionConfig::default();
 //! let pipeline = ObjectDetectionPipeline::new(config)?;
-//! let image = vec![0.5f32; 800 * 800 * 3];
-//! let result = pipeline.detect(&image, 800, 800)?;
+//! // Real post-processing over detections produced elsewhere:
+//! let result = pipeline.postprocess(my_raw_detections, 800, 800);
 //! for det in &result.detections {
 //!     println!("{}: {:.2} @ {:?}", det.label, det.confidence, det.bbox);
 //! }
@@ -39,7 +50,24 @@ pub enum DetectionError {
     EmptyImage,
     #[error("Model error: {0}")]
     ModelError(String),
+    /// The requested checkpoint has no real implementation in this workspace.
+    #[error(
+        "no real detection model is implemented for `{requested}`; supported: {supported}. \
+         This pipeline never returns synthesised detections — use `postprocess` with your own \
+         model's output."
+    )]
+    UnsupportedModel {
+        /// The checkpoint or architecture the caller asked for.
+        requested: String,
+        /// Comma-separated list of architectures that *are* supported.
+        supported: String,
+    },
 }
+
+/// Detection architectures with a real backbone in this workspace.
+///
+/// Deliberately empty — the pipeline says so rather than pretending.
+const SUPPORTED_ARCHITECTURES: &[&str] = &[];
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -383,7 +411,7 @@ pub struct ObjectDetectionPipeline {
     labels: Vec<String>,
 }
 
-/// First 20 COCO class names used for deterministic mock detections.
+/// The first 20 COCO class names, used as the pipeline's default label set.
 const COCO_LABELS_20: &[&str] = &[
     "person",
     "bicycle",
@@ -422,62 +450,37 @@ impl ObjectDetectionPipeline {
     /// Run object detection on a single image.
     ///
     /// `image` is a flat `f32` buffer, `height` and `width` describe its spatial dimensions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DetectionError::EmptyImage`] for an empty buffer and
+    /// [`DetectionError::UnsupportedModel`] otherwise: no detection backbone is
+    /// implemented, and this pipeline will not fabricate boxes. Use
+    /// [`Self::postprocess`] with your own model's raw detections.
     pub fn detect(
         &self,
         image: &[f32],
-        height: usize,
-        width: usize,
+        _height: usize,
+        _width: usize,
     ) -> Result<DetectionResult, DetectionError> {
         if image.is_empty() {
             return Err(DetectionError::EmptyImage);
         }
-
-        // Deterministic: number of detections derived from image length.
-        let num_detections = (image.len() % 10) + 1;
-
-        let mut detections: Vec<Detection> = (0..num_detections)
-            .map(|i| {
-                let label_id = i % self.labels.len();
-                let label = self.labels[label_id].clone();
-
-                // Deterministic box derived from index and image length.
-                let seed = (i as f32 + 1.0) / (num_detections as f32 + 1.0);
-                let x1 = (seed * 0.5).min(0.49);
-                let y1 = (seed * 0.4).min(0.39);
-                let x2 = (x1 + 0.3 + seed * 0.1).min(1.0);
-                let y2 = (y1 + 0.3 + seed * 0.1).min(1.0);
-                // Ensure x2 > x1 and y2 > y1 with a small epsilon.
-                let x2 = x2.max(x1 + 0.01);
-                let y2 = y2.max(y1 + 0.01);
-                let bbox = BoundingBox { x1, y1, x2, y2 };
-                let confidence = 0.55 + seed * 0.4;
-                Detection {
-                    bbox,
-                    label,
-                    label_id,
-                    confidence,
-                }
-            })
-            .collect();
-
-        // Apply confidence threshold filtering.
-        detections.retain(|d| d.confidence >= self.config.confidence_threshold);
-
-        // NMS.
-        let mut after_nms = nms(&detections, self.config.iou_threshold);
-
-        // Cap at max_detections.
-        after_nms.truncate(self.config.max_detections);
-
-        Ok(DetectionResult {
-            detections: after_nms,
-            image_height: height,
-            image_width: width,
-            inference_time_ms: 0,
+        Err(DetectionError::UnsupportedModel {
+            requested: self.config.model_name.clone(),
+            supported: if SUPPORTED_ARCHITECTURES.is_empty() {
+                "none (no detection backbone is implemented yet)".to_string()
+            } else {
+                SUPPORTED_ARCHITECTURES.join(", ")
+            },
         })
     }
 
     /// Run object detection on a batch of images.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::detect`].
     pub fn detect_batch(
         &self,
         images: &[(&[f32], usize, usize)],
@@ -486,6 +489,40 @@ impl ObjectDetectionPipeline {
             return Err(DetectionError::EmptyImage);
         }
         images.iter().map(|&(data, h, w)| self.detect(data, h, w)).collect()
+    }
+
+    /// Apply the pipeline's real post-processing chain to raw detections.
+    ///
+    /// Confidence filtering → greedy NMS at `iou_threshold` → truncation to
+    /// `max_detections`. `inference_time_ms` is reported as the caller's
+    /// measured value, or `0` when unknown — it is never invented.
+    pub fn postprocess(
+        &self,
+        detections: Vec<Detection>,
+        image_height: usize,
+        image_width: usize,
+    ) -> DetectionResult {
+        self.postprocess_timed(detections, image_height, image_width, 0)
+    }
+
+    /// [`Self::postprocess`] with a caller-measured inference duration.
+    pub fn postprocess_timed(
+        &self,
+        mut detections: Vec<Detection>,
+        image_height: usize,
+        image_width: usize,
+        inference_time_ms: u64,
+    ) -> DetectionResult {
+        detections.retain(|d| d.confidence >= self.config.confidence_threshold);
+        let mut after_nms = nms(&detections, self.config.iou_threshold);
+        after_nms.truncate(self.config.max_detections);
+
+        DetectionResult {
+            detections: after_nms,
+            image_height,
+            image_width,
+            inference_time_ms,
+        }
     }
 
     /// Greedy NMS (convenience wrapper; also available as a free function `nms`).
@@ -638,9 +675,16 @@ mod tests {
     #[test]
     fn test_filter_by_confidence() {
         let pipeline = ObjectDetectionPipeline::new(ObjectDetectionConfig::default()).expect("ok");
-        let image = make_image(100, 100);
-        let result = pipeline.detect(&image, 100, 100).expect("ok");
+        let result = pipeline.postprocess(
+            vec![
+                make_det(0.0, 0.0, 0.2, 0.2, 0.95),
+                make_det(0.5, 0.5, 0.7, 0.7, 0.60),
+            ],
+            100,
+            100,
+        );
         let filtered = result.filter_by_confidence(0.8);
+        assert_eq!(filtered.detections.len(), 1);
         assert!(filtered.detections.iter().all(|d| d.confidence >= 0.8));
     }
 
@@ -743,17 +787,56 @@ mod tests {
     // ---- 14. detect basic ----
 
     #[test]
-    fn test_detect_basic() {
+    fn test_detect_reports_unsupported_model() {
+        // Regression: `detect` used to fabricate boxes whose count came from
+        // `image.len() % 10` and whose coordinates came from the loop index.
         let config = ObjectDetectionConfig {
             confidence_threshold: 0.0,
+            model_name: "facebook/detr-resnet-50".to_string(),
             ..Default::default()
         };
         let pipeline = ObjectDetectionPipeline::new(config).expect("ok");
         let image = make_image(50, 50);
-        let result = pipeline.detect(&image, 50, 50).expect("ok");
-        assert!(!result.detections.is_empty());
+        match pipeline.detect(&image, 50, 50) {
+            Err(DetectionError::UnsupportedModel {
+                requested,
+                supported,
+            }) => {
+                assert_eq!(requested, "facebook/detr-resnet-50");
+                assert!(supported.contains("none"), "supported: {supported}");
+            },
+            other => panic!("expected UnsupportedModel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_postprocess_runs_the_real_chain() {
+        let config = ObjectDetectionConfig {
+            confidence_threshold: 0.5,
+            iou_threshold: 0.5,
+            max_detections: 10,
+            ..Default::default()
+        };
+        let pipeline = ObjectDetectionPipeline::new(config).expect("ok");
+        let raw = vec![
+            make_det(0.0, 0.0, 0.4, 0.4, 0.9),     // kept
+            make_det(0.01, 0.01, 0.41, 0.41, 0.8), // suppressed by NMS
+            make_det(0.6, 0.6, 0.9, 0.9, 0.7),     // kept
+            make_det(0.2, 0.2, 0.3, 0.3, 0.1),     // below threshold
+        ];
+        let result = pipeline.postprocess(raw, 50, 50);
+        assert_eq!(result.detections.len(), 2, "{:?}", result.detections);
         assert_eq!(result.image_height, 50);
         assert_eq!(result.image_width, 50);
+        assert_eq!(result.inference_time_ms, 0, "timing must not be invented");
+    }
+
+    #[test]
+    fn test_postprocess_timed_reports_caller_measurement() {
+        let pipeline = ObjectDetectionPipeline::new(ObjectDetectionConfig::default()).expect("ok");
+        let result =
+            pipeline.postprocess_timed(vec![make_det(0.0, 0.0, 0.4, 0.4, 0.9)], 10, 10, 42);
+        assert_eq!(result.inference_time_ms, 42);
     }
 
     // ---- 15. detect empty image ----
@@ -875,7 +958,7 @@ mod tests {
     // ---- 22. detect_batch ----
 
     #[test]
-    fn test_detect_batch() {
+    fn test_detect_batch_reports_unsupported_model() {
         let config = ObjectDetectionConfig {
             confidence_threshold: 0.0,
             ..Default::default()
@@ -885,10 +968,14 @@ mod tests {
         let img2 = make_image(30, 30);
         let batch: Vec<(&[f32], usize, usize)> =
             vec![(img1.as_slice(), 20, 20), (img2.as_slice(), 30, 30)];
-        let results = pipeline.detect_batch(&batch).expect("batch ok");
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].image_height, 20);
-        assert_eq!(results[1].image_height, 30);
+        assert!(matches!(
+            pipeline.detect_batch(&batch),
+            Err(DetectionError::UnsupportedModel { .. })
+        ));
+        assert!(matches!(
+            pipeline.detect_batch(&[]),
+            Err(DetectionError::EmptyImage)
+        ));
     }
 
     // ---- 23. bbox area is positive ----

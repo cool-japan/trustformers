@@ -65,6 +65,9 @@ mod model_test_suite_tests;
 pub mod performance;
 pub mod reference_comparison;
 pub mod reporting;
+pub mod stats;
+#[cfg(test)]
+mod stats_tests;
 pub mod types;
 
 // Re-export all public types and functions for backward compatibility
@@ -77,6 +80,10 @@ pub use model_test_suite::ModelTestSuite;
 pub use performance::PerformanceProfiler;
 pub use reference_comparison::ReferenceComparator;
 pub use reporting::{generate_test_report, save_report_to_file};
+pub use stats::{
+    chi_square_p_value, chi_square_test, expected_calibration_error, normal_cdf, normal_quantile,
+    two_proportion_z_test, ChiSquareResult, TwoProportionTest,
+};
 pub use types::{
     LayerPerformance, MemoryAnalysis, NumericalDifferences, NumericalParityResults,
     OverallPerformance, PerformanceResults, TestResult, TestStatistics, ThroughputMeasurements,

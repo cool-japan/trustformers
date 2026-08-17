@@ -33,6 +33,9 @@ pub struct MemoryProfiler {
     // Performance counters for monitoring overhead
     monitoring_overhead_us: Arc<AtomicU64>,
     total_collections: Arc<AtomicU64>,
+    // Real allocation bookkeeping, fed by `record_allocation`/`record_deallocation`
+    allocated_objects: Arc<AtomicU64>,
+    deallocated_objects: Arc<AtomicU64>,
 }
 
 impl MemoryProfiler {
@@ -55,6 +58,8 @@ impl MemoryProfiler {
             memory_predictor: Arc::new(Mutex::new(MemoryPredictor::default())),
             monitoring_overhead_us: Arc::new(AtomicU64::new(0)),
             total_collections: Arc::new(AtomicU64::new(0)),
+            allocated_objects: Arc::new(AtomicU64::new(0)),
+            deallocated_objects: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -72,7 +77,9 @@ impl MemoryProfiler {
         self.start_time = Some(Instant::now());
 
         let metrics_history = self.metrics_history.clone();
-        let _allocations = self.allocations.clone();
+        let allocations = self.allocations.clone();
+        let allocated_objects = self.allocated_objects.clone();
+        let deallocated_objects = self.deallocated_objects.clone();
         let alerts = self.alerts.clone();
         let patterns = self.patterns.clone();
         let config = self.config.clone();
@@ -98,7 +105,12 @@ impl MemoryProfiler {
                 total_collections.fetch_add(1, Ordering::Relaxed);
 
                 // Collect current memory metrics
-                let current_metrics = match Self::collect_memory_metrics().await {
+                let tracked = Self::snapshot_allocation_stats(
+                    &allocations,
+                    &allocated_objects,
+                    &deallocated_objects,
+                );
+                let current_metrics = match Self::collect_memory_metrics(tracked).await {
                     Ok(metrics) => metrics,
                     Err(e) => {
                         eprintln!("Failed to collect memory metrics: {}", e);
@@ -185,6 +197,72 @@ impl MemoryProfiler {
         });
 
         Ok(())
+    }
+
+    /// Register a real allocation with the profiler.
+    ///
+    /// The profiler has no way to observe allocations it was not told about, so
+    /// the allocation counters in [`MemoryMetrics`] describe exactly the
+    /// allocations registered through this method.
+    ///
+    /// Returns the id under which the allocation is tracked.
+    pub fn record_allocation(&self, info: AllocationInfo) -> Result<Uuid> {
+        let id = info.id;
+        let mut allocations = self
+            .allocations
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock allocations: {}", e))?;
+        allocations.insert(id, info);
+        drop(allocations);
+        self.allocated_objects.fetch_add(1, Ordering::Relaxed);
+        Ok(id)
+    }
+
+    /// Register the release of a previously recorded allocation.
+    ///
+    /// Returns `true` when the allocation was tracked, `false` when the id is
+    /// unknown (in which case no counter is touched).
+    pub fn record_deallocation(&self, id: Uuid) -> Result<bool> {
+        let mut allocations = self
+            .allocations
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock allocations: {}", e))?;
+        let removed = allocations.remove(&id).is_some();
+        drop(allocations);
+        if removed {
+            self.deallocated_objects.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(removed)
+    }
+
+    /// Snapshot of the tracked-allocation counters.
+    pub fn allocation_stats(&self) -> Result<super::system::TrackedAllocationStats> {
+        Ok(Self::snapshot_allocation_stats(
+            &self.allocations,
+            &self.allocated_objects,
+            &self.deallocated_objects,
+        ))
+    }
+
+    fn snapshot_allocation_stats(
+        allocations: &Arc<Mutex<HashMap<Uuid, AllocationInfo>>>,
+        allocated: &Arc<AtomicU64>,
+        deallocated: &Arc<AtomicU64>,
+    ) -> super::system::TrackedAllocationStats {
+        let (active_allocations, active_bytes) = match allocations.lock() {
+            Ok(guard) => (
+                guard.len() as u64,
+                guard.values().map(|info| info.size_bytes as u64).sum(),
+            ),
+            Err(_) => (0, 0),
+        };
+
+        super::system::TrackedAllocationStats {
+            allocated_objects: allocated.load(Ordering::Relaxed),
+            deallocated_objects: deallocated.load(Ordering::Relaxed),
+            active_allocations,
+            active_bytes,
+        }
     }
 
     /// Stop memory monitoring

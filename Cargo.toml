@@ -28,7 +28,7 @@ homepage = "https://github.com/cool-japan/trustformers"
 trustformers = { version = "0.2.1", path = "trustformers", default-features = false }
 trustformers-core = { version = "0.2.1", path = "trustformers-core", default-features = false }
 trustformers-tokenizers = { version = "0.2.1", path = "trustformers-tokenizers", default-features = false }
-trustformers-models = { version = "0.2.1", path = "trustformers-models", default-features = false }
+trustformers-models = { version = "0.2.1", path = "trustformers-models", default-features = false, features = ["mamba2"] }
 trustformers-optim = { version = "0.2.1", path = "trustformers-optim", default-features = false }
 trustformers-training = { version = "0.2.1", path = "trustformers-training", default-features = false }
 trustformers-wasm = { version = "0.2.1", path = "trustformers-wasm", default-features = false }
@@ -55,6 +55,22 @@ indicatif = "0.18.6"
 sha2 = "0.11.0"
 hex = "0.4.3"
 dirs = "6.0.0"
+
+# Cryptography (RustCrypto) — Pure Rust, no C/C++/Fortran in the default tree.
+# Used by trustformers-serve's encryption subsystem for real AEAD, real KDFs and
+# constant-time tag comparison. `getrandom` is the OS CSPRNG (syscall bindings only).
+aes-gcm = { version = "0.11.0", features = ["aes"] }
+chacha20poly1305 = "0.11.0"
+aes = "0.9.2"
+cbc = { version = "0.2.1", features = ["alloc", "block-padding"] }
+salsa20 = "0.11.0"
+poly1305 = "0.9.1"
+hkdf = "0.13.0"
+hmac = "0.13.0"
+pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }
+getrandom = "0.4.3"
+subtle = "2.6.1"
+zeroize = { version = "1.9.0", features = ["derive"] }
 # Pure-Rust cross-platform system telemetry (CPU utilization, temperature sensors,
 # memory) for hardware/ device metrics. No C/C++ toolchain required.
 sysinfo = { version = "0.38.4", default-features = false, features = ["system", "component"] }
@@ -241,6 +257,9 @@ colored = "3.1"
 env_logger = "0.11"
 tokio-rustls = "0.26"
 base64 = "0.22"
+# COOLJAPAN FFT (pure Rust, replaces rustfft/FFTW). Used by the media pipelines
+# for STFT / mel-spectrogram feature extraction.
+oxifft = "0.4.2"
 mime_guess = "2.0"
 fastrand = "2.4.1"
 toml = "1.1.2"

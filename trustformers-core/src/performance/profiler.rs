@@ -1,7 +1,5 @@
 //! Performance profiler for detailed performance analysis
 
-#![allow(unused_variables)] // Performance profiler
-
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -29,6 +27,10 @@ pub struct ProfileResult {
     pub children: Vec<ProfileResult>,
     /// Percentage of parent time
     pub percent_of_parent: f64,
+    /// In-flight [`ProfileResult::record_operation_start`] timers, keyed by
+    /// operation name. Not part of the serialised report.
+    #[serde(skip)]
+    pub(crate) pending_starts: HashMap<String, Instant>,
 }
 
 impl ProfileResult {
@@ -44,6 +46,7 @@ impl ProfileResult {
             self_time: Duration::ZERO,
             children: Vec::new(),
             percent_of_parent: 0.0,
+            pending_starts: HashMap::new(),
         }
     }
 
@@ -72,16 +75,30 @@ impl ProfileResult {
         }
     }
 
-    /// Record operation start (for demo compatibility)
-    pub fn record_operation_start(&mut self, _name: &str) {
-        // For demo purposes - in a real implementation this would start timing
+    /// Start timing the named operation.
+    ///
+    /// The matching [`Self::record_operation_end`] records the real elapsed
+    /// time. Calling `start` twice without an intervening `end` restarts the
+    /// clock for the newer call.
+    pub fn record_operation_start(&mut self, name: &str) {
+        self.pending_starts.insert(name.to_string(), Instant::now());
     }
 
-    /// Record operation end (for demo compatibility)
-    pub fn record_operation_end(&mut self, name: &str) {
-        // For demo purposes - simulate adding a timing measurement
-        let duration = Duration::from_millis(5);
+    /// Stop timing the named operation and record the measured duration.
+    ///
+    /// Returns the measured duration, or `None` when no matching
+    /// [`Self::record_operation_start`] was recorded — in which case nothing is
+    /// added, rather than a synthesised measurement.
+    pub fn record_operation_end(&mut self, name: &str) -> Option<Duration> {
+        let start = self.pending_starts.remove(name)?;
+        let duration = start.elapsed();
         self.add_timing(duration);
+        Some(duration)
+    }
+
+    /// Operations that have been started but not yet ended.
+    pub fn pending_operations(&self) -> usize {
+        self.pending_starts.len()
     }
 
     /// Print profile results
@@ -378,6 +395,40 @@ mod tests {
     use super::*;
     use std::thread::sleep;
     use std::time::Duration;
+
+    /// Regression test: `record_operation_start` was a no-op and
+    /// `record_operation_end` unconditionally added a fabricated 5 ms.
+    #[test]
+    fn test_record_operation_measures_real_elapsed_time() {
+        let mut result = ProfileResult::new("op".to_string());
+
+        result.record_operation_start("op");
+        assert_eq!(result.pending_operations(), 1);
+        sleep(Duration::from_millis(20));
+        let measured = result.record_operation_end("op").expect("a start was recorded");
+
+        assert_eq!(result.call_count, 1);
+        assert!(
+            measured >= Duration::from_millis(15),
+            "measured {measured:?} must reflect the ~20ms sleep, not a fixed 5ms"
+        );
+        assert_ne!(
+            result.total_time,
+            Duration::from_millis(5),
+            "the old hardcoded 5ms measurement must not survive"
+        );
+        assert_eq!(result.pending_operations(), 0);
+    }
+
+    /// Regression test: ending an operation that was never started must record
+    /// nothing rather than inventing a measurement.
+    #[test]
+    fn test_record_operation_end_without_start_records_nothing() {
+        let mut result = ProfileResult::new("op".to_string());
+        assert!(result.record_operation_end("op").is_none());
+        assert_eq!(result.call_count, 0);
+        assert_eq!(result.total_time, Duration::ZERO);
+    }
 
     #[test]
     fn test_basic_profiling() {

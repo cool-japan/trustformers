@@ -154,6 +154,11 @@ pub struct DeltaInfo {
     pub compression_ratio: f64,
     pub delta_size: u64,
     pub full_size: u64,
+    /// SHA-256 (hex) of the delta file's raw bytes, if the server provided
+    /// one. When present, the delta download itself is checksum-verified in
+    /// addition to the TFDELTA1 format's own embedded base/target hashes.
+    #[serde(default)]
+    pub delta_checksum: Option<String>,
 }
 
 /// CDN configuration and routing
@@ -567,7 +572,15 @@ impl DownloadManager {
         }
     }
 
-    /// Apply delta compression if available
+    /// Apply delta compression if available.
+    ///
+    /// The downloaded delta is a self-verifying TFDELTA1 file (see
+    /// [`crate::hub_delta_codec`]): [`apply_binary_delta`](Self::apply_binary_delta)
+    /// refuses to reconstruct anything unless both the base and the
+    /// reconstructed target pass their embedded SHA-256 checks, so a
+    /// mismatched or corrupted delta can never silently produce a bad model
+    /// file. The downloaded delta file is always cleaned up, whether or not
+    /// applying it succeeded.
     pub async fn apply_delta_compression(
         &self,
         delta_info: &DeltaInfo,
@@ -581,7 +594,7 @@ impl DownloadManager {
             local_path: delta_path.clone(),
             filename: "delta".to_string(),
             expected_size: delta_info.delta_size,
-            expected_checksum: None,
+            expected_checksum: delta_info.delta_checksum.clone(),
         };
 
         Self::download_single_file_async(
@@ -593,14 +606,13 @@ impl DownloadManager {
         )
         .await?;
 
-        // Apply delta (simplified implementation)
-        // In a real implementation, this would use a proper binary diff algorithm
-        self.apply_binary_delta(&delta_path, base_path, target_path).await?;
+        let result = self.apply_binary_delta(&delta_path, base_path, target_path).await;
 
-        // Clean up delta file
-        fs::remove_file(delta_path).ok();
+        // Always clean up the downloaded delta file, on both success and
+        // failure — never leave it behind because reconstruction errored out.
+        fs::remove_file(&delta_path).ok();
 
-        Ok(())
+        result
     }
 
     async fn apply_binary_delta(
@@ -609,7 +621,6 @@ impl DownloadManager {
         base_path: &Path,
         target_path: &Path,
     ) -> Result<()> {
-        // Simplified delta application - in reality you'd use bsdiff/xdelta3 or similar
         let delta_data = fs::read(delta_path).map_err(|e| TrustformersError::Io {
             message: format!("Failed to read delta file: {}", e),
             path: Some(delta_path.to_string_lossy().to_string()),
@@ -622,31 +633,36 @@ impl DownloadManager {
             suggestion: Some("Check file existence and permissions".to_string()),
         })?;
 
-        // This is a placeholder - real delta application would reconstruct the target file
-        let target_data = Self::reconstruct_from_delta(&base_data, &delta_data)?;
+        // Reconstructs the target from a real block-copy/insert delta,
+        // verifying both the base and the reconstructed target against the
+        // checksums embedded in the delta itself. Never returns bytes that
+        // haven't passed both checks.
+        let target_data = reconstruct_from_delta(&base_data, &delta_data)?;
 
-        fs::write(target_path, target_data).map_err(|e| TrustformersError::Io {
-            message: format!("Failed to write target file: {}", e),
-            path: Some(target_path.to_string_lossy().to_string()),
+        // Write to a temp file and rename into place, so a crash or a later
+        // error never leaves a partially-written or corrupted file sitting at
+        // `target_path` — by the time we reach this line, `target_data` has
+        // already been checksum-verified against the delta's embedded
+        // `target_sha256`.
+        let mut tmp_name = target_path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+        tmp_name.push(".tmp-delta");
+        let tmp_path = target_path.with_file_name(tmp_name);
+
+        fs::write(&tmp_path, &target_data).map_err(|e| TrustformersError::Io {
+            message: format!("Failed to write reconstructed target file: {}", e),
+            path: Some(tmp_path.to_string_lossy().to_string()),
             suggestion: Some("Check permissions and disk space".to_string()),
+        })?;
+        fs::rename(&tmp_path, target_path).map_err(|e| {
+            fs::remove_file(&tmp_path).ok();
+            TrustformersError::Io {
+                message: format!("Failed to move reconstructed target file into place: {}", e),
+                path: Some(target_path.to_string_lossy().to_string()),
+                suggestion: Some("Check permissions and disk space".to_string()),
+            }
         })?;
 
         Ok(())
-    }
-
-    fn reconstruct_from_delta(base_data: &[u8], delta_data: &[u8]) -> Result<Vec<u8>> {
-        // Placeholder implementation - real implementation would use proper binary diff
-        // For now, just return the base data modified by delta
-        let mut result = base_data.to_vec();
-
-        // Simple example: XOR the delta with the base
-        for (i, &delta_byte) in delta_data.iter().enumerate() {
-            if i < result.len() {
-                result[i] ^= delta_byte;
-            }
-        }
-
-        Ok(result)
     }
 
     /// Smart cache management
@@ -764,6 +780,54 @@ pub struct CacheFileInfo {
     pub size: u64,
     pub access_time: std::time::SystemTime,
     pub score: f64,
+}
+
+// ─── Binary delta codec (TFDELTA1) ─────────────────────────────────────────
+//
+// Real implementation lives in `crate::hub_delta_codec` so this file stays
+// under the workspace's 2000-line-per-file limit; these are the public,
+// bytes-level entry points. Neither needs the `hub` feature — both are pure
+// local computation — so they work even in builds with networking disabled.
+
+/// Reconstruct a target file's bytes from a base file's bytes and a TFDELTA1
+/// binary delta (as produced by [`create_binary_delta`]).
+///
+/// Both the base and the reconstructed target are checksum-verified against
+/// the SHA-256 hashes embedded in the delta itself. A delta that doesn't
+/// match the supplied base, that is truncated or malformed, or that doesn't
+/// replay to the bytes it claims to, is a [`TrustformersError`] — never a
+/// silently corrupted result. This is what makes
+/// [`DownloadManager::apply_binary_delta`] safe: it is the only way this
+/// module ever produces reconstructed bytes.
+pub fn reconstruct_from_delta(base_data: &[u8], delta_data: &[u8]) -> Result<Vec<u8>> {
+    crate::hub_delta_codec::apply_delta(base_data, delta_data).map_err(|message| {
+        TrustformersError::Core(CoreTrustformersError::other(format!(
+            "failed to apply binary delta: {message}"
+        )))
+    })
+}
+
+/// Encode a TFDELTA1 binary delta that reconstructs `target_path` from
+/// `base_path`.
+///
+/// Hosting the result at a [`DeltaInfo::delta_url`] lets a future download of
+/// `target_path`, starting from a peer that already has `base_path`, transfer
+/// only the delta; [`reconstruct_from_delta`] is the inverse operation.
+pub fn create_binary_delta(base_path: &Path, target_path: &Path) -> Result<Vec<u8>> {
+    let base_data = fs::read(base_path).map_err(|e| TrustformersError::Io {
+        message: format!("Failed to read base file: {}", e),
+        path: Some(base_path.to_string_lossy().to_string()),
+        suggestion: Some("Check file existence and permissions".to_string()),
+    })?;
+    let target_data = fs::read(target_path).map_err(|e| TrustformersError::Io {
+        message: format!("Failed to read target file: {}", e),
+        path: Some(target_path.to_string_lossy().to_string()),
+        suggestion: Some("Check file existence and permissions".to_string()),
+    })?;
+    Ok(crate::hub_delta_codec::encode_delta(
+        &base_data,
+        &target_data,
+    ))
 }
 
 /// Local-only fallback when the `hub` feature (networking) is disabled.
@@ -1260,8 +1324,12 @@ pub async fn check_delta_availability(
     from_revision: &str,
     to_revision: &str,
 ) -> Result<Option<DeltaInfo>> {
-    // This is a placeholder implementation
-    // In reality, you would check the hub API for delta information
+    // A real GET against a hypothetical delta-serving endpoint. The public
+    // Hugging Face Hub does not currently expose `/api/models/*/deltas/*`, so
+    // in practice this will honestly resolve to `Ok(None)` (a 404) rather
+    // than fabricating delta availability; a Hub-compatible server that does
+    // implement the endpoint would be answered for real, with no code change
+    // needed here.
     let delta_url = format!(
         "{}/api/models/{}/deltas/{}/{}",
         HF_HUB_URL, model_id, from_revision, to_revision
@@ -1632,6 +1700,7 @@ mod tests {
             delta_url: "https://example.com/delta".to_string(),
             compression_ratio: 0.3,
             delta_size: 30_000_000,
+            delta_checksum: None,
             full_size: 100_000_000,
         };
         assert!(delta.delta_size < delta.full_size);
@@ -1724,5 +1793,169 @@ mod tests {
         let config = DownloadConfig::default();
         let manager = DownloadManager::new(config);
         assert_eq!(manager.stats.total_files, 0);
+    }
+
+    // ── Binary delta codec (create_binary_delta / reconstruct_from_delta) ──
+    //
+    // Regression tests for the historical bug: `reconstruct_from_delta` used
+    // to XOR the delta bytes over the base file and return whatever came out,
+    // with no checksum check, so *any* base/delta pair "succeeded" — even a
+    // delta that had nothing to do with the base. These tests would all have
+    // failed against that code.
+
+    fn delta_test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("trustformers_hub_delta_{name}"));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn test_create_and_reconstruct_from_delta_round_trips() {
+        let dir = delta_test_dir("round_trip");
+        let base_path = dir.join("base.bin");
+        let target_path = dir.join("target.bin");
+        fs::write(
+            &base_path,
+            b"the quick brown fox jumps over the lazy dog".repeat(8),
+        )
+        .expect("write base");
+        let mut target_content = b"the quick brown fox jumps over the lazy dog".repeat(8);
+        target_content.extend_from_slice(b" ...with a tail appended for the new version");
+        fs::write(&target_path, &target_content).expect("write target");
+
+        let delta = create_binary_delta(&base_path, &target_path).expect("create_binary_delta");
+        // A real delta between two very similar files should be much smaller
+        // than the target itself, proving actual matching happened.
+        assert!(delta.len() < target_content.len());
+
+        let base_data = fs::read(&base_path).expect("read base");
+        let reconstructed = reconstruct_from_delta(&base_data, &delta).expect("reconstruct");
+        assert_eq!(reconstructed, target_content);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The old implementation would XOR *any* delta over *any* base and
+    /// return `Ok(_)`. A delta generated for one base must now be refused
+    /// when applied against an unrelated base, instead of silently producing
+    /// a corrupted result.
+    #[test]
+    fn test_reconstruct_from_delta_rejects_mismatched_base() {
+        let dir = delta_test_dir("mismatched_base");
+        let base_path = dir.join("base.bin");
+        let target_path = dir.join("target.bin");
+        fs::write(&base_path, b"original base content for this model version").expect("write base");
+        fs::write(
+            &target_path,
+            b"updated target content for the next model version",
+        )
+        .expect("write target");
+
+        let delta = create_binary_delta(&base_path, &target_path).expect("create_binary_delta");
+
+        let unrelated_base = b"a totally unrelated file that is not the real base".to_vec();
+        let result = reconstruct_from_delta(&unrelated_base, &delta);
+        assert!(
+            result.is_err(),
+            "applying a delta to the wrong base must error, not silently corrupt"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_reconstruct_from_delta_rejects_non_delta_bytes() {
+        let base = b"any base file content".to_vec();
+        let not_a_delta = b"this is just some file that happens to exist on disk".to_vec();
+        let result = reconstruct_from_delta(&base, &not_a_delta);
+        assert!(
+            result.is_err(),
+            "arbitrary bytes must never be accepted as a delta"
+        );
+    }
+
+    #[test]
+    fn test_create_binary_delta_missing_base_file_errors() {
+        let dir = delta_test_dir("missing_base");
+        let target_path = dir.join("target.bin");
+        fs::write(&target_path, b"target content").expect("write target");
+
+        let result = create_binary_delta(&dir.join("does-not-exist.bin"), &target_path);
+        assert!(result.is_err());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// End-to-end at the `DownloadManager` level: given a base file and a
+    /// (locally-produced) delta file on disk, `apply_binary_delta` writes a
+    /// target file whose *actual bytes on disk* match the original target —
+    /// exercising the temp-file-then-rename path, not just the in-memory
+    /// codec functions above.
+    #[cfg(feature = "hub")]
+    #[tokio::test]
+    async fn test_download_manager_apply_binary_delta_writes_verified_target() {
+        let dir = delta_test_dir("apply_binary_delta");
+        let base_path = dir.join("base.safetensors");
+        let target_path = dir.join("target.safetensors");
+        let delta_path = dir.join("update.delta");
+
+        let base_content: Vec<u8> = (0..4096u32).map(|i| (i % 256) as u8).collect();
+        let mut target_content = base_content.clone();
+        target_content.truncate(2048);
+        target_content.extend_from_slice(b"freshly appended tensor bytes for the new revision");
+        fs::write(&base_path, &base_content).expect("write base");
+        fs::write(&target_path, &target_content).expect("write target");
+
+        let delta = create_binary_delta(&base_path, &target_path).expect("create_binary_delta");
+        fs::write(&delta_path, &delta).expect("write delta");
+        // Overwrite the "real" target so we can prove apply_binary_delta
+        // reconstructs it fresh rather than the file already being correct.
+        fs::write(&target_path, b"stale content that must be replaced").expect("clobber target");
+
+        let manager = DownloadManager::new(DownloadConfig::default());
+        manager
+            .apply_binary_delta(&delta_path, &base_path, &target_path)
+            .await
+            .expect("apply_binary_delta");
+
+        let final_bytes = fs::read(&target_path).expect("read final target");
+        assert_eq!(final_bytes, target_content);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Regression test: applying a delta against the wrong base must leave
+    /// whatever was already at `target_path` untouched rather than
+    /// overwriting it with corrupted bytes — verifying the temp-file-then-
+    /// rename ordering actually protects the destination on failure.
+    #[cfg(feature = "hub")]
+    #[tokio::test]
+    async fn test_download_manager_apply_binary_delta_never_corrupts_target_on_mismatch() {
+        let dir = delta_test_dir("apply_binary_delta_failure");
+        let base_path = dir.join("base.safetensors");
+        let target_path = dir.join("target.safetensors");
+        let delta_path = dir.join("update.delta");
+        let wrong_base_path = dir.join("wrong_base.safetensors");
+
+        fs::write(&base_path, b"the real base file contents").expect("write base");
+        fs::write(&wrong_base_path, b"a completely different base file").expect("write wrong base");
+        let target_content = b"the real, correct target file contents".to_vec();
+        fs::write(&target_path, &target_content).expect("write target");
+
+        let delta = create_binary_delta(&base_path, &target_path).expect("create_binary_delta");
+        fs::write(&delta_path, &delta).expect("write delta");
+
+        let sentinel = b"pre-existing target bytes that must survive a failed apply".to_vec();
+        fs::write(&target_path, &sentinel).expect("seed target with sentinel content");
+
+        let manager = DownloadManager::new(DownloadConfig::default());
+        let result = manager.apply_binary_delta(&delta_path, &wrong_base_path, &target_path).await;
+        assert!(result.is_err(), "applying against the wrong base must fail");
+
+        // target_path must be untouched: still the sentinel, not corrupted.
+        let bytes_after = fs::read(&target_path).expect("read target after failed apply");
+        assert_eq!(bytes_after, sentinel);
+
+        fs::remove_dir_all(&dir).ok();
     }
 }

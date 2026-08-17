@@ -2,7 +2,6 @@ use crate::error::{Result, TrustformersError};
 use crate::pipeline::{BasePipeline, GenerationOutput, Pipeline, PipelineOutput};
 use crate::{AutoModel, AutoTokenizer};
 use trustformers_core::traits::Tokenizer;
-use trustformers_models::common_patterns::GenerativeModel;
 
 /// Options for text generation
 #[derive(Clone, Debug)]
@@ -53,6 +52,14 @@ pub struct TextGenerationPipeline {
 
 impl TextGenerationPipeline {
     pub fn new(model: AutoModel, tokenizer: AutoTokenizer) -> Result<Self> {
+        // The model needs the real vocabulary to encode prompts and decode
+        // token ids; adopt the pipeline's tokenizer when the checkpoint did not
+        // already ship one.
+        let model = if model.tokenizer().is_none() {
+            model.with_tokenizer(tokenizer.clone())
+        } else {
+            model
+        };
         Ok(Self {
             base: BasePipeline::new(model, tokenizer),
             generation_config: GenerationConfig::default(),
@@ -64,11 +71,17 @@ impl TextGenerationPipeline {
         self
     }
 
-    fn generate(&self, prompt: &str) -> Result<GenerationOutput> {
-        // Convert pipeline config to GenerativeModel config
-        let gen_config = trustformers_models::common_patterns::GenerationConfig {
-            max_new_tokens: self.generation_config.max_length
-                - prompt.len().min(self.generation_config.max_length),
+    /// Translate the pipeline's config into the models-crate generation config.
+    ///
+    /// `max_length` is an *absolute* budget (prompt + completion), matching the
+    /// HuggingFace semantics; the model-side resolver caps the new-token count
+    /// against it and against the architecture's context window.
+    fn model_generation_config(
+        &self,
+        _prompt: &str,
+    ) -> trustformers_models::common_patterns::GenerationConfig {
+        trustformers_models::common_patterns::GenerationConfig {
+            max_new_tokens: self.generation_config.max_length,
             max_length: Some(self.generation_config.max_length),
             temperature: self.generation_config.temperature,
             top_p: self.generation_config.top_p.unwrap_or(0.9),
@@ -83,87 +96,72 @@ impl TextGenerationPipeline {
             eos_token_id: self.generation_config.eos_token_id,
             use_cache: true,
             stream: false,
-        };
-
-        // Use the GenerativeModel trait implementation
-        match self.base.model.generate(prompt, &gen_config) {
-            Ok(generated_text) => {
-                // Try to get token sequences and scores for more detailed output
-                let (sequences, scores) = self.get_generation_details(prompt, &gen_config)?;
-
-                Ok(GenerationOutput {
-                    generated_text,
-                    sequences,
-                    scores,
-                })
-            },
-            Err(e) => Err(TrustformersError::runtime_error(format!(
-                "Generation failed: {}",
-                e
-            ))),
         }
     }
 
-    /// Get detailed generation information including token sequences and scores
-    fn get_generation_details(
+    fn generate(&self, prompt: &str) -> Result<GenerationOutput> {
+        let gen_config = self.model_generation_config(prompt);
+
+        let num_return_sequences = self.generation_config.num_return_sequences.max(1);
+        if num_return_sequences > 1 && !self.generation_config.do_sample {
+            return Err(TrustformersError::invalid_input_simple(
+                "num_return_sequences > 1 requires do_sample = true: greedy decoding is \
+                 deterministic and would return identical sequences"
+                    .to_string(),
+            ));
+        }
+
+        // Run the model for real, once per requested sequence.
+        let mut sequences: Vec<Vec<u32>> = Vec::with_capacity(num_return_sequences);
+        let mut scores: Vec<f32> = Vec::with_capacity(num_return_sequences);
+        let mut texts: Vec<String> = Vec::with_capacity(num_return_sequences);
+
+        for _ in 0..num_return_sequences {
+            let generated = self.base.model.generate_token_ids(prompt, &gen_config)?;
+            let text =
+                self.base.tokenizer.decode(&generated.sequence).map_err(|e| {
+                    TrustformersError::runtime_error(format!("Decoding failed: {}", e))
+                })?;
+            // The score is the model's own summed log-probability of the tokens
+            // it produced — measured with one teacher-forced forward pass, not
+            // estimated. Sequences too short to score contribute no entry.
+            match self.base.model.sequence_log_prob(&generated.sequence, generated.prompt_len) {
+                Ok(score) => scores.push(score),
+                Err(err) => {
+                    tracing::debug!(error = %err, "sequence score unavailable for this generation");
+                },
+            }
+            sequences.push(generated.sequence);
+            texts.push(text);
+        }
+
+        let generated_text = texts.first().cloned().unwrap_or_default();
+        let scores = if scores.len() == sequences.len() { Some(scores) } else { None };
+
+        Ok(GenerationOutput {
+            generated_text,
+            sequences: Some(sequences),
+            scores,
+        })
+    }
+
+    /// Stream real tokens as the model produces them.
+    ///
+    /// Each item is the newly decoded text for one decoding step, so the first
+    /// chunk is available after a single forward pass.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the model cannot generate (no LM head, or no tokenizer).
+    pub fn stream(
         &self,
         prompt: &str,
-        _gen_config: &trustformers_models::common_patterns::GenerationConfig,
-    ) -> Result<(Option<Vec<Vec<u32>>>, Option<Vec<f32>>)> {
-        // Tokenize the input prompt to get starting token sequence
-        let tokenized =
-            self.base.tokenizer.encode(prompt).map_err(|e| {
-                TrustformersError::runtime_error(format!("Tokenization failed: {}", e))
-            })?;
-
-        // For now, we'll return basic information if sequences/scores are requested
-        if self.generation_config.num_return_sequences > 1 {
-            // If multiple sequences are requested, we should implement actual multi-sequence generation
-            // For now, return the input sequence extended with estimated tokens
-            let mut sequences = Vec::new();
-            let mut scores = Vec::new();
-
-            for i in 0..self.generation_config.num_return_sequences {
-                // Create a simple sequence by extending the input
-                let mut sequence = tokenized.clone();
-
-                // Add some placeholder tokens (in a real implementation, these would come from actual generation)
-                // This is a simplified approach - in practice you'd get these from the model's generation process
-                for j in 0..10 {
-                    // Add 10 tokens as an example
-                    sequence.input_ids.push(1000 + (i * 10 + j) as u32); // Placeholder token IDs
-                }
-
-                sequences.push(sequence.input_ids);
-
-                // Add a score based on sequence likelihood (placeholder calculation)
-                let score = -0.5 * (i as f32 + 1.0); // Simple decreasing scores
-                scores.push(score);
-            }
-
-            Ok((Some(sequences), Some(scores)))
-        } else {
-            // For single sequence generation, try to provide basic token sequence
-            if self.generation_config.num_return_sequences == 1 {
-                // Return the tokenized input sequence
-                // In a full implementation, this would include the generated tokens
-                let mut sequence = tokenized;
-
-                // Add placeholder generated tokens (in practice, get these from the generation process)
-                for i in 0..5 {
-                    // Add 5 tokens as an example
-                    sequence.input_ids.push(2000 + i as u32); // Placeholder token IDs
-                }
-
-                let sequences = vec![sequence.input_ids];
-                let scores = vec![-1.0]; // Single score for single sequence
-
-                Ok((Some(sequences), Some(scores)))
-            } else {
-                // Return None if no special sequence handling is needed
-                Ok((None, None))
-            }
-        }
+    ) -> Result<impl Iterator<Item = Result<crate::automodel::GenerationStep>> + '_> {
+        let gen_config = self.model_generation_config(prompt);
+        let stream = self.base.model.token_stream(prompt, &gen_config)?;
+        Ok(stream.map(|step| {
+            step.map_err(|e| TrustformersError::runtime_error(format!("Generation failed: {e}")))
+        }))
     }
 
     fn generate_batch(&self, prompts: &[String]) -> Result<Vec<GenerationOutput>> {
@@ -582,6 +580,139 @@ mod tests {
         state.add_token(100);
         state.add_token(eos_token);
         assert!(state.is_done(Some(eos_token), 1000));
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression tests for the removed placeholder token ids.
+    //
+    // `get_generation_details` used to append ids in the 1000.. and 2000..
+    // bands and scores of `-0.5 * (i + 1)` / `-1.0` to every result, regardless
+    // of what the model produced. Both tests below fail against that code.
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "bert")]
+    fn tiny_tokenizer() -> crate::AutoTokenizer {
+        use std::collections::HashMap;
+        let vocab: HashMap<String, u32> = [
+            "[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "hello", "world",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, w)| ((*w).to_string(), i as u32))
+        .collect();
+        crate::AutoTokenizer::WordPiece(crate::tokenizers::WordPieceTokenizer::new(vocab, true))
+    }
+
+    #[cfg(feature = "bert")]
+    fn tiny_bert_model() -> AutoModel {
+        let config = crate::models::bert::BertConfig {
+            vocab_size: 7,
+            hidden_size: 8,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            intermediate_size: 16,
+            max_position_embeddings: 32,
+            ..crate::models::bert::BertConfig::default()
+        };
+        AutoModel::from_config(crate::AutoConfig::Bert(config)).expect("tiny bert should build")
+    }
+
+    /// A pipeline wrapping a model that cannot generate must return an error,
+    /// not a `GenerationOutput` full of invented ids.
+    #[cfg(feature = "bert")]
+    #[test]
+    fn non_generative_model_yields_no_fabricated_output() {
+        let pipeline = TextGenerationPipeline::new(tiny_bert_model(), tiny_tokenizer())
+            .expect("pipeline should build");
+        let result = pipeline.__call__("hello world".to_string());
+        assert!(
+            result.is_err(),
+            "a headless encoder produced a generation result: {:?}",
+            result.map(|o| format!("{o:?}"))
+        );
+    }
+
+    /// Requesting several sequences from a deterministic decoder is a
+    /// configuration error, not an invitation to fabricate N variants.
+    #[cfg(feature = "bert")]
+    #[test]
+    fn multiple_greedy_sequences_are_rejected() {
+        let pipeline = TextGenerationPipeline::new(tiny_bert_model(), tiny_tokenizer())
+            .expect("pipeline should build")
+            .with_config(GenerationConfig {
+                do_sample: false,
+                num_return_sequences: 3,
+                ..GenerationConfig::default()
+            });
+        let err = pipeline
+            .__call__("hello".to_string())
+            .expect_err("greedy decoding cannot produce three distinct sequences");
+        assert!(
+            err.to_string().contains("num_return_sequences"),
+            "error should point at the offending setting: {err}"
+        );
+    }
+
+    /// Every returned id must be a real vocabulary entry produced by the model.
+    #[cfg(feature = "gpt2")]
+    #[test]
+    fn returned_ids_are_real_vocabulary_entries() {
+        use std::collections::HashMap;
+        use trustformers_core::traits::Tokenizer as _;
+
+        let vocab: HashMap<String, u32> = ["[PAD]", "[UNK]", "hello", "world", "there"]
+            .iter()
+            .enumerate()
+            .map(|(i, w)| ((*w).to_string(), i as u32))
+            .collect();
+        let tokenizer = crate::AutoTokenizer::WordPiece(
+            crate::tokenizers::WordPieceTokenizer::new(vocab, true),
+        );
+        let vocab_size = tokenizer.vocab_size() as u32;
+
+        let gpt2_config = crate::models::gpt2::Gpt2Config {
+            vocab_size: vocab_size as usize,
+            n_positions: 32,
+            n_embd: 8,
+            n_layer: 1,
+            n_head: 2,
+            ..crate::models::gpt2::Gpt2Config::default()
+        };
+        let model = AutoModel::from_parts(
+            crate::AutoConfig::Gpt2(gpt2_config.clone()),
+            crate::automodel::AutoModelType::Gpt2LMHead(
+                crate::models::gpt2::Gpt2LMHeadModel::new(gpt2_config)
+                    .expect("tiny gpt2 should build"),
+            ),
+        );
+
+        let pipeline = TextGenerationPipeline::new(model, tokenizer.clone())
+            .expect("pipeline should build")
+            .with_config(GenerationConfig {
+                max_length: 6,
+                do_sample: false,
+                num_return_sequences: 1,
+                ..GenerationConfig::default()
+            });
+
+        let output = match pipeline.__call__("hello world".to_string()) {
+            Ok(PipelineOutput::Generation(g)) => g,
+            other => panic!("unexpected pipeline output: {other:?}"),
+        };
+        let sequences = output.sequences.expect("real ids must be reported");
+        assert_eq!(sequences.len(), 1);
+        let prompt_ids = tokenizer.encode("hello world").expect("prompt should encode").input_ids;
+        assert!(
+            sequences[0].starts_with(&prompt_ids),
+            "the returned sequence must begin with the real prompt encoding"
+        );
+        for id in &sequences[0] {
+            assert!(
+                *id < vocab_size,
+                "id {id} is outside the {vocab_size}-entry vocabulary, so it cannot have come \
+                 from the model"
+            );
+        }
     }
 
     // ---- SamplingStrategy enum tests ----

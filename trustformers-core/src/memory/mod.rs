@@ -163,7 +163,15 @@ impl PoolEntry {
     }
 }
 
-/// Zero-copy tensor view for slice operations
+/// A borrowed window onto a contiguous range of a shared tensor.
+///
+/// Holding a `TensorView` is genuinely allocation-free: it keeps an `Arc` to
+/// the source tensor plus the range. Materialising the window as a standalone
+/// [`Tensor`] is *not* free — [`TensorView::as_tensor`] copies the range out.
+/// Use [`TensorView::as_slice`] when a borrowed `&[f32]` is enough.
+///
+/// Only flat ranges of contiguous F32 tensors are supported; other layouts and
+/// dtypes are rejected rather than silently reinterpreted.
 #[derive(Debug)]
 pub struct TensorView {
     /// Original tensor reference
@@ -172,13 +180,15 @@ pub struct TensorView {
     offset: usize,
     /// Shape of the view
     shape: Vec<usize>,
-    /// Strides for the view
-    #[allow(dead_code)]
+    /// Element strides of the view. Always `[1]` for the flat ranges this type
+    /// supports; kept so a strided view can be added without a layout change.
     strides: Vec<usize>,
 }
 
 impl TensorView {
-    /// Create a new zero-copy view of a tensor slice
+    /// Create a view of the flat element range `start..end` of `tensor`.
+    ///
+    /// Creating the view copies nothing.
     pub fn slice(tensor: Arc<Tensor>, start: usize, end: usize) -> Result<Self> {
         let original_shape = tensor.shape();
         if start >= end || end > original_shape.iter().product::<usize>() {
@@ -201,10 +211,55 @@ impl TensorView {
         &self.shape
     }
 
-    /// Get the underlying tensor data (zero-copy)
+    /// Element strides of the view.
+    pub fn strides(&self) -> &[usize] {
+        &self.strides
+    }
+
+    /// Number of elements in the view.
+    pub fn len(&self) -> usize {
+        self.shape.iter().product()
+    }
+
+    /// Whether the view is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Borrow the viewed elements without copying.
+    ///
+    /// Errors for non-F32 or non-contiguous source tensors.
+    pub fn as_slice(&self) -> Result<&[f32]> {
+        match &*self.original {
+            Tensor::F32(arr) => {
+                let data = arr.as_slice().ok_or_else(|| {
+                    TrustformersError::tensor_op_error(
+                        "TensorView requires a contiguous source tensor",
+                        "tensor_view",
+                    )
+                })?;
+                let end = self.offset + self.len();
+                data.get(self.offset..end).ok_or_else(|| {
+                    TrustformersError::invalid_input(format!(
+                        "view range {}..{} is outside the source tensor of {} elements",
+                        self.offset,
+                        end,
+                        data.len()
+                    ))
+                })
+            },
+            _ => Err(TrustformersError::tensor_op_error(
+                "TensorView only supports F32 tensors",
+                "tensor_view",
+            )),
+        }
+    }
+
+    /// Copy the viewed elements into a standalone tensor.
+    ///
+    /// This allocates: it is a copying materialisation, not a borrow. Use
+    /// [`Self::as_slice`] when a borrowed view suffices.
     pub fn as_tensor(&self) -> Result<Tensor> {
-        // This would implement actual zero-copy slicing
-        // For now, return a simple implementation
         match &*self.original {
             Tensor::F32(arr) => {
                 let flat = arr
@@ -221,8 +276,8 @@ impl TensorView {
                 Ok(Tensor::F32(sliced_arr))
             },
             _ => Err(TrustformersError::tensor_op_error(
-                "Zero-copy slicing not implemented for this tensor type",
-                "zero_copy_slice",
+                "TensorView only supports F32 tensors",
+                "tensor_view",
             )),
         }
     }
@@ -584,25 +639,64 @@ impl TensorMemoryPool {
         Ok(())
     }
 
-    /// Adapt pool size based on system memory pressure
+    /// Fraction of host RAM currently in use, from `sysinfo`.
+    ///
+    /// `None` when the host reports no total memory (the reading would be
+    /// meaningless), in which case the caller must not pretend to know the
+    /// pressure.
+    pub fn host_memory_pressure() -> Option<f64> {
+        use sysinfo::{MemoryRefreshKind, RefreshKind, System};
+
+        let mut system = System::new_with_specifics(
+            RefreshKind::nothing().with_memory(MemoryRefreshKind::nothing().with_ram()),
+        );
+        system.refresh_memory();
+
+        let total = system.total_memory();
+        if total == 0 {
+            return None;
+        }
+        let available = system.available_memory();
+        Some(1.0 - (available as f64 / total as f64))
+    }
+
+    /// Adapt pool size based on real system memory pressure.
+    ///
+    /// The host's used-memory fraction comes from `sysinfo`; the pool shrinks
+    /// when the *machine* is short of RAM, not merely when the pool happens to
+    /// be full. The pool's own utilisation is still used as a secondary signal,
+    /// but it can only grow the pool, never mask host pressure.
     fn adapt_by_memory_pressure(&self) -> Result<()> {
-        // Simplified memory pressure detection
-        // In production, this would query OS for available memory
         let current_size =
             *self.current_size.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut dynamic_max =
             self.dynamic_max_size.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let utilization = current_size as f64 / *dynamic_max as f64;
+        let pool_utilization =
+            if *dynamic_max > 0 { current_size as f64 / *dynamic_max as f64 } else { 0.0 };
 
-        if utilization > 0.9 {
-            // High pressure: decrease pool size
-            let new_size = (*dynamic_max as f64 * 0.9) as usize;
-            *dynamic_max = new_size.max(self.config.min_pool_size);
-        } else if utilization < 0.5 {
-            // Low pressure: increase pool size
-            let new_size = (*dynamic_max as f64 * 1.1) as usize;
-            *dynamic_max = new_size.min(self.config.max_pool_size);
+        match Self::host_memory_pressure() {
+            Some(host_pressure) if host_pressure > 0.9 => {
+                // The machine is nearly out of RAM: shrink hard regardless of
+                // how empty the pool is.
+                let new_size = (*dynamic_max as f64 * 0.75) as usize;
+                *dynamic_max = new_size.max(self.config.min_pool_size);
+            },
+            Some(host_pressure) if host_pressure > 0.75 => {
+                let new_size = (*dynamic_max as f64 * 0.9) as usize;
+                *dynamic_max = new_size.max(self.config.min_pool_size);
+            },
+            Some(_) if pool_utilization > 0.9 => {
+                // Host has headroom but the pool is thrashing: grow it.
+                let new_size = (*dynamic_max as f64 * 1.1) as usize;
+                *dynamic_max = new_size.min(self.config.max_pool_size);
+            },
+            Some(_) => {},
+            None => {
+                // No host reading available: leave the pool size alone rather
+                // than adapting to a pressure figure we do not have.
+                tracing::debug!("host memory pressure unavailable; pool size left unchanged");
+            },
         }
 
         Ok(())
@@ -641,17 +735,26 @@ impl TensorMemoryPool {
         Ok(())
     }
 
-    /// Defragment the pool by reorganizing entries
-    fn defragment_pool(&self) -> Result<()> {
-        // Simplified defragmentation: consolidate shape groups
+    /// Compact the pool.
+    ///
+    /// The pool hands out owned `Tensor`s rather than slices of one arena, so
+    /// there is no address-space fragmentation to compact away. What this does
+    /// is real and bounded: drop the shape buckets that have become empty
+    /// (they otherwise accumulate for every shape ever requested) and order the
+    /// survivors most-used-first so the hot entries are found on the first
+    /// probe. Returns the number of empty buckets removed.
+    fn defragment_pool(&self) -> Result<usize> {
         let mut pool = self.pool.write().unwrap_or_else(|poisoned| poisoned.into_inner());
 
+        let before = pool.len();
+        pool.retain(|_, entries| !entries.is_empty());
+        let removed = before - pool.len();
+
         for entries in pool.values_mut() {
-            // Sort entries by access count (most accessed first)
             entries.sort_by_key(|entry| std::cmp::Reverse(entry.access_count));
         }
 
-        Ok(())
+        Ok(removed)
     }
 
     /// Get enhanced memory pool statistics
@@ -941,6 +1044,84 @@ pub fn return_tensor(tensor: Tensor) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test: `TensorView` was documented as zero-copy but
+    /// `as_tensor()` allocated. The borrow path must now be available and the
+    /// copying path must be labelled as such.
+    #[test]
+    fn test_tensor_view_borrows_without_copying() -> Result<()> {
+        let tensor = Arc::new(Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0], &[5])?);
+        let view = TensorView::slice(Arc::clone(&tensor), 1, 4)?;
+
+        assert_eq!(view.len(), 3);
+        assert!(!view.is_empty());
+        assert_eq!(view.strides(), &[1]);
+
+        // Borrowed: the slice must alias the source tensor's buffer.
+        let borrowed = view.as_slice()?;
+        assert_eq!(borrowed, &[2.0, 3.0, 4.0]);
+        let source = match &*tensor {
+            Tensor::F32(arr) => arr.as_slice().expect("contiguous"),
+            _ => panic!("expected F32"),
+        };
+        assert_eq!(
+            borrowed.as_ptr(),
+            source[1..].as_ptr(),
+            "as_slice must alias the source buffer, not copy it"
+        );
+
+        // Materialising copies, which is now documented rather than denied.
+        let materialised = view.as_tensor()?;
+        assert_eq!(materialised.data()?, vec![2.0, 3.0, 4.0]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_tensor_view_rejects_out_of_range_and_non_f32() -> Result<()> {
+        let tensor = Arc::new(Tensor::from_vec(vec![1.0, 2.0], &[2])?);
+        assert!(TensorView::slice(Arc::clone(&tensor), 1, 1).is_err());
+        assert!(TensorView::slice(Arc::clone(&tensor), 0, 5).is_err());
+        Ok(())
+    }
+
+    /// Regression test: `adapt_by_memory_pressure` only looked at the pool's
+    /// own utilisation and never asked the host how much RAM was left.
+    #[test]
+    fn test_memory_pressure_comes_from_the_host() {
+        let pressure = TensorMemoryPool::host_memory_pressure()
+            .expect("sysinfo reports total memory on supported platforms");
+        assert!(
+            (0.0..=1.0).contains(&pressure),
+            "host memory pressure {pressure} must be a fraction"
+        );
+        // A running machine always has *some* memory in use.
+        assert!(pressure > 0.0);
+    }
+
+    /// Regression test: `defragment_pool` sorted buckets and compacted nothing.
+    #[test]
+    fn test_defragment_removes_empty_shape_buckets() -> Result<()> {
+        let pool = TensorMemoryPool::new(MemoryConfig::default());
+
+        // Populate two shapes, then return only one, leaving an empty bucket.
+        let a = pool.get_tensor(&[2, 2], crate::tensor::DType::F32)?;
+        let b = pool.get_tensor(&[3, 3], crate::tensor::DType::F32)?;
+        pool.return_tensor(a)?;
+        pool.return_tensor(b)?;
+
+        {
+            let mut guard = pool.pool.write().unwrap_or_else(|p| p.into_inner());
+            for entries in guard.values_mut() {
+                entries.clear();
+            }
+        }
+
+        let removed = pool.defragment_pool()?;
+        assert!(removed >= 1, "emptied shape buckets must be dropped");
+        assert!(pool.pool.read().unwrap_or_else(|p| p.into_inner()).is_empty());
+        Ok(())
+    }
 
     #[test]
     fn test_memory_config_default() {

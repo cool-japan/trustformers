@@ -352,56 +352,247 @@ impl ValgrindIntegration {
         self
     }
 
-    /// Run memory leak detection using Valgrind
-    pub fn run_leak_check(&self) -> Result<ValgrindReport, Box<dyn std::error::Error>> {
+    /// Whether a usable `valgrind` binary is on `PATH`.
+    ///
+    /// Valgrind is not available on macOS/arm64 and is frequently absent from
+    /// CI images; callers should branch on this rather than assuming success.
+    pub fn is_available() -> bool {
+        Command::new("valgrind")
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Run memory leak detection using Valgrind.
+    ///
+    /// Returns [`ValgrindError::NotAvailable`] when no `valgrind` binary can be
+    /// executed, so a CI gate built on this can never be silently green.
+    pub fn run_leak_check(&self) -> Result<ValgrindReport, ValgrindError> {
+        // Write the XML report next to the other temporaries rather than into
+        // the current working directory.
+        let xml_path = std::env::temp_dir().join(format!(
+            "trustformers_valgrind_{}_{}.xml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+
         let mut cmd = Command::new("valgrind");
         cmd.arg("--tool=memcheck")
             .arg("--leak-check=full")
             .arg("--show-leak-kinds=all")
             .arg("--track-origins=yes")
             .arg("--xml=yes")
-            .arg("--xml-file=valgrind_output.xml")
-            .arg(&self.executable_path);
+            .arg(format!("--xml-file={}", xml_path.display()));
 
         if let Some(ref suppression) = self.suppression_file {
             cmd.arg(format!("--suppressions={}", suppression));
         }
+
+        cmd.arg(&self.executable_path);
 
         // Add test command arguments
         for arg in self.test_command.split_whitespace() {
             cmd.arg(arg);
         }
 
-        let output = cmd.output()?;
+        let output = match cmd.output() {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ValgrindError::NotAvailable(
+                    "no `valgrind` executable was found on PATH".to_string(),
+                ))
+            },
+            Err(error) => {
+                return Err(ValgrindError::NotAvailable(format!(
+                    "failed to execute valgrind: {}",
+                    error
+                )))
+            },
+        };
 
-        if !output.status.success() {
-            return Err(
-                format!("Valgrind failed with exit code: {:?}", output.status.code()).into(),
-            );
+        if !xml_path.exists() {
+            let _ = std::fs::remove_file(&xml_path);
+            return Err(ValgrindError::NotAvailable(format!(
+                "valgrind produced no XML report (exit code {:?}): {}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
         }
 
-        // Parse Valgrind XML output
-        self.parse_valgrind_output("valgrind_output.xml")
+        let xml = std::fs::read_to_string(&xml_path)
+            .map_err(|error| ValgrindError::Io(error.to_string()))?;
+        let _ = std::fs::remove_file(&xml_path);
+
+        parse_valgrind_xml(&xml)
     }
 
-    /// Parse Valgrind XML output into a structured report
-    fn parse_valgrind_output(
-        &self,
-        _xml_file: &str,
-    ) -> Result<ValgrindReport, Box<dyn std::error::Error>> {
-        // In a real implementation, this would parse the XML output
-        // For now, we'll return a simulated report
-        Ok(ValgrindReport {
-            definitely_lost: 0,
-            indirectly_lost: 0,
-            possibly_lost: 0,
-            still_reachable: 0,
-            suppressed: 0,
-            total_heap_usage: 1024 * 1024,
-            leak_records: vec![],
-            error_summary: "No leaks detected".to_string(),
-        })
+    /// Parse a Valgrind memcheck XML report from a file on disk.
+    pub fn parse_valgrind_output(&self, xml_file: &str) -> Result<ValgrindReport, ValgrindError> {
+        let xml = std::fs::read_to_string(xml_file).map_err(|error| {
+            ValgrindError::Io(format!("failed to read {}: {}", xml_file, error))
+        })?;
+        parse_valgrind_xml(&xml)
     }
+}
+
+/// Failure modes of the Valgrind integration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValgrindError {
+    /// Valgrind could not be run at all (not installed, unsupported platform,
+    /// or it produced no report). No leak verdict is available.
+    NotAvailable(String),
+    /// The XML report could not be read.
+    Io(String),
+    /// The XML report was malformed or not a memcheck report.
+    Malformed(String),
+}
+
+impl std::fmt::Display for ValgrindError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ValgrindError::NotAvailable(reason) => {
+                write!(formatter, "valgrind is not available: {}", reason)
+            },
+            ValgrindError::Io(reason) => write!(formatter, "valgrind report I/O error: {}", reason),
+            ValgrindError::Malformed(reason) => {
+                write!(formatter, "malformed valgrind XML report: {}", reason)
+            },
+        }
+    }
+}
+
+impl std::error::Error for ValgrindError {}
+
+/// Parse a Valgrind memcheck `--xml=yes` report.
+///
+/// Reads the real `<error>` records: `<kind>` selects the leak class and
+/// `<xwhat><leakedbytes>/<leakedblocks>` carry the amounts. Suppression counts
+/// come from `<suppcounts>`. Valgrind's XML schema has no element for the
+/// "total heap usage" summary line, so [`ValgrindReport::total_heap_usage`] is
+/// `None` unless a future schema provides one.
+pub fn parse_valgrind_xml(xml: &str) -> Result<ValgrindReport, ValgrindError> {
+    let root = crate::testing::mini_xml::parse(xml)
+        .map_err(|error| ValgrindError::Malformed(error.to_string()))?;
+
+    if root.name != "valgrindoutput" {
+        return Err(ValgrindError::Malformed(format!(
+            "expected a <valgrindoutput> root element, found <{}>",
+            root.name
+        )));
+    }
+
+    if let Some(tool) = root.child_text("protocoltool") {
+        if tool != "memcheck" {
+            return Err(ValgrindError::Malformed(format!(
+                "expected a memcheck report, found tool `{}`",
+                tool
+            )));
+        }
+    }
+
+    let mut definitely_lost = 0usize;
+    let mut indirectly_lost = 0usize;
+    let mut possibly_lost = 0usize;
+    let mut still_reachable = 0usize;
+    let mut leak_records = Vec::new();
+    let mut non_leak_errors = 0usize;
+
+    for error in root.children_named("error") {
+        let kind = error.child_text("kind").unwrap_or_default().to_string();
+
+        let (bytes, blocks) = error
+            .child("xwhat")
+            .map(|xwhat| {
+                (
+                    xwhat
+                        .child_text("leakedbytes")
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .unwrap_or(0),
+                    xwhat
+                        .child_text("leakedblocks")
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .unwrap_or(0),
+                )
+            })
+            .unwrap_or((0, 0));
+
+        let stack_trace = error
+            .child("stack")
+            .map(|stack| {
+                stack
+                    .children_named("frame")
+                    .map(|frame| {
+                        let function = frame.child_text("fn").unwrap_or("<unknown>");
+                        match (frame.child_text("file"), frame.child_text("line")) {
+                            (Some(file), Some(line)) => format!("{} ({}:{})", function, file, line),
+                            (Some(file), None) => format!("{} ({})", function, file),
+                            _ => function.to_string(),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        match kind.as_str() {
+            "Leak_DefinitelyLost" => definitely_lost += bytes,
+            "Leak_IndirectlyLost" => indirectly_lost += bytes,
+            "Leak_PossiblyLost" => possibly_lost += bytes,
+            "Leak_StillReachable" => still_reachable += bytes,
+            _ => {
+                non_leak_errors += 1;
+                continue;
+            },
+        }
+
+        leak_records.push(ValgrindLeakRecord {
+            bytes,
+            blocks,
+            kind,
+            stack_trace,
+        });
+    }
+
+    let suppressed = root
+        .child("suppcounts")
+        .map(|counts| {
+            counts
+                .children_named("pair")
+                .filter_map(|pair| pair.child_text("count"))
+                .filter_map(|count| count.parse::<usize>().ok())
+                .sum::<usize>()
+        })
+        .unwrap_or(0);
+
+    let error_summary = if leak_records.is_empty() && non_leak_errors == 0 {
+        "No leaks or errors reported by valgrind".to_string()
+    } else {
+        format!(
+            "{} leak record(s), {} non-leak error(s); definitely lost {} bytes, \
+             indirectly lost {} bytes, possibly lost {} bytes, still reachable {} bytes",
+            leak_records.len(),
+            non_leak_errors,
+            definitely_lost,
+            indirectly_lost,
+            possibly_lost,
+            still_reachable
+        )
+    };
+
+    Ok(ValgrindReport {
+        definitely_lost,
+        indirectly_lost,
+        possibly_lost,
+        still_reachable,
+        suppressed,
+        // Valgrind's XML schema carries no heap-usage summary element.
+        total_heap_usage: None,
+        leak_records,
+        error_summary,
+    })
 }
 
 /// Valgrind memory leak report
@@ -412,7 +603,11 @@ pub struct ValgrindReport {
     pub possibly_lost: usize,
     pub still_reachable: usize,
     pub suppressed: usize,
-    pub total_heap_usage: usize,
+    /// Total heap usage, if the report carries it.
+    ///
+    /// Valgrind's XML schema has no element for the "total heap usage" summary
+    /// line, so this is `None` for XML-sourced reports.
+    pub total_heap_usage: Option<usize>,
     pub leak_records: Vec<ValgrindLeakRecord>,
     pub error_summary: String,
 }
@@ -446,13 +641,15 @@ impl ValgrindReport {
              Possibly lost: {} bytes\n\
              Still reachable: {} bytes\n\
              Suppressed: {} bytes\n\
-             Total heap usage: {} bytes",
+             Total heap usage: {}",
             self.definitely_lost,
             self.indirectly_lost,
             self.possibly_lost,
             self.still_reachable,
             self.suppressed,
             self.total_heap_usage
+                .map(|bytes| format!("{} bytes", bytes))
+                .unwrap_or_else(|| "not reported".to_string())
         )
     }
 }
@@ -576,6 +773,159 @@ impl CIIntegration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A trimmed but structurally faithful memcheck `--xml=yes` report.
+    const VALGRIND_XML_WITH_LEAKS: &str = r#"<?xml version="1.0"?>
+<valgrindoutput>
+  <protocolversion>4</protocolversion>
+  <protocoltool>memcheck</protocoltool>
+  <pid>4242</pid>
+  <error>
+    <unique>0x1</unique>
+    <tid>1</tid>
+    <kind>Leak_DefinitelyLost</kind>
+    <xwhat>
+      <text>100 bytes in 1 blocks are definitely lost in loss record 1 of 3</text>
+      <leakedbytes>100</leakedbytes>
+      <leakedblocks>1</leakedblocks>
+    </xwhat>
+    <stack>
+      <frame><ip>0x4C2FB0F</ip><fn>malloc</fn><file>vg_replace_malloc.c</file><line>299</line></frame>
+      <frame><ip>0x400544</ip><fn>leak_here</fn><file>main.c</file><line>7</line></frame>
+    </stack>
+  </error>
+  <error>
+    <unique>0x2</unique>
+    <tid>1</tid>
+    <kind>Leak_IndirectlyLost</kind>
+    <xwhat>
+      <text>40 bytes in 2 blocks are indirectly lost in loss record 2 of 3</text>
+      <leakedbytes>40</leakedbytes>
+      <leakedblocks>2</leakedblocks>
+    </xwhat>
+    <stack>
+      <frame><ip>0x4C2FB0F</ip><fn>calloc</fn></frame>
+    </stack>
+  </error>
+  <error>
+    <unique>0x3</unique>
+    <tid>1</tid>
+    <kind>InvalidRead</kind>
+    <what>Invalid read of size 4</what>
+    <stack>
+      <frame><ip>0x400500</ip><fn>oops</fn></frame>
+    </stack>
+  </error>
+  <suppcounts>
+    <pair><count>3</count><name>libc-known</name></pair>
+    <pair><count>1</count><name>dl-open</name></pair>
+  </suppcounts>
+</valgrindoutput>
+"#;
+
+    const VALGRIND_XML_CLEAN: &str = r#"<?xml version="1.0"?>
+<valgrindoutput>
+  <protocolversion>4</protocolversion>
+  <protocoltool>memcheck</protocoltool>
+  <pid>77</pid>
+  <suppcounts>
+  </suppcounts>
+</valgrindoutput>
+"#;
+
+    /// Regression test: `parse_valgrind_output` used to ignore the XML entirely
+    /// and always return an all-zero "No leaks detected" report, so any CI gate
+    /// built on it passed unconditionally.
+    #[test]
+    fn test_valgrind_xml_leaks_are_actually_parsed() {
+        let report = parse_valgrind_xml(VALGRIND_XML_WITH_LEAKS).expect("parse failed");
+
+        assert_eq!(report.definitely_lost, 100);
+        assert_eq!(report.indirectly_lost, 40);
+        assert_eq!(report.possibly_lost, 0);
+        assert_eq!(report.suppressed, 4);
+        assert!(
+            report.has_leaks(),
+            "a report with 140 leaked bytes must have leaks"
+        );
+        assert_eq!(report.total_leaked_bytes(), 140);
+
+        // Only the two leak kinds become leak records; InvalidRead is counted
+        // as a non-leak error.
+        assert_eq!(report.leak_records.len(), 2);
+        assert_eq!(report.leak_records[0].blocks, 1);
+        assert_eq!(report.leak_records[0].kind, "Leak_DefinitelyLost");
+        assert_eq!(
+            report.leak_records[0].stack_trace,
+            vec![
+                "malloc (vg_replace_malloc.c:299)".to_string(),
+                "leak_here (main.c:7)".to_string(),
+            ]
+        );
+
+        assert!(
+            report.error_summary.contains("1 non-leak error"),
+            "summary must reflect the real errors: {}",
+            report.error_summary
+        );
+        assert_ne!(
+            report.error_summary, "No leaks detected",
+            "the old unconditional summary must not survive"
+        );
+        assert!(
+            report.total_heap_usage.is_none(),
+            "valgrind XML carries no heap-usage summary; it must not be invented"
+        );
+    }
+
+    #[test]
+    fn test_valgrind_xml_clean_run() {
+        let report = parse_valgrind_xml(VALGRIND_XML_CLEAN).expect("parse failed");
+        assert!(!report.has_leaks());
+        assert_eq!(report.total_leaked_bytes(), 0);
+        assert_eq!(report.leak_records.len(), 0);
+        assert!(report.error_summary.contains("No leaks or errors"));
+    }
+
+    #[test]
+    fn test_valgrind_rejects_non_memcheck_and_malformed_reports() {
+        let helgrind = r#"<?xml version="1.0"?>
+<valgrindoutput><protocoltool>helgrind</protocoltool></valgrindoutput>"#;
+        assert!(matches!(
+            parse_valgrind_xml(helgrind),
+            Err(ValgrindError::Malformed(_))
+        ));
+
+        assert!(matches!(
+            parse_valgrind_xml("<notvalgrind/>"),
+            Err(ValgrindError::Malformed(_))
+        ));
+
+        assert!(matches!(
+            parse_valgrind_xml("<valgrindoutput>"),
+            Err(ValgrindError::Malformed(_))
+        ));
+    }
+
+    /// Regression test: a missing valgrind binary must surface as
+    /// `NotAvailable`, never as a clean report.
+    #[test]
+    fn test_missing_valgrind_reports_not_available() {
+        if ValgrindIntegration::is_available() {
+            // Valgrind is installed here; the negative path is not reachable.
+            return;
+        }
+
+        let integration = ValgrindIntegration::new(
+            "/nonexistent/trustformers-test-binary".to_string(),
+            String::new(),
+        );
+        match integration.run_leak_check() {
+            Err(ValgrindError::NotAvailable(_)) => {},
+            Err(other) => panic!("expected NotAvailable, got {other}"),
+            Ok(report) => panic!("valgrind is unavailable but a report was returned: {report:?}"),
+        }
+    }
 
     #[test]
     fn test_memory_leak_detector() {

@@ -1,46 +1,56 @@
 //! # Audio Classification Pipeline
 //!
-//! This module provides an audio classification pipeline that maps raw audio signals
-//! or audio file paths to categorical labels (e.g., keyword spotting, sound event
-//! detection, music genre classification).
+//! Maps raw audio signals or audio files to categorical labels (keyword
+//! spotting, sound-event detection, music genre classification).
 //!
-//! ## Supported model families
-//! - **wav2vec2** — general-purpose self-supervised audio encoder
-//! - **Whisper** — multilingual speech model usable for audio classification
-//! - **Audio Spectrogram Transformer (AST)** — vision-transformer applied to mel spectrograms
+//! ## What is real here
+//!
+//! * **Decoding** — uncompressed RIFF/WAVE containers (PCM 8/16/24/32-bit and
+//!   IEEE float 32/64-bit) are decoded for real; compressed containers report a
+//!   structured error instead of being replaced by silence.
+//! * **Resampling** — nearest-neighbour and linear interpolation.
+//! * **Feature extraction** — Hann-windowed STFT via the pure-Rust `oxifft`
+//!   crate, a Slaney-scale triangular mel filterbank, and log compression
+//!   (see [`crate::pipeline::media::audio_dsp`]).
+//! * **Post-processing** — softmax and top-k ranking.
+//!
+//! ## Model support
+//!
+//! No audio classification backbone (wav2vec2, AST, …) has a real,
+//! weight-loadable implementation in `trustformers-models` yet. Consequently
+//! [`AudioClassificationPipeline::classify`] returns a structured
+//! [`TrustformersError::FeatureUnavailable`] rather than inventing labels and
+//! confidence scores. The preprocessing above is fully usable on its own —
+//! call [`AudioClassificationPipeline::extract_log_mel`] and run your own model
+//! on the result.
 //!
 //! ## Example
 //!
 //! ```rust,ignore
 //! use trustformers::pipeline::audio_classification::{
-//!     AudioClassificationConfig, AudioClassificationPipeline, AudioClassificationInput,
+//!     AudioClassificationConfig, AudioClassificationPipeline,
 //! };
 //!
-//! let config = AudioClassificationConfig {
-//!     model_name: "facebook/wav2vec2-base".to_string(),
-//!     sample_rate: 16_000,
-//!     top_k: 5,
-//!     ..Default::default()
-//! };
-//!
-//! let pipeline = AudioClassificationPipeline::new(config)?;
-//!
-//! let input = AudioClassificationInput::RawAudio {
-//!     samples: vec![0.0_f32; 16_000],
-//!     sample_rate: 16_000,
-//! };
-//!
-//! let results = pipeline.classify(&input)?;
-//! for result in &results {
-//!     println!("{}: {:.4}", result.label, result.score);
-//! }
+//! let pipeline = AudioClassificationPipeline::new(AudioClassificationConfig::default())?;
+//! // Real feature extraction:
+//! let mel = pipeline.extract_log_mel(&samples, 16_000)?;
+//! // Classification reports that no backbone is available:
+//! assert!(pipeline.classify(&input).is_err());
 //! # Ok::<(), trustformers::TrustformersError>(())
 //! ```
 
 use crate::error::{Result, TrustformersError};
+use crate::pipeline::media::audio_dsp;
+use crate::pipeline::media::unsupported_model;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use trustformers_core::tensor::Tensor;
+
+/// Architectures with a real, usable audio-classification backbone.
+///
+/// Deliberately empty: none exists yet, and the pipeline says so instead of
+/// pretending otherwise.
+const SUPPORTED_ARCHITECTURES: &[&str] = &[];
 
 // ---------------------------------------------------------------------------
 // Public types — Input
@@ -59,7 +69,8 @@ pub enum AudioClassificationInput {
         /// Sample rate in Hz (e.g. 16 000).
         sample_rate: u32,
     },
-    /// Path to a supported audio file (WAV, FLAC, MP3, OGG).
+    /// Path to an audio file. Only uncompressed RIFF/WAVE can be decoded
+    /// without an external codec; anything else reports an error.
     FilePath(PathBuf),
     /// Pre-computed log-mel spectrogram as a flat `[frames × bins]` tensor.
     MelSpectrogram {
@@ -185,7 +196,7 @@ pub fn resample_audio(samples: &[f32], config: &AudioResampleConfig) -> Vec<f32>
 }
 
 // ---------------------------------------------------------------------------
-// Feature extraction helpers (pure Rust, no external deps)
+// Feature extraction helpers (pure Rust, no C/C++ deps)
 // ---------------------------------------------------------------------------
 
 /// Resample `samples` from `from_hz` to `to_hz` using linear interpolation.
@@ -222,33 +233,6 @@ pub fn resample_nearest(samples: &[f32], from_hz: u32, to_hz: u32) -> Vec<f32> {
     out
 }
 
-/// Compute a simple mean-pooled feature vector from raw samples.
-///
-/// Splits the waveform into `num_frames` non-overlapping segments and
-/// computes the RMS energy of each segment as a 1-D feature.
-fn compute_waveform_features(samples: &[f32], num_frames: usize) -> Vec<f32> {
-    if samples.is_empty() || num_frames == 0 {
-        return vec![0.0; num_frames.max(1)];
-    }
-    let frame_size = (samples.len() / num_frames).max(1);
-    let mut features = Vec::with_capacity(num_frames);
-    for frame_idx in 0..num_frames {
-        let start = frame_idx * frame_size;
-        let end = ((frame_idx + 1) * frame_size).min(samples.len());
-        if start >= samples.len() {
-            features.push(0.0_f32);
-            continue;
-        }
-        let rms: f32 = {
-            let slice = &samples[start..end];
-            let sum_sq: f32 = slice.iter().map(|s| s * s).sum();
-            (sum_sq / slice.len() as f32).sqrt()
-        };
-        features.push(rms);
-    }
-    features
-}
-
 /// Apply softmax normalization to a slice of scores, returning normalized probabilities.
 pub fn normalize_scores(scores: &[f32]) -> Vec<f32> {
     if scores.is_empty() {
@@ -264,107 +248,70 @@ pub fn normalize_scores(scores: &[f32]) -> Vec<f32> {
     }
 }
 
-/// Apply softmax in-place over a slice of logits.
-fn softmax_inplace(logits: &mut Vec<f32>) {
-    if logits.is_empty() {
-        return;
-    }
-    let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let mut sum = 0.0_f32;
-    for v in logits.iter_mut() {
-        *v = (*v - max).exp();
-        sum += *v;
-    }
-    if sum > 0.0 {
-        for v in logits.iter_mut() {
-            *v /= sum;
-        }
-    }
-}
-
-/// Compute a simplified mel spectrogram from raw PCM samples.
+/// Compute a log-mel spectrogram from raw PCM samples.
 ///
-/// Returns a 2D vector of shape `[n_frames][n_mels]` where values are
-/// log-mel filterbank energies.
+/// Uses a real Hann-windowed STFT (`oxifft`) followed by a Slaney-scale
+/// triangular mel filterbank and a natural-log compression. Frames are *not*
+/// centred: frame `t` starts at sample `t · hop_length`, so the frame count is
+/// `(len - n_fft) / hop_length + 1` (or 1 when the signal is shorter than one
+/// window).
+///
+/// Returns a 2D vector of shape `[n_frames][n_mels]`, or an empty vector for
+/// degenerate parameters.
+///
+/// The `sample_rate` used for the mel scale is fixed at 16 kHz, matching the
+/// pipeline default; use [`AudioClassificationPipeline::extract_log_mel`] for a
+/// rate-aware version.
 pub fn compute_mel_spectrogram(
     pcm: &[f32],
     n_fft: usize,
     hop_length: usize,
     n_mels: usize,
 ) -> Vec<Vec<f32>> {
-    if pcm.is_empty() || n_fft == 0 || hop_length == 0 || n_mels == 0 {
-        return Vec::new();
+    compute_mel_spectrogram_at(pcm, 16_000, n_fft, hop_length, n_mels).unwrap_or_default()
+}
+
+/// Rate-aware log-mel spectrogram; see [`compute_mel_spectrogram`].
+///
+/// # Errors
+///
+/// Returns an error when the STFT or filterbank parameters are invalid.
+pub fn compute_mel_spectrogram_at(
+    pcm: &[f32],
+    sample_rate: u32,
+    n_fft: usize,
+    hop_length: usize,
+    n_mels: usize,
+) -> Result<Vec<Vec<f32>>> {
+    if pcm.is_empty() || n_fft == 0 || hop_length == 0 || n_mels == 0 || sample_rate == 0 {
+        return Ok(Vec::new());
     }
 
-    let hop = hop_length.max(1);
-    let n_frames = if pcm.len() >= n_fft { (pcm.len() - n_fft) / hop + 1 } else { 1 };
+    // Match the historical (uncentred) framing so callers keep their frame counts.
+    let padded: Vec<f32> = if pcm.len() >= n_fft {
+        pcm.to_vec()
+    } else {
+        let mut v = pcm.to_vec();
+        v.resize(n_fft, 0.0);
+        v
+    };
 
-    // Pre-compute Hann window
-    let hann_window: Vec<f32> = (0..n_fft)
-        .map(|i| {
-            let phase = 2.0 * std::f32::consts::PI * i as f32 / (n_fft as f32 - 1.0).max(1.0);
-            0.5 * (1.0 - phase.cos())
-        })
-        .collect();
-
-    // Pre-compute simplified mel filterbank center frequencies
-    // Map mel scale to linear FFT bins
-    let n_bins = n_fft / 2 + 1;
-    let mel_centers: Vec<f32> = (0..n_mels)
-        .map(|m| (m as f32 + 1.0) / (n_mels as f32 + 1.0) * n_bins as f32)
-        .collect();
-    let mel_width = (n_bins as f32) / (n_mels as f32 + 1.0);
-
-    let mut spectrogram = Vec::with_capacity(n_frames);
-
-    for frame_idx in 0..n_frames {
-        let start = frame_idx * hop;
-        let end = (start + n_fft).min(pcm.len());
-
-        // Apply Hann window to the frame
-        let mut windowed = vec![0.0_f32; n_fft];
-        for (i, sample_idx) in (start..end).enumerate() {
-            windowed[i] = pcm[sample_idx] * hann_window[i];
-        }
-
-        // Compute power spectrum via simplified DFT (magnitude squared)
-        // For efficiency use a simplified approach: compute N_BINS = n_fft/2+1 bins
-        let mut power_spectrum = vec![0.0_f32; n_bins];
-        for k in 0..n_bins {
-            let mut re = 0.0_f32;
-            let mut im = 0.0_f32;
-            let phase_step = 2.0 * std::f32::consts::PI * k as f32 / n_fft as f32;
-            for (n, &s) in windowed.iter().enumerate() {
-                re += s * (phase_step * n as f32).cos();
-                im -= s * (phase_step * n as f32).sin();
-            }
-            power_spectrum[k] = re * re + im * im;
-        }
-
-        // Apply triangular mel filterbanks and take log
-        let mut mel_frame = vec![0.0_f32; n_mels];
-        for (m, &center) in mel_centers.iter().enumerate() {
-            let left = center - mel_width;
-            let right = center + mel_width;
-            let mut energy = 0.0_f32;
-            for k in 0..n_bins {
-                let kf = k as f32;
-                let weight = if kf >= left && kf <= center {
-                    (kf - left) / mel_width.max(1e-6)
-                } else if kf > center && kf <= right {
-                    (right - kf) / mel_width.max(1e-6)
-                } else {
-                    0.0
-                };
-                energy += weight * power_spectrum[k];
-            }
-            mel_frame[m] = (energy.max(1e-10)).ln();
-        }
-
-        spectrogram.push(mel_frame);
+    let power = audio_dsp::stft_power(&padded, n_fft, hop_length, false)?;
+    if power.is_empty() {
+        return Ok(Vec::new());
     }
-
-    spectrogram
+    let bank = audio_dsp::mel_filterbank(
+        sample_rate,
+        n_fft,
+        n_mels,
+        0.0,
+        f64::from(sample_rate) / 2.0,
+    )?;
+    let mel = audio_dsp::apply_mel_filterbank(&power, &bank)?;
+    Ok(mel
+        .into_iter()
+        .map(|frame| frame.into_iter().map(|v| v.max(1e-10).ln()).collect())
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -387,10 +334,14 @@ impl ClassificationState {
 
     /// Normalise raw samples to the pipeline's expected sample rate and duration.
     fn preprocess_raw(&self, samples: &[f32], input_rate: u32) -> Result<Vec<f32>> {
-        // Resample if needed
+        if input_rate == 0 {
+            return Err(TrustformersError::pipeline(
+                "input sample rate must be greater than zero".to_string(),
+                "audio-classification",
+            ));
+        }
         let resampled = resample_linear(samples, input_rate, self.config.sample_rate);
 
-        // Truncate to max_duration
         let max_samples = self
             .config
             .max_duration_secs
@@ -403,60 +354,20 @@ impl ClassificationState {
         Ok(truncated)
     }
 
-    /// Extract a fixed-size feature vector from preprocessed samples.
-    fn extract_features(&self, samples: &[f32]) -> Result<Tensor> {
-        // We compute 128-dimensional waveform-level features as a simple
-        // approximation. A real implementation would compute mel spectrograms.
-        const FEATURE_DIM: usize = 128;
-        let feats = compute_waveform_features(samples, FEATURE_DIM);
-        // Shape: [1, FEATURE_DIM]
-        Tensor::from_slice(&feats, &[1, FEATURE_DIM])
-            .map_err(|e| TrustformersError::pipeline(e.to_string(), "audio-classification"))
-    }
-
-    /// Simulate model inference: produce mock logits proportional to feature norms.
-    ///
-    /// In a real deployment this would call `model.forward(features)`.
-    fn mock_forward(&self, features: &Tensor) -> Result<Vec<f32>> {
-        let num_labels = self.labels.len();
-        if num_labels == 0 {
+    /// Compute real log-mel features for preprocessed samples.
+    fn extract_log_mel(&self, samples: &[f32]) -> Result<Vec<Vec<f32>>> {
+        if samples.is_empty() {
             return Err(TrustformersError::pipeline(
-                "Label set is empty — cannot classify".to_string(),
+                "cannot extract features from an empty audio buffer".to_string(),
                 "audio-classification",
             ));
         }
-        let flat = features
-            .data_f32()
-            .map_err(|e| TrustformersError::pipeline(e.to_string(), "audio-classification"))?;
-        // Deterministic mock: spread feature energy across labels
-        let mut logits = vec![0.0_f32; num_labels];
-        for (i, &v) in flat.iter().enumerate() {
-            logits[i % num_labels] += v.abs();
-        }
-        Ok(logits)
-    }
-
-    /// Run classification for a single preprocessed sample vector.
-    fn run_inference(&self, samples: &[f32]) -> Result<Vec<AudioClassificationResult>> {
-        let features = self.extract_features(samples)?;
-        let mut logits = self.mock_forward(&features)?;
-        softmax_inplace(&mut logits);
-
-        // Pair logits with labels and sort descending
-        let mut scored: Vec<(usize, f32)> = logits.into_iter().enumerate().collect();
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        let top_k = self.config.top_k.min(scored.len());
-        let results = scored
-            .into_iter()
-            .take(top_k)
-            .map(|(idx, score)| AudioClassificationResult {
-                label: self.labels[idx].clone(),
-                score,
-                label_id: idx,
-            })
-            .collect();
-        Ok(results)
+        let mel = audio_dsp::MelConfig {
+            n_fft: 400,
+            hop_length: 160,
+            n_mels: self.config.num_mel_bins,
+        };
+        audio_dsp::log_mel_spectrogram(samples, self.config.sample_rate, mel)
     }
 }
 
@@ -479,23 +390,10 @@ fn default_labels() -> Vec<String> {
 
 /// Pipeline for audio classification tasks.
 ///
-/// Maps an [`AudioClassificationInput`] to a ranked list of
-/// [`AudioClassificationResult`] values (label + probability).
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use trustformers::pipeline::audio_classification::*;
-///
-/// let pipeline = AudioClassificationPipeline::new(AudioClassificationConfig::default())?;
-/// let input = AudioClassificationInput::RawAudio {
-///     samples: vec![0.0; 8_000],
-///     sample_rate: 8_000,
-/// };
-/// let results = pipeline.classify(&input)?;
-/// assert!(!results.is_empty());
-/// # Ok::<(), trustformers::TrustformersError>(())
-/// ```
+/// Performs real decoding, resampling and log-mel feature extraction. Because
+/// no audio classification backbone is implemented, the classification methods
+/// return a structured [`TrustformersError::FeatureUnavailable`] instead of a
+/// fabricated label ranking. See the module documentation.
 pub struct AudioClassificationPipeline {
     state: ClassificationState,
 }
@@ -506,7 +404,7 @@ impl AudioClassificationPipeline {
     /// # Errors
     ///
     /// Returns [`TrustformersError`] if the configuration is invalid (e.g. zero
-    /// sample rate or an empty `top_k`).
+    /// sample rate, zero `top_k`, or zero mel bins).
     pub fn new(config: AudioClassificationConfig) -> Result<Self> {
         if config.sample_rate == 0 {
             return Err(TrustformersError::pipeline(
@@ -517,6 +415,12 @@ impl AudioClassificationPipeline {
         if config.top_k == 0 {
             return Err(TrustformersError::pipeline(
                 "top_k must be greater than zero".to_string(),
+                "audio-classification",
+            ));
+        }
+        if config.num_mel_bins == 0 {
+            return Err(TrustformersError::pipeline(
+                "num_mel_bins must be greater than zero".to_string(),
                 "audio-classification",
             ));
         }
@@ -538,9 +442,7 @@ impl AudioClassificationPipeline {
         Ok(resample_linear(samples, sample_rate, target_rate))
     }
 
-    /// Compute a simplified mel spectrogram from raw PCM samples.
-    ///
-    /// Returns a 2D vector `[n_frames][n_mels]` of log-mel energies.
+    /// Compute a log-mel spectrogram from raw PCM samples.
     pub fn compute_mel_spectrogram(
         pcm: &[f32],
         n_fft: usize,
@@ -550,10 +452,110 @@ impl AudioClassificationPipeline {
         compute_mel_spectrogram(pcm, n_fft, hop_length, n_mels)
     }
 
+    /// Resample, truncate and compute real log-mel features for `samples`.
+    ///
+    /// This is the pipeline's genuine, reusable front-end: it works regardless
+    /// of whether a classification backbone is available.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an empty buffer, a zero input rate, or audio too
+    /// short for a single STFT frame.
+    pub fn extract_log_mel(&self, samples: &[f32], sample_rate: u32) -> Result<Vec<Vec<f32>>> {
+        let prepared = self.state.preprocess_raw(samples, sample_rate)?;
+        self.state.extract_log_mel(&prepared)
+    }
+
+    /// Decode an audio file into mono PCM at the pipeline's sample rate.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrustformersError::Io`] when the file is missing and
+    /// [`TrustformersError::FeatureUnavailable`] for containers that need an
+    /// external codec. It never substitutes silence.
+    pub fn decode_audio_file(&self, path: &Path) -> Result<Vec<f32>> {
+        if !path.exists() {
+            return Err(TrustformersError::Io {
+                message: format!("Audio file not found: {}", path.to_string_lossy()),
+                path: Some(path.to_string_lossy().into_owned()),
+                suggestion: Some("Check the file path and ensure the file exists.".to_string()),
+            });
+        }
+        let bytes = std::fs::read(path).map_err(|e| TrustformersError::Io {
+            message: format!("failed to read audio file: {e}"),
+            path: Some(path.to_string_lossy().into_owned()),
+            suggestion: Some("Check file permissions.".to_string()),
+        })?;
+        if !audio_dsp::is_wav(&bytes) {
+            return Err(TrustformersError::feature_unavailable(
+                format!(
+                    "cannot decode `{}`: only uncompressed RIFF/WAVE is decodable without an \
+                     external codec",
+                    path.to_string_lossy()
+                ),
+                "audio-codec",
+            ));
+        }
+        let audio = audio_dsp::decode_wav(&bytes)?;
+        audio_dsp::resample_linear(
+            &audio.samples,
+            audio.sample_rate,
+            self.state.config.sample_rate,
+        )
+    }
+
+    /// Rank `logits` against the pipeline's label set and return the top-k.
+    ///
+    /// Real post-processing, exposed so callers that run their own model can
+    /// reuse it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the label set is empty or the logit count does not
+    /// match it.
+    pub fn rank_logits(&self, logits: &[f32]) -> Result<Vec<AudioClassificationResult>> {
+        let labels = &self.state.labels;
+        if labels.is_empty() {
+            return Err(TrustformersError::pipeline(
+                "Label set is empty — cannot classify".to_string(),
+                "audio-classification",
+            ));
+        }
+        if logits.len() != labels.len() {
+            return Err(TrustformersError::pipeline(
+                format!(
+                    "model produced {} logits but the label set has {} entries",
+                    logits.len(),
+                    labels.len()
+                ),
+                "audio-classification",
+            ));
+        }
+        let probabilities = normalize_scores(logits);
+        let mut scored: Vec<(usize, f32)> = probabilities.into_iter().enumerate().collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let top_k = self.state.config.top_k.min(scored.len());
+        Ok(scored
+            .into_iter()
+            .take(top_k)
+            .map(|(idx, score)| AudioClassificationResult {
+                label: labels[idx].clone(),
+                score,
+                label_id: idx,
+            })
+            .collect())
+    }
+
     /// Classify a single audio input (new-style API using `AudioInput`).
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`TrustformersError::FeatureUnavailable`] once the input
+    /// has been validated and preprocessed: no audio classification backbone is
+    /// implemented. Preprocessing errors surface first.
     pub fn classify_input(&self, input: AudioInput) -> Result<Vec<AudioClassificationResult>> {
-        let samples = self.load_audio_input(input)?;
-        self.state.run_inference(&samples)
+        let features = self.features_for_new_style(input)?;
+        self.run_inference(&features)
     }
 
     /// Classify a batch of audio inputs (new-style API).
@@ -565,12 +567,16 @@ impl AudioClassificationPipeline {
     }
 
     /// Classify a single audio input (legacy API).
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::classify_input`].
     pub fn classify(
         &self,
         input: &AudioClassificationInput,
     ) -> Result<Vec<AudioClassificationResult>> {
-        let samples = self.load_samples(input)?;
-        self.state.run_inference(&samples)
+        let features = self.features_for(input)?;
+        self.run_inference(&features)
     }
 
     /// Classify a batch of audio inputs (legacy API).
@@ -591,78 +597,127 @@ impl AudioClassificationPipeline {
         &self.state.labels
     }
 
-    // ------------------------------------------------------------------
-    // Private helpers
-    // ------------------------------------------------------------------
-
-    fn load_audio_input(&self, input: AudioInput) -> Result<Vec<f32>> {
-        match input {
-            AudioInput::RawPcm {
-                samples,
-                sample_rate,
-            } => self.state.preprocess_raw(&samples, sample_rate),
-            AudioInput::MelSpectrogram { data } => {
-                // Flatten the 2D mel spectrogram into a 1D feature vector
-                Ok(data.into_iter().flatten().collect())
-            },
-            AudioInput::FilePath(path_str) => {
-                let path = std::path::Path::new(&path_str);
-                if !path.exists() {
-                    return Err(TrustformersError::Io {
-                        message: format!("Audio file not found: {}", path_str),
-                        path: Some(path_str),
-                        suggestion: Some(
-                            "Check the file path and ensure the file exists.".to_string(),
-                        ),
-                    });
-                }
-                // Placeholder: return silence at target sample rate
-                let placeholder: Vec<f32> = vec![0.0; self.state.config.sample_rate as usize];
-                Ok(placeholder)
-            },
-        }
-    }
-
-    fn load_samples(&self, input: &AudioClassificationInput) -> Result<Vec<f32>> {
+    /// Convert an input into log-mel features, doing all the real work.
+    pub fn features_for(&self, input: &AudioClassificationInput) -> Result<Vec<Vec<f32>>> {
         match input {
             AudioClassificationInput::RawAudio {
                 samples,
                 sample_rate,
-            } => self.state.preprocess_raw(samples, *sample_rate),
+            } => self.extract_log_mel(samples, *sample_rate),
 
             AudioClassificationInput::FilePath(path) => {
-                if !path.exists() {
-                    return Err(TrustformersError::Io {
-                        message: format!("Audio file not found: {}", path.to_string_lossy()),
-                        path: Some(path.to_string_lossy().into_owned()),
-                        suggestion: Some(
-                            "Check the file path and ensure the file exists.".to_string(),
-                        ),
-                    });
-                }
-                // In a full implementation: decode WAV/FLAC/MP3 here.
-                // For now return a zero-filled placeholder so the code
-                // compiles and tests can exercise the path.
-                let placeholder: Vec<f32> = vec![0.0; self.state.config.sample_rate as usize];
-                tracing::debug!(
-                    path = %path.to_string_lossy(),
-                    "Audio file decoding not yet implemented; using zero placeholder"
-                );
-                Ok(placeholder)
+                let pcm = self.decode_audio_file(path)?;
+                self.state.extract_log_mel(&pcm)
             },
 
-            AudioClassificationInput::MelSpectrogram { values, .. } => {
-                // Treat pre-computed spectrogram frames as raw 1-D signal for
-                // the mock inference path.
-                Ok(values.clone())
+            AudioClassificationInput::MelSpectrogram {
+                values,
+                frames,
+                mel_bins,
+            } => reshape_mel(values, *frames, *mel_bins),
+        }
+    }
+
+    fn features_for_new_style(&self, input: AudioInput) -> Result<Vec<Vec<f32>>> {
+        match input {
+            AudioInput::RawPcm {
+                samples,
+                sample_rate,
+            } => self.extract_log_mel(&samples, sample_rate),
+            AudioInput::MelSpectrogram { data } => {
+                if data.is_empty() {
+                    return Err(TrustformersError::pipeline(
+                        "mel spectrogram input is empty".to_string(),
+                        "audio-classification",
+                    ));
+                }
+                Ok(data)
+            },
+            AudioInput::FilePath(path_str) => {
+                let pcm = self.decode_audio_file(Path::new(&path_str))?;
+                self.state.extract_log_mel(&pcm)
             },
         }
     }
+
+    /// Run the (currently unavailable) classification backbone on real features.
+    fn run_inference(&self, features: &[Vec<f32>]) -> Result<Vec<AudioClassificationResult>> {
+        if features.is_empty() {
+            return Err(TrustformersError::pipeline(
+                "no feature frames were produced".to_string(),
+                "audio-classification",
+            ));
+        }
+        if self.state.labels.is_empty() {
+            return Err(TrustformersError::pipeline(
+                "Label set is empty — cannot classify".to_string(),
+                "audio-classification",
+            ));
+        }
+        Err(unsupported_model(
+            "audio-classification",
+            &self.state.config.model_name,
+            SUPPORTED_ARCHITECTURES,
+        ))
+    }
+}
+
+/// Reshape a flat spectrogram buffer into `[frames][mel_bins]`.
+fn reshape_mel(values: &[f32], frames: usize, mel_bins: usize) -> Result<Vec<Vec<f32>>> {
+    if frames == 0 || mel_bins == 0 {
+        return Err(TrustformersError::pipeline(
+            "mel spectrogram dimensions must be non-zero".to_string(),
+            "audio-classification",
+        ));
+    }
+    if values.len() != frames * mel_bins {
+        return Err(TrustformersError::pipeline(
+            format!(
+                "mel spectrogram buffer has {} values but {frames}x{mel_bins} = {} were expected",
+                values.len(),
+                frames * mel_bins
+            ),
+            "audio-classification",
+        ));
+    }
+    Ok(values.chunks_exact(mel_bins).map(<[f32]>::to_vec).collect())
+}
+
+/// Build a `[1, mel_bins, frames]` tensor from log-mel frames.
+///
+/// This is the layout audio encoders (Whisper, AST) expect; exposed so callers
+/// running their own model can reuse the pipeline's front-end.
+///
+/// # Errors
+///
+/// Returns an error for empty or ragged input.
+pub fn mel_frames_to_tensor(frames: &[Vec<f32>]) -> Result<Tensor> {
+    if frames.is_empty() {
+        return Err(TrustformersError::pipeline(
+            "no mel frames to convert".to_string(),
+            "audio-classification",
+        ));
+    }
+    let n_mels = frames[0].len();
+    if n_mels == 0 || frames.iter().any(|f| f.len() != n_mels) {
+        return Err(TrustformersError::pipeline(
+            "mel frames must be non-empty and rectangular".to_string(),
+            "audio-classification",
+        ));
+    }
+    let n_frames = frames.len();
+    let mut flat = vec![0.0f32; n_mels * n_frames];
+    for (t, frame) in frames.iter().enumerate() {
+        for (m, &v) in frame.iter().enumerate() {
+            flat[m * n_frames + t] = v;
+        }
+    }
+    Tensor::from_slice(&flat, &[1, n_mels, n_frames])
+        .map_err(|e| TrustformersError::pipeline(e.to_string(), "audio-classification"))
 }
 
 // ---------------------------------------------------------------------------
-// Trait impl (mirrors Pipeline trait without the associated Input/Output types
-// since those are audio-specific)
+// Trait impl
 // ---------------------------------------------------------------------------
 
 impl crate::pipeline::Pipeline for AudioClassificationPipeline {
@@ -681,110 +736,38 @@ impl crate::pipeline::Pipeline for AudioClassificationPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::media::audio_dsp::encode_wav_pcm16;
 
     fn default_pipeline() -> AudioClassificationPipeline {
         AudioClassificationPipeline::new(AudioClassificationConfig::default())
             .expect("default config should be valid")
     }
 
-    // ---- Legacy API tests (preserved) ----
+    fn tone(freq: f32, sample_rate: u32, n: usize) -> Vec<f32> {
+        (0..n)
+            .map(|i| {
+                0.7 * (2.0 * std::f32::consts::PI * freq * i as f32 / sample_rate as f32).sin()
+            })
+            .collect()
+    }
+
+    fn assert_unsupported(err: &TrustformersError) {
+        match err {
+            TrustformersError::FeatureUnavailable { message, .. } => {
+                assert!(
+                    message.contains("no real model implementation"),
+                    "unexpected message: {message}"
+                );
+            },
+            other => panic!("expected FeatureUnavailable, got {other:?}"),
+        }
+    }
+
+    // ---- Construction ----
 
     #[test]
     fn test_default_config_creates_pipeline() {
         let _p = default_pipeline();
-    }
-
-    #[test]
-    fn test_classify_raw_audio_returns_top_k_results() {
-        let config = AudioClassificationConfig {
-            top_k: 3,
-            ..Default::default()
-        };
-        let pipeline = AudioClassificationPipeline::new(config).expect("valid config");
-        let input = AudioClassificationInput::RawAudio {
-            samples: vec![0.1_f32; 16_000],
-            sample_rate: 16_000,
-        };
-        let results = pipeline.classify(&input).expect("classify should succeed");
-        assert_eq!(results.len(), 3, "should return exactly top_k results");
-    }
-
-    #[test]
-    fn test_classify_batch_length_matches_input() {
-        let pipeline = default_pipeline();
-        let inputs = vec![
-            AudioClassificationInput::RawAudio {
-                samples: vec![0.0; 8_000],
-                sample_rate: 8_000,
-            },
-            AudioClassificationInput::RawAudio {
-                samples: vec![0.3; 8_000],
-                sample_rate: 8_000,
-            },
-            AudioClassificationInput::RawAudio {
-                samples: vec![-0.5; 8_000],
-                sample_rate: 8_000,
-            },
-        ];
-        let batch = pipeline.classify_batch(&inputs).expect("batch classify should succeed");
-        assert_eq!(batch.len(), 3, "batch length must match input count");
-    }
-
-    #[test]
-    fn test_scores_sum_to_approximately_one() {
-        let pipeline = AudioClassificationPipeline::new(AudioClassificationConfig {
-            top_k: 8, // request all default labels
-            ..Default::default()
-        })
-        .expect("valid config");
-        let input = AudioClassificationInput::RawAudio {
-            samples: vec![0.2; 16_000],
-            sample_rate: 16_000,
-        };
-        let results = pipeline.classify(&input).expect("classify ok");
-        let total: f32 = results.iter().map(|r| r.score).sum();
-        assert!(
-            (total - 1.0).abs() < 0.01,
-            "scores should sum to ~1.0, got {total}"
-        );
-    }
-
-    #[test]
-    fn test_missing_file_path_returns_error() {
-        let pipeline = default_pipeline();
-        let tmp = std::env::temp_dir().join("audio_classification_nonexistent.wav");
-        // Ensure it does NOT exist
-        let _ = std::fs::remove_file(&tmp);
-        let input = AudioClassificationInput::FilePath(tmp);
-        let result = pipeline.classify(&input);
-        assert!(
-            result.is_err(),
-            "should fail when the audio file does not exist"
-        );
-    }
-
-    #[test]
-    fn test_mel_spectrogram_input_is_accepted() {
-        let pipeline = default_pipeline();
-        let input = AudioClassificationInput::MelSpectrogram {
-            values: vec![0.5; 128 * 80],
-            frames: 128,
-            mel_bins: 80,
-        };
-        let results = pipeline.classify(&input).expect("mel spectrogram input ok");
-        assert!(!results.is_empty());
-    }
-
-    #[test]
-    fn test_resample_shorter_signal() {
-        let orig = vec![1.0_f32, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0];
-        let out = resample_linear(&orig, 8_000, 4_000);
-        assert_eq!(
-            out.len(),
-            4,
-            "downsampled to half length: got {}",
-            out.len()
-        );
     }
 
     #[test]
@@ -793,68 +776,245 @@ mod tests {
             sample_rate: 0,
             ..Default::default()
         };
-        let result = AudioClassificationPipeline::new(config);
-        assert!(result.is_err(), "zero sample_rate should be rejected");
+        assert!(AudioClassificationPipeline::new(config).is_err());
     }
 
     #[test]
-    fn test_custom_labels_are_used() {
+    fn test_zero_mel_bins_returns_error() {
         let config = AudioClassificationConfig {
-            labels: vec!["cat".to_string(), "dog".to_string(), "bird".to_string()],
-            top_k: 2,
+            num_mel_bins: 0,
+            ..Default::default()
+        };
+        assert!(AudioClassificationPipeline::new(config).is_err());
+    }
+
+    // ---- Honesty: no fabricated classification ----
+
+    #[test]
+    fn test_classify_raw_audio_reports_unsupported_model() {
+        // Regression: `classify` used to return confident labels from
+        // `mock_forward` without ever loading a model.
+        let config = AudioClassificationConfig {
+            top_k: 3,
+            ..Default::default()
+        };
+        let pipeline = AudioClassificationPipeline::new(config).expect("valid config");
+        let input = AudioClassificationInput::RawAudio {
+            samples: tone(440.0, 16_000, 16_000),
+            sample_rate: 16_000,
+        };
+        let err = pipeline.classify(&input).expect_err("no backbone is available");
+        assert_unsupported(&err);
+    }
+
+    #[test]
+    fn test_classify_batch_reports_unsupported_model() {
+        let pipeline = default_pipeline();
+        let inputs = vec![
+            AudioClassificationInput::RawAudio {
+                samples: tone(200.0, 8_000, 8_000),
+                sample_rate: 8_000,
+            },
+            AudioClassificationInput::RawAudio {
+                samples: tone(600.0, 8_000, 8_000),
+                sample_rate: 8_000,
+            },
+        ];
+        let err = pipeline.classify_batch(&inputs).expect_err("no backbone is available");
+        assert_unsupported(&err);
+    }
+
+    #[test]
+    fn test_mel_spectrogram_input_also_reports_unsupported_model() {
+        let pipeline = default_pipeline();
+        let input = AudioClassificationInput::MelSpectrogram {
+            values: vec![0.5; 128 * 80],
+            frames: 128,
+            mel_bins: 80,
+        };
+        let err = pipeline.classify(&input).expect_err("no backbone is available");
+        assert_unsupported(&err);
+    }
+
+    #[test]
+    fn test_new_style_classify_input_reports_unsupported_model() {
+        let pipeline = default_pipeline();
+        let input = AudioInput::RawPcm {
+            samples: tone(300.0, 8_000, 8_000),
+            sample_rate: 8_000,
+        };
+        let err = pipeline.classify_input(input).expect_err("no backbone is available");
+        assert_unsupported(&err);
+    }
+
+    #[test]
+    fn test_unsupported_error_names_the_requested_model() {
+        let config = AudioClassificationConfig {
+            model_name: "MIT/ast-finetuned-audioset".to_string(),
             ..Default::default()
         };
         let pipeline = AudioClassificationPipeline::new(config).expect("valid");
         let input = AudioClassificationInput::RawAudio {
-            samples: vec![0.1; 16_000],
+            samples: tone(440.0, 16_000, 8_000),
             sample_rate: 16_000,
         };
-        let results = pipeline.classify(&input).expect("ok");
-        assert_eq!(results.len(), 2);
-        for r in &results {
-            assert!(
-                ["cat", "dog", "bird"].contains(&r.label.as_str()),
-                "unexpected label: {}",
-                r.label
-            );
+        let err = pipeline.classify(&input).expect_err("no backbone");
+        assert!(
+            err.to_string().contains("MIT/ast-finetuned-audioset"),
+            "err: {err}"
+        );
+    }
+
+    // ---- Real preprocessing ----
+
+    #[test]
+    fn test_extract_log_mel_is_not_all_zero() {
+        let pipeline = default_pipeline();
+        let mel = pipeline
+            .extract_log_mel(&tone(440.0, 16_000, 16_000), 16_000)
+            .expect("feature extraction");
+        assert_eq!(mel.len(), 100);
+        assert_eq!(mel[0].len(), 80);
+        let flat: Vec<f32> = mel.iter().flatten().copied().collect();
+        assert!(
+            flat.iter().any(|&v| v != 0.0),
+            "features must not be all zeros"
+        );
+    }
+
+    #[test]
+    fn test_extract_log_mel_differs_between_tones() {
+        let pipeline = default_pipeline();
+        let a = pipeline.extract_log_mel(&tone(220.0, 16_000, 8_000), 16_000).expect("a");
+        let b = pipeline.extract_log_mel(&tone(3000.0, 16_000, 8_000), 16_000).expect("b");
+        assert_ne!(a, b, "different tones must produce different features");
+    }
+
+    #[test]
+    fn test_extract_log_mel_rejects_empty_audio() {
+        let pipeline = default_pipeline();
+        assert!(pipeline.extract_log_mel(&[], 16_000).is_err());
+    }
+
+    #[test]
+    fn test_extract_log_mel_rejects_zero_input_rate() {
+        let pipeline = default_pipeline();
+        assert!(pipeline.extract_log_mel(&[0.1; 100], 0).is_err());
+    }
+
+    // ---- File handling ----
+
+    #[test]
+    fn test_missing_file_path_returns_error() {
+        let pipeline = default_pipeline();
+        let tmp = std::env::temp_dir().join("audio_classification_nonexistent.wav");
+        let _ = std::fs::remove_file(&tmp);
+        let input = AudioClassificationInput::FilePath(tmp);
+        assert!(matches!(
+            pipeline.classify(&input),
+            Err(TrustformersError::Io { .. })
+        ));
+    }
+
+    #[test]
+    fn test_existing_nonwav_file_is_rejected_not_treated_as_silence() {
+        // Regression: an existing file used to yield `vec![0.0; sample_rate]`
+        // silence and a confident classification.
+        let tmp = std::env::temp_dir().join("audio_classification_not_a_wav.wav");
+        std::fs::write(&tmp, b"").expect("write temp file");
+        let pipeline = default_pipeline();
+        let result = pipeline.classify(&AudioClassificationInput::FilePath(tmp.clone()));
+        let _ = std::fs::remove_file(&tmp);
+        match result {
+            Err(TrustformersError::FeatureUnavailable { feature, .. }) => {
+                assert_eq!(feature, "audio-codec");
+            },
+            other => panic!("expected an audio-codec error, got {other:?}"),
         }
     }
 
     #[test]
-    fn test_existing_file_with_placeholder_succeeds() {
-        // Create a real (zero-byte) temp file so the existence check passes
-        let tmp = std::env::temp_dir().join("audio_classification_test.wav");
-        std::fs::write(&tmp, b"").expect("write temp file");
+    fn test_real_wav_file_decodes_to_real_samples() {
+        let tmp = std::env::temp_dir().join("audio_classification_real.wav");
+        std::fs::write(&tmp, encode_wav_pcm16(&tone(500.0, 16_000, 8_000), 16_000))
+            .expect("write fixture");
         let pipeline = default_pipeline();
-        let input = AudioClassificationInput::FilePath(tmp.clone());
-        let result = pipeline.classify(&input);
-        // Clean up
+        let pcm = pipeline.decode_audio_file(&tmp).expect("decode");
         let _ = std::fs::remove_file(&tmp);
-        // With a placeholder zero signal the pipeline should succeed
-        assert!(result.is_ok(), "should succeed for existing file path");
+        assert_eq!(pcm.len(), 8_000);
+        assert!(
+            pcm.iter().any(|&s| s.abs() > 0.5),
+            "decoded audio must not be silence"
+        );
     }
 
-    // ---- New tests for enhanced API ----
+    // ---- Post-processing (real, reusable) ----
+
+    #[test]
+    fn test_rank_logits_orders_and_normalises() {
+        let pipeline = default_pipeline();
+        let mut logits = vec![0.0f32; pipeline.labels().len()];
+        logits[2] = 5.0;
+        let ranked = pipeline.rank_logits(&logits).expect("rank");
+        assert_eq!(ranked.len(), 5, "top_k defaults to 5");
+        assert_eq!(ranked[0].label_id, 2);
+        assert!(ranked[0].score > ranked[1].score);
+        let total: f32 = normalize_scores(&logits).iter().sum();
+        assert!((total - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_rank_logits_rejects_mismatched_length() {
+        let pipeline = default_pipeline();
+        assert!(pipeline.rank_logits(&[1.0, 2.0]).is_err());
+    }
+
+    #[test]
+    fn test_mel_frames_to_tensor_transposes() {
+        let frames = vec![vec![1.0f32, 2.0], vec![3.0, 4.0], vec![5.0, 6.0]];
+        let tensor = mel_frames_to_tensor(&frames).expect("tensor");
+        assert_eq!(tensor.shape(), vec![1, 2, 3]);
+        assert_eq!(
+            tensor.to_vec_f32().expect("values"),
+            vec![1.0, 3.0, 5.0, 2.0, 4.0, 6.0]
+        );
+    }
+
+    #[test]
+    fn test_mel_frames_to_tensor_rejects_ragged_input() {
+        let frames = vec![vec![1.0f32, 2.0], vec![3.0]];
+        assert!(mel_frames_to_tensor(&frames).is_err());
+        assert!(mel_frames_to_tensor(&[]).is_err());
+    }
+
+    #[test]
+    fn test_reshape_mel_validates_dimensions() {
+        assert!(reshape_mel(&[1.0, 2.0, 3.0, 4.0], 2, 2).is_ok());
+        assert!(reshape_mel(&[1.0, 2.0, 3.0], 2, 2).is_err());
+        assert!(reshape_mel(&[], 0, 2).is_err());
+    }
+
+    // ---- Resampling ----
+
+    #[test]
+    fn test_resample_shorter_signal() {
+        let orig = vec![1.0_f32, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0];
+        let out = resample_linear(&orig, 8_000, 4_000);
+        assert_eq!(out.len(), 4);
+    }
 
     #[test]
     fn test_preprocess_pcm_resamples_correctly() {
-        // 8 samples at 8kHz → 4 samples at 4kHz (2:1 downsample)
         let samples = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
         let result = AudioClassificationPipeline::preprocess_pcm(&samples, 8_000, 4_000)
             .expect("preprocess_pcm ok");
-        assert_eq!(
-            result.len(),
-            4,
-            "expected 4 output samples, got {}",
-            result.len()
-        );
+        assert_eq!(result.len(), 4);
     }
 
     #[test]
     fn test_preprocess_pcm_zero_target_rate_errors() {
         let samples = vec![0.1_f32; 100];
-        let result = AudioClassificationPipeline::preprocess_pcm(&samples, 16_000, 0);
-        assert!(result.is_err(), "zero target_rate must fail");
+        assert!(AudioClassificationPipeline::preprocess_pcm(&samples, 16_000, 0).is_err());
     }
 
     #[test]
@@ -862,65 +1022,14 @@ mod tests {
         let samples = vec![0.1_f32, 0.2, 0.3, 0.4];
         let result =
             AudioClassificationPipeline::preprocess_pcm(&samples, 16_000, 16_000).expect("ok");
-        assert_eq!(
-            result, samples,
-            "same-rate preprocess should return identical signal"
-        );
+        assert_eq!(result, samples);
     }
 
     #[test]
-    fn test_compute_mel_spectrogram_returns_correct_shape() {
-        // 1 second of silence at 16kHz → check frame count and mel bin count
-        let pcm = vec![0.0_f32; 16_000];
-        let n_fft = 512;
-        let hop = 160;
-        let n_mels = 40;
-        let mel = AudioClassificationPipeline::compute_mel_spectrogram(&pcm, n_fft, hop, n_mels);
-        assert!(!mel.is_empty(), "mel spectrogram should not be empty");
-        let expected_frames = (pcm.len() - n_fft) / hop + 1;
-        assert_eq!(mel.len(), expected_frames, "frame count mismatch");
-        for frame in &mel {
-            assert_eq!(frame.len(), n_mels, "each frame must have n_mels bins");
-        }
-    }
-
-    #[test]
-    fn test_compute_mel_spectrogram_empty_pcm_returns_empty() {
-        let mel = AudioClassificationPipeline::compute_mel_spectrogram(&[], 512, 160, 40);
-        assert!(mel.is_empty(), "empty pcm should yield empty spectrogram");
-    }
-
-    #[test]
-    fn test_normalize_scores_sums_to_one() {
-        let logits = vec![1.0_f32, 2.0, 3.0, 4.0];
-        let probs = normalize_scores(&logits);
-        assert_eq!(probs.len(), logits.len());
-        let total: f32 = probs.iter().sum();
-        assert!(
-            (total - 1.0).abs() < 1e-5,
-            "normalized scores must sum to 1.0, got {total}"
-        );
-    }
-
-    #[test]
-    fn test_normalize_scores_preserves_ordering() {
-        let logits = vec![1.0_f32, 5.0, 3.0];
-        let probs = normalize_scores(&logits);
-        // score[1] > score[2] > score[0] after normalization
-        assert!(
-            probs[1] > probs[2],
-            "highest logit should get highest probability"
-        );
-        assert!(
-            probs[2] > probs[0],
-            "middle logit should be between extremes"
-        );
-    }
-
-    #[test]
-    fn test_normalize_scores_empty_returns_empty() {
-        let probs = normalize_scores(&[]);
-        assert!(probs.is_empty(), "empty input should yield empty output");
+    fn test_upsample_doubles_length() {
+        let samples = vec![0.0_f32, 1.0, 0.0, 1.0];
+        let out = resample_linear(&samples, 4_000, 8_000);
+        assert_eq!(out.len(), 8);
     }
 
     #[test]
@@ -931,13 +1040,7 @@ mod tests {
             target_rate: 4_000,
             algorithm: ResampleAlgorithm::LinearInterpolation,
         };
-        let out = resample_audio(&samples, &config);
-        assert_eq!(
-            out.len(),
-            4,
-            "linear: expected 4 samples, got {}",
-            out.len()
-        );
+        assert_eq!(resample_audio(&samples, &config).len(), 4);
     }
 
     #[test]
@@ -948,13 +1051,7 @@ mod tests {
             target_rate: 4_000,
             algorithm: ResampleAlgorithm::NearestNeighbor,
         };
-        let out = resample_audio(&samples, &config);
-        assert_eq!(
-            out.len(),
-            4,
-            "nearest: expected 4 samples, got {}",
-            out.len()
-        );
+        assert_eq!(resample_audio(&samples, &config).len(), 4);
     }
 
     #[test]
@@ -965,81 +1062,48 @@ mod tests {
             target_rate: 16_000,
             algorithm: ResampleAlgorithm::LinearInterpolation,
         };
-        let out = resample_audio(&samples, &config);
-        assert_eq!(out, samples);
+        assert_eq!(resample_audio(&samples, &config), samples);
     }
 
-    #[test]
-    fn test_new_style_classify_input_raw_pcm() {
-        let pipeline = default_pipeline();
-        let input = AudioInput::RawPcm {
-            samples: vec![0.1_f32; 8_000],
-            sample_rate: 8_000,
-        };
-        let results = pipeline.classify_input(input).expect("classify_input ok");
-        assert!(!results.is_empty(), "should return at least one result");
-    }
+    // ---- Mel spectrogram helper ----
 
     #[test]
-    fn test_new_style_classify_input_mel_spectrogram() {
-        let pipeline = default_pipeline();
-        // 50 frames × 40 mel bins
-        let mel_data: Vec<Vec<f32>> = (0..50).map(|_| vec![0.5_f32; 40]).collect();
-        let input = AudioInput::MelSpectrogram { data: mel_data };
-        let results = pipeline.classify_input(input).expect("mel spectrogram input ok");
-        assert!(!results.is_empty());
-    }
-
-    #[test]
-    fn test_new_style_batch_classify() {
-        let pipeline = default_pipeline();
-        let inputs = vec![
-            AudioInput::RawPcm {
-                samples: vec![0.0_f32; 4_000],
-                sample_rate: 8_000,
-            },
-            AudioInput::RawPcm {
-                samples: vec![0.5_f32; 4_000],
-                sample_rate: 8_000,
-            },
-        ];
-        let batch = pipeline.classify_batch_inputs(inputs).expect("batch ok");
-        assert_eq!(batch.len(), 2);
-    }
-
-    #[test]
-    fn test_result_has_label_id() {
-        let pipeline = AudioClassificationPipeline::new(AudioClassificationConfig {
-            top_k: 3,
-            ..Default::default()
-        })
-        .expect("valid");
-        let input = AudioClassificationInput::RawAudio {
-            samples: vec![0.1_f32; 16_000],
-            sample_rate: 16_000,
-        };
-        let results = pipeline.classify(&input).expect("ok");
-        // Each label_id must be within valid range
-        let label_count = pipeline.labels().len();
-        for r in &results {
-            assert!(
-                r.label_id < label_count,
-                "label_id {} out of bounds",
-                r.label_id
-            );
+    fn test_compute_mel_spectrogram_returns_correct_shape() {
+        let pcm = tone(440.0, 16_000, 16_000);
+        let n_fft = 512;
+        let hop = 160;
+        let n_mels = 40;
+        let mel = AudioClassificationPipeline::compute_mel_spectrogram(&pcm, n_fft, hop, n_mels);
+        assert!(!mel.is_empty());
+        let expected_frames = (pcm.len() - n_fft) / hop + 1;
+        assert_eq!(mel.len(), expected_frames, "frame count mismatch");
+        for frame in &mel {
+            assert_eq!(frame.len(), n_mels);
         }
     }
 
     #[test]
-    fn test_upsample_doubles_length() {
-        // 4 samples at 4kHz → 8 samples at 8kHz
-        let samples = vec![0.0_f32, 1.0, 0.0, 1.0];
-        let out = resample_linear(&samples, 4_000, 8_000);
-        assert_eq!(
-            out.len(),
-            8,
-            "upsampled length should be 8, got {}",
-            out.len()
+    fn test_compute_mel_spectrogram_empty_pcm_returns_empty() {
+        let mel = AudioClassificationPipeline::compute_mel_spectrogram(&[], 512, 160, 40);
+        assert!(mel.is_empty());
+    }
+
+    #[test]
+    fn test_compute_mel_spectrogram_locates_a_tone() {
+        // A 3 kHz tone must land in a higher mel band than a 250 Hz tone.
+        let peak_band = |freq: f32| {
+            let mel = compute_mel_spectrogram_at(&tone(freq, 16_000, 16_000), 16_000, 400, 160, 40)
+                .expect("mel");
+            let mid = &mel[mel.len() / 2];
+            mid.iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(i, _)| i)
+                .unwrap_or(0)
+        };
+        assert!(
+            peak_band(250.0) < peak_band(3000.0),
+            "mel band ordering must follow frequency"
         );
     }
 
@@ -1051,12 +1115,47 @@ mod tests {
             for (bi, &val) in frame.iter().enumerate() {
                 assert!(
                     val.is_finite(),
-                    "frame {} bin {} has non-finite value {}",
-                    fi,
-                    bi,
-                    val
+                    "frame {fi} bin {bi} has non-finite value {val}"
                 );
             }
         }
+    }
+
+    // ---- Score normalisation ----
+
+    #[test]
+    fn test_normalize_scores_sums_to_one() {
+        let logits = vec![1.0_f32, 2.0, 3.0, 4.0];
+        let probs = normalize_scores(&logits);
+        assert_eq!(probs.len(), logits.len());
+        let total: f32 = probs.iter().sum();
+        assert!((total - 1.0).abs() < 1e-5, "got {total}");
+    }
+
+    #[test]
+    fn test_normalize_scores_preserves_ordering() {
+        let logits = vec![1.0_f32, 5.0, 3.0];
+        let probs = normalize_scores(&logits);
+        assert!(probs[1] > probs[2]);
+        assert!(probs[2] > probs[0]);
+    }
+
+    #[test]
+    fn test_normalize_scores_empty_returns_empty() {
+        assert!(normalize_scores(&[]).is_empty());
+    }
+
+    #[test]
+    fn test_custom_labels_are_resolved() {
+        let config = AudioClassificationConfig {
+            labels: vec!["cat".to_string(), "dog".to_string(), "bird".to_string()],
+            top_k: 2,
+            ..Default::default()
+        };
+        let pipeline = AudioClassificationPipeline::new(config).expect("valid");
+        assert_eq!(pipeline.labels(), ["cat", "dog", "bird"]);
+        let ranked = pipeline.rank_logits(&[0.1, 5.0, 0.2]).expect("rank");
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].label, "dog");
     }
 }

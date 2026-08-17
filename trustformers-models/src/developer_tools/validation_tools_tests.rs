@@ -112,17 +112,76 @@ mod tests {
         }
     }
 
+    // --- Config validation: must inspect the configuration ---
+
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    struct DemoConfig {
+        hidden_size: usize,
+        num_heads: usize,
+    }
+
+    impl trustformers_core::traits::Config for DemoConfig {
+        fn architecture(&self) -> &'static str {
+            "demo"
+        }
+
+        fn validate(&self) -> trustformers_core::Result<()> {
+            if self.hidden_size == 0 {
+                return Err(
+                    trustformers_core::errors::TrustformersError::invalid_config(
+                        "hidden_size must be greater than zero".to_string(),
+                    ),
+                );
+            }
+            if self.num_heads == 0 || self.hidden_size % self.num_heads != 0 {
+                return Err(
+                    trustformers_core::errors::TrustformersError::invalid_config(format!(
+                        "hidden_size {} must be divisible by num_heads {}",
+                        self.hidden_size, self.num_heads
+                    )),
+                );
+            }
+            Ok(())
+        }
+    }
+
     #[test]
-    fn test_validate_config_basic() {
-        let config = ValidationConfig::default();
-        let validator = ModelValidator::new(config);
-        let test_config = PerformanceThresholds {
-            max_forward_time_ms: 100.0,
-            max_memory_mb: 512.0,
-            min_throughput: 50.0,
-        };
-        let result = validator.validate_config(&test_config);
-        assert!(result.passed);
+    fn test_validate_config_accepts_a_valid_configuration() {
+        let validator = ModelValidator::new(ValidationConfig::default());
+        let result = validator.validate_config(&DemoConfig {
+            hidden_size: 768,
+            num_heads: 12,
+        });
+        assert!(result.passed, "{:?}", result.errors);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_validate_config_rejects_an_invalid_configuration() {
+        let validator = ModelValidator::new(ValidationConfig::default());
+
+        // hidden_size not divisible by num_heads.
+        let result = validator.validate_config(&DemoConfig {
+            hidden_size: 768,
+            num_heads: 7,
+        });
+        assert!(
+            !result.passed,
+            "an invalid configuration must not pass validation"
+        );
+        assert!(
+            result.errors.iter().any(|error| error.contains("divisible")),
+            "the configuration's own error must be surfaced: {:?}",
+            result.errors
+        );
+
+        // Zero hidden size.
+        let result = validator.validate_config(&DemoConfig {
+            hidden_size: 0,
+            num_heads: 1,
+        });
+        assert!(!result.passed);
+        assert!(result.errors.iter().any(|error| error.contains("hidden_size")));
     }
 
     #[test]
@@ -237,12 +296,12 @@ mod tests {
     fn test_performance_metrics_fields() {
         let metrics = PerformanceMetrics {
             forward_time_ms: 5.0,
-            memory_usage_mb: 128.0,
+            memory_usage_mb: Some(128.0),
             throughput: 200.0,
-            parameter_count: 1000000,
+            parameter_count: Some(1_000_000),
         };
         assert!((metrics.forward_time_ms - 5.0).abs() < f64::EPSILON);
-        assert_eq!(metrics.parameter_count, 1000000);
+        assert_eq!(metrics.parameter_count, Some(1_000_000));
     }
 
     // --- Validate against reference tests ---

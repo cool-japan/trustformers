@@ -3,8 +3,6 @@
 //! This module provides unified configuration structures and patterns
 //! that standardize configuration management across all modules.
 
-#![allow(unused_variables)] // Config unification
-
 use super::{validators, ConfigSerializable, StandardConfig};
 use crate::errors::Result;
 use serde::{Deserialize, Serialize};
@@ -961,14 +959,55 @@ impl Default for ConfigManager {
     }
 }
 
-/// Merge two unified configurations (second overrides first)
+/// Deep-merge two unified configurations.
+///
+/// The merge is field-wise over the serde representation: every value present
+/// in `override_config` wins, and every field it does not mention keeps the
+/// value from `base`. Nested objects are merged recursively, so overriding a
+/// single `logging.level` no longer discards the whole `resources` section —
+/// which is what returning `override_config` wholesale used to do.
+///
+/// Arrays are replaced rather than concatenated: a list in an override is a
+/// complete specification of that list.
 pub fn merge_unified_configs(
     base: UnifiedConfig,
     override_config: UnifiedConfig,
 ) -> Result<UnifiedConfig> {
-    // For now, we'll do a simple override merge
-    // In a more sophisticated implementation, we might merge nested structures
-    Ok(override_config)
+    let mut merged = serde_json::to_value(&base).map_err(|error| {
+        crate::errors::TrustformersError::serialization_error(format!(
+            "failed to serialize base config: {error}"
+        ))
+    })?;
+    let overrides = serde_json::to_value(&override_config).map_err(|error| {
+        crate::errors::TrustformersError::serialization_error(format!(
+            "failed to serialize override config: {error}"
+        ))
+    })?;
+
+    merge_json_values(&mut merged, overrides);
+
+    serde_json::from_value(merged).map_err(|error| {
+        crate::errors::TrustformersError::serialization_error(format!(
+            "merged configuration is not a valid UnifiedConfig: {error}"
+        ))
+    })
+}
+
+/// Recursively merge `overrides` into `target`.
+fn merge_json_values(target: &mut serde_json::Value, overrides: serde_json::Value) {
+    match (target, overrides) {
+        (serde_json::Value::Object(target_map), serde_json::Value::Object(override_map)) => {
+            for (key, value) in override_map {
+                match target_map.get_mut(&key) {
+                    Some(existing) => merge_json_values(existing, value),
+                    None => {
+                        target_map.insert(key, value);
+                    },
+                }
+            }
+        },
+        (target_slot, value) => *target_slot = value,
+    }
 }
 
 #[cfg(test)]

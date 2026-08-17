@@ -1,10 +1,22 @@
 //! # Image Segmentation Pipeline
 //!
-//! SegFormer-compatible semantic segmentation that assigns a class label to each pixel.
+//! ## What is real here
 //!
-//! ## Supported model families
-//! - **SegFormer** — hierarchical transformer for semantic segmentation
-//! - **Mask2Former** — universal image segmentation architecture
+//! The mask analytics: [`SegmentationMask`] class counting, dominant-class
+//! selection and resizing; [`SegmentationResult::segment_stats`]; the
+//! semantic/instance/panoptic *views* over a mask; and the IoU / pixel-accuracy
+//! metrics. All operate on any mask you supply.
+//!
+//! ## Model support
+//!
+//! No segmentation backbone (SegFormer, Mask2Former, …) is implemented in
+//! `trustformers-models`, so [`ImageSegmentationPipeline::segment`] returns
+//! [`SegmentationError::UnsupportedModel`] instead of assigning each output
+//! pixel a class from `(pixel_value * num_classes)` — a "segmentation" that was
+//! just a quantised copy of the red channel.
+//!
+//! Feed a real mask to [`ImageSegmentationPipeline::postprocess`] to use the
+//! analytics.
 //!
 //! ## Example
 //!
@@ -15,8 +27,7 @@
 //!
 //! let config = ImageSegmentationConfig::default();
 //! let pipeline = ImageSegmentationPipeline::new(config)?;
-//! let image = vec![0.5f32; 512 * 512 * 3];
-//! let result = pipeline.segment(&image, 512, 512)?;
+//! let result = pipeline.postprocess(my_class_ids, out_h, out_w, None)?;
 //! println!("Dominant class: {:?}", result.mask.dominant_class());
 //! # Ok::<(), image_segmentation::SegmentationError>(())
 //! ```
@@ -40,7 +51,24 @@ pub enum SegmentationError {
     ModelError(String),
     #[error("Dimension mismatch: predictions and ground truth must have the same shape")]
     DimensionMismatch,
+    /// The requested checkpoint has no real implementation in this workspace.
+    #[error(
+        "no real segmentation model is implemented for `{requested}`; supported: {supported}. \
+         This pipeline never returns a synthesised mask — use `postprocess` with your own \
+         model's output."
+    )]
+    UnsupportedModel {
+        /// The checkpoint or architecture the caller asked for.
+        requested: String,
+        /// Comma-separated list of architectures that *are* supported.
+        supported: String,
+    },
 }
+
+/// Segmentation architectures with a real backbone in this workspace.
+///
+/// Deliberately empty — the pipeline says so rather than pretending.
+const SUPPORTED_ARCHITECTURES: &[&str] = &[];
 
 // ---------------------------------------------------------------------------
 // Segmentation type
@@ -606,44 +634,59 @@ impl ImageSegmentationPipeline {
                 "height and width must be > 0".to_string(),
             ));
         }
+        Err(SegmentationError::UnsupportedModel {
+            requested: self.config.model_name.clone(),
+            supported: if SUPPORTED_ARCHITECTURES.is_empty() {
+                "none (no segmentation backbone is implemented yet)".to_string()
+            } else {
+                SUPPORTED_ARCHITECTURES.join(", ")
+            },
+        })
+    }
 
-        let out_h = (self.config.input_height / self.config.output_stride).max(1);
-        let out_w = (self.config.input_width / self.config.output_stride).max(1);
+    /// The output mask resolution implied by the configuration.
+    pub fn output_dimensions(&self) -> (usize, usize) {
+        (
+            (self.config.input_height / self.config.output_stride).max(1),
+            (self.config.input_width / self.config.output_stride).max(1),
+        )
+    }
 
-        // Mock: class assignment derived from pixel value at the nearest source location.
-        // class_id = (pixel_value * num_classes) as u32, clamped to [0, num_classes - 1].
-        let num_classes = self.config.num_classes as u32;
-        let mut class_ids = Vec::with_capacity(out_h * out_w);
-        let mut confidence_map: Option<Vec<f32>> = if self.config.return_confidence_map {
-            Some(Vec::with_capacity(out_h * out_w))
-        } else {
-            None
-        };
-
-        let channels = image.len().checked_div(height * width).unwrap_or(1).max(1);
-
-        for oy in 0..out_h {
-            for ox in 0..out_w {
-                // Map output pixel to source image pixel.
-                let sy = (oy * self.config.output_stride).min(height - 1);
-                let sx = (ox * self.config.output_stride).min(width - 1);
-                let src_idx = (sy * width + sx) * channels;
-                let pixel_val = image.get(src_idx).copied().unwrap_or(0.0);
-
-                let class_id = if num_classes == 0 {
-                    0u32
-                } else {
-                    ((pixel_val.clamp(0.0, 1.0) * num_classes as f32) as u32).min(num_classes - 1)
-                };
-                class_ids.push(class_id);
-
-                if let Some(ref mut cm) = confidence_map {
-                    // Confidence is a simple function of distance from class boundary.
-                    let fractional = pixel_val.clamp(0.0, 1.0) * num_classes as f32;
-                    let dist_to_boundary = (fractional - fractional.round()).abs();
-                    let conf = 1.0 - dist_to_boundary * 2.0;
-                    cm.push(conf.clamp(0.0, 1.0));
-                }
+    /// Wrap a model's own per-pixel class predictions in a [`SegmentationResult`].
+    ///
+    /// `class_ids` must contain `out_h * out_w` entries; `confidence_map`, when
+    /// supplied, must match. `inference_time_ms` is reported as `0` unless the
+    /// caller measured it.
+    ///
+    /// # Errors
+    ///
+    /// [`SegmentationError::InvalidDimensions`] on any length mismatch.
+    pub fn postprocess(
+        &self,
+        class_ids: Vec<u32>,
+        out_h: usize,
+        out_w: usize,
+        confidence_map: Option<Vec<f32>>,
+    ) -> Result<SegmentationResult, SegmentationError> {
+        if out_h == 0 || out_w == 0 {
+            return Err(SegmentationError::InvalidDimensions(
+                "output dimensions must be > 0".to_string(),
+            ));
+        }
+        if class_ids.len() != out_h * out_w {
+            return Err(SegmentationError::InvalidDimensions(format!(
+                "class_ids has {} entries but {out_h}x{out_w} = {} were expected",
+                class_ids.len(),
+                out_h * out_w
+            )));
+        }
+        if let Some(cm) = &confidence_map {
+            if cm.len() != class_ids.len() {
+                return Err(SegmentationError::InvalidDimensions(format!(
+                    "confidence_map has {} entries but {} were expected",
+                    cm.len(),
+                    class_ids.len()
+                )));
             }
         }
 
@@ -746,7 +789,9 @@ impl ImageSegmentationPipeline {
 
     /// Run panoptic segmentation on an [`ImageInput`].
     ///
-    /// Mock: classes with even id are treated as "stuff" (background), odd as "things".
+    /// Classes with an even id are treated as "stuff" (background) and odd ids
+    /// as "things"; this is a documented convention over a real mask, not a
+    /// model prediction.
     pub fn segment_panoptic(
         &self,
         input: &ImageInput,
@@ -903,7 +948,34 @@ mod tests {
     // ---- 8. segment basic ----
 
     #[test]
-    fn test_segment_basic() {
+    fn test_segment_reports_unsupported_model() {
+        // Regression: `segment` used to assign every output pixel a class from
+        // `(pixel_value * num_classes)` — a quantised copy of the red channel
+        // reported as a semantic segmentation.
+        let config = ImageSegmentationConfig {
+            input_height: 16,
+            input_width: 16,
+            output_stride: 4,
+            num_classes: 10,
+            model_name: "nvidia/segformer-b0-finetuned-ade-512-512".to_string(),
+            ..Default::default()
+        };
+        let pipeline = ImageSegmentationPipeline::new(config).unwrap();
+        let image = make_image(16, 16);
+        match pipeline.segment(&image, 16, 16) {
+            Err(SegmentationError::UnsupportedModel {
+                requested,
+                supported,
+            }) => {
+                assert_eq!(requested, "nvidia/segformer-b0-finetuned-ade-512-512");
+                assert!(supported.contains("none"), "supported: {supported}");
+            },
+            other => panic!("expected UnsupportedModel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_postprocess_wraps_real_model_output() {
         let config = ImageSegmentationConfig {
             input_height: 16,
             input_width: 16,
@@ -912,12 +984,26 @@ mod tests {
             ..Default::default()
         };
         let pipeline = ImageSegmentationPipeline::new(config).unwrap();
-        let image = make_image(16, 16);
-        let result = pipeline.segment(&image, 16, 16).unwrap();
+        assert_eq!(pipeline.output_dimensions(), (4, 4));
+        let result = pipeline.postprocess(vec![3u32; 16], 4, 4, None).expect("postprocess");
         assert_eq!(result.mask.height, 4);
         assert_eq!(result.mask.width, 4);
         assert_eq!(result.mask.class_ids.len(), 16);
         assert!(result.confidence_map.is_none());
+        assert_eq!(result.inference_time_ms, 0, "timing must not be invented");
+    }
+
+    #[test]
+    fn test_postprocess_rejects_length_mismatch() {
+        let pipeline = ImageSegmentationPipeline::new(ImageSegmentationConfig::default()).unwrap();
+        assert!(matches!(
+            pipeline.postprocess(vec![0u32; 3], 2, 2, None),
+            Err(SegmentationError::InvalidDimensions(_))
+        ));
+        assert!(matches!(
+            pipeline.postprocess(vec![0u32; 4], 2, 2, Some(vec![0.5; 2])),
+            Err(SegmentationError::InvalidDimensions(_))
+        ));
     }
 
     // ---- 9. segment_stats coverage_ratio ----
@@ -942,7 +1028,7 @@ mod tests {
     // ---- 10. segment_batch ----
 
     #[test]
-    fn test_segment_batch() {
+    fn test_segment_batch_reports_unsupported_model() {
         let config = ImageSegmentationConfig {
             input_height: 8,
             input_width: 8,
@@ -955,18 +1041,20 @@ mod tests {
         let img2 = make_image(12, 12);
         let batch: Vec<(&[f32], usize, usize)> =
             vec![(img1.as_slice(), 8, 8), (img2.as_slice(), 12, 12)];
-        let results = pipeline.segment_batch(&batch).unwrap();
-        assert_eq!(results.len(), 2);
-        for r in &results {
-            assert_eq!(r.mask.height, 4);
-            assert_eq!(r.mask.width, 4);
-        }
+        assert!(matches!(
+            pipeline.segment_batch(&batch),
+            Err(SegmentationError::UnsupportedModel { .. })
+        ));
+        assert!(matches!(
+            pipeline.segment_batch(&[]),
+            Err(SegmentationError::EmptyImage)
+        ));
     }
 
     // ---- 11. confidence_map returned when configured ----
 
     #[test]
-    fn test_confidence_map_returned() {
+    fn test_confidence_map_passthrough() {
         let config = ImageSegmentationConfig {
             input_height: 8,
             input_width: 8,
@@ -976,10 +1064,10 @@ mod tests {
             ..Default::default()
         };
         let pipeline = ImageSegmentationPipeline::new(config).unwrap();
-        let image = make_image(8, 8);
-        let result = pipeline.segment(&image, 8, 8).unwrap();
-        assert!(result.confidence_map.is_some());
-        let cm = result.confidence_map.unwrap();
+        let result = pipeline
+            .postprocess(vec![1u32; 4], 2, 2, Some(vec![0.25, 0.5, 0.75, 1.0]))
+            .expect("postprocess");
+        let cm = result.confidence_map.expect("confidence map preserved");
         assert_eq!(cm.len(), result.mask.height * result.mask.width);
         assert!(cm.iter().all(|&v| (0.0..=1.0).contains(&v)));
     }
@@ -1198,9 +1286,10 @@ mod tests {
         };
         let pipeline = ImageSegmentationPipeline::new(config).expect("ok");
         let input = ImageInput::new(make_image(8, 8), 8, 8);
-        let map = pipeline.segment_semantic(&input).expect("ok");
-        assert_eq!(map.height(), 2);
-        assert_eq!(map.width(), 2);
+        assert!(matches!(
+            pipeline.segment_semantic(&input),
+            Err(SegmentationError::UnsupportedModel { .. })
+        ));
     }
 
     // ---- 21. segment_instance ----
@@ -1216,12 +1305,10 @@ mod tests {
         };
         let pipeline = ImageSegmentationPipeline::new(config).expect("ok");
         let input = ImageInput::new(make_image(8, 8), 8, 8);
-        let instances = pipeline.segment_instance(&input).expect("ok");
-        assert!(!instances.is_empty(), "should return at least one instance");
-        for inst in &instances {
-            assert!(inst.area > 0, "each instance must have non-zero area");
-            assert!(inst.score > 0.0);
-        }
+        assert!(matches!(
+            pipeline.segment_instance(&input),
+            Err(SegmentationError::UnsupportedModel { .. })
+        ));
     }
 
     // ---- 22. segment_panoptic ----
@@ -1237,12 +1324,10 @@ mod tests {
         };
         let pipeline = ImageSegmentationPipeline::new(config).expect("ok");
         let input = ImageInput::new(make_image(8, 8), 8, 8);
-        let segments = pipeline.segment_panoptic(&input).expect("ok");
-        assert!(!segments.is_empty(), "should return at least one segment");
-        // At least one stuff and possibly one thing.
-        let has_stuff = segments.iter().any(|s| s.is_stuff);
-        let has_thing = segments.iter().any(|s| !s.is_stuff);
-        assert!(has_stuff || has_thing, "segments should be classified");
+        assert!(matches!(
+            pipeline.segment_panoptic(&input),
+            Err(SegmentationError::UnsupportedModel { .. })
+        ));
     }
 
     // ---- 23. SegmentationConfig includes segmentation_type ----

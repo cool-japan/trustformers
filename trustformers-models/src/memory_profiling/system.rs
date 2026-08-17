@@ -1,14 +1,23 @@
 //! System memory collection utilities
 //!
-//! This module provides platform-specific utilities for collecting
-//! memory information from the system and current process.
+//! Every figure produced here is a **real measurement** taken from the operating
+//! system through the pure-Rust [`sysinfo`] crate. Nothing is simulated: when a
+//! value cannot be obtained on the current platform the corresponding field is
+//! `None` (or the call returns an error) rather than a plausible-looking constant.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use sysinfo::{MemoryRefreshKind, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 
 use super::types::*;
 
-/// System memory information
+const BYTES_PER_MB: f64 = 1024.0 * 1024.0;
+
+/// GPU memory information.
+///
+/// Only produced when a GPU backend is compiled in; there is deliberately no
+/// fallback that invents a device.
 #[derive(Debug, Clone)]
 pub struct GpuMemoryInfo {
     pub total_mb: f64,
@@ -16,111 +25,166 @@ pub struct GpuMemoryInfo {
     pub free_mb: f64,
 }
 
-/// Process memory information for internal tracking
+/// Measured memory footprint of the current process.
 #[derive(Debug, Clone)]
 pub struct ProcessMemoryInfo {
-    pub total_mb: f64,
-    pub heap_mb: f64,
-    pub stack_mb: f64,
-    pub peak_mb: f64,
+    /// Resident set size (physical memory currently held), in MB.
+    pub resident_mb: f64,
+    /// Virtual memory size, in MB.
+    pub virtual_mb: f64,
+    /// Largest resident set size observed by this process since start-up, in MB.
+    ///
+    /// This is a running maximum over the samples this profiler has taken, not a
+    /// kernel-reported high-water mark.
+    pub peak_resident_mb: f64,
+}
+
+/// Counts of allocations the caller has explicitly registered with the profiler.
+///
+/// The profiler cannot see allocations it was not told about, so these counters
+/// describe *tracked* allocations only.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TrackedAllocationStats {
+    /// Cumulative number of allocations registered.
     pub allocated_objects: u64,
+    /// Cumulative number of deallocations registered.
     pub deallocated_objects: u64,
+    /// Allocations currently registered as live.
     pub active_allocations: u64,
-    pub gc_collections: u64,
-    pub gc_time_ms: f64,
+    /// Total size of the live allocations, in bytes.
+    pub active_bytes: u64,
+}
+
+/// Running maximum of the resident set size, in bytes.
+static PEAK_RESIDENT_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Shared `sysinfo` handle.
+///
+/// `System` caches per-process bookkeeping between refreshes, so a single
+/// long-lived instance is both cheaper and more accurate than creating one per
+/// sample.
+fn system_handle() -> &'static Mutex<System> {
+    static SYSTEM: std::sync::OnceLock<Mutex<System>> = std::sync::OnceLock::new();
+    SYSTEM.get_or_init(|| {
+        Mutex::new(System::new_with_specifics(
+            RefreshKind::nothing().with_memory(MemoryRefreshKind::everything()),
+        ))
+    })
 }
 
 impl super::profiler::MemoryProfiler {
-    /// Collect current memory metrics
-    pub async fn collect_memory_metrics() -> Result<MemoryMetrics> {
-        // Use system APIs to collect memory information
-        let _memory_info = Self::get_system_memory_info()?;
+    /// Collect current memory metrics from the operating system.
+    ///
+    /// `tracked` carries the allocation counters the profiler maintains for
+    /// allocations that were explicitly registered by the caller.
+    pub async fn collect_memory_metrics(tracked: TrackedAllocationStats) -> Result<MemoryMetrics> {
         let process_info = Self::get_process_memory_info()?;
-        let gpu_info = Self::get_gpu_memory_info().await.ok();
+        let gpu_info = Self::get_gpu_memory_info().await?;
 
         Ok(MemoryMetrics {
             timestamp: std::time::SystemTime::now(),
-            total_memory_mb: process_info.total_mb,
-            heap_memory_mb: process_info.heap_mb,
-            stack_memory_mb: process_info.stack_mb,
+            total_memory_mb: process_info.resident_mb,
+            virtual_memory_mb: process_info.virtual_mb,
+            heap_memory_mb: None,
+            stack_memory_mb: None,
             gpu_memory_mb: gpu_info.map(|info| info.used_mb),
-            peak_memory_mb: process_info.peak_mb,
-            allocated_objects: process_info.allocated_objects,
-            deallocated_objects: process_info.deallocated_objects,
-            active_allocations: process_info.active_allocations,
-            memory_fragmentation_ratio: Self::calculate_fragmentation_ratio(&process_info),
-            gc_collections: process_info.gc_collections,
-            gc_time_ms: process_info.gc_time_ms,
-            memory_growth_rate_mb_per_sec: 0.0, // Will be calculated later
+            peak_memory_mb: process_info.peak_resident_mb,
+            allocated_objects: tracked.allocated_objects,
+            deallocated_objects: tracked.deallocated_objects,
+            active_allocations: tracked.active_allocations,
+            memory_fragmentation_ratio: Self::calculate_fragmentation_ratio(&process_info, tracked),
+            memory_growth_rate_mb_per_sec: 0.0, // Filled in by the sampling loop
         })
     }
 
-    /// Get system memory information
+    /// Read the machine's memory statistics.
+    ///
+    /// `cached_memory` and `buffer_memory` are `None`: they are not exposed
+    /// portably, and reporting a guess would be worse than reporting nothing.
     pub fn get_system_memory_info() -> Result<SystemMemoryInfo> {
-        // This would use platform-specific APIs in a real implementation
-        // For now, return mock data that represents realistic system values
+        let mut system = system_handle()
+            .lock()
+            .map_err(|_| anyhow!("system information handle is poisoned"))?;
+        system.refresh_memory();
+
+        let total_memory = system.total_memory();
+        if total_memory == 0 {
+            return Err(anyhow!(
+                "the operating system reported a total memory of 0 bytes; \
+                 memory statistics are unavailable on this platform"
+            ));
+        }
+
         Ok(SystemMemoryInfo {
-            total_memory: 16 * 1024 * 1024 * 1024,    // 16GB
-            available_memory: 8 * 1024 * 1024 * 1024, // 8GB
-            used_memory: 8 * 1024 * 1024 * 1024,      // 8GB
-            free_memory: 4 * 1024 * 1024 * 1024,      // 4GB
-            cached_memory: 2 * 1024 * 1024 * 1024,    // 2GB
-            buffer_memory: 2 * 1024 * 1024 * 1024,    // 2GB
+            total_memory,
+            available_memory: system.available_memory(),
+            used_memory: system.used_memory(),
+            free_memory: system.free_memory(),
+            cached_memory: None,
+            buffer_memory: None,
         })
     }
 
-    /// Get process memory information
+    /// Read this process's resident and virtual memory footprint.
     pub fn get_process_memory_info() -> Result<ProcessMemoryInfo> {
-        // This would use platform-specific APIs to get real memory info
-        // For now, return mock data that simulates realistic values
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = sysinfo::get_current_pid()
+            .map_err(|e| anyhow!("failed to determine the current process id: {e}"))?;
 
-        // Simulate some realistic memory growth patterns
-        let base_memory = 512.0;
-        let growth = (count as f64 * 0.1).min(500.0);
-        let noise = (count as f64 * 0.05).sin() * 10.0; // Add some realistic noise
+        let mut system = system_handle()
+            .lock()
+            .map_err(|_| anyhow!("system information handle is poisoned"))?;
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing().with_memory(),
+        );
+
+        let process = system
+            .process(pid)
+            .ok_or_else(|| anyhow!("the operating system reported no process with id {pid}"))?;
+
+        let resident_bytes = process.memory();
+        let virtual_bytes = process.virtual_memory();
+        drop(system);
+
+        if resident_bytes == 0 {
+            return Err(anyhow!(
+                "the operating system reported a resident set size of 0 bytes for this process; \
+                 process memory statistics are unavailable on this platform"
+            ));
+        }
+
+        let peak_bytes = PEAK_RESIDENT_BYTES.fetch_max(resident_bytes, Ordering::Relaxed);
 
         Ok(ProcessMemoryInfo {
-            total_mb: base_memory + growth + noise,
-            heap_mb: (base_memory + growth + noise) * 0.8,
-            stack_mb: 64.0 + (count as f64 * 0.01).min(32.0),
-            peak_mb: base_memory + growth + noise + 100.0,
-            allocated_objects: 1000000 + count * 1000,
-            deallocated_objects: 950000 + count * 950,
-            active_allocations: 50000 + count * 50,
-            gc_collections: 10 + count / 100,
-            gc_time_ms: 150.0 + (count as f64 * 0.1),
+            resident_mb: resident_bytes as f64 / BYTES_PER_MB,
+            virtual_mb: virtual_bytes as f64 / BYTES_PER_MB,
+            peak_resident_mb: peak_bytes.max(resident_bytes) as f64 / BYTES_PER_MB,
         })
     }
 
-    /// Get GPU memory information
-    pub async fn get_gpu_memory_info() -> Result<GpuMemoryInfo> {
-        // This would use CUDA/ROCm APIs in a real implementation
-        // For now, return mock data
-        static GPU_COUNTER: AtomicU64 = AtomicU64::new(0);
-        let count = GPU_COUNTER.fetch_add(1, Ordering::Relaxed);
-
-        let base_usage = 2048.0;
-        let usage_growth = (count as f64 * 0.5).min(2048.0);
-
-        Ok(GpuMemoryInfo {
-            total_mb: 8192.0,
-            used_mb: base_usage + usage_growth,
-            free_mb: 8192.0 - (base_usage + usage_growth),
-        })
+    /// Read GPU memory usage.
+    ///
+    /// Returns `Ok(None)` when no GPU backend is compiled in — this crate has no
+    /// way to query a device that is not there, and a fabricated card would make
+    /// every downstream report fiction.
+    pub async fn get_gpu_memory_info() -> Result<Option<GpuMemoryInfo>> {
+        Ok(None)
     }
 
-    /// Calculate memory fragmentation ratio
-    pub fn calculate_fragmentation_ratio(info: &ProcessMemoryInfo) -> f64 {
-        // Simple fragmentation estimation based on allocation patterns
-        // In reality, this would be more sophisticated and platform-specific
-        let theoretical_optimal = info.active_allocations as f64 * 64.0 / 1024.0 / 1024.0; // Assume avg 64 bytes per allocation
-        if theoretical_optimal > 0.0 {
-            ((info.total_mb - theoretical_optimal) / info.total_mb).clamp(0.0, 1.0)
-        } else {
-            0.0
+    /// Share of the resident set that is *not* covered by tracked allocations.
+    ///
+    /// With no registered allocations there is nothing to compare the resident
+    /// set against, so the ratio is `0.0` rather than an invented percentage.
+    pub fn calculate_fragmentation_ratio(
+        info: &ProcessMemoryInfo,
+        tracked: TrackedAllocationStats,
+    ) -> f64 {
+        if tracked.active_bytes == 0 || info.resident_mb <= 0.0 {
+            return 0.0;
         }
+        let tracked_mb = tracked.active_bytes as f64 / BYTES_PER_MB;
+        ((info.resident_mb - tracked_mb) / info.resident_mb).clamp(0.0, 1.0)
     }
 
     /// Update adaptive thresholds based on current metrics

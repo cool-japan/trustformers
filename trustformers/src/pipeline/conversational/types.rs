@@ -185,7 +185,11 @@ pub struct StreamingConfig {
     pub chunk_size: usize,
     /// Buffer size
     pub buffer_size: usize,
-    /// Typing delay simulation (ms)
+    /// Optional pacing between emitted chunks, in milliseconds.
+    ///
+    /// Defaults to `0`: streaming yields each chunk as soon as the model has
+    /// produced it. Set a non-zero value only when a UI wants a deliberate
+    /// typing cadence — it slows delivery down, it does not make it smoother.
     pub typing_delay_ms: u64,
 }
 
@@ -195,7 +199,7 @@ impl Default for StreamingConfig {
             enabled: false,
             chunk_size: 10,
             buffer_size: 100,
-            typing_delay_ms: 50,
+            typing_delay_ms: 0,
         }
     }
 }
@@ -976,6 +980,13 @@ pub struct StreamingResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: streaming used to insert a 50 ms delay between chunks by
+    /// default, so every stream was deliberately slowed. Pacing is now opt-in.
+    #[test]
+    fn streaming_typing_delay_is_opt_in() {
+        assert_eq!(StreamingConfig::default().typing_delay_ms, 0);
+    }
 
     fn make_turn(role: ConversationRole, content: &str, token_count: usize) -> ConversationTurn {
         ConversationTurn {

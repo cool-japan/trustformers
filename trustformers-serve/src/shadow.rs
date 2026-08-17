@@ -40,6 +40,9 @@ pub struct ShadowConfig {
 
     /// Shadow model configurations
     pub shadow_models: HashMap<String, ShadowModelConfig>,
+
+    /// Version string reported for the production side of every comparison.
+    pub production_model_version: String,
 }
 
 impl Default for ShadowConfig {
@@ -52,6 +55,7 @@ impl Default for ShadowConfig {
             max_shadow_results: 10000,
             enable_detailed_logging: true,
             shadow_models: HashMap::new(),
+            production_model_version: crate::VERSION.to_string(),
         }
     }
 }
@@ -282,11 +286,96 @@ pub struct ShadowTestingService {
     /// Event broadcaster for shadow events
     event_sender: broadcast::Sender<ShadowEvent>,
 
-    /// Request sender for shadow processing
-    request_sender: mpsc::UnboundedSender<ShadowRequest>,
+    /// Request sender for shadow processing. Carries the real production
+    /// response alongside the request so the comparator never has to invent one.
+    request_sender: mpsc::UnboundedSender<(ShadowRequest, ShadowResponse)>,
+
+    /// Invoker used to run the configured shadow models. When absent, shadow
+    /// responses are recorded as explicit errors rather than being synthesized.
+    invoker: Option<Arc<dyn ShadowModelInvoker>>,
 
     /// Background task handles
     task_handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+}
+
+/// Runs a shadow model for a mirrored request.
+///
+/// Implementors must perform real inference. There is deliberately no default
+/// implementation: a service without an invoker reports an error instead of a
+/// plausible-looking payload.
+#[async_trait::async_trait]
+pub trait ShadowModelInvoker: Send + Sync {
+    /// Invoke `model_name` for `request` and return its real response payload.
+    async fn invoke(
+        &self,
+        model_name: &str,
+        model_config: &ShadowModelConfig,
+        request: &ShadowRequest,
+    ) -> Result<serde_json::Value>;
+}
+
+/// A [`ShadowModelInvoker`] backed by a real batching service.
+///
+/// The mirrored request's `text` field is submitted to the batching stack and
+/// the model's real output is returned.
+pub struct BatchingShadowInvoker {
+    batching_service: Arc<crate::batching::DynamicBatchingService>,
+}
+
+impl BatchingShadowInvoker {
+    pub fn new(batching_service: Arc<crate::batching::DynamicBatchingService>) -> Self {
+        Self { batching_service }
+    }
+}
+
+#[async_trait::async_trait]
+impl ShadowModelInvoker for BatchingShadowInvoker {
+    async fn invoke(
+        &self,
+        model_name: &str,
+        _model_config: &ShadowModelConfig,
+        request: &ShadowRequest,
+    ) -> Result<serde_json::Value> {
+        let text = request
+            .payload
+            .get("text")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("mirrored payload has no 'text' field to shadow"))?
+            .to_string();
+        let max_length =
+            request.payload.get("max_length").and_then(|v| v.as_u64()).map(|v| v as usize);
+
+        let internal = crate::batching::Request {
+            id: crate::batching::RequestId::new(),
+            input: crate::batching::aggregator::RequestInput::Text { text, max_length },
+            priority: crate::batching::config::Priority::Low,
+            submitted_at: std::time::Instant::now(),
+            deadline: None,
+            metadata: HashMap::new(),
+        };
+
+        let result = self.batching_service.submit_request(internal).await?;
+        match result.output {
+            crate::batching::aggregator::ProcessingOutput::Text(text) => Ok(serde_json::json!({
+                "text": text,
+                "tokens": text.split_whitespace().collect::<Vec<_>>(),
+                "model": model_name,
+            })),
+            crate::batching::aggregator::ProcessingOutput::Tokens(tokens) => {
+                Ok(serde_json::json!({
+                    "tokens": tokens,
+                    "model": model_name,
+                }))
+            },
+            crate::batching::aggregator::ProcessingOutput::Error(error) => {
+                Err(anyhow::anyhow!(error))
+            },
+            other => Err(anyhow::anyhow!(
+                "unsupported shadow output type: {:?}",
+                other
+            )),
+        }
+    }
 }
 
 /// Shadow testing events
@@ -325,8 +414,20 @@ pub enum ShadowEvent {
 }
 
 impl ShadowTestingService {
-    /// Create a new shadow testing service
+    /// Create a new shadow testing service with no model invoker.
+    ///
+    /// Mirrored requests are still compared, but every shadow response is
+    /// recorded as an explicit error stating that no invoker is configured.
     pub fn new(config: ShadowConfig) -> Self {
+        Self::build(config, None)
+    }
+
+    /// Create a shadow testing service that invokes real shadow models.
+    pub fn with_invoker(config: ShadowConfig, invoker: Arc<dyn ShadowModelInvoker>) -> Self {
+        Self::build(config, Some(invoker))
+    }
+
+    fn build(config: ShadowConfig, invoker: Option<Arc<dyn ShadowModelInvoker>>) -> Self {
         let (event_sender, _) = broadcast::channel(1000);
         let (request_sender, request_receiver) = mpsc::unbounded_channel();
 
@@ -337,6 +438,7 @@ impl ShadowTestingService {
             stats: Arc::new(RwLock::new(ShadowStats::default())),
             event_sender,
             request_sender,
+            invoker,
             task_handles: Arc::new(Mutex::new(Vec::new())),
         };
 
@@ -344,6 +446,11 @@ impl ShadowTestingService {
         service.start_background_processing(request_receiver);
 
         service
+    }
+
+    /// Whether a real shadow model invoker is installed.
+    pub fn has_invoker(&self) -> bool {
+        self.invoker.is_some()
     }
 
     /// Start shadow testing service
@@ -368,20 +475,29 @@ impl ShadowTestingService {
         Ok(())
     }
 
-    /// Process a request with shadow testing
+    /// Mirror a request to the configured shadow models.
+    ///
+    /// `production_payload` and `production_time_ms` describe the response the
+    /// production path actually returned; they become the baseline the shadow
+    /// responses are compared against, so no side of the comparison is invented.
+    ///
+    /// Returns the request id that was mirrored, or `None` when shadow testing
+    /// is disabled or the request was not sampled.
     pub async fn process_request(
         &self,
         payload: serde_json::Value,
+        production_payload: serde_json::Value,
+        production_time_ms: f64,
         client_info: Option<ClientInfo>,
         metadata: HashMap<String, String>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         if !self.config.enabled {
-            return Ok(());
+            return Ok(None);
         }
 
         // Check if this request should be shadowed
         if !self.should_shadow_request() {
-            return Ok(());
+            return Ok(None);
         }
 
         let request_id = Uuid::new_v4().to_string();
@@ -393,6 +509,19 @@ impl ShadowTestingService {
             metadata,
         };
 
+        let production_response = ShadowResponse {
+            response_id: Uuid::new_v4().to_string(),
+            request_id: request_id.clone(),
+            model_name: "production".to_string(),
+            model_version: self.config.production_model_version.clone(),
+            payload: production_payload,
+            processing_time_ms: production_time_ms,
+            timestamp: chrono::Utc::now(),
+            status: ShadowResponseStatus::Success,
+            error: None,
+            metrics: HashMap::new(),
+        };
+
         // Store active request
         {
             let mut active_requests =
@@ -401,11 +530,63 @@ impl ShadowTestingService {
         }
 
         // Send for shadow processing
-        if let Err(e) = self.request_sender.send(shadow_request) {
+        if let Err(e) = self.request_sender.send((shadow_request, production_response)) {
             tracing::error!("Failed to send shadow request: {}", e);
+            return Err(anyhow::anyhow!(
+                "shadow pipeline is not accepting requests: {}",
+                e
+            ));
         }
 
-        Ok(())
+        Ok(Some(request_id))
+    }
+
+    /// Mirror a request and wait until its comparison is recorded.
+    ///
+    /// Returns `None` when the request was not sampled, and an error when the
+    /// comparison does not appear within `timeout_duration`.
+    pub async fn process_request_blocking(
+        &self,
+        payload: serde_json::Value,
+        production_payload: serde_json::Value,
+        production_time_ms: f64,
+        timeout_duration: Duration,
+    ) -> Result<Option<ShadowComparison>> {
+        let Some(request_id) = self
+            .process_request(
+                payload,
+                production_payload,
+                production_time_ms,
+                None,
+                HashMap::new(),
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        let deadline = Instant::now() + timeout_duration;
+        loop {
+            if let Some(comparison) = self
+                .shadow_results
+                .lock()
+                .await
+                .iter()
+                .rev()
+                .find(|c| c.request_id == request_id)
+                .cloned()
+            {
+                return Ok(Some(comparison));
+            }
+            if Instant::now() >= deadline {
+                return Err(anyhow::anyhow!(
+                    "shadow comparison for request {} did not complete within {:?}",
+                    request_id,
+                    timeout_duration
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 
     /// Get shadow testing statistics
@@ -443,14 +624,14 @@ impl ShadowTestingService {
     /// Start background processing
     fn start_background_processing(
         &self,
-        mut request_receiver: mpsc::UnboundedReceiver<ShadowRequest>,
+        mut request_receiver: mpsc::UnboundedReceiver<(ShadowRequest, ShadowResponse)>,
     ) {
         let service = self.clone();
         let service_for_handles = self.clone();
 
         let handle = tokio::spawn(async move {
-            while let Some(request) = request_receiver.recv().await {
-                service.process_shadow_request(request).await;
+            while let Some((request, production_response)) = request_receiver.recv().await {
+                service.process_shadow_request(request, production_response).await;
             }
         });
 
@@ -460,8 +641,12 @@ impl ShadowTestingService {
         });
     }
 
-    /// Process a shadow request
-    async fn process_shadow_request(&self, request: ShadowRequest) {
+    /// Process a shadow request against the real production response.
+    async fn process_shadow_request(
+        &self,
+        request: ShadowRequest,
+        production_response: ShadowResponse,
+    ) {
         let request_id = request.request_id.clone();
 
         // Send start event
@@ -481,10 +666,10 @@ impl ShadowTestingService {
 
             let start_time = Instant::now();
 
-            // Simulate shadow model processing
+            // Run the real shadow model.
             let response = match timeout(
                 Duration::from_secs(self.config.shadow_timeout_seconds),
-                self.simulate_model_processing(model_name, model_config, &request),
+                self.invoke_shadow_model(model_name, model_config, &request),
             )
             .await
             {
@@ -533,20 +718,7 @@ impl ShadowTestingService {
             shadow_responses.push(response);
         }
 
-        // Create production response (simulated)
-        let production_response = ShadowResponse {
-            response_id: Uuid::new_v4().to_string(),
-            request_id: request_id.clone(),
-            model_name: "production".to_string(),
-            model_version: "1.0.0".to_string(),
-            payload: serde_json::json!({"text": "Production response", "tokens": ["production", "response"]}),
-            processing_time_ms: 50.0,
-            timestamp: chrono::Utc::now(),
-            status: ShadowResponseStatus::Success,
-            error: None,
-            metrics: HashMap::new(),
-        };
-
+        // The production response is the real one recorded by the caller.
         // Compare responses
         let comparison = self.compare_responses(&production_response, &shadow_responses);
 
@@ -580,34 +752,40 @@ impl ShadowTestingService {
         }
     }
 
-    /// Simulate model processing (placeholder)
-    async fn simulate_model_processing(
+    /// Invoke a configured shadow model for a mirrored request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no [`ShadowModelInvoker`] is installed, or when the
+    /// invoker itself fails. No payload is ever synthesized.
+    async fn invoke_shadow_model(
         &self,
         model_name: &str,
-        _model_config: &ShadowModelConfig,
+        model_config: &ShadowModelConfig,
         request: &ShadowRequest,
     ) -> Result<ShadowResponse> {
-        // Simulate processing delay
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let invoker = self.invoker.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no shadow model invoker is configured; build the service with \
+                 ShadowTestingService::with_invoker to mirror traffic to a real model"
+            )
+        })?;
 
-        // Generate mock response
-        let response = ShadowResponse {
+        let started = Instant::now();
+        let payload = invoker.invoke(model_name, model_config, request).await?;
+
+        Ok(ShadowResponse {
             response_id: Uuid::new_v4().to_string(),
             request_id: request.request_id.clone(),
             model_name: model_name.to_string(),
-            model_version: "1.0.0".to_string(),
-            payload: serde_json::json!({
-                "text": format!("Shadow response from {}", model_name),
-                "tokens": ["shadow", "response", "from", model_name]
-            }),
-            processing_time_ms: 100.0,
+            model_version: model_config.version.clone(),
+            payload,
+            processing_time_ms: started.elapsed().as_secs_f64() * 1000.0,
             timestamp: chrono::Utc::now(),
             status: ShadowResponseStatus::Success,
             error: None,
             metrics: HashMap::new(),
-        };
-
-        Ok(response)
+        })
     }
 
     /// Compare responses
@@ -732,6 +910,7 @@ impl Clone for ShadowTestingService {
             stats: Arc::clone(&self.stats),
             event_sender: self.event_sender.clone(),
             request_sender: self.request_sender.clone(),
+            invoker: self.invoker.clone(),
             task_handles: Arc::clone(&self.task_handles),
         }
     }
@@ -772,13 +951,53 @@ mod tests {
         assert_eq!(stats.total_requests, 0);
     }
 
-    #[tokio::test]
-    async fn test_shadow_request_processing() {
+    fn shadow_config_with_one_model() -> ShadowConfig {
         let mut config = ShadowConfig::default();
         config.enabled = true;
         config.traffic_percentage = 100.0; // Always shadow
+        config.shadow_models.insert(
+            "candidate".to_string(),
+            ShadowModelConfig {
+                model_name: "candidate".to_string(),
+                version: "2.0.0".to_string(),
+                endpoint: None,
+                parameters: HashMap::new(),
+                enabled: true,
+                traffic_percentage: None,
+            },
+        );
+        config
+    }
 
-        let service = ShadowTestingService::new(config);
+    /// An invoker that performs a real, deterministic transformation of the
+    /// mirrored payload, so the comparison is between two genuinely different
+    /// computed values.
+    #[derive(Debug)]
+    struct UppercasingInvoker;
+
+    #[async_trait::async_trait]
+    impl ShadowModelInvoker for UppercasingInvoker {
+        async fn invoke(
+            &self,
+            model_name: &str,
+            _model_config: &ShadowModelConfig,
+            request: &ShadowRequest,
+        ) -> Result<serde_json::Value> {
+            let text = request
+                .payload
+                .get("text")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("no text to shadow"))?;
+            Ok(serde_json::json!({ "text": text.to_uppercase(), "model": model_name }))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_shadow_request_processing() {
+        let service = ShadowTestingService::with_invoker(
+            shadow_config_with_one_model(),
+            Arc::new(UppercasingInvoker),
+        );
 
         let payload = serde_json::json!({"text": "test input"});
         let client_info = Some(ClientInfo {
@@ -789,7 +1008,13 @@ mod tests {
         });
 
         service
-            .process_request(payload, client_info, HashMap::new())
+            .process_request(
+                payload,
+                serde_json::json!({"text": "test output"}),
+                12.5,
+                client_info,
+                HashMap::new(),
+            )
             .await
             .expect("async operation should succeed in test");
 
@@ -798,5 +1023,88 @@ mod tests {
 
         let stats = service.get_stats().await;
         assert_eq!(stats.total_requests, 1);
+    }
+
+    /// Regression: both sides of a comparison must be real. The production side
+    /// used to be the literal `"Production response"` and the shadow side
+    /// `"Shadow response from {model}"`.
+    #[tokio::test]
+    async fn comparison_uses_real_responses_on_both_sides() {
+        let service = ShadowTestingService::with_invoker(
+            shadow_config_with_one_model(),
+            Arc::new(UppercasingInvoker),
+        );
+
+        let comparison = service
+            .process_request_blocking(
+                serde_json::json!({"text": "hello shadow"}),
+                serde_json::json!({"text": "hello production"}),
+                42.0,
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("mirroring must succeed")
+            .expect("the request must be sampled at 100%");
+
+        // Production side is exactly what the caller recorded.
+        assert_eq!(
+            comparison.production_response.payload["text"],
+            serde_json::json!("hello production")
+        );
+        assert!((comparison.production_response.processing_time_ms - 42.0).abs() < 1e-9);
+        assert_ne!(
+            comparison.production_response.payload["text"],
+            serde_json::json!("Production response")
+        );
+
+        // Shadow side is what the invoker computed.
+        let shadow = comparison.shadow_responses.first().expect("one shadow response");
+        assert_eq!(shadow.payload["text"], serde_json::json!("HELLO SHADOW"));
+        assert!(!shadow.payload["text"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("Shadow response from"));
+        assert_eq!(shadow.model_version, "2.0.0");
+    }
+
+    /// Regression: with no invoker the shadow side must record an error rather
+    /// than a synthesized payload.
+    #[tokio::test]
+    async fn missing_invoker_records_an_error_not_a_payload() {
+        let service = ShadowTestingService::new(shadow_config_with_one_model());
+        assert!(!service.has_invoker());
+
+        let comparison = service
+            .process_request_blocking(
+                serde_json::json!({"text": "hello"}),
+                serde_json::json!({"text": "produced"}),
+                10.0,
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("mirroring must succeed")
+            .expect("the request must be sampled at 100%");
+
+        let shadow = comparison.shadow_responses.first().expect("one shadow response");
+        assert!(matches!(shadow.status, ShadowResponseStatus::Error));
+        assert!(shadow.error.as_deref().unwrap_or_default().contains("no shadow model invoker"));
+        assert_eq!(shadow.payload, serde_json::Value::Null);
+    }
+
+    /// Regression: a disabled service must report "not sampled", never a
+    /// fabricated comparison.
+    #[tokio::test]
+    async fn disabled_service_does_not_compare() {
+        let service = ShadowTestingService::new(ShadowConfig::default());
+        let outcome = service
+            .process_request_blocking(
+                serde_json::json!({"text": "hello"}),
+                serde_json::json!({"text": "produced"}),
+                10.0,
+                Duration::from_millis(200),
+            )
+            .await
+            .expect("call must succeed");
+        assert!(outcome.is_none());
     }
 }

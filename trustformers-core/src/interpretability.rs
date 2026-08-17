@@ -1,7 +1,16 @@
+//! Model interpretability analysis.
+//!
+//! Provides attention-pattern classification, occlusion-based feature
+//! importance, gradient attribution and activation statistics.
+//!
+//! Every metric produced by this module is computed from data the caller
+//! supplies. Methods that would need information the caller cannot provide
+//! (for example per-layer ablation without a per-layer forward hook) return an
+//! empty result rather than a synthesised constant.
+
 use crate::errors::{Result, TrustformersError};
-use crate::layers::attention::MultiHeadAttention;
 use crate::tensor::Tensor;
-use scirs2_core::ndarray::{s, Array2, ArrayD, Axis, IxDyn};
+use scirs2_core::ndarray::s;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -53,18 +62,40 @@ pub enum AttentionPatternType {
 /// Feature importance analysis results
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureImportance {
+    /// Per-token occlusion importance (zeroing each token and measuring the
+    /// mean absolute output change).
     pub token_importance: Vec<f32>,
+    /// Per-position masking importance (scaling each position by 0.1 and
+    /// measuring the mean absolute output change).
     pub position_importance: Vec<f32>,
+    /// Per-layer attention concentration, averaged over the heads recorded for
+    /// that layer. `1 - H(row) / ln(seq_len)`, i.e. 0 for uniform attention and
+    /// 1 for a one-hot row. Empty when no attention patterns were recorded via
+    /// [`InterpretabilityAnalyzer::analyze_attention_patterns`].
     pub layer_importance: Vec<f32>,
+    /// Per-head attention concentration, indexed `[layer][head]`. Empty when no
+    /// attention patterns were recorded.
     pub head_importance: Vec<Vec<f32>>, // [layer][head]
 }
 
 /// Gradient-based attribution
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GradientAttribution {
+    /// Raw input gradients, flattened.
     pub input_gradients: Vec<f32>,
-    pub integrated_gradients: Vec<f32>,
+    /// Element-wise `input * gradient` ("gradient x input" attribution).
+    ///
+    /// This is *not* integrated gradients: it is a single-point attribution.
+    /// Use [`InterpretabilityAnalyzer::compute_integrated_gradients`] for a
+    /// real Riemann-sum path integral against a baseline.
+    pub gradient_x_input: Vec<f32>,
+    /// Integrated gradients along a baseline->input path. Only populated by
+    /// [`InterpretabilityAnalyzer::analyze_integrated_gradients`]; `None`
+    /// otherwise.
+    pub integrated_gradients: Option<Vec<f32>>,
+    /// Absolute value of the input gradients.
     pub saliency_scores: Vec<f32>,
+    /// Which attribution method produced this result.
     pub attribution_method: AttributionMethod,
 }
 
@@ -230,26 +261,27 @@ impl InterpretabilityAnalyzer {
 
     /// Classify attention pattern type
     fn classify_attention_pattern(&self, attention_weights: &[Vec<f32>]) -> AttentionPatternType {
-        let seq_len = attention_weights.len();
-
         // Calculate various pattern scores
         let local_score = self.calculate_local_pattern_score(attention_weights);
         let diagonal_score = self.calculate_diagonal_pattern_score(attention_weights);
         let vertical_score = self.calculate_vertical_pattern_score(attention_weights);
         let block_score = self.calculate_block_pattern_score(attention_weights);
 
-        // Determine dominant pattern
-        let scores = vec![
+        // Determine dominant pattern. `max_by` returns the *last* of several
+        // equal maxima, so the list is ordered least-specific first: a matrix
+        // that is simultaneously a one-column block and a vertical pattern is
+        // reported as `Vertical`.
+        let scores = [
+            (block_score, AttentionPatternType::Block),
             (local_score, AttentionPatternType::Local),
             (diagonal_score, AttentionPatternType::Diagonal),
             (vertical_score, AttentionPatternType::Vertical),
-            (block_score, AttentionPatternType::Block),
         ];
 
         let (max_score, pattern_type) = scores
             .into_iter()
             .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
-            .expect("scores vec is non-empty");
+            .unwrap_or((0.0, AttentionPatternType::Random));
 
         if max_score > 0.3 {
             pattern_type
@@ -264,45 +296,76 @@ impl InterpretabilityAnalyzer {
         }
     }
 
+    /// Normalise an observed attention mass against the mass a *uniform* row
+    /// would place on the same number of cells.
+    ///
+    /// Returns the "excess over uniform", rescaled to `[0, 1]`:
+    /// `(observed - uniform) / (1 - uniform)`. This makes the four pattern
+    /// scores directly comparable: without it a window that happens to cover
+    /// the whole row scores 1.0 for every possible attention matrix, and short
+    /// sequences are always classified `Local`.
+    fn excess_over_uniform(observed: f32, cells: usize, seq_len: usize) -> f32 {
+        if seq_len == 0 || cells == 0 {
+            return 0.0;
+        }
+        let uniform = cells as f32 / seq_len as f32;
+        let denominator = 1.0 - uniform;
+        if denominator <= f32::EPSILON {
+            // The region covers the whole row: it carries no information.
+            return 0.0;
+        }
+        ((observed - uniform) / denominator).clamp(0.0, 1.0)
+    }
+
     fn calculate_local_pattern_score(&self, attention_weights: &[Vec<f32>]) -> f32 {
         let seq_len = attention_weights.len();
-        let mut local_score = 0.0;
-        let window_size = 5; // Local window
+        if seq_len == 0 {
+            return 0.0;
+        }
+        let window_size = 5usize.min(seq_len); // Local window, clamped to the sequence
+        let half = window_size / 2;
 
-        for i in 0..seq_len {
-            let start = (i as i32 - window_size as i32 / 2).max(0) as usize;
-            let end = (i + window_size / 2 + 1).min(seq_len);
-
-            let local_sum: f32 = attention_weights[i][start..end].iter().sum();
-            local_score += local_sum;
+        let mut score_sum = 0.0;
+        for (i, row) in attention_weights.iter().enumerate() {
+            let start = i.saturating_sub(half);
+            let end = (i + half + 1).min(seq_len);
+            let cells = end - start;
+            let local_mass: f32 = row[start..end].iter().sum();
+            score_sum += Self::excess_over_uniform(local_mass, cells, seq_len);
         }
 
-        local_score / seq_len as f32
+        score_sum / seq_len as f32
     }
 
     fn calculate_diagonal_pattern_score(&self, attention_weights: &[Vec<f32>]) -> f32 {
         let seq_len = attention_weights.len();
-        let mut diagonal_score = 0.0;
+        if seq_len == 0 {
+            return 0.0;
+        }
+        let mut score_sum = 0.0;
 
-        for i in 0..seq_len {
-            if i < seq_len {
-                diagonal_score += attention_weights[i][i];
-            }
+        for (i, row) in attention_weights.iter().enumerate() {
+            let diagonal_mass = row.get(i).copied().unwrap_or(0.0);
+            score_sum += Self::excess_over_uniform(diagonal_mass, 1, seq_len);
         }
 
-        diagonal_score / seq_len as f32
+        score_sum / seq_len as f32
     }
 
     fn calculate_vertical_pattern_score(&self, attention_weights: &[Vec<f32>]) -> f32 {
         let seq_len = attention_weights.len();
-        let mut max_col_sum = 0.0;
+        if seq_len == 0 {
+            return 0.0;
+        }
+        let mut max_col_mean: f32 = 0.0;
 
         for j in 0..seq_len {
-            let col_sum: f32 = attention_weights.iter().map(|row| row[j]).sum();
-            max_col_sum = max_col_sum.max(col_sum);
+            let col_sum: f32 =
+                attention_weights.iter().map(|row| row.get(j).copied().unwrap_or(0.0)).sum();
+            max_col_mean = max_col_mean.max(col_sum / seq_len as f32);
         }
 
-        max_col_sum / seq_len as f32
+        Self::excess_over_uniform(max_col_mean, 1, seq_len)
     }
 
     fn calculate_block_pattern_score(&self, attention_weights: &[Vec<f32>]) -> f32 {
@@ -312,7 +375,7 @@ impl InterpretabilityAnalyzer {
             return 0.0;
         }
 
-        let mut block_score = 0.0;
+        let mut best_block_mean: f32 = 0.0;
         let num_blocks = seq_len / block_size;
 
         for block_i in 0..num_blocks {
@@ -323,32 +386,94 @@ impl InterpretabilityAnalyzer {
                 let end_j = (start_j + block_size).min(seq_len);
 
                 let mut block_sum = 0.0;
-                for i in start_i..end_i {
+                for row in attention_weights.iter().take(end_i).skip(start_i) {
                     for j in start_j..end_j {
-                        block_sum += attention_weights[i][j];
+                        block_sum += row.get(j).copied().unwrap_or(0.0);
                     }
                 }
 
-                block_score = block_score.max(block_sum);
+                // Mean attention mass placed by each row of the block inside it.
+                let rows = (end_i - start_i).max(1);
+                best_block_mean = best_block_mean.max(block_sum / rows as f32);
             }
         }
 
-        block_score / (num_blocks * block_size) as f32
+        Self::excess_over_uniform(best_block_mean, block_size, seq_len)
     }
 
+    /// Global-pattern score: mean row entropy normalised by `ln(seq_len)`.
+    ///
+    /// 1.0 for perfectly uniform attention (fully global), 0.0 for a one-hot row.
     fn calculate_global_pattern_score(&self, attention_weights: &[Vec<f32>]) -> f32 {
         let seq_len = attention_weights.len();
-        let mut variance_sum = 0.0;
+        if seq_len < 2 {
+            return 0.0;
+        }
+        let max_entropy = (seq_len as f32).ln();
+        let mut entropy_sum = 0.0;
 
         for row in attention_weights {
-            let mean: f32 = row.iter().sum::<f32>() / seq_len as f32;
-            let variance: f32 =
-                row.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / seq_len as f32;
-            variance_sum += variance;
+            let mass: f32 = row.iter().sum();
+            if mass <= f32::EPSILON {
+                continue;
+            }
+            let mut entropy = 0.0;
+            for &weight in row {
+                let p = weight / mass;
+                if p > 1e-8 {
+                    entropy -= p * p.ln();
+                }
+            }
+            entropy_sum += entropy;
         }
 
-        let avg_variance = variance_sum / seq_len as f32;
-        1.0 / (1.0 + avg_variance * 100.0) // Lower variance = more global
+        (entropy_sum / seq_len as f32 / max_entropy).clamp(0.0, 1.0)
+    }
+
+    /// Attention concentration of one head: `1 - H(row) / ln(seq_len)`.
+    ///
+    /// 0.0 when the head attends uniformly (carries no positional preference),
+    /// 1.0 when it is one-hot.
+    fn attention_concentration(&self, pattern: &AttentionPattern) -> f32 {
+        1.0 - self.calculate_global_pattern_score(&pattern.attention_weights)
+    }
+
+    /// Per-layer / per-head attention concentration derived from the attention
+    /// patterns recorded so far.
+    ///
+    /// Returns `(layer_scores, head_scores)`. Both are empty when
+    /// [`Self::analyze_attention_patterns`] has not been called: layer-level
+    /// ablation is not reachable through the single `model_fn` closure this
+    /// analyzer is given, so no value is invented for it.
+    fn attention_derived_importance(&self) -> (Vec<f32>, Vec<Vec<f32>>) {
+        if self.attention_patterns.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+
+        let num_layers = self.attention_patterns.iter().map(|p| p.layer_idx).max().unwrap_or(0) + 1;
+        let mut head_scores: Vec<Vec<f32>> = vec![Vec::new(); num_layers];
+
+        for pattern in &self.attention_patterns {
+            let score = self.attention_concentration(pattern);
+            let heads = &mut head_scores[pattern.layer_idx];
+            if heads.len() <= pattern.head_idx {
+                heads.resize(pattern.head_idx + 1, 0.0);
+            }
+            heads[pattern.head_idx] = score;
+        }
+
+        let layer_scores = head_scores
+            .iter()
+            .map(|heads| {
+                if heads.is_empty() {
+                    0.0
+                } else {
+                    heads.iter().sum::<f32>() / heads.len() as f32
+                }
+            })
+            .collect();
+
+        (layer_scores, head_scores)
     }
 
     /// Analyze feature importance using various methods
@@ -364,8 +489,7 @@ impl InterpretabilityAnalyzer {
 
         let token_importance = self.calculate_token_importance(inputs, outputs, model_fn)?;
         let position_importance = self.calculate_position_importance(inputs, outputs, model_fn)?;
-        let layer_importance = vec![1.0; 12]; // Placeholder - would need layer-wise analysis
-        let head_importance = vec![vec![1.0; 8]; 12]; // Placeholder
+        let (layer_importance, head_importance) = self.attention_derived_importance();
 
         self.feature_importance = Some(FeatureImportance {
             token_importance,
@@ -488,13 +612,23 @@ impl InterpretabilityAnalyzer {
             return Ok(());
         }
 
+        if method == AttributionMethod::IntegratedGradients {
+            return Err(TrustformersError::invalid_input(
+                "Integrated gradients cannot be computed from a single gradient tensor; \
+                 use `analyze_integrated_gradients(inputs, baseline, grad_fn, steps)` \
+                 which evaluates the gradient along the baseline->input path"
+                    .to_string(),
+            ));
+        }
+
         let input_gradients = self.extract_input_gradients(gradients)?;
-        let integrated_gradients = self.calculate_integrated_gradients(inputs, gradients)?;
+        let gradient_x_input = self.calculate_gradient_x_input(inputs, gradients)?;
         let saliency_scores = self.calculate_saliency_scores(&input_gradients);
 
         self.gradient_attribution = Some(GradientAttribution {
             input_gradients,
-            integrated_gradients,
+            gradient_x_input,
+            integrated_gradients: None,
             saliency_scores,
             attribution_method: method,
         });
@@ -512,23 +646,126 @@ impl InterpretabilityAnalyzer {
         }
     }
 
-    /// Calculate integrated gradients
-    fn calculate_integrated_gradients(
-        &self,
-        inputs: &Tensor,
-        gradients: &Tensor,
-    ) -> Result<Vec<f32>> {
-        // Simplified integrated gradients - in practice would need multiple evaluations
+    /// Element-wise `input * gradient` attribution (a.k.a. "gradient x input").
+    ///
+    /// This is a single-point attribution, not a path integral. See
+    /// [`Self::compute_integrated_gradients`] for the real Riemann-sum variant.
+    fn calculate_gradient_x_input(&self, inputs: &Tensor, gradients: &Tensor) -> Result<Vec<f32>> {
         match (inputs, gradients) {
             (Tensor::F32(inp), Tensor::F32(grad)) => {
-                let integrated: Vec<f32> =
+                if inp.len() != grad.len() {
+                    return Err(TrustformersError::dimension_mismatch(
+                        format!("{} input elements", inp.len()),
+                        format!("{} gradient elements", grad.len()),
+                    ));
+                }
+                let attributed: Vec<f32> =
                     inp.iter().zip(grad.iter()).map(|(input, gradient)| input * gradient).collect();
-                Ok(integrated)
+                Ok(attributed)
             },
             _ => Err(TrustformersError::invalid_operation(
-                "Tensor type mismatch in integrated gradients".into(),
+                "Tensor type mismatch in gradient x input attribution".into(),
             )),
         }
+    }
+
+    /// Compute integrated gradients along the straight-line path from
+    /// `baseline` to `inputs` (Sundararajan et al., 2017).
+    ///
+    /// `IG_i = (x_i - x'_i) * (1/m) * sum_{k=1..m} d f / d x_i evaluated at
+    /// `x' + (k/m) * (x - x')`. `grad_fn` must return the gradient of the model
+    /// output with respect to the tensor it is given; it is called `steps`
+    /// times, so this is genuinely a multi-evaluation path integral.
+    pub fn compute_integrated_gradients(
+        &self,
+        inputs: &Tensor,
+        baseline: &Tensor,
+        grad_fn: &dyn Fn(&Tensor) -> Result<Tensor>,
+        steps: usize,
+    ) -> Result<Vec<f32>> {
+        if steps == 0 {
+            return Err(TrustformersError::invalid_input(
+                "integrated gradients requires at least one Riemann step".to_string(),
+            ));
+        }
+
+        let (input_arr, baseline_arr) = match (inputs, baseline) {
+            (Tensor::F32(a), Tensor::F32(b)) => (a, b),
+            _ => {
+                return Err(TrustformersError::invalid_operation(
+                    "integrated gradients requires F32 tensors".into(),
+                ))
+            },
+        };
+
+        if input_arr.shape() != baseline_arr.shape() {
+            return Err(TrustformersError::dimension_mismatch(
+                format!("{:?}", baseline_arr.shape()),
+                format!("{:?}", input_arr.shape()),
+            ));
+        }
+
+        let mut accumulated = vec![0.0f32; input_arr.len()];
+
+        for step in 1..=steps {
+            let alpha = step as f32 / steps as f32;
+            let mut interpolated = baseline_arr.clone();
+            for (dst, (base, inp)) in
+                interpolated.iter_mut().zip(baseline_arr.iter().zip(input_arr.iter()))
+            {
+                *dst = base + alpha * (inp - base);
+            }
+
+            let gradient = grad_fn(&Tensor::F32(interpolated))?;
+            let gradient_values = self.extract_input_gradients(&gradient)?;
+            if gradient_values.len() != accumulated.len() {
+                return Err(TrustformersError::dimension_mismatch(
+                    format!("{} input elements", accumulated.len()),
+                    format!("{} gradient elements", gradient_values.len()),
+                ));
+            }
+            for (acc, g) in accumulated.iter_mut().zip(gradient_values.iter()) {
+                *acc += g;
+            }
+        }
+
+        let scale = 1.0 / steps as f32;
+        let integrated: Vec<f32> = accumulated
+            .iter()
+            .zip(baseline_arr.iter().zip(input_arr.iter()))
+            .map(|(acc, (base, inp))| (inp - base) * acc * scale)
+            .collect();
+
+        Ok(integrated)
+    }
+
+    /// Run integrated-gradients attribution and store the result.
+    pub fn analyze_integrated_gradients(
+        &mut self,
+        inputs: &Tensor,
+        baseline: &Tensor,
+        grad_fn: &dyn Fn(&Tensor) -> Result<Tensor>,
+        steps: usize,
+    ) -> Result<()> {
+        if !self.config.enable_gradient_analysis {
+            return Ok(());
+        }
+
+        let integrated = self.compute_integrated_gradients(inputs, baseline, grad_fn, steps)?;
+        let end_point_gradients = self.extract_input_gradients(&grad_fn(inputs)?)?;
+        let gradient_x_input =
+            self.calculate_gradient_x_input(inputs, &grad_fn(inputs)?).unwrap_or_default();
+        let saliency_scores = self.calculate_saliency_scores(&end_point_gradients);
+
+        self.gradient_attribution = Some(GradientAttribution {
+            input_gradients: end_point_gradients,
+            gradient_x_input,
+            integrated_gradients: Some(integrated),
+            saliency_scores,
+            attribution_method: AttributionMethod::IntegratedGradients,
+        });
+
+        Ok(())
     }
 
     /// Calculate saliency scores from gradients
@@ -575,31 +812,51 @@ impl InterpretabilityAnalyzer {
         Ok(())
     }
 
+    /// Per-neuron activation columns.
+    ///
+    /// The last tensor axis is the neuron axis; every preceding axis (batch,
+    /// sequence, ...) is flattened into the sample axis. Returns
+    /// `columns[neuron][sample]`.
+    fn neuron_columns(arr: &scirs2_core::ndarray::ArrayD<f32>) -> Vec<Vec<f32>> {
+        let shape = arr.shape();
+        if shape.is_empty() {
+            return Vec::new();
+        }
+        let num_neurons = shape[shape.len() - 1];
+        if num_neurons == 0 {
+            return Vec::new();
+        }
+        let num_samples = arr.len() / num_neurons;
+
+        let mut columns = vec![Vec::with_capacity(num_samples); num_neurons];
+        // Standard (row-major) iteration order visits the neuron axis fastest.
+        for (flat_index, value) in arr.iter().enumerate() {
+            columns[flat_index % num_neurons].push(*value);
+        }
+        columns
+    }
+
     /// Extract activation patterns from tensor
+    ///
+    /// Returns the mean activation of each neuron over all samples.
     fn extract_activation_patterns(&self, tensor: &Tensor) -> Result<Vec<f32>> {
         match tensor {
             Tensor::F32(arr) => {
-                // Calculate mean activation per neuron
                 let shape = arr.shape();
                 if shape.len() < 2 {
                     return Ok(vec![0.0]);
                 }
 
-                let num_neurons = shape[shape.len() - 1];
-                let mut patterns = Vec::with_capacity(num_neurons);
-
-                for neuron_idx in 0..num_neurons {
-                    let mut sum = 0.0;
-                    let mut count = 0;
-
-                    // Sum activations across batch and sequence dimensions
-                    for elem in arr.iter() {
-                        sum += elem;
-                        count += 1;
-                    }
-
-                    patterns.push(if count > 0 { sum / count as f32 } else { 0.0 });
-                }
+                let patterns = Self::neuron_columns(arr)
+                    .into_iter()
+                    .map(|column| {
+                        if column.is_empty() {
+                            0.0
+                        } else {
+                            column.iter().sum::<f32>() / column.len() as f32
+                        }
+                    })
+                    .collect();
 
                 Ok(patterns)
             },
@@ -668,33 +925,21 @@ impl InterpretabilityAnalyzer {
         }
     }
 
-    /// Count dead neurons (always zero activation)
+    /// Count dead neurons (never activate across any sample).
+    ///
+    /// A neuron is the last tensor axis; a neuron is dead when *every* value in
+    /// its column is within 1e-6 of zero.
     fn count_dead_neurons(&self, tensor: &Tensor) -> Result<usize> {
         match tensor {
             Tensor::F32(arr) => {
-                let shape = arr.shape();
-                if shape.is_empty() {
+                if arr.shape().is_empty() {
                     return Ok(0);
                 }
 
-                let num_neurons = shape[shape.len() - 1];
-                let mut dead_count = 0;
-
-                for neuron_idx in 0..num_neurons {
-                    let mut is_dead = true;
-
-                    // Check if neuron ever activates
-                    for val in arr.iter() {
-                        if val.abs() > 1e-6 {
-                            is_dead = false;
-                            break;
-                        }
-                    }
-
-                    if is_dead {
-                        dead_count += 1;
-                    }
-                }
+                let dead_count = Self::neuron_columns(arr)
+                    .into_iter()
+                    .filter(|column| column.iter().all(|value| value.abs() <= 1e-6))
+                    .count();
 
                 Ok(dead_count)
             },
@@ -710,43 +955,113 @@ impl InterpretabilityAnalyzer {
         layer_name: &str,
         tensor: &Tensor,
     ) -> Result<Vec<ActivationCluster>> {
-        // Simplified k-means clustering
-        let k = 3; // Number of clusters
-        let mut clusters = Vec::with_capacity(k);
+        // Lloyd's k-means over the per-neuron activation profiles.
+        const K: usize = 3;
+        const MAX_ITERATIONS: usize = 50;
 
         match tensor {
             Tensor::F32(arr) => {
-                let shape = arr.shape();
-                if shape.is_empty() {
-                    return Ok(clusters);
+                if arr.shape().is_empty() {
+                    return Ok(Vec::new());
                 }
 
-                let num_neurons = shape[shape.len() - 1];
+                let columns = Self::neuron_columns(arr);
+                if columns.is_empty() || columns[0].is_empty() {
+                    return Ok(Vec::new());
+                }
+                let dimension = columns[0].len();
+                let k = K.min(columns.len());
 
-                // For simplicity, create clusters based on activation magnitude
-                for cluster_id in 0..k {
-                    let mut neuron_indices = Vec::new();
-                    let threshold_min = cluster_id as f32 / k as f32;
-                    let threshold_max = (cluster_id + 1) as f32 / k as f32;
+                // Deterministic k-means++ style seeding: first centroid is
+                // neuron 0, each subsequent centroid is the neuron farthest
+                // from every centroid chosen so far.
+                let mut centroids: Vec<Vec<f32>> = vec![columns[0].clone()];
+                while centroids.len() < k {
+                    let mut best_index = 0usize;
+                    let mut best_distance = -1.0f32;
+                    for (index, column) in columns.iter().enumerate() {
+                        let distance = centroids
+                            .iter()
+                            .map(|centroid| squared_distance(column, centroid))
+                            .fold(f32::INFINITY, f32::min);
+                        if distance > best_distance {
+                            best_distance = distance;
+                            best_index = index;
+                        }
+                    }
+                    centroids.push(columns[best_index].clone());
+                }
 
-                    for neuron_idx in 0..num_neurons {
-                        let activation_sum: f32 = arr.iter().sum();
-                        let normalized = activation_sum / arr.len() as f32;
-
-                        if normalized >= threshold_min && normalized < threshold_max {
-                            neuron_indices.push(neuron_idx);
+                let mut assignments = vec![0usize; columns.len()];
+                for _ in 0..MAX_ITERATIONS {
+                    let mut changed = false;
+                    for (index, column) in columns.iter().enumerate() {
+                        let mut best_cluster = 0usize;
+                        let mut best_distance = f32::INFINITY;
+                        for (cluster_id, centroid) in centroids.iter().enumerate() {
+                            let distance = squared_distance(column, centroid);
+                            if distance < best_distance {
+                                best_distance = distance;
+                                best_cluster = cluster_id;
+                            }
+                        }
+                        if assignments[index] != best_cluster {
+                            assignments[index] = best_cluster;
+                            changed = true;
                         }
                     }
 
-                    if !neuron_indices.is_empty() {
-                        clusters.push(ActivationCluster {
-                            layer_name: layer_name.to_string(),
-                            cluster_id,
-                            neuron_indices,
-                            centroid: vec![0.5; 10], // Placeholder centroid
-                            variance: 0.1,
-                        });
+                    // Recompute centroids from the current assignment.
+                    let mut sums = vec![vec![0.0f32; dimension]; k];
+                    let mut counts = vec![0usize; k];
+                    for (index, column) in columns.iter().enumerate() {
+                        let cluster_id = assignments[index];
+                        counts[cluster_id] += 1;
+                        for (accumulator, value) in sums[cluster_id].iter_mut().zip(column.iter()) {
+                            *accumulator += value;
+                        }
                     }
+                    for (cluster_id, centroid) in centroids.iter_mut().enumerate() {
+                        if counts[cluster_id] > 0 {
+                            let inverse = 1.0 / counts[cluster_id] as f32;
+                            for (target, sum) in centroid.iter_mut().zip(sums[cluster_id].iter()) {
+                                *target = sum * inverse;
+                            }
+                        }
+                    }
+
+                    if !changed {
+                        break;
+                    }
+                }
+
+                let mut clusters = Vec::with_capacity(k);
+                for (cluster_id, centroid) in centroids.into_iter().enumerate() {
+                    let neuron_indices: Vec<usize> = assignments
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, assigned)| **assigned == cluster_id)
+                        .map(|(index, _)| index)
+                        .collect();
+
+                    if neuron_indices.is_empty() {
+                        continue;
+                    }
+
+                    // Mean squared distance of the members to their centroid.
+                    let variance = neuron_indices
+                        .iter()
+                        .map(|index| squared_distance(&columns[*index], &centroid))
+                        .sum::<f32>()
+                        / neuron_indices.len() as f32;
+
+                    clusters.push(ActivationCluster {
+                        layer_name: layer_name.to_string(),
+                        cluster_id,
+                        neuron_indices,
+                        centroid,
+                        variance,
+                    });
                 }
 
                 Ok(clusters)
@@ -826,6 +1141,11 @@ impl InterpretabilityAnalyzer {
     pub fn get_activation_analysis(&self) -> Option<&ActivationAnalysis> {
         self.activation_analysis.as_ref()
     }
+}
+
+/// Squared Euclidean distance between two equal-length activation profiles.
+fn squared_distance(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum()
 }
 
 /// Complete interpretability report
@@ -960,6 +1280,196 @@ mod tests {
         assert!(dead_count > 0);
     }
 
+    /// Regression test: `count_dead_neurons` used to scan the *whole* tensor for
+    /// every neuron index, so it could only ever return 0 or `num_neurons`.
+    /// Neurons 1 and 2 below are dead, neurons 0 and 3 are alive.
+    #[test]
+    fn test_dead_neuron_count_is_per_neuron_not_all_or_nothing() {
+        let analyzer = InterpretabilityAnalyzer::new(InterpretabilityConfig::default());
+
+        // shape [3, 4]; last axis is the neuron axis.
+        //   neuron 0 -> [1.0, 5.0, 9.0]  (alive)
+        //   neuron 1 -> [0.0, 0.0, 0.0]  (dead)
+        //   neuron 2 -> [0.0, 0.0, 0.0]  (dead)
+        //   neuron 3 -> [4.0, 8.0, 12.0] (alive)
+        #[rustfmt::skip]
+        let data = vec![
+            1.0, 0.0, 0.0, 4.0,
+            5.0, 0.0, 0.0, 8.0,
+            9.0, 0.0, 0.0, 12.0,
+        ];
+        let tensor = Tensor::from_vec(data, &[3, 4]).expect("Tensor from_vec failed");
+
+        let dead_count = analyzer.count_dead_neurons(&tensor).expect("dead neuron count failed");
+        assert_eq!(
+            dead_count, 2,
+            "expected exactly the two all-zero neuron columns to be dead"
+        );
+
+        // The old implementation also gave every neuron the same activation
+        // pattern; the per-neuron means must now differ.
+        let patterns = analyzer
+            .extract_activation_patterns(&tensor)
+            .expect("activation patterns failed");
+        assert_eq!(patterns.len(), 4);
+        assert!((patterns[0] - 5.0).abs() < 1e-6, "got {:?}", patterns);
+        assert!((patterns[1] - 0.0).abs() < 1e-6, "got {:?}", patterns);
+        assert!((patterns[3] - 8.0).abs() < 1e-6, "got {:?}", patterns);
+    }
+
+    /// Regression test: `cluster_activations` used to give every neuron the same
+    /// score (`arr.iter().sum()`) and a hardcoded `centroid: vec![0.5; 10]`.
+    #[test]
+    fn test_activation_clustering_uses_real_centroids() {
+        let analyzer = InterpretabilityAnalyzer::new(InterpretabilityConfig::default());
+
+        // Two clearly separated neuron groups: low (~0.1) and high (~10.0).
+        #[rustfmt::skip]
+        let data = vec![
+            0.1, 0.1, 10.0, 10.0,
+            0.1, 0.1, 10.0, 10.0,
+        ];
+        let tensor = Tensor::from_vec(data, &[2, 4]).expect("Tensor from_vec failed");
+
+        let clusters = analyzer.cluster_activations("layer0", &tensor).expect("clustering failed");
+        assert!(!clusters.is_empty());
+
+        for cluster in &clusters {
+            // Centroid must have the sample dimension (2), not the old fixed 10.
+            assert_eq!(
+                cluster.centroid.len(),
+                2,
+                "centroid must be a real mean vector"
+            );
+            // Every centroid must sit on one of the two real groups.
+            let value = cluster.centroid[0];
+            assert!(
+                (value - 0.1).abs() < 1e-4 || (value - 10.0).abs() < 1e-4,
+                "centroid {} is neither of the two real activation groups",
+                value
+            );
+            assert!(cluster.variance >= 0.0);
+            assert!(
+                (cluster.variance - 0.1).abs() > 1e-9 || cluster.neuron_indices.len() > 1,
+                "variance must be measured, not the old hardcoded 0.1"
+            );
+        }
+
+        // The two groups must not be collapsed into one cluster.
+        let populated = clusters.iter().filter(|c| !c.neuron_indices.is_empty()).count();
+        assert!(
+            populated >= 2,
+            "expected the low and high groups to separate"
+        );
+    }
+
+    /// Regression test: `analyze_gradient_attribution` used to label
+    /// `input * gradient` as integrated gradients. Real integrated gradients
+    /// need multiple evaluations along a baseline->input path.
+    #[test]
+    fn test_integrated_gradients_are_a_real_path_integral() {
+        let analyzer = InterpretabilityAnalyzer::new(InterpretabilityConfig::default());
+
+        // f(x) = sum(x^2) => df/dx_i = 2 x_i.
+        let grad_fn = |t: &Tensor| -> Result<Tensor> {
+            match t {
+                Tensor::F32(arr) => {
+                    let doubled = arr.mapv(|v| 2.0 * v);
+                    Ok(Tensor::F32(doubled))
+                },
+                _ => Err(TrustformersError::invalid_operation("expected F32".into())),
+            }
+        };
+
+        let inputs = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).expect("from_vec failed");
+        let baseline = Tensor::zeros(&[3]).expect("zeros failed");
+
+        let integrated = analyzer
+            .compute_integrated_gradients(&inputs, &baseline, &grad_fn, 512)
+            .expect("integrated gradients failed");
+
+        // Completeness axiom: sum(IG) == f(x) - f(baseline) == sum(x^2).
+        // For f(x)=x^2 the exact per-feature attribution is x_i^2.
+        for (value, expected) in integrated.iter().zip([1.0f32, 4.0, 9.0]) {
+            assert!(
+                (value - expected).abs() < 0.05,
+                "integrated gradients {:?} do not satisfy the completeness axiom",
+                integrated
+            );
+        }
+
+        // gradient x input for the same function would be 2*x*x = 2 x^2, i.e.
+        // twice the correct attribution: the two must not be interchangeable.
+        let gradients = grad_fn(&inputs).expect("grad_fn failed");
+        let gxi = analyzer
+            .calculate_gradient_x_input(&inputs, &gradients)
+            .expect("gradient x input failed");
+        assert!((gxi[2] - 18.0).abs() < 1e-4, "got {:?}", gxi);
+    }
+
+    /// Regression test: requesting `IntegratedGradients` from the single-tensor
+    /// entry point must fail loudly instead of silently returning gradient x input.
+    #[test]
+    fn test_single_tensor_attribution_rejects_integrated_gradients() {
+        let mut analyzer = InterpretabilityAnalyzer::new(InterpretabilityConfig::default());
+        let inputs = Tensor::from_vec(vec![1.0, 2.0], &[2]).expect("from_vec failed");
+        let gradients = Tensor::from_vec(vec![0.5, 0.5], &[2]).expect("from_vec failed");
+
+        let result = analyzer.analyze_gradient_attribution(
+            &inputs,
+            &gradients,
+            AttributionMethod::IntegratedGradients,
+        );
+        assert!(result.is_err(), "must not fabricate integrated gradients");
+    }
+
+    /// Regression test: `layer_importance` / `head_importance` used to be
+    /// `vec![1.0; 12]` / `vec![vec![1.0; 8]; 12]` regardless of the model.
+    #[test]
+    fn test_feature_importance_reports_no_layer_scores_without_attention_data() {
+        let mut analyzer = InterpretabilityAnalyzer::new(InterpretabilityConfig::default());
+
+        let inputs = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[1, 4]).expect("from_vec failed");
+        let model_fn = |t: &Tensor| -> Result<Tensor> { Ok(t.clone()) };
+        let outputs = model_fn(&inputs).expect("model failed");
+
+        analyzer
+            .analyze_feature_importance(&inputs, &outputs, &model_fn)
+            .expect("feature importance failed");
+
+        let importance = analyzer.feature_importance.as_ref().expect("importance recorded");
+        assert!(
+            importance.layer_importance.is_empty(),
+            "no attention patterns were recorded, so no layer scores may be invented"
+        );
+        assert!(importance.head_importance.is_empty());
+        assert_eq!(importance.token_importance.len(), 4);
+    }
+
+    /// Regression test: the local-window score used to saturate at 1.0 for any
+    /// short sequence, so a clearly diagonal matrix was classified `Local`.
+    #[test]
+    fn test_pattern_scores_are_normalised_against_uniform_attention() {
+        let analyzer = InterpretabilityAnalyzer::new(InterpretabilityConfig::default());
+
+        // A uniform matrix has no pattern at all: every score must be ~0.
+        let uniform = vec![vec![0.25f32; 4]; 4];
+        assert!(analyzer.calculate_local_pattern_score(&uniform) < 1e-5);
+        assert!(analyzer.calculate_diagonal_pattern_score(&uniform) < 1e-5);
+        assert!(analyzer.calculate_vertical_pattern_score(&uniform) < 1e-5);
+        assert_eq!(
+            analyzer.classify_attention_pattern(&uniform),
+            AttentionPatternType::Global
+        );
+
+        // A vertical (single-column) pattern must beat the local window score.
+        let vertical: Vec<Vec<f32>> = (0..4).map(|_| vec![1.0, 0.0, 0.0, 0.0]).collect();
+        assert_eq!(
+            analyzer.classify_attention_pattern(&vertical),
+            AttentionPatternType::Vertical
+        );
+    }
+
     #[test]
     fn test_gradient_attribution_analysis() {
         let config = InterpretabilityConfig::default();
@@ -1020,10 +1530,7 @@ mod tests {
             enable_feature_importance: false,
             save_visualizations: true,
             output_dir: Some(
-                std::env::temp_dir()
-                    .join("interpretability")
-                    .to_string_lossy()
-                    .to_string(),
+                std::env::temp_dir().join("interpretability").to_string_lossy().to_string(),
             ),
         };
 

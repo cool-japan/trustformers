@@ -42,6 +42,7 @@ use crate::resource_management::types::{
 };
 
 // GpuManagerError and GpuResult are imported from super::types::*
+use super::GpuTelemetrySample;
 
 /// Comprehensive GPU resource management system
 ///
@@ -679,10 +680,26 @@ impl GpuResourceManager {
                         };
 
                         for device in devices_to_monitor {
-                            // Simulate collecting real-time metrics
-                            let metrics = Self::collect_device_metrics(&device).await;
-                            if let Err(e) = monitoring_system.update_metrics(device.device_id, metrics).await {
-                                error!("Failed to update metrics for device {}: {}", device.device_id, e);
+                            // Read live telemetry from the driver. Devices the
+                            // driver does not report are skipped, never faked.
+                            match Self::collect_device_metrics(&device).await {
+                                Ok(Some(metrics)) => {
+                                    if let Err(e) = monitoring_system.update_metrics(device.device_id, metrics).await {
+                                        error!("Failed to update metrics for device {}: {}", device.device_id, e);
+                                    }
+                                },
+                                Ok(None) => {
+                                    debug!(
+                                        "No telemetry available for GPU device {}; skipping this sample",
+                                        device.device_id
+                                    );
+                                },
+                                Err(e) => {
+                                    warn!(
+                                        "Telemetry query failed for GPU device {}: {}",
+                                        device.device_id, e
+                                    );
+                                },
                             }
                         }
                     }
@@ -698,34 +715,115 @@ impl GpuResourceManager {
         Ok(())
     }
 
-    /// Collect real-time metrics for a device
-    async fn collect_device_metrics(device: &GpuDeviceInfo) -> GpuRealTimeMetrics {
-        // In a real implementation, this would use:
-        // - NVML for NVIDIA GPUs
-        // - ROCm for AMD GPUs
-        // - System monitoring APIs
+    /// Read live telemetry for one device from the NVIDIA driver.
+    ///
+    /// Queries `nvidia-smi --query-gpu=utilization.gpu,temperature.gpu,power.draw,
+    /// clocks.sm,clocks.mem,memory.used,fan.speed`. Returns `Ok(None)` when the
+    /// tool is unavailable or does not report the requested device: no value in
+    /// the returned metrics is ever synthesized.
+    async fn collect_device_metrics(
+        device: &GpuDeviceInfo,
+    ) -> GpuResult<Option<GpuRealTimeMetrics>> {
+        let Some(sample) = Self::query_nvidia_telemetry(device.device_id).await? else {
+            return Ok(None);
+        };
 
-        // For mock implementation, simulate realistic metrics
-        let utilization =
-            (device.device_id as f32 * 7.0 + Utc::now().timestamp() as f32 * 0.1) % 100.0;
-        let temperature = 45.0 + (utilization * 0.4) + (device.device_id as f32 * 2.0);
-        let memory_usage = (device.total_memory_mb as f32 * utilization / 100.0) as u64;
-        let power_consumption = 150.0 + (utilization * 2.0);
-
-        GpuRealTimeMetrics {
+        Ok(Some(GpuRealTimeMetrics {
             device_id: device.device_id,
             timestamp: Utc::now(),
-            memory_usage_mb: memory_usage,
-            utilization_percent: utilization,
-            temperature_celsius: temperature,
-            power_consumption_watts: power_consumption,
+            memory_usage_mb: sample.memory_used_mb,
+            utilization_percent: sample.utilization_percent,
+            temperature_celsius: sample.temperature_celsius,
+            power_consumption_watts: sample.power_watts,
             clock_speeds: ResourceGpuClockSpeeds {
-                core_clock_mhz: 1800 + (utilization as u32 * 5),
-                memory_clock_mhz: 7000,
-                shader_clock_mhz: Some(1900 + (utilization as u32 * 6)),
+                core_clock_mhz: sample.sm_clock_mhz,
+                memory_clock_mhz: sample.memory_clock_mhz,
+                shader_clock_mhz: None,
             },
-            fan_speeds: vec![40.0 + (temperature - 45.0) * 1.5],
+            fan_speeds: sample.fan_percent.map(|f| vec![f]).unwrap_or_default(),
+        }))
+    }
+
+    /// Live telemetry for a single GPU, exactly as reported by the driver.
+    pub async fn device_telemetry(device_id: usize) -> GpuResult<Option<GpuTelemetrySample>> {
+        Self::query_nvidia_telemetry(device_id).await
+    }
+
+    async fn query_nvidia_telemetry(device_id: usize) -> GpuResult<Option<GpuTelemetrySample>> {
+        let spawn_result = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("nvidia-smi")
+                .args([
+                    &format!("--id={}", device_id),
+                    "--query-gpu=utilization.gpu,temperature.gpu,power.draw,clocks.sm,clocks.mem,memory.used,fan.speed",
+                    "--format=csv,noheader,nounits",
+                ])
+                .output()
+        })
+        .await
+        .map_err(|e| GpuManagerError::MonitoringError {
+            source: anyhow::anyhow!("spawn_blocking for nvidia-smi failed: {}", e),
+        })?;
+
+        let output = match spawn_result {
+            Ok(output) => output,
+            Err(e) => {
+                debug!("nvidia-smi unavailable for telemetry ({})", e);
+                return Ok(None);
+            },
+        };
+
+        if !output.status.success() {
+            debug!(
+                "nvidia-smi telemetry query for device {} exited with {:?}",
+                device_id, output.status
+            );
+            return Ok(None);
         }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let Some(line) = stdout.lines().map(str::trim).find(|l| !l.is_empty()) else {
+            return Ok(None);
+        };
+
+        let fields: Vec<&str> = line.split(',').map(str::trim).collect();
+        if fields.len() < 7 {
+            warn!(
+                "nvidia-smi telemetry line has {} fields, expected 7: {:?}",
+                fields.len(),
+                line
+            );
+            return Ok(None);
+        }
+
+        // "[N/A]" and "[Not Supported]" are the driver's way of saying a sensor
+        // is absent; propagate that as `None` rather than as a number.
+        fn parse_f32(value: &str) -> Option<f32> {
+            value.parse::<f32>().ok()
+        }
+        fn parse_u32(value: &str) -> Option<u32> {
+            value.parse::<u32>().ok()
+        }
+
+        Ok(Some(GpuTelemetrySample {
+            device_id,
+            utilization_percent: parse_f32(fields[0]).unwrap_or(0.0),
+            temperature_celsius: parse_f32(fields[1]).unwrap_or(f32::NAN),
+            power_watts: parse_f32(fields[2]).unwrap_or(f32::NAN),
+            sm_clock_mhz: parse_u32(fields[3]).unwrap_or(0),
+            memory_clock_mhz: parse_u32(fields[4]).unwrap_or(0),
+            memory_used_mb: fields[5].parse::<u64>().unwrap_or(0),
+            fan_percent: parse_f32(fields[6]),
+        }))
+    }
+
+    /// Enumerate the real GPU devices on this host.
+    ///
+    /// An empty list means the host genuinely has no discoverable NVIDIA GPU.
+    pub async fn enumerate_devices(config: &GpuPoolConfig) -> GpuResult<Vec<GpuDeviceInfo>> {
+        let devices = Self::discover_gpu_devices(config).await?;
+        let mut devices: Vec<GpuDeviceInfo> = devices.into_values().collect();
+        devices.sort_by_key(|d| d.device_id);
+        Ok(devices)
     }
 
     /// Allocate GPU devices based on performance requirements

@@ -1,23 +1,45 @@
-#![allow(unused_variables)] // NUMA optimization with platform-specific code
+//! NUMA (Non-Uniform Memory Access) optimization for TrustformeRS.
+//!
+//! Topology is read from the kernel on Linux (`/sys/devices/system/node`).
+//! On platforms without a NUMA interface this module reports
+//! [`ErrorKind::UnsupportedOperation`](crate::errors::ErrorKind::UnsupportedOperation)
+//! rather than synthesising a topology: macOS in particular has no NUMA API and
+//! a fabricated multi-node topology would produce misleading placement advice.
+//!
+//! Allocations made through [`NumaAllocator`] are real heap allocations with
+//! real addresses. Binding a page to a specific node needs `mbind`/libnuma,
+//! which this crate does not link, so [`NumaAllocation::bound_to_node`] records
+//! whether the requested node was actually enforced (currently never on any
+//! platform) instead of implying that it was.
 
 use crate::errors::{Result, TrustformersError};
 use serde::{Deserialize, Serialize};
+use std::alloc::Layout;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 
-/// NUMA (Non-Uniform Memory Access) optimization system for TrustformeRS
-/// Provides intelligent memory allocation and thread scheduling for optimal performance on multi-socket systems
-///
 /// NUMA node information
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NumaNode {
+    /// Kernel node index.
     pub node_id: u32,
+    /// CPU cores belonging to this node.
     pub cpu_cores: Vec<u32>,
+    /// Total memory attached to this node, in GiB.
     pub memory_size_gb: f64,
+    /// Free memory on this node, in GiB.
     pub available_memory_gb: f64,
-    pub memory_bandwidth_gbps: f64,
-    pub interconnect_latency_ns: HashMap<u32, u32>, // node_id -> latency
+    /// Memory bandwidth in GB/s, when the platform reports it.
+    ///
+    /// `None` on Linux: `/sys` exposes no bandwidth figure, and inventing one
+    /// would silently drive node selection.
+    pub memory_bandwidth_gbps: Option<f64>,
+    /// Relative access cost to each other node, from the ACPI SLIT table
+    /// (`/sys/devices/system/node/nodeN/distance`). These are *relative
+    /// distances* (10 = local), not nanoseconds.
+    pub relative_distance: HashMap<u32, u32>,
+    /// Whether the kernel currently reports the node as online.
     pub is_available: bool,
 }
 
@@ -68,14 +90,32 @@ impl Default for NumaPolicy {
     }
 }
 
-/// NUMA allocation tracking
+/// NUMA allocation tracking.
+///
+/// `address` is the address of a real heap allocation owned by the
+/// [`NumaAllocator`]; it stays valid until [`NumaAllocator::deallocate`] is
+/// called with the matching `allocation_id`.
 #[derive(Debug, Clone)]
 pub struct NumaAllocation {
+    /// Identifier used to free this allocation.
     pub allocation_id: String,
+    /// The node the allocation was *requested* on. See `bound_to_node`.
     pub node_id: u32,
+    /// Size of the allocation in bytes.
     pub size_bytes: usize,
+    /// Real address of the allocated block.
     pub address: usize,
+    /// Alignment the block was allocated with.
+    pub alignment: usize,
+    /// Whether the pages were actually bound to `node_id`.
+    ///
+    /// Binding requires `mbind(2)`/libnuma, which this crate does not link, so
+    /// this is currently always `false`: the allocation follows the kernel's
+    /// default (first-touch) policy.
+    pub bound_to_node: bool,
+    /// When the allocation was made.
     pub allocation_time: std::time::SystemTime,
+    /// Declared access pattern, used for placement scoring.
     pub access_pattern: AccessPattern,
 }
 
@@ -150,110 +190,120 @@ impl NumaAllocator {
         })
     }
 
-    /// Detect NUMA topology on the current system
-    fn detect_numa_topology() -> Result<NumaTopology> {
-        // In a real implementation, this would use system calls to detect actual NUMA topology
-        // For now, we'll create a mock topology for demonstration
-
-        let num_nodes = Self::get_numa_node_count()?;
-        let mut nodes = HashMap::new();
-        let mut node_distances = HashMap::new();
-
-        let cores_per_node = num_cpus::get() / num_nodes as usize;
-        let memory_per_node = Self::get_total_memory()? / num_nodes as f64;
-
-        for node_id in 0..num_nodes {
-            let cpu_cores: Vec<u32> = ((node_id * cores_per_node as u32)
-                ..((node_id + 1) * cores_per_node as u32))
-                .collect();
-
-            let mut interconnect_latency = HashMap::new();
-            for other_node in 0..num_nodes {
-                let latency = if node_id == other_node {
-                    10 // Local access latency (ns)
-                } else {
-                    50 + (node_id.abs_diff(other_node) * 10) // Remote access latency
-                };
-                interconnect_latency.insert(other_node, latency);
-            }
-
-            let node = NumaNode {
-                node_id,
-                cpu_cores,
-                memory_size_gb: memory_per_node,
-                available_memory_gb: memory_per_node * 0.8, // 80% available
-                memory_bandwidth_gbps: 100.0,               // GB/s
-                interconnect_latency_ns: interconnect_latency,
-                is_available: true,
-            };
-
-            nodes.insert(node_id, node);
-
-            // Calculate node distances
-            for other_node in 0..num_nodes {
-                let distance = if node_id == other_node {
-                    10 // Local distance
-                } else {
-                    20 + (node_id.abs_diff(other_node) * 10) // Remote distance
-                };
-                node_distances.insert((node_id, other_node), distance);
-            }
-        }
-
-        Ok(NumaTopology {
-            nodes,
-            total_nodes: num_nodes,
-            total_cores: num_cpus::get() as u32,
-            total_memory_gb: Self::get_total_memory()?,
-            node_distances,
-        })
-    }
-
-    fn get_numa_node_count() -> Result<u32> {
-        // Try to detect actual NUMA nodes, fallback to 1 if not available
+    /// Detect the real NUMA topology of the current system.
+    ///
+    /// Linux only: every field is read from `/sys/devices/system/node`. On any
+    /// other platform this returns an `UnsupportedOperation` error, because
+    /// there is no NUMA interface to read and a synthesised topology would
+    /// drive placement decisions from fiction.
+    pub fn detect_numa_topology() -> Result<NumaTopology> {
         #[cfg(target_os = "linux")]
         {
-            use std::fs;
-            match fs::read_dir("/sys/devices/system/node") {
-                Ok(entries) => {
-                    let count = entries
-                        .filter_map(|entry| entry.ok())
-                        .filter(|entry| entry.file_name().to_string_lossy().starts_with("node"))
-                        .count() as u32;
-                    Ok(if count > 0 { count } else { 1 })
-                },
-                Err(_) => Ok(1),
-            }
+            Self::detect_numa_topology_linux()
         }
 
         #[cfg(not(target_os = "linux"))]
         {
-            // For non-Linux systems, assume single NUMA node for now
-            // In a full implementation, this would use platform-specific APIs
-            Ok(std::cmp::max(1, (num_cpus::get() / 8) as u32))
+            Err(crate::errors::unsupported_operation(
+                "NUMA topology detection",
+                format!(
+                    "{} (only Linux exposes a NUMA topology interface; \
+                     no topology is reported on this platform)",
+                    std::env::consts::OS
+                ),
+            ))
         }
     }
 
-    fn get_total_memory() -> Result<f64> {
-        // Get total system memory in GB
-        #[cfg(target_os = "linux")]
-        {
-            use std::fs;
-            if let Ok(meminfo) = fs::read_to_string("/proc/meminfo") {
-                for line in meminfo.lines() {
-                    if line.starts_with("MemTotal:") {
-                        if let Some(kb_str) = line.split_whitespace().nth(1) {
-                            if let Ok(kb) = kb_str.parse::<u64>() {
-                                return Ok(kb as f64 / 1024.0 / 1024.0); // Convert KB to GB
-                            }
-                        }
-                    }
+    /// Read the topology from `/sys/devices/system/node`.
+    #[cfg(target_os = "linux")]
+    fn detect_numa_topology_linux() -> Result<NumaTopology> {
+        use std::fs;
+
+        let node_root = std::path::Path::new("/sys/devices/system/node");
+        let entries = fs::read_dir(node_root).map_err(|error| {
+            crate::errors::unsupported_operation(
+                "NUMA topology detection",
+                format!("cannot read {}: {}", node_root.display(), error),
+            )
+        })?;
+
+        let mut node_ids: Vec<u32> = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Some(index) = name.strip_prefix("node") {
+                if let Ok(node_id) = index.parse::<u32>() {
+                    node_ids.push(node_id);
                 }
             }
         }
+        node_ids.sort_unstable();
 
-        // Fallback estimation
-        Ok(8.0) // Default to 8GB
+        if node_ids.is_empty() {
+            return Err(crate::errors::unsupported_operation(
+                "NUMA topology detection",
+                format!("{} lists no NUMA nodes", node_root.display()),
+            ));
+        }
+
+        let mut nodes = HashMap::new();
+        let mut node_distances = HashMap::new();
+        let mut total_cores = 0u32;
+        let mut total_memory_gb = 0.0f64;
+
+        for &node_id in &node_ids {
+            let node_dir = node_root.join(format!("node{}", node_id));
+
+            let cpu_cores = fs::read_to_string(node_dir.join("cpulist"))
+                .ok()
+                .map(|list| parse_cpu_list(list.trim()))
+                .unwrap_or_default();
+            total_cores += cpu_cores.len() as u32;
+
+            let (memory_size_gb, available_memory_gb) =
+                fs::read_to_string(node_dir.join("meminfo"))
+                    .ok()
+                    .map(|meminfo| parse_node_meminfo(&meminfo))
+                    .unwrap_or((0.0, 0.0));
+            total_memory_gb += memory_size_gb;
+
+            let mut relative_distance = HashMap::new();
+            if let Ok(distances) = fs::read_to_string(node_dir.join("distance")) {
+                for (index, value) in distances.split_whitespace().enumerate() {
+                    if let (Some(&other), Ok(distance)) =
+                        (node_ids.get(index), value.parse::<u32>())
+                    {
+                        relative_distance.insert(other, distance);
+                        node_distances.insert((node_id, other), distance);
+                    }
+                }
+            }
+
+            let is_available = fs::read_to_string(node_root.join("online"))
+                .map(|online| parse_cpu_list(online.trim()).contains(&node_id))
+                .unwrap_or(true);
+
+            nodes.insert(
+                node_id,
+                NumaNode {
+                    node_id,
+                    cpu_cores,
+                    memory_size_gb,
+                    available_memory_gb,
+                    memory_bandwidth_gbps: None,
+                    relative_distance,
+                    is_available,
+                },
+            );
+        }
+
+        Ok(NumaTopology {
+            total_nodes: nodes.len() as u32,
+            nodes,
+            total_cores,
+            total_memory_gb,
+            node_distances,
+        })
     }
 
     /// Allocate memory with NUMA awareness
@@ -273,8 +323,9 @@ impl NumaAllocator {
 
         let node_id = self.select_optimal_node(&policy, size, &access_pattern)?;
 
-        // Simulate memory allocation (in a real implementation, this would use NUMA-specific allocation)
-        let address = self.allocate_on_node(node_id, size, alignment)?;
+        // Real heap allocation; `bound_to_node` records that node binding was
+        // not enforced (see the module docs).
+        let (address, alignment) = self.allocate_on_node(node_id, size, alignment)?;
 
         let allocation_id = self.generate_allocation_id();
         let allocation = NumaAllocation {
@@ -282,6 +333,8 @@ impl NumaAllocator {
             node_id,
             size_bytes: size,
             address,
+            alignment,
+            bound_to_node: false,
             allocation_time: std::time::SystemTime::now(),
             access_pattern,
         };
@@ -390,12 +443,14 @@ impl NumaAllocator {
         size: usize,
         access_pattern: &AccessPattern,
     ) -> Result<u32> {
+        // Nodes that cannot hold the request are not candidates at all.
+        let required_gb = size as f64 / 1024.0 / 1024.0 / 1024.0;
         let mut scores = HashMap::new();
         let monitor =
             self.performance_monitor.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         for (&node_id, node) in &topology.nodes {
-            if !node.is_available {
+            if !node.is_available || node.available_memory_gb < required_gb {
                 continue;
             }
 
@@ -405,11 +460,16 @@ impl NumaAllocator {
             let memory_score = node.available_memory_gb / node.memory_size_gb;
             score += memory_score * 0.3;
 
-            // Bandwidth utilization score (prefer less utilized nodes)
-            let bandwidth_util =
-                monitor.memory_bandwidth_usage.get(&node_id).copied().unwrap_or(0.0);
-            let bandwidth_score = 1.0 - (bandwidth_util / node.memory_bandwidth_gbps);
-            score += bandwidth_score * 0.2;
+            // Bandwidth utilization score (prefer less utilized nodes).
+            // Only contributes when the platform actually reports a bandwidth
+            // figure for the node; otherwise the term is skipped rather than
+            // scored against an invented denominator.
+            if let Some(bandwidth_gbps) = node.memory_bandwidth_gbps.filter(|value| *value > 0.0) {
+                let bandwidth_util =
+                    monitor.memory_bandwidth_usage.get(&node_id).copied().unwrap_or(0.0);
+                let bandwidth_score = 1.0 - (bandwidth_util / bandwidth_gbps);
+                score += bandwidth_score * 0.2;
+            }
 
             // Access pattern compatibility score
             let pattern_score = match access_pattern {
@@ -455,22 +515,58 @@ impl NumaAllocator {
             .ok_or_else(|| TrustformersError::other("No suitable NUMA node found".to_string()))
     }
 
-    fn allocate_on_node(&self, node_id: u32, size: usize, _alignment: usize) -> Result<usize> {
-        // In a real implementation, this would use NUMA-specific allocation APIs
-        // For now, we'll simulate allocation
+    /// Allocate a real block of memory for `node_id`.
+    ///
+    /// Returns `(address, alignment)`. The block is a genuine heap allocation:
+    /// the returned address is dereferenceable for `size` bytes until
+    /// [`Self::deallocate`] frees it. Node *binding* is not performed — see
+    /// [`NumaAllocation::bound_to_node`].
+    fn allocate_on_node(
+        &self,
+        node_id: u32,
+        size: usize,
+        alignment: usize,
+    ) -> Result<(usize, usize)> {
+        {
+            let topology = self.topology.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !topology.nodes.contains_key(&node_id) {
+                return Err(TrustformersError::other(format!(
+                    "Invalid NUMA node: {}",
+                    node_id
+                )));
+            }
+        }
 
-        let topology = self.topology.read().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !topology.nodes.contains_key(&node_id) {
-            return Err(TrustformersError::other(format!(
-                "Invalid NUMA node: {}",
-                node_id
+        if size == 0 {
+            return Err(TrustformersError::invalid_input(
+                "NUMA allocation size must be greater than zero".to_string(),
+            ));
+        }
+
+        // `Layout` requires a power-of-two alignment of at least 1.
+        let alignment = alignment.max(1).next_power_of_two();
+        let layout = Layout::from_size_align(size, alignment).map_err(|error| {
+            TrustformersError::invalid_input(format!(
+                "invalid NUMA allocation layout (size {}, alignment {}): {}",
+                size, alignment, error
+            ))
+        })?;
+
+        // SAFETY: `layout` has a non-zero size and a valid power-of-two
+        // alignment. The pointer is stored in `self.allocations` together with
+        // its layout and is freed exactly once in `deallocate`.
+        let pointer = unsafe { std::alloc::alloc(layout) };
+        if pointer.is_null() {
+            let mut monitor =
+                self.performance_monitor.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            monitor.allocation_stats.entry(node_id).or_default().allocation_failures += 1;
+            return Err(TrustformersError::resource_exhausted(format!(
+                "failed to allocate {} bytes for NUMA node {}",
+                size, node_id
             )));
         }
 
-        // Simulate memory allocation by returning a mock address
-        // In reality, this would call numa_alloc_onnode() or similar
-        let mock_address = 0x1000000 + (node_id as usize * 0x10000000) + size;
-        Ok(mock_address)
+        Ok((pointer as usize, alignment))
     }
 
     fn generate_allocation_id(&self) -> String {
@@ -495,39 +591,35 @@ impl NumaAllocator {
         }
     }
 
-    /// Set thread affinity to specific NUMA nodes
+    /// Pin the calling thread to the CPUs of the given NUMA nodes.
+    ///
+    /// Setting CPU affinity requires `sched_setaffinity` (Linux) or
+    /// `SetThreadAffinityMask` (Windows). `trustformers-core` links no libc
+    /// bindings, so this reports [`TrustformersError::not_implemented`] rather
+    /// than logging a message and returning `Ok(())` while the thread stays
+    /// unpinned.
     pub fn set_thread_affinity(&self, affinity: ThreadAffinity) -> Result<()> {
-        // In a real implementation, this would set CPU affinity using platform-specific APIs
-        // For Linux: sched_setaffinity()
-        // For Windows: SetThreadAffinityMask()
-
-        tracing::info!(
-            "Setting thread affinity for {:?} to nodes {:?}",
-            affinity.thread_id,
-            affinity.preferred_nodes
-        );
-
-        // Mock implementation - in reality would call OS-specific APIs
-        self.bind_thread_to_nodes(&affinity.preferred_nodes)?;
-
-        Ok(())
+        Err(TrustformersError::not_implemented(format!(
+            "thread affinity (requested nodes {:?}, cores {:?}) needs sched_setaffinity / \
+             SetThreadAffinityMask bindings, which are not linked into trustformers-core",
+            affinity.preferred_nodes, affinity.cpu_cores
+        )))
     }
 
-    fn bind_thread_to_nodes(&self, node_ids: &[u32]) -> Result<()> {
-        #[cfg(target_os = "linux")]
-        {
-            // On Linux, we would use libnuma or direct syscalls
-            // This is a simplified mock implementation
-            tracing::debug!("Binding thread to NUMA nodes: {:?}", node_ids);
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            // On Windows, we would use SetThreadAffinityMask
-            tracing::debug!("Binding thread to NUMA nodes: {:?}", node_ids);
-        }
-
-        Ok(())
+    /// CPU cores that belong to the given NUMA nodes, per the detected topology.
+    ///
+    /// This is the information a caller needs to pin threads itself; it does
+    /// not change any thread's affinity.
+    pub fn cores_for_nodes(&self, node_ids: &[u32]) -> Vec<u32> {
+        let topology = self.topology.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut cores: Vec<u32> = node_ids
+            .iter()
+            .filter_map(|node_id| topology.nodes.get(node_id))
+            .flat_map(|node| node.cpu_cores.iter().copied())
+            .collect();
+        cores.sort_unstable();
+        cores.dedup();
+        cores
     }
 
     /// Free NUMA-aware allocated memory
@@ -550,7 +642,23 @@ impl NumaAllocator {
             }
         }
 
-        // In a real implementation, this would call numa_free() or similar
+        // Really free the block that `allocate_on_node` allocated.
+        let layout = Layout::from_size_align(allocation.size_bytes, allocation.alignment).map_err(
+            |error| {
+                TrustformersError::invalid_state(format!(
+                    "tracked NUMA allocation {} has an invalid layout: {}",
+                    allocation_id, error
+                ))
+            },
+        )?;
+
+        // SAFETY: `allocation.address` came from `std::alloc::alloc` with
+        // exactly this layout, was removed from the tracking map above (so it
+        // cannot be freed twice), and no `NumaAllocation` clone can free it.
+        unsafe {
+            std::alloc::dealloc(allocation.address as *mut u8, layout);
+        }
+
         tracing::debug!(
             "Deallocated {} bytes from NUMA node {} (allocation: {})",
             allocation.size_bytes,
@@ -643,7 +751,6 @@ impl NumaAllocator {
     pub fn analyze_numa_traffic(&self) -> NumaTrafficAnalysis {
         let monitor =
             self.performance_monitor.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let topology = self.topology.read().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let mut analysis = NumaTrafficAnalysis {
             total_cross_node_traffic: 0,
@@ -722,6 +829,66 @@ pub enum HotspotSeverity {
     High,
 }
 
+/// Parse a Linux CPU/node list such as `0-3,8,10-11` into individual indices.
+///
+/// Only reachable from the Linux topology reader; the unit tests exercise it on
+/// every platform.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_cpu_list(list: &str) -> Vec<u32> {
+    let mut indices = Vec::new();
+    for part in list.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        match part.split_once('-') {
+            Some((start, end)) => {
+                if let (Ok(start), Ok(end)) =
+                    (start.trim().parse::<u32>(), end.trim().parse::<u32>())
+                {
+                    for index in start..=end {
+                        indices.push(index);
+                    }
+                }
+            },
+            None => {
+                if let Ok(index) = part.parse::<u32>() {
+                    indices.push(index);
+                }
+            },
+        }
+    }
+    indices
+}
+
+/// Parse `/sys/devices/system/node/nodeN/meminfo` into `(total_gb, free_gb)`.
+///
+/// Only reachable from the Linux topology reader; the unit tests exercise it on
+/// every platform.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_node_meminfo(meminfo: &str) -> (f64, f64) {
+    let mut total_gb = 0.0;
+    let mut free_gb = 0.0;
+    for line in meminfo.lines() {
+        // Format: "Node 0 MemTotal:       16384000 kB"
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let Some(position) = fields.iter().position(|field| field.ends_with(':')) else {
+            continue;
+        };
+        let Some(value) = fields.get(position + 1).and_then(|value| value.parse::<f64>().ok())
+        else {
+            continue;
+        };
+        let gib = value / 1024.0 / 1024.0;
+        match fields[position] {
+            "MemTotal:" => total_gb = gib,
+            "MemFree:" => free_gb = gib,
+            _ => {},
+        }
+    }
+    (total_gb, free_gb)
+}
+
 /// Global NUMA allocator instance
 static NUMA_ALLOCATOR: std::sync::OnceLock<Arc<NumaAllocator>> = std::sync::OnceLock::new();
 
@@ -761,6 +928,26 @@ pub fn numa_free(allocation_id: &str) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// Regression test: on platforms with no NUMA interface the allocator used
+    /// to fabricate a multi-node topology (invented core ranges, `memory / n`
+    /// per node, invented interconnect latencies). It must now say so.
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn test_numa_is_unsupported_off_linux() {
+        let error =
+            NumaAllocator::detect_numa_topology().expect_err("no NUMA interface on this platform");
+        let message = error.to_string();
+        assert!(
+            message.contains("NUMA topology detection"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            NumaAllocator::new().is_err(),
+            "constructing an allocator must fail when no topology can be read"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_numa_allocator_creation() {
         let allocator = NumaAllocator::new().expect("operation failed in test");
@@ -769,8 +956,12 @@ mod tests {
         assert!(topology.total_cores > 0);
     }
 
+    /// Regression test: `allocate_on_node` used to return the synthetic value
+    /// `0x1000000 + node * 0x10000000 + size` and `deallocate` only logged.
+    /// The address must now be a real, writable, freeable allocation.
+    #[cfg(target_os = "linux")]
     #[test]
-    fn test_numa_allocation() {
+    fn test_numa_allocation_returns_a_real_pointer() {
         let allocator = NumaAllocator::new().expect("operation failed in test");
 
         let allocation = allocator
@@ -779,10 +970,70 @@ mod tests {
 
         assert_eq!(allocation.size_bytes, 1024);
         assert!(!allocation.allocation_id.is_empty());
+        assert_ne!(allocation.address, 0);
+        assert_eq!(
+            allocation.address % allocation.alignment,
+            0,
+            "the returned address must honour the requested alignment"
+        );
+        assert_ne!(
+            allocation.address,
+            0x1000000 + (allocation.node_id as usize * 0x10000000) + 1024,
+            "the old synthetic address formula must not reappear"
+        );
+        assert!(
+            !allocation.bound_to_node,
+            "node binding is not performed and must not be claimed"
+        );
+
+        // SAFETY: the allocator owns `size_bytes` writable bytes at this
+        // address until `deallocate` is called.
+        unsafe {
+            let pointer = allocation.address as *mut u8;
+            std::ptr::write_bytes(pointer, 0xAB, allocation.size_bytes);
+            assert_eq!(std::ptr::read(pointer.add(allocation.size_bytes - 1)), 0xAB);
+        }
 
         allocator
             .deallocate(&allocation.allocation_id)
             .expect("operation failed in test");
+        assert!(
+            allocator.deallocate(&allocation.allocation_id).is_err(),
+            "a freed allocation must not be freeable twice"
+        );
+    }
+
+    /// Regression test: thread affinity used to log and return `Ok(())` without
+    /// pinning anything.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_thread_affinity_is_reported_as_unimplemented() {
+        let allocator = NumaAllocator::new().expect("operation failed in test");
+        let result = allocator.set_thread_affinity(ThreadAffinity {
+            thread_id: std::thread::current().id(),
+            preferred_nodes: vec![0],
+            cpu_cores: vec![0],
+            priority: ThreadPriority::Normal,
+        });
+        assert!(result.is_err(), "affinity is not actually applied");
+    }
+
+    #[test]
+    fn test_parse_cpu_list() {
+        assert_eq!(parse_cpu_list("0-3"), vec![0, 1, 2, 3]);
+        assert_eq!(parse_cpu_list("0,2,4"), vec![0, 2, 4]);
+        assert_eq!(parse_cpu_list("0-1,4,6-7"), vec![0, 1, 4, 6, 7]);
+        assert!(parse_cpu_list("").is_empty());
+    }
+
+    #[test]
+    fn test_parse_node_meminfo() {
+        let meminfo = "Node 0 MemTotal:       16777216 kB\n\
+                       Node 0 MemFree:         8388608 kB\n\
+                       Node 0 MemUsed:         8388608 kB\n";
+        let (total, free) = parse_node_meminfo(meminfo);
+        assert!((total - 16.0).abs() < 1e-6, "got {total}");
+        assert!((free - 8.0).abs() < 1e-6, "got {free}");
     }
 
     #[test]
@@ -797,6 +1048,7 @@ mod tests {
         assert!(policy.strict);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_topology_detection() {
         let topology = NumaAllocator::detect_numa_topology().expect("operation failed in test");
@@ -810,6 +1062,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_workload_aware_selection() {
         let allocator = NumaAllocator::new().expect("operation failed in test");
@@ -822,6 +1075,7 @@ mod tests {
         assert!(topology.nodes.contains_key(&node_id));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_performance_monitoring() {
         let allocator = NumaAllocator::new().expect("operation failed in test");
@@ -842,6 +1096,7 @@ mod tests {
         assert!(total_allocations >= 2);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_memory_layout_optimization() {
         let allocator = NumaAllocator::new().expect("operation failed in test");

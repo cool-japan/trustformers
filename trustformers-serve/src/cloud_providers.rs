@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info};
+use tracing::error;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CloudProviderConfig {
@@ -209,8 +209,13 @@ pub enum OutputData {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponseMetadata {
+    /// Measured round-trip time of the provider call, in milliseconds.
     pub processing_time_ms: u64,
-    pub queue_time_ms: u64,
+    /// Time the request spent queued before processing.
+    ///
+    /// `None` when the provider does not report it — which is every public
+    /// inference API. It is never guessed.
+    pub queue_time_ms: Option<u64>,
     pub model_load_time_ms: Option<u64>,
     pub input_tokens: Option<u32>,
     pub output_tokens: Option<u32>,
@@ -231,6 +236,12 @@ pub struct PerformanceMetrics {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CostMetrics {
+    /// Whether these figures came from the provider's API.
+    ///
+    /// When `false`, every amount below is zero because the provider returned
+    /// no billing data — not because the request was free. Never present a
+    /// `false` snapshot as a cost.
+    pub reported_by_provider: bool,
     pub cost_usd: f64,
     pub input_cost_usd: f64,
     pub output_cost_usd: f64,
@@ -316,10 +327,18 @@ pub struct SecurityConfig {
 pub struct ModelDeploymentResponse {
     pub deployment_id: String,
     pub deployment_status: DeploymentStatus,
+    /// Cloud resource identifier returned by the deployment API, when it
+    /// returns one.
+    pub endpoint_arn: Option<String>,
+    /// Publicly invocable URL, when the provider exposes one. `None` for
+    /// SDK-only endpoints such as SageMaker.
     pub endpoint_url: Option<String>,
     pub deployment_time: DateTime<Utc>,
-    pub estimated_cost_per_hour: f64,
-    pub performance_estimate: PerformanceEstimate,
+    /// Hourly price, when the deployment API returns one. `None` means the
+    /// provider published no price — never assume zero cost.
+    pub estimated_cost_per_hour: Option<f64>,
+    /// Provider-published performance estimate, when one exists.
+    pub performance_estimate: Option<PerformanceEstimate>,
     pub monitoring_dashboard_url: Option<String>,
 }
 
@@ -378,10 +397,15 @@ pub struct ModelInfo {
     pub input_schema: serde_json::Value,
     pub output_schema: serde_json::Value,
     pub supported_formats: Vec<String>,
-    pub max_input_size: u64,
-    pub max_output_size: u64,
-    pub pricing: PricingInfo,
-    pub performance_characteristics: PerformanceCharacteristics,
+    /// Maximum input size the provider publishes, if any.
+    pub max_input_size: Option<u64>,
+    /// Maximum output size the provider publishes, if any.
+    pub max_output_size: Option<u64>,
+    /// Pricing, when the provider publishes it through its API. `None` means
+    /// no price was returned — it is never invented.
+    pub pricing: Option<PricingInfo>,
+    /// Performance characteristics, when the provider publishes them.
+    pub performance_characteristics: Option<PerformanceCharacteristics>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -416,14 +440,21 @@ pub struct HealthStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderMetrics {
     pub provider: String,
+    /// Requests per second measured over this process's observation window.
     pub requests_per_second: f32,
+    /// Mean measured round-trip latency, in milliseconds.
     pub average_latency_ms: u64,
+    /// Observed error ratio in `[0, 1]`.
     pub error_rate: f64,
-    pub cost_per_hour: f64,
+    /// Hourly spend, when the provider reports it. `None` otherwise.
+    pub cost_per_hour: Option<f64>,
     pub active_connections: u32,
     pub queue_depth: u32,
     pub throughput_tokens_per_second: f32,
-    pub resource_utilization: ResourceUtilization,
+    /// Host utilisation, when the provider exposes it. Public inference APIs
+    /// do not, so this is normally `None` rather than a plausible-looking
+    /// invented figure.
+    pub resource_utilization: Option<ResourceUtilization>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -700,385 +731,27 @@ impl CloudProviderManager {
     }
 }
 
-// Provider implementations (placeholders)
-struct AwsSagemakerProvider;
-struct GoogleVertexAiProvider;
-struct AzureMachineLearningProvider;
-struct HuggingFaceProvider;
-struct OpenAiProvider;
-struct AnthropicProvider;
-struct CustomProvider {
-    name: String,
-}
+// ── Provider implementations ─────────────────────────────────────────────────
+//
+// Every provider below performs real API calls; see the module docs of
+// `cloud_providers::rest` and `cloud_providers::sagemaker`. There is no shared
+// macro producing canned responses any more.
 
-macro_rules! impl_provider {
-    ($provider:ident, $type:expr) => {
-        impl $provider {
-            async fn new() -> Result<Self> {
-                Ok(Self)
-            }
-        }
+pub mod errors;
+pub mod rest;
+pub mod sagemaker;
+pub mod support;
 
-        #[async_trait]
-        impl CloudProvider for $provider {
-            async fn initialize(&self, _config: &ProviderConfig) -> Result<()> {
-                info!("Initializing provider: {}", stringify!($provider));
-                Ok(())
-            }
+#[cfg(test)]
+mod cloud_provider_tests;
 
-            async fn inference(&self, request: CloudInferenceRequest) -> Result<CloudInferenceResponse> {
-                // Placeholder implementation
-                Ok(CloudInferenceResponse {
-                    request_id: request.request_id,
-                    provider: stringify!($provider).to_string(),
-                    model_name: request.model_name,
-                    model_version: request.model_version,
-                    output_data: OutputData::Text("Mock response".to_string()),
-                    metadata: ResponseMetadata {
-                        processing_time_ms: 100,
-                        queue_time_ms: 50,
-                        model_load_time_ms: Some(200),
-                        input_tokens: Some(10),
-                        output_tokens: Some(20),
-                        finish_reason: Some("completed".to_string()),
-                        confidence_score: Some(0.95),
-                        provider_metadata: HashMap::new(),
-                    },
-                    performance: PerformanceMetrics {
-                        latency_ms: 150,
-                        throughput_tokens_per_second: Some(100.0),
-                        memory_usage_mb: Some(512),
-                        cpu_usage_percent: Some(25.0),
-                        gpu_usage_percent: Some(80.0),
-                        provider_metrics: HashMap::new(),
-                    },
-                    cost: CostMetrics {
-                        cost_usd: 0.01,
-                        input_cost_usd: 0.005,
-                        output_cost_usd: 0.005,
-                        compute_cost_usd: 0.0,
-                        storage_cost_usd: 0.0,
-                        network_cost_usd: 0.0,
-                        currency: "USD".to_string(),
-                        billing_period: "per_request".to_string(),
-                    },
-                    timestamp: Utc::now(),
-                })
-            }
-
-            async fn batch_inference(&self, requests: Vec<CloudInferenceRequest>) -> Result<Vec<CloudInferenceResponse>> {
-                let mut responses = Vec::new();
-                for request in requests {
-                    responses.push(self.inference(request).await?);
-                }
-                Ok(responses)
-            }
-
-            async fn deploy_model(&self, request: ModelDeploymentRequest) -> Result<ModelDeploymentResponse> {
-                Ok(ModelDeploymentResponse {
-                    deployment_id: request.deployment_id,
-                    deployment_status: DeploymentStatus::Completed,
-                    endpoint_url: Some("https://example.com/endpoint".to_string()),
-                    deployment_time: Utc::now(),
-                    estimated_cost_per_hour: 1.0,
-                    performance_estimate: PerformanceEstimate {
-                        expected_latency_ms: 100,
-                        expected_throughput_rps: 10.0,
-                        max_concurrent_requests: 100,
-                        memory_usage_estimate_mb: 1024,
-                    },
-                    monitoring_dashboard_url: Some("https://example.com/dashboard".to_string()),
-                })
-            }
-
-            async fn update_deployment(&self, _deployment_id: &str, config: ModelDeploymentRequest) -> Result<ModelDeploymentResponse> {
-                self.deploy_model(config).await
-            }
-
-            async fn delete_deployment(&self, _deployment_id: &str) -> Result<()> {
-                Ok(())
-            }
-
-            async fn get_deployment_status(&self, _deployment_id: &str) -> Result<DeploymentStatus> {
-                Ok(DeploymentStatus::Completed)
-            }
-
-            async fn list_deployments(&self) -> Result<Vec<ModelDeploymentResponse>> {
-                Ok(vec![])
-            }
-
-            async fn get_model_info(&self, model_name: &str) -> Result<ModelInfo> {
-                Ok(ModelInfo {
-                    name: model_name.to_string(),
-                    version: "1.0.0".to_string(),
-                    description: Some("Mock model".to_string()),
-                    model_type: "text-generation".to_string(),
-                    input_schema: serde_json::json!({"type": "string"}),
-                    output_schema: serde_json::json!({"type": "string"}),
-                    supported_formats: vec!["text".to_string()],
-                    max_input_size: 4096,
-                    max_output_size: 2048,
-                    pricing: PricingInfo {
-                        input_cost_per_token: 0.0001,
-                        output_cost_per_token: 0.0002,
-                        compute_cost_per_hour: 1.0,
-                        minimum_charge: 0.01,
-                        currency: "USD".to_string(),
-                    },
-                    performance_characteristics: PerformanceCharacteristics {
-                        average_latency_ms: 100,
-                        throughput_tokens_per_second: 50.0,
-                        memory_requirements_mb: 512,
-                        concurrent_request_limit: 100,
-                    },
-                })
-            }
-
-            async fn health_check(&self) -> Result<HealthStatus> {
-                Ok(HealthStatus {
-                    provider: stringify!($provider).to_string(),
-                    status: "healthy".to_string(),
-                    availability: 0.99,
-                    last_check: Utc::now(),
-                    response_time_ms: 50,
-                    error_rate: 0.01,
-                    active_deployments: 5,
-                    region_status: HashMap::new(),
-                })
-            }
-
-            async fn get_metrics(&self) -> Result<ProviderMetrics> {
-                Ok(ProviderMetrics {
-                    provider: stringify!($provider).to_string(),
-                    requests_per_second: 10.0,
-                    average_latency_ms: 100,
-                    error_rate: 0.01,
-                    cost_per_hour: 1.0,
-                    active_connections: 50,
-                    queue_depth: 5,
-                    throughput_tokens_per_second: 100.0,
-                    resource_utilization: ResourceUtilization {
-                        cpu_usage_percent: 25.0,
-                        memory_usage_percent: 60.0,
-                        gpu_usage_percent: 80.0,
-                        network_io_mbps: 10.0,
-                        storage_io_mbps: 5.0,
-                    },
-                })
-            }
-
-            async fn get_cost_estimate(&self, _request: &CloudInferenceRequest) -> Result<f64> {
-                Ok(0.01)
-            }
-
-            fn get_provider_type(&self) -> CloudProviderType {
-                $type
-            }
-
-            fn supports_feature(&self, feature: &str) -> bool {
-                match feature {
-                    "streaming" => true,
-                    "batch" => true,
-                    "deployment" => true,
-                    _ => false,
-                }
-            }
-        }
-    };
-}
-
-impl_provider!(AwsSagemakerProvider, CloudProviderType::AwsSagemaker);
-impl_provider!(GoogleVertexAiProvider, CloudProviderType::GoogleVertexAi);
-impl_provider!(
-    AzureMachineLearningProvider,
-    CloudProviderType::AzureMachineLearning
-);
-impl_provider!(HuggingFaceProvider, CloudProviderType::HuggingFaceInference);
-impl_provider!(OpenAiProvider, CloudProviderType::OpenAiApi);
-impl_provider!(AnthropicProvider, CloudProviderType::AnthropicClaude);
-
-impl CustomProvider {
-    async fn new(name: &str) -> Result<Self> {
-        Ok(Self {
-            name: name.to_string(),
-        })
-    }
-}
-
-#[async_trait]
-impl CloudProvider for CustomProvider {
-    async fn initialize(&self, _config: &ProviderConfig) -> Result<()> {
-        info!("Initializing custom provider: {}", self.name);
-        Ok(())
-    }
-
-    async fn inference(&self, request: CloudInferenceRequest) -> Result<CloudInferenceResponse> {
-        Ok(CloudInferenceResponse {
-            request_id: request.request_id,
-            provider: self.name.clone(),
-            model_name: request.model_name,
-            model_version: request.model_version,
-            output_data: OutputData::Text("Custom provider response".to_string()),
-            metadata: ResponseMetadata {
-                processing_time_ms: 100,
-                queue_time_ms: 50,
-                model_load_time_ms: Some(200),
-                input_tokens: Some(10),
-                output_tokens: Some(20),
-                finish_reason: Some("completed".to_string()),
-                confidence_score: Some(0.95),
-                provider_metadata: HashMap::new(),
-            },
-            performance: PerformanceMetrics {
-                latency_ms: 150,
-                throughput_tokens_per_second: Some(100.0),
-                memory_usage_mb: Some(512),
-                cpu_usage_percent: Some(25.0),
-                gpu_usage_percent: Some(80.0),
-                provider_metrics: HashMap::new(),
-            },
-            cost: CostMetrics {
-                cost_usd: 0.01,
-                input_cost_usd: 0.005,
-                output_cost_usd: 0.005,
-                compute_cost_usd: 0.0,
-                storage_cost_usd: 0.0,
-                network_cost_usd: 0.0,
-                currency: "USD".to_string(),
-                billing_period: "per_request".to_string(),
-            },
-            timestamp: Utc::now(),
-        })
-    }
-
-    async fn batch_inference(
-        &self,
-        requests: Vec<CloudInferenceRequest>,
-    ) -> Result<Vec<CloudInferenceResponse>> {
-        let mut responses = Vec::new();
-        for request in requests {
-            responses.push(self.inference(request).await?);
-        }
-        Ok(responses)
-    }
-
-    async fn deploy_model(
-        &self,
-        request: ModelDeploymentRequest,
-    ) -> Result<ModelDeploymentResponse> {
-        Ok(ModelDeploymentResponse {
-            deployment_id: request.deployment_id,
-            deployment_status: DeploymentStatus::Completed,
-            endpoint_url: Some("https://custom-provider.com/endpoint".to_string()),
-            deployment_time: Utc::now(),
-            estimated_cost_per_hour: 1.0,
-            performance_estimate: PerformanceEstimate {
-                expected_latency_ms: 100,
-                expected_throughput_rps: 10.0,
-                max_concurrent_requests: 100,
-                memory_usage_estimate_mb: 1024,
-            },
-            monitoring_dashboard_url: Some("https://custom-provider.com/dashboard".to_string()),
-        })
-    }
-
-    async fn update_deployment(
-        &self,
-        _deployment_id: &str,
-        config: ModelDeploymentRequest,
-    ) -> Result<ModelDeploymentResponse> {
-        self.deploy_model(config).await
-    }
-
-    async fn delete_deployment(&self, _deployment_id: &str) -> Result<()> {
-        Ok(())
-    }
-
-    async fn get_deployment_status(&self, _deployment_id: &str) -> Result<DeploymentStatus> {
-        Ok(DeploymentStatus::Completed)
-    }
-
-    async fn list_deployments(&self) -> Result<Vec<ModelDeploymentResponse>> {
-        Ok(vec![])
-    }
-
-    async fn get_model_info(&self, model_name: &str) -> Result<ModelInfo> {
-        Ok(ModelInfo {
-            name: model_name.to_string(),
-            version: "1.0.0".to_string(),
-            description: Some("Custom provider model".to_string()),
-            model_type: "text-generation".to_string(),
-            input_schema: serde_json::json!({"type": "string"}),
-            output_schema: serde_json::json!({"type": "string"}),
-            supported_formats: vec!["text".to_string()],
-            max_input_size: 4096,
-            max_output_size: 2048,
-            pricing: PricingInfo {
-                input_cost_per_token: 0.0001,
-                output_cost_per_token: 0.0002,
-                compute_cost_per_hour: 1.0,
-                minimum_charge: 0.01,
-                currency: "USD".to_string(),
-            },
-            performance_characteristics: PerformanceCharacteristics {
-                average_latency_ms: 100,
-                throughput_tokens_per_second: 50.0,
-                memory_requirements_mb: 512,
-                concurrent_request_limit: 100,
-            },
-        })
-    }
-
-    async fn health_check(&self) -> Result<HealthStatus> {
-        Ok(HealthStatus {
-            provider: self.name.clone(),
-            status: "healthy".to_string(),
-            availability: 0.99,
-            last_check: Utc::now(),
-            response_time_ms: 50,
-            error_rate: 0.01,
-            active_deployments: 5,
-            region_status: HashMap::new(),
-        })
-    }
-
-    async fn get_metrics(&self) -> Result<ProviderMetrics> {
-        Ok(ProviderMetrics {
-            provider: self.name.clone(),
-            requests_per_second: 10.0,
-            average_latency_ms: 100,
-            error_rate: 0.01,
-            cost_per_hour: 1.0,
-            active_connections: 50,
-            queue_depth: 5,
-            throughput_tokens_per_second: 100.0,
-            resource_utilization: ResourceUtilization {
-                cpu_usage_percent: 25.0,
-                memory_usage_percent: 60.0,
-                gpu_usage_percent: 80.0,
-                network_io_mbps: 10.0,
-                storage_io_mbps: 5.0,
-            },
-        })
-    }
-
-    async fn get_cost_estimate(&self, _request: &CloudInferenceRequest) -> Result<f64> {
-        Ok(0.01)
-    }
-
-    fn get_provider_type(&self) -> CloudProviderType {
-        CloudProviderType::Custom(self.name.clone())
-    }
-
-    fn supports_feature(&self, feature: &str) -> bool {
-        match feature {
-            "streaming" => true,
-            "batch" => true,
-            "deployment" => true,
-            _ => false,
-        }
-    }
-}
+pub use errors::CloudProviderError;
+pub use rest::{
+    AnthropicProvider, AzureMachineLearningProvider, CustomProvider, GoogleVertexAiProvider,
+    HuggingFaceProvider, OpenAiProvider,
+};
+pub use sagemaker::AwsSagemakerProvider;
+pub use support::{ObservedStats, ProviderState};
 
 impl Default for CloudProviderConfig {
     fn default() -> Self {
@@ -1277,6 +950,7 @@ mod tests {
     #[test]
     fn test_cost_metrics_construction() {
         let cost = CostMetrics {
+            reported_by_provider: true,
             cost_usd: 0.05,
             input_cost_usd: 0.02,
             output_cost_usd: 0.03,
@@ -1288,6 +962,15 @@ mod tests {
         };
         // Input + output = total
         assert!((cost.input_cost_usd + cost.output_cost_usd - cost.cost_usd).abs() < 1e-10);
+    }
+
+    /// A snapshot the provider did not report must be recognisable as such: the
+    /// zeros are the absence of data, not a zero bill.
+    #[test]
+    fn test_unreported_cost_is_flagged() {
+        let cost = support::unreported_cost();
+        assert!(!cost.reported_by_provider);
+        assert_eq!(cost.cost_usd, 0.0);
     }
 
     #[test]

@@ -1,5 +1,22 @@
+//! Hopfield associative memory networks.
+//!
+//! This module implements two complementary flavours of Hopfield dynamics that
+//! share one memory state:
+//!
+//! * **Classical (binary) Hopfield networks** — patterns are stored with the
+//!   Hebbian outer-product rule `W += x xᵀ` (zero diagonal) and recalled by
+//!   iterating the synchronous update `s ← sign(W s)` until a fixpoint is
+//!   reached. Stored bipolar patterns are fixpoints of that map, and probes
+//!   within the basin of attraction converge onto them.
+//! * **Modern (continuous) Hopfield networks** — recall is the softmax update
+//!   `retrieve(q) = softmax(β · q Xᵀ) X` over the stored pattern matrix `X`,
+//!   which is the update rule underlying "Hopfield Networks is All You Need".
+//!
+//! Both paths operate on the *same* stored patterns, so a pattern written with
+//! [`HopfieldLayer::store_pattern`] can be recalled either way.
+
 use trustformers_core::{
-    errors::Result,
+    errors::{Result, TrustformersError},
     layers::{LayerNorm, Linear},
     tensor::Tensor,
     traits::Layer,
@@ -7,17 +24,94 @@ use trustformers_core::{
 
 use super::{config::BiologicalConfig, model::BiologicalModelOutput};
 
+/// Replace row `row` of a 2-D tensor with `values`, returning a new tensor.
+fn set_row(matrix: &Tensor, row: usize, values: &[f32]) -> Result<Tensor> {
+    let shape = matrix.shape();
+    if shape.len() != 2 {
+        return Err(TrustformersError::shape_error(format!(
+            "set_row expects a 2-D tensor, got shape {:?}",
+            shape
+        )));
+    }
+    if row >= shape[0] {
+        return Err(TrustformersError::shape_error(format!(
+            "row index {} out of bounds for {} rows",
+            row, shape[0]
+        )));
+    }
+    if values.len() != shape[1] {
+        return Err(TrustformersError::shape_error(format!(
+            "row length {} does not match tensor width {}",
+            values.len(),
+            shape[1]
+        )));
+    }
+
+    let mut data = matrix.to_vec_f32()?;
+    let offset = row * shape[1];
+    data[offset..offset + shape[1]].copy_from_slice(values);
+    Tensor::from_vec(data, &shape)
+}
+
+/// Zero the diagonal of a square matrix (self-connections are forbidden in a
+/// classical Hopfield network — they would make every state a fixpoint).
+fn zero_diagonal(matrix: &Tensor) -> Result<Tensor> {
+    let shape = matrix.shape();
+    if shape.len() != 2 || shape[0] != shape[1] {
+        return Err(TrustformersError::shape_error(format!(
+            "zero_diagonal expects a square 2-D tensor, got shape {:?}",
+            shape
+        )));
+    }
+    let n = shape[0];
+    let mut data = matrix.to_vec_f32()?;
+    for i in 0..n {
+        data[i * n + i] = 0.0;
+    }
+    Tensor::from_vec(data, &shape)
+}
+
+/// Bipolar sign: strictly negative values map to `-1.0`, everything else
+/// (including exact zero) maps to `+1.0`. This is the standard convention for
+/// binary Hopfield networks, where zero-field neurons keep the positive state.
+fn bipolar_sign(tensor: &Tensor) -> Result<Tensor> {
+    let shape = tensor.shape();
+    let data: Vec<f32> = tensor
+        .to_vec_f32()?
+        .into_iter()
+        .map(|x| if x < 0.0 { -1.0 } else { 1.0 })
+        .collect();
+    Tensor::from_vec(data, &shape)
+}
+
+/// Normalise a pattern argument to a `[rows, d_model]` matrix.
+fn as_pattern_matrix(pattern: &Tensor, d_model: usize) -> Result<Tensor> {
+    let shape = pattern.shape();
+    match shape.len() {
+        1 if shape[0] == d_model => pattern.reshape(&[1, d_model]),
+        2 if shape[1] == d_model => Ok(pattern.clone()),
+        _ => Err(TrustformersError::shape_error(format!(
+            "Hopfield pattern must be [d_model] or [rows, d_model] with d_model = {}, got {:?}",
+            d_model, shape
+        ))),
+    }
+}
+
 /// Hopfield network memory state
 #[derive(Debug, Clone)]
 pub struct HopfieldMemoryState {
-    /// Stored patterns
+    /// Stored patterns, shape `[memory_capacity, d_model]`
     pub patterns: Tensor,
-    /// Pattern activations
+    /// Most recent per-slot attention/activation, shape `[batch, memory_capacity]`
     pub activations: Tensor,
-    /// Memory weights
+    /// Hebbian association matrix, shape `[d_model, d_model]`, zero diagonal
     pub weights: Tensor,
-    /// Current state
+    /// Current state, shape `[batch, d_model]`
     pub current_state: Tensor,
+    /// Number of slots that hold an explicitly stored pattern
+    pub stored_count: usize,
+    /// Per-slot usage counter, used by the replacement policy when memory is full
+    pub slot_usage: Vec<f32>,
 }
 
 /// Modern Hopfield network layer
@@ -45,7 +139,6 @@ impl HopfieldLayer {
     /// Create a new Hopfield layer
     pub fn new(config: &BiologicalConfig) -> Result<Self> {
         let d_model = config.d_model;
-        let _memory_capacity = config.memory_capacity;
 
         let query_projection = Linear::new(d_model, d_model, config.use_bias);
         let key_projection = Linear::new(d_model, d_model, config.use_bias);
@@ -70,11 +163,13 @@ impl HopfieldLayer {
         let d_model = self.config.d_model;
         let memory_capacity = self.config.memory_capacity;
 
-        // Initialize stored patterns
+        // Stored patterns start from a small random initialisation so that the
+        // modern-Hopfield softmax is well defined before anything is stored.
         let patterns = Tensor::randn(&[memory_capacity, d_model])?
             .scalar_mul(self.config.initializer_range)?;
         let activations = Tensor::zeros(&[batch_size, memory_capacity])?;
-        let weights = Tensor::zeros(&[memory_capacity, memory_capacity])?;
+        // The Hebbian association matrix lives in pattern space, not slot space.
+        let weights = Tensor::zeros(&[d_model, d_model])?;
         let current_state = Tensor::zeros(&[batch_size, d_model])?;
 
         self.memory_state = Some(HopfieldMemoryState {
@@ -82,169 +177,302 @@ impl HopfieldLayer {
             activations,
             weights,
             current_state,
+            stored_count: 0,
+            slot_usage: vec![0.0; memory_capacity],
         });
 
         Ok(())
     }
 
-    /// Forward pass through Hopfield layer
-    pub fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
-        let batch_size = input.shape()[0];
-        let seq_len = input.shape()[1];
+    fn memory(&self) -> Result<&HopfieldMemoryState> {
+        self.memory_state.as_ref().ok_or_else(|| {
+            TrustformersError::model_error("Hopfield memory state not initialized".to_string())
+        })
+    }
 
-        // Initialize memory if not present
+    fn memory_mut(&mut self) -> Result<&mut HopfieldMemoryState> {
+        self.memory_state.as_mut().ok_or_else(|| {
+            TrustformersError::model_error("Hopfield memory state not initialized".to_string())
+        })
+    }
+
+    /// Forward pass through Hopfield layer.
+    ///
+    /// `input` is `[batch, seq_len, d_model]`; the output keeps that shape.
+    pub fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
+        let shape = input.shape();
+        if shape.len() != 3 {
+            return Err(TrustformersError::shape_error(format!(
+                "HopfieldLayer::forward expects [batch, seq_len, d_model], got {:?}",
+                shape
+            )));
+        }
+        let batch_size = shape[0];
+        let seq_len = shape[1];
+
         if self.memory_state.is_none() {
             self.init_memory(batch_size)?;
         }
 
-        let mut outputs = Vec::new();
+        let mut outputs = Vec::with_capacity(seq_len);
 
-        // Process each time step
         for t in 0..seq_len {
             let input_t = input.slice(1, t, t + 1)?.squeeze(1)?;
             let output_t = self.forward_timestep(&input_t)?;
-            outputs.push(output_t);
+            outputs.push(output_t.unsqueeze(1)?);
         }
 
-        // Stack outputs
-        let mut output = outputs[0].clone();
-        for i in 1..outputs.len() {
-            output = Tensor::concat(&[output, outputs[i].clone()], 1)?;
-        }
-
-        Ok(output)
+        Tensor::concat(&outputs, 1)?.contiguous()
     }
 
-    /// Forward pass for a single timestep
+    /// Forward pass for a single timestep (`input` is `[batch, d_model]`).
     fn forward_timestep(&mut self, input: &Tensor) -> Result<Tensor> {
-        // Project input to query, key, value
+        // Project input to query, and the stored patterns to keys/values.
         let query = self.query_projection.forward(input.clone())?;
         let (key, value) = {
-            let memory_state = self.memory_state.as_ref().ok_or_else(|| {
-                trustformers_core::errors::TrustformersError::model_error(
-                    "Hopfield memory state not initialized".to_string(),
-                )
-            })?;
+            let memory_state = self.memory()?;
             let key = self.key_projection.forward(memory_state.patterns.clone())?;
             let value = self.value_projection.forward(memory_state.patterns.clone())?;
             (key, value)
         };
 
-        // Compute attention weights (modern Hopfield)
-        let attention_scores = query.matmul(&key.transpose(0, 1)?)?;
+        // Modern Hopfield retrieval: softmax(beta * q Kᵀ) V.
+        let attention_scores = query.matmul(&key.transpose(0, 1)?)?.mul_scalar(self.beta)?;
         let attention_weights = attention_scores.softmax(1)?;
-
-        // Compute output
         let output = attention_weights.matmul(&value)?;
 
-        // Update memory state (simplified)
-        {
-            let memory_state = self.memory_state.as_mut().ok_or_else(|| {
-                trustformers_core::errors::TrustformersError::model_error(
-                    "Hopfield memory state not initialized".to_string(),
-                )
-            })?;
+        // Real memory update: Hebbian plasticity plus activation bookkeeping.
+        self.update_memory_state(input, &output, &attention_weights)?;
 
-            // Simple memory update - add current pattern to memory
-            let pattern_update = input.mul_scalar(0.1)?; // learning rate
-            memory_state.patterns = memory_state.patterns.add(&pattern_update)?;
-
-            // Update current state with output
-            memory_state.current_state = output.clone();
-
-            // Update activations (simple running average)
-            memory_state.activations =
-                memory_state.activations.mul_scalar(0.9)?.add(&output.mul_scalar(0.1)?)?;
-        }
-
-        // Apply layer normalization
         let normalized_output = self.layer_norm.forward(output)?;
-
-        // Final projection
-        let final_output = self.output_projection.forward(normalized_output)?;
-
-        Ok(final_output)
+        self.output_projection.forward(normalized_output)
     }
 
-    /// Update memory state
-    #[allow(dead_code)]
+    /// Update the memory state after a retrieval step.
+    ///
+    /// * `activations` tracks the attention mass each memory slot received.
+    /// * `weights` accumulates the Hebbian outer product of the presented
+    ///   pattern, scaled by the configured plasticity learning rate.
     fn update_memory_state(
-        &self,
+        &mut self,
         input: &Tensor,
         output: &Tensor,
-        memory_state: &mut HopfieldMemoryState,
+        attention_weights: &Tensor,
     ) -> Result<()> {
-        // Update current state
-        memory_state.current_state = output.clone();
-
-        // Update pattern activations based on similarity
-        let similarities = input.matmul(&memory_state.patterns.transpose(0, 1)?)?;
-        memory_state.activations = similarities.softmax(1)?;
-
-        // Update weights using Hebbian learning
         let learning_rate = self.config.learning_rate;
-        let outer_product =
-            memory_state.activations.transpose(0, 1)?.matmul(&memory_state.activations)?;
-        let weight_update = outer_product.mul_scalar(learning_rate)?;
-        memory_state.weights = memory_state.weights.add(&weight_update)?;
+        // Hebbian outer product over the batch: Σ_b x_b x_bᵀ  -> [d_model, d_model].
+        let outer_product = input.transpose(0, 1)?.matmul(input)?.mul_scalar(learning_rate)?;
+        let outer_product = zero_diagonal(&outer_product)?;
+
+        // Track which slots were used so the replacement policy is meaningful.
+        let per_slot: Vec<f32> = {
+            let shape = attention_weights.shape();
+            let data = attention_weights.to_vec_f32()?;
+            let (rows, cols) = (shape[0], shape[1]);
+            (0..cols).map(|c| (0..rows).map(|r| data[r * cols + c]).sum::<f32>()).collect()
+        };
+
+        let memory_state = self.memory_mut()?;
+        memory_state.current_state = output.clone();
+        memory_state.activations = attention_weights.clone();
+        memory_state.weights = memory_state.weights.add(&outer_product)?;
+        for (slot, mass) in memory_state.slot_usage.iter_mut().zip(per_slot.iter()) {
+            *slot += *mass;
+        }
 
         Ok(())
     }
 
-    /// Store new pattern in memory
+    /// Store one or more patterns into memory.
+    ///
+    /// Each row of `pattern` is written into a memory slot (the next free slot,
+    /// or the least-used slot once memory is full) and folded into the Hebbian
+    /// association matrix with `W += x xᵀ` (diagonal zeroed).
     pub fn store_pattern(&mut self, pattern: &Tensor) -> Result<()> {
-        if let Some(memory_state) = &mut self.memory_state {
-            let _memory_capacity = self.config.memory_capacity;
-            let _pattern_size = pattern.shape()[1];
+        let d_model = self.config.d_model;
+        let matrix = as_pattern_matrix(pattern, d_model)?;
+        let rows = matrix.shape()[0];
 
-            // Find least used pattern slot (simple replacement strategy)
-            let _activation_sum = memory_state.activations.sum(None, false)?;
-            // Use simple strategy - assume index 0 for now (argmin not available)
-            let _min_idx = 0usize;
+        if self.memory_state.is_none() {
+            self.init_memory(rows.max(1))?;
+        }
 
-            // Replace pattern (simplified - just update the whole patterns tensor)
-            let _new_pattern = pattern.slice(0, 0, 1)?.squeeze(0)?;
-            // For now, just update patterns - more complex indexing update needed
-            // memory_state.patterns = new_pattern.unsqueeze(0)?;
+        let capacity = self.config.memory_capacity;
+        if capacity == 0 {
+            return Err(TrustformersError::invalid_config(
+                "memory_capacity must be greater than 0 to store Hopfield patterns".to_string(),
+            ));
+        }
+
+        let flat = matrix.to_vec_f32()?;
+
+        for row in 0..rows {
+            let values = &flat[row * d_model..(row + 1) * d_model];
+            let vector = Tensor::from_vec(values.to_vec(), &[1, d_model])?;
+            // Hebbian storage: W += x xᵀ, no self-connections.
+            let outer = zero_diagonal(&vector.transpose(0, 1)?.matmul(&vector)?)?;
+
+            let memory_state = self.memory_mut()?;
+            let slot = if memory_state.stored_count < capacity {
+                let slot = memory_state.stored_count;
+                memory_state.stored_count += 1;
+                slot
+            } else {
+                // Least-frequently-used replacement over real usage statistics.
+                let mut best = 0usize;
+                let mut best_usage = f32::INFINITY;
+                for (idx, usage) in memory_state.slot_usage.iter().enumerate() {
+                    if *usage < best_usage {
+                        best_usage = *usage;
+                        best = idx;
+                    }
+                }
+                best
+            };
+
+            memory_state.patterns = set_row(&memory_state.patterns, slot, values)?;
+            memory_state.slot_usage[slot] = 0.0;
+            memory_state.weights = memory_state.weights.add(&outer)?;
         }
 
         Ok(())
     }
 
-    /// Retrieve pattern from memory
-    pub fn retrieve_pattern(&mut self, query: &Tensor) -> Result<Tensor> {
-        if let Some(memory_state) = &mut self.memory_state {
-            // Compute similarities
-            let similarities = query.matmul(&memory_state.patterns.transpose(0, 1)?)?;
-            let _best_match_idx = similarities.argmax(1)?;
-
-            // Retrieve best matching pattern (simplified - use index 0 since argmax is complex)
-            let retrieved_pattern = memory_state.patterns.select(0, 0)?;
-            Ok(retrieved_pattern)
-        } else {
-            Err(trustformers_core::errors::TrustformersError::model_error(
-                "Memory state not initialized".to_string(),
-            ))
-        }
+    /// Number of patterns explicitly stored via [`Self::store_pattern`].
+    pub fn stored_count(&self) -> usize {
+        self.memory_state.as_ref().map(|m| m.stored_count).unwrap_or(0)
     }
 
-    /// Run Hopfield dynamics for convergence
-    pub fn run_dynamics(&mut self, input: &Tensor, max_iterations: usize) -> Result<Tensor> {
-        let mut state = input.clone();
-        let tolerance = 1e-6;
+    /// Index of the memory slot that best matches each query row.
+    ///
+    /// Returns one index per row of `query` (`query` is `[batch, d_model]` or
+    /// `[d_model]`). Only slots that hold an explicitly stored pattern are
+    /// considered; if nothing has been stored yet all slots are candidates.
+    pub fn best_match_indices(&self, query: &Tensor) -> Result<Vec<usize>> {
+        let d_model = self.config.d_model;
+        let query_matrix = as_pattern_matrix(query, d_model)?;
+        let memory_state = self.memory()?;
 
-        for _ in 0..max_iterations {
-            let new_state = self.forward_timestep(&state)?;
+        let capacity = memory_state.patterns.shape()[0];
+        let searchable =
+            if memory_state.stored_count > 0 { memory_state.stored_count } else { capacity };
 
-            // Check convergence
-            let diff = new_state.sub(&state)?.pow(2.0)?.mean()?.sqrt()?;
-            let max_diff_value = diff.to_scalar()?;
+        let patterns = memory_state.patterns.slice(0, 0, searchable)?;
+        let similarities = query_matrix.matmul(&patterns.transpose(0, 1)?)?;
+        let indices = similarities.argmax(1)?.to_vec_f32()?;
 
-            if max_diff_value < tolerance {
+        Ok(indices.into_iter().map(|i| (i.max(0.0) as usize).min(searchable - 1)).collect())
+    }
+
+    /// Retrieve the stored pattern that best matches each query row.
+    ///
+    /// The returned tensor has shape `[rows, d_model]`, one recalled pattern per
+    /// query row, selected by the *actual* similarity argmax.
+    pub fn retrieve_pattern(&mut self, query: &Tensor) -> Result<Tensor> {
+        let d_model = self.config.d_model;
+        let indices = self.best_match_indices(query)?;
+
+        let memory_state = self.memory_mut()?;
+        let mut rows = Vec::with_capacity(indices.len());
+        for &index in &indices {
+            memory_state.slot_usage[index] += 1.0;
+            rows.push(memory_state.patterns.select(0, index as i64)?.reshape(&[1, d_model])?);
+        }
+
+        Tensor::concat(&rows, 0)
+    }
+
+    /// Modern (continuous) Hopfield retrieval: `softmax(β · q Xᵀ) X`.
+    ///
+    /// `query` is `[rows, d_model]` (or `[d_model]`); the result has shape
+    /// `[rows, d_model]`. Large `beta` makes the retrieval converge to the
+    /// nearest stored pattern; small `beta` produces a metastable mixture.
+    pub fn modern_retrieval(&self, query: &Tensor, beta: f32) -> Result<Tensor> {
+        let d_model = self.config.d_model;
+        let query_matrix = as_pattern_matrix(query, d_model)?;
+        let memory_state = self.memory()?;
+
+        let capacity = memory_state.patterns.shape()[0];
+        let searchable =
+            if memory_state.stored_count > 0 { memory_state.stored_count } else { capacity };
+        let patterns = memory_state.patterns.slice(0, 0, searchable)?;
+
+        let scores = query_matrix.matmul(&patterns.transpose(0, 1)?)?.mul_scalar(beta)?;
+        let weights = scores.softmax(1)?;
+        weights.matmul(&patterns)
+    }
+
+    /// One synchronous classical Hopfield update: `s ← sign(W s)`.
+    ///
+    /// `state` is `[rows, d_model]` (or `[d_model]`).
+    pub fn classical_step(&self, state: &Tensor) -> Result<Tensor> {
+        let d_model = self.config.d_model;
+        let state_matrix = as_pattern_matrix(state, d_model)?;
+        let memory_state = self.memory()?;
+        let field = state_matrix.matmul(&memory_state.weights)?;
+        bipolar_sign(&field)
+    }
+
+    /// Iterate the classical Hopfield update until a fixpoint is reached.
+    ///
+    /// Units are updated *asynchronously* (one unit at a time, in index order,
+    /// immediately visible to the units that follow). For a symmetric weight
+    /// matrix with zero diagonal this update is guaranteed to decrease the
+    /// Hopfield energy `E = -½ sᵀ W s` monotonically and therefore to converge
+    /// to a fixpoint; the synchronous map of [`Self::classical_step`] can
+    /// instead settle into a two-cycle.
+    ///
+    /// `max_sweeps` bounds the number of full passes over the units.
+    pub fn run_classical_dynamics(&self, probe: &Tensor, max_sweeps: usize) -> Result<Tensor> {
+        let d_model = self.config.d_model;
+        let state_matrix = as_pattern_matrix(probe, d_model)?;
+        let mut state = bipolar_sign(&state_matrix)?.to_vec_f32()?;
+        let rows = state.len() / d_model;
+        let weights = self.memory()?.weights.to_vec_f32()?;
+
+        for _ in 0..max_sweeps {
+            let mut changed = false;
+            for row in 0..rows {
+                for j in 0..d_model {
+                    let mut field = 0.0f32;
+                    for i in 0..d_model {
+                        field += state[row * d_model + i] * weights[i * d_model + j];
+                    }
+                    let updated = if field < 0.0 { -1.0 } else { 1.0 };
+                    if (updated - state[row * d_model + j]).abs() > f32::EPSILON {
+                        state[row * d_model + j] = updated;
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
                 break;
             }
+        }
 
+        Tensor::from_vec(state, &[rows, d_model])
+    }
+
+    /// Run modern Hopfield dynamics to convergence.
+    ///
+    /// Repeatedly applies `s ← softmax(β · s Xᵀ) X` until the update size falls
+    /// below `1e-6` or `max_iterations` is exhausted.
+    pub fn run_dynamics(&mut self, input: &Tensor, max_iterations: usize) -> Result<Tensor> {
+        let d_model = self.config.d_model;
+        let mut state = as_pattern_matrix(input, d_model)?;
+
+        if self.memory_state.is_none() {
+            self.init_memory(state.shape()[0])?;
+        }
+
+        let tolerance = 1e-6;
+        for _ in 0..max_iterations {
+            let new_state = self.modern_retrieval(&state, self.beta)?;
+            let diff = new_state.sub(&state)?.pow(2.0)?.mean()?.sqrt()?.to_scalar()?;
             state = new_state;
+            if diff < tolerance {
+                break;
+            }
         }
 
         Ok(state)
@@ -304,28 +532,20 @@ impl HopfieldNetwork {
         let mut hidden_states = input.clone();
         let mut all_memory_states = Vec::new();
 
-        // Pass through all layers
         for layer in &mut self.layers {
             hidden_states = layer.forward(&hidden_states)?;
 
-            // Collect memory states
             if let Some(memory_state) = &layer.memory_state {
-                all_memory_states.push(memory_state.current_state.clone());
+                all_memory_states.push(memory_state.current_state.clone().unsqueeze(1)?);
             }
         }
 
-        // Project to output dimension
         let output = self.output_projection.forward(hidden_states)?;
 
-        // Stack memory states
-        let memory_states = if !all_memory_states.is_empty() {
-            let mut stacked = all_memory_states[0].clone();
-            for i in 1..all_memory_states.len() {
-                stacked = Tensor::concat(&[stacked, all_memory_states[i].clone()], 2)?;
-            }
-            Some(stacked)
-        } else {
+        let memory_states = if all_memory_states.is_empty() {
             None
+        } else {
+            Some(Tensor::concat(&all_memory_states, 1)?.contiguous()?)
         };
 
         Ok(BiologicalModelOutput {
@@ -339,9 +559,8 @@ impl HopfieldNetwork {
         })
     }
 
-    /// Update plasticity for all layers
+    /// Update plasticity for all layers by storing the targets as patterns
     pub fn update_plasticity(&mut self, targets: &Tensor) -> Result<()> {
-        // Store targets as new patterns
         for layer in &mut self.layers {
             layer.store_pattern(targets)?;
         }
@@ -371,21 +590,21 @@ impl HopfieldNetwork {
         let mut retrieved = Vec::new();
 
         for query in queries {
-            // Use first layer for retrieval
-            if let Some(layer) = self.layers.first_mut() {
-                let pattern = layer.retrieve_pattern(query)?;
-                retrieved.push(pattern);
-            }
+            let layer = self.layers.first_mut().ok_or_else(|| {
+                TrustformersError::model_error(
+                    "Hopfield network has no layers to retrieve from".to_string(),
+                )
+            })?;
+            retrieved.push(layer.retrieve_pattern(query)?);
         }
 
         Ok(retrieved)
     }
 
-    /// Run associative memory retrieval
+    /// Run associative memory retrieval through modern Hopfield dynamics
     pub fn associative_retrieval(&mut self, partial_input: &Tensor) -> Result<Tensor> {
         let mut current_state = partial_input.clone();
 
-        // Run dynamics in each layer
         for layer in &mut self.layers {
             current_state = layer.run_dynamics(&current_state, 50)?;
         }

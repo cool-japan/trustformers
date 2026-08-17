@@ -629,7 +629,7 @@ pub use pytorch_compat::{
 };
 pub use quantized::{Adam8bit, AdamW8bit, QuantizationConfig, QuantizedState};
 pub use quantized_advanced::{
-    Adam4bit, Adam4bitOptimizerConfig, AdvancedQuantizationConfig, GradientStatistics,
+    Adam4bit, Adam4bitOptimizerConfig, AdamW4bit, AdvancedQuantizationConfig, GradientStatistics,
     QuantizationMethod, QuantizationUtils, QuantizedTensor,
 };
 pub use quantum_inspired::{

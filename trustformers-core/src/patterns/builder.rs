@@ -3,8 +3,6 @@
 //! This module provides a consistent builder pattern implementation
 //! that can be used across all modules for configuration and object construction.
 
-#![allow(unused_variables)] // Builder pattern
-
 use crate::errors::Result;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
@@ -64,8 +62,12 @@ pub trait StandardConfig: Debug + Clone + Default + Serialize + for<'de> Deseria
         Ok(())
     }
 
-    /// Merge with another configuration (self takes precedence)
-    fn merge(self, other: Self) -> Self {
+    /// Merge with another configuration.
+    ///
+    /// The default is "self wins outright": it returns `self` unchanged and
+    /// discards `other`. Implementations that need field-wise merging must
+    /// override this.
+    fn merge(self, _other: Self) -> Self {
         self
     }
 }
@@ -351,10 +353,37 @@ where
     }
 }
 
-/// Quick builder macro for simple cases
+/// Generate a builder for a struct with the listed fields.
+///
+/// The generated `build()` constructs `$target` from the values the caller set;
+/// a field left unset is a `BuilderError::MissingField`. `$target` must be a
+/// struct with exactly the listed fields, in any order.
+///
+/// ```
+/// use trustformers_core::patterns::Builder;
+/// use trustformers_core::quick_builder;
+///
+/// #[derive(Debug, PartialEq)]
+/// pub struct Endpoint {
+///     pub host: String,
+///     pub port: u16,
+/// }
+///
+/// quick_builder!(EndpointBuilder for Endpoint { host: String, port: u16 });
+///
+/// let endpoint = EndpointBuilder::new()
+///     .host("localhost".to_string())
+///     .port(8080)
+///     .build()
+///     .expect("all fields set");
+/// assert_eq!(endpoint, Endpoint { host: "localhost".to_string(), port: 8080 });
+///
+/// // A missing field is an error, not a silently defaulted value.
+/// assert!(EndpointBuilder::new().port(1).build().is_err());
+/// ```
 #[macro_export]
 macro_rules! quick_builder {
-    ($name:ident for $target:ty {
+    ($name:ident for $target:ident {
         $(
             $field:ident: $field_type:ty
         ),* $(,)?
@@ -379,24 +408,18 @@ macro_rules! quick_builder {
             )*
         }
 
-        impl Builder<$target> for $name {
-            fn build(self) -> Result<$target> {
-                // NOTE: This is a template implementation. Real builders should
-                // implement custom logic to construct the target type from the builder fields.
-                // Example implementation for a struct with the same fields:
-                // Ok($target {
-                //     $(
-                //         $field: self.$field.ok_or_else(|| {
-                //             crate::errors::TrustformersError::invalid_input {
-                //                 message: format!("Missing required field: {}", stringify!($field)),
-                //                 details: std::collections::HashMap::new(),
-                //             }
-                //         })?,
-                //     )*
-                // })
-
-                // For now, return a default instance if the target implements Default
-                Ok(<$target>::default())
+        impl $crate::patterns::Builder<$target> for $name {
+            fn build(self) -> $crate::errors::Result<$target> {
+                Ok($target {
+                    $(
+                        $field: self.$field.ok_or_else(|| {
+                            $crate::errors::TrustformersError::invalid_input(format!(
+                                "missing required field: {}",
+                                stringify!($field)
+                            ))
+                        })?,
+                    )*
+                })
             }
 
             fn reset(self) -> Self {
@@ -762,15 +785,39 @@ mod tests {
         enabled: bool
     });
 
+    /// Regression test: the generated `build()` used to discard every field the
+    /// caller set and return `<$target>::default()`.
     #[test]
-    fn test_quick_builder_creation() {
-        let builder = TestObjectBuilder::new().name("test".to_string()).value(42).enabled(true);
+    fn test_quick_builder_uses_the_values_that_were_set() {
+        let built = TestObjectBuilder::new()
+            .name("test".to_string())
+            .value(42)
+            .enabled(true)
+            .build()
+            .expect("all fields were set");
 
-        // Note: build() would need to be implemented for the specific type
-        // This just tests the builder pattern creation
-        assert!(builder.name.is_some());
-        assert!(builder.value.is_some());
-        assert!(builder.enabled.is_some());
+        assert_eq!(built.name, "test");
+        assert_eq!(built.value, 42);
+        assert!(built.enabled);
+
+        // The default instance must be observably different, so this test would
+        // have failed against the old `Default::default()` body.
+        let default_object = TestObject::default();
+        assert_ne!(built.name, default_object.name);
+        assert_ne!(built.value, default_object.value);
+    }
+
+    /// A field left unset must be an error, not a silent default.
+    #[test]
+    fn test_quick_builder_rejects_missing_fields() {
+        let error = TestObjectBuilder::new()
+            .name("test".to_string())
+            .build()
+            .expect_err("value and enabled were never set");
+        assert!(
+            error.to_string().contains("value") || error.to_string().contains("enabled"),
+            "the error must name the missing field: {error}"
+        );
     }
 
     #[test]

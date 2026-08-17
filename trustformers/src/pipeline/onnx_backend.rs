@@ -9,13 +9,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use trustformers_core::errors::{runtime_error, Result as CoreResult};
 use trustformers_core::traits::{Model, Tokenizer};
-// Note: Using mock types since actual ONNX runtime types need implementation
+// This module used to define its own "mock ONNX types" with hardcoded outputs.
+// It now thinly wraps trustformers-core's real pure-Rust ONNX CPU interpreter
+// (`trustformers_core::export::onnx_runtime` / `onnx_cpu`): `ONNXRuntimeBackend`
+// below is a pipeline-facing handle over the core backend, and `ONNXRuntimeSession`
+// (imported directly, not reimplemented) really parses `.onnx` protobufs and
+// really executes their graphs.
 use trustformers_core::export::onnx_runtime::{
     ExecutionMode, ExecutionProvider, GraphOptimizationLevel, LogLevel, MemoryInfo,
     ONNXRuntimeConfig, ONNXRuntimeSession,
 };
 
-// Mock ONNX types - replace with actual implementation
+/// Pipeline-facing handle over the real core ONNX backend.
 #[derive(Debug, Clone)]
 pub struct ONNXRuntimeBackend;
 
@@ -26,7 +31,6 @@ pub struct BenchmarkResults {
     pub memory_usage: u64,
 }
 
-// Mock implementations
 impl ONNXRuntimeBackend {
     pub fn new(_config: ONNXRuntimeConfig) -> CoreResult<Self> {
         Ok(Self)
@@ -39,17 +43,49 @@ impl ONNXRuntimeBackend {
             .map_err(|e| runtime_error(format!("Failed to load ONNX model: {}", e)))
     }
 
+    /// Execution providers this build can actually run a graph on.
+    ///
+    /// Only [`ExecutionProvider::CPU`] is listed because only the CPU
+    /// interpreter exists; this mirrors
+    /// [`trustformers_core::export::onnx_runtime::ONNXRuntimeBackend::get_available_providers`]
+    /// rather than advertising accelerators nothing here can drive.
     pub fn get_available_providers(&self) -> CoreResult<Vec<ExecutionProvider>> {
         Ok(vec![ExecutionProvider::CPU])
     }
 
+    /// Real host properties for the CPU provider; a structured error for every
+    /// other provider, since no execution backend exists for them.
     pub fn get_device_properties(
         &self,
-        _provider: &ExecutionProvider,
+        provider: &ExecutionProvider,
     ) -> CoreResult<HashMap<String, String>> {
-        let mut props = HashMap::new();
-        props.insert("type".to_string(), "mock".to_string());
-        Ok(props)
+        match provider {
+            ExecutionProvider::CPU => {
+                let mut props = HashMap::new();
+                props.insert("type".to_string(), "cpu".to_string());
+                props.insert("logical_cores".to_string(), num_cpus::get().to_string());
+                props.insert(
+                    "physical_cores".to_string(),
+                    num_cpus::get_physical().to_string(),
+                );
+                let mut system = sysinfo::System::new();
+                system.refresh_memory();
+                props.insert(
+                    "total_memory_bytes".to_string(),
+                    system.total_memory().to_string(),
+                );
+                props.insert(
+                    "available_memory_bytes".to_string(),
+                    system.available_memory().to_string(),
+                );
+                Ok(props)
+            },
+            other => Err(runtime_error(format!(
+                "no device properties are available for {other:?}: this build executes ONNX \
+                 graphs with a pure-Rust CPU interpreter only, no accelerator execution \
+                 provider is linked in"
+            ))),
+        }
     }
 }
 
@@ -82,31 +118,29 @@ pub trait ONNXSessionOps {
 
 impl ONNXSessionOps for ONNXRuntimeSession {
     fn input_names(&self) -> &[String] {
-        self.input_names()
+        ONNXRuntimeSession::input_names(self)
     }
 
     fn output_names(&self) -> &[String] {
-        self.output_names()
+        ONNXRuntimeSession::output_names(self)
     }
 
     fn run(
         &self,
-        _inputs: HashMap<String, trustformers_core::tensor::Tensor>,
+        inputs: HashMap<String, trustformers_core::tensor::Tensor>,
     ) -> Result<HashMap<String, trustformers_core::tensor::Tensor>> {
-        // Mock implementation - return empty result
-        let mut outputs = HashMap::new();
-        let mock_tensor = trustformers_core::tensor::Tensor::zeros(&[1, 10])
-            .map_err(crate::error::TrustformersError::from)?;
-        outputs.insert("logits".to_string(), mock_tensor);
-        Ok(outputs)
+        // Delegates to the real interpreter in trustformers-core: it parses the
+        // loaded `.onnx` graph and executes every supported node against `inputs`.
+        ONNXRuntimeSession::run(self, inputs).map_err(crate::error::TrustformersError::from)
     }
 
     fn run_with_provider(
         &self,
         inputs: HashMap<String, trustformers_core::tensor::Tensor>,
-        _provider: ExecutionProvider,
+        provider: ExecutionProvider,
     ) -> Result<HashMap<String, trustformers_core::tensor::Tensor>> {
-        ONNXSessionOps::run(self, inputs)
+        ONNXRuntimeSession::run_with_provider(self, inputs, provider)
+            .map_err(crate::error::TrustformersError::from)
     }
 
     async fn run_async(
@@ -118,23 +152,35 @@ impl ONNXSessionOps for ONNXRuntimeSession {
 
     fn benchmark(
         &self,
-        _inputs: HashMap<String, trustformers_core::tensor::Tensor>,
-        _num_runs: usize,
-        _warmup_runs: usize,
+        inputs: HashMap<String, trustformers_core::tensor::Tensor>,
+        num_runs: usize,
+        warmup_runs: usize,
     ) -> Result<BenchmarkResults> {
+        // Real warm-up: run and discard, exactly like ONNX Runtime's own benchmark
+        // protocol, so caches/allocators are primed before the timed runs.
+        for _ in 0..warmup_runs {
+            ONNXRuntimeSession::run(self, inputs.clone())
+                .map_err(crate::error::TrustformersError::from)?;
+        }
+
+        let core_results = ONNXRuntimeSession::benchmark(self, inputs, num_runs.max(1))
+            .map_err(crate::error::TrustformersError::from)?;
+        let memory = ONNXRuntimeSession::get_memory_info(self)
+            .map_err(crate::error::TrustformersError::from)?;
+
         Ok(BenchmarkResults {
-            avg_latency_ms: 30.0,
-            throughput: 33.0,
-            memory_usage: 512 * 1024 * 1024, // 512MB
+            avg_latency_ms: core_results.mean_latency_ms,
+            throughput: if core_results.mean_latency_ms > 0.0 {
+                1000.0 / core_results.mean_latency_ms
+            } else {
+                0.0
+            },
+            memory_usage: memory.model_memory_bytes as u64,
         })
     }
 
     fn get_memory_info(&self) -> Result<MemoryInfo> {
-        Ok(MemoryInfo {
-            total_memory_bytes: 4 * 1024 * 1024 * 1024,     // 4GB
-            model_memory_bytes: 1024 * 1024 * 1024,         // 1GB
-            available_memory_bytes: 3 * 1024 * 1024 * 1024, // 3GB
-        })
+        ONNXRuntimeSession::get_memory_info(self).map_err(crate::error::TrustformersError::from)
     }
 }
 use trustformers_core::tensor::Tensor;
@@ -269,7 +315,7 @@ impl ONNXBackendConfig {
             enable_cpu_mem_arena: self.enable_cpu_mem_arena,
             enable_mem_pattern: self.enable_memory_pattern,
             execution_mode: self.execution_mode.clone(),
-            graph_optimization_level: self.optimization_level.clone(),
+            graph_optimization_level: self.optimization_level,
             log_severity_level: self.log_level.clone(),
         }
     }
@@ -297,6 +343,19 @@ impl ONNXModel {
         let runtime_config = config.to_runtime_config();
         let backend = ONNXRuntimeBackend::new(runtime_config)?;
         let session = backend.load_model(&config.model_path)?;
+
+        // Fail loudly here rather than building a pipeline that would only
+        // discover mid-inference (or, worse, silently on a lucky graph prefix)
+        // that some operator has no CPU-interpreter implementation.
+        let unsupported = session.unsupported_operators();
+        if !unsupported.is_empty() {
+            return Err(runtime_error(format!(
+                "ONNX model {:?} uses operators this build's CPU interpreter cannot execute: {}. \
+                 Refusing to build a pipeline on top of it.",
+                config.model_path,
+                unsupported.join(", ")
+            )));
+        }
 
         let input_names = session.input_names().to_vec();
         let output_names = session.output_names().to_vec();
@@ -355,28 +414,19 @@ impl ONNXModel {
         self.session.run_with_provider(inputs, provider).map_err(Into::into)
     }
 
-    /// Benchmark the model
+    /// Benchmark the model by timing real graph execution.
     pub fn benchmark(
         &self,
         inputs: HashMap<String, Tensor>,
         num_runs: usize,
     ) -> CoreResult<BenchmarkResults> {
-        // Mock benchmark implementation
-        Ok(BenchmarkResults {
-            avg_latency_ms: 10.0,
-            throughput: 100.0,
-            memory_usage: 1024 * 1024, // 1MB
-        })
+        ONNXSessionOps::benchmark(self.session.as_ref(), inputs, num_runs, 0).map_err(Into::into)
     }
 
-    /// Get memory usage information
+    /// Get memory usage information: the model's real weight bytes plus the
+    /// host's real total/available memory.
     pub fn memory_info(&self) -> CoreResult<MemoryInfo> {
-        // Mock memory info implementation
-        Ok(MemoryInfo {
-            total_memory_bytes: 1024 * 1024 * 1024,    // 1GB
-            model_memory_bytes: 512 * 1024 * 1024,     // 512MB
-            available_memory_bytes: 512 * 1024 * 1024, // 512MB
-        })
+        ONNXSessionOps::get_memory_info(self.session.as_ref()).map_err(Into::into)
     }
 
     /// Get available execution providers
@@ -412,11 +462,19 @@ impl Model for ONNXModel {
         &self.config
     }
 
-    /// Get the number of parameters in the model
+    /// Get the number of parameters in the model.
+    ///
+    /// Computed from the real parsed graph: the total element count across every
+    /// initializer tensor (weights, biases, embeddings, ...), which is the
+    /// standard definition of "parameter count" for a static computation graph.
     fn num_parameters(&self) -> usize {
-        // For ONNX models, we can't easily determine this without parsing the model
-        // Return a placeholder value or implement actual parameter counting if needed
-        0 // Placeholder - would need ONNX model introspection
+        self.session
+            .executor()
+            .graph()
+            .initializers
+            .iter()
+            .map(|tensor| tensor.dims.iter().map(|&d| d.max(0) as usize).product::<usize>())
+            .sum()
     }
 }
 
@@ -544,8 +602,7 @@ impl<T: Tokenizer + Clone> Pipeline for ONNXTextClassificationPipeline<T> {
         })?;
 
         // Apply softmax to get probabilities (simplified)
-        let logits_data = logits.data();
-        let flat_data: Vec<f32> = logits_data.iter().flatten().cloned().collect();
+        let flat_data: Vec<f32> = logits.data().map_err(crate::error::TrustformersError::from)?;
         let max_logit = flat_data.iter().fold(f32::NEG_INFINITY, |a, b| a.max(*b));
         let exp_logits: Vec<f32> = flat_data.iter().map(|x| (*x - max_logit).exp()).collect();
         let sum_exp: f32 = exp_logits.iter().sum();
@@ -662,8 +719,8 @@ impl<T: Tokenizer + Clone> Pipeline for ONNXTextGenerationPipeline<T> {
             })?;
 
             // Get next token (simplified greedy decoding)
-            let logits_data = logits.data();
-            let flat_data: Vec<f32> = logits_data.iter().flatten().cloned().collect();
+            let flat_data: Vec<f32> =
+                logits.data().map_err(crate::error::TrustformersError::from)?;
             let vocab_size = flat_data.len() / (batch_size * seq_len);
             let last_token_logits = &flat_data[(seq_len - 1) * vocab_size..seq_len * vocab_size];
 
@@ -1049,48 +1106,359 @@ mod tests {
         assert_eq!(options.warmup_runs, 10);
     }
 
-    // ── Session mock ops ──────────────────────────────────────────────────────
+    // ── Real ONNX execution fixtures ──────────────────────────────────────────
+    //
+    // These build a tiny, real, binary `.onnx` protobuf in-test (the same
+    // `y = Relu(x @ w1) @ w2` MLP trustformers-core's own interpreter tests use)
+    // and drive it end to end through this *pipeline* module's public API, to
+    // prove `ONNXModel`/`ONNXSessionOps` really call the CPU interpreter instead
+    // of returning `Tensor::zeros`.
 
-    #[test]
-    fn test_mock_session_benchmark_results() {
-        let temp_dir = tempdir().expect("temp dir");
-        let model_path = temp_dir.path().join("model.onnx");
-        let _ = fs::File::create(&model_path).expect("create model file");
-        let backend = ONNXRuntimeBackend::new(ONNXRuntimeConfig::default())
-            .expect("runtime backend creation failed");
-        let result = backend.load_model(&model_path);
-        if let Ok(session) = result {
-            let inputs = HashMap::new();
-            let bench = ONNXSessionOps::benchmark(&session, inputs, 5, 2);
-            if let Ok(b) = bench {
-                assert!(b.avg_latency_ms > 0.0, "avg latency must be positive");
-                assert!(b.throughput > 0.0, "throughput must be positive");
-                assert!(b.memory_usage > 0, "memory usage must be non-zero");
-            }
+    fn onnx_fixture_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create fixture dir");
+        dir
+    }
+
+    fn onnx_value_info(name: &str, dims: &[i64]) -> trustformers_core::export::onnx::ONNXValueInfo {
+        use trustformers_core::export::onnx::{
+            ONNXDataType, ONNXDimension, ONNXTensorShape, ONNXTensorType, ONNXTypeInfo,
+            ONNXValueInfo,
+        };
+        ONNXValueInfo {
+            name: name.to_string(),
+            type_info: ONNXTypeInfo {
+                tensor_type: ONNXTensorType {
+                    elem_type: ONNXDataType::Float,
+                    shape: ONNXTensorShape {
+                        dims: dims.iter().map(|&d| ONNXDimension::Value(d)).collect(),
+                    },
+                },
+            },
         }
     }
 
+    fn onnx_initializer(
+        name: &str,
+        dims: &[i64],
+        values: &[f32],
+    ) -> trustformers_core::export::onnx::ONNXTensor {
+        use trustformers_core::export::onnx::{ONNXDataType, ONNXTensor};
+        ONNXTensor {
+            name: name.to_string(),
+            data_type: ONNXDataType::Float,
+            dims: dims.to_vec(),
+            raw_data: values.iter().flat_map(|v| v.to_le_bytes()).collect(),
+        }
+    }
+
+    fn onnx_node(
+        op: &str,
+        name: &str,
+        inputs: &[&str],
+        outputs: &[&str],
+    ) -> trustformers_core::export::onnx::ONNXNode {
+        use trustformers_core::export::onnx::ONNXNode;
+        ONNXNode {
+            op_type: op.to_string(),
+            inputs: inputs.iter().map(|s| s.to_string()).collect(),
+            outputs: outputs.iter().map(|s| s.to_string()).collect(),
+            attributes: HashMap::new(),
+            name: name.to_string(),
+        }
+    }
+
+    /// Fixture weights for the tiny MLP: `y = Relu(x @ w1) @ w2`, `x: [1, 64]`.
+    fn onnx_fixture_weights() -> (Vec<f32>, Vec<f32>) {
+        let w1: Vec<f32> = (0..64 * 8).map(|i| ((i % 17) as f32 - 8.0) * 0.05).collect();
+        let w2: Vec<f32> = (0..8 * 4).map(|i| ((i % 11) as f32 - 5.0) * 0.1).collect();
+        (w1, w2)
+    }
+
+    fn write_real_onnx_mlp(path: &std::path::Path) {
+        use trustformers_core::export::onnx::{ONNXExporter, ONNXGraph};
+        use trustformers_core::export::ExportConfig;
+
+        let (w1, w2) = onnx_fixture_weights();
+        let graph = ONNXGraph {
+            nodes: vec![
+                onnx_node("MatMul", "mm1", &["x", "w1"], &["h"]),
+                onnx_node("Relu", "relu", &["h"], &["a"]),
+                onnx_node("MatMul", "mm2", &["a", "w2"], &["y"]),
+            ],
+            inputs: vec![onnx_value_info("x", &[1, 64])],
+            outputs: vec![onnx_value_info("y", &[1, 4])],
+            initializers: vec![
+                onnx_initializer("w1", &[64, 8], &w1),
+                onnx_initializer("w2", &[8, 4], &w2),
+            ],
+            name: "mlp".to_string(),
+        };
+
+        let exporter = ONNXExporter::new().with_opset_version(17);
+        let model = exporter.wrap_graph(graph, &ExportConfig::default());
+        exporter.export_graph(&model, path).expect("write fixture onnx model");
+    }
+
+    /// A graph whose single node uses an operator the CPU interpreter does not
+    /// implement, to exercise the "fail loudly" path.
+    fn write_unsupported_op_onnx(path: &std::path::Path) {
+        use trustformers_core::export::onnx::{ONNXExporter, ONNXGraph};
+        use trustformers_core::export::ExportConfig;
+
+        let graph = ONNXGraph {
+            nodes: vec![onnx_node("TotallyMadeUpVendorOp", "n1", &["x"], &["y"])],
+            inputs: vec![onnx_value_info("x", &[1, 4])],
+            outputs: vec![onnx_value_info("y", &[1, 4])],
+            initializers: vec![],
+            name: "unsupported".to_string(),
+        };
+        let exporter = ONNXExporter::new().with_opset_version(17);
+        let model = exporter.wrap_graph(graph, &ExportConfig::default());
+        exporter.export_graph(&model, path).expect("write fixture onnx model");
+    }
+
+    fn onnx_fixture_input() -> HashMap<String, Tensor> {
+        let values: Vec<f32> = (0..64).map(|i| (i as f32 % 7.0) - 3.0).collect();
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            "x".to_string(),
+            Tensor::from_vec(values, &[1, 64]).expect("fixture input tensor"),
+        );
+        inputs
+    }
+
+    /// Minimal `Tokenizer` for driving the pipeline-level factory functions
+    /// without touching the network: always emits 64 fixed token ids, matching
+    /// the fixture MLP's `x: [1, 64]` input.
+    #[derive(Clone)]
+    struct FixedTokenizer;
+
+    impl Tokenizer for FixedTokenizer {
+        fn encode(&self, _text: &str) -> CoreResult<TokenizedInput> {
+            Ok(TokenizedInput::new(vec![1u32; 64], vec![1u8; 64]))
+        }
+        fn encode_pair(&self, text: &str, _text2: &str) -> CoreResult<TokenizedInput> {
+            self.encode(text)
+        }
+        fn decode(&self, ids: &[u32]) -> CoreResult<String> {
+            Ok(format!("{ids:?}"))
+        }
+        fn vocab_size(&self) -> usize {
+            100
+        }
+        fn get_vocab(&self) -> std::collections::HashMap<String, u32> {
+            std::collections::HashMap::new()
+        }
+        fn token_to_id(&self, _token: &str) -> Option<u32> {
+            None
+        }
+        fn id_to_token(&self, _id: u32) -> Option<String> {
+            None
+        }
+    }
+
+    /// Regression test for the `Tensor::zeros(&[1, 10])` mock: the pipeline's
+    /// `ONNXModel::forward` must return the interpreter's real, deterministic
+    /// answer for the fixture graph, matching a hand-computed reference.
     #[test]
-    fn test_mock_session_memory_info() {
-        let temp_dir = tempdir().expect("temp dir");
-        let model_path = temp_dir.path().join("model.onnx");
-        let _ = fs::File::create(&model_path).expect("create model file");
+    fn real_onnx_execution_matches_hand_computed_reference() {
+        let dir = onnx_fixture_dir("trustformers_pipeline_onnx_run");
+        let path = dir.join("mlp.onnx");
+        write_real_onnx_mlp(&path);
+
+        let config = ONNXBackendConfig::cpu_optimized(path);
+        let model = ONNXModel::from_config(config).expect("load real onnx fixture");
+
+        let inputs = onnx_fixture_input();
+        let x = inputs["x"].to_vec_f32().expect("f32");
+        let outputs = model.forward(inputs).expect("forward must execute the real graph");
+        let y = outputs.get("y").expect("y output").to_vec_f32().expect("f32");
+
+        let (w1, w2) = onnx_fixture_weights();
+        let mut hidden = [0.0f32; 8];
+        for (column, cell) in hidden.iter_mut().enumerate() {
+            let mut acc = 0.0f32;
+            for (row, &value) in x.iter().enumerate() {
+                acc += value * w1[row * 8 + column];
+            }
+            *cell = acc.max(0.0);
+        }
+        let mut expected = [0.0f32; 4];
+        for (column, cell) in expected.iter_mut().enumerate() {
+            let mut acc = 0.0f32;
+            for (row, &value) in hidden.iter().enumerate() {
+                acc += value * w2[row * 4 + column];
+            }
+            *cell = acc;
+        }
+
+        assert_eq!(y.len(), 4);
+        for (actual, expected) in y.iter().zip(expected.iter()) {
+            assert!((actual - expected).abs() < 1e-4, "{actual} vs {expected}");
+        }
+        // The old mock always answered zeros([1, 10]), which fails both the
+        // shape and value assertions above.
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Regression test for `from_config` silently building a pipeline on top of
+    /// operators the interpreter cannot run.
+    #[test]
+    fn from_config_refuses_a_graph_with_an_unsupported_operator() {
+        let dir = onnx_fixture_dir("trustformers_pipeline_onnx_unsupported");
+        let path = dir.join("bad.onnx");
+        write_unsupported_op_onnx(&path);
+
+        let config = ONNXBackendConfig::cpu_optimized(path);
+        let result = ONNXModel::from_config(config);
+        let message = match result {
+            Ok(_) => panic!("a graph with an unimplemented operator must be refused"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            message.contains("TotallyMadeUpVendorOp"),
+            "error should name the unsupported operator: {message}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Regression test: the public pipeline factory must fail loudly (not
+    /// build a classifier that will misbehave later) for the same reason.
+    #[test]
+    fn onnx_text_classification_pipeline_fails_loudly_for_unsupported_ops() {
+        let dir = onnx_fixture_dir("trustformers_pipeline_onnx_factory_unsupported");
+        let path = dir.join("bad.onnx");
+        write_unsupported_op_onnx(&path);
+
+        let result = onnx_text_classification_pipeline(&path, FixedTokenizer, None);
+        assert!(
+            result.is_err(),
+            "the factory must refuse to build a pipeline it cannot run"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Regression test for `Model::num_parameters` returning a hardcoded `0`.
+    #[test]
+    fn num_parameters_counts_real_initializer_elements() {
+        let dir = onnx_fixture_dir("trustformers_pipeline_onnx_params");
+        let path = dir.join("mlp.onnx");
+        write_real_onnx_mlp(&path);
+
+        let config = ONNXBackendConfig::cpu_optimized(path);
+        let model = ONNXModel::from_config(config).expect("load real onnx fixture");
+
+        assert_eq!(model.num_parameters(), 64 * 8 + 8 * 4);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Regression test for the fixed `avg_latency_ms: 30.0, throughput: 33.0,
+    /// memory_usage: 512MB` mock: values must come from real measurement.
+    #[test]
+    fn benchmark_measures_real_execution_not_fixed_mock_values() {
+        let dir = onnx_fixture_dir("trustformers_pipeline_onnx_benchmark");
+        let path = dir.join("mlp.onnx");
+        write_real_onnx_mlp(&path);
+
+        let config = ONNXBackendConfig::cpu_optimized(path);
+        let model = ONNXModel::from_config(config).expect("load real onnx fixture");
+
+        let result = model.benchmark(onnx_fixture_input(), 5).expect("benchmark");
+        assert!(
+            result.avg_latency_ms > 0.0,
+            "latency must be a real positive measurement"
+        );
+        assert!(
+            result.throughput > 0.0,
+            "throughput must be a real positive measurement"
+        );
+        // Real weight bytes for this fixture: (64*8 + 8*4) f32 elements.
+        assert_eq!(result.memory_usage, ((64 * 8 + 8 * 4) * 4) as u64);
+        assert_ne!(
+            (
+                result.avg_latency_ms,
+                result.throughput,
+                result.memory_usage
+            ),
+            (30.0, 33.0, 512 * 1024 * 1024),
+            "must not be the old hardcoded mock triple"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Regression test for `memory_info` returning fixed 1GB/512MB/512MB.
+    #[test]
+    fn memory_info_reports_real_model_weight_bytes() {
+        let dir = onnx_fixture_dir("trustformers_pipeline_onnx_memory");
+        let path = dir.join("mlp.onnx");
+        write_real_onnx_mlp(&path);
+
+        let config = ONNXBackendConfig::cpu_optimized(path);
+        let model = ONNXModel::from_config(config).expect("load real onnx fixture");
+
+        let info = model.memory_info().expect("memory info");
+        assert_eq!(info.model_memory_bytes, (64 * 8 + 8 * 4) * 4);
+        assert!(info.total_memory_bytes > 0);
+        assert!(info.available_memory_bytes <= info.total_memory_bytes);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Regression test for `get_device_properties` always answering
+    /// `{"type": "mock"}` regardless of the requested provider.
+    #[test]
+    fn get_device_properties_reports_real_cpu_info_not_mock() {
         let backend = ONNXRuntimeBackend::new(ONNXRuntimeConfig::default())
             .expect("runtime backend creation failed");
-        let result = backend.load_model(&model_path);
-        if let Ok(session) = result {
-            let info = ONNXSessionOps::get_memory_info(&session);
-            if let Ok(m) = info {
-                assert!(
-                    m.total_memory_bytes > 0,
-                    "total memory bytes must be positive"
-                );
-                assert!(
-                    m.available_memory_bytes <= m.total_memory_bytes,
-                    "available must be ≤ total"
-                );
-            }
-        }
+
+        let cpu_props =
+            backend.get_device_properties(&ExecutionProvider::CPU).expect("cpu properties");
+        assert_eq!(cpu_props.get("type").map(String::as_str), Some("cpu"));
+        assert_ne!(cpu_props.get("type").map(String::as_str), Some("mock"));
+        let cores: usize = cpu_props
+            .get("logical_cores")
+            .expect("logical_cores")
+            .parse()
+            .expect("numeric core count");
+        assert!(cores > 0);
+
+        let err = backend
+            .get_device_properties(&ExecutionProvider::CUDA { device_id: Some(0) })
+            .expect_err("no CUDA provider exists in this build");
+        assert!(!err.to_string().is_empty());
+    }
+
+    // ── Session ops on a real fixture ─────────────────────────────────────────
+
+    #[test]
+    fn session_benchmark_and_memory_info_are_real() {
+        let dir = onnx_fixture_dir("trustformers_pipeline_onnx_session_ops");
+        let path = dir.join("mlp.onnx");
+        write_real_onnx_mlp(&path);
+
+        let backend = ONNXRuntimeBackend::new(ONNXRuntimeConfig::default())
+            .expect("runtime backend creation failed");
+        let session = backend.load_model(&path).expect("load real onnx fixture");
+
+        let bench =
+            ONNXSessionOps::benchmark(&session, onnx_fixture_input(), 5, 2).expect("benchmark");
+        assert!(bench.avg_latency_ms > 0.0, "avg latency must be positive");
+        assert!(bench.throughput > 0.0, "throughput must be positive");
+        assert_eq!(bench.memory_usage, ((64 * 8 + 8 * 4) * 4) as u64);
+
+        let info = ONNXSessionOps::get_memory_info(&session).expect("memory info");
+        assert_eq!(info.model_memory_bytes, (64 * 8 + 8 * 4) * 4);
+        assert!(info.total_memory_bytes > 0);
+        assert!(info.available_memory_bytes <= info.total_memory_bytes);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // ── Benchmark results struct ──────────────────────────────────────────────

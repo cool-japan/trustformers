@@ -1,8 +1,27 @@
 //! Speech Recognition Pipeline (Automatic Speech Recognition / ASR).
 //!
-//! Converts audio input to text using Whisper-compatible models. Supports
-//! transcription (preserving the source language) and translation (always to English),
-//! with optional word- or sentence-level timestamps.
+//! ## What is real here
+//!
+//! * **Container decoding** — uncompressed RIFF/WAVE (PCM 8/16/24/32-bit and
+//!   IEEE float 32/64-bit); other containers report a structured error rather
+//!   than decoding to silence.
+//! * **Resampling** — linear interpolation to the configured rate.
+//! * **Feature extraction** — a Hann-windowed STFT computed with the pure-Rust
+//!   `oxifft` crate, projected through an **HTK-scale**
+//!   (`2595·log10(1 + f/700)`) triangular mel filterbank and log-compressed.
+//! * **Voice-activity / segmentation utilities** in `SpeechProcessor`.
+//!
+//! ## Model support
+//!
+//! No ASR decoder is wired into this pipeline, so
+//! [`SpeechRecognitionPipeline::transcribe`] returns a structured
+//! [`TrustformersError::FeatureUnavailable`] instead of the
+//! `"[transcription|en|1.0s|energy:0.0042] (stub output — model not loaded)"`
+//! string it used to emit alongside a fabricated `detected_language` of `"en"`
+//! and a constant `confidence` of `0.5`.
+//!
+//! Use [`SpeechRecognitionPipeline::prepare_features`] to obtain real log-mel
+//! frames and run your own decoder.
 //!
 //! # Example
 //!
@@ -27,6 +46,7 @@
 //! ```
 
 use crate::error::{Result, TrustformersError};
+use crate::pipeline::media::audio_dsp;
 use serde::{Deserialize, Serialize};
 use std::f32::consts::PI;
 use std::path::{Path, PathBuf};
@@ -154,8 +174,9 @@ pub struct TranscriptionSegment {
     pub start_secs: Option<f32>,
     /// Segment end time in seconds, if timestamps were requested.
     pub end_secs: Option<f32>,
-    /// Confidence score in [0, 1].
-    pub confidence: f32,
+    /// Decoder confidence in `[0, 1]`, or `None` when the decoder exposes no
+    /// score. Never a fabricated constant.
+    pub confidence: Option<f32>,
     /// Detected or forced language code for this segment.
     pub language: Option<String>,
 }
@@ -238,9 +259,17 @@ impl SpeechRecognitionPipeline {
     // -----------------------------------------------------------------------
 
     /// Transcribe a single audio input.
+    /// Transcribe an audio input.
+    ///
+    /// # Errors
+    ///
+    /// Decoding/validation errors surface first; otherwise returns
+    /// [`TrustformersError::FeatureUnavailable`] because no ASR decoder is
+    /// wired in. See [`Self::prepare_features`].
     pub fn transcribe(&self, audio: &AudioInput) -> Result<TranscriptionResult> {
-        let (samples, duration_secs) = self.prepare_audio(audio)?;
-        self.run_asr(&samples, duration_secs)
+        // Run the real front-end so input errors surface accurately.
+        let _features = self.prepare_features(audio)?;
+        Err(self.unsupported_decoder())
     }
 
     /// Transcribe a batch of audio inputs.
@@ -335,15 +364,42 @@ impl SpeechRecognitionPipeline {
                         ),
                     });
                 }
-                // Without an audio decoding library we return a silent placeholder.
-                // In a full implementation this would read WAV/FLAC/MP3 using e.g. symphonia.
-                warn!(
-                    path = %path.display(),
-                    "Audio file decoding is not yet available; returning silence placeholder"
+                // Real decoding: uncompressed RIFF/WAVE only. Anything else is
+                // reported, never silently replaced by silence.
+                let bytes = std::fs::read(path).map_err(|e| TrustformersError::Io {
+                    message: format!("failed to read audio file: {e}"),
+                    path: Some(path.to_string_lossy().to_string()),
+                    suggestion: Some("Check file permissions".to_string()),
+                })?;
+                if !audio_dsp::is_wav(&bytes) {
+                    return Err(TrustformersError::feature_unavailable(
+                        format!(
+                            "cannot decode '{}': only uncompressed RIFF/WAVE is decodable \
+                             without an external codec",
+                            path.display()
+                        ),
+                        "audio-codec",
+                    ));
+                }
+                let decoded = audio_dsp::decode_wav(&bytes)?;
+                let resampled = resample_linear(
+                    &decoded.samples,
+                    decoded.sample_rate,
+                    self.config.sample_rate,
                 );
-                let n = (self.config.max_duration_secs * self.config.sample_rate as f32) as usize;
-                let duration = n as f32 / self.config.sample_rate as f32;
-                Ok((vec![0.0_f32; n], duration))
+                let max_samples =
+                    (self.config.max_duration_secs * self.config.sample_rate as f32) as usize;
+                let truncated = if resampled.len() > max_samples {
+                    warn!(
+                        input_len = resampled.len(),
+                        max_samples, "Audio truncated to max_duration_secs"
+                    );
+                    resampled[..max_samples].to_vec()
+                } else {
+                    resampled
+                };
+                let duration = truncated.len() as f32 / self.config.sample_rate as f32;
+                Ok((truncated, duration))
             },
 
             AudioInput::MelSpectrogram(mel) => {
@@ -355,87 +411,109 @@ impl SpeechRecognitionPipeline {
                         Some("empty"),
                     ));
                 }
-                // Reconstruct approximate duration from frame count and hop length
+                // Reconstruct the duration from the frame count and hop length.
+                // Pre-computed features cannot be turned back into a waveform,
+                // so `prepare_audio` is not the right entry point for them —
+                // `transcribe` handles this variant directly.
                 let duration_secs = mel.len() as f32 * self.config.hop_length as f32
                     / self.config.sample_rate as f32;
-                // Flatten mel back to a dummy PCM signal for the stub forward pass
-                let fake_pcm: Vec<f32> = mel.iter().flat_map(|row| row.iter().cloned()).collect();
-                Ok((fake_pcm, duration_secs))
+                Err(TrustformersError::invalid_input(
+                    format!(
+                        "MelSpectrogram input ({duration_secs:.2}s of features) cannot be \
+                         converted back to PCM; pass it straight to the decoder instead"
+                    ),
+                    Some("MelSpectrogram"),
+                    Some("RawAudio or FilePath"),
+                    Some("MelSpectrogram"),
+                ))
             },
         }
     }
 
-    /// Run the ASR stub and produce a [`TranscriptionResult`].
-    fn run_asr(&self, samples: &[f32], duration_secs: f32) -> Result<TranscriptionResult> {
-        // Compute mel spectrogram
-        let mel = compute_mel_spectrogram_internal(
-            samples,
+    /// Compute real log-mel features for an audio input.
+    ///
+    /// This is the pipeline's genuine, reusable front-end: decode → resample →
+    /// Hann-windowed STFT (`oxifft`) → HTK mel filterbank → natural-log
+    /// compression. It works with or without a decoder attached.
+    ///
+    /// # Errors
+    ///
+    /// Propagates decoding and validation errors.
+    pub fn prepare_features(&self, audio: &AudioInput) -> Result<Vec<Vec<f32>>> {
+        if let AudioInput::MelSpectrogram(mel) = audio {
+            if mel.is_empty() {
+                return Err(TrustformersError::invalid_input(
+                    "MelSpectrogram input must not be empty",
+                    Some("MelSpectrogram"),
+                    Some("non-empty 2-D mel matrix"),
+                    Some("empty"),
+                ));
+            }
+            return Ok(mel.clone());
+        }
+        let (samples, _duration) = self.prepare_audio(audio)?;
+        Ok(compute_mel_spectrogram_internal(
+            &samples,
             self.config.fft_window_size,
             self.config.hop_length,
             self.config.num_mel_bins,
             self.config.sample_rate,
-        );
+        ))
+    }
 
-        debug!(
-            frames = mel.len(),
-            mel_bins = self.config.num_mel_bins,
-            duration_secs,
-            "Running ASR stub forward pass"
-        );
+    /// The error this pipeline returns when asked to decode.
+    fn unsupported_decoder(&self) -> TrustformersError {
+        TrustformersError::FeatureUnavailable {
+            message: format!(
+                "no speech recognition decoder is wired into this pipeline, so `{}` cannot \
+                 transcribe. Feature extraction is real — call `prepare_features` and run your \
+                 own decoder. This pipeline never returns a stub transcript, a guessed language \
+                 or a constant confidence.",
+                self.config.model_name
+            ),
+            feature: "asr-decoder".to_string(),
+            suggestion: Some(
+                "Use `SpeechRecognitionPipeline::prepare_features` with your own decoder."
+                    .to_string(),
+            ),
+            alternatives: Vec::new(),
+        }
+    }
 
-        // Stub: produce a placeholder transcription based on audio energy
-        let text = self.stub_decode(&mel, duration_secs);
-
-        let detected_language = self.config.language.clone().or_else(|| {
-            // Heuristic stub: derive "language" from energy pattern
-            Some("en".to_string())
-        });
-
-        // Build segments according to the requested timestamp granularity
-        let segments = self.build_segments(&text, duration_secs);
-
-        Ok(TranscriptionResult {
+    /// Assemble a [`TranscriptionResult`] from a decoder's output.
+    ///
+    /// Exposed so callers running their own decoder can reuse the pipeline's
+    /// real segmentation. `confidence` is whatever the decoder reported;
+    /// `None` when it exposes no score.
+    pub fn build_result(
+        &self,
+        text: String,
+        duration_secs: f32,
+        detected_language: Option<String>,
+        confidence: Option<f32>,
+    ) -> TranscriptionResult {
+        let segments = self.build_segments(&text, duration_secs, confidence);
+        TranscriptionResult {
             text,
             segments,
             detected_language,
             duration_secs,
-        })
-    }
-
-    /// Deterministic stub decoder: generates placeholder text from mel energy.
-    fn stub_decode(&self, mel: &[Vec<f32>], duration_secs: f32) -> String {
-        if mel.is_empty() {
-            return String::new();
         }
-
-        // Compute overall energy
-        let energy: f32 = mel.iter().flat_map(|row| row.iter()).map(|&v| v.abs()).sum::<f32>()
-            / (mel.len() * mel[0].len().max(1)) as f32;
-
-        let task_tag = match self.config.task {
-            SpeechTask::Transcribe => "transcription",
-            SpeechTask::Translate => "translation",
-        };
-
-        let lang_tag = self.config.language.as_deref().unwrap_or("auto").to_string();
-
-        format!(
-            "[{task_tag}|{lang_tag}|{duration:.1}s|energy:{energy:.4}] (stub output — model not loaded)",
-            task_tag = task_tag,
-            lang_tag = lang_tag,
-            duration = duration_secs,
-            energy = energy,
-        )
     }
 
     /// Build transcript segments based on the configured timestamp granularity.
-    fn build_segments(&self, text: &str, duration_secs: f32) -> Vec<TranscriptionSegment> {
+    fn build_segments(
+        &self,
+        text: &str,
+        duration_secs: f32,
+        confidence: Option<f32>,
+    ) -> Vec<TranscriptionSegment> {
         match self.config.return_timestamps {
             ReturnTimestamps::None => vec![TranscriptionSegment {
                 text: text.to_string(),
                 start_secs: None,
                 end_secs: None,
-                confidence: 0.5,
+                confidence,
                 language: self.config.language.clone(),
             }],
 
@@ -448,10 +526,10 @@ impl SpeechRecognitionPipeline {
                         let start = i as f32 * segment_dur;
                         let end = ((i + 1) as f32 * segment_dur).min(duration_secs);
                         TranscriptionSegment {
-                            text: format!("[segment {}/{n_segs}] {text}", i + 1),
+                            text: text.to_string(),
                             start_secs: Some(start),
                             end_secs: Some(end),
-                            confidence: 0.5,
+                            confidence,
                             language: self.config.language.clone(),
                         }
                     })
@@ -475,7 +553,7 @@ impl SpeechRecognitionPipeline {
                             text: word.to_string(),
                             start_secs: Some(start),
                             end_secs: Some(end),
-                            confidence: 0.5,
+                            confidence,
                             language: self.config.language.clone(),
                         }
                     })
@@ -704,20 +782,8 @@ fn rfft_magnitude(frame: &[f32], fft_size: usize) -> Vec<f32> {
     let mut padded = vec![0.0_f32; fft_size];
     padded[..n].copy_from_slice(&frame[..n]);
 
-    let half = fft_size / 2 + 1;
-    let mut magnitudes = Vec::with_capacity(half);
-
-    for k in 0..half {
-        let mut re = 0.0_f32;
-        let mut im = 0.0_f32;
-        for (j, &x) in padded.iter().enumerate() {
-            let angle = 2.0 * PI * k as f32 * j as f32 / fft_size as f32;
-            re += x * angle.cos();
-            im -= x * angle.sin();
-        }
-        magnitudes.push((re * re + im * im).sqrt());
-    }
-    magnitudes
+    // Real FFT via the pure-Rust `oxifft` crate: N real inputs -> N/2+1 bins.
+    oxifft::rfft(&padded).into_iter().map(|c| c.norm()).collect()
 }
 
 /// Build a triangular mel filterbank.
@@ -862,72 +928,48 @@ mod tests {
         assert!(SpeechRecognitionPipeline::new(cfg).is_err());
     }
 
-    #[test]
-    fn test_transcribe_raw_audio() {
-        let p = default_pipeline();
-        let result = p.transcribe(&silence(16_000)).expect("transcribe silence");
-        assert!(!result.text.is_empty());
-        assert!(result.duration_secs > 0.0);
-        assert!(!result.segments.is_empty());
+    fn assert_no_decoder(err: &TrustformersError) {
+        match err {
+            TrustformersError::FeatureUnavailable {
+                feature, message, ..
+            } => {
+                assert_eq!(feature, "asr-decoder");
+                assert!(
+                    !message.contains("stub output"),
+                    "the stub transcript must be gone: {message}"
+                );
+            },
+            other => panic!("expected an asr-decoder error, got {other:?}"),
+        }
     }
 
     #[test]
-    fn test_transcribe_batch() {
+    fn test_transcribe_reports_missing_decoder() {
+        // Regression: `transcribe` used to return
+        // "[transcription|auto|1.0s|energy:0.0000] (stub output — model not
+        // loaded)" with a fabricated `detected_language` of "en" and a constant
+        // 0.5 confidence.
+        let p = default_pipeline();
+        let err = p.transcribe(&silence(16_000)).expect_err("no decoder is wired in");
+        assert_no_decoder(&err);
+    }
+
+    #[test]
+    fn test_transcribe_batch_reports_missing_decoder() {
         let p = default_pipeline();
         let audios = vec![silence(8_000), silence(16_000), silence(4_000)];
-        let results = p.transcribe_batch(&audios).expect("batch transcribe");
-        assert_eq!(results.len(), 3);
+        let err = p.transcribe_batch(&audios).expect_err("no decoder is wired in");
+        assert_no_decoder(&err);
     }
 
     #[test]
-    fn test_transcribe_word_timestamps() {
-        let p = SpeechRecognitionPipeline::new(SpeechRecognitionConfig {
-            return_timestamps: ReturnTimestamps::Word,
-            ..Default::default()
-        })
-        .expect("valid config");
-        let result = p.transcribe(&silence(16_000)).expect("transcribe");
-        // Each segment should have timestamps
-        for seg in &result.segments {
-            assert!(seg.start_secs.is_some());
-            assert!(seg.end_secs.is_some());
-        }
-    }
-
-    #[test]
-    fn test_transcribe_sentence_timestamps() {
-        let p = SpeechRecognitionPipeline::new(SpeechRecognitionConfig {
-            return_timestamps: ReturnTimestamps::Sentence,
-            max_duration_secs: 10.0,
-            ..Default::default()
-        })
-        .expect("valid config");
-        let result = p.transcribe(&silence(16_000 * 10)).expect("transcribe 10s");
-        assert!(!result.segments.is_empty());
-        for seg in &result.segments {
-            assert!(seg.start_secs.is_some());
-            assert!(seg.end_secs.is_some());
-        }
-    }
-
-    #[test]
-    fn test_transcribe_translate_task() {
-        let p = SpeechRecognitionPipeline::new(SpeechRecognitionConfig {
-            task: SpeechTask::Translate,
-            language: Some("fr".to_string()),
-            ..Default::default()
-        })
-        .expect("valid config");
-        let result = p.transcribe(&silence(8_000)).expect("translate");
-        assert!(result.text.contains("translation"));
-    }
-
-    #[test]
-    fn test_transcribe_mel_spectrogram_input() {
+    fn test_transcribe_mel_spectrogram_input_reports_missing_decoder() {
         let p = default_pipeline();
         let mel = vec![vec![0.0_f32; 80]; 100];
-        let result = p.transcribe(&AudioInput::MelSpectrogram(mel)).expect("mel input");
-        assert!(!result.text.is_empty());
+        let err = p
+            .transcribe(&AudioInput::MelSpectrogram(mel))
+            .expect_err("no decoder is wired in");
+        assert_no_decoder(&err);
     }
 
     #[test]
@@ -935,6 +977,76 @@ mod tests {
         let p = default_pipeline();
         let result = p.transcribe(&AudioInput::MelSpectrogram(Vec::new()));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_prepare_features_produces_real_mel_frames() {
+        let p = default_pipeline();
+        let tone: Vec<f32> = (0..16_000)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16_000.0).sin())
+            .collect();
+        let frames = p
+            .prepare_features(&AudioInput::RawAudio {
+                samples: tone,
+                sample_rate: 16_000,
+            })
+            .expect("features");
+        assert!(!frames.is_empty());
+        assert_eq!(frames[0].len(), 80);
+        let flat: Vec<f32> = frames.iter().flatten().copied().collect();
+        assert!(
+            flat.iter().any(|&v| v != 0.0),
+            "features must not be all zeros"
+        );
+    }
+
+    #[test]
+    fn test_prepare_features_distinguishes_tones() {
+        let p = default_pipeline();
+        let make = |freq: f32| AudioInput::RawAudio {
+            samples: (0..8_000)
+                .map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / 16_000.0).sin())
+                .collect(),
+            sample_rate: 16_000,
+        };
+        let low = p.prepare_features(&make(220.0)).expect("low");
+        let high = p.prepare_features(&make(3000.0)).expect("high");
+        assert_ne!(low, high, "different tones must yield different features");
+    }
+
+    #[test]
+    fn test_build_result_reports_caller_supplied_scores() {
+        let p = SpeechRecognitionPipeline::new(SpeechRecognitionConfig {
+            return_timestamps: ReturnTimestamps::Word,
+            ..Default::default()
+        })
+        .expect("valid config");
+        let result = p.build_result(
+            "hello world".to_string(),
+            2.0,
+            Some("en".to_string()),
+            Some(0.73),
+        );
+        assert_eq!(result.segments.len(), 2);
+        for seg in &result.segments {
+            assert_eq!(seg.confidence, Some(0.73));
+            assert!(seg.start_secs.is_some());
+            assert!(seg.end_secs.is_some());
+        }
+        assert_eq!(result.detected_language.as_deref(), Some("en"));
+    }
+
+    #[test]
+    fn test_build_result_without_scores_reports_none() {
+        let p = default_pipeline();
+        let result = p.build_result("hi".to_string(), 1.0, None, None);
+        assert!(
+            result.detected_language.is_none(),
+            "language must not be guessed"
+        );
+        for seg in &result.segments {
+            assert!(seg.confidence.is_none(), "confidence must not be invented");
+        }
     }
 
     #[test]
@@ -967,16 +1079,53 @@ mod tests {
     }
 
     #[test]
-    fn test_transcribe_file_exists_placeholder() {
-        let tmp_dir = std::env::temp_dir();
-        let audio_path = tmp_dir.join("tf_asr_test_placeholder.wav");
+    fn test_transcribe_file_rejects_a_bogus_wav() {
+        // Regression: an existing file used to decode to
+        // `vec![0.0; max_duration * sample_rate]` silence and still produce a
+        // "transcript".
+        let audio_path = std::env::temp_dir().join("tf_asr_test_bogus.wav");
         std::fs::write(&audio_path, b"RIFF....fake wav").expect("write fake wav");
 
         let p = default_pipeline();
-        let result = p.transcribe_file(&audio_path).expect("transcribe existing file");
-        assert!(!result.text.is_empty());
-
+        let result = p.transcribe_file(&audio_path);
         std::fs::remove_file(&audio_path).ok();
+        assert!(result.is_err(), "a malformed RIFF stream must not decode");
+    }
+
+    #[test]
+    fn test_transcribe_file_decodes_a_real_wav() {
+        let audio_path = std::env::temp_dir().join("tf_asr_test_real.wav");
+        let tone: Vec<f32> = (0..16_000)
+            .map(|i| 0.6 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16_000.0).sin())
+            .collect();
+        std::fs::write(
+            &audio_path,
+            crate::pipeline::media::audio_dsp::encode_wav_pcm16(&tone, 16_000),
+        )
+        .expect("write real wav");
+
+        let p = default_pipeline();
+        let frames = p.prepare_features(&AudioInput::FilePath(audio_path.clone()));
+        let decode_err = p.transcribe_file(&audio_path);
+        std::fs::remove_file(&audio_path).ok();
+
+        let frames = frames.expect("a real WAV must decode");
+        assert!(!frames.is_empty(), "real audio must yield mel frames");
+        // Decoding worked; only the decoder is missing.
+        assert_no_decoder(&decode_err.expect_err("no decoder is wired in"));
+    }
+
+    #[test]
+    fn test_transcribe_file_rejects_compressed_container() {
+        let audio_path = std::env::temp_dir().join("tf_asr_test_fake.mp3");
+        std::fs::write(&audio_path, b"ID3\x04\x00\x00\x00\x00\x00\x00").expect("write");
+        let p = default_pipeline();
+        let result = p.transcribe_file(&audio_path);
+        std::fs::remove_file(&audio_path).ok();
+        assert!(matches!(
+            result,
+            Err(TrustformersError::FeatureUnavailable { .. })
+        ));
     }
 
     #[test]

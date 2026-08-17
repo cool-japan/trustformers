@@ -3,12 +3,15 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 use super::functions::*;
+use super::jobs::JobStore;
+use super::streams::StreamStore;
 use crate::{
     auth::AuthService,
-    batching::DynamicBatchingService,
+    batching::{BatchExecutor, DynamicBatchingService},
     caching::CachingService,
     health::{HAConfig, HighAvailabilityService},
     metrics::MetricsService,
+    model_management::{ModelManager, ModelRegistry, VersionManager},
     polling::LongPollingService,
     shadow::ShadowTestingService,
     streaming::{SseHandler, StreamingService, WebSocketHandler},
@@ -20,9 +23,9 @@ use axum::{
     Router,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use sysinfo::System;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -64,6 +67,15 @@ pub struct TrustformerServer {
     pub(crate) shadow_service: Arc<ShadowTestingService>,
     pub(crate) auth_service: Option<Arc<AuthService>>,
     pub(crate) startup_time: Instant,
+    /// Registry of async inference jobs; backs `/inference/async` and
+    /// `/jobs/{id}/status`.
+    pub(crate) job_store: Arc<JobStore>,
+    /// Registry of streaming inference requests; backs `/v1/inference/stream`.
+    pub(crate) stream_store: Arc<StreamStore>,
+    /// Real model loader; backs `/models/load`.
+    pub(crate) model_manager: Arc<ModelManager>,
+    /// Requests observed by the HTTP layer, counted for `/admin/stats`.
+    pub(crate) request_counter: Arc<AtomicU64>,
 }
 impl TrustformerServer {
     /// Get batching service
@@ -86,10 +98,27 @@ impl TrustformerServer {
     pub fn metrics_service(&self) -> &Arc<MetricsService> {
         &self.metrics_service
     }
-    /// Create a new server instance
+    /// Create a new server instance without a model.
+    ///
+    /// Inference endpoints on such a server report `503 Service Unavailable`
+    /// rather than returning synthesized output; use
+    /// [`TrustformerServer::with_executor`] to install a real batch executor.
     pub fn new(config: ServerConfig) -> Self {
-        let batching_service =
-            Arc::new(DynamicBatchingService::new(config.batching_config.clone()));
+        Self::build(config, None)
+    }
+
+    /// Create a server whose batching stack is backed by `executor`.
+    pub fn with_executor(config: ServerConfig, executor: Arc<dyn BatchExecutor>) -> Self {
+        Self::build(config, Some(executor))
+    }
+
+    fn build(config: ServerConfig, executor: Option<Arc<dyn BatchExecutor>>) -> Self {
+        let batching_service = Arc::new(match executor {
+            Some(executor) => {
+                DynamicBatchingService::with_executor(config.batching_config.clone(), executor)
+            },
+            None => DynamicBatchingService::new(config.batching_config.clone()),
+        });
         let caching_service = Arc::new(CachingService::new(config.caching_config.clone()));
         let streaming_service = Arc::new(StreamingService::new(config.streaming_config.clone()));
         let sse_handler = Arc::new(SseHandler::new(config.streaming_config.sse_config.clone()));
@@ -100,6 +129,14 @@ impl TrustformerServer {
         let metrics_service = Arc::new(MetricsService::default());
         let polling_service = Arc::new(LongPollingService::new(config.polling_config.clone()));
         let shadow_service = Arc::new(ShadowTestingService::new(config.shadow_config.clone()));
+        let model_registry = Arc::new(ModelRegistry::new(
+            config.model_management_config.metadata_dir.clone(),
+        ));
+        let model_manager = Arc::new(ModelManager::new(
+            config.model_management_config.clone(),
+            model_registry,
+            Arc::new(VersionManager::new()),
+        ));
         Self {
             config,
             batching_service,
@@ -113,31 +150,82 @@ impl TrustformerServer {
             shadow_service,
             auth_service: None,
             startup_time: Instant::now(),
+            job_store: Arc::new(JobStore::new()),
+            stream_store: Arc::new(StreamStore::new()),
+            model_manager,
+            request_counter: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Registry of async inference jobs.
+    pub fn job_store(&self) -> &Arc<JobStore> {
+        &self.job_store
+    }
+
+    /// Registry of streaming inference requests.
+    pub fn stream_store(&self) -> &Arc<StreamStore> {
+        &self.stream_store
+    }
+
+    /// Real model loader used by `/models/load`.
+    pub fn model_manager(&self) -> &Arc<ModelManager> {
+        &self.model_manager
+    }
+
+    /// Total HTTP requests observed since startup.
+    pub fn total_requests(&self) -> u64 {
+        self.request_counter.load(Ordering::Relaxed)
+    }
+
+    /// Record one observed HTTP request.
+    pub(crate) fn record_request(&self) {
+        self.request_counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Whether a real model is wired into the batching stack.
+    pub fn has_model(&self) -> bool {
+        self.batching_service.has_model()
     }
     /// Get server uptime in seconds
     pub fn uptime_seconds(&self) -> f64 {
         self.startup_time.elapsed().as_secs_f64()
     }
-    /// Get actual system metrics
+    /// Measured host metrics.
+    ///
+    /// Every field is read from `sysinfo`; a disk figure that cannot be measured
+    /// is reported as `-1.0` rather than as a plausible percentage.
+    ///
+    /// `active_connections` counts the work this process is genuinely driving
+    /// right now (streaming requests in flight plus async jobs being processed).
+    /// Use [`TrustformerServer::system_health_info`] for the fuller picture that
+    /// also includes live SSE/WebSocket connections.
     pub fn get_system_metrics(&self) -> SystemHealthInfo {
-        let mut system = System::new_all();
-        system.refresh_all();
-        let cpu_usage = system.cpus().iter().map(|cpu| cpu.cpu_usage() as f64).sum::<f64>()
-            / system.cpus().len() as f64;
-        let memory_usage = if system.total_memory() > 0 {
-            (system.used_memory() as f64 / system.total_memory() as f64) * 100.0
-        } else {
-            0.0
-        };
-        let disk_usage = get_disk_usage_percentage().unwrap_or(0.0);
-        let active_connections = self.get_active_connection_count();
+        let snapshot = super::system_stats::measure_host();
         SystemHealthInfo {
-            cpu_usage,
-            memory_usage,
-            disk_usage,
-            active_connections,
+            cpu_usage: snapshot.cpu_percent,
+            memory_usage: snapshot.memory_percent,
+            disk_usage: snapshot.disk_percent.unwrap_or(-1.0),
+            active_connections: self.in_flight_work_count(),
         }
+    }
+
+    /// Measured host metrics including live streaming connections.
+    pub async fn system_health_info(&self) -> SystemHealthInfo {
+        let snapshot = super::system_stats::measure_host_async().await;
+        SystemHealthInfo {
+            cpu_usage: snapshot.cpu_percent,
+            memory_usage: snapshot.memory_percent,
+            disk_usage: snapshot.disk_percent.unwrap_or(-1.0),
+            active_connections: self.active_connection_count().await,
+        }
+    }
+
+    /// Requests this process is driving right now, countable synchronously.
+    pub fn in_flight_work_count(&self) -> usize {
+        let streaming = self.stream_store.count_in_state(super::streams::StreamState::Streaming);
+        let jobs = self.job_store.count_in_state(super::jobs::JobState::Processing)
+            + self.job_store.count_in_state(super::jobs::JobState::Pending);
+        streaming + jobs
     }
     /// Enable authentication
     pub fn with_auth(mut self, auth_service: AuthService) -> Self {
@@ -164,13 +252,13 @@ impl TrustformerServer {
         }
         Ok(())
     }
-    /// Create the router with all endpoints for testing
-    pub async fn create_test_router(self) -> Router {
-        if let Err(e) = self.batching_service.start().await {
-            tracing::warn!("Failed to start batching service for tests: {}", e);
-        }
-        let shared_state = Arc::new(self);
-        let mut router = Router::new()
+    /// The complete route table this server serves.
+    ///
+    /// Both the production router and the test router are built from this single
+    /// table, so an endpoint can never be reachable in tests while returning 404
+    /// in production.
+    fn routes() -> Router {
+        Router::new()
             .route("/health", get(health_check))
             .route("/health/detailed", get(detailed_health_check))
             .route("/health/readiness", get(readiness_check))
@@ -181,11 +269,14 @@ impl TrustformerServer {
             .route("/inference/batch", post(batch_inference_endpoint))
             .route("/v1/inference/stream", post(streaming_inference_endpoint))
             .route("/inference/stream", post(streaming_inference_endpoint))
+            .route("/v1/inference/stream/{id}", get(stream_status_endpoint))
             .route("/inference/async", post(async_inference_endpoint))
+            .route("/jobs/{id}/status", get(job_status_endpoint))
             .route("/admin/stats", get(get_stats))
             .route("/admin/config", get(get_config))
             .route("/admin/memory/pressure", get(memory_pressure_endpoint))
-            .route("/metrics", get(metrics_endpoint))
+            .route("/admin/failover", post(admin_failover_endpoint))
+            .route("/admin/gpu/status", get(admin_gpu_status_endpoint))
             .route("/stream", get(sse_stream_endpoint))
             .route("/v1/stream/sse", get(sse_stream_endpoint))
             .route("/ws", get(websocket_endpoint))
@@ -201,64 +292,112 @@ impl TrustformerServer {
             .route("/shadow/compare", post(shadow_comparison_endpoint))
             .route("/graphql", post(graphql_handler))
             .route("/graphql/playground", get(graphql_playground_handler))
-            .route("/jobs/{id}/status", get(job_status_endpoint))
             .route("/models/load", post(model_load_endpoint))
-            .route("/admin/failover", post(admin_failover_endpoint))
-            .route("/admin/gpu/status", get(admin_gpu_status_endpoint))
             .route("/api-docs/openapi.json", get(openapi_json_endpoint))
             .route("/docs", get(swagger_ui_endpoint))
-            .route("/auth/token", post(mock_auth_token_handler))
-            .route("/auth/login", post(mock_auth_token_handler));
+            .route("/auth/token", post(auth_token_handler))
+            .route("/auth/login", post(auth_token_handler))
+    }
+
+    /// Paths served by this server, for diagnostics and for the router parity test.
+    pub fn route_paths() -> &'static [&'static str] {
+        &[
+            "/health",
+            "/health/detailed",
+            "/health/readiness",
+            "/health/liveness",
+            "/v1/inference",
+            "/inference",
+            "/v1/inference/batch",
+            "/inference/batch",
+            "/v1/inference/stream",
+            "/inference/stream",
+            "/v1/inference/stream/{id}",
+            "/inference/async",
+            "/jobs/{id}/status",
+            "/admin/stats",
+            "/admin/config",
+            "/admin/memory/pressure",
+            "/admin/failover",
+            "/admin/gpu/status",
+            "/stream",
+            "/v1/stream/sse",
+            "/ws",
+            "/v1/stream/ws",
+            "/poll",
+            "/v1/poll",
+            "/poll/stats",
+            "/v1/poll/stats",
+            "/shadow/stats",
+            "/v1/shadow/stats",
+            "/shadow/results",
+            "/v1/shadow/results",
+            "/shadow/compare",
+            "/graphql",
+            "/graphql/playground",
+            "/models/load",
+            "/api-docs/openapi.json",
+            "/docs",
+            "/auth/token",
+            "/auth/login",
+        ]
+    }
+
+    /// Create the router with all endpoints for testing
+    pub async fn create_test_router(self) -> Router {
+        if let Err(e) = self.batching_service.start().await {
+            tracing::warn!("Failed to start batching service for tests: {}", e);
+        }
+        let shared_state = Arc::new(self);
+        let mut router = Self::routes().route("/metrics", get(metrics_endpoint));
+
         if shared_state.auth_service.is_some() {
             router = router.layer(axum::middleware::from_fn(auth_extension_middleware));
         }
-        router = router.layer(axum::Extension(shared_state));
+        router = router
+            .layer(axum::middleware::from_fn(request_counting_middleware))
+            .layer(axum::Extension(shared_state));
         router
     }
-    /// Create the router with all endpoints
+
+    /// Create the production router.
+    ///
+    /// Serves exactly the same endpoints as [`TrustformerServer::create_test_router`];
+    /// only the observability layers and the `/metrics` gate differ.
     async fn create_router(self) -> Router {
         let shared_state = Arc::new(self);
-        let mut router = Router::new()
-            .route("/health", get(health_check))
-            .route("/health/detailed", get(detailed_health_check))
-            .route("/health/readiness", get(readiness_check))
-            .route("/health/liveness", get(liveness_check))
-            .route("/admin/stats", get(get_stats))
-            .route("/admin/config", get(get_config))
-            .route("/stream", get(sse_stream_endpoint))
-            .route("/ws", get(websocket_endpoint))
-            .route("/poll/stats", get(poll_stats_endpoint))
-            .route("/shadow/stats", get(shadow_stats_endpoint))
-            .route("/shadow/results", get(shadow_results_endpoint));
+        let mut router = Self::routes();
+
         if shared_state.config.enable_metrics {
             router = router.route("/metrics", get(metrics_endpoint));
         }
         if shared_state.auth_service.is_some() {
             router = router.layer(axum::middleware::from_fn(auth_extension_middleware));
         }
-        router = router.layer(
-            ServiceBuilder::new()
-                .layer(TraceLayer::new_for_http())
-                .layer(CorsLayer::permissive()),
-        );
+        router = router
+            .layer(axum::middleware::from_fn(request_counting_middleware))
+            .layer(axum::Extension(shared_state))
+            .layer(
+                ServiceBuilder::new()
+                    .layer(TraceLayer::new_for_http())
+                    .layer(CorsLayer::permissive()),
+            );
         router
     }
 }
+
 impl TrustformerServer {
-    /// Get the current number of active connections
-    fn get_active_connection_count(&self) -> usize {
-        let batching_queue_size = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let stats = self.batching_service.get_stats().await;
-                stats.aggregator_stats.pending_requests + stats.aggregator_stats.queue_depth
-            })
-        });
-        let mut active_connections = batching_queue_size;
-        if batching_queue_size > 0 {
-            active_connections += 1;
-        }
-        active_connections += 2;
-        active_connections
+    /// Number of connections currently being served.
+    ///
+    /// Counted from the real streaming registries plus the work in flight in the
+    /// batching stack. No constant is added to make the number look busier.
+    pub async fn active_connection_count(&self) -> usize {
+        let batching = self.batching_service.get_stats().await;
+        let in_flight =
+            batching.aggregator_stats.pending_requests + batching.aggregator_stats.queue_depth;
+        let sse = self.sse_handler.get_stats().await.active_connections;
+        let websockets = self.websocket_handler.get_stats().await.active_connections;
+        in_flight + sse + websockets
     }
 }
 /// Async inference response
@@ -341,8 +480,7 @@ pub struct InferenceResponse {
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[schema(example = json!({"target_node":"node-2"}))]
 pub struct FailoverRequest {
-    // reason: deserialized from the failover request payload; not read directly yet.
-    #[allow(dead_code)]
+    /// Node the caller wants to fail over to. Read by `/admin/failover`.
     pub(crate) target_node: String,
 }
 /// Model load request
@@ -350,7 +488,19 @@ pub struct FailoverRequest {
 pub struct ModelLoadRequest {
     pub(crate) model_name: String,
     pub(crate) model_version: String,
+    #[serde(default = "default_device")]
     pub(crate) device: String,
+    /// Filesystem path of the checkpoint to load. Required: the server never
+    /// fabricates weights for a model it cannot find.
+    #[serde(default)]
+    pub(crate) model_path: Option<String>,
+    /// Requested weight precision (`fp32`, `fp16`, ...).
+    #[serde(default)]
+    pub(crate) precision: Option<String>,
+}
+
+fn default_device() -> String {
+    "cpu".to_string()
 }
 /// Mock authentication token handler for testing
 #[derive(Debug, serde::Deserialize)]
@@ -420,4 +570,121 @@ pub struct HealthResponse {
     pub(crate) timestamp: chrono::DateTime<chrono::Utc>,
     pub(crate) version: String,
     pub(crate) uptime_seconds: f64,
+}
+
+#[cfg(test)]
+mod router_tests {
+    use super::*;
+
+    /// Regression: the production router used to register only 11 of the
+    /// server's routes and no `Extension` layer, so an operator who ran
+    /// `TrustformerServer::start()` got 404 (or a 500) on every endpoint the
+    /// tests exercised through `create_test_router`.
+    #[tokio::test]
+    async fn production_router_serves_every_endpoint() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let mut config = ServerConfig::default();
+        config.enable_metrics = true;
+        let router = TrustformerServer::new(config).create_router().await;
+
+        // Endpoints that must answer a GET without a body.
+        for path in [
+            "/health",
+            "/health/liveness",
+            "/admin/config",
+            "/metrics",
+            "/api-docs/openapi.json",
+            "/docs",
+            "/graphql/playground",
+            "/admin/gpu/status",
+        ] {
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).expect("request builds"))
+                .await
+                .expect("router answers");
+            assert_ne!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{path} is not registered on the production router"
+            );
+            assert_ne!(
+                response.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{path} failed on the production router"
+            );
+        }
+
+        // Endpoints that must answer a POST.
+        for path in [
+            "/v1/inference",
+            "/inference/async",
+            "/models/load",
+            "/graphql",
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("content-type", "application/json")
+                        .body(Body::from("{}"))
+                        .expect("request builds"),
+                )
+                .await
+                .expect("router answers");
+            assert_ne!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{path} is not registered on the production router"
+            );
+            assert_ne!(
+                response.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{path} does not accept POST on the production router"
+            );
+        }
+    }
+
+    /// Regression: an inference request against a server with no model must be
+    /// answered with 503, never with a synthesized completion.
+    #[tokio::test]
+    async fn inference_without_a_model_is_service_unavailable() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let router = TrustformerServer::new(ServerConfig::default()).create_test_router().await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/inference")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"hello"}"#))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router answers");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Every documented path is actually registered.
+    #[test]
+    fn route_paths_are_declared_once() {
+        let paths = TrustformerServer::route_paths();
+        let mut sorted = paths.to_vec();
+        sorted.sort_unstable();
+        let before = sorted.len();
+        sorted.dedup();
+        assert_eq!(before, sorted.len(), "duplicate route path declared");
+        assert!(paths.contains(&"/v1/inference"));
+        assert!(paths.contains(&"/graphql"));
+        assert!(paths.contains(&"/models/load"));
+    }
 }

@@ -32,6 +32,10 @@ half.workspace = true
 safetensors.workspace = true
 tokio.workspace = true
 num_cpus.workspace = true
+# Pure-Rust system telemetry: real process/system memory readings for memory_profiling.
+sysinfo.workspace = true
+# Structured logging facade: libraries must not write to stdout.
+tracing.workspace = true
 regex.workspace = true
 approx.workspace = true
 

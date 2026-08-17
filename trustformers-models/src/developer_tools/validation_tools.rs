@@ -7,6 +7,14 @@ use scirs2_core::ndarray::ArrayD; // SciRS2 Integration Policy
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use trustformers_core::tensor::Tensor;
+use trustformers_core::traits::{Config, Model};
+
+/// Current process resident-set size in MB, or `None` when unavailable.
+fn current_resident_mb() -> Option<f64> {
+    crate::memory_profiling::MemoryProfiler::get_process_memory_info()
+        .ok()
+        .map(|info| info.resident_mb)
+}
 
 /// Validation configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,17 +57,22 @@ pub struct ValidationResult {
     pub performance_metrics: Option<PerformanceMetrics>,
 }
 
-/// Performance metrics
+/// Performance metrics measured by [`ModelValidator`].
+///
+/// Fields that were not measured are `None` — the validator never reports a
+/// placeholder as if it had been observed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerformanceMetrics {
-    /// Forward pass time in milliseconds
+    /// Mean measured forward-pass time in milliseconds
     pub forward_time_ms: f64,
-    /// Memory usage in MB
-    pub memory_usage_mb: f64,
-    /// Throughput in samples/second
+    /// Resident-set growth observed across the timed runs, in MB.
+    ///
+    /// `None` when the platform cannot report process memory.
+    pub memory_usage_mb: Option<f64>,
+    /// Throughput in samples/second, derived from the measured time
     pub throughput: f64,
-    /// Parameter count
-    pub parameter_count: usize,
+    /// Parameter count, when the caller supplied a model to introspect
+    pub parameter_count: Option<usize>,
 }
 
 /// Model validator
@@ -217,20 +230,39 @@ impl ModelValidator {
         }
     }
 
-    /// Validate model configuration
-    pub fn validate_config<T>(&self, _config: &T) -> ValidationResult
+    /// Validate a model configuration by delegating to the configuration's own
+    /// [`Config::validate`] implementation.
+    ///
+    /// The validator has no way to reason about an arbitrary struct's invariants;
+    /// the configuration does. Anything that does not implement [`Config`] cannot
+    /// be validated here — which is why the bound is `Config` and not `Debug`.
+    pub fn validate_config<C>(&self, config: &C) -> ValidationResult
     where
-        T: std::fmt::Debug,
+        C: Config,
     {
-        // This would typically use reflection or custom traits to validate config
-        // For now, we provide a basic framework
-
-        ValidationResult {
+        let mut result = ValidationResult {
             passed: true,
             errors: Vec::new(),
             warnings: Vec::new(),
             performance_metrics: None,
+        };
+
+        if let Err(error) = config.validate() {
+            result.passed = false;
+            result.errors.push(format!(
+                "configuration for architecture `{}` is invalid: {error}",
+                config.architecture()
+            ));
         }
+
+        if config.architecture().trim().is_empty() {
+            result.passed = false;
+            result
+                .errors
+                .push("the configuration reports an empty architecture name".to_string());
+        }
+
+        result
     }
 
     /// Validate model performance
@@ -244,6 +276,8 @@ impl ModelValidator {
             warnings: Vec::new(),
             performance_metrics: None,
         };
+
+        let memory_before = current_resident_mb();
 
         // Warmup runs
         for _ in 0..3 {
@@ -270,13 +304,18 @@ impl ModelValidator {
 
         // Calculate performance metrics
         let avg_time_ms = durations.iter().sum::<f64>() / durations.len() as f64;
-        let throughput = 1000.0 / avg_time_ms; // samples per second
+        let throughput = if avg_time_ms > 0.0 { 1000.0 / avg_time_ms } else { 0.0 };
 
         let performance_metrics = PerformanceMetrics {
             forward_time_ms: avg_time_ms,
-            memory_usage_mb: 0.0, // Would need platform-specific memory measurement
+            memory_usage_mb: match (memory_before, current_resident_mb()) {
+                (Some(before), Some(after)) => Some(after - before),
+                _ => None,
+            },
             throughput,
-            parameter_count: 0, // Would need model introspection
+            // The closure hides the model, so there is nothing to introspect here;
+            // `validate_model_performance` fills this in.
+            parameter_count: None,
         };
 
         // Check against thresholds
@@ -296,6 +335,28 @@ impl ModelValidator {
         }
 
         result.performance_metrics = Some(performance_metrics);
+        result
+    }
+
+    /// Validate a model's forward-pass performance and record its real parameter
+    /// count.
+    ///
+    /// Runs the same warm-up / timed-run protocol as
+    /// [`ModelValidator::validate_performance`], but because it owns the model it
+    /// can report `parameter_count` from [`Model::num_parameters`] instead of
+    /// leaving it unmeasured.
+    pub fn validate_model_performance<M>(&self, model: &M, input: &Tensor) -> ValidationResult
+    where
+        M: Model<Input = Tensor, Output = Tensor>,
+    {
+        let mut result = self.validate_performance(|| {
+            model.forward(input.clone()).map_err(|e| anyhow::anyhow!("{}", e))
+        });
+
+        if let Some(metrics) = result.performance_metrics.as_mut() {
+            metrics.parameter_count = Some(model.num_parameters());
+        }
+
         result
     }
 

@@ -31,16 +31,15 @@ mod tests {
             .map(|_| MemoryMetrics {
                 timestamp: SystemTime::now(),
                 total_memory_mb: 100.0 + rng.next_f64() * 200.0,
-                heap_memory_mb: 80.0 + rng.next_f64() * 100.0,
-                stack_memory_mb: 2.0 + rng.next_f64() * 5.0,
+                virtual_memory_mb: 100.0 + rng.next_f64() * 200.0,
+                heap_memory_mb: Some(80.0 + rng.next_f64() * 100.0),
+                stack_memory_mb: Some(2.0 + rng.next_f64() * 5.0),
                 gpu_memory_mb: None,
                 peak_memory_mb: 300.0,
                 allocated_objects: rng.next() % 10000,
                 deallocated_objects: rng.next() % 10000,
                 active_allocations: rng.next() % 5000,
                 memory_fragmentation_ratio: rng.next_f64() * 0.5,
-                gc_collections: rng.next() % 100,
-                gc_time_ms: rng.next_f64() * 500.0,
                 memory_growth_rate_mb_per_sec: rng.next_f64() * 20.0 - 5.0,
             })
             .collect()
@@ -137,16 +136,15 @@ mod tests {
             .map(|_| MemoryMetrics {
                 timestamp: SystemTime::now(),
                 total_memory_mb: 100.0 + rng.next_f64() * 10.0,
-                heap_memory_mb: 80.0,
-                stack_memory_mb: 2.0,
+                virtual_memory_mb: 100.0 + rng.next_f64() * 10.0,
+                heap_memory_mb: Some(80.0),
+                stack_memory_mb: Some(2.0),
                 gpu_memory_mb: None,
                 peak_memory_mb: 120.0,
                 allocated_objects: 500,
                 deallocated_objects: 500,
                 active_allocations: 100,
                 memory_fragmentation_ratio: 0.1,
-                gc_collections: 5,
-                gc_time_ms: 10.0,
                 memory_growth_rate_mb_per_sec: 0.5, // Low growth
             })
             .collect();
@@ -166,16 +164,15 @@ mod tests {
             .map(|_| MemoryMetrics {
                 timestamp: SystemTime::now(),
                 total_memory_mb: 500.0,
-                heap_memory_mb: 400.0,
-                stack_memory_mb: 2.0,
+                virtual_memory_mb: 500.0,
+                heap_memory_mb: Some(400.0),
+                stack_memory_mb: Some(2.0),
                 gpu_memory_mb: None,
                 peak_memory_mb: 500.0,
                 allocated_objects: 10000,
                 deallocated_objects: 5000,
                 active_allocations: 5000,
                 memory_fragmentation_ratio: 0.1,
-                gc_collections: 5,
-                gc_time_ms: 10.0,
                 memory_growth_rate_mb_per_sec: 50.0, // High growth
             })
             .collect();
@@ -190,16 +187,15 @@ mod tests {
             .map(|_| MemoryMetrics {
                 timestamp: SystemTime::now(),
                 total_memory_mb: 200.0,
-                heap_memory_mb: 180.0,
-                stack_memory_mb: 2.0,
+                virtual_memory_mb: 200.0,
+                heap_memory_mb: Some(180.0),
+                stack_memory_mb: Some(2.0),
                 gpu_memory_mb: None,
                 peak_memory_mb: 250.0,
                 allocated_objects: 20000,
                 deallocated_objects: 5000, // Much less than allocated
                 active_allocations: 15000,
                 memory_fragmentation_ratio: 0.1,
-                gc_collections: 5,
-                gc_time_ms: 10.0,
                 memory_growth_rate_mb_per_sec: 1.0,
             })
             .collect();
@@ -235,16 +231,15 @@ mod tests {
             .map(|i| MemoryMetrics {
                 timestamp: SystemTime::now(),
                 total_memory_mb: 100.0 + (i as f64) * 2.0, // Clear linear trend
-                heap_memory_mb: 80.0 + (i as f64) * 1.5,
-                stack_memory_mb: 2.0,
+                virtual_memory_mb: 200.0 + (i as f64) * 2.0,
+                heap_memory_mb: Some(80.0 + (i as f64) * 1.5),
+                stack_memory_mb: Some(2.0),
                 gpu_memory_mb: None,
                 peak_memory_mb: 300.0,
                 allocated_objects: 1000,
                 deallocated_objects: 900,
                 active_allocations: 100,
                 memory_fragmentation_ratio: 0.1,
-                gc_collections: 5,
-                gc_time_ms: 10.0,
                 memory_growth_rate_mb_per_sec: 2.0,
             })
             .collect();
@@ -264,16 +259,15 @@ mod tests {
             .map(|i| MemoryMetrics {
                 timestamp: SystemTime::now(),
                 total_memory_mb: 100.0 + (i as f64) * 1.0,
-                heap_memory_mb: 80.0,
-                stack_memory_mb: 2.0,
+                virtual_memory_mb: 100.0 + (i as f64) * 1.0,
+                heap_memory_mb: Some(80.0),
+                stack_memory_mb: Some(2.0),
                 gpu_memory_mb: None,
                 peak_memory_mb: 250.0,
                 allocated_objects: 1000,
                 deallocated_objects: 1000,
                 active_allocations: 100,
                 memory_fragmentation_ratio: 0.1,
-                gc_collections: 5,
-                gc_time_ms: 10.0,
                 memory_growth_rate_mb_per_sec: 1.0,
             })
             .collect();
@@ -306,16 +300,15 @@ mod tests {
             .map(|i| MemoryMetrics {
                 timestamp: SystemTime::now(),
                 total_memory_mb: 100.0 + (i as f64),
-                heap_memory_mb: 80.0,
-                stack_memory_mb: 2.0,
+                virtual_memory_mb: 100.0 + (i as f64),
+                heap_memory_mb: Some(80.0),
+                stack_memory_mb: Some(2.0),
                 gpu_memory_mb: None,
                 peak_memory_mb: 200.0,
                 allocated_objects: 1000,
                 deallocated_objects: 1000,
                 active_allocations: 100,
                 memory_fragmentation_ratio: 0.1,
-                gc_collections: 5,
-                gc_time_ms: 10.0,
                 memory_growth_rate_mb_per_sec: 1.0,
             })
             .collect();
@@ -343,16 +336,15 @@ mod tests {
             .map(|_| MemoryMetrics {
                 timestamp: SystemTime::now(),
                 total_memory_mb: 100.0,
-                heap_memory_mb: 80.0,
-                stack_memory_mb: 2.0,
+                virtual_memory_mb: 100.0,
+                heap_memory_mb: Some(80.0),
+                stack_memory_mb: Some(2.0),
                 gpu_memory_mb: None,
                 peak_memory_mb: 200.0,
                 allocated_objects: 1000,
                 deallocated_objects: 1000,
                 active_allocations: 100,
                 memory_fragmentation_ratio: 0.1,
-                gc_collections: 5,
-                gc_time_ms: 10.0,
                 memory_growth_rate_mb_per_sec: 0.0,
             })
             .collect();

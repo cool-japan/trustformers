@@ -1,25 +1,30 @@
 //! # Audio Generation Pipeline
 //!
-//! AudioLDM/MusicGen-compatible pipeline that generates audio waveforms from
-//! natural language text descriptions.
+//! ## What is real here
 //!
-//! ## Supported model families
-//! - **AudioLDM** — latent diffusion model for general audio generation
-//! - **MusicGen** — auto-regressive transformer for music generation
+//! [`AudioWaveform`] is a complete, tested mono PCM toolkit: RMS energy, peak
+//! amplitude, peak normalisation, linear-interpolation resampling, silence
+//! trimming and ratio mixing. All of it works on any waveform, wherever it came
+//! from.
+//!
+//! ## Model support
+//!
+//! No text-to-audio backbone (AudioLDM, MusicGen, …) is implemented in
+//! `trustformers-models`, so [`AudioGenerationPipeline::generate`] returns
+//! [`AudioGenError::UnsupportedModel`] instead of the hash-seeded sine tone it
+//! used to return as "generated audio".
 //!
 //! ## Example
 //!
 //! ```rust,ignore
-//! use trustformers::pipeline::audio_generation::{AudioGenerationConfig, AudioGenerationPipeline};
+//! use trustformers::pipeline::audio_generation::{AudioGenerationConfig, AudioWaveform};
 //!
-//! let config = AudioGenerationConfig::default();
-//! let pipeline = AudioGenerationPipeline::new(config)?;
-//! let waveforms = pipeline.generate("ambient forest soundscape")?;
-//! println!("Generated {} waveform(s)", waveforms.len());
+//! // The waveform utilities are real and usable on their own:
+//! let waveform = AudioWaveform::new(my_pcm, 16_000)?;
+//! let loud = waveform.normalize();
+//! println!("peak {} rms {}", loud.peak_amplitude(), loud.rms_energy());
 //! # Ok::<(), trustformers::pipeline::audio_generation::AudioGenError>(())
 //! ```
-
-use std::f32::consts::PI;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -43,7 +48,23 @@ pub enum AudioGenError {
     /// A generic model-level error with a descriptive message.
     #[error("Model error: {0}")]
     ModelError(String),
+    /// The requested checkpoint has no real implementation in this workspace.
+    #[error(
+        "no real text-to-audio model is implemented for `{requested}`; supported: {supported}. \
+         This pipeline never returns synthesised tones as generated audio."
+    )]
+    UnsupportedModel {
+        /// The checkpoint or architecture the caller asked for.
+        requested: String,
+        /// Comma-separated list of architectures that *are* supported.
+        supported: String,
+    },
 }
+
+/// Text-to-audio architectures with a real backbone in this workspace.
+///
+/// Deliberately empty — the pipeline says so rather than pretending.
+const SUPPORTED_ARCHITECTURES: &[&str] = &[];
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -254,52 +275,6 @@ impl AudioWaveform {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Compute a deterministic djb2-style hash of the given string.
-fn djb2_hash(s: &str) -> u64 {
-    let mut h: u64 = 5381;
-    for b in s.bytes() {
-        h = h.wrapping_mul(33).wrapping_add(b as u64);
-    }
-    h
-}
-
-/// Generate a mock waveform: sine wave at a hash-derived frequency, shaped by a
-/// Hann window.
-fn generate_mock_waveform(
-    prompt: &str,
-    sample_rate: u32,
-    audio_length_seconds: f32,
-    waveform_index: usize,
-) -> AudioWaveform {
-    let num_samples = (sample_rate as f32 * audio_length_seconds) as usize;
-    let base_hash = djb2_hash(prompt);
-    // Produce a frequency between 110 Hz and 880 Hz.
-    let idx_offset: u64 = waveform_index as u64 * 7919;
-    let freq_hash = base_hash.wrapping_add(idx_offset);
-    let freq = 110.0 + (freq_hash % 770) as f32;
-
-    let mut samples = Vec::with_capacity(num_samples);
-    for i in 0..num_samples {
-        let t = i as f32 / sample_rate as f32;
-        // Hann window for smooth onset/offset.
-        let window = if num_samples > 1 {
-            0.5 * (1.0 - (2.0 * PI * i as f32 / (num_samples - 1) as f32).cos())
-        } else {
-            1.0
-        };
-        let sine = (2.0 * PI * freq * t).sin();
-        samples.push(sine * window);
-    }
-
-    let duration_seconds = num_samples as f32 / sample_rate as f32;
-    AudioWaveform {
-        samples,
-        sample_rate,
-        duration_seconds,
-        num_channels: 1,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Pipeline
 // ---------------------------------------------------------------------------
@@ -329,28 +304,25 @@ impl AudioGenerationPipeline {
 
     /// Generate one or more waveforms from the given text prompt.
     ///
-    /// Returns [`AudioGenerationConfig::num_waveforms_per_prompt`] waveforms as a `Vec`.
-    ///
     /// # Errors
     ///
-    /// Returns [`AudioGenError::EmptyPrompt`] for blank prompts.
+    /// Returns [`AudioGenError::EmptyPrompt`] for blank prompts, and
+    /// [`AudioGenError::UnsupportedModel`] otherwise: no text-to-audio backbone
+    /// is implemented and this pipeline will not return a synthesised tone as
+    /// generated audio.
     pub fn generate(&self, prompt: &str) -> Result<Vec<AudioWaveform>, AudioGenError> {
         let trimmed = prompt.trim();
         if trimmed.is_empty() {
             return Err(AudioGenError::EmptyPrompt);
         }
-        let n = self.config.num_waveforms_per_prompt.max(1);
-        let waveforms = (0..n)
-            .map(|idx| {
-                generate_mock_waveform(
-                    trimmed,
-                    self.config.sample_rate,
-                    self.config.audio_length_seconds,
-                    idx,
-                )
-            })
-            .collect();
-        Ok(waveforms)
+        Err(AudioGenError::UnsupportedModel {
+            requested: self.config.model_name.clone(),
+            supported: if SUPPORTED_ARCHITECTURES.is_empty() {
+                "none (no text-to-audio backbone is implemented yet)".to_string()
+            } else {
+                SUPPORTED_ARCHITECTURES.join(", ")
+            },
+        })
     }
 
     /// Generate waveforms for each prompt in the batch.
@@ -478,40 +450,35 @@ mod tests {
     // --- Pipeline::generate ---
 
     #[test]
-    fn test_generate_returns_correct_count() {
+    fn test_generate_reports_unsupported_model() {
+        // Regression: `generate` used to return a djb2-hash-seeded sine tone
+        // shaped by a Hann window and call it generated audio.
         let config = AudioGenerationConfig {
             num_waveforms_per_prompt: 3,
+            model_name: "cvssp/audioldm-s-full-v2".to_string(),
             ..Default::default()
         };
         let p = AudioGenerationPipeline::new(config).expect("valid");
-        let waveforms = p.generate("rain on a tin roof").expect("generate ok");
-        assert_eq!(waveforms.len(), 3);
+        match p.generate("rain on a tin roof") {
+            Err(AudioGenError::UnsupportedModel {
+                requested,
+                supported,
+            }) => {
+                assert_eq!(requested, "cvssp/audioldm-s-full-v2");
+                assert!(supported.contains("none"), "supported: {supported}");
+            },
+            other => panic!("expected UnsupportedModel, got {other:?}"),
+        }
     }
 
     #[test]
-    fn test_generate_wave_length_equals_sr_times_duration() {
-        let sr = 22_050_u32;
-        let dur = 2.0_f32;
-        let config = AudioGenerationConfig {
-            sample_rate: sr,
-            audio_length_seconds: dur,
-            num_waveforms_per_prompt: 1,
-            ..Default::default()
-        };
-        let p = AudioGenerationPipeline::new(config).expect("valid");
-        let waveforms = p.generate("gentle piano").expect("ok");
-        let expected = (sr as f32 * dur) as usize;
-        assert_eq!(waveforms[0].num_samples(), expected);
-    }
-
-    // --- Pipeline::generate_batch ---
-
-    #[test]
-    fn test_generate_batch_count() {
+    fn test_generate_batch_reports_unsupported_model() {
         let p = default_pipeline();
         let prompts = ["thunder", "birds", "ocean waves"];
-        let batch = p.generate_batch(&prompts).expect("batch ok");
-        assert_eq!(batch.len(), 3);
+        assert!(matches!(
+            p.generate_batch(&prompts),
+            Err(AudioGenError::UnsupportedModel { .. })
+        ));
     }
 
     // --- Error cases ---

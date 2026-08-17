@@ -1,5 +1,5 @@
 use trustformers_core::{
-    errors::Result,
+    errors::{Result, TrustformersError},
     layers::{LayerNorm, Linear},
     quantum::{QuantumAnsatz, QuantumNeuralLayer},
     tensor::Tensor,
@@ -7,6 +7,54 @@ use trustformers_core::{
 };
 
 use super::{config::QuantumClassicalConfig, model::QuantumClassicalModelOutput};
+
+/// Receptive field of the 1-D convolutions, in sequence positions.
+pub const CONV_KERNEL_SIZE: usize = 3;
+
+/// Build the `im2col` window tensor of a 1-D convolution with "same" padding.
+///
+/// `input` is `[batch, seq_len, channels]`; the result is
+/// `[batch, seq_len, channels * kernel_size]`, where window position `t`
+/// concatenates the channel vectors at `t - k/2 ..= t + k/2`, zero-padded at
+/// the sequence boundaries. Applying a `Linear(channels * kernel_size,
+/// out_channels)` to that tensor is exactly a 1-D convolution.
+pub fn conv1d_windows(input: &Tensor, kernel_size: usize) -> Result<Tensor> {
+    if kernel_size == 0 || kernel_size.is_multiple_of(2) {
+        return Err(TrustformersError::invalid_input(
+            "conv1d kernel size must be odd and non-zero".to_string(),
+        ));
+    }
+
+    let shape = input.shape();
+    if shape.len() != 3 {
+        return Err(TrustformersError::shape_error(format!(
+            "conv1d_windows expects [batch, seq_len, channels], got {:?}",
+            shape
+        )));
+    }
+    let (batch, seq_len, channels) = (shape[0], shape[1], shape[2]);
+    let radius = (kernel_size / 2) as isize;
+
+    let data = input.to_vec_f32()?;
+    let mut windows = vec![0.0f32; batch * seq_len * channels * kernel_size];
+
+    for b in 0..batch {
+        for t in 0..seq_len {
+            for (tap, offset) in (-radius..=radius).enumerate() {
+                let source = t as isize + offset;
+                if source < 0 || source >= seq_len as isize {
+                    continue; // zero padding
+                }
+                let source = source as usize;
+                let src = (b * seq_len + source) * channels;
+                let dst = ((b * seq_len + t) * kernel_size + tap) * channels;
+                windows[dst..dst + channels].copy_from_slice(&data[src..src + channels]);
+            }
+        }
+    }
+
+    Tensor::from_vec(windows, &[batch, seq_len, channels * kernel_size])
+}
 
 /// Quantum convolutional neural network
 #[derive(Debug)]
@@ -34,7 +82,13 @@ impl QuantumConvolutionalNN {
         let mut layer_norms = Vec::new();
 
         for _ in 0..config.n_classical_layers {
-            conv_layers.push(Linear::new(config.d_model, config.d_model, config.use_bias));
+            // A genuine 1-D convolution: the kernel spans CONV_KERNEL_SIZE
+            // sequence positions of every input channel.
+            conv_layers.push(Linear::new(
+                config.d_model * CONV_KERNEL_SIZE,
+                config.d_model,
+                config.use_bias,
+            ));
             fc_layers.push(Linear::new(config.d_model, config.d_model, config.use_bias));
             layer_norms.push(LayerNorm::new(vec![config.d_model], 1e-12)?);
         }
@@ -70,8 +124,9 @@ impl QuantumConvolutionalNN {
         for (i, (conv_layer, layer_norm)) in
             self.conv_layers.iter().zip(self.layer_norms.iter()).enumerate()
         {
-            // Convolution (simplified as linear transformation)
-            let conv_output = conv_layer.forward(hidden_states.clone())?;
+            // 1-D convolution over the sequence axis (im2col + GEMM).
+            let windows = conv1d_windows(&hidden_states, CONV_KERNEL_SIZE)?;
+            let conv_output = conv_layer.forward(windows)?;
             hidden_states = layer_norm.forward(conv_output)?;
 
             // Quantum pooling

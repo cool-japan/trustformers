@@ -3,10 +3,30 @@
 //! Maps an image (raw RGB bytes, a file path, or a pre-computed feature vector)
 //! to a ranked list of category labels with associated probabilities.
 //!
-//! ## Supported model families
-//! - **ViT** (Vision Transformer) — patch-based transformer for image classification
-//! - **CLIP** — contrastive language-image pre-training; zero-shot classification
-//! - **ResNet / EfficientNet** — classic convolutional baselines
+//! ## What is real here
+//!
+//! * **Decoding** — binary Netpbm always, and every format the pure-Rust
+//!   `image` crate supports when the `vision` feature is on. A file that cannot
+//!   be decoded produces a structured error; it is never replaced by a black
+//!   image.
+//! * **Preprocessing** — real bilinear resize with half-pixel centres, real
+//!   bicubic resize (Catmull-Rom), centre-crop, ImageNet/CLIP normalisation and
+//!   HWC → CHW conversion.
+//! * **Post-processing** — softmax and top-k ranking over model logits.
+//!
+//! ## Model support
+//!
+//! Inference runs only when a real vision backbone is attached:
+//!
+//! * with the `vit` feature, [`ImageClassificationPipeline::with_vit`] accepts a
+//!   caller-constructed [`trustformers_models::vit::ViTForImageClassification`]
+//!   (weights are the caller's responsibility) and the pipeline runs its real
+//!   forward pass;
+//! * otherwise [`ImageClassificationPipeline::classify`] returns a structured
+//!   [`TrustformersError::FeatureUnavailable`] naming the supported
+//!   architectures.
+//!
+//! Nothing in this module fabricates labels, scores or timings.
 //!
 //! ## Example
 //!
@@ -15,13 +35,7 @@
 //!     ImageClassificationConfig, ImageClassificationPipeline, ImageClassificationInput,
 //! };
 //!
-//! let config = ImageClassificationConfig {
-//!     model_name: "google/vit-base-patch16-224".to_string(),
-//!     top_k: 5,
-//!     ..Default::default()
-//! };
-//!
-//! let pipeline = ImageClassificationPipeline::new(config)?;
+//! let pipeline = ImageClassificationPipeline::new(ImageClassificationConfig::default())?;
 //!
 //! let input = ImageClassificationInput::RgbImage {
 //!     data: vec![128u8; 224 * 224 * 3],
@@ -29,17 +43,23 @@
 //!     height: 224,
 //! };
 //!
-//! let results = pipeline.classify(&input)?;
-//! for result in &results {
-//!     println!("{}: {:.4}", result.label, result.score);
-//! }
+//! // Real preprocessing, always available:
+//! let features = pipeline.preprocess(&input)?;
+//! // Classification needs a real backbone:
+//! assert!(pipeline.classify(&input).is_err());
 //! # Ok::<(), trustformers::TrustformersError>(())
 //! ```
 
 use crate::error::{Result, TrustformersError};
+use crate::pipeline::media::image_proc;
+use crate::pipeline::media::unsupported_model;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use trustformers_core::tensor::Tensor;
+
+/// Architectures this pipeline can actually execute.
+const SUPPORTED_ARCHITECTURES: &[&str] = &["vit (requires the `vit` feature)"];
 
 // ---------------------------------------------------------------------------
 // Public types — Input
@@ -303,34 +323,39 @@ fn cubic_weight(t: f32) -> f32 {
 // ---------------------------------------------------------------------------
 
 /// Bilinear resize of a flat RGB byte buffer to `(target × target)` pixels.
-fn resize_rgb_bilinear(data: &[u8], src_w: u32, src_h: u32, target: u32) -> Vec<u8> {
-    if src_w == target && src_h == target {
-        return data.to_vec();
-    }
-    let tw = target as usize;
-    let th = target as usize;
-    let sw = src_w as usize;
-    let sh = src_h as usize;
-    let mut out = vec![0u8; tw * th * 3];
-    for ty in 0..th {
-        for tx in 0..tw {
-            let sx = (tx as f32 * sw as f32 / tw as f32) as usize;
-            let sy = (ty as f32 * sh as f32 / th as f32) as usize;
-            let sx = sx.min(sw - 1);
-            let sy = sy.min(sh - 1);
-            let src_base = (sy * sw + sx) * 3;
-            let dst_base = (ty * tw + tx) * 3;
-            out[dst_base] = data.get(src_base).copied().unwrap_or(0);
-            out[dst_base + 1] = data.get(src_base + 1).copied().unwrap_or(0);
-            out[dst_base + 2] = data.get(src_base + 2).copied().unwrap_or(0);
-        }
-    }
-    out
+///
+/// Real bilinear interpolation with half-pixel centres — the previous
+/// implementation of this function sampled the nearest source pixel despite its
+/// name, which produced visibly aliased inputs to the model.
+///
+/// # Errors
+///
+/// Returns an error when the buffer does not match `src_w × src_h × 3` or any
+/// dimension is zero.
+fn resize_rgb_bilinear(data: &[u8], src_w: u32, src_h: u32, target: u32) -> Result<Vec<u8>> {
+    let image = bytes_to_rgb_image(data, src_w, src_h)?;
+    let resized = image_proc::resize_bilinear(&image, target as usize, target as usize)?;
+    Ok(resized
+        .data
+        .iter()
+        .map(|&v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+        .collect())
 }
 
-/// Convert a raw RGB `u8` buffer to a normalised `f32` vector in `[0.0, 1.0]`.
-fn normalise_rgb(data: &[u8]) -> Vec<f32> {
-    data.iter().map(|&b| b as f32 / 255.0).collect()
+/// Wrap a flat HWC RGB byte buffer as an [`image_proc::RgbImage`].
+fn bytes_to_rgb_image(data: &[u8], width: u32, height: u32) -> Result<image_proc::RgbImage> {
+    let expected = width as usize * height as usize * 3;
+    if data.len() != expected {
+        return Err(TrustformersError::pipeline(
+            format!(
+                "RGB buffer has {} bytes but {width}x{height}x3 = {expected} were expected",
+                data.len()
+            ),
+            "image-classification",
+        ));
+    }
+    let floats: Vec<f32> = data.iter().map(|&b| f32::from(b) / 255.0).collect();
+    image_proc::RgbImage::new(floats, height as usize, width as usize)
 }
 
 /// Apply softmax in-place.
@@ -370,26 +395,27 @@ impl ClassificationState {
         Self { config, labels }
     }
 
+    /// Preprocess an [`image_proc::RgbImage`] into a `[1, 3, size, size]` tensor.
+    ///
+    /// Real bilinear resize followed (when `apply_imagenet_norm` is set) by
+    /// per-channel ImageNet normalisation, laid out channels-first as ViT and
+    /// CLIP expect.
+    fn preprocess_image(&self, image: &image_proc::RgbImage) -> Result<Tensor> {
+        let sz = self.config.image_size as usize;
+        let resized = image_proc::resize_bilinear(image, sz, sz)?;
+        let chw = if self.config.apply_imagenet_norm {
+            image_proc::normalize_to_chw(&resized, IMAGENET_MEAN, IMAGENET_STD)?
+        } else {
+            image_proc::normalize_to_chw(&resized, [0.0; 3], [1.0; 3])?
+        };
+        Tensor::from_slice(&chw, &[1, 3, sz, sz])
+            .map_err(|e| TrustformersError::pipeline(e.to_string(), "image-classification"))
+    }
+
     /// Preprocess raw RGB bytes into a normalised feature tensor.
     fn preprocess_rgb(&self, data: &[u8], width: u32, height: u32) -> Result<Tensor> {
-        let sz = self.config.image_size;
-        let resized = resize_rgb_bilinear(data, width, height, sz);
-        let norm = normalise_rgb(&resized);
-        // Shape: [1, 3, sz, sz]  (channels-first, as expected by ViT/CLIP)
-        let sz = sz as usize;
-        let expected = sz * sz * 3;
-        if norm.len() != expected {
-            return Err(TrustformersError::pipeline(
-                format!(
-                    "normalised buffer has length {} but expected {}",
-                    norm.len(),
-                    expected
-                ),
-                "image-classification",
-            ));
-        }
-        Tensor::from_slice(&norm, &[1, 3, sz, sz])
-            .map_err(|e| TrustformersError::pipeline(e.to_string(), "image-classification"))
+        let image = bytes_to_rgb_image(data, width, height)?;
+        self.preprocess_image(&image)
     }
 
     /// Preprocess an already-normalised float tensor.
@@ -407,35 +433,32 @@ impl ClassificationState {
         .map_err(|e| TrustformersError::pipeline(e.to_string(), "image-classification"))
     }
 
-    /// Mock forward pass: produce logits proportional to mean pixel intensity
-    /// per spatial region. A real pipeline would call `model.forward(features)`.
-    fn mock_forward(&self, features: &Tensor) -> Result<Vec<f32>> {
-        let num_labels = self.labels.len();
-        if num_labels == 0 {
+    /// Rank raw model logits into the pipeline's top-k label list.
+    fn rank_logits(&self, logits: &[f32]) -> Result<Vec<ImageClassificationResult>> {
+        if self.labels.is_empty() {
             return Err(TrustformersError::pipeline(
                 "Label set is empty — cannot classify".to_string(),
                 "image-classification",
             ));
         }
-        let flat = features
-            .data_f32()
-            .map_err(|e| TrustformersError::pipeline(e.to_string(), "image-classification"))?;
-        let mut logits = vec![0.0_f32; num_labels];
-        for (i, &v) in flat.iter().enumerate() {
-            logits[i % num_labels] += v;
+        if logits.len() != self.labels.len() {
+            return Err(TrustformersError::pipeline(
+                format!(
+                    "model produced {} logits but the label set has {} entries",
+                    logits.len(),
+                    self.labels.len()
+                ),
+                "image-classification",
+            ));
         }
-        Ok(logits)
-    }
+        let mut probabilities = logits.to_vec();
+        softmax_inplace(&mut probabilities);
 
-    fn run_inference(&self, features: Tensor) -> Result<Vec<ImageClassificationResult>> {
-        let mut logits = self.mock_forward(&features)?;
-        softmax_inplace(&mut logits);
-
-        let mut scored: Vec<(usize, f32)> = logits.into_iter().enumerate().collect();
+        let mut scored: Vec<(usize, f32)> = probabilities.into_iter().enumerate().collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let top_k = self.config.top_k.min(scored.len());
-        let results = scored
+        Ok(scored
             .into_iter()
             .take(top_k)
             .map(|(idx, score)| ImageClassificationResult {
@@ -443,8 +466,28 @@ impl ClassificationState {
                 score,
                 label_id: idx,
             })
-            .collect();
-        Ok(results)
+            .collect())
+    }
+}
+
+/// The inference backend attached to an [`ImageClassificationPipeline`].
+#[derive(Clone)]
+pub enum ImageClassificationBackend {
+    /// No vision backbone attached — classification reports the architecture as
+    /// unsupported instead of returning fabricated labels.
+    Unavailable,
+    /// A caller-supplied Vision Transformer classifier.
+    #[cfg(feature = "vit")]
+    Vit(Arc<trustformers_models::vit::ViTForImageClassification>),
+}
+
+impl std::fmt::Debug for ImageClassificationBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable => f.write_str("ImageClassificationBackend::Unavailable"),
+            #[cfg(feature = "vit")]
+            Self::Vit(_) => f.write_str("ImageClassificationBackend::Vit"),
+        }
     }
 }
 
@@ -484,6 +527,7 @@ fn default_imagenet_labels() -> Vec<String> {
 /// [`ImageClassificationResult`] values.
 pub struct ImageClassificationPipeline {
     state: ClassificationState,
+    backend: ImageClassificationBackend,
 }
 
 impl ImageClassificationPipeline {
@@ -507,13 +551,51 @@ impl ImageClassificationPipeline {
         }
         Ok(Self {
             state: ClassificationState::new(config),
+            backend: ImageClassificationBackend::Unavailable,
         })
+    }
+
+    /// Attach a caller-supplied Vision Transformer classifier as the backend.
+    ///
+    /// Weight provenance is the caller's responsibility: the pipeline runs the
+    /// model's real forward pass on real preprocessed pixels.
+    #[cfg(feature = "vit")]
+    pub fn with_vit(
+        mut self,
+        model: Arc<trustformers_models::vit::ViTForImageClassification>,
+    ) -> Self {
+        self.backend = ImageClassificationBackend::Vit(model);
+        self
+    }
+
+    /// The currently attached backend.
+    pub fn backend(&self) -> &ImageClassificationBackend {
+        &self.backend
+    }
+
+    /// Preprocess an input into the `[1, 3, size, size]` tensor a vision
+    /// backbone expects.
+    ///
+    /// This is the pipeline's real, reusable front-end: decoding, bilinear
+    /// resize, normalisation and CHW layout. It works with or without a
+    /// backbone attached.
+    pub fn preprocess(&self, input: &ImageClassificationInput) -> Result<Tensor> {
+        self.build_features(input)
+    }
+
+    /// Rank raw model logits with the pipeline's label set and `top_k`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the logit count does not match the label set.
+    pub fn rank_logits(&self, logits: &[f32]) -> Result<Vec<ImageClassificationResult>> {
+        self.state.rank_logits(logits)
     }
 
     /// Classify a single image using the new-style `ImageInput` enum.
     pub fn classify_image(&self, input: ImageInput) -> Result<Vec<ImageClassificationResult>> {
         let features = self.build_features_from_image_input(input)?;
-        self.state.run_inference(features)
+        self.run_inference(&features)
     }
 
     /// Classify a batch of images using the new-style `ImageInput` enum.
@@ -530,7 +612,7 @@ impl ImageClassificationPipeline {
         input: &ImageClassificationInput,
     ) -> Result<Vec<ImageClassificationResult>> {
         let features = self.build_features(input)?;
-        self.state.run_inference(features)
+        self.run_inference(&features)
     }
 
     /// Classify a batch of images in one call (legacy API).
@@ -555,6 +637,25 @@ impl ImageClassificationPipeline {
     // Private helpers
     // ------------------------------------------------------------------
 
+    /// Decode an image file into the pipeline's feature tensor.
+    ///
+    /// # Errors
+    ///
+    /// [`TrustformersError::Io`] for a missing/unreadable file, and
+    /// [`TrustformersError::FeatureUnavailable`] when the format needs the
+    /// `vision` feature. Never a blank image.
+    fn decode_file(&self, path: &Path) -> Result<Tensor> {
+        if !path.exists() {
+            return Err(TrustformersError::Io {
+                message: format!("Image file not found: {}", path.to_string_lossy()),
+                path: Some(path.to_string_lossy().into_owned()),
+                suggestion: Some("Check the file path and ensure the file exists.".to_string()),
+            });
+        }
+        let image = image_proc::decode_image_file(path)?;
+        self.state.preprocess_image(&image)
+    }
+
     fn build_features_from_image_input(&self, input: ImageInput) -> Result<Tensor> {
         match input {
             ImageInput::RgbPixels {
@@ -573,22 +674,7 @@ impl ImageClassificationPipeline {
                 height as u32,
                 width as u32,
             ),
-            ImageInput::FilePath(path_str) => {
-                let path = std::path::Path::new(&path_str);
-                if !path.exists() {
-                    return Err(TrustformersError::Io {
-                        message: format!("Image file not found: {}", path_str),
-                        path: Some(path_str),
-                        suggestion: Some(
-                            "Check the file path and ensure the file exists.".to_string(),
-                        ),
-                    });
-                }
-                let sz = self.state.config.image_size as usize;
-                let placeholder = vec![0.0_f32; sz * sz * 3];
-                Tensor::from_slice(&placeholder, &[1, 3, sz, sz])
-                    .map_err(|e| TrustformersError::pipeline(e.to_string(), "image-classification"))
-            },
+            ImageInput::FilePath(path_str) => self.decode_file(Path::new(&path_str)),
         }
     }
 
@@ -600,27 +686,7 @@ impl ImageClassificationPipeline {
                 height,
             } => self.state.preprocess_rgb(data, *width, *height),
 
-            ImageClassificationInput::FilePath(path) => {
-                if !path.exists() {
-                    return Err(TrustformersError::Io {
-                        message: format!("Image file not found: {}", path.to_string_lossy()),
-                        path: Some(path.to_string_lossy().into_owned()),
-                        suggestion: Some(
-                            "Check the file path and ensure the file exists.".to_string(),
-                        ),
-                    });
-                }
-                // Full decoding (JPEG/PNG/etc.) is not yet implemented.
-                // Use a zero-pixel placeholder so the code path can be tested.
-                let sz = self.state.config.image_size as usize;
-                let placeholder = vec![0.0_f32; sz * sz * 3];
-                tracing::debug!(
-                    path = %path.to_string_lossy(),
-                    "Image file decoding not yet implemented; using zero placeholder"
-                );
-                Tensor::from_slice(&placeholder, &[1, 3, sz, sz])
-                    .map_err(|e| TrustformersError::pipeline(e.to_string(), "image-classification"))
-            },
+            ImageClassificationInput::FilePath(path) => self.decode_file(path),
 
             ImageClassificationInput::NormalisedTensor {
                 values,
@@ -630,6 +696,49 @@ impl ImageClassificationPipeline {
             } => self.state.preprocess_normalised(values, *channels, *height, *width),
         }
     }
+
+    /// Run the attached backbone on real preprocessed features.
+    fn run_inference(&self, features: &Tensor) -> Result<Vec<ImageClassificationResult>> {
+        match &self.backend {
+            ImageClassificationBackend::Unavailable => Err(unsupported_model(
+                "image-classification",
+                &self.state.config.model_name,
+                SUPPORTED_ARCHITECTURES,
+            )),
+            #[cfg(feature = "vit")]
+            ImageClassificationBackend::Vit(model) => {
+                let logits = run_vit(model, features)?;
+                self.state.rank_logits(&logits)
+            },
+        }
+    }
+}
+
+/// Run a Vision Transformer classifier over a `[1, 3, H, W]` feature tensor.
+#[cfg(feature = "vit")]
+fn run_vit(
+    model: &trustformers_models::vit::ViTForImageClassification,
+    features: &Tensor,
+) -> Result<Vec<f32>> {
+    use scirs2_core::ndarray::Array4;
+
+    let shape = features.shape().to_vec();
+    if shape.len() != 4 {
+        return Err(TrustformersError::pipeline(
+            format!("expected a [batch, 3, H, W] feature tensor, got {shape:?}"),
+            "image-classification",
+        ));
+    }
+    let flat = features
+        .to_vec_f32()
+        .map_err(|e| TrustformersError::pipeline(e.to_string(), "image-classification"))?;
+    let images = Array4::from_shape_vec((shape[0], shape[1], shape[2], shape[3]), flat)
+        .map_err(|e| TrustformersError::pipeline(e.to_string(), "image-classification"))?;
+
+    let logits = model
+        .forward(&images)
+        .map_err(|e| TrustformersError::model(e.to_string(), "vit"))?;
+    Ok(logits.iter().copied().collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -652,13 +761,38 @@ impl crate::pipeline::Pipeline for ImageClassificationPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::media::image_proc::{encode_ppm, RgbImage};
 
     fn default_pipeline() -> ImageClassificationPipeline {
         ImageClassificationPipeline::new(ImageClassificationConfig::default())
             .expect("default config should be valid")
     }
 
-    // ---- Legacy API tests (preserved) ----
+    fn gradient_bytes(h: usize, w: usize) -> Vec<u8> {
+        let mut data = Vec::with_capacity(h * w * 3);
+        for y in 0..h {
+            for x in 0..w {
+                data.push((x * 255 / w.max(1)) as u8);
+                data.push((y * 255 / h.max(1)) as u8);
+                data.push(64u8);
+            }
+        }
+        data
+    }
+
+    fn assert_unsupported(err: &TrustformersError) {
+        match err {
+            TrustformersError::FeatureUnavailable { message, .. } => {
+                assert!(
+                    message.contains("no real model implementation"),
+                    "unexpected message: {message}"
+                );
+            },
+            other => panic!("expected FeatureUnavailable, got {other:?}"),
+        }
+    }
+
+    // ---- Construction ----
 
     #[test]
     fn test_default_config_creates_pipeline() {
@@ -666,7 +800,38 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_rgb_returns_top_k() {
+    fn test_zero_top_k_is_rejected() {
+        let config = ImageClassificationConfig {
+            top_k: 0,
+            ..Default::default()
+        };
+        assert!(ImageClassificationPipeline::new(config).is_err());
+    }
+
+    #[test]
+    fn test_zero_image_size_is_rejected() {
+        let config = ImageClassificationConfig {
+            image_size: 0,
+            ..Default::default()
+        };
+        assert!(ImageClassificationPipeline::new(config).is_err());
+    }
+
+    #[test]
+    fn test_backend_defaults_to_unavailable() {
+        let pipeline = default_pipeline();
+        assert_eq!(
+            format!("{:?}", pipeline.backend()),
+            "ImageClassificationBackend::Unavailable"
+        );
+    }
+
+    // ---- Honesty: no fabricated classification ----
+
+    #[test]
+    fn test_classify_rgb_reports_unsupported_model() {
+        // Regression: `classify` used to return confident ImageNet labels from
+        // `mock_forward` without ever loading a model.
         let config = ImageClassificationConfig {
             top_k: 3,
             image_size: 64,
@@ -674,61 +839,30 @@ mod tests {
         };
         let pipeline = ImageClassificationPipeline::new(config).expect("valid");
         let input = ImageClassificationInput::RgbImage {
-            data: vec![128u8; 64 * 64 * 3],
+            data: gradient_bytes(64, 64),
             width: 64,
             height: 64,
         };
-        let results = pipeline.classify(&input).expect("classify ok");
-        assert_eq!(results.len(), 3);
+        let err = pipeline.classify(&input).expect_err("no backbone attached");
+        assert_unsupported(&err);
     }
 
     #[test]
-    fn test_batch_classify_length_matches() {
+    fn test_batch_classify_reports_unsupported_model() {
         let pipeline = default_pipeline();
-        let inputs: Vec<ImageClassificationInput> = (0..4)
-            .map(|i| ImageClassificationInput::RgbImage {
-                data: vec![(i * 60) as u8; 224 * 224 * 3],
+        let inputs: Vec<ImageClassificationInput> = (0..2)
+            .map(|_| ImageClassificationInput::RgbImage {
+                data: gradient_bytes(224, 224),
                 width: 224,
                 height: 224,
             })
             .collect();
-        let batch = pipeline.classify_batch(&inputs).expect("batch ok");
-        assert_eq!(batch.len(), 4);
+        let err = pipeline.classify_batch(&inputs).expect_err("no backbone attached");
+        assert_unsupported(&err);
     }
 
     #[test]
-    fn test_scores_sum_to_approximately_one() {
-        let config = ImageClassificationConfig {
-            top_k: 20,
-            image_size: 32,
-            ..Default::default()
-        };
-        let pipeline = ImageClassificationPipeline::new(config).expect("valid");
-        let input = ImageClassificationInput::RgbImage {
-            data: vec![100u8; 32 * 32 * 3],
-            width: 32,
-            height: 32,
-        };
-        let results = pipeline.classify(&input).expect("ok");
-        let total: f32 = results.iter().map(|r| r.score).sum();
-        assert!(
-            (total - 1.0).abs() < 0.01,
-            "scores should sum to ~1.0, got {total}"
-        );
-    }
-
-    #[test]
-    fn test_missing_file_returns_error() {
-        let pipeline = default_pipeline();
-        let tmp = std::env::temp_dir().join("image_classification_nonexistent.jpg");
-        let _ = std::fs::remove_file(&tmp);
-        let input = ImageClassificationInput::FilePath(tmp);
-        let result = pipeline.classify(&input);
-        assert!(result.is_err(), "should fail for non-existent file");
-    }
-
-    #[test]
-    fn test_normalised_tensor_input() {
+    fn test_normalised_tensor_input_reports_unsupported_model() {
         let pipeline = default_pipeline();
         let sz = pipeline.config().image_size as usize;
         let input = ImageClassificationInput::NormalisedTensor {
@@ -737,8 +871,209 @@ mod tests {
             height: sz as u32,
             width: sz as u32,
         };
-        let results = pipeline.classify(&input).expect("ok");
-        assert!(!results.is_empty());
+        let err = pipeline.classify(&input).expect_err("no backbone attached");
+        assert_unsupported(&err);
+    }
+
+    #[test]
+    fn test_new_style_classify_reports_unsupported_model() {
+        let pipeline = default_pipeline();
+        let sz = pipeline.config().image_size as usize;
+        let input = ImageInput::RgbPixels {
+            data: gradient_bytes(sz, sz),
+            width: sz,
+            height: sz,
+        };
+        let err = pipeline.classify_image(input).expect_err("no backbone attached");
+        assert_unsupported(&err);
+    }
+
+    #[test]
+    fn test_unsupported_error_names_the_requested_model() {
+        let config = ImageClassificationConfig {
+            model_name: "microsoft/resnet-50".to_string(),
+            image_size: 32,
+            ..Default::default()
+        };
+        let pipeline = ImageClassificationPipeline::new(config).expect("valid");
+        let input = ImageClassificationInput::RgbImage {
+            data: gradient_bytes(32, 32),
+            width: 32,
+            height: 32,
+        };
+        let err = pipeline.classify(&input).expect_err("no backbone");
+        assert!(
+            err.to_string().contains("microsoft/resnet-50"),
+            "err: {err}"
+        );
+        assert!(err.to_string().contains("vit"), "err: {err}");
+    }
+
+    // ---- Real preprocessing ----
+
+    #[test]
+    fn test_preprocess_produces_nonzero_chw_tensor() {
+        let config = ImageClassificationConfig {
+            image_size: 8,
+            ..Default::default()
+        };
+        let pipeline = ImageClassificationPipeline::new(config).expect("valid");
+        let input = ImageClassificationInput::RgbImage {
+            data: gradient_bytes(16, 16),
+            width: 16,
+            height: 16,
+        };
+        let tensor = pipeline.preprocess(&input).expect("preprocess");
+        assert_eq!(tensor.shape(), vec![1, 3, 8, 8]);
+        let values = tensor.to_vec_f32().expect("values");
+        assert!(
+            values.iter().any(|&v| v != 0.0),
+            "features must not be all zeros"
+        );
+        // Channel-major layout: the red plane varies along x, the green plane along y.
+        let plane = 8 * 8;
+        assert!(
+            (values[1] - values[0]).abs() > 1e-3,
+            "red plane must vary along x"
+        );
+        assert!(
+            (values[plane + 8] - values[plane]).abs() > 1e-3,
+            "green plane must vary along y"
+        );
+    }
+
+    #[test]
+    fn test_preprocess_distinguishes_images() {
+        let config = ImageClassificationConfig {
+            image_size: 8,
+            ..Default::default()
+        };
+        let pipeline = ImageClassificationPipeline::new(config).expect("valid");
+        let a = pipeline
+            .preprocess(&ImageClassificationInput::RgbImage {
+                data: gradient_bytes(16, 16),
+                width: 16,
+                height: 16,
+            })
+            .expect("a")
+            .to_vec_f32()
+            .expect("a values");
+        let mut reversed = gradient_bytes(16, 16);
+        reversed.reverse();
+        let b = pipeline
+            .preprocess(&ImageClassificationInput::RgbImage {
+                data: reversed,
+                width: 16,
+                height: 16,
+            })
+            .expect("b")
+            .to_vec_f32()
+            .expect("b values");
+        assert_ne!(a, b, "different images must preprocess differently");
+    }
+
+    #[test]
+    fn test_preprocess_rejects_wrong_buffer_length() {
+        let pipeline = default_pipeline();
+        let input = ImageClassificationInput::RgbImage {
+            data: vec![0u8; 10],
+            width: 16,
+            height: 16,
+        };
+        assert!(pipeline.preprocess(&input).is_err());
+    }
+
+    // ---- File handling ----
+
+    #[test]
+    fn test_missing_file_returns_error() {
+        let pipeline = default_pipeline();
+        let tmp = std::env::temp_dir().join("image_classification_nonexistent.ppm");
+        let _ = std::fs::remove_file(&tmp);
+        let input = ImageClassificationInput::FilePath(tmp);
+        assert!(matches!(
+            pipeline.classify(&input),
+            Err(TrustformersError::Io { .. })
+        ));
+    }
+
+    #[test]
+    fn test_existing_undecodable_file_is_rejected_not_treated_as_black() {
+        // Regression: an existing file used to be replaced by an all-zero
+        // (black) tensor and classified with confident labels.
+        let tmp = std::env::temp_dir().join("image_classification_not_an_image.jpg");
+        std::fs::write(&tmp, b"").expect("write temp file");
+        let pipeline = default_pipeline();
+        let result = pipeline.preprocess(&ImageClassificationInput::FilePath(tmp.clone()));
+        let _ = std::fs::remove_file(&tmp);
+        assert!(
+            result.is_err(),
+            "an empty file must not decode to a black image"
+        );
+    }
+
+    #[test]
+    fn test_real_image_file_decodes_to_real_pixels() {
+        let tmp = std::env::temp_dir().join("image_classification_real.ppm");
+        let image = RgbImage::new(
+            gradient_bytes(12, 12).iter().map(|&b| f32::from(b) / 255.0).collect(),
+            12,
+            12,
+        )
+        .expect("fixture");
+        std::fs::write(&tmp, encode_ppm(&image)).expect("write fixture");
+        let config = ImageClassificationConfig {
+            image_size: 8,
+            ..Default::default()
+        };
+        let pipeline = ImageClassificationPipeline::new(config).expect("valid");
+        let tensor = pipeline
+            .preprocess(&ImageClassificationInput::FilePath(tmp.clone()))
+            .expect("decode + preprocess");
+        let _ = std::fs::remove_file(&tmp);
+        assert_eq!(tensor.shape(), vec![1, 3, 8, 8]);
+        let values = tensor.to_vec_f32().expect("values");
+        assert!(values.iter().any(|&v| v != 0.0));
+    }
+
+    // ---- Post-processing (real, reusable) ----
+
+    #[test]
+    fn test_rank_logits_orders_and_normalises() {
+        let pipeline = default_pipeline();
+        let mut logits = vec![0.0f32; pipeline.labels().len()];
+        logits[3] = 6.0;
+        let ranked = pipeline.rank_logits(&logits).expect("rank");
+        assert_eq!(ranked.len(), 5);
+        assert_eq!(ranked[0].label_id, 3);
+        for window in ranked.windows(2) {
+            assert!(window[0].score >= window[1].score);
+        }
+        for r in &ranked {
+            assert!(r.label_id < pipeline.labels().len());
+        }
+    }
+
+    #[test]
+    fn test_rank_logits_rejects_length_mismatch() {
+        let pipeline = default_pipeline();
+        assert!(pipeline.rank_logits(&[1.0, 2.0]).is_err());
+    }
+
+    #[test]
+    fn test_rank_logits_scores_sum_to_one() {
+        let config = ImageClassificationConfig {
+            top_k: 20,
+            ..Default::default()
+        };
+        let pipeline = ImageClassificationPipeline::new(config).expect("valid");
+        let logits: Vec<f32> = (0..pipeline.labels().len()).map(|i| i as f32 * 0.1).collect();
+        let ranked = pipeline.rank_logits(&logits).expect("rank");
+        let total: f32 = ranked.iter().map(|r| r.score).sum();
+        assert!(
+            (total - 1.0).abs() < 0.01,
+            "scores should sum to ~1.0, got {total}"
+        );
     }
 
     #[test]
@@ -750,126 +1085,87 @@ mod tests {
             ..Default::default()
         };
         let pipeline = ImageClassificationPipeline::new(config).expect("valid");
-        let input = ImageClassificationInput::RgbImage {
-            data: vec![50u8; 32 * 32 * 3],
-            width: 32,
-            height: 32,
-        };
-        let results = pipeline.classify(&input).expect("ok");
-        assert_eq!(results.len(), 2);
-        for r in &results {
-            assert!(["cat", "dog"].contains(&r.label.as_str()));
-        }
+        let ranked = pipeline.rank_logits(&[0.1, 4.0]).expect("rank");
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].label, "dog");
     }
 
-    #[test]
-    fn test_zero_top_k_is_rejected() {
-        let config = ImageClassificationConfig {
-            top_k: 0,
-            ..Default::default()
-        };
-        assert!(
-            ImageClassificationPipeline::new(config).is_err(),
-            "top_k=0 should be rejected"
-        );
-    }
-
-    #[test]
-    fn test_zero_image_size_is_rejected() {
-        let config = ImageClassificationConfig {
-            image_size: 0,
-            ..Default::default()
-        };
-        assert!(
-            ImageClassificationPipeline::new(config).is_err(),
-            "image_size=0 should be rejected"
-        );
-    }
-
-    #[test]
-    fn test_existing_file_with_placeholder_succeeds() {
-        let tmp = std::env::temp_dir().join("image_classification_test.jpg");
-        std::fs::write(&tmp, b"").expect("write temp file");
-        let pipeline = default_pipeline();
-        let input = ImageClassificationInput::FilePath(tmp.clone());
-        let result = pipeline.classify(&input);
-        let _ = std::fs::remove_file(&tmp);
-        assert!(result.is_ok(), "should succeed for existing file path");
-    }
+    // ---- Resize helpers ----
 
     #[test]
     fn test_resize_bilinear_preserves_size_when_already_target() {
-        let data = vec![255u8; 4 * 4 * 3];
-        let out = resize_rgb_bilinear(&data, 4, 4, 4);
-        assert_eq!(out.len(), data.len());
+        let data = gradient_bytes(4, 4);
+        let out = resize_rgb_bilinear(&data, 4, 4, 4).expect("resize");
+        assert_eq!(out, data);
     }
 
-    // ---- New ImagePreprocessor tests ----
+    #[test]
+    fn test_resize_bilinear_interpolates_not_nearest() {
+        // 2x2 red ramp: 0, 255 / 0, 255. Upsampling to 4 px must produce
+        // intermediate values that nearest-neighbour sampling never yields.
+        let data: Vec<u8> = vec![
+            0, 0, 0, 255, 0, 0, // row 0
+            0, 0, 0, 255, 0, 0, // row 1
+        ];
+        let out = resize_rgb_bilinear(&data, 2, 2, 4).expect("resize");
+        assert_eq!(out.len(), 4 * 4 * 3);
+        let reds: Vec<u8> = out.chunks_exact(3).map(|p| p[0]).collect();
+        assert!(
+            reds.iter().any(|&r| r > 5 && r < 250),
+            "bilinear resize must produce intermediate values, got {reds:?}"
+        );
+    }
+
+    #[test]
+    fn test_resize_bilinear_rejects_bad_buffer() {
+        assert!(resize_rgb_bilinear(&[0u8; 5], 4, 4, 4).is_err());
+    }
+
+    // ---- ImagePreprocessor ----
 
     #[test]
     fn test_resize_bicubic_output_dimensions() {
         let src = vec![128u8; 8 * 8 * 3];
         let out = ImagePreprocessor::resize_bicubic(&src, 8, 8, 4, 4);
-        assert_eq!(out.len(), 4 * 4 * 3, "output should be 4×4×3 bytes");
+        assert_eq!(out.len(), 4 * 4 * 3);
     }
 
     #[test]
     fn test_resize_bicubic_same_size_returns_same() {
         let src = vec![100u8; 6 * 6 * 3];
-        let out = ImagePreprocessor::resize_bicubic(&src, 6, 6, 6, 6);
-        assert_eq!(out, src, "same-size bicubic should be identity");
+        assert_eq!(ImagePreprocessor::resize_bicubic(&src, 6, 6, 6, 6), src);
     }
 
     #[test]
     fn test_resize_bicubic_upscale_dimensions() {
         let src = vec![200u8; 4 * 4 * 3];
         let out = ImagePreprocessor::resize_bicubic(&src, 4, 4, 8, 8);
-        assert_eq!(out.len(), 8 * 8 * 3, "upscaled output dimensions wrong");
+        assert_eq!(out.len(), 8 * 8 * 3);
     }
 
     #[test]
     fn test_normalize_imagenet_range() {
-        // All-128 image: pixel=0.502, normalized for R: (0.502-0.485)/0.229 ≈ 0.074
-        let pixels = vec![128u8; 4 * 3]; // 4 pixels
+        let pixels = vec![128u8; 4 * 3];
         let out = ImagePreprocessor::normalize_imagenet(&pixels);
-        assert_eq!(out.len(), 12, "output length should match input length");
-        // Values should be small (near 0) for near-mean pixels
+        assert_eq!(out.len(), 12);
         for v in &out {
-            assert!(
-                v.abs() < 3.0,
-                "normalized value {} is unexpectedly large",
-                v
-            );
+            assert!(v.abs() < 3.0, "normalized value {v} is unexpectedly large");
         }
     }
 
     #[test]
     fn test_normalize_imagenet_black_pixel() {
-        // Black pixel (0): all channels should be negative after normalization
-        let pixels = vec![0u8; 3];
-        let out = ImagePreprocessor::normalize_imagenet(&pixels);
-        // (0/255 - mean[c]) / std[c] < 0 for all c since mean > 0
+        let out = ImagePreprocessor::normalize_imagenet(&[0u8; 3]);
         for v in &out {
-            assert!(
-                *v < 0.0,
-                "black pixel should normalize to negative value, got {}",
-                v
-            );
+            assert!(*v < 0.0, "black pixel should normalize negative, got {v}");
         }
     }
 
     #[test]
     fn test_normalize_imagenet_white_pixel() {
-        // White pixel (255): all channels should be positive after normalization
-        let pixels = vec![255u8; 3];
-        let out = ImagePreprocessor::normalize_imagenet(&pixels);
-        // (1.0 - mean[c]) / std[c] > 0 since mean < 1.0
+        let out = ImagePreprocessor::normalize_imagenet(&[255u8; 3]);
         for v in &out {
-            assert!(
-                *v > 0.0,
-                "white pixel should normalize to positive value, got {}",
-                v
-            );
+            assert!(*v > 0.0, "white pixel should normalize positive, got {v}");
         }
     }
 
@@ -877,155 +1173,39 @@ mod tests {
     fn test_center_crop_output_dimensions() {
         let src = vec![128u8; 10 * 10 * 3];
         let (out, w, h) = ImagePreprocessor::center_crop(&src, 10, 10, 6);
-        assert_eq!(w, 6, "cropped width should be 6");
-        assert_eq!(h, 6, "cropped height should be 6");
-        assert_eq!(out.len(), 6 * 6 * 3, "cropped data length wrong");
+        assert_eq!((w, h), (6, 6));
+        assert_eq!(out.len(), 6 * 6 * 3);
     }
 
     #[test]
     fn test_center_crop_smaller_than_crop_size() {
         let src = vec![200u8; 4 * 4 * 3];
         let (out, w, h) = ImagePreprocessor::center_crop(&src, 4, 4, 8);
-        // Crop size > image size: should return the full 4×4 image
-        assert_eq!(w, 4);
-        assert_eq!(h, 4);
+        assert_eq!((w, h), (4, 4));
         assert_eq!(out.len(), 4 * 4 * 3);
     }
 
     #[test]
     fn test_to_chw_format_shape() {
-        // HWC: 2×2×3
         let hwc = vec![
-            1.0_f32, 2.0, 3.0, // pixel (0,0): R=1, G=2, B=3
-            4.0, 5.0, 6.0, // pixel (0,1): R=4, G=5, B=6
-            7.0, 8.0, 9.0, // pixel (1,0): R=7, G=8, B=9
-            10.0, 11.0, 12.0, // pixel (1,1): R=10, G=11, B=12
+            1.0_f32, 2.0, 3.0, //
+            4.0, 5.0, 6.0, //
+            7.0, 8.0, 9.0, //
+            10.0, 11.0, 12.0,
         ];
         let chw = ImagePreprocessor::to_chw_format(&hwc, 2, 2, 3);
-        assert_eq!(chw.len(), 12, "CHW output length should be 12");
-        // Channel 0 (R): [1, 4, 7, 10]
-        assert!(
-            (chw[0] - 1.0).abs() < 1e-6,
-            "CHW[0] (R@00) should be 1.0, got {}",
-            chw[0]
-        );
-        assert!(
-            (chw[1] - 4.0).abs() < 1e-6,
-            "CHW[1] (R@01) should be 4.0, got {}",
-            chw[1]
-        );
-        // Channel 1 (G): [2, 5, 8, 11]
-        assert!(
-            (chw[4] - 2.0).abs() < 1e-6,
-            "CHW[4] (G@00) should be 2.0, got {}",
-            chw[4]
-        );
+        assert_eq!(chw.len(), 12);
+        assert!((chw[0] - 1.0).abs() < 1e-6);
+        assert!((chw[1] - 4.0).abs() < 1e-6);
+        assert!((chw[4] - 2.0).abs() < 1e-6);
     }
 
     #[test]
     fn test_to_chw_format_roundtrip_values() {
-        // Single pixel, 3 channels
-        let hwc = vec![0.1_f32, 0.2, 0.3];
-        let chw = ImagePreprocessor::to_chw_format(&hwc, 1, 1, 3);
+        let chw = ImagePreprocessor::to_chw_format(&[0.1_f32, 0.2, 0.3], 1, 1, 3);
         assert_eq!(chw.len(), 3);
         assert!((chw[0] - 0.1).abs() < 1e-6);
         assert!((chw[1] - 0.2).abs() < 1e-6);
         assert!((chw[2] - 0.3).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_new_style_classify_rgb_pixels() {
-        let pipeline = default_pipeline();
-        let sz = pipeline.config().image_size as usize;
-        let input = ImageInput::RgbPixels {
-            data: vec![100u8; sz * sz * 3],
-            width: sz,
-            height: sz,
-        };
-        let results = pipeline.classify_image(input).expect("classify_image ok");
-        assert!(!results.is_empty());
-    }
-
-    #[test]
-    fn test_new_style_classify_float_tensor() {
-        let pipeline = default_pipeline();
-        let sz = pipeline.config().image_size as usize;
-        let input = ImageInput::FloatTensor {
-            data: vec![0.5_f32; sz * sz * 3],
-            width: sz,
-            height: sz,
-            channels: 3,
-        };
-        let results = pipeline.classify_image(input).expect("classify_image ok");
-        assert!(!results.is_empty());
-    }
-
-    #[test]
-    fn test_new_style_batch_classify() {
-        let pipeline = default_pipeline();
-        let sz = pipeline.config().image_size as usize;
-        let inputs = vec![
-            ImageInput::RgbPixels {
-                data: vec![0u8; sz * sz * 3],
-                width: sz,
-                height: sz,
-            },
-            ImageInput::RgbPixels {
-                data: vec![128u8; sz * sz * 3],
-                width: sz,
-                height: sz,
-            },
-        ];
-        let batch = pipeline.classify_image_batch(inputs).expect("batch ok");
-        assert_eq!(batch.len(), 2);
-    }
-
-    #[test]
-    fn test_result_has_label_id() {
-        let config = ImageClassificationConfig {
-            top_k: 5,
-            image_size: 32,
-            ..Default::default()
-        };
-        let pipeline = ImageClassificationPipeline::new(config).expect("valid");
-        let input = ImageClassificationInput::RgbImage {
-            data: vec![50u8; 32 * 32 * 3],
-            width: 32,
-            height: 32,
-        };
-        let results = pipeline.classify(&input).expect("ok");
-        let label_count = pipeline.labels().len();
-        for r in &results {
-            assert!(
-                r.label_id < label_count,
-                "label_id {} out of bounds (max {})",
-                r.label_id,
-                label_count
-            );
-        }
-    }
-
-    #[test]
-    fn test_results_sorted_descending() {
-        let config = ImageClassificationConfig {
-            top_k: 5,
-            image_size: 32,
-            ..Default::default()
-        };
-        let pipeline = ImageClassificationPipeline::new(config).expect("valid");
-        let input = ImageClassificationInput::RgbImage {
-            data: vec![200u8; 32 * 32 * 3],
-            width: 32,
-            height: 32,
-        };
-        let results = pipeline.classify(&input).expect("ok");
-        for window in results.windows(2) {
-            assert!(
-                window[0].score >= window[1].score,
-                "results should be sorted by descending score: {} < {}",
-                window[0].score,
-                window[1].score
-            );
-        }
     }
 }

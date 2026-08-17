@@ -634,12 +634,14 @@ impl RingAttentionManager {
             let next_device = (i + 1) % num_devices;
             let (mut keys, mut values) = snapshot[i].clone();
 
-            // Apply compression if enabled
-            if self.config.compression_enabled {
-                self.compress_kv_data(&mut keys, &mut values)?;
-            }
-
-            let comm_volume = (keys.len() + values.len()) * std::mem::size_of::<f32>();
+            // Apply compression if enabled. `comm_volume` is the number of
+            // bytes that really travel, so enabling compression is visible in
+            // the statistics instead of being a silent no-op.
+            let comm_volume = if self.config.compression_enabled {
+                self.compress_kv_data(&mut keys, &mut values)?
+            } else {
+                Self::uncompressed_kv_bytes(keys.len())
+            };
 
             let kv_pair = RingKVPair {
                 keys,
@@ -670,11 +672,11 @@ impl RingAttentionManager {
             let prev_device = (i + num_devices - 1) % num_devices;
             let (mut keys, mut values) = snapshot[i].clone();
 
-            if self.config.compression_enabled {
-                self.compress_kv_data(&mut keys, &mut values)?;
-            }
-
-            let comm_volume = (keys.len() + values.len()) * std::mem::size_of::<f32>();
+            let comm_volume = if self.config.compression_enabled {
+                self.compress_kv_data(&mut keys, &mut values)?
+            } else {
+                Self::uncompressed_kv_bytes(keys.len())
+            };
 
             let kv_pair = RingKVPair {
                 keys,
@@ -919,42 +921,83 @@ impl ModelParams {
 }
 
 impl RingAttentionManager {
-    /// Compress key-value data for efficient communication
-    fn compress_kv_data(&self, keys: &mut Vec<f32>, values: &mut Vec<f32>) -> Result<()> {
-        if !self.config.compression_enabled {
-            return Ok(());
+    /// Bytes of metadata that accompany one quantized buffer on the wire: an
+    /// `f32` scale and an `f32` zero point.
+    const QUANT_HEADER_BYTES: usize = 2 * std::mem::size_of::<f32>();
+
+    /// Bit width used to transmit a K/V buffer at the configured ratio, or
+    /// `None` when the ratio asks for no compression at all.
+    ///
+    /// [`RingAttentionConfig::compression_ratio`] is the target
+    /// bytes-out / bytes-in, so a ratio of `r` over 32-bit input asks for
+    /// `32 * r` bits. A ratio of `1.0` or more (and any non-finite value) means
+    /// "do not shrink the payload", which must be a genuine no-op rather than
+    /// lossy 16-bit quantization advertised as a halving. Otherwise the width
+    /// is clamped to `2..=16`: below two bits a buffer degenerates to its
+    /// min/max, and at seventeen or more the saving no longer justifies the
+    /// loss.
+    fn quantization_bits(compression_ratio: f32) -> Option<u32> {
+        if !compression_ratio.is_finite() || compression_ratio >= 1.0 {
+            return None;
+        }
+        Some(((compression_ratio * 32.0).round() as i64).clamp(2, 16) as u32)
+    }
+
+    /// Quantize `keys` and `values` for transmission and return the number of
+    /// bytes that actually travel.
+    ///
+    /// The buffers are replaced by their *reconstruction*, which is what the
+    /// receiver observes — the same length, the same shape, with quantization
+    /// error. An earlier revision decimated the buffer and then padded it back
+    /// to full length with a geometric decay of the last kept sample: the
+    /// payload never shrank (so the reported saving was zero), the tail was
+    /// fabricated data, and a `compression_ratio` above `1.0` or below
+    /// `1/len` panicked on `step_by(0)` / an empty-vector index.
+    fn compress_kv_data(&self, keys: &mut [f32], values: &mut [f32]) -> Result<usize> {
+        let Some(bits) = Self::quantization_bits(self.config.compression_ratio) else {
+            // The configuration asks for no reduction: leave the data untouched
+            // and report the full uncompressed size.
+            return Ok(Self::uncompressed_kv_bytes(keys.len()));
+        };
+
+        Self::quantize_in_place(keys, bits);
+        Self::quantize_in_place(values, bits);
+
+        let payload_bits = (keys.len() + values.len()) * bits as usize;
+        Ok(payload_bits.div_ceil(8) + 2 * Self::QUANT_HEADER_BYTES)
+    }
+
+    /// Uniform affine quantization to `bits` levels, followed by immediate
+    /// dequantization — the values the receiver would reconstruct.
+    fn quantize_in_place(buffer: &mut [f32], bits: u32) {
+        if buffer.is_empty() {
+            return;
         }
 
-        let compression_ratio = self.config.compression_ratio;
-        let original_len = keys.len();
-        let compressed_len = (original_len as f32 * compression_ratio) as usize;
-
-        // Simple compression: keep only the most significant values
-        // In practice, this would use more sophisticated compression algorithms
-
-        // For keys: keep every nth element based on compression ratio
-        let step = (1.0 / compression_ratio) as usize;
-        let mut compressed_keys = Vec::with_capacity(compressed_len);
-        let mut compressed_values = Vec::with_capacity(compressed_len);
-
-        for i in (0..original_len).step_by(step) {
-            if compressed_keys.len() < compressed_len && i < keys.len() {
-                compressed_keys.push(keys[i]);
-                compressed_values.push(values[i]);
-            }
+        let mut min_value = f32::INFINITY;
+        let mut max_value = f32::NEG_INFINITY;
+        for value in buffer.iter() {
+            min_value = min_value.min(*value);
+            max_value = max_value.max(*value);
         }
 
-        // Pad to original size with interpolated values
-        while compressed_keys.len() < original_len {
-            let last_idx = compressed_keys.len() - 1;
-            compressed_keys.push(compressed_keys[last_idx] * 0.9); // Simple interpolation
-            compressed_values.push(compressed_values[last_idx] * 0.9);
+        let span = max_value - min_value;
+        if !span.is_finite() || span <= 0.0 {
+            // A constant (or non-finite) buffer quantizes exactly; leave it be.
+            return;
         }
 
-        *keys = compressed_keys;
-        *values = compressed_values;
+        let levels = ((1u32 << bits) - 1) as f32;
+        let scale = span / levels;
+        for value in buffer.iter_mut() {
+            let level = ((*value - min_value) / scale).round().clamp(0.0, levels);
+            *value = min_value + level * scale;
+        }
+    }
 
-        Ok(())
+    /// Bytes one uncompressed K/V pair of `elements` values each occupies.
+    fn uncompressed_kv_bytes(elements: usize) -> usize {
+        2 * elements * std::mem::size_of::<f32>()
     }
 
     /// Block-sparse (tiled) attention with an online softmax.
@@ -1542,400 +1585,4 @@ impl RingAttentionMemoryPoolV2 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_ring_attention_config() {
-        let config = RingAttentionConfig::default();
-        assert_eq!(config.num_devices, 8);
-        assert_eq!(config.chunk_size, 4096);
-        assert!(config.bidirectional);
-    }
-
-    #[test]
-    fn test_ring_attention_manager_creation() {
-        let config = RingAttentionConfig::default();
-        let sequence_length = 32768;
-        let manager =
-            RingAttentionManager::new(config, sequence_length).expect("operation failed in test");
-
-        assert_eq!(manager.devices.len(), 8);
-        assert_eq!(manager.global_sequence_length, sequence_length);
-
-        // Check device chunk assignments
-        for (i, device) in manager.devices.iter().enumerate() {
-            assert_eq!(device.device_rank, i);
-            let expected_start = i * 4096;
-            assert_eq!(device.sequence_chunk.0, expected_start);
-        }
-    }
-
-    #[test]
-    fn test_optimal_device_calculation() {
-        let devices = utils::calculate_optimal_devices(1_000_000, 4096);
-        assert!(devices > 0);
-        assert!(devices <= 128);
-
-        // Should prefer power-of-2 device counts
-        assert!([1, 2, 4, 8, 16, 32, 64, 128].contains(&devices));
-    }
-
-    #[test]
-    fn test_speedup_estimation() {
-        let speedup = utils::estimate_speedup(1_000_000, 32, 900.0);
-        assert!(speedup > 1.0);
-        assert!(speedup <= 32.0); // Can't exceed number of devices
-    }
-
-    #[test]
-    fn test_preset_configs() {
-        let presets = utils::create_preset_configs();
-        assert!(presets.contains_key("small_scale"));
-        assert!(presets.contains_key("medium_scale"));
-        assert!(presets.contains_key("large_scale"));
-        assert!(presets.contains_key("ultra_scale"));
-
-        let ultra_config = &presets["ultra_scale"];
-        assert_eq!(ultra_config.num_devices, 128);
-        assert!(ultra_config.compression_enabled);
-    }
-
-    #[test]
-    fn test_model_params_memory_estimation() {
-        let params = ModelParams {
-            num_heads: 32,
-            head_dim: 128,
-            hidden_dim: 4096,
-            num_layers: 24,
-            causal: true,
-        };
-
-        let memory = params.estimate_memory_usage();
-        assert!(memory > 0);
-        // Should be reasonable for a large model (several GB)
-        assert!(memory > 1_000_000_000); // > 1GB
-    }
-
-    #[test]
-    fn test_ring_attention_stats() {
-        let mut stats = RingAttentionStats {
-            total_attention_ops: 1000,
-            computation_time_ms: 100.0,
-            communication_time_ms: 20.0,
-            ..RingAttentionStats::default()
-        };
-
-        // Compute efficiency: computation / total time
-        let total_time = stats.computation_time_ms + stats.communication_time_ms;
-        stats.efficiency_score = (stats.computation_time_ms / total_time) as f32;
-
-        let expected_efficiency = 100.0 / 120.0;
-        assert!((stats.efficiency_score - expected_efficiency as f32).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_optimized_config_creation() {
-        let model_params = ModelParams {
-            num_heads: 32,
-            head_dim: 128,
-            hidden_dim: 4096,
-            num_layers: 24,
-            causal: true,
-        };
-
-        let config = RingAttentionManager::create_optimized_config(
-            2_000_000, // 2M tokens
-            16,        // 16 devices
-            model_params,
-        );
-
-        assert_eq!(config.num_devices, 16);
-        assert!(config.compression_enabled); // Should enable for 2M tokens
-        assert!(config.chunk_size > 0);
-    }
-
-    /// Dense scaled dot-product attention, written the obvious way, used as the
-    /// reference for the tiled implementation.
-    fn naive_attention(
-        queries: &[f32],
-        keys: &[f32],
-        values: &[f32],
-        seq_len: usize,
-        hidden: usize,
-        scale: f32,
-        causal: bool,
-    ) -> Vec<f32> {
-        let mut output = vec![0.0f32; seq_len * hidden];
-        for i in 0..seq_len {
-            let last = if causal { i + 1 } else { seq_len };
-            let mut scores = Vec::with_capacity(last);
-            for j in 0..last {
-                let dot: f32 = (0..hidden)
-                    .map(|d| queries[i * hidden + d] * keys[j * hidden + d])
-                    .sum::<f32>()
-                    * scale;
-                scores.push(dot);
-            }
-            let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let exponentials: Vec<f32> = scores.iter().map(|s| (s - max).exp()).collect();
-            let total: f32 = exponentials.iter().sum();
-            for (j, weight) in exponentials.iter().enumerate() {
-                for d in 0..hidden {
-                    output[i * hidden + d] += (weight / total) * values[j * hidden + d];
-                }
-            }
-        }
-        output
-    }
-
-    fn block_sparse_manager(causal: bool, hidden: usize) -> RingAttentionManager {
-        let config = RingAttentionConfig {
-            num_devices: 1,
-            chunk_size: 8,
-            head_dim: hidden,
-            causal,
-            ..RingAttentionConfig::default()
-        };
-        RingAttentionManager::new(config, 8).expect("manager must build in test")
-    }
-
-    /// Regression: the block-sparse path used to accumulate into a discarded
-    /// temporary and return the freshly zeroed output tensor, so it produced
-    /// all-zero attention for every input. It must now match dense attention.
-    #[test]
-    fn block_sparse_attention_matches_dense_reference() {
-        let seq_len = 8usize;
-        let hidden = 4usize;
-        let make = |seed: f32| -> Vec<f32> {
-            (0..seq_len * hidden)
-                .map(|i| ((i as f32 * 0.37 + seed).sin() * 0.9) + seed * 0.1)
-                .collect()
-        };
-        let queries = make(0.2);
-        let keys = make(1.1);
-        let values = make(2.3);
-        let scale = 1.0 / (hidden as f32).sqrt();
-
-        for causal in [false, true] {
-            let mut manager = block_sparse_manager(causal, hidden);
-            let q = Tensor::from_vec(queries.clone(), &[1, seq_len, hidden])
-                .expect("tensor must build in test");
-            let k = Tensor::from_vec(keys.clone(), &[1, seq_len, hidden])
-                .expect("tensor must build in test");
-            let v = Tensor::from_vec(values.clone(), &[1, seq_len, hidden])
-                .expect("tensor must build in test");
-
-            let expected =
-                naive_attention(&queries, &keys, &values, seq_len, hidden, scale, causal);
-
-            // Every tile size must give the same answer as the dense reference.
-            for block_size in [1usize, 3, 8, 32] {
-                let actual = manager
-                    .compute_block_sparse_attention(&q, &k, &v, block_size)
-                    .expect("block-sparse attention must succeed in test")
-                    .to_vec_f32()
-                    .expect("tensor read must succeed in test");
-
-                assert_eq!(actual.len(), expected.len());
-                assert!(
-                    actual.iter().any(|value| value.abs() > 1e-6),
-                    "output must not be all zeros (causal={causal}, block={block_size})"
-                );
-                for (index, (got, want)) in actual.iter().zip(&expected).enumerate() {
-                    assert!(
-                        (got - want).abs() < 1e-4,
-                        "causal={causal} block={block_size} index={index}: {got} != {want}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn block_sparse_attention_output_depends_on_values() {
-        let seq_len = 4usize;
-        let hidden = 2usize;
-        let mut manager = block_sparse_manager(false, hidden);
-
-        let queries: Vec<f32> = (0..seq_len * hidden).map(|i| i as f32 * 0.1).collect();
-        let keys: Vec<f32> = (0..seq_len * hidden).map(|i| (i as f32 * 0.2).cos()).collect();
-        let q = Tensor::from_vec(queries, &[1, seq_len, hidden]).expect("tensor builds in test");
-        let k = Tensor::from_vec(keys, &[1, seq_len, hidden]).expect("tensor builds in test");
-
-        let first = manager
-            .compute_block_sparse_attention(
-                &q,
-                &k,
-                &Tensor::from_vec(vec![1.0f32; seq_len * hidden], &[1, seq_len, hidden])
-                    .expect("tensor builds in test"),
-                2,
-            )
-            .expect("attention must succeed in test")
-            .to_vec_f32()
-            .expect("tensor read must succeed in test");
-
-        let second = manager
-            .compute_block_sparse_attention(
-                &q,
-                &k,
-                &Tensor::from_vec(
-                    (0..seq_len * hidden).map(|i| i as f32).collect::<Vec<f32>>(),
-                    &[1, seq_len, hidden],
-                )
-                .expect("tensor builds in test"),
-                2,
-            )
-            .expect("attention must succeed in test")
-            .to_vec_f32()
-            .expect("tensor read must succeed in test");
-
-        assert_ne!(first, second, "the output must depend on the value tensor");
-        // A constant value tensor is reproduced exactly by any convex
-        // combination of its rows.
-        for value in &first {
-            assert!((value - 1.0).abs() < 1e-5, "expected 1.0, got {value}");
-        }
-    }
-
-    #[test]
-    fn block_sparse_attention_rejects_mismatched_shapes() {
-        let mut manager = block_sparse_manager(false, 2);
-        let q = Tensor::from_vec(vec![0.0f32; 8], &[1, 4, 2]).expect("tensor builds in test");
-        let k = Tensor::from_vec(vec![0.0f32; 4], &[1, 2, 2]).expect("tensor builds in test");
-        assert!(manager.compute_block_sparse_attention(&q, &k, &q, 2).is_err());
-    }
-
-    // ── Ring KV rotation ─────────────────────────────────────────────────
-    //
-    // The previous implementation ignored every device's stored K/V and pushed
-    // a freshly synthesised `sin`/`cos` buffer around the ring. These tests
-    // pin the rotation to the real data: what arrives at device `i + 1` must be
-    // exactly what device `i` holds.
-
-    fn ring_manager(num_devices: usize, chunk: usize, head_dim: usize) -> RingAttentionManager {
-        let config = RingAttentionConfig {
-            num_devices,
-            chunk_size: chunk,
-            head_dim,
-            compression_enabled: false,
-            bidirectional: false,
-            ..Default::default()
-        };
-        RingAttentionManager::new(config, chunk * num_devices)
-            .expect("ring manager must build in test")
-    }
-
-    /// Device-specific K/V that no synthetic generator would reproduce.
-    fn device_kv(rank: usize, len: usize) -> (Vec<f32>, Vec<f32>) {
-        let keys: Vec<f32> = (0..len).map(|i| 100.0 * rank as f32 + i as f32).collect();
-        let values: Vec<f32> = (0..len).map(|i| -(100.0 * rank as f32 + i as f32)).collect();
-        (keys, values)
-    }
-
-    #[test]
-    fn rotation_delivers_each_device_s_own_kv_to_its_successor() {
-        let devices = 4;
-        let len = 6;
-        let mut manager = ring_manager(devices, 3, 2);
-        manager.communication_pattern = RingCommunicationPattern::Unidirectional;
-
-        for rank in 0..devices {
-            let (keys, values) = device_kv(rank, len);
-            manager.set_local_kv(rank, keys, values).expect("kv must load in test");
-        }
-
-        manager.rotate_kv_pairs().expect("rotation must succeed in test");
-
-        for source in 0..devices {
-            let destination = (source + 1) % devices;
-            let received = &manager.devices[destination].received_kv;
-            assert_eq!(
-                received.len(),
-                1,
-                "device {destination} must get exactly one hop"
-            );
-
-            let pair = &received[0];
-            assert_eq!(pair.source_rank, source);
-
-            let (expected_keys, expected_values) = device_kv(source, len);
-            assert_eq!(
-                pair.keys, expected_keys,
-                "device {destination} must receive device {source}'s real keys"
-            );
-            assert_eq!(pair.values, expected_values);
-            assert_eq!(
-                pair.position_range, manager.devices[source].sequence_chunk,
-                "the chunk range must travel with the data"
-            );
-        }
-    }
-
-    #[test]
-    fn rotation_without_loaded_kv_errors_instead_of_synthesising() {
-        let mut manager = ring_manager(2, 3, 2);
-        manager.communication_pattern = RingCommunicationPattern::Unidirectional;
-
-        let error =
-            manager.rotate_kv_pairs().expect_err("rotating empty devices must fail in test");
-        assert!(error.to_string().contains("set_local_kv"), "{error}");
-    }
-
-    #[test]
-    fn bidirectional_rotation_delivers_both_neighbours_real_kv() {
-        let devices = 3;
-        let len = 4;
-        let mut manager = ring_manager(devices, 2, 2);
-        manager.communication_pattern = RingCommunicationPattern::Bidirectional;
-
-        for rank in 0..devices {
-            let (keys, values) = device_kv(rank, len);
-            manager.set_local_kv(rank, keys, values).expect("kv must load in test");
-        }
-
-        manager.rotate_kv_pairs().expect("rotation must succeed in test");
-
-        for destination in 0..devices {
-            let mut sources: Vec<usize> = manager.devices[destination]
-                .received_kv
-                .iter()
-                .map(|pair| pair.source_rank)
-                .collect();
-            sources.sort_unstable();
-
-            let forward = (destination + devices - 1) % devices;
-            let backward = (destination + 1) % devices;
-            let mut expected = vec![forward, backward];
-            expected.sort_unstable();
-            assert_eq!(sources, expected, "device {destination} neighbours");
-
-            for pair in &manager.devices[destination].received_kv {
-                let (expected_keys, _) = device_kv(pair.source_rank, len);
-                assert_eq!(pair.keys, expected_keys);
-            }
-        }
-    }
-
-    #[test]
-    fn rotation_accounts_for_the_bytes_it_actually_moved() {
-        let devices = 2;
-        let len = 8;
-        let mut manager = ring_manager(devices, 4, 2);
-        manager.communication_pattern = RingCommunicationPattern::Unidirectional;
-
-        for rank in 0..devices {
-            let (keys, values) = device_kv(rank, len);
-            manager.set_local_kv(rank, keys, values).expect("kv must load in test");
-        }
-        manager.rotate_kv_pairs().expect("rotation must succeed in test");
-
-        let expected_bytes = (2 * len * std::mem::size_of::<f32>()) as u64;
-        for rank in 0..devices {
-            assert_eq!(
-                manager.devices[rank].attention_stats.communication_volume, expected_bytes,
-                "device {rank} must report the bytes it really sent"
-            );
-        }
-    }
-}
+mod tests;

@@ -782,6 +782,93 @@ mod tests {
         assert!(!encoded.input_ids.is_empty());
     }
 
+    /// Direct regression test for `calculate_removal_loss`'s real EM-derived
+    /// removal loss, distinguishing it from the old `word.contains(token)`
+    /// substring-count heuristic.
+    ///
+    /// With vocabulary `{"a": -1.0, "b": -1.0, "ab": -0.5}`, the only word
+    /// "ab" (freq 10) Viterbi-segments as the single piece `["ab"]` (total
+    /// score -0.5), strictly better than `["a", "b"]` (score -2.0) -- so
+    /// "ab"'s real best segmentation never actually selects "a" or "b" at
+    /// all, even though the *string* "ab" contains "a" as a substring.
+    #[test]
+    fn test_calculate_removal_loss_ignores_substring_matches_that_were_never_selected() {
+        let mut vocab: HashMap<String, f64> = HashMap::new();
+        vocab.insert("a".to_string(), -1.0);
+        vocab.insert("b".to_string(), -1.0);
+        vocab.insert("ab".to_string(), -0.5);
+
+        let unk_score = UnigramTrainer::unigram_unk_score(&vocab);
+
+        let mut word_freqs: HashMap<String, usize> = HashMap::new();
+        word_freqs.insert("ab".to_string(), 10);
+
+        // Mirror `prune_vocabulary`'s own E-step exactly: real Viterbi
+        // segmentation of every corpus word, then an inverted piece->words
+        // index built from those real segmentations (not from substring
+        // matching).
+        let mut segmentations: HashMap<&str, (Vec<String>, f64)> = HashMap::new();
+        for word in word_freqs.keys() {
+            segmentations.insert(
+                word.as_str(),
+                UnigramTrainer::viterbi_segment(&vocab, unk_score, None, word),
+            );
+        }
+        assert_eq!(
+            segmentations["ab"].0,
+            vec!["ab".to_string()],
+            "the real Viterbi segmentation of \"ab\" must select the single \"ab\" piece, \
+             not [\"a\", \"b\"]"
+        );
+
+        let mut piece_to_words: HashMap<&str, Vec<&str>> = HashMap::new();
+        for (word, (pieces, _)) in &segmentations {
+            for piece in pieces {
+                piece_to_words.entry(piece.as_str()).or_default().push(*word);
+            }
+        }
+
+        // "a" is never chosen by any word's real segmentation (only the
+        // whole piece "ab" is), so its real removal loss must be exactly
+        // zero. The old `word.contains(token)` heuristic instead counted
+        // "ab" as "using" the substring "a" and would have reported a large
+        // nonzero fabricated loss (`vocab["a"] * freq = -1.0 * 10 = -10.0`,
+        // scaled by the invented length penalty) for a piece that removal
+        // cannot actually affect at all.
+        let loss_a = UnigramTrainer::calculate_removal_loss(
+            "a",
+            &vocab,
+            unk_score,
+            &segmentations,
+            &piece_to_words,
+            &word_freqs,
+        );
+        assert_eq!(
+            loss_a, 0.0,
+            "\"a\" is not selected by any word's real segmentation, so removing it must cost \
+             nothing"
+        );
+
+        // "ab" IS selected (by "ab" itself), so removing it must show a
+        // real, strictly positive loss: without it, "ab" is forced back to
+        // ["a", "b"] (score -2.0 instead of -0.5) -- a real likelihood
+        // drop, hand-computed as freq * (old_score - new_score)
+        // = 10 * (-0.5 - (-2.0)) = 15.0.
+        let loss_ab = UnigramTrainer::calculate_removal_loss(
+            "ab",
+            &vocab,
+            unk_score,
+            &segmentations,
+            &piece_to_words,
+            &word_freqs,
+        );
+        assert!(
+            (loss_ab - 15.0).abs() < 1e-9,
+            "expected the exact hand-computed EM removal loss 15.0, got {}",
+            loss_ab
+        );
+    }
+
     #[test]
     fn test_bpe_merge_word() {
         let config = TrainingConfig::default();

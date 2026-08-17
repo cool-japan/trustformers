@@ -1,9 +1,46 @@
+//! # Speech-to-text (ASR) pipeline
+//!
+//! Real audio front-end, honest back-end.
+//!
+//! ## What is real here
+//!
+//! * **Container decoding** — RIFF/WAVE (PCM 8/16/24/32-bit and IEEE float
+//!   32/64-bit, any channel count) via [`media::audio_dsp::decode_wav`].
+//!   Base64 payloads are decoded with the `base64` crate and then *sniffed*,
+//!   not assumed to be WAV.
+//! * **Resampling** — linear interpolation to the configured rate.
+//! * **Feature extraction** — Hann-windowed STFT (pure-Rust `oxifft`), Slaney
+//!   mel filterbank, Whisper-style log compression.
+//!
+//! ## What is not available
+//!
+//! The pipeline runs inference only when a real speech model is attached. The
+//! generic [`AutoModel`] carries no speech architecture, so
+//! [`SpeechToTextPipeline::new`] produces a pipeline whose
+//! [`Pipeline::__call__`] returns a structured
+//! [`TrustformersError::FeatureUnavailable`] listing the supported backends.
+//!
+//! With the `whisper` feature enabled, [`SpeechToTextPipeline::with_whisper`]
+//! accepts a caller-constructed
+//! [`trustformers_models::whisper::SpeechRecognitionTask`] and the pipeline
+//! then runs the real encoder–decoder forward pass and decodes the produced
+//! token IDs with the pipeline's tokenizer.
+//!
+//! Under no configuration does this pipeline invent a transcript, a language,
+//! or a confidence score.
+
 use crate::error::{Result, TrustformersError};
+use crate::pipeline::media::audio_dsp::{self, MelConfig};
+use crate::pipeline::media::unsupported_model;
 use crate::pipeline::{BasePipeline, Pipeline};
 use crate::{AutoModel, AutoTokenizer};
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
+
+/// Architectures this pipeline can actually execute.
+const SUPPORTED_ARCHITECTURES: &[&str] = &["whisper (requires the `whisper` feature)"];
 
 /// Audio input for speech-to-text pipeline
 #[derive(Debug, Clone)]
@@ -23,7 +60,7 @@ pub enum AudioInput {
 }
 
 /// Supported audio formats
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AudioFormat {
     Wav,
     Flac,
@@ -45,6 +82,14 @@ impl AudioFormat {
             _ => None,
         }
     }
+
+    /// Whether this crate can decode the container without external codecs.
+    ///
+    /// Only uncompressed RIFF/WAVE is decodable in pure Rust here; the
+    /// compressed formats need a codec that is not part of this workspace.
+    pub fn is_decodable(self) -> bool {
+        matches!(self, AudioFormat::Wav)
+    }
 }
 
 /// Speech-to-text output
@@ -52,13 +97,14 @@ impl AudioFormat {
 pub struct SpeechToTextOutput {
     /// Transcribed text
     pub text: String,
-    /// Confidence score (0.0 to 1.0)
+    /// Mean per-token probability of the emitted tokens, or `None` when the
+    /// backend does not expose token scores. Never a fabricated constant.
     pub confidence: Option<f32>,
-    /// Word-level timestamps (if supported)
+    /// Word-level timestamps, when the backend produces them.
     pub word_timestamps: Option<Vec<WordTimestamp>>,
     /// Language detected (if multi-language model)
     pub language: Option<String>,
-    /// Processing time in milliseconds
+    /// Measured wall-clock processing time in milliseconds.
     pub processing_time_ms: Option<u64>,
 }
 
@@ -100,6 +146,15 @@ pub struct SpeechToTextConfig {
     pub stride_length_s: Option<f64>,
 }
 
+/// Default decoder token budget (Whisper's decoder context length).
+pub const DEFAULT_MAX_NEW_TOKENS: usize = 448;
+
+/// Whisper's start-of-transcript special token.
+///
+/// Its numeric id differs between checkpoints, so it is always resolved through
+/// the tokenizer (or an explicit override) rather than hardcoded.
+pub const WHISPER_SOT_TOKEN: &str = "<|startoftranscript|>";
+
 impl Default for SpeechToTextConfig {
     fn default() -> Self {
         Self {
@@ -128,29 +183,103 @@ pub enum SpeechTask {
     Translate,
 }
 
+/// The inference backend attached to a [`SpeechToTextPipeline`].
+#[derive(Clone)]
+pub enum SpeechToTextBackend {
+    /// No speech model attached — inference reports the architecture as
+    /// unsupported instead of returning a synthesised transcript.
+    Unavailable,
+    /// A caller-supplied Whisper encoder–decoder with real weights.
+    #[cfg(feature = "whisper")]
+    Whisper(Arc<trustformers_models::whisper::SpeechRecognitionTask>),
+}
+
+impl std::fmt::Debug for SpeechToTextBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable => f.write_str("SpeechToTextBackend::Unavailable"),
+            #[cfg(feature = "whisper")]
+            Self::Whisper(_) => f.write_str("SpeechToTextBackend::Whisper"),
+        }
+    }
+}
+
 /// Pipeline for speech-to-text tasks (ASR)
 #[derive(Clone)]
 pub struct SpeechToTextPipeline {
     base: BasePipeline<AutoModel, AutoTokenizer>,
     config: SpeechToTextConfig,
-    feature_extractor: Arc<AudioFeatureExtractor>,
+    backend: SpeechToTextBackend,
+    max_new_tokens: usize,
+    decoder_start_token: Option<u32>,
 }
 
 impl SpeechToTextPipeline {
-    /// Create a new speech-to-text pipeline
+    /// Create a new speech-to-text pipeline.
+    ///
+    /// [`AutoModel`] carries no speech architecture, so the resulting pipeline
+    /// has [`SpeechToTextBackend::Unavailable`]: audio preprocessing works, but
+    /// transcription returns a structured error. Attach a real backend with
+    /// [`Self::with_whisper`].
     pub fn new(model: AutoModel, tokenizer: AutoTokenizer) -> Result<Self> {
         let base = BasePipeline::new(model, tokenizer);
         let config = SpeechToTextConfig::default();
-        let feature_extractor = Arc::new(AudioFeatureExtractor::new(config.sample_rate)?);
+        // Validate the default rate eagerly so the error surfaces at construction.
+        AudioFeatureExtractor::new(config.sample_rate)?;
 
         Ok(Self {
             base,
             config,
-            feature_extractor,
+            backend: SpeechToTextBackend::Unavailable,
+            max_new_tokens: DEFAULT_MAX_NEW_TOKENS,
+            decoder_start_token: None,
         })
     }
 
-    /// Create pipeline with custom configuration
+    /// Build the feature extractor for the pipeline's current sample rate.
+    fn extractor(&self) -> Result<AudioFeatureExtractor> {
+        AudioFeatureExtractor::new(self.config.sample_rate)
+    }
+
+    /// Cap the number of tokens the decoder may emit per utterance.
+    pub fn with_max_new_tokens(mut self, max_new_tokens: usize) -> Self {
+        self.max_new_tokens = max_new_tokens;
+        self
+    }
+
+    /// Set the decoder's start-of-transcript token id explicitly.
+    ///
+    /// Overrides the tokenizer lookup of [`WHISPER_SOT_TOKEN`]. Use this when
+    /// the tokenizer does not expose Whisper's special tokens.
+    pub fn with_decoder_start_token(mut self, token_id: u32) -> Self {
+        self.decoder_start_token = Some(token_id);
+        self
+    }
+
+    /// The configured decoder start token override, if any.
+    pub fn decoder_start_token(&self) -> Option<u32> {
+        self.decoder_start_token
+    }
+
+    /// Attach a real Whisper model (with caller-loaded weights) as the backend.
+    #[cfg(feature = "whisper")]
+    pub fn with_whisper(
+        mut self,
+        task: Arc<trustformers_models::whisper::SpeechRecognitionTask>,
+    ) -> Self {
+        self.backend = SpeechToTextBackend::Whisper(task);
+        self
+    }
+
+    /// The currently attached backend.
+    pub fn backend(&self) -> &SpeechToTextBackend {
+        &self.backend
+    }
+
+    /// Create pipeline with custom configuration.
+    ///
+    /// An invalid sample rate is not rejected here (the builder is infallible);
+    /// it surfaces as a structured error the first time audio is preprocessed.
     pub fn with_config(mut self, config: SpeechToTextConfig) -> Self {
         self.config = config;
         self
@@ -209,99 +338,212 @@ impl SpeechToTextPipeline {
         self.__call__(input)
     }
 
-    /// Pre-process audio input to features
-    fn preprocess_audio(&self, input: &AudioInput) -> Result<AudioFeatures> {
+    /// Decode an [`AudioInput`] into mono PCM at the pipeline's sample rate.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured error when the container cannot be decoded. It
+    /// never substitutes silence for undecodable audio.
+    pub fn decode_input(&self, input: &AudioInput) -> Result<Vec<f32>> {
+        let extractor = self.extractor()?;
+        let target = self.config.sample_rate;
         match input {
-            AudioInput::FilePath(path) => {
-                // Load audio file and extract features
-                self.feature_extractor.load_and_extract(path)
-            },
+            AudioInput::FilePath(path) => extractor.load_pcm(path, target),
             AudioInput::RawAudio {
                 samples,
                 sample_rate,
-            } => {
-                // Resample if necessary
-                let resampled = if *sample_rate != self.config.sample_rate {
-                    self.feature_extractor.resample(
-                        samples,
-                        *sample_rate,
-                        self.config.sample_rate,
-                    )?
-                } else {
-                    samples.clone()
-                };
-
-                // Extract features
-                self.feature_extractor.extract_features(&resampled)
-            },
+            } => audio_dsp::resample_linear(samples, *sample_rate, target),
             AudioInput::Base64(encoded) => {
-                // Decode base64 and process
-                let decoded = base64::decode(encoded).map_err(|e| {
-                    TrustformersError::invalid_input_simple(format!(
-                        "Failed to decode base64 audio: {}",
-                        e
-                    ))
-                })?;
-
-                // Assume WAV format for base64 input
-                self.feature_extractor.decode_and_extract(&decoded, AudioFormat::Wav)
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(encoded.trim())
+                    .map_err(|e| {
+                        TrustformersError::invalid_input_simple(format!(
+                            "Failed to decode base64 audio: {e}"
+                        ))
+                    })?;
+                if decoded.is_empty() {
+                    return Err(TrustformersError::invalid_input_simple(
+                        "base64 audio payload decoded to zero bytes".to_string(),
+                    ));
+                }
+                // Sniff the container instead of assuming WAV.
+                if !audio_dsp::is_wav(&decoded) {
+                    return Err(TrustformersError::feature_unavailable(
+                        "base64 audio payload is not a RIFF/WAVE stream; only uncompressed WAV \
+                         can be decoded without an external codec"
+                            .to_string(),
+                        "audio-codec",
+                    ));
+                }
+                let audio = audio_dsp::decode_wav(&decoded)?;
+                audio_dsp::resample_linear(&audio.samples, audio.sample_rate, target)
             },
             AudioInput::Bytes {
                 data,
                 format,
                 sample_rate,
             } => {
-                // Decode bytes and extract features
-                self.feature_extractor
-                    .decode_and_extract(data, *format)?
-                    .resample_to(self.config.sample_rate)
+                let audio = extractor.decode_bytes(data, *format)?;
+                // Trust the container's own rate; fall back to the caller's hint
+                // only when the container did not carry one.
+                let source_rate =
+                    if audio.sample_rate > 0 { audio.sample_rate } else { *sample_rate };
+                audio_dsp::resample_linear(&audio.samples, source_rate, target)
             },
         }
     }
 
-    /// Post-process model output to speech-to-text result
-    fn postprocess_output(
+    /// Pre-process audio input into log-mel features.
+    pub fn preprocess_audio(&self, input: &AudioInput) -> Result<AudioFeatures> {
+        let pcm = self.decode_input(input)?;
+        self.extractor()?.extract_features(&pcm)
+    }
+
+    /// Run the attached backend on the extracted features.
+    fn run_backend(&self, features: &AudioFeatures) -> Result<SpeechToTextOutput> {
+        match &self.backend {
+            SpeechToTextBackend::Unavailable => Err(unsupported_model(
+                "speech-to-text",
+                "AutoModel (no speech architecture attached)",
+                SUPPORTED_ARCHITECTURES,
+            )),
+            #[cfg(feature = "whisper")]
+            SpeechToTextBackend::Whisper(task) => self.run_whisper(task, features),
+        }
+    }
+
+    /// Resolve the decoder's `<|startoftranscript|>` token id.
+    ///
+    /// Uses the explicit override from [`Self::with_decoder_start_token`] when
+    /// set, otherwise looks the special token up in the pipeline's tokenizer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrustformersError::Model`] when neither source supplies an id
+    /// — the pipeline refuses to guess a constant.
+    #[cfg(feature = "whisper")]
+    fn resolve_decoder_start_token(&self) -> Result<u32> {
+        use trustformers_core::traits::Tokenizer as _;
+
+        if let Some(id) = self.decoder_start_token {
+            return Ok(id);
+        }
+        self.base.tokenizer.token_to_id(WHISPER_SOT_TOKEN).ok_or_else(|| {
+            TrustformersError::model(
+                format!(
+                    "the tokenizer does not define `{WHISPER_SOT_TOKEN}`, so the decoder \
+                         start token is unknown; set it explicitly with \
+                         `with_decoder_start_token`"
+                ),
+                "whisper",
+            )
+        })
+    }
+
+    #[cfg(feature = "whisper")]
+    fn run_whisper(
         &self,
-        model_output: &crate::core::tensor::Tensor,
-        audio_duration: f64,
+        task: &trustformers_models::whisper::SpeechRecognitionTask,
+        features: &AudioFeatures,
     ) -> Result<SpeechToTextOutput> {
-        // This is a simplified implementation
-        // In a real implementation, this would:
-        // 1. Decode token IDs to text using the tokenizer
-        // 2. Extract timestamps if requested
-        // 3. Calculate confidence scores
-        // 4. Handle language detection
+        use trustformers_core::traits::Tokenizer as _;
 
-        let text = "Transcribed text placeholder".to_string(); // Simplified
-        let confidence = Some(0.95); // Placeholder confidence
+        let mel = features.to_whisper_mel_tensor()?;
+        let config = task.config();
+        let vocab_size = config.vocab_size;
+        if vocab_size == 0 {
+            return Err(TrustformersError::model(
+                "Whisper config reports a zero-sized vocabulary".to_string(),
+                "whisper",
+            ));
+        }
+        let eos_token = (vocab_size - 1) as u32;
+        // The decoder prompt must start with the checkpoint's real
+        // <|startoftranscript|> id. Resolve it from the tokenizer (or from an
+        // explicit override) rather than assuming a constant — guessing here
+        // would silently decode from the wrong prefix.
+        let start_token = self.resolve_decoder_start_token()?;
+        let mut decoder_ids: Vec<u32> = vec![start_token];
+        let mut generated: Vec<u32> = Vec::new();
+        let mut token_probs: Vec<f32> = Vec::new();
 
-        let word_timestamps = if self.config.return_timestamps {
-            Some(vec![
-                WordTimestamp {
-                    word: "Transcribed".to_string(),
-                    start_time: 0.0,
-                    end_time: 0.5,
-                    confidence: 0.95,
-                },
-                WordTimestamp {
-                    word: "text".to_string(),
-                    start_time: 0.5,
-                    end_time: 1.0,
-                    confidence: 0.90,
-                },
-            ])
+        for _ in 0..self.max_new_tokens {
+            let logits = task
+                .forward(&mel, &decoder_ids)
+                .map_err(|e| TrustformersError::model(e.to_string(), "whisper"))?;
+            let (next, prob) = argmax_last_position(&logits)?;
+            if next == eos_token {
+                break;
+            }
+            generated.push(next);
+            token_probs.push(prob);
+            decoder_ids.push(next);
+        }
+
+        let text = if generated.is_empty() {
+            String::new()
         } else {
+            self.base.tokenizer.decode(&generated).map_err(|e| {
+                TrustformersError::model(
+                    format!("failed to decode Whisper token IDs: {e}"),
+                    "whisper",
+                )
+            })?
+        };
+
+        let confidence = if token_probs.is_empty() {
             None
+        } else {
+            Some(token_probs.iter().sum::<f32>() / token_probs.len() as f32)
         };
 
         Ok(SpeechToTextOutput {
             text,
             confidence,
-            word_timestamps,
+            // Word alignment requires cross-attention timestamps, which this
+            // backend does not expose; reporting `None` beats inventing spans.
+            word_timestamps: None,
             language: self.config.language.clone(),
-            processing_time_ms: Some(100), // Placeholder
+            processing_time_ms: None,
         })
     }
+}
+
+/// Extract the argmax token id and its softmax probability from the final
+/// position of a `[batch, seq, vocab]` logits tensor.
+#[cfg(feature = "whisper")]
+fn argmax_last_position(logits: &crate::core::tensor::Tensor) -> Result<(u32, f32)> {
+    let shape = logits.shape().to_vec();
+    if shape.len() != 3 {
+        return Err(TrustformersError::model(
+            format!("expected [batch, seq, vocab] logits, got shape {shape:?}"),
+            "whisper",
+        ));
+    }
+    let (seq_len, vocab) = (shape[1], shape[2]);
+    if seq_len == 0 || vocab == 0 {
+        return Err(TrustformersError::model(
+            "decoder produced an empty logits tensor".to_string(),
+            "whisper",
+        ));
+    }
+    let flat = logits.to_vec_f32().map_err(TrustformersError::from)?;
+    let offset = (seq_len - 1) * vocab;
+    let row = flat.get(offset..offset + vocab).ok_or_else(|| {
+        TrustformersError::model("logits buffer too small".to_string(), "whisper")
+    })?;
+
+    let mut best = 0usize;
+    let mut best_val = f32::NEG_INFINITY;
+    for (i, &v) in row.iter().enumerate() {
+        if v > best_val {
+            best_val = v;
+            best = i;
+        }
+    }
+    let sum_exp: f32 = row.iter().map(|&v| (v - best_val).exp()).sum();
+    let prob = if sum_exp > 0.0 { 1.0 / sum_exp } else { 0.0 };
+    Ok((best as u32, prob))
 }
 
 impl Pipeline for SpeechToTextPipeline {
@@ -311,7 +553,7 @@ impl Pipeline for SpeechToTextPipeline {
     fn __call__(&self, input: Self::Input) -> Result<Self::Output> {
         let start_time = std::time::Instant::now();
 
-        // 1. Preprocess audio to features
+        // 1. Decode + resample + extract real log-mel features.
         let audio_features = self.preprocess_audio(&input)?;
         let audio_duration = audio_features.duration();
 
@@ -319,120 +561,146 @@ impl Pipeline for SpeechToTextPipeline {
         if let Some(max_duration) = self.config.max_duration {
             if audio_duration > max_duration {
                 return Err(TrustformersError::invalid_input_simple(format!(
-                    "Audio duration ({:.2}s) exceeds maximum allowed ({:.2}s)",
-                    audio_duration, max_duration
+                    "Audio duration ({audio_duration:.2}s) exceeds maximum allowed \
+                     ({max_duration:.2}s)"
                 )));
             }
         }
 
-        // 3. Convert features to tensor for model input
-        let input_tensor = audio_features.to_tensor()?;
+        // 3. Run the attached backend (or report that none is attached).
+        let mut result = self.run_backend(&audio_features)?;
 
-        // 4. Run model inference (simplified for demonstration)
-        // let model_output = self.base.model.forward(input_tensor)?;
-        let model_output = input_tensor; // Placeholder
-
-        // 5. Post-process output to final result
-        let mut result = self.postprocess_output(&model_output, audio_duration)?;
-
-        // 6. Add processing time
+        // 4. Report the measured wall-clock time.
         result.processing_time_ms = Some(start_time.elapsed().as_millis() as u64);
 
         Ok(result)
     }
 }
 
-/// Audio feature extractor for speech models
+/// Audio feature extractor for speech models.
+///
+/// Computes a real Whisper-style log-mel spectrogram; see
+/// [`crate::pipeline::media::audio_dsp`] for the exact conventions.
+#[derive(Debug, Clone)]
 pub struct AudioFeatureExtractor {
     sample_rate: u32,
-    n_fft: usize,
-    hop_length: usize,
-    n_mels: usize,
+    mel: MelConfig,
 }
 
 impl AudioFeatureExtractor {
+    /// Create an extractor for audio at `sample_rate` with Whisper's mel settings.
     pub fn new(sample_rate: u32) -> Result<Self> {
+        if sample_rate == 0 {
+            return Err(TrustformersError::invalid_input_simple(
+                "AudioFeatureExtractor: sample rate must be non-zero".to_string(),
+            ));
+        }
         Ok(Self {
             sample_rate,
-            n_fft: 400,      // Whisper default
-            hop_length: 160, // Whisper default
-            n_mels: 80,      // Whisper default
+            mel: MelConfig::default(),
         })
     }
 
+    /// The extractor's target sample rate.
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    /// Number of mel bands produced.
+    pub fn n_mels(&self) -> usize {
+        self.mel.n_mels
+    }
+
+    /// Decode an audio file from disk into mono PCM at `target_rate`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrustformersError::Io`] when the file cannot be read and
+    /// [`TrustformersError::FeatureUnavailable`] for containers this crate
+    /// cannot decode without an external codec.
+    pub fn load_pcm(&self, path: &str, target_rate: u32) -> Result<Vec<f32>> {
+        let bytes = std::fs::read(path).map_err(|e| TrustformersError::Io {
+            message: format!("failed to read audio file: {e}"),
+            path: Some(path.to_string()),
+            suggestion: Some("Check that the file exists and is readable".to_string()),
+        })?;
+
+        if !audio_dsp::is_wav(&bytes) {
+            let ext = Path::new(path)
+                .extension()
+                .map(|e| e.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            return Err(TrustformersError::feature_unavailable(
+                format!(
+                    "cannot decode `{path}` (extension `{ext}`): only uncompressed RIFF/WAVE is \
+                     decodable without an external codec"
+                ),
+                "audio-codec",
+            ));
+        }
+
+        let audio = audio_dsp::decode_wav(&bytes)?;
+        audio_dsp::resample_linear(&audio.samples, audio.sample_rate, target_rate)
+    }
+
+    /// Decode an audio file and extract log-mel features from it.
     pub fn load_and_extract(&self, path: &str) -> Result<AudioFeatures> {
-        // Placeholder implementation
-        // In a real implementation, this would use a library like `symphonia` or `rodio`
-        // to load audio files and extract features
-
-        Ok(AudioFeatures {
-            features: vec![vec![0.0; self.n_mels]; 100], // Placeholder mel spectrogram
-            sample_rate: self.sample_rate,
-            duration_s: 5.0, // Placeholder duration
-        })
+        let pcm = self.load_pcm(path, self.sample_rate)?;
+        self.extract_features(&pcm)
     }
 
+    /// Compute a Whisper-style log-mel spectrogram from mono PCM.
     pub fn extract_features(&self, samples: &[f32]) -> Result<AudioFeatures> {
-        // Placeholder for mel spectrogram extraction
-        // In a real implementation, this would:
-        // 1. Apply pre-emphasis filter
-        // 2. Compute STFT
-        // 3. Convert to mel scale
-        // 4. Apply log compression
-
-        let duration_s = samples.len() as f64 / self.sample_rate as f64;
-        let n_frames = (samples.len() / self.hop_length) + 1;
-
+        let duration_s = samples.len() as f64 / f64::from(self.sample_rate);
+        let features = audio_dsp::log_mel_spectrogram(samples, self.sample_rate, self.mel)?;
         Ok(AudioFeatures {
-            features: vec![vec![0.0; self.n_mels]; n_frames], // Placeholder
+            features,
             sample_rate: self.sample_rate,
             duration_s,
         })
     }
 
+    /// Resample mono PCM between sample rates.
     pub fn resample(&self, samples: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32>> {
-        if from_rate == to_rate {
-            return Ok(samples.to_vec());
-        }
-
-        // Simplified resampling (in reality would use proper resampling algorithm)
-        let ratio = to_rate as f64 / from_rate as f64;
-        let new_len = (samples.len() as f64 * ratio) as usize;
-
-        let mut resampled = Vec::with_capacity(new_len);
-        for i in 0..new_len {
-            let original_idx = (i as f64 / ratio) as usize;
-            if original_idx < samples.len() {
-                resampled.push(samples[original_idx]);
-            } else {
-                resampled.push(0.0);
-            }
-        }
-
-        Ok(resampled)
+        audio_dsp::resample_linear(samples, from_rate, to_rate)
     }
 
-    pub fn decode_and_extract(&self, data: &[u8], format: AudioFormat) -> Result<AudioFeatures> {
-        // Placeholder for audio decoding
-        // In a real implementation, this would decode various audio formats
-
-        match format {
-            AudioFormat::Wav => {
-                // Decode WAV format
-                self.extract_features(&[0.0; 16000]) // Placeholder
-            },
-            _ => {
-                // For other formats, would use appropriate decoder
-                self.extract_features(&[0.0; 16000]) // Placeholder
-            },
+    /// Decode a byte buffer in the declared container format.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrustformersError::FeatureUnavailable`] for compressed
+    /// containers (FLAC/MP3/M4A/Ogg/WebM), which need a codec that this
+    /// workspace does not ship.
+    pub fn decode_bytes(
+        &self,
+        data: &[u8],
+        format: AudioFormat,
+    ) -> Result<audio_dsp::DecodedAudio> {
+        if !format.is_decodable() {
+            return Err(TrustformersError::feature_unavailable(
+                format!(
+                    "{format:?} decoding is not implemented; only uncompressed WAV is decodable \
+                     in pure Rust here"
+                ),
+                "audio-codec",
+            ));
         }
+        audio_dsp::decode_wav(data)
+    }
+
+    /// Decode a byte buffer and extract features from it.
+    pub fn decode_and_extract(&self, data: &[u8], format: AudioFormat) -> Result<AudioFeatures> {
+        let audio = self.decode_bytes(data, format)?;
+        let pcm = audio_dsp::resample_linear(&audio.samples, audio.sample_rate, self.sample_rate)?;
+        self.extract_features(&pcm)
     }
 }
 
-/// Audio features (typically mel spectrogram)
-#[derive(Debug)]
+/// Log-mel features: `[time_frames][n_mels]`.
+#[derive(Debug, Clone)]
 pub struct AudioFeatures {
-    pub features: Vec<Vec<f32>>, // [time_frames, n_mels]
+    pub features: Vec<Vec<f32>>,
     pub sample_rate: u32,
     pub duration_s: f64,
 }
@@ -442,39 +710,87 @@ impl AudioFeatures {
         self.duration_s
     }
 
-    pub fn to_tensor(&self) -> Result<crate::core::tensor::Tensor> {
-        // Convert features to tensor format expected by model
-        // This is a placeholder implementation
-        use crate::core::tensor::Tensor;
-
-        // Flatten features for tensor creation
-        let flat_features: Vec<f32> = self.features.iter().flatten().cloned().collect();
-        let shape = vec![1, self.features.len(), self.features[0].len()]; // [batch, time, features]
-
-        Tensor::from_vec(flat_features, &shape).map_err(Into::into)
+    /// Number of mel bands per frame (0 when there are no frames).
+    pub fn n_mels(&self) -> usize {
+        self.features.first().map_or(0, Vec::len)
     }
 
+    /// Convert to a `[1, frames, n_mels]` tensor.
+    pub fn to_tensor(&self) -> Result<crate::core::tensor::Tensor> {
+        use crate::core::tensor::Tensor;
+
+        if self.features.is_empty() {
+            return Err(TrustformersError::invalid_input_simple(
+                "AudioFeatures: no frames to convert".to_string(),
+            ));
+        }
+        let n_mels = self.features[0].len();
+        let flat: Vec<f32> = self.features.iter().flatten().copied().collect();
+        let shape = vec![1, self.features.len(), n_mels];
+        Tensor::from_vec(flat, &shape).map_err(Into::into)
+    }
+
+    /// Convert to the `[1, n_mels, frames]` layout Whisper's encoder expects.
+    pub fn to_whisper_mel_tensor(&self) -> Result<crate::core::tensor::Tensor> {
+        use crate::core::tensor::Tensor;
+
+        if self.features.is_empty() {
+            return Err(TrustformersError::invalid_input_simple(
+                "AudioFeatures: no frames to convert".to_string(),
+            ));
+        }
+        let frames = self.features.len();
+        let n_mels = self.features[0].len();
+        let mut flat = vec![0.0f32; frames * n_mels];
+        for (t, frame) in self.features.iter().enumerate() {
+            if frame.len() != n_mels {
+                return Err(TrustformersError::invalid_input_simple(
+                    "AudioFeatures: ragged mel frames".to_string(),
+                ));
+            }
+            for (m, &v) in frame.iter().enumerate() {
+                flat[m * frames + t] = v;
+            }
+        }
+        Tensor::from_vec(flat, &[1, n_mels, frames]).map_err(Into::into)
+    }
+
+    /// Reject a sample-rate change after feature extraction.
+    ///
+    /// Mel features cannot be resampled meaningfully once computed — the
+    /// filterbank is tied to the waveform's rate. Resample the waveform before
+    /// extraction instead. Returns `self` unchanged when the rate already
+    /// matches, and an error otherwise.
     pub fn resample_to(self, target_rate: u32) -> Result<Self> {
         if self.sample_rate == target_rate {
             return Ok(self);
         }
-
-        // Placeholder resampling
-        Ok(self)
-    }
-}
-
-// Import base64 crate (would be added to dependencies)
-mod base64 {
-    pub fn decode(_input: &str) -> Result<Vec<u8>, String> {
-        // Placeholder implementation
-        Ok(vec![])
+        Err(TrustformersError::invalid_input_simple(format!(
+            "AudioFeatures were computed at {} Hz and cannot be converted to {} Hz after the \
+             fact; resample the waveform before extracting features",
+            self.sample_rate, target_rate
+        )))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::media::audio_dsp::encode_wav_pcm16;
+
+    fn tone(freq: f32, sample_rate: u32, n: usize) -> Vec<f32> {
+        (0..n)
+            .map(|i| {
+                0.8 * (2.0 * std::f32::consts::PI * freq * i as f32 / sample_rate as f32).sin()
+            })
+            .collect()
+    }
+
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(name);
+        p
+    }
 
     // ---- AudioFormat tests ----
 
@@ -520,6 +836,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_only_wav_is_decodable() {
+        assert!(AudioFormat::Wav.is_decodable());
+        for fmt in [
+            AudioFormat::Flac,
+            AudioFormat::Mp3,
+            AudioFormat::M4a,
+            AudioFormat::Ogg,
+            AudioFormat::WebM,
+        ] {
+            assert!(!fmt.is_decodable(), "{fmt:?} must not claim decodability");
+        }
+    }
+
     // ---- SpeechToTextConfig tests ----
 
     #[test]
@@ -546,13 +876,19 @@ mod tests {
     #[test]
     fn test_extractor_creates_successfully() {
         let extractor = AudioFeatureExtractor::new(16000).expect("extractor creation succeeded");
-        assert_eq!(extractor.sample_rate, 16000);
+        assert_eq!(extractor.sample_rate(), 16000);
+        assert_eq!(extractor.n_mels(), 80);
+    }
+
+    #[test]
+    fn test_extractor_rejects_zero_sample_rate() {
+        assert!(AudioFeatureExtractor::new(0).is_err());
     }
 
     #[test]
     fn test_extract_features_duration_calculation() {
         let extractor = AudioFeatureExtractor::new(16000).expect("ok");
-        let samples = vec![0.0f32; 16000]; // 1 second of silence
+        let samples = tone(300.0, 16000, 16000); // 1 second
         let features = extractor.extract_features(&samples).expect("ok");
         assert!((features.duration_s - 1.0).abs() < 0.01);
     }
@@ -560,21 +896,47 @@ mod tests {
     #[test]
     fn test_extract_features_frame_count() {
         let extractor = AudioFeatureExtractor::new(16000).expect("ok");
-        let samples = vec![0.0f32; 1600]; // 0.1 seconds
+        let samples = tone(300.0, 16000, 1600); // 0.1 seconds
         let features = extractor.extract_features(&samples).expect("ok");
-        // n_frames = (1600 / 160) + 1 = 11
-        assert_eq!(features.features.len(), 11);
+        // Whisper convention: centred STFT with the final frame dropped →
+        // len / hop = 1600 / 160 = 10 frames.
+        assert_eq!(features.features.len(), 10);
     }
 
     #[test]
     fn test_extract_features_mel_dims() {
         let extractor = AudioFeatureExtractor::new(16000).expect("ok");
-        let samples = vec![0.0f32; 3200];
+        let samples = tone(300.0, 16000, 3200);
         let features = extractor.extract_features(&samples).expect("ok");
-        // Each frame should have n_mels = 80 dimensions
         for frame in &features.features {
             assert_eq!(frame.len(), 80);
         }
+    }
+
+    #[test]
+    fn test_extract_features_are_not_all_zero() {
+        // Regression: `extract_features` used to return `vec![vec![0.0; 80]; n]`.
+        let extractor = AudioFeatureExtractor::new(16000).expect("ok");
+        let features = extractor.extract_features(&tone(440.0, 16000, 8000)).expect("ok");
+        let flat: Vec<f32> = features.features.iter().flatten().copied().collect();
+        assert!(
+            flat.iter().any(|&v| v != 0.0),
+            "mel features must not be all zeros"
+        );
+        let min = flat.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = flat.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        assert!(max - min > 0.5, "mel features must vary: {min}..{max}");
+    }
+
+    #[test]
+    fn test_extract_features_differ_between_tones() {
+        let extractor = AudioFeatureExtractor::new(16000).expect("ok");
+        let a = extractor.extract_features(&tone(220.0, 16000, 8000)).expect("a");
+        let b = extractor.extract_features(&tone(3000.0, 16000, 8000)).expect("b");
+        assert_ne!(
+            a.features, b.features,
+            "different tones must yield different features"
+        );
     }
 
     // ---- Resampling tests ----
@@ -593,25 +955,17 @@ mod tests {
     #[test]
     fn test_resample_upsample_increases_length() {
         let extractor = AudioFeatureExtractor::new(16000).expect("ok");
-        let samples = vec![0.0f32; 100];
+        let samples = tone(100.0, 8000, 100);
         let resampled = extractor.resample(&samples, 8000, 16000).expect("ok");
-        assert!(
-            resampled.len() > samples.len(),
-            "upsampled should be longer: {}",
-            resampled.len()
-        );
+        assert_eq!(resampled.len(), 200);
     }
 
     #[test]
     fn test_resample_downsample_decreases_length() {
         let extractor = AudioFeatureExtractor::new(16000).expect("ok");
-        let samples = vec![0.0f32; 200];
+        let samples = tone(100.0, 16000, 200);
         let resampled = extractor.resample(&samples, 16000, 8000).expect("ok");
-        assert!(
-            resampled.len() < samples.len(),
-            "downsampled should be shorter: {}",
-            resampled.len()
-        );
+        assert_eq!(resampled.len(), 100);
     }
 
     // ---- AudioFeatures tests ----
@@ -637,10 +991,23 @@ mod tests {
         };
         let tensor = af.to_tensor().expect("tensor creation succeeded");
         let shape = tensor.shape();
-        // Expected shape: [1, n_frames, n_mels]
         assert_eq!(shape[0], 1);
         assert_eq!(shape[1], n_frames);
         assert_eq!(shape[2], n_mels);
+    }
+
+    #[test]
+    fn test_audio_features_whisper_layout_transposes() {
+        let af = AudioFeatures {
+            features: vec![vec![1.0, 2.0], vec![3.0, 4.0], vec![5.0, 6.0]],
+            sample_rate: 16000,
+            duration_s: 1.0,
+        };
+        let tensor = af.to_whisper_mel_tensor().expect("tensor");
+        assert_eq!(tensor.shape(), &[1, 2, 3]);
+        let flat = tensor.to_vec_f32().expect("values");
+        // mel-major: [1,3,5, 2,4,6]
+        assert_eq!(flat, vec![1.0, 3.0, 5.0, 2.0, 4.0, 6.0]);
     }
 
     #[test]
@@ -652,6 +1019,22 @@ mod tests {
         };
         let result = af.resample_to(16000).expect("ok");
         assert_eq!(result.sample_rate, 16000);
+    }
+
+    #[test]
+    fn test_audio_features_resample_to_other_rate_errors() {
+        // Regression: `resample_to` used to silently return `self` unchanged
+        // while claiming to have resampled.
+        let af = AudioFeatures {
+            features: vec![vec![0.0; 80]; 5],
+            sample_rate: 16000,
+            duration_s: 1.0,
+        };
+        let err = af.resample_to(8000).expect_err("must not silently no-op");
+        assert!(
+            err.to_string().contains("cannot be converted"),
+            "err: {err}"
+        );
     }
 
     // ---- WordTimestamp tests ----
@@ -693,37 +1076,178 @@ mod tests {
         assert!(matches!(task, SpeechTask::Translate));
     }
 
-    // ---- Feature extraction simulation (MFCC-like) ----
+    // ---- File / byte decoding ----
 
     #[test]
-    fn test_frame_level_processing_non_empty() {
+    fn test_load_and_extract_rejects_missing_file() {
+        // Regression: `load_and_extract` used to return 100 zero frames and a
+        // hardcoded 5-second duration for any path, including nonexistent ones.
         let extractor = AudioFeatureExtractor::new(16000).expect("ok");
-        // Use LCG to generate deterministic pseudo-random audio samples
-        let mut seed = 12345u64;
-        let samples: Vec<f32> = (0..4800)
-            .map(|_| {
-                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-                ((seed >> 33) as f32 / u32::MAX as f32) * 2.0 - 1.0
-            })
-            .collect();
-        let features = extractor.extract_features(&samples).expect("ok");
-        assert!(!features.features.is_empty());
-        assert_eq!(features.features[0].len(), 80);
+        let err = extractor
+            .load_and_extract("definitely-not-a-real-file.wav")
+            .expect_err("missing file must error");
+        assert!(matches!(err, TrustformersError::Io { .. }), "err: {err}");
     }
 
     #[test]
-    fn test_load_and_extract_returns_features() {
+    fn test_load_and_extract_reads_a_real_wav() {
         let extractor = AudioFeatureExtractor::new(16000).expect("ok");
-        let af = extractor.load_and_extract("dummy_path.wav").expect("ok");
-        assert!(!af.features.is_empty());
-        assert!(af.duration_s > 0.0);
+        let path = temp_path("trustformers-stt-load.wav");
+        std::fs::write(&path, encode_wav_pcm16(&tone(500.0, 16000, 8000), 16000))
+            .expect("write fixture");
+        let features =
+            extractor.load_and_extract(&path.to_string_lossy()).expect("decode real wav");
+        assert_eq!(features.features.len(), 50);
+        assert!(features.features.iter().flatten().any(|&v| v != 0.0));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn test_decode_and_extract_wav() {
+    fn test_load_and_extract_rejects_compressed_container() {
         let extractor = AudioFeatureExtractor::new(16000).expect("ok");
-        let dummy_data = vec![0u8; 512];
-        let af = extractor.decode_and_extract(&dummy_data, AudioFormat::Wav).expect("ok");
-        assert!(!af.features.is_empty());
+        let path = temp_path("trustformers-stt-fake.mp3");
+        std::fs::write(&path, b"ID3\x04\x00\x00\x00\x00\x00\x00").expect("write fixture");
+        let err = extractor
+            .load_and_extract(&path.to_string_lossy())
+            .expect_err("mp3 must not be decoded as silence");
+        assert!(matches!(err, TrustformersError::FeatureUnavailable { .. }));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_decode_and_extract_rejects_garbage_wav() {
+        // Regression: `decode_and_extract` used to ignore `data` entirely and
+        // extract features from `&[0.0; 16000]`.
+        let extractor = AudioFeatureExtractor::new(16000).expect("ok");
+        let err = extractor
+            .decode_and_extract(&[0u8; 512], AudioFormat::Wav)
+            .expect_err("512 zero bytes are not a WAV file");
+        assert!(err.to_string().contains("RIFF"), "err: {err}");
+    }
+
+    #[test]
+    fn test_decode_and_extract_accepts_real_wav() {
+        let extractor = AudioFeatureExtractor::new(16000).expect("ok");
+        let bytes = encode_wav_pcm16(&tone(700.0, 16000, 4800), 16000);
+        let features = extractor
+            .decode_and_extract(&bytes, AudioFormat::Wav)
+            .expect("real wav decodes");
+        assert_eq!(features.features.len(), 30);
+        assert!(features.features.iter().flatten().any(|&v| v != 0.0));
+    }
+
+    #[test]
+    fn test_decode_bytes_rejects_compressed_formats() {
+        let extractor = AudioFeatureExtractor::new(16000).expect("ok");
+        for fmt in [AudioFormat::Flac, AudioFormat::Mp3, AudioFormat::Ogg] {
+            let err = extractor
+                .decode_bytes(&[0u8; 16], fmt)
+                .expect_err("compressed containers are not decodable");
+            assert!(matches!(err, TrustformersError::FeatureUnavailable { .. }));
+        }
+    }
+
+    #[test]
+    fn test_decode_bytes_resamples_from_container_rate() {
+        // The container's own 8 kHz rate must win over any caller hint.
+        let extractor = AudioFeatureExtractor::new(16000).expect("ok");
+        let bytes = encode_wav_pcm16(&tone(400.0, 8000, 4000), 8000);
+        let audio = extractor.decode_bytes(&bytes, AudioFormat::Wav).expect("decode");
+        assert_eq!(audio.sample_rate, 8000);
+        let resampled = extractor.resample(&audio.samples, audio.sample_rate, 16000).expect("rs");
+        assert_eq!(resampled.len(), 8000);
+    }
+
+    // ---- base64 ----
+
+    #[test]
+    fn test_base64_decoding_is_real() {
+        // Regression: a private `mod base64` shadowed the real crate and
+        // returned `Ok(vec![])` for every input.
+        let wav = encode_wav_pcm16(&tone(440.0, 16000, 1600), 16000);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&wav);
+        let decoded =
+            base64::engine::general_purpose::STANDARD.decode(&encoded).expect("round trip");
+        assert_eq!(decoded, wav);
+        assert!(!decoded.is_empty(), "real base64 decode must not be empty");
+    }
+
+    #[test]
+    fn test_base64_invalid_payload_errors() {
+        let err = base64::engine::general_purpose::STANDARD
+            .decode("!!!not base64!!!")
+            .expect_err("invalid base64 must error");
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_backend_defaults_to_unavailable() {
+        let backend = SpeechToTextBackend::Unavailable;
+        assert_eq!(format!("{backend:?}"), "SpeechToTextBackend::Unavailable");
+    }
+
+    fn stub_pipeline() -> SpeechToTextPipeline {
+        use trustformers_tokenizers::CharTokenizer;
+        let mut vocab = std::collections::HashMap::new();
+        vocab.insert(WHISPER_SOT_TOKEN.to_string(), 50_258_u32);
+        let tokenizer = AutoTokenizer::Char(CharTokenizer::new(vocab));
+        let model = AutoModel::from_config(crate::AutoConfig::Bert(Default::default()))
+            .expect("bert config builds");
+        SpeechToTextPipeline::new(model, tokenizer).expect("pipeline")
+    }
+
+    #[test]
+    fn test_decoder_start_token_defaults_to_tokenizer_lookup() {
+        // Regression: the whisper decode loop used to hardcode token id 0 as
+        // `<|startoftranscript|>`, which is wrong for every real checkpoint.
+        let pipeline = stub_pipeline();
+        assert!(
+            pipeline.decoder_start_token().is_none(),
+            "no override is set by default; the id comes from the tokenizer"
+        );
+        assert_eq!(WHISPER_SOT_TOKEN, "<|startoftranscript|>");
+    }
+
+    #[test]
+    fn test_decoder_start_token_override_is_stored() {
+        let pipeline = stub_pipeline().with_decoder_start_token(50_258);
+        assert_eq!(pipeline.decoder_start_token(), Some(50_258));
+    }
+
+    #[cfg(feature = "whisper")]
+    #[test]
+    fn test_resolve_decoder_start_token_uses_the_vocabulary() {
+        let pipeline = stub_pipeline();
+        assert_eq!(
+            pipeline.resolve_decoder_start_token().expect("token present"),
+            50_258
+        );
+    }
+
+    #[cfg(feature = "whisper")]
+    #[test]
+    fn test_resolve_decoder_start_token_errors_without_the_special_token() {
+        use trustformers_tokenizers::CharTokenizer;
+        let tokenizer = AutoTokenizer::Char(CharTokenizer::new(std::collections::HashMap::new()));
+        let model = AutoModel::from_config(crate::AutoConfig::Bert(Default::default()))
+            .expect("bert config builds");
+        let pipeline = SpeechToTextPipeline::new(model, tokenizer).expect("pipeline");
+        let err = pipeline.resolve_decoder_start_token().expect_err("the id must not be guessed");
+        assert!(err.to_string().contains(WHISPER_SOT_TOKEN), "err: {err}");
+    }
+
+    #[test]
+    fn test_unsupported_backend_error_lists_whisper() {
+        let err = crate::pipeline::media::unsupported_model(
+            "speech-to-text",
+            "AutoModel (no speech architecture attached)",
+            SUPPORTED_ARCHITECTURES,
+        );
+        match err {
+            TrustformersError::FeatureUnavailable { alternatives, .. } => {
+                assert!(alternatives.iter().any(|a| a.contains("whisper")));
+            },
+            other => panic!("expected FeatureUnavailable, got {other:?}"),
+        }
     }
 }

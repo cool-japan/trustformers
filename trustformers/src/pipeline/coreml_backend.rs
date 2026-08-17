@@ -1,5 +1,25 @@
 // Core ML Pipeline Backend Integration for TrustformeRS
 // Provides native Core ML inference optimized for iOS and macOS deployment
+//
+// # Why prediction always fails
+//
+// Running an actual `.mlmodel`/`.mlpackage` requires Apple's Core ML framework,
+// reachable from Rust only through `objc2`/`objc2-metal`-style bindings to the
+// Objective-C runtime. No such binding is linked into this crate (it would be a
+// macOS-only, non-pure-source dependency, and this workspace keeps that class of
+// dependency feature-gated and off by default; see `trustformers-core`'s `metal`
+// feature). `trustformers-core::export::coreml` is a *topology writer* for
+// exporting a trained model's parameters into Core ML's protobuf shape — it
+// contains no execution engine, and even it refuses to fabricate the topology it
+// cannot recover (see its module docs).
+//
+// An earlier revision of this file `load_model`ed unconditionally and had
+// `predict` return `sin(i * 0.001 + input[0])` dressed up as classifier logits,
+// while `detect_device_capabilities` hardcoded Apple Silicon numbers regardless
+// of the host. Neither survives: `load_model`/`predict` return a structured
+// [`TrustformersError::FeatureUnavailable`] naming the missing framework, and
+// capability detection reports only what `cfg!` / `num_cpus` / `sysinfo` can
+// really observe about the host running the build.
 
 use crate::core::traits::Tokenizer;
 use crate::error::{Result, TrustformersError};
@@ -7,6 +27,12 @@ use crate::pipeline::{ClassificationOutput, GenerationOutput, Pipeline, Pipeline
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use trustformers_core::tensor::Tensor;
+
+/// Human-readable explanation attached to every Core ML "unavailable" error.
+const COREML_UNAVAILABLE_REASON: &str =
+    "Core ML inference requires Apple's Core ML framework via objc2-style Objective-C \
+     bindings, which this pure-Rust build does not link. No pure-Rust Core ML execution \
+     engine exists in trustformers-core to fall back to.";
 
 // Core ML backend types
 #[derive(Debug, Clone)]
@@ -126,60 +152,62 @@ impl CoreMLBackend {
         })
     }
 
-    /// Detect device capabilities
+    /// Detect device capabilities.
+    ///
+    /// Only facts this build can actually establish are reported:
+    /// - `has_neural_engine` / `has_gpu` / `supports_float16` / `supports_int8`
+    ///   are derived from `cfg!(target_os, target_arch)`. Every shipped Apple
+    ///   Silicon Mac (aarch64 macOS) has a Neural Engine and GPU; Core ML's
+    ///   float16/int8 execution modes exist only on macOS. On any other target
+    ///   these are honestly `false` rather than the old unconditional `true`.
+    /// - `cpu_core_count` comes from `num_cpus::get()`.
+    /// - `max_memory_mb` comes from `sysinfo`'s real host memory reading.
+    /// - `gpu_core_count` / `neural_engine_core_count` are genuinely
+    ///   unknowable without private Apple APIs this crate does not call, so
+    ///   they are `None` rather than a fabricated guess.
     fn detect_device_capabilities() -> CoreMLDeviceCapabilities {
-        // In a real implementation, this would query the system
+        let is_apple_silicon = cfg!(target_os = "macos") && cfg!(target_arch = "aarch64");
+        let is_macos = cfg!(target_os = "macos");
+
+        let mut system = sysinfo::System::new();
+        system.refresh_memory();
+        let max_memory_mb = (system.total_memory() / (1024 * 1024)) as usize;
+
         CoreMLDeviceCapabilities {
-            has_neural_engine: true, // Assume Apple Silicon
-            has_gpu: true,
-            supports_float16: true,
-            supports_int8: true,
-            max_memory_mb: 8192, // 8GB
-            cpu_core_count: 8,
-            gpu_core_count: Some(8),
-            neural_engine_core_count: Some(16),
+            has_neural_engine: is_apple_silicon,
+            has_gpu: is_macos,
+            supports_float16: is_macos,
+            supports_int8: is_macos,
+            max_memory_mb,
+            cpu_core_count: num_cpus::get(),
+            gpu_core_count: None,
+            neural_engine_core_count: None,
         }
     }
 
-    /// Load and compile Core ML model
-    pub fn load_model(&mut self, model_path: &Path) -> Result<()> {
-        // In a real implementation, this would:
-        // 1. Load .mlmodel or .mlpackage file
-        // 2. Compile for target device
-        // 3. Configure compute units
-        // 4. Validate input/output specifications
-        self.model = Some(CoreMLModel);
-        Ok(())
+    /// Load and compile a Core ML model.
+    ///
+    /// Always fails: see the module docs for why no build of this crate can
+    /// actually load a `.mlmodel`/`.mlpackage`.
+    pub fn load_model(&mut self, _model_path: &Path) -> Result<()> {
+        Err(TrustformersError::feature_unavailable(
+            COREML_UNAVAILABLE_REASON,
+            "coreml_inference",
+        ))
     }
 
-    /// Run inference with Core ML
-    pub fn predict(&self, inputs: HashMap<String, Tensor>) -> Result<HashMap<String, Tensor>> {
-        if self.model.is_none() {
-            return Err(TrustformersError::invalid_input_simple(
-                "Core ML model not loaded".to_string(),
-            ));
-        }
-
-        // Mock inference - in real implementation would:
-        // 1. Convert tensors to MLMultiArray
-        // 2. Create MLFeatureProvider
-        // 3. Run model prediction
-        // 4. Extract outputs and convert back to tensors
-        let mut outputs = HashMap::new();
-
-        // Create mock output based on input
-        if let Some(input_tensor) = inputs.values().next() {
-            let input_data = input_tensor.data()?;
-            let output_size = 1000; // Example classification output
-            let mock_logits: Vec<f32> = (0..output_size)
-                .map(|i| (i as f32 * 0.001 + input_data.first().unwrap_or(&0.5)).sin())
-                .collect();
-
-            let output_tensor = Tensor::from_vec(mock_logits, &[1, output_size])?;
-            outputs.insert("output".to_string(), output_tensor);
-        }
-
-        Ok(outputs)
+    /// Run inference with Core ML.
+    ///
+    /// Always fails, honestly: there is no path to real Core ML execution in
+    /// this build, and this method must never again return `sin(...)` dressed
+    /// up as logits. `self.model` can never legitimately be `Some` (only
+    /// `load_model` sets it, and `load_model` always errors), so both branches
+    /// report the same real reason.
+    pub fn predict(&self, _inputs: HashMap<String, Tensor>) -> Result<HashMap<String, Tensor>> {
+        Err(TrustformersError::feature_unavailable(
+            COREML_UNAVAILABLE_REASON,
+            "coreml_inference",
+        ))
     }
 
     /// Get model metadata
@@ -480,41 +508,64 @@ pub fn create_coreml_text_generation_pipeline<T: Tokenizer + Clone>(
     CoreMLTextGenerationPipeline::new(tokenizer, config)
 }
 
-/// Utility functions for Core ML model conversion
+/// Utility functions for Core ML model conversion.
+///
+/// Every method here used to return `Ok(())` without writing an output file —
+/// callers were told their model had been converted when nothing had happened.
+/// None of them can honestly succeed: writing a real `.mlmodel`/`.mlpackage`
+/// needs the same Core ML protobuf writer
+/// `trustformers_core::export::coreml::CoreMLExporter` already refuses to drive
+/// (it can recover a model's parameters but not its topology; see that module's
+/// docs). Use the GGUF or GGML exporters for a real, honest weight container
+/// instead.
 pub struct CoreMLModelConverter;
 
 impl CoreMLModelConverter {
-    /// Convert PyTorch model to Core ML format
+    /// Convert a PyTorch model to Core ML format. Always fails; see the type
+    /// docs for why no build of this crate can produce a real `.mlmodel`.
     pub fn from_pytorch(
-        model_path: &Path,
-        output_path: &Path,
-        input_shapes: HashMap<String, Vec<usize>>,
+        _model_path: &Path,
+        _output_path: &Path,
+        _input_shapes: HashMap<String, Vec<usize>>,
     ) -> Result<()> {
-        // In real implementation would use PyTorch -> Core ML conversion
-        // This is a placeholder for the actual conversion logic
-        Ok(())
+        Err(TrustformersError::feature_unavailable(
+            "PyTorch -> Core ML conversion needs both a PyTorch model reader and the Core ML \
+             protobuf writer; neither is implemented in this pure-Rust build.",
+            "coreml_conversion",
+        ))
     }
 
-    /// Convert ONNX model to Core ML format
-    pub fn from_onnx(model_path: &Path, output_path: &Path) -> Result<()> {
-        // In real implementation would use ONNX -> Core ML conversion
-        Ok(())
+    /// Convert an ONNX model to Core ML format. Always fails.
+    pub fn from_onnx(_model_path: &Path, _output_path: &Path) -> Result<()> {
+        Err(TrustformersError::feature_unavailable(
+            "ONNX -> Core ML conversion needs the Core ML protobuf writer, which is not \
+             implemented in this pure-Rust build (trustformers-core's CoreML exporter writes \
+             parameters only, never topology).",
+            "coreml_conversion",
+        ))
     }
 
-    /// Convert TensorFlow model to Core ML format
-    pub fn from_tensorflow(model_path: &Path, output_path: &Path) -> Result<()> {
-        // In real implementation would use TensorFlow -> Core ML conversion
-        Ok(())
+    /// Convert a TensorFlow model to Core ML format. Always fails.
+    pub fn from_tensorflow(_model_path: &Path, _output_path: &Path) -> Result<()> {
+        Err(TrustformersError::feature_unavailable(
+            "TensorFlow -> Core ML conversion needs both a TensorFlow model reader and the \
+             Core ML protobuf writer; neither is implemented in this pure-Rust build.",
+            "coreml_conversion",
+        ))
     }
 
-    /// Optimize Core ML model for specific device
+    /// Optimize a Core ML model for a specific device. Always fails: there is
+    /// no Core ML model reader/writer in this build to optimize with.
     pub fn optimize_for_device(
-        model_path: &Path,
-        output_path: &Path,
-        target_device: CoreMLComputeUnit,
+        _model_path: &Path,
+        _output_path: &Path,
+        _target_device: CoreMLComputeUnit,
     ) -> Result<()> {
-        // In real implementation would apply device-specific optimizations
-        Ok(())
+        Err(TrustformersError::feature_unavailable(
+            "Core ML model optimization needs the Core ML protobuf reader/writer, which is \
+             not implemented in this pure-Rust build.",
+            "coreml_conversion",
+        ))
     }
 }
 
@@ -529,15 +580,20 @@ mod tests {
         assert!(backend.is_ok());
     }
 
+    /// Regression test for hardcoded `has_neural_engine: true, // Assume Apple
+    /// Silicon`: capabilities must reflect the *actual* host, not an assumption.
     #[test]
     fn test_device_capabilities() {
         let config = CoreMLBackendConfig::for_ios();
         let backend = CoreMLBackend::new(config).expect("operation failed in test");
         let capabilities = backend.device_capabilities();
 
-        assert!(capabilities.has_neural_engine);
-        assert!(capabilities.has_gpu);
-        assert!(capabilities.supports_float16);
+        let is_apple_silicon = cfg!(target_os = "macos") && cfg!(target_arch = "aarch64");
+        let is_macos = cfg!(target_os = "macos");
+        assert_eq!(capabilities.has_neural_engine, is_apple_silicon);
+        assert_eq!(capabilities.has_gpu, is_macos);
+        assert_eq!(capabilities.supports_float16, is_macos);
+        assert_eq!(capabilities.cpu_core_count, num_cpus::get());
         assert!(capabilities.cpu_core_count > 0);
     }
 
@@ -564,15 +620,20 @@ mod tests {
         assert_eq!(accuracy_config.precision, CoreMLPrecision::Float32);
     }
 
+    /// Regression test: converters used to return `Ok(())` while writing no
+    /// file at all. They must now honestly refuse.
     #[test]
     fn test_model_converter() {
-        // Test that converter methods don't panic
         let input_path = Path::new("input.pt");
         let output_path = Path::new("output.mlmodel");
         let input_shapes = HashMap::new();
 
         let result = CoreMLModelConverter::from_pytorch(input_path, output_path, input_shapes);
-        assert!(result.is_ok());
+        assert!(
+            result.is_err(),
+            "no PyTorch -> Core ML conversion exists in this build"
+        );
+        assert!(!output_path.exists());
     }
 
     // ── Default config ────────────────────────────────────────────────────────
@@ -620,33 +681,29 @@ mod tests {
     #[test]
     fn test_model_description_none_before_load() {
         let config = CoreMLBackendConfig::for_ios();
-        let mut backend = CoreMLBackend::new(config).expect("backend creation failed");
-        // model not yet loaded — should return None
-        // Note: new() does NOT call load_model(), so model is None initially
-        // BUT the test config calls load_model in the pipeline ctor, not here.
-        // We deliberately skip loading to verify None case.
-        // Reset model to None manually isn't possible via public API, so we
-        // just test that after loading the description is Some.
-        let dummy = std::env::temp_dir().join("dummy.mlmodel");
-        backend.load_model(&dummy).expect("load_model mock should succeed");
-        let desc = backend.model_description();
-        assert!(
-            desc.is_some(),
-            "description must be present after load_model"
-        );
+        let backend = CoreMLBackend::new(config).expect("backend creation failed");
+        // model not yet loaded — must be None
+        assert!(backend.model_description().is_none());
     }
 
+    /// Regression test: `load_model` used to unconditionally set
+    /// `self.model = Some(CoreMLModel)` and return `Ok(())`, so
+    /// `model_description()` would report an invented model afterwards. It
+    /// must now fail loudly instead, and the description must stay `None`.
     #[test]
-    fn test_model_description_fields_after_load() {
+    fn test_load_model_fails_and_description_stays_none() {
         let config = CoreMLBackendConfig::for_ios();
         let mut backend = CoreMLBackend::new(config).expect("backend creation failed");
         let dummy = std::env::temp_dir().join("test.mlpackage");
-        backend.load_model(&dummy).expect("load_model should succeed");
-        let desc = backend.model_description().expect("description should be Some");
-        assert!(!desc.name.is_empty());
-        assert!(!desc.version.is_empty());
-        assert!(!desc.input_names.is_empty());
-        assert!(!desc.output_names.is_empty());
+
+        let err = backend
+            .load_model(&dummy)
+            .expect_err("no Core ML runtime is linked into this build");
+        assert!(!err.to_string().is_empty());
+        assert!(
+            backend.model_description().is_none(),
+            "a failed load must never leave a fabricated model description behind"
+        );
     }
 
     // ── Predict before load returns error ────────────────────────────────────
@@ -663,23 +720,26 @@ mod tests {
         );
     }
 
-    // ── Predict after load returns Some output ────────────────────────────────
+    // ── Predict never fabricates output ───────────────────────────────────────
 
+    /// Regression test for `predict` returning
+    /// `(i as f32 * 0.001 + input[0]).sin()` dressed up as 1000-way classifier
+    /// logits. `load_model` cannot succeed either, so `predict` must fail even
+    /// after attempting to load — and it must never synthesize any tensor.
     #[test]
-    fn test_predict_after_load_succeeds() {
+    fn test_predict_never_fabricates_output() {
         let config = CoreMLBackendConfig::for_ios();
         let mut backend = CoreMLBackend::new(config).expect("backend creation failed");
-        backend.load_model(&std::env::temp_dir().join("m.mlmodel")).expect("load ok");
-        // Provide a dummy input tensor
+        let _ = backend.load_model(&std::env::temp_dir().join("m.mlmodel"));
+
         let input_tensor =
             trustformers_core::tensor::Tensor::zeros(&[1, 10]).expect("tensor creation ok");
         let mut inputs = HashMap::new();
         inputs.insert("input_ids".to_string(), input_tensor);
-        let outputs = backend.predict(inputs).expect("predict should succeed after load");
-        assert!(
-            !outputs.is_empty(),
-            "outputs should contain at least one entry"
-        );
+        let err = backend
+            .predict(inputs)
+            .expect_err("no Core ML runtime is linked into this build");
+        assert!(!err.to_string().is_empty());
     }
 
     // ── Optimize for device ───────────────────────────────────────────────────
@@ -705,26 +765,29 @@ mod tests {
         assert!(cap.max_memory_mb > 0, "max_memory_mb must be positive");
     }
 
+    /// Regression test for the hardcoded `gpu_core_count: Some(8)`: this crate
+    /// has no way to really learn a Mac's GPU core count without private Apple
+    /// APIs, so it must honestly report `None` rather than guessing.
     #[test]
     fn test_device_capabilities_gpu_core_count() {
         let config = CoreMLBackendConfig::for_ios();
         let backend = CoreMLBackend::new(config).expect("backend ok");
         let cap = backend.device_capabilities();
-        // Mock returns Some(8)
         assert!(
-            cap.gpu_core_count.is_some(),
-            "gpu_core_count should be present on Apple Silicon"
+            cap.gpu_core_count.is_none(),
+            "gpu core count is not obtainable in this build and must not be fabricated"
         );
     }
 
+    /// Regression test for the hardcoded `neural_engine_core_count: Some(16)`.
     #[test]
     fn test_device_capabilities_neural_engine_core_count() {
         let config = CoreMLBackendConfig::for_ios();
         let backend = CoreMLBackend::new(config).expect("backend ok");
         let cap = backend.device_capabilities();
         assert!(
-            cap.neural_engine_core_count.is_some(),
-            "neural_engine_core_count should be present"
+            cap.neural_engine_core_count.is_none(),
+            "neural engine core count is not obtainable in this build and must not be fabricated"
         );
     }
 
@@ -765,30 +828,34 @@ mod tests {
 
     // ── Converter additional methods ──────────────────────────────────────────
 
+    /// Regression test for `from_onnx` returning `Ok(())` while writing no
+    /// `.mlmodel` file at all.
     #[test]
-    fn test_converter_from_onnx_ok() {
-        let result =
-            CoreMLModelConverter::from_onnx(Path::new("model.onnx"), Path::new("model.mlmodel"));
-        assert!(result.is_ok());
+    fn test_converter_from_onnx_is_unavailable() {
+        let output_path = Path::new("model.mlmodel");
+        let result = CoreMLModelConverter::from_onnx(Path::new("model.onnx"), output_path);
+        assert!(result.is_err());
+        assert!(!output_path.exists());
     }
 
     #[test]
-    fn test_converter_from_tensorflow_ok() {
-        let result = CoreMLModelConverter::from_tensorflow(
-            Path::new("model.pb"),
-            Path::new("model.mlmodel"),
-        );
-        assert!(result.is_ok());
+    fn test_converter_from_tensorflow_is_unavailable() {
+        let output_path = Path::new("model.mlmodel");
+        let result = CoreMLModelConverter::from_tensorflow(Path::new("model.pb"), output_path);
+        assert!(result.is_err());
+        assert!(!output_path.exists());
     }
 
     #[test]
-    fn test_converter_optimize_for_device_ok() {
+    fn test_converter_optimize_for_device_is_unavailable() {
+        let output_path = Path::new("model_opt.mlmodel");
         let result = CoreMLModelConverter::optimize_for_device(
             Path::new("model.mlmodel"),
-            Path::new("model_opt.mlmodel"),
+            output_path,
             CoreMLComputeUnit::All,
         );
-        assert!(result.is_ok());
+        assert!(result.is_err());
+        assert!(!output_path.exists());
     }
 
     // ── MacOS preset ──────────────────────────────────────────────────────────
@@ -806,5 +873,85 @@ mod tests {
     fn test_macos_config_timeout_30s() {
         let cfg = CoreMLBackendConfig::for_macos();
         assert!((cfg.timeout_seconds - 30.0).abs() < 1e-6);
+    }
+
+    /// Regression test for the hardcoded `max_memory_mb: 8192`: the reported
+    /// value must track the host's real memory, not a fixed constant.
+    #[test]
+    fn test_device_capabilities_memory_matches_real_host() {
+        let config = CoreMLBackendConfig::for_ios();
+        let backend = CoreMLBackend::new(config).expect("backend ok");
+        let cap = backend.device_capabilities();
+
+        let mut system = sysinfo::System::new();
+        system.refresh_memory();
+        let expected_mb = (system.total_memory() / (1024 * 1024)) as usize;
+
+        // Allow a little drift: the host's memory reading can shift by a few MB
+        // between the two `refresh_memory()` calls under real-world jitter.
+        let diff = cap.max_memory_mb.abs_diff(expected_mb);
+        assert!(
+            diff <= expected_mb / 100 + 8,
+            "reported {} MB, host reports {} MB",
+            cap.max_memory_mb,
+            expected_mb
+        );
+    }
+
+    /// A minimal `Tokenizer` for exercising the pipeline-level factory
+    /// functions without any model/tokenizer files.
+    #[derive(Clone)]
+    struct StubTokenizer;
+
+    impl Tokenizer for StubTokenizer {
+        fn encode(
+            &self,
+            _text: &str,
+        ) -> crate::core::errors::Result<crate::core::traits::TokenizedInput> {
+            Ok(crate::core::traits::TokenizedInput::new(
+                vec![1, 2, 3],
+                vec![1, 1, 1],
+            ))
+        }
+        fn encode_pair(
+            &self,
+            text: &str,
+            _text2: &str,
+        ) -> crate::core::errors::Result<crate::core::traits::TokenizedInput> {
+            self.encode(text)
+        }
+        fn decode(&self, ids: &[u32]) -> crate::core::errors::Result<String> {
+            Ok(format!("{ids:?}"))
+        }
+        fn vocab_size(&self) -> usize {
+            10
+        }
+        fn get_vocab(&self) -> std::collections::HashMap<String, u32> {
+            std::collections::HashMap::new()
+        }
+        fn token_to_id(&self, _token: &str) -> Option<u32> {
+            None
+        }
+        fn id_to_token(&self, _id: u32) -> Option<String> {
+            None
+        }
+    }
+
+    /// Regression test: the public factory functions must fail loudly, not
+    /// build a pipeline whose `__call__` only fails later (or worse, whose
+    /// `predict` used to succeed with fabricated logits).
+    #[test]
+    fn factory_functions_fail_loudly_instead_of_building_a_dead_pipeline() {
+        let classification = create_coreml_text_classification_pipeline(
+            StubTokenizer,
+            Some(CoreMLBackendConfig::for_ios()),
+        );
+        assert!(classification.is_err());
+
+        let generation = create_coreml_text_generation_pipeline(
+            StubTokenizer,
+            Some(CoreMLBackendConfig::for_ios()),
+        );
+        assert!(generation.is_err());
     }
 }

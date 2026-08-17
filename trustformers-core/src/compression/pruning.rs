@@ -3,7 +3,6 @@
 //! Various strategies for removing unnecessary weights and structures
 
 #![allow(clippy::excessive_nesting)] // Complex pruning algorithms require deep nesting
-#![allow(unused_variables)] // Model pruning
 
 use crate::tensor::Tensor;
 use anyhow::{anyhow, Result};
@@ -166,18 +165,26 @@ impl StructuredPruner {
     }
 }
 
-impl PruningStrategy for StructuredPruner {
-    fn prune_weights(&self, weights: &Tensor, config: &PruningConfig) -> Result<Tensor> {
-        // Structured pruning removes entire channels/filters
+impl StructuredPruner {
+    /// Indices of the structures (channels / filters) this configuration prunes.
+    fn pruned_structures(
+        &self,
+        weights: &Tensor,
+        config: &PruningConfig,
+    ) -> Result<HashSet<usize>> {
         let shape = weights.shape();
         if shape.len() < 2 {
             return Err(anyhow!("Structured pruning requires at least 2D tensors"));
         }
+        if self.pruning_dim >= shape.len() {
+            return Err(anyhow!(
+                "pruning dimension {} is out of range for shape {:?}",
+                self.pruning_dim,
+                shape
+            ));
+        }
 
-        // Calculate importance scores for each structure
         let importance_scores = self.calculate_importance(weights)?;
-
-        // Determine which structures to prune
         let num_structures = shape[self.pruning_dim];
         let num_prune = (num_structures as f32 * config.target_sparsity) as usize;
 
@@ -188,13 +195,20 @@ impl PruningStrategy for StructuredPruner {
                 .unwrap_or(::std::cmp::Ordering::Equal)
         });
 
-        let pruned_indices: HashSet<_> = indices.iter().take(num_prune).cloned().collect();
+        Ok(indices.iter().take(num_prune).copied().collect())
+    }
+}
+
+impl PruningStrategy for StructuredPruner {
+    fn prune_weights(&self, weights: &Tensor, config: &PruningConfig) -> Result<Tensor> {
+        // Structured pruning removes entire channels/filters
+        let shape = weights.shape();
+        let pruned_indices = self.pruned_structures(weights, config)?;
 
         // Create pruned tensor
         let data = weights.data()?;
         let mut pruned_data = Vec::with_capacity(data.len());
 
-        // This is simplified - in practice would need proper indexing
         for (i, &val) in data.iter().enumerate() {
             let structure_idx = (i / shape.iter().skip(self.pruning_dim + 1).product::<usize>())
                 % shape[self.pruning_dim];
@@ -209,9 +223,26 @@ impl PruningStrategy for StructuredPruner {
         Ok(Tensor::from_vec(pruned_data, &shape)?)
     }
 
+    /// Binary keep-mask matching exactly what [`Self::prune_weights`] zeroes.
     fn get_mask(&self, weights: &Tensor, config: &PruningConfig) -> Result<Tensor> {
-        // Similar to prune_weights but returns mask
-        Ok(Tensor::ones(&weights.shape())?)
+        let shape = weights.shape();
+        let pruned_indices = self.pruned_structures(weights, config)?;
+        let structure_stride = shape.iter().skip(self.pruning_dim + 1).product::<usize>();
+        let num_structures = shape[self.pruning_dim];
+
+        let element_count = weights.data()?.len();
+        let mask: Vec<f32> = (0..element_count)
+            .map(|i| {
+                let structure_idx = (i / structure_stride) % num_structures;
+                if pruned_indices.contains(&structure_idx) {
+                    0.0
+                } else {
+                    1.0
+                }
+            })
+            .collect();
+
+        Ok(Tensor::from_vec(mask, &shape)?)
     }
 
     fn name(&self) -> &str {
@@ -784,28 +815,32 @@ impl LayerPruner {
         }
     }
 
-    /// Calculate layer importance using model-level metrics (simplified)
+    /// Score each layer by the L2 norm of its real weights.
+    ///
+    /// The scores come from [`crate::traits::Model::named_tensors`], so they
+    /// describe the model in front of you. A model with no named tensors is an
+    /// error rather than an excuse to invent a layer table.
     pub fn analyze_model<M>(&mut self, model: &M) -> Result<()>
     where
         M: crate::traits::Model,
     {
-        // Simplified implementation using only model-level information
-        // In a real implementation, would need access to actual layer weights
-        // For now, simulate importance scores based on parameter count
-        let total_params = model.num_parameters();
+        let tensors = model.named_tensors();
+        if tensors.is_empty() {
+            return Err(anyhow!(
+                "LayerPruner::analyze_model needs weight access: this model exposes no tensors \
+                 through Model::named_tensors"
+            ));
+        }
 
-        // Simulate layer importance based on typical model architectures
-        let typical_layers = vec![
-            ("embedding".to_string(), 0.8),
-            ("attention_0".to_string(), 0.6),
-            ("feedforward_0".to_string(), 0.4),
-            ("attention_1".to_string(), 0.5),
-            ("feedforward_1".to_string(), 0.3),
-            ("output".to_string(), 0.9),
-        ];
-
-        for (name, importance) in typical_layers {
-            self.layer_importance.insert(name, importance * total_params as f32);
+        self.layer_importance.clear();
+        for (name, tensor) in tensors {
+            let l2_norm = tensor
+                .data()?
+                .iter()
+                .map(|value| (*value as f64) * (*value as f64))
+                .sum::<f64>()
+                .sqrt() as f32;
+            self.layer_importance.insert(name, l2_norm);
         }
 
         Ok(())
@@ -899,92 +934,160 @@ impl AutomaticPruner {
 }
 
 impl Pruner for AutomaticPruner {
+    /// Prune a model in place by rewriting its named tensors.
+    ///
+    /// Every parameter tensor exposed by [`crate::traits::Model::named_tensors_mut`]
+    /// is passed through the strategy registered for its detected layer type
+    /// and written back, so the model really changes. The reported sparsity is
+    /// then *measured* from the resulting weights, never assumed from
+    /// `config.target_sparsity`.
+    ///
+    /// Errors when the model exposes no named tensors: without weight access
+    /// nothing can be pruned, and reporting a sparsity for an untouched model
+    /// would be a fabrication.
     fn prune<M>(&self, model: M, config: &PruningConfig) -> Result<PruningResult<M>>
     where
         M: crate::traits::Model + Clone,
     {
-        // Simplified pruning implementation that works with the available Model interface
-        let total_params = model.num_parameters();
-        let estimated_pruned_params = (total_params as f32 * config.target_sparsity) as usize;
+        let mut model = model;
+        let total_params_reported = model.num_parameters();
 
-        // Simulate layer-wise sparsity distribution
         let mut layer_sparsity = HashMap::new();
-        let simulated_layers = vec![
-            ("embedding", 0.2),   // Conservative pruning for embeddings
-            ("attention", 0.4),   // Moderate pruning for attention layers
-            ("feedforward", 0.6), // More aggressive pruning for FFN layers
-            ("output", 0.1),      // Very conservative for output layers
-        ];
+        let mut total_elements = 0usize;
+        let mut total_zeros = 0usize;
+        let mut pruned_layers = 0usize;
 
-        for (layer_type, base_sparsity) in simulated_layers {
-            // Adjust sparsity based on config
-            let actual_sparsity = (base_sparsity * config.target_sparsity).min(0.9);
-            layer_sparsity.insert(layer_type.to_string(), actual_sparsity);
+        {
+            let tensors = model.named_tensors_mut();
+            if tensors.is_empty() {
+                return Err(anyhow!(
+                    "AutomaticPruner::prune needs weight access: this model exposes no tensors \
+                     through Model::named_tensors_mut, so nothing can be pruned. Implement \
+                     named_tensors_mut on the model rather than reporting a sparsity for \
+                     untouched weights."
+                ));
+            }
+
+            for (name, tensor) in tensors {
+                let element_count = tensor.data()?.len();
+                total_elements += element_count;
+
+                if config.exclude_layers.contains(&name) {
+                    let zeros = count_zeros(tensor)?;
+                    total_zeros += zeros;
+                    layer_sparsity.insert(name, sparsity_of(zeros, element_count));
+                    continue;
+                }
+
+                let layer_type = self.detect_layer_type(&name);
+                let strategy = self
+                    .strategies
+                    .get(&layer_type)
+                    .map(|boxed| boxed.as_ref())
+                    .unwrap_or(self.default_strategy.as_ref());
+
+                match strategy.prune_weights(tensor, config) {
+                    Ok(pruned) => {
+                        *tensor = pruned;
+                        pruned_layers += 1;
+                    },
+                    Err(error) => {
+                        // A strategy that cannot handle this tensor's shape
+                        // (for example structured pruning of a 1-D bias) leaves
+                        // it untouched; its real sparsity is still measured.
+                        tracing::debug!(
+                            layer = %name,
+                            strategy = strategy.name(),
+                            "pruning strategy skipped this tensor: {}",
+                            error
+                        );
+                    },
+                }
+
+                let zeros = count_zeros(tensor)?;
+                total_zeros += zeros;
+                layer_sparsity.insert(name, sparsity_of(zeros, element_count));
+            }
         }
 
-        let overall_sparsity = config.target_sparsity;
+        if pruned_layers == 0 {
+            return Err(anyhow!(
+                "no tensor could be pruned: every registered strategy rejected every parameter \
+                 tensor"
+            ));
+        }
 
-        // Clone the model to simulate pruning
-        // In a real implementation, this would create a new model with pruned weights
-        let pruned_model = model;
+        let total_params = if total_elements > 0 { total_elements } else { total_params_reported };
 
         Ok(PruningResult {
-            model: pruned_model,
-            sparsity: overall_sparsity,
-            pruned_params: estimated_pruned_params,
+            model,
+            sparsity: sparsity_of(total_zeros, total_params),
+            pruned_params: total_zeros,
             total_params,
             layer_sparsity,
         })
     }
 
+    /// Measure the model's *current* sparsity, per layer and overall.
+    ///
+    /// This reads the live weights; it does not predict what pruning would
+    /// achieve, and it does not derive numbers from `config.target_sparsity`.
     fn estimate_pruning_potential<M>(
         &self,
         model: &M,
-        config: &PruningConfig,
+        _config: &PruningConfig,
     ) -> Result<PruningStats>
     where
         M: crate::traits::Model,
     {
-        let total_params = model.num_parameters();
-        let estimated_zero_params = (total_params as f32 * config.target_sparsity) as usize;
+        let tensors = model.named_tensors();
+        if tensors.is_empty() {
+            return Err(anyhow!(
+                "estimate_pruning_potential needs weight access: this model exposes no tensors \
+                 through Model::named_tensors"
+            ));
+        }
 
-        // Simulate layer-wise statistics
         let mut layer_stats = HashMap::new();
-        let simulated_layers = vec![
-            ("embedding", 0.15),
-            ("attention", 0.30),
-            ("feedforward", 0.45),
-            ("output", 0.05),
-        ];
+        let mut total_params = 0usize;
+        let mut zero_params = 0usize;
 
-        for (layer_name, param_fraction) in simulated_layers {
-            let layer_total = (total_params as f32 * param_fraction) as usize;
-            let layer_zeros = (layer_total as f32 * config.target_sparsity) as usize;
-            let layer_sparsity =
-                if layer_total > 0 { layer_zeros as f32 / layer_total as f32 } else { 0.0 };
+        for (name, tensor) in tensors {
+            let element_count = tensor.data()?.len();
+            let zeros = count_zeros(tensor)?;
+            total_params += element_count;
+            zero_params += zeros;
 
             layer_stats.insert(
-                layer_name.to_string(),
+                name,
                 LayerPruningStats {
-                    total_params: layer_total,
-                    zero_params: layer_zeros,
-                    sparsity: layer_sparsity,
+                    total_params: element_count,
+                    zero_params: zeros,
+                    sparsity: sparsity_of(zeros, element_count),
                 },
             );
         }
 
-        let overall_sparsity = if total_params > 0 {
-            estimated_zero_params as f32 / total_params as f32
-        } else {
-            0.0
-        };
-
         Ok(PruningStats {
             total_params,
-            zero_params: estimated_zero_params,
-            sparsity: overall_sparsity,
+            zero_params,
+            sparsity: sparsity_of(zero_params, total_params),
             layer_stats,
         })
+    }
+}
+
+/// Number of exactly-zero elements in a tensor.
+fn count_zeros(tensor: &Tensor) -> Result<usize> {
+    Ok(tensor.data()?.iter().filter(|value| **value == 0.0).count())
+}
+
+/// Fraction of `zeros` among `total`, or 0.0 for an empty tensor.
+fn sparsity_of(zeros: usize, total: usize) -> f32 {
+    if total == 0 {
+        0.0
+    } else {
+        zeros as f32 / total as f32
     }
 }
 
@@ -998,33 +1101,121 @@ impl Default for AutomaticPruner {
 pub struct PruningUtils;
 
 impl PruningUtils {
-    /// Calculate optimal sparsity for each layer based on sensitivity analysis (simplified)
+    /// Measure how sensitive the model's output is to each parameter tensor,
+    /// by real ablation.
+    ///
+    /// For every tensor exposed through
+    /// [`crate::traits::Model::named_tensors_mut`] the tensor is temporarily
+    /// zeroed, the model is run over `validation_data`, and the mean absolute
+    /// output change against the un-ablated baseline is recorded; the original
+    /// weights are then restored. Scores are normalised to `[0, 1]` by the
+    /// largest observed change, so 1.0 marks the most sensitive tensor.
+    ///
+    /// Errors when the model exposes no named tensors or when
+    /// `validation_data` is empty — either way there is nothing to measure.
     pub fn calculate_layer_sensitivities<M>(
-        model: &M,
-        _validation_data: &[Tensor],
+        model: &mut M,
+        validation_data: &[Tensor],
     ) -> Result<HashMap<String, f32>>
     where
-        M: crate::traits::Model,
+        M: crate::traits::Model<Input = Tensor, Output = Tensor>,
     {
-        let mut sensitivities = HashMap::new();
-
-        // Simplified sensitivity analysis based on typical model architectures
-        // In a real implementation, would analyze actual layer gradients/activations
-        let _total_params = model.num_parameters(); // Use for more sophisticated analysis
-
-        let typical_sensitivities = vec![
-            ("embedding".to_string(), 0.95),   // Embeddings are usually sensitive
-            ("attention".to_string(), 0.75),   // Attention layers are moderately sensitive
-            ("feedforward".to_string(), 0.50), // FFN layers can be pruned more aggressively
-            ("output".to_string(), 0.90),      // Output layers are sensitive
-            ("classifier".to_string(), 0.90),  // Classification layers are sensitive
-        ];
-
-        for (layer_name, sensitivity) in typical_sensitivities {
-            sensitivities.insert(layer_name, sensitivity);
+        if validation_data.is_empty() {
+            return Err(anyhow!(
+                "layer sensitivity analysis needs validation data to ablate against"
+            ));
+        }
+        if model.named_tensors().is_empty() {
+            return Err(anyhow!(
+                "layer sensitivity analysis needs weight access: this model exposes no tensors \
+                 through Model::named_tensors_mut"
+            ));
         }
 
-        Ok(sensitivities)
+        // Baseline outputs before any ablation.
+        let mut baselines = Vec::with_capacity(validation_data.len());
+        for input in validation_data {
+            baselines.push(model.forward(input.clone())?.data()?);
+        }
+
+        let layer_names: Vec<String> =
+            model.named_tensors().into_iter().map(|(name, _)| name).collect();
+
+        let mut raw_sensitivities: HashMap<String, f64> = HashMap::new();
+
+        for layer_name in layer_names {
+            // Zero this tensor, keeping the original values for restoration.
+            let original = {
+                let mut saved = None;
+                for (name, tensor) in model.named_tensors_mut() {
+                    if name == layer_name {
+                        saved = Some(tensor.clone());
+                        *tensor = Tensor::zeros(&tensor.shape())?;
+                        break;
+                    }
+                }
+                match saved {
+                    Some(tensor) => tensor,
+                    None => continue,
+                }
+            };
+
+            let mut total_change = 0.0f64;
+            let mut counted = 0usize;
+            let mut failure = None;
+
+            for (input, baseline) in validation_data.iter().zip(baselines.iter()) {
+                match model.forward(input.clone()).and_then(|output| output.data()) {
+                    Ok(ablated) => {
+                        if ablated.len() != baseline.len() {
+                            failure = Some(anyhow!(
+                                "ablating '{}' changed the output length from {} to {}",
+                                layer_name,
+                                baseline.len(),
+                                ablated.len()
+                            ));
+                            break;
+                        }
+                        let change: f64 = baseline
+                            .iter()
+                            .zip(ablated.iter())
+                            .map(|(base, value)| (base - value).abs() as f64)
+                            .sum();
+                        total_change += change / baseline.len().max(1) as f64;
+                        counted += 1;
+                    },
+                    Err(error) => {
+                        failure = Some(anyhow!("{}", error));
+                        break;
+                    },
+                }
+            }
+
+            // Always restore the weights, even if the forward pass failed.
+            for (name, tensor) in model.named_tensors_mut() {
+                if name == layer_name {
+                    *tensor = original;
+                    break;
+                }
+            }
+
+            if let Some(error) = failure {
+                return Err(error);
+            }
+
+            let mean_change = if counted > 0 { total_change / counted as f64 } else { 0.0 };
+            raw_sensitivities.insert(layer_name, mean_change);
+        }
+
+        let max_change = raw_sensitivities.values().copied().fold(0.0f64, f64::max);
+
+        Ok(raw_sensitivities
+            .into_iter()
+            .map(|(name, change)| {
+                let normalised = if max_change > 0.0 { (change / max_change) as f32 } else { 0.0 };
+                (name, normalised)
+            })
+            .collect())
     }
 
     /// Generate pruning schedule for gradual pruning
@@ -1079,6 +1270,281 @@ impl PruningUtils {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::{Config, Model};
+    use std::io::Read;
+
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    struct TinyConfig;
+
+    impl Config for TinyConfig {
+        fn architecture(&self) -> &'static str {
+            "tiny"
+        }
+    }
+
+    /// A model that exposes its real weights.
+    #[derive(Debug, Clone)]
+    struct TinyModel {
+        config: TinyConfig,
+        linear_weight: Tensor,
+        embedding_weight: Tensor,
+    }
+
+    impl TinyModel {
+        fn new() -> Self {
+            Self {
+                config: TinyConfig,
+                linear_weight: Tensor::from_vec(
+                    vec![0.9, -0.8, 0.05, -0.02, 0.7, -0.6, 0.01, -0.03],
+                    &[2, 4],
+                )
+                .expect("from_vec failed"),
+                embedding_weight: Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2])
+                    .expect("from_vec failed"),
+            }
+        }
+    }
+
+    impl Model for TinyModel {
+        type Config = TinyConfig;
+        type Input = Tensor;
+        type Output = Tensor;
+
+        fn forward(&self, input: Self::Input) -> crate::errors::Result<Self::Output> {
+            // A real dependency on the weights, so ablating one changes the output.
+            let scale: f32 = self.linear_weight.data()?.iter().sum::<f32>()
+                + self.embedding_weight.data()?.iter().sum::<f32>();
+            input.scalar_mul(scale)
+        }
+
+        fn load_pretrained(&mut self, _reader: &mut dyn Read) -> crate::errors::Result<()> {
+            Ok(())
+        }
+
+        fn get_config(&self) -> &Self::Config {
+            &self.config
+        }
+
+        fn num_parameters(&self) -> usize {
+            12
+        }
+
+        fn named_tensors(&self) -> Vec<(String, &Tensor)> {
+            vec![
+                ("linear.weight".to_string(), &self.linear_weight),
+                ("embedding.weight".to_string(), &self.embedding_weight),
+            ]
+        }
+
+        fn named_tensors_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+            vec![
+                ("linear.weight".to_string(), &mut self.linear_weight),
+                ("embedding.weight".to_string(), &mut self.embedding_weight),
+            ]
+        }
+    }
+
+    /// A model with no weight access at all.
+    #[derive(Debug, Clone)]
+    struct OpaqueModel;
+
+    impl Model for OpaqueModel {
+        type Config = TinyConfig;
+        type Input = Tensor;
+        type Output = Tensor;
+
+        fn forward(&self, input: Self::Input) -> crate::errors::Result<Self::Output> {
+            Ok(input)
+        }
+
+        fn load_pretrained(&mut self, _reader: &mut dyn Read) -> crate::errors::Result<()> {
+            Ok(())
+        }
+
+        fn get_config(&self) -> &Self::Config {
+            &TinyConfig
+        }
+
+        fn num_parameters(&self) -> usize {
+            1_000_000
+        }
+    }
+
+    /// Regression test: `AutomaticPruner::prune` used to return the model
+    /// untouched while reporting `sparsity = config.target_sparsity` and a
+    /// hardcoded per-layer table of embedding/attention/feedforward/output.
+    #[test]
+    fn test_automatic_pruner_really_zeroes_weights() -> Result<()> {
+        let pruner = AutomaticPruner::new();
+        let config = PruningConfig {
+            target_sparsity: 0.5,
+            ..Default::default()
+        };
+
+        let model = TinyModel::new();
+        let before = model.linear_weight.data()?;
+        let result = pruner.prune(model, &config)?;
+
+        let after = result.model.linear_weight.data()?;
+        assert_ne!(before, after, "the weights must actually change");
+        assert!(
+            after.iter().filter(|value| **value == 0.0).count() > 0,
+            "pruning must produce real zeros: {after:?}"
+        );
+
+        // The sparsity must be measured, and the layer map must name the real
+        // tensors, not the old invented layer types.
+        assert!(result.sparsity > 0.0);
+        assert_eq!(result.pruned_params, {
+            let mut zeros = 0;
+            for (_, tensor) in result.model.named_tensors() {
+                zeros += tensor.data()?.iter().filter(|value| **value == 0.0).count();
+            }
+            zeros
+        });
+        assert!(result.layer_sparsity.contains_key("linear.weight"));
+        assert!(result.layer_sparsity.contains_key("embedding.weight"));
+        assert!(!result.layer_sparsity.contains_key("feedforward"));
+        assert_eq!(result.total_params, 12);
+        Ok(())
+    }
+
+    /// Excluded layers must be left alone but still measured honestly.
+    #[test]
+    fn test_excluded_layers_are_not_pruned() -> Result<()> {
+        let pruner = AutomaticPruner::new();
+        let mut exclude = HashSet::new();
+        exclude.insert("embedding.weight".to_string());
+        let config = PruningConfig {
+            target_sparsity: 0.9,
+            exclude_layers: exclude,
+            ..Default::default()
+        };
+
+        let original = TinyModel::new().embedding_weight.data()?;
+        let result = pruner.prune(TinyModel::new(), &config)?;
+        assert_eq!(result.model.embedding_weight.data()?, original);
+        assert_eq!(result.layer_sparsity.get("embedding.weight"), Some(&0.0));
+        Ok(())
+    }
+
+    /// Regression test: a model with no weight access must not get a sparsity
+    /// report at all.
+    #[test]
+    fn test_pruning_a_model_without_weight_access_is_refused() {
+        let pruner = AutomaticPruner::new();
+        let config = PruningConfig::default();
+        let error = pruner
+            .prune(OpaqueModel, &config)
+            .expect_err("nothing can be pruned without weight access");
+        assert!(error.to_string().contains("named_tensors_mut"));
+
+        assert!(pruner.estimate_pruning_potential(&OpaqueModel, &config).is_err());
+    }
+
+    /// Regression test: `estimate_pruning_potential` used to derive per-layer
+    /// statistics from a fixed `embedding/attention/feedforward/output` table.
+    #[test]
+    fn test_estimate_pruning_potential_measures_current_sparsity() -> Result<()> {
+        let pruner = AutomaticPruner::new();
+        let config = PruningConfig::default();
+
+        let mut model = TinyModel::new();
+        // Zero three of the twelve weights.
+        model.linear_weight =
+            Tensor::from_vec(vec![0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 4])?;
+
+        let stats = pruner.estimate_pruning_potential(&model, &config)?;
+        assert_eq!(stats.total_params, 12);
+        assert_eq!(stats.zero_params, 3);
+        assert!((stats.sparsity - 0.25).abs() < 1e-6);
+        assert!(stats.layer_stats.contains_key("linear.weight"));
+        assert_eq!(
+            stats.layer_stats.get("linear.weight").map(|s| s.zero_params),
+            Some(3)
+        );
+        Ok(())
+    }
+
+    /// Regression test: `LayerPruner::analyze_model` used to insert a fixed
+    /// six-entry layer table scaled by `num_parameters()`.
+    #[test]
+    fn test_layer_pruner_scores_real_tensors() -> Result<()> {
+        let mut pruner = LayerPruner::new();
+        pruner.analyze_model(&TinyModel::new())?;
+
+        let candidates = pruner.get_pruning_candidates(&PruningConfig {
+            target_sparsity: 0.5,
+            ..Default::default()
+        })?;
+        assert!(!candidates.is_empty());
+        for name in &candidates {
+            assert!(
+                name == "linear.weight" || name == "embedding.weight",
+                "unexpected layer name {name}"
+            );
+        }
+
+        assert!(LayerPruner::new().analyze_model(&OpaqueModel).is_err());
+        Ok(())
+    }
+
+    /// Regression test: `calculate_layer_sensitivities` returned the same five
+    /// constants for every model.
+    #[test]
+    fn test_layer_sensitivities_are_measured_by_ablation() -> Result<()> {
+        let mut model = TinyModel::new();
+        let validation = vec![Tensor::from_vec(vec![1.0, 1.0], &[1, 2])?];
+
+        let sensitivities = PruningUtils::calculate_layer_sensitivities(&mut model, &validation)?;
+
+        assert_eq!(sensitivities.len(), 2);
+        assert!(sensitivities.contains_key("linear.weight"));
+        assert!(sensitivities.contains_key("embedding.weight"));
+        assert!(!sensitivities.contains_key("classifier"));
+
+        // The embedding weights sum to 10.0 and the linear ones to ~0.21, so
+        // ablating the embedding must matter far more.
+        let embedding = sensitivities["embedding.weight"];
+        let linear = sensitivities["linear.weight"];
+        assert!(
+            embedding > linear,
+            "embedding ({embedding}) should dominate linear ({linear})"
+        );
+        assert!(
+            (embedding - 1.0).abs() < 1e-6,
+            "the max must normalise to 1.0"
+        );
+
+        // The ablation must restore the weights it borrowed.
+        assert_eq!(model.embedding_weight.data()?, vec![1.0, 2.0, 3.0, 4.0]);
+
+        assert!(PruningUtils::calculate_layer_sensitivities(&mut model, &[]).is_err());
+        Ok(())
+    }
+
+    /// Regression test: `StructuredPruner::get_mask` returned all ones, so the
+    /// mask never matched what `prune_weights` actually zeroed.
+    #[test]
+    fn test_structured_pruner_mask_matches_pruned_weights() -> Result<()> {
+        let pruner = StructuredPruner::new(0);
+        let weights = Tensor::from_vec(vec![10.0, 10.0, 0.1, 0.1], &[2, 2])?;
+        let config = PruningConfig {
+            target_sparsity: 0.5,
+            ..Default::default()
+        };
+
+        let mask = pruner.get_mask(&weights, &config)?.data()?;
+        let pruned = pruner.prune_weights(&weights, &config)?.data()?;
+
+        assert!(mask.contains(&0.0), "mask must not be all ones");
+        for (index, (mask_value, pruned_value)) in mask.iter().zip(pruned.iter()).enumerate() {
+            if *mask_value == 0.0 {
+                assert_eq!(*pruned_value, 0.0, "element {index} masked but not zeroed");
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn test_pruning_config_default() {

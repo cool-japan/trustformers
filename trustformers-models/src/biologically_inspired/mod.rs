@@ -3,6 +3,8 @@ pub mod capsule_networks;
 pub mod config;
 pub mod dendritic_computation;
 pub mod hopfield_networks;
+#[cfg(test)]
+mod hopfield_networks_tests;
 pub mod liquid_time_constant;
 pub mod model;
 pub mod neural_turing_machine;

@@ -37,6 +37,10 @@ reqwest = { workspace = true, optional = true }
 bytes.workspace = true
 indicatif.workspace = true
 image = { workspace = true, optional = true }
+base64.workspace = true
+oxifft.workspace = true
+# Only needed by the feature-gated vision backends (ViT/CLIP take `Array4<f32>`).
+scirs2-core = { workspace = true, optional = true }
 sha2.workspace = true
 hex.workspace = true
 dirs.workspace = true
@@ -47,6 +51,11 @@ chrono.workspace = true
 uuid.workspace = true
 axum = { workspace = true, optional = true }
 num_cpus.workspace = true
+sysinfo.workspace = true
+# Real memory-mapped I/O for `ParallelLoaderConfig::use_mmap` (loading/parallel_loader.rs).
+# Already a workspace dependency used by trustformers-models/trustformers-tokenizers;
+# pure Rust (raw libc/win32 syscall bindings, no C/C++/Fortran compilation).
+memmap2.workspace = true
 oxiarc-deflate.workspace = true
 oxiarc-archive.workspace = true
 tokio-stream.workspace = true
@@ -65,18 +74,34 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile.workspace = true
 proptest.workspace = true
 scirs2-core.workspace = true
+# Local mock HTTP server for tests/hub_upload_mock.rs (asserts the real Hub
+# upload wire protocol's request shape without touching the network). Already
+# a workspace dependency used by the `async` feature; harmless as a dev-dep
+# even when `async`/`hub` are off, since it's only linked into test binaries.
+axum.workspace = true
 trustformers-core = { path = "../trustformers-core" }
 trustformers-training = { path = "../trustformers-training" }
 
 [features]
 default = ["bert", "async"]
 bert = ["trustformers-models/bert"]
+# The Mamba-2 pipeline delegates its selective scan to the models crate's real
+# SSD blocks. The module is compiled unconditionally, so the architecture is
+# enabled on the workspace `trustformers-models` dependency rather than through
+# this crate's feature set; the alias is kept for callers that name it.
+mamba2 = ["trustformers-models/mamba2"]
 roberta = ["trustformers-models/roberta"]
 albert = ["trustformers-models/albert"]
 gpt2 = ["trustformers-models/gpt2"]
 gpt_neo = ["trustformers-models/gpt_neo"]
 gpt_j = ["trustformers-models/gpt_j"]
 t5 = ["trustformers-models/t5"]
+# Media backbones. Enabling one lets the matching media pipeline accept a real,
+# caller-supplied model; with the feature off the pipeline reports the
+# architecture as unsupported instead of fabricating an output.
+whisper = ["trustformers-models/whisper"]
+vit = ["trustformers-models/vit", "dep:scirs2-core"]
+clip = ["trustformers-models/clip", "dep:scirs2-core"]
 all-models = ["bert", "roberta", "albert", "gpt2", "gpt_neo", "gpt_j", "t5"]
 candle = ["trustformers-core/candle", "trustformers-training/candle"]
 cuda = ["trustformers-models/cuda"]
@@ -88,7 +113,17 @@ audio = []
 # loading still works; remote downloads return a clean "enable `hub`" error.
 hub = ["dep:reqwest"]
 # Full feature set for testing
-full = ["all-models", "candle", "async", "vision", "hub", "trustformers-core/full"]
+full = [
+    "all-models",
+    "candle",
+    "async",
+    "vision",
+    "hub",
+    "whisper",
+    "vit",
+    "clip",
+    "trustformers-core/full",
+]
 
 # `custom_backend_examples` builds a RemoteBackend on top of `reqwest`, so it
 # only compiles with the `hub` feature enabled.

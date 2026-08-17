@@ -773,3 +773,70 @@ mod tests {
         assert!(debug_str.contains("GPUMemoryStats"));
     }
 }
+
+#[cfg(test)]
+mod state_persistence_tests {
+    use super::*;
+    use crate::adam::Adam;
+
+    /// Regression: `StatefulOptimizer` declared `state_dict`/`load_state_dict` as
+    /// required methods with no file-level counterpart, so every implementor had to
+    /// hand-roll checkpointing. The trait now ships a default round trip.
+    #[test]
+    fn save_state_and_load_state_round_trip() {
+        let mut optimizer = Adam::new(0.01, (0.9, 0.999), 1e-8, 0.0);
+        let mut param = Tensor::from_vec(vec![1.0_f32, 2.0], &[2]).expect("tensor");
+        let grad = Tensor::from_vec(vec![0.5_f32, -0.5], &[2]).expect("grad");
+        optimizer.update_named("w", &mut param, &grad).expect("step 1");
+        Optimizer::step(&mut optimizer);
+        optimizer.update_named("w", &mut param, &grad).expect("step 2");
+
+        let path = std::env::temp_dir().join(format!(
+            "trustformers-optim-state-{}.bin",
+            std::process::id()
+        ));
+        optimizer.save_state(&path).expect("save_state");
+
+        let mut restored = Adam::new(0.5, (0.1, 0.1), 1e-2, 0.9);
+        restored.load_state(&path).expect("load_state");
+        let _ = std::fs::remove_file(&path);
+
+        let original = optimizer.state_dict().expect("state_dict");
+        let round_trip = restored.state_dict().expect("state_dict");
+        assert_eq!(original.len(), round_trip.len(), "every entry must survive");
+        for (key, tensor) in &original {
+            let other = round_trip.get(key).unwrap_or_else(|| panic!("missing '{key}'"));
+            assert_eq!(other.shape(), tensor.shape(), "shape of '{key}'");
+            assert_eq!(
+                other.data_f32().expect("data"),
+                tensor.data_f32().expect("data"),
+                "payload of '{key}'"
+            );
+        }
+    }
+
+    /// Corrupt bytes must be reported, not silently ignored.
+    #[test]
+    fn decoding_rejects_corrupt_state() {
+        assert!(decode_state_dict(&[0xff, 0x00, 0x13, 0x37]).is_err());
+    }
+
+    /// A payload whose length disagrees with its shape must be rejected.
+    #[test]
+    fn decoding_rejects_a_shape_payload_mismatch() {
+        let wire: Vec<(String, Vec<usize>, Vec<f32>)> =
+            vec![("w".to_string(), vec![4], vec![1.0, 2.0])];
+        let bytes =
+            oxicode::serde::encode_to_vec(&wire, oxicode::config::standard()).expect("encode");
+        assert!(decode_state_dict(&bytes).is_err());
+    }
+
+    /// Loading must fail loudly when the file does not exist.
+    #[test]
+    fn load_state_reports_a_missing_file() {
+        let mut optimizer = Adam::new(0.01, (0.9, 0.999), 1e-8, 0.0);
+        let path = std::env::temp_dir().join("trustformers-optim-definitely-absent.bin");
+        let _ = std::fs::remove_file(&path);
+        assert!(optimizer.load_state(&path).is_err());
+    }
+}

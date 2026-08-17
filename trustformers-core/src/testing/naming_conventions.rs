@@ -980,7 +980,18 @@ impl NamingCli {
 
         // Auto-fix violations if requested
         if fix_violations {
-            Self::fix_violations(&violations)?;
+            let plan_path = directory.join("naming_rename_plan.json");
+            let planned = Self::write_rename_plan(&violations, &plan_path)?;
+            println!(
+                "Wrote {} proposed rename(s) to {}. Renames are NOT applied: rewriting a \
+                 declaration without its references would break the build. Apply them with a \
+                 refactoring tool (for example `cargo fix`-style rename support in your editor).",
+                planned,
+                plan_path.display()
+            );
+            return Err(Box::new(std::io::Error::other(
+                "naming auto-fix is not implemented; a rename plan was written instead",
+            )));
         }
 
         // Exit with error code if there are errors (for CI/CD)
@@ -991,33 +1002,133 @@ impl NamingCli {
         Ok(())
     }
 
-    /// Attempt to automatically fix naming violations
-    fn fix_violations(violations: &[NamingViolation]) -> Result<(), std::io::Error> {
-        // Group violations by file
-        let mut violations_by_file: HashMap<PathBuf, Vec<&NamingViolation>> = HashMap::new();
-        for violation in violations {
-            violations_by_file
-                .entry(violation.file_path.clone())
-                .or_default()
-                .push(violation);
-        }
+    /// Write a machine-readable rename plan for the violations that carry a
+    /// suggested name.
+    ///
+    /// This does *not* edit any source file. Renaming an identifier at its
+    /// declaration site without also updating every reference produces code
+    /// that does not compile, and this crate has no cross-file reference
+    /// resolver. The plan lists `(file, line, column, from, to)` so a
+    /// refactoring tool — or a human — can apply the renames safely.
+    ///
+    /// Returns the number of renames written.
+    pub fn write_rename_plan(
+        violations: &[NamingViolation],
+        output_path: &Path,
+    ) -> Result<usize, std::io::Error> {
+        let entries: Vec<serde_json::Value> = violations
+            .iter()
+            .filter_map(|violation| {
+                let suggested = violation.suggested_name.as_ref()?;
+                Some(serde_json::json!({
+                    "file": violation.file_path.display().to_string(),
+                    "line": violation.line_number,
+                    "column": violation.column,
+                    "element_type": format!("{:?}", violation.element_type),
+                    "from": violation.element_name,
+                    "to": suggested,
+                    "severity": format!("{:?}", violation.severity),
+                }))
+            })
+            .collect();
 
-        // Process each file
-        for (file_path, file_violations) in violations_by_file {
-            if let Some(_suggested_name) = &file_violations[0].suggested_name {
-                println!("Fixing violations in {}", file_path.display());
-                // Implementation would replace names in file content
-                // This is simplified - real implementation would need careful parsing
-            }
-        }
+        let count = entries.len();
+        let document = serde_json::json!({
+            "applied": false,
+            "note": "declaration-site renames only; references are not resolved by this tool",
+            "renames": entries,
+        });
 
-        Ok(())
+        std::fs::write(
+            output_path,
+            serde_json::to_string_pretty(&document).map_err(std::io::Error::other)?,
+        )?;
+
+        Ok(count)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test: `fix_violations` printed "Fixing violations in <file>"
+    /// per file and changed nothing, and the CLI exited 0. It must now produce
+    /// a real, inspectable rename plan.
+    #[test]
+    fn test_rename_plan_is_written_and_nothing_is_edited() {
+        let directory =
+            std::env::temp_dir().join(format!("trustformers_naming_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("mkdir failed");
+
+        let source = directory.join("lib.rs");
+        let original = "fn BadName() {}\n";
+        std::fs::write(&source, original).expect("write failed");
+
+        let violations = vec![NamingViolation {
+            file_path: source.clone(),
+            line_number: 1,
+            column: 4,
+            element_type: ElementType::Function,
+            element_name: "BadName".to_string(),
+            expected_rule: NamingRule::SnakeCase,
+            suggested_name: Some("bad_name".to_string()),
+            severity: ViolationSeverity::Error,
+            message: "function names must be snake_case".to_string(),
+        }];
+
+        let plan_path = directory.join("plan.json");
+        let count =
+            NamingCli::write_rename_plan(&violations, &plan_path).expect("plan should be written");
+        assert_eq!(count, 1);
+
+        let plan: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&plan_path).expect("read failed"))
+                .expect("plan must be valid JSON");
+        assert_eq!(plan["applied"], serde_json::Value::Bool(false));
+        assert_eq!(plan["renames"][0]["from"], "BadName");
+        assert_eq!(plan["renames"][0]["to"], "bad_name");
+        assert_eq!(plan["renames"][0]["line"], 1);
+
+        // The source file must be untouched: the tool never claims to have
+        // rewritten code it cannot rewrite safely.
+        assert_eq!(
+            std::fs::read_to_string(&source).expect("read failed"),
+            original
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// Violations with no suggested name contribute nothing to the plan.
+    #[test]
+    fn test_rename_plan_skips_violations_without_a_suggestion() {
+        let directory =
+            std::env::temp_dir().join(format!("trustformers_naming_empty_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("mkdir failed");
+
+        let violations = vec![NamingViolation {
+            file_path: directory.join("lib.rs"),
+            line_number: 1,
+            column: 1,
+            element_type: ElementType::Module,
+            element_name: "Weird".to_string(),
+            expected_rule: NamingRule::SnakeCase,
+            suggested_name: None,
+            severity: ViolationSeverity::Warning,
+            message: "no suggestion".to_string(),
+        }];
+
+        let plan_path = directory.join("plan.json");
+        assert_eq!(
+            NamingCli::write_rename_plan(&violations, &plan_path).expect("plan written"),
+            0
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
 
     #[test]
     fn test_snake_case_validation() {

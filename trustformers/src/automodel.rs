@@ -1,9 +1,11 @@
 use crate::core::traits::TokenizedInput;
 use crate::error::{Result, TrustformersError};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Read as IoRead;
 use std::path::Path;
+use std::sync::Arc;
 use trustformers_core::errors::Result as CoreResult;
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::{Config, Model, Tokenizer};
@@ -390,10 +392,41 @@ impl Config for AutoConfig {
     }
 }
 
+/// Weight file names [`AutoModel::from_pretrained`] recognises, in priority
+/// order.
+pub const WEIGHT_FILE_CANDIDATES: &[&str] = &[
+    "model.safetensors",
+    "pytorch_model.safetensors",
+    "pytorch_model.bin",
+    "model.bin",
+];
+
+/// Options controlling how [`AutoModel::from_pretrained_with_options`] loads a
+/// checkpoint.
+#[derive(Debug, Clone, Default)]
+pub struct ModelLoadOptions {
+    /// Hub revision (branch/tag/commit) to resolve, when applicable.
+    pub revision: Option<String>,
+    /// Accept a checkpoint that has **no** weight file and return a randomly
+    /// initialised network instead.
+    ///
+    /// Off by default: a silent random init is indistinguishable from a real
+    /// load at the call site, and every downstream number would be noise.
+    pub allow_random_init: bool,
+}
+
 #[derive(Clone)]
 pub struct AutoModel {
     pub config: AutoConfig,
     pub model_type: AutoModelType,
+    /// Tokenizer that belongs to this checkpoint.
+    ///
+    /// Populated by [`AutoModel::from_pretrained`] when the checkpoint directory
+    /// (or the Hub cache) carries a usable tokenizer. Text-level APIs such as
+    /// [`GenerativeModel::generate`] require it: without a real vocabulary there
+    /// is no honest way to turn a prompt into token ids, so those APIs return a
+    /// structured error instead of guessing.
+    tokenizer: Option<Arc<dyn Tokenizer>>,
 }
 
 #[derive(Clone)]
@@ -471,7 +504,66 @@ impl AutoModel {
             _ => unreachable!("No model features enabled"),
         };
 
-        Ok(AutoModel { config, model_type })
+        Ok(AutoModel {
+            config,
+            model_type,
+            tokenizer: None,
+        })
+    }
+
+    /// Assemble a model from an already-built architecture instance.
+    ///
+    /// Useful when a caller has constructed a specific head (for example
+    /// `BertForMaskedLM`) and wants to drive it through the `AutoModel`
+    /// dispatch. No weights are loaded and no tokenizer is attached.
+    pub fn from_parts(config: AutoConfig, model_type: AutoModelType) -> Self {
+        Self {
+            config,
+            model_type,
+            tokenizer: None,
+        }
+    }
+
+    /// Attach the tokenizer that belongs to this checkpoint.
+    ///
+    /// Text-level generation ([`GenerativeModel::generate`]) needs a real
+    /// vocabulary; use this when the model was built with
+    /// [`AutoModel::from_config`] or when the tokenizer lives somewhere other
+    /// than the model directory.
+    pub fn with_tokenizer<T: Tokenizer + 'static>(mut self, tokenizer: T) -> Self {
+        self.tokenizer = Some(Arc::new(tokenizer));
+        self
+    }
+
+    /// Attach an already-shared tokenizer.
+    pub fn with_shared_tokenizer(mut self, tokenizer: Arc<dyn Tokenizer>) -> Self {
+        self.tokenizer = Some(tokenizer);
+        self
+    }
+
+    /// Borrow the tokenizer attached to this model, if any.
+    pub fn tokenizer(&self) -> Option<&Arc<dyn Tokenizer>> {
+        self.tokenizer.as_ref()
+    }
+
+    /// Borrow the tokenizer, or fail with an actionable error.
+    ///
+    /// # Errors
+    ///
+    /// Returns a pipeline runtime error when no tokenizer was attached — the
+    /// caller has to supply one via
+    /// [`AutoModel::with_tokenizer`] or load the model through
+    /// [`AutoModel::from_pretrained`] on a directory that contains one.
+    pub fn require_tokenizer(&self) -> Result<&Arc<dyn Tokenizer>> {
+        self.tokenizer.as_ref().ok_or_else(|| {
+            TrustformersError::runtime_error(
+                "no tokenizer is attached to this AutoModel: text generation needs the \
+                 checkpoint's real vocabulary. Load the model with \
+                 `AutoModel::from_pretrained(<dir containing tokenizer.json/vocab.txt>)` or \
+                 attach one explicitly with `AutoModel::with_tokenizer(..)`."
+                    .to_string(),
+            )
+        })
     }
 
     pub fn from_pretrained(model_name_or_path: &str) -> Result<Self> {
@@ -482,11 +574,66 @@ impl AutoModel {
         model_name_or_path: &str,
         revision: Option<&str>,
     ) -> Result<Self> {
+        Self::from_pretrained_with_options(
+            model_name_or_path,
+            &ModelLoadOptions {
+                revision: revision.map(str::to_string),
+                ..ModelLoadOptions::default()
+            },
+        )
+    }
+
+    /// First recognised weight file inside `dir`, if any.
+    ///
+    /// `Checkpoint::from_bytes` auto-detects the container, so both
+    /// safetensors and the pure-Rust torch `.bin` reader are covered.
+    fn locate_weight_file(dir: &Path) -> Option<std::path::PathBuf> {
+        WEIGHT_FILE_CANDIDATES
+            .iter()
+            .map(|name| dir.join(name))
+            .find(|candidate| candidate.exists())
+    }
+
+    /// Load a checkpoint with explicit control over what counts as a
+    /// successful load.
+    ///
+    /// By default the checkpoint **must** carry a weight file: returning a
+    /// randomly initialised network from `from_pretrained` would look exactly
+    /// like a successful load while producing meaningless outputs. Callers that
+    /// genuinely want an untrained network (fresh training runs, architecture
+    /// smoke tests) opt in via [`ModelLoadOptions::allow_random_init`].
+    ///
+    /// # Errors
+    ///
+    /// Fails when the configuration cannot be resolved, when no recognised
+    /// weight file is present and random initialisation was not requested, or
+    /// when the weight file itself cannot be parsed.
+    pub fn from_pretrained_with_options(
+        model_name_or_path: &str,
+        options: &ModelLoadOptions,
+    ) -> Result<Self> {
+        let revision = options.revision.as_deref();
         let config = AutoConfig::from_pretrained_with_revision(model_name_or_path, revision)?;
         let mut model = Self::from_config(config)?;
 
-        let weights_path = Path::new(model_name_or_path).join("model.safetensors");
-        if weights_path.exists() {
+        let weights_path = Self::locate_weight_file(Path::new(model_name_or_path));
+        match (&weights_path, options.allow_random_init) {
+            (None, false) => {
+                return Err(TrustformersError::file_not_found(format!(
+                    "no weight file found for `{model_name_or_path}` (looked for {}).                      Refusing to return a randomly initialised model from `from_pretrained`;                      pass `ModelLoadOptions {{ allow_random_init: true, .. }}` if an untrained                      network is genuinely what you want.",
+                    WEIGHT_FILE_CANDIDATES.join(", ")
+                )));
+            },
+            (None, true) => {
+                tracing::warn!(
+                    model = model_name_or_path,
+                    "no weight file found; returning a randomly initialised model because                      `allow_random_init` was requested. Its outputs are not meaningful."
+                );
+            },
+            (Some(_), _) => {},
+        }
+
+        if let Some(weights_path) = weights_path {
             match &mut model.model_type {
                 #[cfg(feature = "bert")]
                 AutoModelType::Bert(bert) => {
@@ -591,6 +738,21 @@ impl AutoModel {
                     albert.load_pretrained(&mut reader)?;
                 },
             }
+        }
+
+        // Attach the checkpoint's own tokenizer when it ships one. This is what
+        // makes real (non-fabricated) text generation possible; when the
+        // checkpoint has no tokenizer the field stays `None` and the text-level
+        // APIs return a structured error rather than inventing token ids.
+        match AutoTokenizer::from_pretrained_with_revision(model_name_or_path, revision) {
+            Ok(tokenizer) => model.tokenizer = Some(Arc::new(tokenizer)),
+            Err(err) => {
+                tracing::debug!(
+                    model = model_name_or_path,
+                    error = %err,
+                    "no tokenizer found next to the checkpoint; text-level APIs will error"
+                );
+            },
         }
 
         Ok(model)
@@ -1066,68 +1228,9 @@ impl Model for AutoModel {
 
 impl GenerativeModel for AutoModel {
     fn generate(&self, prompt: &str, config: &GenerationConfig) -> anyhow::Result<String> {
-        match &self.model_type {
-            #[cfg(feature = "gpt2")]
-            AutoModelType::Gpt2LMHead(model) => {
-                // For now, create a simple tokenization by converting characters to token IDs
-                // In a real implementation, this should use a proper tokenizer
-                let input_ids: Vec<u32> =
-                    prompt.chars().filter(|c| c.is_ascii()).map(|c| c as u32).collect();
-
-                if input_ids.is_empty() {
-                    return Ok(prompt.to_string()); // Return original prompt if no valid tokens
-                }
-
-                let generated_ids = model.generate(
-                    input_ids,
-                    config.max_new_tokens.min(config.max_length.unwrap_or(100)),
-                    config.temperature,
-                    config.top_k,
-                    Some(config.top_p),
-                )?;
-
-                // Convert generated token IDs back to text (simplified)
-                let generated_text: String = generated_ids
-                    .iter()
-                    .filter_map(|&id| {
-                        if id < 256 {
-                            // ASCII range
-                            char::from_u32(id)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-
-                Ok(if generated_text.is_empty() {
-                    format!("{} [Generated]", prompt)
-                } else {
-                    generated_text
-                })
-            },
-            #[cfg(feature = "gpt_neo")]
-            AutoModelType::GptNeoLMHead(model) => {
-                // GPT-Neo text generation - improved implementation
-                Self::generate_text_with_model(model, prompt, config).map_err(|e| e.into())
-            },
-            #[cfg(feature = "gpt_j")]
-            AutoModelType::GptJLMHead(model) => {
-                // GPT-J text generation - improved implementation
-                Self::generate_text_with_model(model, prompt, config).map_err(|e| e.into())
-            },
-            #[cfg(feature = "t5")]
-            AutoModelType::T5ForConditionalGeneration(model) => {
-                // T5 text generation - improved encoder-decoder implementation
-                Self::generate_text_with_t5_model(model, prompt, config).map_err(|e| e.into())
-            },
-            _ => {
-                // For non-generative models, return a placeholder
-                Ok(format!(
-                    "Model does not support text generation. Prompt: {}",
-                    prompt
-                ))
-            },
-        }
+        let outcome = self.generate_token_ids(prompt, config)?;
+        let tokenizer = self.require_tokenizer()?;
+        Ok(tokenizer.decode(&outcome.sequence)?)
     }
 
     fn generate_batch(
@@ -1143,9 +1246,11 @@ impl GenerativeModel for AutoModel {
         prompt: &str,
         config: &GenerationConfig,
     ) -> anyhow::Result<Box<dyn Iterator<Item = anyhow::Result<String>>>> {
-        // For now, just return a single result
-        let result = self.generate(prompt, config)?;
-        Ok(Box::new(std::iter::once(Ok(result))))
+        // Real incremental decoding: every `next()` runs exactly one more
+        // decoding step and yields the newly decoded text delta. Time-to-first
+        // token is therefore one forward pass, not a full generation.
+        let stream = self.into_token_stream(prompt, config)?;
+        Ok(Box::new(stream.map(|step| step.map(|s| s.text_delta))))
     }
 
     fn max_context_length(&self) -> usize {
@@ -1296,47 +1401,145 @@ impl GenerativeModel for AutoModel {
     }
 }
 
-impl AutoModel {
-    fn generate_text_with_model<M: Model>(
-        model: &M,
-        prompt: &str,
-        config: &GenerationConfig,
-    ) -> Result<String> {
-        // Simplified text generation implementation
-        let max_length = config.max_new_tokens.min(50);
-        let temperature = config.temperature;
+/// Real autoregressive generation for [`AutoModel`].
+#[path = "automodel_generation.rs"]
+mod generation;
 
-        // For now, just append some text to demonstrate generation
-        let generated_text = format!(
-            " [Generated: max_tokens={}, temp={:.2}]",
-            max_length, temperature
-        );
-        Ok(format!("{}{}", prompt, generated_text))
+pub use generation::{AutoModelTokenStream, GeneratedSequence, GenerationStep};
+
+#[cfg(test)]
+mod generation_honesty_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// A real WordPiece tokenizer over a handful of words.
+    #[cfg(feature = "bert")]
+    fn tiny_tokenizer() -> crate::tokenizers::WordPieceTokenizer {
+        let vocab: HashMap<String, u32> = [
+            "[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "hello", "world",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, w)| ((*w).to_string(), i as u32))
+        .collect();
+        crate::tokenizers::WordPieceTokenizer::new(vocab, true)
     }
 
-    fn generate_text_with_t5_model<M: Model>(
-        model: &M,
-        prompt: &str,
-        config: &GenerationConfig,
-    ) -> Result<String> {
-        let max_length = config.max_new_tokens.min(50);
+    #[cfg(feature = "bert")]
+    fn tiny_bert_config() -> crate::models::bert::BertConfig {
+        crate::models::bert::BertConfig {
+            vocab_size: 7,
+            hidden_size: 8,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            intermediate_size: 16,
+            max_position_embeddings: 32,
+            ..crate::models::bert::BertConfig::default()
+        }
+    }
 
-        // T5 is an encoder-decoder model, so we simulate that behavior
-        let generated = if prompt.starts_with("summarize:") {
-            let text = prompt.strip_prefix("summarize:").unwrap_or(prompt).trim();
-            let words: Vec<&str> = text.split_whitespace().collect();
-            let summary_len = (words.len() / 3).max(5).min(max_length / 5);
-            format!(
-                "Summary: {}",
-                words[..summary_len.min(words.len())].join(" ")
-            )
-        } else if prompt.starts_with("translate") {
-            format!("Translation: [T5 translation of: {}]", prompt)
-        } else {
-            format!("T5 output: [Generated from: {}]", prompt)
+    /// A model with no LM head must refuse to generate.
+    ///
+    /// The previous implementation returned
+    /// `Ok("Model does not support text generation. Prompt: …")`, i.e. a
+    /// successful-looking result carrying no model output at all.
+    #[cfg(feature = "bert")]
+    #[test]
+    fn non_generative_model_errors_instead_of_returning_a_sentence() {
+        let model = AutoModel::from_config(AutoConfig::Bert(tiny_bert_config()))
+            .expect("tiny bert should build")
+            .with_tokenizer(tiny_tokenizer());
+
+        let Err(err) = model.generate("hello world", &GenerationConfig::default()) else {
+            panic!("a headless BERT cannot generate text");
         };
+        let message = err.to_string();
+        assert!(
+            !message.contains("Prompt:"),
+            "the error must not echo the prompt back as if it were output: {message}"
+        );
+        assert!(
+            message.contains("language-modelling head"),
+            "the error should explain why generation is impossible: {message}"
+        );
+    }
 
-        Ok(generated)
+    /// Generation without a tokenizer must fail rather than fall back to
+    /// character codes.
+    #[cfg(feature = "bert")]
+    #[test]
+    fn generation_without_a_tokenizer_errors() {
+        let model = AutoModel::from_config(AutoConfig::Bert(tiny_bert_config()))
+            .expect("tiny bert should build");
+        assert!(model.tokenizer().is_none());
+        let Err(err) = model.generate("hello", &GenerationConfig::default()) else {
+            panic!("no vocabulary means no honest tokenization");
+        };
+        assert!(
+            err.to_string().contains("tokenizer"),
+            "error should name the missing tokenizer: {err}"
+        );
+    }
+
+    /// `from_pretrained` must not hand back an untrained network.
+    #[cfg(feature = "bert")]
+    #[test]
+    fn from_pretrained_requires_weights_unless_opted_in() {
+        let dir =
+            std::env::temp_dir().join(format!("trustformers_weightless_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let config_json = serde_json::json!({
+            "model_type": "bert",
+            "vocab_size": 7,
+            "hidden_size": 8,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "intermediate_size": 16,
+            "hidden_act": "gelu",
+            "hidden_dropout_prob": 0.1,
+            "attention_probs_dropout_prob": 0.1,
+            "max_position_embeddings": 32,
+            "type_vocab_size": 2,
+            "initializer_range": 0.02,
+            "layer_norm_eps": 1e-12,
+            "pad_token_id": 0
+        });
+        std::fs::write(dir.join("config.json"), config_json.to_string()).expect("write config");
+        let path = dir.to_string_lossy().to_string();
+
+        let strict = AutoModel::from_pretrained(&path);
+        let permissive = AutoModel::from_pretrained_with_options(
+            &path,
+            &ModelLoadOptions {
+                allow_random_init: true,
+                ..ModelLoadOptions::default()
+            },
+        );
+        std::fs::remove_dir_all(&dir).ok();
+
+        let Err(err) = strict else {
+            panic!("a config-only directory carries no trained weights");
+        };
+        assert!(
+            err.to_string().contains("no weight file"),
+            "error should say which files were looked for: {err}"
+        );
+        assert!(
+            permissive.is_ok(),
+            "an explicit opt-in must still be able to build an untrained network"
+        );
+    }
+
+    /// Encoder-decoder sequences cannot be scored by the decoder-only path.
+    ///
+    /// Feeding decoder ids into T5's encoder returns a plausible float that is
+    /// not a log-probability of anything; refusing is the only honest answer.
+    #[cfg(feature = "t5")]
+    #[test]
+    fn t5_sequence_scoring_is_refused() {
+        let config = crate::models::t5::T5Config::default();
+        let model = AutoModel::from_config(AutoConfig::T5(config)).expect("t5 should build");
+        assert!(model.sequence_log_prob(&[1, 2, 3], 0).is_err());
     }
 }
 

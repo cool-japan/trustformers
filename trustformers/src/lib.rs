@@ -50,6 +50,7 @@ pub mod error;
 pub mod evaluation;
 pub mod finetuning;
 pub mod hub;
+mod hub_delta_codec;
 pub mod hub_differential;
 // hub_local_mirror is a networking module (reqwest-backed Hub mirror); gate it
 // behind `hub` so the default tree stays free of reqwest -> aws-lc-sys (C/C++).
@@ -58,6 +59,7 @@ pub mod hub_local_mirror;
 pub mod hub_model_card;
 pub mod hub_offline_packs;
 pub mod hub_p2p;
+pub mod hub_search;
 #[cfg(feature = "async")]
 pub mod hub_ui;
 pub mod hub_upload;

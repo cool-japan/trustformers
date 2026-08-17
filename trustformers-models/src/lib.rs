@@ -371,12 +371,16 @@ pub mod model_compression;
 
 // Continual learning framework
 pub mod continual_learning;
+#[cfg(test)]
+mod continual_learning_tests;
 
 // Curriculum learning framework
 pub mod curriculum_learning;
 
 // Multi-task learning framework
 pub mod multi_task_learning;
+#[cfg(test)]
+mod multi_task_learning_tests;
 
 // Progressive training framework
 pub mod progressive_training;

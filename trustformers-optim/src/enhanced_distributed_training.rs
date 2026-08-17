@@ -1376,10 +1376,18 @@ impl<T: Optimizer + StatefulOptimizer + Clone> EnhancedDistributedTrainer<T> {
 
     /// Write [`Self::training_stats_report`] to stdout.
     ///
-    /// This is an explicit, caller-initiated reporting helper; nothing on the
-    /// training hot path writes to stdout.
+    /// This is an explicit, caller-initiated escape hatch for binaries and
+    /// examples; nothing on the training path writes to stdout. Library callers
+    /// should prefer [`Self::log_training_stats`], which routes the same report
+    /// through the `log` facade so the host application controls the sink.
     pub fn print_training_stats(&self) {
         println!("{}", self.training_stats_report());
+    }
+
+    /// Emit [`Self::training_stats_report`] at `info` level through the `log`
+    /// facade.
+    pub fn log_training_stats(&self) {
+        log::info!("{}", self.training_stats_report());
     }
 
     /// Whether the fault handler considers a checkpoint due at the current
@@ -1757,5 +1765,41 @@ mod tests {
             .expect("single-device trainer must build in test");
         assert_eq!(trainer.config.num_gpus, 1);
         assert_eq!(trainer.step_count, 0);
+    }
+
+    #[test]
+    fn optimize_hyperparameters_reports_not_implemented_instead_of_a_success_banner() {
+        // The previous implementation printed "✅ Hyperparameter optimization
+        // completed (placeholder)" and returned a clone of the input optimizer.
+        let mut config = DistributedConfig::new().with_gpus(1);
+        config.monitoring.auto_tuning = true;
+        let optimizer = Adam::new(0.001, (0.9, 0.999), 1e-8, 0.0);
+
+        let mut trainer = EnhancedDistributedTrainer::new(config, optimizer)
+            .expect("single-device trainer must build in test");
+
+        let Err(error) = trainer.optimize_hyperparameters() else {
+            panic!("auto-tuning must not report success without running a search in test");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("hyperparameter") && message.contains("not implemented")
+                || message.contains("HyperparameterTuner"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn optimize_hyperparameters_is_a_no_op_when_auto_tuning_is_off() {
+        let mut config = DistributedConfig::new().with_gpus(1);
+        config.monitoring.auto_tuning = false;
+        let optimizer = Adam::new(0.001, (0.9, 0.999), 1e-8, 0.0);
+
+        let mut trainer = EnhancedDistributedTrainer::new(config, optimizer)
+            .expect("single-device trainer must build in test");
+
+        // No optimization was requested, so returning the current optimizer
+        // unchanged is the honest answer.
+        assert!(trainer.optimize_hyperparameters().is_ok());
     }
 }

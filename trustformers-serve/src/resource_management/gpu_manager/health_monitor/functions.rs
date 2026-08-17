@@ -36,16 +36,58 @@ mod tests {
         let monitor = GpuHealthMonitor::new();
         assert!(!monitor.is_monitoring());
     }
+    /// Regression: temperature and power used to be synthesized from the
+    /// device's utilization (`45.0 + util * 0.5`), so a genuinely overheating GPU
+    /// could never trip the check and `driver_ok` was hardcoded `true`.
+    ///
+    /// The values must now come from the driver, and a sensor the driver does
+    /// not report must read as *not ok* / unknown rather than as comfortably
+    /// within threshold.
     #[tokio::test]
     async fn test_health_check() {
         let device = create_test_device(0);
         let config = Arc::new(RwLock::new(GpuHealthConfig::default()));
         let health = GpuHealthMonitor::perform_comprehensive_health_check(&device, &config).await;
+
         assert_eq!(health.device_id, 0);
         assert!(health.health_score >= 0.0 && health.health_score <= 1.0);
-        assert!(health.temperature_ok);
+
+        // Memory and utilization come from the device record itself and remain
+        // measurable.
         assert!(health.memory_ok);
         assert!(health.performance_ok);
+
+        if health.driver_ok {
+            // A driver answered, so the sensor values are real measurements.
+            assert!(
+                health.current_temperature.is_finite(),
+                "a driver that answered must report a real temperature"
+            );
+        } else {
+            // No driver answered for this synthetic device: nothing may be
+            // reported as within threshold, and the reason must be stated.
+            assert!(!health.temperature_ok);
+            assert!(!health.power_ok);
+            assert!(health.current_temperature.is_nan());
+            assert!(health.current_power.is_nan());
+            assert!(health
+                .issues
+                .iter()
+                .any(|issue| issue.contains("Temperature sensor is unavailable")));
+            assert!(health
+                .issues
+                .iter()
+                .any(|issue| issue.contains("did not answer a telemetry query")));
+        }
+
+        // The old synthesized value must never reappear.
+        let synthesized = 45.0 + device.utilization_percent * 0.5;
+        assert!(
+            health.current_temperature.is_nan()
+                || (health.current_temperature - synthesized).abs() > f32::EPSILON,
+            "temperature {} matches the removed synthetic formula",
+            health.current_temperature
+        );
     }
     #[tokio::test]
     async fn test_health_monitoring_lifecycle() {

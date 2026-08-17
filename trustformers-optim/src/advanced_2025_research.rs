@@ -832,7 +832,7 @@ impl MeZOV2 {
             for sample in 0..self.num_samples {
                 let seed = self
                     .random_seed
-                    .wrapping_add((self.step as u64).wrapping_mul(0x1000_0000_1B3))
+                    .wrapping_add((self.step as u64).wrapping_mul(0x0100_0000_01B3))
                     .wrapping_add((level_index as u64) << 32)
                     .wrapping_add(sample as u64);
 

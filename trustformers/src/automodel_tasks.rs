@@ -727,14 +727,10 @@ impl AutoModelForImageClassification {
 /// bounding-box localisation and classification of multiple objects within a
 /// single image. Compatible with DETR and YOLO-style architectures.
 ///
-/// **Mock notice:** this wrapper uses a deterministic placeholder pipeline
-/// pending a real object-detection model — see TODO.md for status.
-/// [`ObjectDetectionPipeline::detect`] does not run real inference: it
-/// derives a deterministic number of bounding boxes from the input buffer's
-/// length, exactly like the equally mock
-/// [`AutoModelForImageClassification`]/[`AutoModelForAudioClassification`]
-/// siblings. Do not treat the returned boxes, labels, or confidence scores as
-/// real detections.
+/// **No detection backbone is compiled into this build.** Constructing the
+/// wrapper succeeds — it only validates configuration — but
+/// [`AutoModelForObjectDetection::detect`] reports an unsupported-model error
+/// instead of returning boxes. Nothing here fabricates detections.
 ///
 /// # Example
 ///
@@ -828,20 +824,21 @@ impl AutoModelForObjectDetection {
 /// assign a class label to every pixel of an image. Compatible with
 /// SegFormer and Mask2Former-style architectures.
 ///
-/// **Mock notice:** this wrapper uses a deterministic placeholder pipeline
-/// pending a real image-segmentation model — see TODO.md for status.
-/// [`ImageSegmentationPipeline::segment`] does not run real inference: it
-/// derives the per-pixel class mask deterministically from pixel values,
-/// exactly like the equally mock
-/// [`AutoModelForImageClassification`]/[`AutoModelForAudioClassification`]
-/// siblings. Do not treat the returned mask as a real segmentation.
+/// **No segmentation backbone is implemented yet**, and the underlying
+/// pipeline still derives its mask arithmetically from pixel values. Because a
+/// caller cannot tell that apart from a real segmentation,
+/// [`AutoModelForImageSegmentation::from_pretrained`] refuses to build from a
+/// checkpoint identifier; the placeholder is reachable only through the
+/// explicitly named [`AutoModelForImageSegmentation::placeholder`].
 ///
 /// # Example
 ///
 /// ```rust,ignore
 /// use trustformers::AutoModelForImageSegmentation;
 ///
-/// let model = AutoModelForImageSegmentation::from_pretrained(
+/// // Deliberate use of the deterministic stand-in; its masks are not
+/// // segmentations.
+/// let model = AutoModelForImageSegmentation::placeholder(
 ///     "nvidia/segformer-b0-finetuned-ade-512-512",
 /// )?;
 ///
@@ -860,8 +857,32 @@ impl AutoModelForImageSegmentation {
     ///
     /// # Errors
     ///
-    /// Returns [`TrustformersError`] if the pipeline configuration is invalid.
+    /// Always fails: no segmentation backbone is implemented, so a checkpoint
+    /// identifier cannot be honoured. Accepting one and returning the
+    /// arithmetic placeholder would present invented masks as model output.
+    /// Use [`AutoModelForImageSegmentation::placeholder`] if the deterministic
+    /// stand-in is genuinely what you want.
     pub fn from_pretrained(model_name: &str) -> Result<Self> {
+        Err(TrustformersError::feature_unavailable(
+            format!(
+                "no image-segmentation backbone is implemented, so `{model_name}` cannot be \
+                 loaded. `AutoModelForImageSegmentation::placeholder` returns the deterministic \
+                 stand-in explicitly; its masks are not segmentations."
+            ),
+            "image-segmentation",
+        ))
+    }
+
+    /// Build the deterministic placeholder segmenter.
+    ///
+    /// The returned masks are computed arithmetically from pixel values and are
+    /// **not** segmentations. This constructor exists so that using the
+    /// placeholder is always a deliberate act.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrustformersError`] if the pipeline configuration is invalid.
+    pub fn placeholder(model_name: &str) -> Result<Self> {
         let config = ImageSegmentationConfig {
             model_name: model_name.to_string(),
             ..Default::default()
@@ -890,7 +911,7 @@ impl AutoModelForImageSegmentation {
                 ),
             });
         }
-        Self::from_pretrained(path)
+        Self::placeholder(path)
     }
 
     /// Segment a single image.
@@ -1215,14 +1236,15 @@ mod tests {
     }
 
     #[test]
-    fn test_object_detect_single_input_returns_detections() {
+    fn test_object_detect_single_input_reports_unsupported_model() {
+        // No detection backbone is compiled in, so `detect` must say so rather
+        // than return boxes derived from the buffer length.
         let model = AutoModelForObjectDetection::from_pretrained("test-detr-model")
-            .expect("from_pretrained should succeed");
+            .expect("configuration-only construction should succeed");
         let image = vec![0.5f32; 32 * 32 * 3];
-        let result = model.detect(&image, 32, 32);
         assert!(
-            result.is_ok(),
-            "detect should succeed for a non-empty image"
+            model.detect(&image, 32, 32).is_err(),
+            "detect must not fabricate detections"
         );
     }
 
@@ -1286,17 +1308,20 @@ mod tests {
     // ---- AutoModelForImageSegmentation tests ----
 
     #[test]
-    fn test_image_segmentation_from_pretrained_returns_model() {
+    fn test_image_segmentation_from_pretrained_refuses_checkpoint_ids() {
         let model = AutoModelForImageSegmentation::from_pretrained(
             "nvidia/segformer-b0-finetuned-ade-512-512",
         );
-        assert!(model.is_ok(), "Expected Ok result from from_pretrained");
+        assert!(
+            model.is_err(),
+            "no segmentation backbone exists, so a checkpoint id must be refused"
+        );
     }
 
     #[test]
     fn test_image_segmentation_model_name_stored_correctly() {
         let model_name = "nvidia/segformer-b0-finetuned-ade-512-512";
-        let model = AutoModelForImageSegmentation::from_pretrained(model_name)
+        let model = AutoModelForImageSegmentation::placeholder(model_name)
             .expect("from_pretrained should succeed");
         assert_eq!(
             model.model_name(),
@@ -1323,35 +1348,35 @@ mod tests {
 
     #[test]
     fn test_image_segmentation_pipeline_access() {
-        let model = AutoModelForImageSegmentation::from_pretrained("test-segformer-model")
-            .expect("from_pretrained should succeed");
+        let model = AutoModelForImageSegmentation::placeholder("test-segformer-model")
+            .expect("the explicit placeholder constructor should succeed");
         let _pipeline = model.pipeline();
     }
 
     #[test]
-    fn test_image_segment_single_input_returns_mask() {
-        let model = AutoModelForImageSegmentation::from_pretrained("test-segformer-model")
-            .expect("from_pretrained should succeed");
+    fn test_image_segment_single_input_is_reachable_only_via_placeholder() {
+        // The stand-in is reachable, but only through the explicitly named
+        // constructor; whether it answers or reports an unsupported model is
+        // the segmentation pipeline's own contract.
+        let model = AutoModelForImageSegmentation::placeholder("test-segformer-model")
+            .expect("the explicit placeholder constructor should succeed");
         let image = vec![0.5f32; 32 * 32 * 3];
-        let result = model.segment(&image, 32, 32);
-        assert!(
-            result.is_ok(),
-            "segment should succeed for a non-empty image"
-        );
+        let _ = model.segment(&image, 32, 32);
+        assert!(AutoModelForImageSegmentation::from_pretrained("test-segformer-model").is_err());
     }
 
     #[test]
     fn test_image_segment_empty_image_returns_error() {
-        let model = AutoModelForImageSegmentation::from_pretrained("test-segformer-model")
-            .expect("from_pretrained should succeed");
+        let model = AutoModelForImageSegmentation::placeholder("test-segformer-model")
+            .expect("the explicit placeholder constructor should succeed");
         let result = model.segment(&[], 32, 32);
         assert!(result.is_err(), "segment should fail for an empty image");
     }
 
     #[test]
     fn test_image_segmentation_model_name_is_nonempty() {
-        let model = AutoModelForImageSegmentation::from_pretrained("segformer-b0")
-            .expect("from_pretrained should succeed");
+        let model = AutoModelForImageSegmentation::placeholder("segformer-b0")
+            .expect("the explicit placeholder constructor should succeed");
         assert!(
             !model.model_name().is_empty(),
             "model_name must not be empty"
@@ -1373,9 +1398,9 @@ mod tests {
 
     #[test]
     fn test_multiple_image_segmentation_models_have_independent_names() {
-        let m1 = AutoModelForImageSegmentation::from_pretrained("segformer-model-a")
+        let m1 = AutoModelForImageSegmentation::placeholder("segformer-model-a")
             .expect("from_pretrained for segformer-model-a should succeed");
-        let m2 = AutoModelForImageSegmentation::from_pretrained("segformer-model-b")
+        let m2 = AutoModelForImageSegmentation::placeholder("segformer-model-b")
             .expect("from_pretrained for segformer-model-b should succeed");
         assert_ne!(
             m1.model_name(),
@@ -1387,12 +1412,62 @@ mod tests {
     #[test]
     fn test_image_segmentation_long_model_name() {
         let long_name = "s".repeat(256);
-        let model = AutoModelForImageSegmentation::from_pretrained(&long_name)
+        let model = AutoModelForImageSegmentation::placeholder(&long_name)
             .expect("from_pretrained should succeed even with long name");
         assert_eq!(
             model.model_name(),
             long_name.as_str(),
             "Long model name must be preserved"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression tests: task wrappers must never hand back invented results.
+    // -----------------------------------------------------------------------
+
+    /// A segmentation checkpoint id must not silently yield the placeholder.
+    #[test]
+    fn image_segmentation_from_pretrained_refuses_a_checkpoint_id() {
+        let Err(err) = AutoModelForImageSegmentation::from_pretrained(
+            "nvidia/segformer-b0-finetuned-ade-512-512",
+        ) else {
+            panic!("no segmentation backbone exists, so this must not succeed");
+        };
+        assert!(
+            matches!(err, TrustformersError::FeatureUnavailable { .. }),
+            "expected FeatureUnavailable, got {err:?}"
+        );
+        assert!(
+            AutoModelForImageSegmentation::placeholder("explicit").is_ok(),
+            "the placeholder must still be reachable deliberately"
+        );
+    }
+
+    /// Object detection must report an unsupported model rather than boxes.
+    #[test]
+    fn object_detection_reports_unsupported_instead_of_boxes() {
+        let model = AutoModelForObjectDetection::from_pretrained("facebook/detr-resnet-50")
+            .expect("configuration-only construction should succeed");
+        let image = vec![0.5f32; 32 * 32 * 3];
+        assert!(
+            model.detect(&image, 32, 32).is_err(),
+            "a build with no detection backbone must not return detections"
+        );
+    }
+
+    /// Image classification must report an unsupported model rather than labels.
+    #[test]
+    fn image_classification_reports_unsupported_instead_of_labels() {
+        let model = AutoModelForImageClassification::from_pretrained("google/vit-base-patch16-224")
+            .expect("configuration-only construction should succeed");
+        let input = ImageClassificationInput::RgbImage {
+            data: vec![128u8; 32 * 32 * 3],
+            width: 32,
+            height: 32,
+        };
+        assert!(
+            model.classify(&input).is_err(),
+            "a build with no vision backbone must not return ImageNet labels"
         );
     }
 }
